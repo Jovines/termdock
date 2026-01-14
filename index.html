@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="A complete web-based terminal application" />
+    <title>Web Terminal</title>
+    
+    <!-- Preload Nerd Fonts for terminal icon display -->
+    <link rel="preload" href="https://cdn.jsdelivr.net/gh/mshaugh/nerdfont-webfonts@v3.3.0/build/fonts/JetBrainsMonoNLNerdFont-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="https://cdn.jsdelivr.net/gh/mshaugh/nerdfont-webfonts@v3.3.0/build/fonts/FiraCodeNerdFont-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    
+    <!-- Nerd Font CSS with fallback -->
+    <style>
+      /* Nerd Font @font-face declarations */
+      @font-face {
+        font-family: 'JetBrainsMonoNL Nerd Font';
+        src: url('https://cdn.jsdelivr.net/gh/mshaugh/nerdfont-webfonts@v3.3.0/build/fonts/JetBrainsMonoNLNerdFont-Regular.woff2') format('woff2');
+        font-weight: normal;
+        font-style: normal;
+        font-display: swap;
+      }
+      
+      @font-face {
+        font-family: 'FiraCode Nerd Font';
+        src: url('https://cdn.jsdelivr.net/gh/mshaugh/nerdfont-webfonts@v3.3.0/build/fonts/FiraCodeNerdFont-Regular.woff2') format('woff2');
+        font-weight: normal;
+        font-style: normal;
+        font-display: swap;
+      }
+    </style>
+  </head>
+  <body class="dark">
+    <!-- Loading state that shows immediately -->
+    <div id="loading-fallback" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #0d1117; color: white; font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 20px; z-index: 9999; display: flex; flex-direction: column; align-items: center; justify-content: center;">
+      <h1 style="color: #58a6ff; margin-bottom: 20px; text-align: center;">Web Terminal</h1>
+      <div id="loading-status" style="background: #161b22; padding: 20px; border-radius: 8px; max-width: 500px; width: 100%;">
+        <h2 style="color: #c9d1d9; margin-top: 0; font-size: 16px;">Loading Status</h2>
+        <div style="margin: 15px 0;">
+          <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+            <span style="color: #8b949e;">HTML Loaded:</span>
+            <span id="html-status" style="color: #7ee787;">✓</span>
+          </div>
+          <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+            <span style="color: #8b949e;">JS Loading:</span>
+            <span id="js-status" style="color: #ff7b72;">Loading...</span>
+          </div>
+          <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+            <span style="color: #8b949e;">React App:</span>
+            <span id="react-status" style="color: #ff7b72;">Waiting</span>
+          </div>
+        </div>
+        <div style="background: #30363d; height: 4px; border-radius: 2px; overflow: hidden; margin: 20px 0;">
+          <div id="loading-bar" style="background: #238636; height: 100%; width: 30%;"></div>
+        </div>
+        <div style="color: #8b949e; font-size: 14px; text-align: center;">
+          If this message stays visible, there might be a loading issue.
+          <br>Try refreshing or check browser console for errors.
+        </div>
+      </div>
+      <div style="margin-top: 30px; text-align: center; font-size: 14px; color: #8b949e;">
+        <div>Debug Info:</div>
+        <div id="debug-info" style="font-family: monospace; font-size: 12px; background: #161b22; padding: 10px; border-radius: 4px; margin-top: 10px; word-break: break-all;"></div>
+        <div id="ios-diagnostic" style="font-family: monospace; font-size: 12px; background: #1a1a2e; padding: 10px; border-radius: 4px; margin-top: 10px; color: #ff6b6b; border: 2px solid red;">
+          <div>iOS Diagnostic:</div>
+          <div id="ios-info">Detecting...</div>
+        </div>
+      </div>
+    </div>
+    
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    
+    <script>
+      // Inline script to update loading status
+      document.addEventListener('DOMContentLoaded', () => {
+        const jsStatus = document.getElementById('js-status');
+        jsStatus.textContent = '✓';
+        jsStatus.style.color = '#7ee787';
+        
+        const debugInfo = document.getElementById('debug-info');
+        debugInfo.textContent = 'URL: ' + window.location.href + 
+          ' | Screen: ' + window.innerWidth + 'x' + window.innerHeight +
+          ' | UA: ' + navigator.userAgent.substring(0, 50) + '...';
+        
+        const iosInfo = document.getElementById('ios-info');
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || 
+                     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+        const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+        iosInfo.innerHTML = `isIOS: ${isIOS}<br>Safari: ${isSafari}<br>Touch: ${hasTouch}<br>TouchPoints: ${navigator.maxTouchPoints}<br>CSS: ${document.styleSheets.length} sheets`;
+        
+        // Hide loading fallback when React app loads
+        const fallback = document.getElementById('loading-fallback');
+        setTimeout(() => {
+          if (document.getElementById('root').children.length > 0) {
+            fallback.style.display = 'none';
+          }
+        }, 3000);
+      });
+    </script>
+  </body>
+</html>

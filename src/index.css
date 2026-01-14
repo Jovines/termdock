@@ -1,0 +1,240 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0d1117;
+  --foreground: #f0f6fc;
+  --surface: #161b22;
+  --surface-elevated: #21262d;
+  --muted: #6e7681;
+  --border: #30363d;
+  --input: #0d1117;
+  --primary: #238636;
+  --primary-foreground: #ffffff;
+  --accent: #1f6feb;
+  --accent-foreground: #ffffff;
+  --destructive: #da3633;
+  --destructive-foreground: #ffffff;
+  --ring: #1f6feb;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+.terminal-viewport-container {
+  cursor: text;
+  /* 触摸滚动优化 */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: none;
+}
+
+.terminal-viewport-container:focus {
+  outline: none;
+}
+
+.overlay-scrollbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  background: transparent;
+  transition: background 0.2s;
+}
+
+.overlay-scrollbar--flush {
+  top: 0;
+  right: 0;
+  bottom: 0;
+}
+
+.overlay-scrollbar--dense {
+  width: 8px;
+}
+
+.overlay-scrollbar--zero {
+  border-radius: 0;
+}
+
+.overlay-scrollbar-target {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.overlay-scrollbar-target::-webkit-scrollbar {
+  display: none;
+}
+
+.overlay-scrollbar-container {
+  position: relative;
+}
+
+.overlay-scrollbar--flush > .overlay-scrollbar-track {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+}
+
+.overlay-scrollbar-track {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  background: transparent;
+}
+
+.overlay-scrollbar-thumb {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 100%;
+  background: var(--muted);
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.overlay-scrollbar:hover .overlay-scrollbar-thumb {
+  opacity: 0.5;
+}
+
+.overlay-scrollbar-container:hover .overlay-scrollbar-thumb {
+  opacity: 0.5;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* iOS safe area handling - allow content to respect safe areas */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  html {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  body {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Prevent iOS Home Indicator from appearing */
+html {
+  overscroll-behavior: none;
+  touch-action: pan-x pan-y;
+}
+
+/* Disable iOS rubber-banding effect on the page */
+body {
+  overscroll-behavior: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Disable Home Indicator on all elements */
+* {
+  -webkit-touch-callout: none;
+}
+
+/* Mobile-specific styles - Ensure visibility */
+@media (max-width: 768px) {
+  html {
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  body {
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+    /* Allow scrolling for terminal */
+    touch-action: pan-y;
+    /* Ensure visibility even if something goes wrong */
+    background-color: #0d1117 !important;
+    color: white !important;
+  }
+
+  .terminal-viewport-container {
+    touch-action: pan-y;
+  }
+  
+  /* Diagnostic overlay for debugging - always show on mobile */
+  #mobile-debug-overlay {
+    position: fixed !important;
+    top: 10px !important;
+    left: 10px !important;
+    right: 10px !important;
+    background: rgba(0, 0, 0, 0.9) !important;
+    color: white !important;
+    padding: 10px !important;
+    font-family: monospace !important;
+    font-size: 12px !important;
+    z-index: 99999 !important;
+    border: 2px solid red !important;
+    border-radius: 5px !important;
+    display: block !important;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+
+.animate-slide-down {
+  animation: slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
