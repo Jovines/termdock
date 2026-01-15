@@ -298,10 +298,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   useTerminalStore.getState().setSessionHistory(directory, []);
                 }
 
-                // Only auto-focus on desktop to avoid triggering keyboard on mobile
-                if (!isMobile) {
-                  terminalControllerRef.current?.focus();
-                }
+                terminalControllerRef.current?.focus();
                 break;
               }
               case 'reconnecting': {

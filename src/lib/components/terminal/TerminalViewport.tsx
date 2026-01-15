@@ -80,6 +80,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
     const remainderPxRef = React.useRef(0);
+    const isComposingRef = React.useRef(false); // Track IME composition state
     const [, forceRender] = React.useReducer((x) => x + 1, 0);
     const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
     const [loadingState, setLoadingState] = React.useState<LoadingState>('loading');
@@ -284,10 +285,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           }
 
           fitTerminal();
-          // Only auto-focus on desktop to avoid triggering keyboard on mobile
-          if (!enableTouchScroll) {
-            terminal.focus();
-          }
+          terminal.focus();
 
           localDisposables = [
             terminal.onData((data: string) => {
@@ -346,10 +344,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       resetWriteState();
       lastReportedSizeRef.current = null;
       fitTerminal();
-      // Only auto-focus on desktop to avoid triggering keyboard on mobile
-      if (!enableTouchScroll) {
-        terminal.focus();
-      }
+      terminal.focus();
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionKey, terminalReadyVersion, fitTerminal, resetWriteState]);
 
@@ -526,6 +521,11 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                   outline: 'none',
                 }}
                 onInput={(event) => {
+                  // Skip input events during IME composition to prevent intermediate characters
+                  if (isComposingRef.current) {
+                    return;
+                  }
+
                   const raw = String(event.currentTarget.value || '');
                   if (!raw) {
                     return;
@@ -540,6 +540,23 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                     if (!event.currentTarget.value) {
                       inputHandlerRef.current('\x7f');
                     }
+                  }
+                }}
+                onCompositionStart={() => {
+                  isComposingRef.current = true;
+                }}
+                onCompositionUpdate={() => {
+                  isComposingRef.current = true;
+                }}
+                onCompositionEnd={(event) => {
+                  isComposingRef.current = false;
+
+                  // Send the composed text after composition ends
+                  const raw = String(event.currentTarget.value || '');
+                  if (raw) {
+                    const value = raw.replace(/\r\n|\r|\n/g, '\r');
+                    inputHandlerRef.current(value);
+                    event.currentTarget.value = '';
                   }
                 }}
               />
