@@ -5,12 +5,36 @@ import type {
   ConnectStreamOptions,
 } from './types';
 
+let csrfToken: string | null = null;
+
+/**
+ * 获取CSRF令牌
+ */
+async function getCsrfToken(): Promise<string> {
+  if (csrfToken) {
+    return csrfToken as string;
+  }
+
+  const response = await fetch('/api/csrf-token');
+  if (!response.ok) {
+    throw new Error('Failed to get CSRF token');
+  }
+
+  const data = await response.json();
+  csrfToken = data.csrfToken;
+  return csrfToken as string;
+}
+
 export async function createTerminalSession(
   options: CreateTerminalOptions
 ): Promise<TerminalSession> {
+  const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/create', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
     body: JSON.stringify({
       cwd: options.cwd,
       cols: options.cols || 80,
@@ -166,9 +190,13 @@ export async function sendTerminalInput(
   sessionId: string,
   data: string
 ): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/${sessionId}/input`, {
     method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
+    headers: {
+      'Content-Type': 'text/plain',
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
     body: data,
   });
 
@@ -183,9 +211,13 @@ export async function resizeTerminal(
   cols: number,
   rows: number
 ): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/${sessionId}/resize`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
     body: JSON.stringify({ cols, rows }),
   });
 
@@ -196,8 +228,12 @@ export async function resizeTerminal(
 }
 
 export async function closeTerminal(sessionId: string): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/${sessionId}`, {
     method: 'DELETE',
+    headers: {
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
   });
 
   if (!response.ok) {
@@ -210,9 +246,13 @@ export async function restartTerminalSession(
   currentSessionId: string,
   options: { cwd: string; cols?: number; rows?: number }
 ): Promise<TerminalSession> {
+  const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/${currentSessionId}/restart`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
     body: JSON.stringify({
       cwd: options.cwd,
       cols: options.cols ?? 80,
@@ -251,13 +291,41 @@ export async function checkTerminalHealth(sessionId: string): Promise<{
   return response.json();
 }
 
+// 重连到现有 session
+export async function reconnectTerminalSession(sessionId: string): Promise<{
+  sessionId: string;
+  cwd: string;
+  backend: string;
+  clients: number;
+  age: number;
+  history: string[];  // 历史输出数据
+}> {
+  const response = await fetch(`/api/terminal/${sessionId}/reconnect`, {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to reconnect to terminal' }));
+    if (response.status === 404 || response.status === 410) {
+      throw new Error('SESSION_EXPIRED');
+    }
+    throw new Error(error.error || 'Failed to reconnect to terminal session');
+  }
+
+  return response.json();
+}
+
 export async function forceKillTerminal(options: {
   sessionId?: string;
   cwd?: string;
 }): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/force-kill', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
     body: JSON.stringify(options),
   });
 

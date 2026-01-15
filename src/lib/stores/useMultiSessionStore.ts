@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { v4 as uuidv4 } from 'uuid';
 import type { TerminalSession } from '../terminal';
 
 export interface TerminalSessionInfo {
@@ -49,7 +50,7 @@ export const useMultiSessionStore = create<MultiSessionStore>((set, get) => ({
   nextSessionNumber: 1,
 
   createSession: (cwd: string) => {
-    const sessionId = crypto.randomUUID();
+    const sessionId = uuidv4();
     const timestamp = Date.now();
 
     const sessions = get().sessions;

@@ -6,6 +6,7 @@ export interface PersistedTab {
   tabId: string;
   cwd: string;
   name: string;
+  sessionId: string | null;  // 后端 sessionId，用于复用
   createdAt: number;
   lastActivity: number;
 }
@@ -14,10 +15,11 @@ interface UseSessionPersistenceReturn {
   tabs: PersistedTab[];
   activeTabId: string | null;
   isLoading: boolean;
-  saveTab: (tab: Omit<PersistedTab, 'createdAt' | 'lastActivity'>) => void;
+  saveTab: (tab: Omit<PersistedTab, 'createdAt' | 'lastActivity' | 'sessionId'>, sessionId: string | null) => void;
   removeTab: (tabId: string) => void;
   updateTabActivity: (tabId: string) => void;
   setActiveTab: (tabId: string | null) => void;
+  updateTabSessionId: (tabId: string, sessionId: string) => void;
   clearAllTabs: () => void;
   restoreTabs: () => Promise<PersistedTab[]>;
 }
@@ -67,10 +69,11 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   }, []);
 
   // 保存新标签页
-  const saveTab = useCallback((tab: Omit<PersistedTab, 'createdAt' | 'lastActivity'>) => {
+  const saveTab = useCallback((tab: Omit<PersistedTab, 'createdAt' | 'lastActivity' | 'sessionId'>, sessionId: string | null) => {
     const now = Date.now();
     const newTab: PersistedTab = {
       ...tab,
+      sessionId,
       createdAt: now,
       lastActivity: now,
     };
@@ -127,6 +130,20 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     }
   }, []);
 
+  // 更新标签页的 sessionId
+  const updateTabSessionId = useCallback((tabId: string, sessionId: string) => {
+    setTabs(prev => {
+      const updated = prev.map(tab =>
+        tab.tabId === tabId ? { ...tab, sessionId } : tab
+      );
+      // 保持当前的 activeTabId 不变
+      const currentActive = prev.find(tab => tab.tabId === activeTabId);
+      const newActiveId = currentActive ? currentActive.tabId : (updated[0]?.tabId || null);
+      persistTabs(updated, newActiveId);
+      return updated;
+    });
+  }, [activeTabId, persistTabs]);
+
   // 初始化时恢复标签页
   useEffect(() => {
     if (!initialized.current) {
@@ -143,6 +160,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     removeTab,
     updateTabActivity,
     setActiveTab,
+    updateTabSessionId,
     clearAllTabs,
     restoreTabs,
   };

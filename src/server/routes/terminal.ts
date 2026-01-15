@@ -1,5 +1,6 @@
 import express from 'express';
 import fs from 'fs';
+import path from 'path';
 
 const router = express.Router();
 
@@ -35,6 +36,7 @@ interface TerminalSession {
   cwd: string;
   lastActivity: number;
   clients: Set<string>;
+  createdAt: number;
 }
 
 const terminalSessions = new Map<string, TerminalSession>();
@@ -42,8 +44,71 @@ const MAX_TERMINAL_SESSIONS = parseInt(process.env.MAX_TERMINAL_SESSIONS || '20'
 
 // 开发模式下使用更激进的清理策略
 const isDevelopment = process.env.NODE_ENV === 'development';
-const TERMINAL_IDLE_TIMEOUT = parseInt(process.env.TERMINAL_IDLE_TIMEOUT || (isDevelopment ? '60000' : '1800000'), 10); // 开发: 1分钟, 生产: 30分钟
-const CLEANUP_INTERVAL = isDevelopment ? 30 * 1000 : 5 * 60 * 1000; // 开发: 30秒, 生产: 5分钟
+const TERMINAL_IDLE_TIMEOUT = parseInt(process.env.TERMINAL_IDLE_TIMEOUT || (isDevelopment ? '300000' : '1800000'), 10);
+const CLEANUP_INTERVAL = isDevelopment ? 60 * 1000 : 5 * 60 * 1000;
+
+// Session 持久化存储
+const SESSION_STORAGE_FILE = path.join(process.cwd(), '.terminal-sessions.json');
+
+interface PersistedSessionMeta {
+  sessionId: string;
+  cwd: string;
+  createdAt: number;
+  lastActivity: number;
+}
+
+// 输出历史缓冲区（限制大小）
+const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
+const sessionHistory = new Map<string, { chunks: string[]; size: number }>();
+
+function addToHistory(sessionId: string, data: string): void {
+  const history = sessionHistory.get(sessionId);
+  if (!history) {
+    sessionHistory.set(sessionId, { chunks: [data], size: data.length });
+    return;
+  }
+
+  history.chunks.push(data);
+  history.size += data.length;
+
+  // 超出限制时移除最旧的 chunk
+  while (history.size > MAX_HISTORY_SIZE && history.chunks.length > 0) {
+    const removed = history.chunks.shift();
+    if (removed) {
+      history.size -= removed.length;
+    }
+  }
+}
+
+function getHistory(sessionId: string): string[] {
+  const history = sessionHistory.get(sessionId);
+  return history ? [...history.chunks] : [];
+}
+
+function clearHistory(sessionId: string): void {
+  sessionHistory.delete(sessionId);
+}
+
+function persistSessions(sessions: PersistedSessionMeta[]): void {
+  try {
+    fs.writeFileSync(SESSION_STORAGE_FILE, JSON.stringify(sessions, null, 2));
+  } catch {
+    // Ignore errors
+  }
+}
+
+setInterval(() => {
+  const sessionMetas: PersistedSessionMeta[] = [];
+  for (const [sessionId, session] of terminalSessions.entries()) {
+    sessionMetas.push({
+      sessionId,
+      cwd: session.cwd,
+      createdAt: session.createdAt,
+      lastActivity: session.lastActivity,
+    });
+  }
+  persistSessions(sessionMetas);
+}, 30000);
 
 function buildAugmentedPath(): string {
   const pathEnv = process.env.PATH || '';
@@ -146,6 +211,7 @@ router.post('/create', async (req, res) => {
       cwd,
       lastActivity: Date.now(),
       clients: new Set(),
+      createdAt: Date.now(),
     };
 
     terminalSessions.set(sessionId, session);
@@ -198,6 +264,8 @@ router.get('/:sessionId/stream', (req, res) => {
   const dataHandler = (data: string) => {
     try {
       session.lastActivity = Date.now();
+      // Capture to history buffer
+      addToHistory(sessionId, data);
       const ok = res.write(`data: ${JSON.stringify({ type: 'data', data })}\n\n`);
       if (!ok && session.ptyProcess && typeof session.ptyProcess.pause === 'function') {
         session.ptyProcess.pause();
@@ -253,17 +321,55 @@ router.get('/:sessionId/stream', (req, res) => {
   }
   
   console.log(`Health check: session ${sessionId} healthy, cwd=${session.cwd}, clients=${session.clients.size}, lastActivity=${Date.now() - session.lastActivity}ms ago`);
-  res.json({ 
-    healthy: true, 
-    sessionId,
-    cwd: session.cwd,
-    clients: session.clients.size,
-    lastActivity: session.lastActivity,
-    backend: session.ptyBackend
-  });
-});
+   res.json({ 
+     healthy: true, 
+     sessionId,
+     cwd: session.cwd,
+     clients: session.clients.size,
+     lastActivity: session.lastActivity,
+     backend: session.ptyBackend
+   });
+ });
 
-router.post('/:sessionId/input', express.text({ type: '*/*' }), (req, res) => {
+  // 重连 API - 检查并返回现有 session 信息
+  router.get('/:sessionId/reconnect', (req, res) => {
+    const { sessionId } = req.params;
+    const session = terminalSessions.get(sessionId);
+
+    if (!session) {
+      clearHistory(sessionId);
+      return res.status(404).json({
+        error: 'Session not found or expired',
+        expired: true
+      });
+    }
+
+    // 检查是否超时
+    const age = Date.now() - session.lastActivity;
+    if (age > TERMINAL_IDLE_TIMEOUT) {
+      console.log(`Reconnect rejected: session ${sessionId} expired (age: ${age}ms)`);
+      terminalSessions.delete(sessionId);
+      clearHistory(sessionId);
+      return res.status(410).json({
+        error: 'Session expired',
+        expired: true
+      });
+    }
+
+    // 返回 session 信息和历史数据
+    const history = getHistory(sessionId);
+    console.log(`Reconnect accepted: session=${sessionId} cwd=${session.cwd}, historySize=${history.length} chunks, ${history.join('').length} bytes`);
+    res.json({
+      sessionId,
+      cwd: session.cwd,
+      backend: session.ptyBackend,
+      clients: session.clients.size,
+      age,
+      history
+    });
+  });
+
+ router.post('/:sessionId/input', express.text({ type: '*/*' }), (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
 
@@ -377,6 +483,7 @@ router.post('/:sessionId/restart', async (req, res) => {
       cwd,
       lastActivity: Date.now(),
       clients: new Set(),
+      createdAt: Date.now(),
     };
 
     terminalSessions.set(newSessionId, session);

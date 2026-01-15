@@ -7,6 +7,7 @@ export interface TerminalStore {
 
   getTerminalSession: (directory: string) => TerminalSessionState | undefined;
   setTerminalSession: (directory: string, terminalSession: TerminalSession) => void;
+  setSessionHistory: (directory: string, history: string[]) => void;
   setConnecting: (directory: string, isConnecting: boolean) => void;
   appendToBuffer: (directory: string, chunk: string) => void;
   clearTerminalSession: (directory: string) => void;
@@ -67,6 +68,20 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         updatedAt: Date.now(),
       });
 
+      return { sessions: newSessions };
+    });
+  },
+
+  setSessionHistory: (directory: string, history: string[]) => {
+    const key = normalizeDirectory(directory);
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      const existing = newSessions.get(key) ?? createEmptySessionState(key);
+      newSessions.set(key, {
+        ...existing,
+        history,
+        updatedAt: Date.now(),
+      });
       return { sessions: newSessions };
     });
   },

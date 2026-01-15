@@ -101,4 +101,28 @@ export interface TerminalSessionState {
   bufferChunks: TerminalChunk[];
   bufferLength: number;
   updatedAt: number;
+  history?: string[];  // 从后端恢复的历史输出
+}
+
+// 断联清理时长配置类型
+export type DisconnectCleanupDuration = number;  // 清理时长（毫秒），Infinity 表示永不清理
+
+// 预设的清理时长选项（毫秒）
+export const CLEANUP_DURATION_PRESETS = {
+  'never': Infinity,  // 永远不清理
+  'default': 5 * 60 * 1000,  // 默认5分钟（开发环境）
+  '5min': 5 * 60 * 1000,      // 5分钟
+  '10min': 10 * 60 * 1000,    // 10分钟
+  '30min': 30 * 60 * 1000,    // 30分钟
+  '1hour': 60 * 60 * 1000,    // 1小时
+  '2hours': 2 * 60 * 60 * 1000, // 2小时
+  '1day': 24 * 60 * 60 * 1000,  // 1天
+} as const;
+
+export type CleanupDurationPreset = keyof typeof CLEANUP_DURATION_PRESETS;
+
+// 前端设置配置
+export interface TerminalSettings {
+  cleanupDuration: DisconnectCleanupDuration;
+  cleanupDurationPreset: CleanupDurationPreset | 'custom';
 }

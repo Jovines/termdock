@@ -3,6 +3,7 @@ import { Ghostty, Terminal as GhosttyTerminal, FitAddon } from 'ghostty-web';
 import type { TerminalTheme } from '../../terminal';
 import { getGhosttyTerminalOptions } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
+import { useTouchScroll } from '../../hooks/useTouchScroll';
 
 let ghosttyPromise: Promise<Ghostty> | null = null;
 
@@ -77,10 +78,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const isWritingRef = React.useRef(false);
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
-    const viewportDiscoveryTimeoutRef = React.useRef<number | null>(null);
-    const viewportDiscoveryAttemptsRef = React.useRef(0);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
-    const isCurrentlyScrollingRef = React.useRef(false);
+    const remainderPxRef = React.useRef(0);
     const [, forceRender] = React.useReducer((x) => x + 1, 0);
     const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
     const [loadingState, setLoadingState] = React.useState<LoadingState>('loading');
@@ -91,6 +90,22 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
     inputHandlerRef.current = onInput;
     resizeHandlerRef.current = onResize;
+
+    const handleScroll = React.useCallback((deltaPixels: number): boolean => {
+      const terminal = terminalRef.current;
+      if (!terminal) return false;
+      
+      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+      const total = remainderPxRef.current + deltaPixels;
+      const lines = Math.trunc(total / lineHeightPx);
+      remainderPxRef.current = total - lines * lineHeightPx;
+      
+      if (lines !== 0) {
+        terminal.scrollLines(lines);
+        return true;
+      }
+      return false;
+    }, [fontSize]);
 
     const focusHiddenInput = React.useCallback((clientX?: number, clientY?: number) => {
       const input = hiddenInputRef.current;
@@ -121,6 +136,12 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         } catch { /* ignored */ }
       }
     }, []);
+
+    const { setupTouchScroll, isScrolling } = useTouchScroll(containerRef, {
+      onScroll: handleScroll,
+      onTap: focusHiddenInput,
+      tapThreshold: 12,
+    });
 
     const resetWriteState = React.useCallback(() => {
       pendingWriteRef.current = '';
@@ -213,412 +234,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       [scheduleFlushWrites]
     );
 
-    const setupTouchScroll = React.useCallback(() => {
-      touchScrollCleanupRef.current?.();
-      touchScrollCleanupRef.current = null;
-
-      if (viewportDiscoveryTimeoutRef.current !== null && typeof window !== 'undefined') {
-        window.clearTimeout(viewportDiscoveryTimeoutRef.current);
-        viewportDiscoveryTimeoutRef.current = null;
-      }
-
-      if (!enableTouchScroll) {
-        viewportDiscoveryAttemptsRef.current = 0;
-        return;
-      }
-
-      const container = containerRef.current;
-      if (!container) {
-        return;
-      }
-
-      const terminal = terminalRef.current;
-      if (!terminal) {
-        return;
-      }
-
-      viewportDiscoveryAttemptsRef.current = 0;
-
-      const baseScrollMultiplier = 3.0; // 从 2.2 提高到 3.0，使滑动更跟手
-      const maxScrollBoost = 2.0; // 从 2.8 降低，快速滑动时不会过于灵敏
-      const boostDenominator = 30; // 从 25 提高，使增益更平滑
-      const velocityAlpha = 0.18; // 从 0.25 降低，速度计算更平滑
-      const maxVelocity = 15; // 从 8 提高到 15，允许更快的滚动速度
-      const minVelocity = 0.02; // 从 0.05 降低，惯性持续更久
-      const deceleration = 0.008; // 从 0.015 降低，惯性滑动更持久
-
-      const state = {
-        lastY: null as number | null,
-        lastTime: null as number | null,
-        velocity: 0,
-        rafId: null as number | null,
-        startX: null as number | null,
-        startY: null as number | null,
-        didMove: false,
-      };
-
-      const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
-
-      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
-      let remainderPx = 0;
-
-      // 边界状态跟踪
-      let consecutiveNoScroll = 0;
-
-      const scrollByPixels = (deltaPixels: number) => {
-        if (!deltaPixels) {
-          return false;
-        }
-
-        const before = terminal.getViewportY();
-
-        const total = remainderPx + deltaPixels;
-        const lines = Math.trunc(total / lineHeightPx);
-        remainderPx = total - lines * lineHeightPx;
-
-        if (lines !== 0) {
-          terminal.scrollLines(lines);
-        }
-
-        const after = terminal.getViewportY();
-
-        // 如果滚动没有发生（可能是到达边界），增加计数
-        if (after === before) {
-          consecutiveNoScroll++;
-        } else {
-          consecutiveNoScroll = 0;
-        }
-
-        return after !== before;
-      };
-
-      const stopKinetic = () => {
-        if (state.rafId !== null && typeof window !== 'undefined') {
-          window.cancelAnimationFrame(state.rafId);
-        }
-        state.rafId = null;
-      };
-
-      const listenerOptions: AddEventListenerOptions = { passive: false, capture: false };
-      const supportsPointerEvents = typeof window !== 'undefined' && 'PointerEvent' in window;
-
-      if (supportsPointerEvents) {
-        const stateWithPointerId = Object.assign(state, {
-          pointerId: null as number | null,
-          startX: null as number | null,
-          startY: null as number | null,
-          moved: false,
-        });
-
-        const TAP_MOVE_THRESHOLD_PX = 12;
-
-        const handlePointerDown = (event: PointerEvent) => {
-          if (event.pointerType !== 'touch') {
-            return;
-          }
-          stopKinetic();
-          isCurrentlyScrollingRef.current = false;
-          stateWithPointerId.pointerId = event.pointerId;
-          stateWithPointerId.startX = event.clientX;
-          stateWithPointerId.startY = event.clientY;
-          stateWithPointerId.moved = false;
-          stateWithPointerId.lastY = event.clientY;
-          stateWithPointerId.lastTime = nowMs();
-          stateWithPointerId.velocity = 0;
-          try {
-            container.setPointerCapture(event.pointerId);
-          } catch { /* ignored */ }
-        };
-
-        const handlePointerMove = (event: PointerEvent) => {
-          if (event.pointerType !== 'touch' || stateWithPointerId.pointerId !== event.pointerId) {
-            return;
-          }
-
-          if (stateWithPointerId.startX !== null && stateWithPointerId.startY !== null && !stateWithPointerId.moved) {
-            const dx = event.clientX - stateWithPointerId.startX;
-            const dy = event.clientY - stateWithPointerId.startY;
-            if (Math.hypot(dx, dy) >= TAP_MOVE_THRESHOLD_PX) {
-              stateWithPointerId.moved = true;
-              isCurrentlyScrollingRef.current = true;
-            }
-          }
-
-          if (stateWithPointerId.lastY === null) {
-            stateWithPointerId.lastY = event.clientY;
-            stateWithPointerId.lastTime = nowMs();
-            return;
-          }
-
-          const previousY = stateWithPointerId.lastY;
-          const previousTime = stateWithPointerId.lastTime ?? nowMs();
-          const currentTime = nowMs();
-          stateWithPointerId.lastY = event.clientY;
-          stateWithPointerId.lastTime = currentTime;
-
-          const deltaY = previousY - event.clientY;
-          if (Math.abs(deltaY) < 1) {
-            return;
-          }
-
-          const dt = Math.max(currentTime - previousTime, 8);
-          const scrollMultiplier = baseScrollMultiplier + Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
-          const deltaPixels = deltaY * scrollMultiplier;
-          const instantVelocity = deltaPixels / dt;
-          stateWithPointerId.velocity = stateWithPointerId.velocity * (1 - velocityAlpha) + instantVelocity * velocityAlpha;
-
-          if (stateWithPointerId.velocity > maxVelocity) {
-            stateWithPointerId.velocity = maxVelocity;
-          } else if (stateWithPointerId.velocity < -maxVelocity) {
-            stateWithPointerId.velocity = -maxVelocity;
-          }
-
-          if (stateWithPointerId.moved) {
-            if (event.cancelable) {
-              event.preventDefault();
-            }
-            event.stopPropagation();
-          }
-
-          scrollByPixels(deltaPixels);
-        };
-
-        const handlePointerUp = (event: PointerEvent) => {
-          if (event.pointerType !== 'touch' || stateWithPointerId.pointerId !== event.pointerId) {
-            return;
-          }
-
-          const wasTap = !stateWithPointerId.moved;
-
-          stateWithPointerId.pointerId = null;
-          stateWithPointerId.startX = null;
-          stateWithPointerId.startY = null;
-          stateWithPointerId.moved = false;
-          stateWithPointerId.lastY = null;
-          stateWithPointerId.lastTime = null;
-          try {
-            container.releasePointerCapture(event.pointerId);
-          } catch { /* ignored */ }
-
-          if (wasTap) {
-            focusHiddenInput(event.clientX, event.clientY);
-            isCurrentlyScrollingRef.current = false;
-            return;
-          }
-
-          if (typeof window === 'undefined') {
-            return;
-          }
-
-          if (Math.abs(stateWithPointerId.velocity) < minVelocity) {
-            stateWithPointerId.velocity = 0;
-            isCurrentlyScrollingRef.current = false;
-            return;
-          }
-
-          let lastFrame = nowMs();
-          const step = () => {
-            const frameTime = nowMs();
-            const dt = Math.max(frameTime - lastFrame, 8);
-            lastFrame = frameTime;
-
-            const moved = scrollByPixels(stateWithPointerId.velocity * dt) ?? false;
-
-            const sign = Math.sign(stateWithPointerId.velocity);
-            const nextMagnitude = Math.max(0, Math.abs(stateWithPointerId.velocity) - deceleration * dt);
-            stateWithPointerId.velocity = nextMagnitude * sign;
-
-            if (!moved || nextMagnitude <= minVelocity) {
-              stopKinetic();
-              stateWithPointerId.velocity = 0;
-              isCurrentlyScrollingRef.current = false;
-              return;
-            }
-
-            stateWithPointerId.rafId = window.requestAnimationFrame(step);
-          };
-
-          stateWithPointerId.rafId = window.requestAnimationFrame(step);
-        };
-
-        container.addEventListener('pointerdown', handlePointerDown, listenerOptions);
-        container.addEventListener('pointermove', handlePointerMove, listenerOptions);
-        container.addEventListener('pointerup', handlePointerUp, listenerOptions);
-        container.addEventListener('pointercancel', handlePointerUp, listenerOptions);
-
-        const previousTouchAction = container.style.touchAction;
-        container.style.touchAction = 'pan-y';
-
-        touchScrollCleanupRef.current = () => {
-          stopKinetic();
-          if (viewportDiscoveryTimeoutRef.current !== null && typeof window !== 'undefined') {
-            window.clearTimeout(viewportDiscoveryTimeoutRef.current);
-            viewportDiscoveryTimeoutRef.current = null;
-          }
-          viewportDiscoveryAttemptsRef.current = 0;
-          container.removeEventListener('pointerdown', handlePointerDown, listenerOptions);
-          container.removeEventListener('pointermove', handlePointerMove, listenerOptions);
-          container.removeEventListener('pointerup', handlePointerUp, listenerOptions);
-          container.removeEventListener('pointercancel', handlePointerUp, listenerOptions);
-          container.style.touchAction = previousTouchAction;
-        };
-
-        return;
-      }
-
-      const TAP_MOVE_THRESHOLD_PX = 12;
-
-      const handleTouchStart = (event: TouchEvent) => {
-        if (event.touches.length !== 1) {
-          return;
-        }
-        stopKinetic();
-        isCurrentlyScrollingRef.current = false;
-        state.lastY = event.touches[0].clientY;
-        state.lastTime = nowMs();
-        state.velocity = 0;
-        state.startX = event.touches[0].clientX;
-        state.startY = event.touches[0].clientY;
-        state.didMove = false;
-      };
-
-      const handleTouchMove = (event: TouchEvent) => {
-        if (event.touches.length !== 1) {
-          state.lastY = null;
-          state.lastTime = null;
-          state.velocity = 0;
-          state.startX = null;
-          state.startY = null;
-          state.didMove = false;
-          stopKinetic();
-          return;
-        }
-
-        const currentX = event.touches[0].clientX;
-        const currentY = event.touches[0].clientY;
-
-        if (state.startX !== null && state.startY !== null && !state.didMove) {
-          const dx = currentX - state.startX;
-          const dy = currentY - state.startY;
-          if (Math.hypot(dx, dy) >= TAP_MOVE_THRESHOLD_PX) {
-            state.didMove = true;
-            isCurrentlyScrollingRef.current = true;
-          }
-        }
-
-        if (state.lastY === null) {
-          state.lastY = currentY;
-          state.lastTime = nowMs();
-          return;
-        }
-
-        const previousY = state.lastY;
-        const previousTime = state.lastTime ?? nowMs();
-        const currentTime = nowMs();
-        state.lastY = currentY;
-        state.lastTime = currentTime;
-
-        const deltaY = previousY - currentY;
-        if (Math.abs(deltaY) < 1) {
-          return;
-        }
-
-        const dt = Math.max(currentTime - previousTime, 8);
-        const scrollMultiplier = baseScrollMultiplier + Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
-        const deltaPixels = deltaY * scrollMultiplier;
-        const instantVelocity = deltaPixels / dt;
-        state.velocity = state.velocity * (1 - velocityAlpha) + instantVelocity * velocityAlpha;
-
-        if (state.velocity > maxVelocity) {
-          state.velocity = maxVelocity;
-        } else if (state.velocity < -maxVelocity) {
-          state.velocity = -maxVelocity;
-        }
-
-        if (state.didMove) {
-          event.preventDefault();
-          event.stopPropagation();
-        }
-
-        scrollByPixels(deltaPixels);
-      };
-
-      const handleTouchEnd = (event: TouchEvent) => {
-        const wasTap = !state.didMove;
-
-        state.lastY = null;
-        state.lastTime = null;
-
-        const velocity = state.velocity;
-        state.startX = null;
-        state.startY = null;
-        state.didMove = false;
-
-        if (wasTap) {
-          const point = event.changedTouches?.[0];
-          focusHiddenInput(point?.clientX, point?.clientY);
-          isCurrentlyScrollingRef.current = false;
-          return;
-        }
-
-        if (typeof window === 'undefined') {
-          return;
-        }
-
-        if (Math.abs(velocity) < minVelocity) {
-          state.velocity = 0;
-          isCurrentlyScrollingRef.current = false;
-          return;
-        }
-
-        let lastFrame = nowMs();
-        const step = () => {
-          const frameTime = nowMs();
-          const dt = Math.max(frameTime - lastFrame, 8);
-          lastFrame = frameTime;
-
-          const moved = scrollByPixels(state.velocity * dt) ?? false;
-
-          const sign = Math.sign(state.velocity);
-          const nextMagnitude = Math.max(0, Math.abs(state.velocity) - deceleration * dt);
-          state.velocity = nextMagnitude * sign;
-
-          if (!moved || nextMagnitude <= minVelocity) {
-            stopKinetic();
-            state.velocity = 0;
-            isCurrentlyScrollingRef.current = false;
-            return;
-          }
-
-          state.rafId = window.requestAnimationFrame(step);
-        };
-
-        state.rafId = window.requestAnimationFrame(step);
-      };
-
-      container.addEventListener('touchstart', handleTouchStart, listenerOptions);
-      container.addEventListener('touchmove', handleTouchMove, listenerOptions);
-      container.addEventListener('touchend', handleTouchEnd as unknown as EventListener, listenerOptions);
-      container.addEventListener('touchcancel', handleTouchEnd as unknown as EventListener, listenerOptions);
-
-        const previousTouchAction = container.style.touchAction;
-        container.style.touchAction = 'pan-y';
-
-      touchScrollCleanupRef.current = () => {
-        stopKinetic();
-        if (viewportDiscoveryTimeoutRef.current !== null && typeof window !== 'undefined') {
-          window.clearTimeout(viewportDiscoveryTimeoutRef.current);
-          viewportDiscoveryTimeoutRef.current = null;
-        }
-        viewportDiscoveryAttemptsRef.current = 0;
-        container.removeEventListener('touchstart', handleTouchStart, listenerOptions);
-        container.removeEventListener('touchmove', handleTouchMove, listenerOptions);
-        container.removeEventListener('touchend', handleTouchEnd as unknown as EventListener, listenerOptions);
-        container.removeEventListener('touchcancel', handleTouchEnd as unknown as EventListener, listenerOptions);
-        container.style.touchAction = previousTouchAction;
-      };
-    }, [enableTouchScroll, focusHiddenInput, fontSize]);
-
     React.useEffect(() => {
       let disposed = false;
       let localTerminal: GhosttyTerminal | null = null;
@@ -669,8 +284,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           }
 
           fitTerminal();
-          setupTouchScroll();
-          terminal.focus();
+          // Only auto-focus on desktop to avoid triggering keyboard on mobile
+          if (!enableTouchScroll) {
+            terminal.focus();
+          }
 
           localDisposables = [
             terminal.onData((data: string) => {
@@ -717,7 +334,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         lastReportedSizeRef.current = null;
         resetWriteState();
       };
-    }, [fitTerminal, fontFamily, fontSize, setupTouchScroll, theme, resetWriteState]);
+    }, [fitTerminal, fontFamily, fontSize, theme, resetWriteState]);
+
 
     React.useEffect(() => {
       const terminal = terminalRef.current;
@@ -728,18 +346,22 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       resetWriteState();
       lastReportedSizeRef.current = null;
       fitTerminal();
-      terminal.focus();
+      // Only auto-focus on desktop to avoid triggering keyboard on mobile
+      if (!enableTouchScroll) {
+        terminal.focus();
+      }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionKey, terminalReadyVersion, fitTerminal, resetWriteState]);
 
     React.useEffect(() => {
-      setupTouchScroll();
+      if (!enableTouchScroll) return;
+      const cleanup = setupTouchScroll();
+      touchScrollCleanupRef.current = cleanup;
       return () => {
-        touchScrollCleanupRef.current?.();
+        cleanup();
         touchScrollCleanupRef.current = null;
       };
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [setupTouchScroll, sessionKey]);
+    }, [enableTouchScroll, setupTouchScroll]);
 
     React.useEffect(() => {
       const terminal = terminalRef.current;
@@ -805,11 +427,23 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         ref={containerRef}
         className={`relative h-full w-full terminal-viewport-container ${className || ''}`}
         style={{ backgroundColor: theme.background }}
+        role="button"
+        tabIndex={0}
         onClick={(event) => {
-          if (enableTouchScroll && !isCurrentlyScrollingRef.current) {
+          if (enableTouchScroll && !isScrolling()) {
             focusHiddenInput(event.clientX, event.clientY);
           } else if (!enableTouchScroll) {
             terminalRef.current?.focus();
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            if (enableTouchScroll && !isScrolling()) {
+              focusHiddenInput();
+            } else if (!enableTouchScroll) {
+              terminalRef.current?.focus();
+            }
           }
         }}
       >
@@ -839,6 +473,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             <div className="flex flex-col items-center gap-3 text-center max-w-md">
               <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center">
                 <svg className="w-6 h-6 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <title>Error</title>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                 </svg>
               </div>

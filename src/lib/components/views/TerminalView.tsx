@@ -1,5 +1,5 @@
 import React from 'react';
-import { RiAlertLine, RiArrowDownLine, RiArrowGoBackLine, RiArrowLeftLine, RiArrowRightLine, RiArrowUpLine, RiCheckboxCircleLine, RiCircleLine, RiCloseLine, RiCommandLine, RiDeleteBinLine, RiRestartLine } from '@remixicon/react';
+import { RiArrowDownLine, RiArrowGoBackLine, RiArrowLeftLine, RiArrowRightLine, RiArrowUpLine, RiCommandLine } from '@remixicon/react';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalStreamEvent } from '../../terminal';
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
@@ -67,6 +67,8 @@ interface TerminalViewProps {
   theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   fontFamily?: string;
   fontSize?: number;
+  showDebug?: boolean;
+  onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
 }
 
 export const TerminalView: React.FC<TerminalViewProps> = ({
@@ -74,6 +76,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   theme: themeName = 'dark',
   fontFamily = 'Menlo, Monaco, Consolas, monospace',
   fontSize = TERMINAL_FONT_SIZE,
+  showDebug: externalShowDebug,
+  onStatusChange,
 }) => {
   const terminal = React.useMemo(() => createWebTerminalAPI(), []);
 
@@ -97,7 +101,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const terminalSessionRef = terminalState?.terminalSessionId ?? null;
   const bufferChunks = terminalState?.bufferChunks ?? [];
-  const bufferLength = terminalState?.bufferLength ?? 0;
   const isConnecting = terminalState?.isConnecting ?? false;
   const terminalSessionId = terminalSessionRef;
 
@@ -106,7 +109,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [activeModifier, setActiveModifier] = React.useState<Modifier | null>(null);
   const [isRestarting, setIsRestarting] = React.useState(false);
   const [keyboardHeight, setKeyboardHeight] = React.useState(0);
-  const [showDebug, setShowDebug] = React.useState(false);
+  const showDebug = externalShowDebug !== undefined ? externalShowDebug : false;
 
   // 软键盘状态管理（防抖逻辑用 ref，渲染用 state）
   const keyboardStateRef = React.useRef({
@@ -126,9 +129,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return /iPad|iPhone|iPod/.test(navigator.userAgent) || 
            (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   }, []);
-
-  // iOS 软键盘上方导航条高度
-  const IOS_KEYBOARD_ACCESSORY_HEIGHT = 44;
 
   // 键盘检测配置
   const KEYBOARD_MIN_HEIGHT = 100; // 最小键盘高度阈值
@@ -286,7 +286,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setConnecting(directory, false);
                 setConnectionError(null);
                 setIsFatalError(false);
-                terminalControllerRef.current?.focus();
+
+                // 恢复历史输出到 buffer
+                const sessionState = useTerminalStore.getState().getTerminalSession(directory);
+                if (sessionState?.history && sessionState.history.length > 0) {
+                  console.log(`[Terminal] Restoring ${sessionState.history.length} history chunks`);
+                  sessionState.history.forEach(chunk => {
+                    appendToBuffer(directory, chunk);
+                  });
+                  // 清除历史，避免重复填充
+                  useTerminalStore.getState().setSessionHistory(directory, []);
+                }
+
+                // Only auto-focus on desktop to avoid triggering keyboard on mobile
+                if (!isMobile) {
+                  terminalControllerRef.current?.focus();
+                }
                 break;
               }
               case 'reconnecting': {
@@ -353,6 +368,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const hasInitializedRef = React.useRef(false);
 
+  // 用于跟踪当前 effect run 的唯一标识符，防止跨 run 的 race condition
+  const currentRunIdRef = React.useRef(0);
+
   React.useEffect(() => {
     if (!cwd) {
       setConnectionError('No working directory available for terminal.');
@@ -365,7 +383,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       console.log(`[useEffect] cwd changed from ${directoryRef.current} to ${cwd}, allowing reinitialization`);
       hasInitializedRef.current = false;
     }
-    
+
     // 防止重复初始化
     if (hasInitializedRef.current && directoryRef.current === cwd) {
       console.log(`[useEffect] Already initialized for cwd=${cwd}, skipping`);
@@ -375,22 +393,31 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     console.log(`[useEffect] Running ensureSession for cwd=${cwd}, hasInitialized=${hasInitializedRef.current}`);
     hasInitializedRef.current = true;
 
-    let cancelled = false;
+    // 生成新的 run ID 并增加计数器
+    const runId = ++currentRunIdRef.current;
 
     const ensureSession = async () => {
       const directory = cwd;
-      console.log(`[ensureSession] Starting for directory=${directory}, directoryRef.current=${directoryRef.current}`);
+      console.log(`[ensureSession] Starting for directory=${directory}, directoryRef.current=${directoryRef.current}, runId=${runId}`);
+
+      // 检查 directory 是否变化，以及是否是当前 run
       if (!directoryRef.current || directoryRef.current !== directory) {
-        console.log(`[ensureSession] Directory mismatch, skipping`);
+        console.log(`[ensureSession] Directory mismatch or stale run (current=${directoryRef.current}, target=${directory}), skipping`);
         return;
       }
-      
+
+      // 检查是否是当前最新的 run，避免过期的 run 继续执行
+      if (runId !== currentRunIdRef.current) {
+        console.log(`[ensureSession] Stale run detected (runId=${runId}, currentRunId=${currentRunIdRef.current}), skipping`);
+        return;
+      }
+
       // 直接从store获取最新状态和函数，避免闭圈问题
       const store = useTerminalStore.getState();
       const currentState = store.getTerminalSession(directory);
-      console.log(`[ensureSession] Current state from store:`, { 
+      console.log(`[ensureSession] Current state from store:`, {
         terminalSessionId: currentState?.terminalSessionId,
-        isConnecting: currentState?.isConnecting 
+        isConnecting: currentState?.isConnecting
       });
 
       let terminalId = currentState?.terminalSessionId ?? null;
@@ -428,11 +455,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       // 需要创建新会话（要么没有会话ID，要么会话不健康）
       console.log(`[ensureSession] Decision: shouldCreateNewSession=${shouldCreateNewSession}, terminalId=${terminalId}`);
       if (shouldCreateNewSession) {
-        console.log(`[ensureSession] Creating new session, shouldCreateNewSession=${shouldCreateNewSession}, cancelled=${cancelled}`);
+        console.log(`[ensureSession] Creating new session, shouldCreateNewSession=${shouldCreateNewSession}, runId=${runId}`);
         setConnectionError(null);
         setIsFatalError(false);
         store.setConnecting(directory, true);
-        
+
         // 重新检查store，防止竞争条件：其他实例可能已经创建了会话
         const currentStore = useTerminalStore.getState();
         const recheckedState = currentStore.getTerminalSession(directory);
@@ -445,22 +472,29 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         } else {
           // 继续创建新会话
           try {
-          const session = await terminal.createSession({
-            cwd: directory,
-          });
-          console.log(`[ensureSession] Created new session ${session.sessionId}, cwd=${directory}`);
-          if (cancelled) {
-            console.log(`[ensureSession] Cancelled, closing new session`);
-            try {
-              await terminal.close(session.sessionId);
-            } catch { /* ignored */ }
-            return;
-          }
-          store.setTerminalSession(directory, session);
-          console.log(`[ensureSession] Updated store with new session ${session.sessionId}`);
-          terminalId = session.sessionId;
-        } catch (error) {
-          if (!cancelled) {
+            const session = await terminal.createSession({
+              cwd: directory,
+            });
+            console.log(`[ensureSession] Created new session ${session.sessionId}, cwd=${directory}`);
+
+            // 检查是否是当前最新的 run，避免过期的 run 继续执行
+            if (runId !== currentRunIdRef.current) {
+              console.log(`[ensureSession] Stale run after session creation (runId=${runId}, currentRunId=${currentRunIdRef.current}), closing session`);
+              try {
+                await terminal.close(session.sessionId);
+              } catch { /* ignored */ }
+              return;
+            }
+
+            store.setTerminalSession(directory, session);
+            console.log(`[ensureSession] Updated store with new session ${session.sessionId}`);
+            terminalId = session.sessionId;
+          } catch (error) {
+            // 检查是否是当前最新的 run，避免过期的 run 设置错误状态
+            if (runId !== currentRunIdRef.current) {
+              console.log(`[ensureSession] Stale run after session creation failed, skipping error handling`);
+              return;
+            }
             setConnectionError(
               error instanceof Error
                 ? error.message
@@ -468,14 +502,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             );
             setIsFatalError(true);
             store.setConnecting(directory, false);
+            return;
           }
-          return;
         }
       }
-    }
 
-      if (!terminalId || cancelled) {
-        console.log(`[ensureSession] No terminalId or cancelled, terminalId=${terminalId}, cancelled=${cancelled}`);
+      // 最终检查：确保仍是当前最新的 run
+      if (runId !== currentRunIdRef.current) {
+        console.log(`[ensureSession] Stale run before starting stream (runId=${runId}, currentRunId=${currentRunIdRef.current}), skipping`);
+        return;
+      }
+
+      if (!terminalId) {
+        console.log(`[ensureSession] No terminalId, terminalId=${terminalId}`);
         return;
       }
 
@@ -488,48 +527,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     void ensureSession();
 
     return () => {
-      cancelled = true;
-      terminalIdRef.current = null;
-      disconnectStream();
+      // 只标记当前 run 为过期，不影响其他 run
+      // 通过增加 run ID 来"取消"当前 run，这样当前 run 的异步操作会检查并自停止
+      console.log(`[useEffect] Cleanup for cwd=${cwd}, runId=${runId}`);
+      // 注意：这里不直接设置 cancelled，而是让异步操作通过比较 runId 来检测过期
+      // 这样可以避免之前版本中的变量提升问题
     };
   }, [cwd, startStream, disconnectStream, terminal]);
-
-  const handleRestart = React.useCallback(async () => {
-    if (!cwd) return;
-    if (isRestarting) return;
-
-    setIsRestarting(true);
-    setConnectionError(null);
-    setIsFatalError(false);
-    disconnectStream();
-
-    const currentTerminalId = terminalIdRef.current;
-
-    try {
-      if (terminal.restartSession && currentTerminalId) {
-        const newSession = await terminal.restartSession(currentTerminalId, {
-          cwd,
-        });
-        setTerminalSession(cwd, newSession);
-        terminalIdRef.current = newSession.sessionId;
-        startStream(newSession.sessionId);
-      } else {
-        if (currentTerminalId) {
-          try {
-            await terminal.close(currentTerminalId);
-          } catch { /* ignored */ }
-        }
-        removeTerminalSession(cwd);
-      }
-    } catch (error) {
-      setConnectionError(
-        error instanceof Error ? error.message : 'Failed to restart terminal'
-      );
-      setIsFatalError(true);
-    } finally {
-      setIsRestarting(false);
-    }
-  }, [cwd, isRestarting, disconnectStream, terminal, setTerminalSession, startStream, removeTerminalSession]);
 
   const handleHardRestart = React.useCallback(async () => {
     if (!cwd) return;
@@ -570,20 +574,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       setIsRestarting(false);
     }
   }, [cwd, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream]);
-
-  const handleClear = React.useCallback(() => {
-    if (!cwd) return;
-    clearBuffer(cwd);
-    terminalControllerRef.current?.clear();
-    terminalControllerRef.current?.focus();
-
-    const terminalId = terminalIdRef.current;
-    if (terminalId) {
-      void terminal.sendInput(terminalId, '\u000c').catch((error) => {
-        setConnectionError(error instanceof Error ? error.message : 'Failed to refresh prompt');
-      });
-    }
-  }, [clearBuffer, cwd, terminal]);
 
   const handleViewportInput = React.useCallback(
     (data: string) => {
@@ -664,15 +654,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return `${directoryPart}::${terminalPart}`;
   }, [cwd, terminalSessionId]);
 
-  const isReconnecting = connectionError?.includes('Reconnecting');
-
-  const statusIcon = connectionError
-    ? isReconnecting
-      ? <RiAlertLine size={20} className="text-amber-400" />
-      : <RiCloseLine size={20} className="text-red-500" />
-    : terminalSessionId && !isConnecting && !isRestarting
-      ? <RiCheckboxCircleLine size={20} className="text-emerald-400" />
-      : <RiCircleLine size={20} className="text-muted-foreground animate-pulse" />;
+  // 通知父组件状态变化
+  React.useEffect(() => {
+    onStatusChange?.({
+      isConnecting,
+      isRestarting,
+      hasError: !!connectionError,
+      sessionId: terminalSessionId,
+    });
+  }, [isConnecting, isRestarting, connectionError, terminalSessionId, onStatusChange]);
 
   if (!cwd) {
     return (
@@ -686,47 +676,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
-      <div className="px-3 py-2 text-xs bg-background border-b border-border">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
-            <span className="truncate font-mono text-foreground/90">{cwd}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            {statusIcon}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowDebug(prev => !prev);
-              }}
-              className={`px-2 py-1 text-xs border rounded ${showDebug ? 'bg-blue-500 text-white' : 'hover:bg-surface-elevated'}`}
-            >
-              {showDebug ? 'DEBUG ON' : 'DEBUG'}
-            </button>
-            <button
-              type="button"
-              onClick={handleClear}
-              disabled={!bufferLength}
-              title="Clear output"
-              className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-            >
-              <RiDeleteBinLine size={16} className="inline mr-1" />
-              Clear
-            </button>
-            <button
-              type="button"
-              onClick={handleRestart}
-              disabled={isRestarting}
-              title="Restart terminal session"
-              className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-            >
-              <RiRestartLine size={16} className={`inline mr-1 ${(isConnecting || isRestarting) ? 'animate-spin' : ''}`} />
-              Restart
-            </button>
-          </div>
-        </div>
-      </div>
-
       {/* 调试面板 - 点击3次状态图标或DEBUG按钮显示 */}
       {showDebug && (
         <div className="px-3 py-2 bg-blue-900/90 text-white text-xs border-b border-blue-700">
@@ -812,14 +761,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         )}
       </div>
 
-      {/* 移动端工具区 - 始终显示在底部，软键盘/HOME 指示器升起时保持在键盘上方 */}
-      {isMobile && (
+      {/* 移动端工具区 - 仅在软键盘弹出时显示，软键盘/HOME 指示器升起时保持在键盘上方 */}
+      {isMobile && keyboardHeight > 0 && (
         <div
           className="px-3 py-2 border-t border-border bg-background"
           style={{
             paddingBottom: keyboardHeight > 0 
-              ? `${keyboardHeight + (isIOS ? IOS_KEYBOARD_ACCESSORY_HEIGHT : 0)}px`
-              : isIOS ? `${IOS_KEYBOARD_ACCESSORY_HEIGHT}px` : undefined,
+              ? `${keyboardHeight}px`
+              : isIOS ? 'env(safe-area-inset-bottom, 0px)' : undefined,
           }}
         >
           <div className="flex flex-wrap items-center gap-1">
