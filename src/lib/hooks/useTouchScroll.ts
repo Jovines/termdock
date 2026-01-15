@@ -157,17 +157,18 @@ export const useTouchScroll = (
         }
       }
 
-      // 应用滚动
-      if (Math.abs(deltaY) > 0.5) {
-        state.isCurrentlyScrolling = true;
-        
-        // 计算滚动乘数（速度越快，乘数越大）
-        const scrollMultiplierAdjusted = scrollMultiplier + 
-          Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
-        const deltaPixels = deltaY * scrollMultiplierAdjusted;
-        
-        scrollByPixels(deltaPixels);
-      }
+        // 应用滚动（deltaY 取反，使滑动方向符合直觉）
+        // 手指向上滑动(deltaY < 0)时，内容应向下滚动
+        if (Math.abs(deltaY) > 0.5) {
+          state.isCurrentlyScrolling = true;
+          
+          // 计算滚动乘数（速度越快，乘数越大）
+          const scrollMultiplierAdjusted = scrollMultiplier + 
+            Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
+          const deltaPixels = -deltaY * scrollMultiplierAdjusted;
+          
+          scrollByPixels(deltaPixels);
+        }
 
       state.lastY = event.clientY;
       state.lastTime = currentTime;
@@ -195,7 +196,7 @@ export const useTouchScroll = (
           const dt = currentTime - (state.lastTime || currentTime);
           state.lastTime = currentTime;
 
-          // 应用减速
+          // 应用减速（velocity 取反，使惯性滚动方向符合直觉）
           state.velocity *= (1 - deceleration * dt);
           if (Math.abs(state.velocity) < minVelocity) {
             state.velocity = 0;
@@ -203,7 +204,7 @@ export const useTouchScroll = (
             return;
           }
 
-          const moved = scrollByPixels(state.velocity * dt);
+          const moved = scrollByPixels(-state.velocity * dt);
           if (!moved && consecutiveNoScrollRef.current > 2) {
             state.velocity = 0;
             stopKinetic();
@@ -311,14 +312,15 @@ export const useTouchScroll = (
 
       const deltaY = currentY - state.lastY;
 
-      // 应用滚动
+      // 应用滚动（deltaY 取反，使滑动方向符合直觉）
+      // 手指向上滑动(deltaY < 0)时，内容应向下滚动
       if (Math.abs(deltaY) > 0.5) {
         state.isCurrentlyScrolling = true;
         
         // 计算滚动乘数
         const scrollMultiplierAdjusted = scrollMultiplier + 
           Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
-        const deltaPixels = deltaY * scrollMultiplierAdjusted;
+        const deltaPixels = -deltaY * scrollMultiplierAdjusted;
         
         scrollByPixels(deltaPixels);
       }
@@ -341,7 +343,7 @@ export const useTouchScroll = (
       state.startX = null;
       state.startY = null;
 
-      // 简单惯性滚动
+      // 简单惯性滚动（velocity 取反，使方向符合直觉）
       if (state.didMove && Math.abs(state.velocity) > minVelocity) {
         const animate = () => {
           const dt = 16; // 假设60fps
@@ -353,7 +355,7 @@ export const useTouchScroll = (
             return;
           }
 
-          const moved = scrollByPixels(state.velocity * dt);
+          const moved = scrollByPixels(-state.velocity * dt);
           if (!moved && consecutiveNoScrollRef.current > 2) {
             state.velocity = 0;
             stopKinetic();
