@@ -1,39 +1,18 @@
 import React from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { RiArrowDownLine, RiArrowGoBackLine, RiArrowLeftLine, RiArrowRightLine, RiArrowUpLine, RiCommandLine } from '@remixicon/react';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalStreamEvent } from '../../terminal';
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
 import { convertThemeToXterm, getDefaultTheme } from '../../terminal';
 import { createWebTerminalAPI } from '../../terminal/factory';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
+import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
+import { DebugPanel } from '../terminal/DebugPanel';
+import { ConnectionStatus } from '../terminal/ConnectionStatus';
 
 const TERMINAL_FONT_SIZE = 13;
 
 type Modifier = 'ctrl' | 'cmd';
-type MobileKey =
-  | 'esc'
-  | 'tab'
-  | 'enter'
-  | 'arrow-up'
-  | 'arrow-down'
-  | 'arrow-left'
-  | 'arrow-right';
-
-const BASE_KEY_SEQUENCES: Record<MobileKey, string> = {
-  esc: '\u001b',
-  tab: '\t',
-  enter: '\r',
-  'arrow-up': '\u001b[A',
-  'arrow-down': '\u001b[B',
-  'arrow-left': '\u001b[D',
-  'arrow-right': '\u001b[C',
-};
-
-const MODIFIER_ARROW_SUFFIX: Record<Modifier, string> = {
-  ctrl: '5',
-  cmd: '3',
-};
 
 const STREAM_OPTIONS = {
   retry: {
@@ -44,28 +23,9 @@ const STREAM_OPTIONS = {
   connectionTimeoutMs: 15_000,
 };
 
-const getSequenceForKey = (key: MobileKey, modifier: Modifier | null): string | null => {
-  if (modifier) {
-    switch (key) {
-      case 'arrow-up':
-        return `\u001b[1;${MODIFIER_ARROW_SUFFIX[modifier]}A`;
-      case 'arrow-down':
-        return `\u001b[1;${MODIFIER_ARROW_SUFFIX[modifier]}B`;
-      case 'arrow-right':
-        return `\u001b[1;${MODIFIER_ARROW_SUFFIX[modifier]}C`;
-      case 'arrow-left':
-        return `\u001b[1;${MODIFIER_ARROW_SUFFIX[modifier]}D`;
-      default:
-        break;
-    }
-  }
-
-  return BASE_KEY_SEQUENCES[key] ?? null;
-};
-
 interface TerminalViewProps {
-  sessionId?: string;  // 前端 session ID，用于 store 键名
-  cwd?: string;        // 工作目录
+  sessionId?: string;
+  cwd?: string;
   theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   fontFamily?: string;
   fontSize?: number;
@@ -88,6 +48,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [sessionId] = React.useState(initialSessionId || uuidv4());
   const [cwd] = React.useState(initialCwd || process.cwd());
   const [isMobile, setIsMobile] = React.useState(false);
+  const [isIOS, setIsIOS] = React.useState(false);
+  const [keyboardHeight, setKeyboardHeight] = React.useState(0);
+  const [activeModifier, setActiveModifier] = React.useState<Modifier | null>(null);
 
   const terminalStore = useTerminalStore();
   const terminalSessions = terminalStore.sessions;
@@ -110,16 +73,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const [connectionError, setConnectionError] = React.useState<string | null>(null);
   const [isFatalError, setIsFatalError] = React.useState(false);
-  const [activeModifier, setActiveModifier] = React.useState<Modifier | null>(null);
   const [isRestarting, setIsRestarting] = React.useState(false);
-  const [keyboardHeight, setKeyboardHeight] = React.useState(0);
   const showDebug = externalShowDebug !== undefined ? externalShowDebug : false;
-
-  // 软键盘状态管理（防抖逻辑用 ref，渲染用 state）
-  const keyboardStateRef = React.useRef({
-    debounceTimer: null as NodeJS.Timeout | null,
-    isKeyboardVisible: false,
-  });
 
   // 流清理和活动终端引用
   const streamCleanupRef = React.useRef<(() => void) | null>(null);
@@ -128,40 +83,44 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const sessionIdRef = React.useRef<string | null>(null);
   const terminalControllerRef = React.useRef<TerminalController | null>(null);
 
-  const isIOS = React.useMemo(() => {
-    if (typeof window === 'undefined') return false;
-    return /iPad|iPhone|iPod/.test(navigator.userAgent) || 
-           (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  // iOS detection
+  React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      setIsIOS(false);
+      return;
+    }
+    const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+               (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    setIsIOS(ios);
   }, []);
 
-  // 键盘检测配置
-  const KEYBOARD_MIN_HEIGHT = 100; // 最小键盘高度阈值
-  const KEYBOARD_DEBOUNCE_MS = 300; // 键盘关闭延迟确认时间
-
+  // Keyboard detection
   React.useEffect(() => {
     if (!isMobile || typeof window === 'undefined') return;
 
-    const state = keyboardStateRef.current;
-    
+    const KEYBOARD_MIN_HEIGHT = 100;
+    const KEYBOARD_DEBOUNCE_MS = 300;
+
+    const state = {
+      debounceTimer: null as NodeJS.Timeout | null,
+      isKeyboardVisible: false,
+    };
+
     const updateKeyboardState = (visible: boolean, height: number) => {
-      // 清除之前的防抖定时器
       if (state.debounceTimer) {
         clearTimeout(state.debounceTimer);
         state.debounceTimer = null;
       }
 
       if (visible) {
-        // 软键盘升起：立即更新
         state.isKeyboardVisible = true;
         setKeyboardHeight(height);
       } else {
-        // 软键盘关闭：延迟确认后再更新
         state.debounceTimer = setTimeout(() => {
           const viewport = window.visualViewport;
           if (viewport) {
             const currentWindowHeight = window.innerHeight;
             const currentKeyboardH = currentWindowHeight - viewport.height;
-            // 使用更严格的阈值判断
             if (currentKeyboardH < KEYBOARD_MIN_HEIGHT) {
               state.isKeyboardVisible = false;
               setKeyboardHeight(0);
@@ -179,7 +138,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const windowHeight = window.innerHeight;
       const keyboardH = windowHeight - viewport.height;
 
-      // 使用可配置的阈值
       if (keyboardH >= KEYBOARD_MIN_HEIGHT) {
         updateKeyboardState(true, keyboardH);
       } else if (keyboardH < KEYBOARD_MIN_HEIGHT && state.isKeyboardVisible) {
@@ -187,7 +145,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
     };
 
-    // 初始检测
     handleVisualViewportChange();
 
     window.visualViewport?.addEventListener('resize', handleVisualViewportChange);
@@ -222,25 +179,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [terminalSessionId, activeModifier]);
 
-  // 改进的移动端检测：结合触屏能力和屏幕宽度
   React.useEffect(() => {
     const checkIsMobile = () => {
       if (typeof window === 'undefined') return false;
-      // 检测触屏设备
       const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
-      // 结合屏幕宽度判断
       const isNarrow = window.innerWidth < 768;
       return hasTouch && isNarrow;
     };
-    
-    // 初始化检测
+
     setIsMobile(checkIsMobile());
-    
-    // 监听窗口大小变化
+
     const handleResize = () => {
       setIsMobile(checkIsMobile());
     };
-    
+
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
@@ -291,14 +243,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setConnectionError(null);
                 setIsFatalError(false);
 
-                // 恢复历史输出到 buffer
                 const sessionState = useTerminalStore.getState().getTerminalSession(storeSessionId);
                 if (sessionState?.history && sessionState.history.length > 0) {
                   console.log(`[Terminal] Restoring ${sessionState.history.length} history chunks`);
                   sessionState.history.forEach(chunk => {
                     appendToBuffer(storeSessionId, chunk);
                   });
-                  // 清除历史，避免重复填充
                   useTerminalStore.getState().setSessionHistory(storeSessionId, []);
                 }
 
@@ -364,12 +314,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearTerminalSession, disconnectStream, removeTerminalSession, setConnecting, terminal]
+    [appendToBuffer, clearTerminalSession, disconnectStream, removeTerminalSession, setConnecting, terminal, sessionId]
   );
 
   const hasInitializedRef = React.useRef(false);
-
-  // 用于跟踪当前 effect run 的唯一标识符，防止跨 run 的 race condition
   const currentRunIdRef = React.useRef(0);
 
   React.useEffect(() => {
@@ -379,13 +327,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
 
-    // 如果sessionId改变，允许重新初始化
     if (sessionIdRef.current !== sessionId) {
       console.log(`[useEffect] sessionId changed from ${sessionIdRef.current} to ${sessionId}, allowing reinitialization`);
       hasInitializedRef.current = false;
     }
 
-    // 防止重复初始化
     if (hasInitializedRef.current && sessionIdRef.current === sessionId) {
       console.log(`[useEffect] Already initialized for sessionId=${sessionId}, skipping`);
       return;
@@ -394,25 +340,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     console.log(`[useEffect] Running ensureSession for sessionId=${sessionId}, cwd=${cwd}, hasInitialized=${hasInitializedRef.current}`);
     hasInitializedRef.current = true;
 
-    // 生成新的 run ID 并增加计数器
     const runId = ++currentRunIdRef.current;
 
     const ensureSession = async () => {
       console.log(`[ensureSession] Starting for sessionId=${sessionId}, cwd=${cwd}, runId=${runId}`);
 
-      // 检查 sessionId 是否变化，以及是否是当前 run
       if (!sessionIdRef.current || sessionIdRef.current !== sessionId) {
         console.log(`[ensureSession] SessionId mismatch or stale run (current=${sessionIdRef.current}, target=${sessionId}), skipping`);
         return;
       }
 
-      // 检查是否是当前最新的 run，避免过期的 run 继续执行
       if (runId !== currentRunIdRef.current) {
         console.log(`[ensureSession] Stale run detected (runId=${runId}, currentRunId=${currentRunIdRef.current}), skipping`);
         return;
       }
 
-      // 直接从store获取最新状态和函数，避免闭圈问题
       const store = useTerminalStore.getState();
       const currentState = store.getTerminalSession(sessionId);
       console.log(`[ensureSession] Current state from store:`, {
@@ -423,7 +365,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       let terminalId = currentState?.terminalSessionId ?? null;
       let shouldCreateNewSession = !terminalId;
 
-      // 如果存在会话ID，检查会话是否健康
       if (terminalId && terminal.checkHealth) {
         console.log(`[ensureSession] Checking health of existing session ${terminalId}`);
         try {
@@ -433,7 +374,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             console.log(`[ensureSession] Session ${terminalId} is NOT healthy (healthy=${health.healthy}), will create new session`);
             console.log(`[ensureSession] Health check details:`, health);
             shouldCreateNewSession = true;
-            // 清理不健康的会话
             store.clearTerminalSession(sessionId);
             console.log(`[ensureSession] Cleared unhealthy session from store`);
           } else {
@@ -447,12 +387,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         } catch (error) {
           console.warn(`[ensureSession] Failed to check health of session ${terminalId}:`, error);
           console.warn(`[ensureSession] Health check API call failed, proceeding as if session might be unhealthy`);
-          // 健康检查失败，保守起见认为会话可能不健康，但先尝试连接
-          // 如果连接失败，会在流连接错误处理中处理
         }
       }
 
-      // 需要创建新会话（要么没有会话ID，要么会话不健康）
       console.log(`[ensureSession] Decision: shouldCreateNewSession=${shouldCreateNewSession}, terminalId=${terminalId}`);
       if (shouldCreateNewSession) {
         console.log(`[ensureSession] Creating new session, shouldCreateNewSession=${shouldCreateNewSession}, runId=${runId}`);
@@ -460,24 +397,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         setIsFatalError(false);
         store.setConnecting(sessionId, true);
 
-        // 重新检查store，防止竞争条件：其他实例可能已经创建了会话
         const currentStore = useTerminalStore.getState();
         const recheckedState = currentStore.getTerminalSession(sessionId);
         if (recheckedState?.terminalSessionId) {
           console.log(`[ensureSession] Race condition avoided: another instance already created session ${recheckedState.terminalSessionId}`);
-          store.setConnecting(sessionId, false); // 重置连接状态
+          store.setConnecting(sessionId, false);
           terminalId = recheckedState.terminalSessionId;
           shouldCreateNewSession = false;
-          // 继续执行流程，使用现有会话
         } else {
-          // 继续创建新会话
           try {
             const session = await terminal.createSession({
               cwd: cwd,
             });
             console.log(`[ensureSession] Created new session ${session.sessionId}, cwd=${cwd}`);
 
-            // 检查是否是当前最新的 run，避免过期的 run 继续执行
             if (runId !== currentRunIdRef.current) {
               console.log(`[ensureSession] Stale run after session creation (runId=${runId}, currentRunId=${currentRunIdRef.current}), closing session`);
               try {
@@ -490,7 +423,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             console.log(`[ensureSession] Updated store with new session ${session.sessionId}`);
             terminalId = session.sessionId;
           } catch (error) {
-            // 检查是否是当前最新的 run，避免过期的 run 设置错误状态
             if (runId !== currentRunIdRef.current) {
               console.log(`[ensureSession] Stale run after session creation failed, skipping error handling`);
               return;
@@ -507,7 +439,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         }
       }
 
-      // 最终检查：确保仍是当前最新的 run
       if (runId !== currentRunIdRef.current) {
         console.log(`[ensureSession] Stale run before starting stream (runId=${runId}, currentRunId=${currentRunIdRef.current}), skipping`);
         return;
@@ -527,11 +458,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     void ensureSession();
 
     return () => {
-      // 只标记当前 run 为过期，不影响其他 run
-      // 通过增加 run ID 来"取消"当前 run，这样当前 run 的异步操作会检查并自停止
       console.log(`[useEffect] Cleanup for sessionId=${sessionId}, cwd=${cwd}, runId=${runId}`);
-      // 注意：这里不直接设置 cancelled，而是让异步操作通过比较 runId 来检测过期
-      // 这样可以避免之前版本中的变量提升问题
     };
   }, [sessionId, cwd, startStream, disconnectStream, terminal]);
 
@@ -634,7 +561,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   );
 
   const handleMobileKeyPress = React.useCallback(
-    (key: MobileKey) => {
+    (key: 'esc' | 'tab' | 'enter' | 'arrow-up' | 'arrow-down' | 'arrow-left' | 'arrow-right') => {
       const sequence = getSequenceForKey(key, activeModifier);
       if (!sequence) {
         return;
@@ -654,7 +581,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return `${directoryPart}::${terminalPart}`;
   }, [cwd, terminalSessionId]);
 
-  // 通知父组件状态变化
   React.useEffect(() => {
     onStatusChange?.({
       isConnecting,
@@ -676,26 +602,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
-      {/* 调试面板 - 点击3次状态图标或DEBUG按钮显示 */}
       {showDebug && (
-        <div className="px-3 py-2 bg-blue-900/90 text-white text-xs border-b border-blue-700">
-          <div className="font-bold mb-2">🔧 Debug Info</div>
-          <div className="grid grid-cols-2 gap-1 font-mono">
-            <div>isMobile: <span className={isMobile ? 'text-green-400' : 'text-red-400'}>{String(isMobile)}</span></div>
-            <div>touchPoints: {navigator.maxTouchPoints}</div>
-            <div>innerWidth: {typeof window !== 'undefined' ? window.innerWidth : 'N/A'}</div>
-            <div>innerHeight: {typeof window !== 'undefined' ? window.innerHeight : 'N/A'}</div>
-            <div>viewportH: {typeof window !== 'undefined' && window.visualViewport ? Math.round(window.visualViewport.height) : 'N/A'}</div>
-            <div>keyboardH: {keyboardHeight}px</div>
-            <div>connecting: <span className={isConnecting ? 'text-yellow-400' : 'text-green-400'}>{String(isConnecting)}</span></div>
-            <div>sessionId: <span className={terminalSessionId ? 'text-green-400' : 'text-red-400'}>{terminalSessionId ? '✓' : '✗'}</span></div>
-            <div>error: <span className={connectionError ? 'text-red-400' : 'text-green-400'}>{connectionError ? 'Yes' : 'No'}</span></div>
-            <div>isIOS: <span className={isIOS ? 'text-yellow-400' : 'text-green-400'}>{String(isIOS)}</span></div>
-          </div>
-          <div className="mt-2 pt-2 border-t border-blue-700">
-            <div>💡 Tip: 连续点击上方状态栏3次可切换调试面板</div>
-          </div>
-        </div>
+        <DebugPanel
+          isMobile={isMobile}
+          keyboardHeight={keyboardHeight}
+          isIOS={isIOS}
+          isConnecting={isConnecting}
+          connectionError={connectionError}
+          terminalSessionId={terminalSessionId}
+        />
       )}
 
       <div
@@ -743,114 +658,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             />
           </ErrorBoundary>
         </div>
-        {connectionError && (
-          <div className="absolute inset-x-0 bottom-0 bg-red-500/90 px-3 py-2 text-xs text-white flex items-center justify-between gap-2">
-            <span>{connectionError}</span>
-            {isFatalError && (
-              <button
-                type="button"
-                onClick={handleHardRestart}
-                disabled={isRestarting}
-                title="Force kill and create fresh session"
-                className="h-6 px-2 py-0 text-xs bg-white/20 hover:bg-white/30 rounded disabled:opacity-50"
-              >
-                Hard Restart
-              </button>
-            )}
-          </div>
-        )}
+
+        <ConnectionStatus
+          connectionError={connectionError}
+          isFatalError={isFatalError}
+          isRestarting={isRestarting}
+          onHardRestart={handleHardRestart}
+        />
       </div>
 
-      {/* 移动端工具区 - 仅在软键盘弹出时显示，软键盘/HOME 指示器升起时保持在键盘上方 */}
-      {isMobile && keyboardHeight > 0 && (
-        <div
-          className="px-3 py-2 border-t border-border bg-background"
-          style={{
-            paddingBottom: keyboardHeight > 0 
-              ? `${keyboardHeight}px`
-              : isIOS ? 'env(safe-area-inset-bottom, 0px)' : undefined,
-          }}
-        >
-          <div className="flex flex-wrap items-center gap-1">
-            <button
-              type="button"
-              onClick={() => handleMobileKeyPress('esc')}
-              disabled={quickKeysDisabled}
-              className="h-6 px-2 text-xs border rounded hover:bg-accent disabled:opacity-50"
-            >
-              Esc
-            </button>
-            <button
-              type="button"
-              onClick={() => handleMobileKeyPress('tab')}
-              disabled={quickKeysDisabled}
-              className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
-            >
-              <RiArrowRightLine size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={() => handleModifierToggle('ctrl')}
-              disabled={quickKeysDisabled}
-              className={`h-6 w-9 p-0 border rounded disabled:opacity-50 flex items-center justify-center ${
-                activeModifier === 'ctrl' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'
-              }`}
-            >
-              <span className="text-xs font-medium">Ctrl</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleModifierToggle('cmd')}
-              disabled={quickKeysDisabled}
-              className={`h-6 w-9 p-0 border rounded disabled:opacity-50 flex items-center justify-center ${
-                activeModifier === 'cmd' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'
-              }`}
-            >
-              <RiCommandLine size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={() => handleMobileKeyPress('arrow-up')}
-              disabled={quickKeysDisabled}
-              className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
-            >
-              <RiArrowUpLine size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={() => handleMobileKeyPress('arrow-left')}
-              disabled={quickKeysDisabled}
-              className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
-            >
-              <RiArrowLeftLine size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={() => handleMobileKeyPress('arrow-down')}
-              disabled={quickKeysDisabled}
-              className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
-            >
-              <RiArrowDownLine size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={() => handleMobileKeyPress('arrow-right')}
-              disabled={quickKeysDisabled}
-              className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
-            >
-              <RiArrowRightLine size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={() => handleMobileKeyPress('enter')}
-              disabled={quickKeysDisabled}
-              className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
-            >
-              <RiArrowGoBackLine size={16} />
-            </button>
-          </div>
-        </div>
-      )}
+      <MobileKeyboard
+        isMobile={isMobile}
+        keyboardHeight={keyboardHeight}
+        isIOS={isIOS}
+        activeModifier={activeModifier}
+        disabled={quickKeysDisabled}
+        onKeyPress={handleMobileKeyPress}
+        onModifierToggle={handleModifierToggle}
+      />
     </div>
   );
 };
