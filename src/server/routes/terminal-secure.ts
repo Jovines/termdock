@@ -1,5 +1,6 @@
 import express from 'express';
 import fs from 'fs';
+import os from 'os';
 
 const router = express.Router();
 
@@ -358,11 +359,8 @@ router.delete('/:sessionId', (req, res) => {
 // 重启会话
 router.post('/:sessionId/restart', async (req, res) => {
   const { sessionId } = req.params;
-  const { cwd, cols, rows } = req.body;
-
-  if (!cwd) {
-    return res.status(400).json({ error: 'cwd is required' });
-  }
+  const { cwd: inputCwd, cols, rows } = req.body;
+  const cwd = inputCwd || os.homedir();
 
   const existingSession = terminalSessions.get(sessionId);
   if (existingSession) {

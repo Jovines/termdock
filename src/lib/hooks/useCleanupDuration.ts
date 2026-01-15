@@ -5,6 +5,7 @@ const SETTINGS_STORAGE_KEY = 'web-terminal-settings';
 const DEFAULT_SETTINGS: TerminalSettings = {
   cleanupDuration: 5 * 60 * 1000,  // 默认5分钟
   cleanupDurationPreset: 'default',
+  fontSize: 13,  // 默认字体大小
 };
 
 // 预设时长选项的显示名称
@@ -69,6 +70,7 @@ export function useCleanupDuration(): UseCleanupDurationReturn {
         return {
           cleanupDuration: data.cleanupDuration ?? DEFAULT_SETTINGS.cleanupDuration,
           cleanupDurationPreset: data.cleanupDurationPreset ?? DEFAULT_SETTINGS.cleanupDurationPreset,
+          fontSize: data.fontSize ?? DEFAULT_SETTINGS.fontSize,
         };
       }
     } catch (error) {
@@ -116,22 +118,24 @@ export function useCleanupDuration(): UseCleanupDurationReturn {
     const newSettings: TerminalSettings = {
       cleanupDuration: duration,
       cleanupDurationPreset: preset,
+      fontSize: settings.fontSize,
     };
     
     setSettings(newSettings);
     persistSettings(newSettings);
-  }, [settings.cleanupDuration, persistSettings]);
+  }, [settings.cleanupDuration, settings.fontSize, persistSettings]);
 
   // 设置自定义清理时长
   const setCustomDuration = useCallback((durationMs: number) => {
     const newSettings: TerminalSettings = {
       cleanupDuration: durationMs,
       cleanupDurationPreset: 'custom',
+      fontSize: settings.fontSize,
     };
     
     setSettings(newSettings);
     persistSettings(newSettings);
-  }, [persistSettings]);
+  }, [settings.fontSize, persistSettings]);
 
   // 获取当前有效的清理时长（毫秒）
   const getEffectiveDuration = useCallback(() => {

@@ -1,53 +1,38 @@
 import React from 'react';
-import { RiFolderLine, RiPaletteLine, RiTimerLine, RiInformationLine } from '@remixicon/react';
+import { RiPaletteLine, RiTimerLine, RiInformationLine, RiAddLine, RiSubtractLine } from '@remixicon/react';
 import type { CleanupDurationPreset } from '../../terminal/types';
 
 interface MobileSettingsProps {
-  defaultCwd: string;
   theme: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   cleanupDurationPreset: CleanupDurationPreset | 'custom';
   customDurationInput: string;
+  fontSize: number;
   showDebug: boolean;
-  onCwdChange: (value: string) => void;
   onThemeChange: (value: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord') => void;
   onCleanupPresetChange: (value: CleanupDurationPreset | 'custom') => void;
   onCustomDurationChange: (value: string) => void;
   onCustomDurationBlur: () => void;
   onSetCustomDuration: (ms: number) => void;
+  onFontSizeChange: (size: number) => void;
   onToggleDebug: () => void;
 }
 
 export const MobileSettings: React.FC<MobileSettingsProps> = ({
-  defaultCwd,
   theme,
   cleanupDurationPreset,
   customDurationInput,
+  fontSize,
   showDebug,
-  onCwdChange,
   onThemeChange,
   onCleanupPresetChange,
   onCustomDurationChange,
   onCustomDurationBlur,
   onSetCustomDuration,
+  onFontSizeChange,
   onToggleDebug,
 }) => {
   return (
     <div className="p-4 space-y-4">
-      <div>
-        <label htmlFor="mobile-cwd" className="flex items-center gap-2 text-sm font-medium text-muted mb-2">
-          <RiFolderLine className="w-4 h-4" />
-          Working Directory
-        </label>
-        <input
-          id="mobile-cwd"
-          type="text"
-          value={defaultCwd}
-          onChange={(e) => onCwdChange(e.target.value)}
-          placeholder="/home"
-          className="w-full px-4 py-3 text-base border rounded-lg bg-input text-foreground min-h-[48px] focus:outline-none focus:ring-2 focus:ring-accent transition-shadow"
-        />
-      </div>
-
       <div>
         <label htmlFor="mobile-theme" className="flex items-center gap-2 text-sm font-medium text-muted mb-2">
           <RiPaletteLine className="w-4 h-4" />
@@ -117,6 +102,51 @@ export const MobileSettings: React.FC<MobileSettingsProps> = ({
           <p className="text-xs text-muted mt-1">范围：1-10080 分钟（最多7天）</p>
         </div>
       )}
+
+      <div>
+        <label htmlFor="mobile-fontsize" className="flex items-center gap-2 text-sm font-medium text-muted mb-2">
+          <span className="text-base">A</span>
+          字体大小
+        </label>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onFontSizeChange(fontSize - 1)}
+            className="flex-1 flex items-center justify-center gap-1 px-4 py-3 text-base border rounded-lg bg-input text-foreground min-h-[48px] hover:bg-surface-elevated transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={fontSize <= 8}
+          >
+            <RiSubtractLine className="w-5 h-5" />
+            <span>减小</span>
+          </button>
+          <div className="flex-1 flex items-center justify-center px-4 py-3 text-base border rounded-lg bg-input text-foreground min-h-[48px]">
+            <input
+              id="mobile-fontsize"
+              type="number"
+              min="8"
+              max="32"
+              value={fontSize}
+              onChange={(e) => {
+                const value = parseInt(e.target.value, 10);
+                if (!isNaN(value)) {
+                  onFontSizeChange(value);
+                }
+              }}
+              className="bg-transparent border-none outline-none w-16 text-center text-lg font-medium [-moz-appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+            />
+            <span className="text-muted ml-1">px</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onFontSizeChange(fontSize + 1)}
+            className="flex-1 flex items-center justify-center gap-1 px-4 py-3 text-base border rounded-lg bg-input text-foreground min-h-[48px] hover:bg-surface-elevated transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={fontSize >= 32}
+          >
+            <RiAddLine className="w-5 h-5" />
+            <span>增大</span>
+          </button>
+        </div>
+        <p className="text-xs text-muted mt-1">范围：8-32 px</p>
+      </div>
 
       <div className="pt-2 border-t border-border">
         <button

@@ -82,7 +82,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onClick={() => onKeyPress('esc')}
           disabled={disabled}
-          className="h-6 px-2 text-xs border rounded hover:bg-accent disabled:opacity-50"
+          className="h-6 px-2 text-xs border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
         >
           Esc
         </button>
@@ -90,7 +90,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onClick={() => onKeyPress('tab')}
           disabled={disabled}
-          className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
+          className="h-6 w-9 p-0 border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowRightLine size={16} />
         </button>
@@ -99,7 +99,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           onClick={() => onModifierToggle('ctrl')}
           disabled={disabled}
           className={`h-6 w-9 p-0 border rounded disabled:opacity-50 flex items-center justify-center ${
-            activeModifier === 'ctrl' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'
+            activeModifier === 'ctrl' ? 'bg-primary text-primary-foreground' : ''
           }`}
         >
           <span className="text-xs font-medium">Ctrl</span>
@@ -109,7 +109,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           onClick={() => onModifierToggle('cmd')}
           disabled={disabled}
           className={`h-6 w-9 p-0 border rounded disabled:opacity-50 flex items-center justify-center ${
-            activeModifier === 'cmd' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'
+            activeModifier === 'cmd' ? 'bg-primary text-primary-foreground' : ''
           }`}
         >
           <RiCommandLine size={16} />
@@ -118,7 +118,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onClick={() => onKeyPress('arrow-up')}
           disabled={disabled}
-          className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
+          className="h-6 w-9 p-0 border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowUpLine size={16} />
         </button>
@@ -126,7 +126,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onClick={() => onKeyPress('arrow-left')}
           disabled={disabled}
-          className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
+          className="h-6 w-9 p-0 border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowLeftLine size={16} />
         </button>
@@ -134,7 +134,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onClick={() => onKeyPress('arrow-down')}
           disabled={disabled}
-          className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
+          className="h-6 w-9 p-0 border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowDownLine size={16} />
         </button>
@@ -142,7 +142,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onClick={() => onKeyPress('arrow-right')}
           disabled={disabled}
-          className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
+          className="h-6 w-9 p-0 border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowRightLine size={16} />
         </button>
@@ -150,7 +150,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onClick={() => onKeyPress('enter')}
           disabled={disabled}
-          className="h-6 w-9 p-0 border rounded hover:bg-accent disabled:opacity-50 flex items-center justify-center"
+          className="h-6 w-9 p-0 border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowGoBackLine size={16} />
         </button>

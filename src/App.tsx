@@ -1,29 +1,24 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useCallback, useState } from 'react';
 import { MultiTerminalView } from './lib/components/MultiTerminalView';
-import { RiTerminalBoxLine } from '@remixicon/react';
+import { RiTerminalBoxLine, RiSettings4Line, RiAddLine, RiCloseLine } from '@remixicon/react';
 import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
-import { DesktopSettings } from './lib/components/settings/DesktopSettings';
-import { MobileSettings } from './lib/components/settings/MobileSettings';
-import { DebugInfoPanel } from './lib/components/settings/DebugInfoPanel';
+import { useFontSize } from './lib/hooks/useFontSize';
 import type { CleanupDurationPreset } from './lib/terminal/types';
 
+interface TerminalSessionInfo {
+  id: string;
+  cwd: string;
+  name: string;
+}
+
 function App() {
-  const [defaultCwd, setDefaultCwd] = React.useState<string>('/home');
   const [theme, setTheme] = React.useState<'dark' | 'light' | 'solarized' | 'dracula' | 'nord'>('dark');
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = React.useState(false);
   const [showDebug, setShowDebug] = React.useState(false);
   const [debugInfo, setDebugInfo] = React.useState<Record<string, any>>({});
-  const [terminalStatus, setTerminalStatus] = React.useState<{
-    isConnecting: boolean;
-    isRestarting: boolean;
-    hasError: boolean;
-    sessionId: string | null;
-  }>({
-    isConnecting: false,
-    isRestarting: false,
-    hasError: false,
-    sessionId: null,
-  });
+  const { fontSize, setFontSize } = useFontSize();
+  const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
+  const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
+  const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
 
   const {
     cleanupDurationPreset,
@@ -41,26 +36,6 @@ function App() {
       setCustomDurationInput('');
     }
   }, [cleanupDurationPreset, customDurationMs]);
-
-  useEffect(() => {
-    const fetchHomeDirectory = async () => {
-      try {
-        const response = await fetch('/api/home');
-        if (response.ok) {
-          const data = await response.json();
-          if (data.home) {
-            setDefaultCwd(data.home);
-          }
-        }
-      } catch (error) {
-        console.warn('Failed to fetch home directory, using default');
-      }
-    };
-
-    fetchHomeDirectory();
-  }, []);
-
-  const closeMobileMenu = () => setIsMobileMenuOpen(false);
 
   useEffect(() => {
     const info: Record<string, any> = {};
@@ -103,106 +78,203 @@ function App() {
     }
   };
 
+  // Listen for session updates from MultiTerminalView
+  const handleSessionDataUpdate = useCallback((data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => {
+    setSessions(data.sessions);
+    setActiveSessionId(data.activeSessionId);
+  }, []);
+
   return (
-    <div className="h-screen w-screen flex flex-col bg-background text-foreground">
-      <header className="relative flex items-center justify-between px-4 py-2 border-b border-border bg-surface">
-        <div className="flex items-center gap-3">
-          {terminalStatus.hasError
-            ? <span className="text-red-500">●</span>
-            : terminalStatus.isConnecting || terminalStatus.isRestarting
-              ? <span className="text-muted-foreground animate-pulse">●</span>
-              : terminalStatus.sessionId
-                ? <span className="text-emerald-400">●</span>
-                : <span className="text-muted-foreground animate-pulse">●</span>}
-          <h1 className="text-base font-semibold truncate">{defaultCwd}</h1>
-          <button
-            type="button"
-            onClick={() => {
-              const event = new CustomEvent('open-session-drawer');
-              window.dispatchEvent(event);
-            }}
-            className="lg:hidden flex items-center gap-1.5 px-2 py-1 text-xs bg-surface-elevated rounded hover:bg-accent/50 transition-colors"
-          >
-            <RiTerminalBoxLine size={14} />
-            <span className="max-w-[100px] truncate">Sessions</span>
-          </button>
-        </div>
-
-        <DesktopSettings
-          defaultCwd={defaultCwd}
-          theme={theme}
-          cleanupDurationPreset={cleanupDurationPreset}
-          customDurationInput={customDurationInput}
-          isMobileMenuOpen={isMobileMenuOpen}
-          onCwdChange={setDefaultCwd}
-          onThemeChange={setTheme}
-          onCleanupPresetChange={(value) => setCleanupDurationPreset(value as CleanupDurationPreset)}
-          onCustomDurationChange={setCustomDurationInput}
-          onCustomDurationBlur={handleCustomDurationBlur}
-          onSetCustomDuration={setCustomDuration}
-          onToggleMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-        />
-
-        <button
-          type="button"
-          onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-          className="lg:hidden p-2 -mr-2 rounded-lg hover:bg-surface-elevated transition-colors focus:outline-none focus:ring-2 focus:ring-accent min-w-[44px] min-h-[44px] flex items-center justify-center"
-          aria-label="Toggle settings menu"
-          aria-expanded={isMobileMenuOpen}
-        >
-          {isMobileMenuOpen ? (
-            <span className="w-6 h-6 flex items-center justify-center">✕</span>
-          ) : (
-            <span className="w-6 h-6 flex items-center justify-center">⚙</span>
-          )}
-        </button>
-
-        {isMobileMenuOpen && (
-          <>
-            <button
-              type="button"
-              className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 lg:hidden animate-fade-in cursor-default"
-              onClick={closeMobileMenu}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') {
-                  closeMobileMenu();
-                }
-              }}
-            />
-            <div className="absolute top-full left-0 right-0 mt-1 mx-4 bg-surface border border-border rounded-lg shadow-xl z-50 lg:hidden animate-slide-down max-h-[80vh] overflow-y-auto">
-              <MobileSettings
-                defaultCwd={defaultCwd}
-                theme={theme}
-                cleanupDurationPreset={cleanupDurationPreset}
-                customDurationInput={customDurationInput}
-                showDebug={showDebug}
-                onCwdChange={setDefaultCwd}
-                onThemeChange={setTheme}
-                onCleanupPresetChange={(value) => setCleanupDurationPreset(value as CleanupDurationPreset)}
-                onCustomDurationChange={setCustomDurationInput}
-                onCustomDurationBlur={handleCustomDurationBlur}
-                onSetCustomDuration={setCustomDuration}
-                onToggleDebug={() => setShowDebug(!showDebug)}
-              />
-            </div>
-          </>
-        )}
-      </header>
-
-      <main className="flex-1 overflow-hidden">
+    <div className="h-screen w-screen flex flex-col bg-background text-foreground overflow-hidden">
+      <main className="flex-1 overflow-hidden relative">
         <MultiTerminalView
-          defaultCwd={defaultCwd}
           theme={theme}
+          fontSize={fontSize}
           showDebug={showDebug}
-          onStatusChange={setTerminalStatus}
+          onSessionDataUpdate={handleSessionDataUpdate}
         />
       </main>
 
-      <DebugInfoPanel
-        debugInfo={debugInfo}
-        showDebug={showDebug}
-        onClose={() => setShowDebug(false)}
-      />
+      {/* Settings/Sessions Button - Top Right */}
+      <button
+        type="button"
+        onClick={() => setIsDrawerOpen(true)}
+        className="fixed top-3 right-3 z-30 p-2 text-muted-foreground hover:text-foreground transition-colors duration-200"
+        aria-label="Open sessions and settings"
+      >
+        <RiSettings4Line size={20} />
+      </button>
+
+      {/* Combined Drawer - Sessions + Settings */}
+      {isDrawerOpen && (
+        <>
+          <button
+            type="button"
+            className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 animate-fade-in cursor-default"
+            onClick={() => setIsDrawerOpen(false)}
+          />
+          <div className="fixed top-3 right-3 bottom-auto left-auto z-50 w-72 bg-surface/95 backdrop-blur-xl border border-border/50 rounded-xl shadow-2xl animate-fade-in max-h-[calc(100vh-24px)] overflow-y-auto">
+            <div className="p-4 space-y-3">
+              {/* Sessions Section */}
+              {sessions.length > 0 && (
+                <>
+                  <div className="space-y-1.5">
+                    {sessions.map((session) => (
+                      <button
+                        key={session.id}
+                        type="button"
+                        onClick={() => {
+                          const event = new CustomEvent('switch-terminal-session', { detail: session.id });
+                          window.dispatchEvent(event);
+                          setIsDrawerOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-2 px-3 py-2 text-sm rounded-lg transition-colors ${
+                          session.id === activeSessionId
+                            ? 'bg-primary/15 text-primary border border-primary/30'
+                            : 'hover:bg-surface-elevated'
+                        }`}
+                      >
+                        <RiTerminalBoxLine size={14} />
+                        <span className="flex-1 truncate text-left">{session.name}</span>
+                        <span className="text-xs text-muted-foreground truncate max-w-[80px]">
+                          {session.cwd.replace(/^\/home\/[^/]+/, '~')}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const event = new CustomEvent('close-terminal-session', { detail: session.id });
+                            window.dispatchEvent(event);
+                          }}
+                          className="p-1 rounded hover:bg-red-500/20 hover:text-red-500"
+                        >
+                          <RiCloseLine size={14} />
+                        </button>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Add Session Button */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleNewSession();
+                      setIsDrawerOpen(false);
+                    }}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm border border-dashed border-border rounded-lg hover:bg-surface-elevated transition-colors text-muted-foreground"
+                  >
+                    <RiAddLine size={14} />
+                    <span>New Session</span>
+                  </button>
+
+                  {/* Divider */}
+                  <div className="border-t border-border/50" />
+                </>
+              )}
+
+              {/* Settings Section */}
+              <div className="space-y-3">
+                <span className="text-xs text-muted-foreground uppercase tracking-wider">Settings</span>
+
+                {/* Theme */}
+                <div className="space-y-1.5">
+                  <span className="text-xs text-muted-foreground">Theme</span>
+                  <select
+                    value={theme}
+                    onChange={(e) => setTheme(e.target.value as any)}
+                    className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
+                  >
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
+                    <option value="solarized">Solarized</option>
+                    <option value="dracula">Dracula</option>
+                    <option value="nord">Nord</option>
+                  </select>
+                </div>
+
+                {/* Font Size */}
+                <div className="space-y-1.5">
+                  <span className="text-xs text-muted-foreground">Font Size: {fontSize}px</span>
+                  <input
+                    type="range"
+                    min="8"
+                    max="32"
+                    value={fontSize}
+                    onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
+                    className="w-full"
+                    aria-label="Font size"
+                  />
+                </div>
+
+                {/* Cleanup Duration */}
+                <div className="space-y-1.5">
+                  <span className="text-xs text-muted-foreground">Cleanup</span>
+                  <select
+                    value={cleanupDurationPreset}
+                    onChange={(e) => setCleanupDurationPreset(e.target.value as CleanupDurationPreset)}
+                    className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
+                  >
+                    <option value="never">Never</option>
+                    <option value="default">Default (5min)</option>
+                    <option value="5min">5 minutes</option>
+                    <option value="10min">10 minutes</option>
+                    <option value="30min">30 minutes</option>
+                    <option value="1hour">1 hour</option>
+                    <option value="2hours">2 hours</option>
+                    <option value="1day">1 day</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                  {cleanupDurationPreset === 'custom' && (
+                    <input
+                      type="number"
+                      min="1"
+                      max="10080"
+                      value={customDurationInput}
+                      onChange={(e) => setCustomDurationInput(e.target.value)}
+                      onBlur={handleCustomDurationBlur}
+                      placeholder="Minutes"
+                      className="w-full px-3 py-2 text-sm border rounded bg-input mt-2"
+                    />
+                  )}
+                </div>
+
+                {/* Debug Toggle */}
+                <div className="flex items-center justify-between pt-2">
+                  <span className="text-xs text-muted-foreground">Debug Mode</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowDebug(!showDebug)}
+                    className={`px-3 py-1 text-xs rounded transition-colors ${
+                      showDebug ? 'bg-primary text-primary-foreground' : 'bg-surface-elevated'
+                    }`}
+                  >
+                    {showDebug ? 'On' : 'Off'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Debug Info Panel */}
+      {showDebug && (
+        <div className="fixed bottom-0 left-0 right-0 bg-surface/95 backdrop-blur-xl border-t border-border/50 p-3 z-40 animate-fade-in max-h-48 overflow-y-auto">
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-xs font-medium text-muted-foreground">Debug Info</h4>
+            <button
+              type="button"
+              onClick={() => setShowDebug(false)}
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              Close
+            </button>
+          </div>
+          <pre className="text-xs font-mono whitespace-pre-wrap break-all">
+            {JSON.stringify(debugInfo, null, 2)}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }

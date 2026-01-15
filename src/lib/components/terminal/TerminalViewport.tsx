@@ -1,11 +1,12 @@
 import React from 'react';
-import { Ghostty, Terminal as GhosttyTerminal, FitAddon } from 'ghostty-web';
+import { Ghostty, Terminal as GhosttyTerminal } from 'ghostty-web';
 import type { TerminalTheme } from '../../terminal';
 import { getGhosttyTerminalOptions } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
 import { useTouchScroll } from '../../hooks/useTouchScroll';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
+import { FitAddonNoScrollbar } from './FitAddonNoScrollbar';
 
 let ghosttyPromise: Promise<Ghostty> | null = null;
 
@@ -71,7 +72,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const containerRef = React.useRef<HTMLDivElement>(null);
     const viewportRef = React.useRef<HTMLElement | null>(null);
     const terminalRef = React.useRef<GhosttyTerminal | null>(null);
-    const fitAddonRef = React.useRef<FitAddon | null>(null);
+    const fitAddonRef = React.useRef<FitAddonNoScrollbar | null>(null);
     const inputHandlerRef = React.useRef<(data: string) => void>(onInput);
     const resizeHandlerRef = React.useRef<(cols: number, rows: number) => void>(onResize);
     const lastReportedSizeRef = React.useRef<{ cols: number; rows: number } | null>(null);
@@ -80,11 +81,12 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const isWritingRef = React.useRef(false);
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
-    const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
-    const remainderPxRef = React.useRef(0);
-    const isComposingRef = React.useRef(false); // Track IME composition state
-    const [, forceRender] = React.useReducer((x) => x + 1, 0);
-    const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
+  const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
+  const remainderPxRef = React.useRef(0);
+  const isComposingRef = React.useRef(false); // Track IME composition state
+  const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
+  const [, forceRender] = React.useReducer((x) => x + 1, 0);
+  const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
     const [loadingState, setLoadingState] = React.useState<LoadingState>('loading');
     const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
@@ -267,7 +269,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
           const terminal = new GhosttyTerminal(options);
 
-          const fitAddon = new FitAddon();
+          const fitAddon = new FitAddonNoScrollbar();
 
           localTerminal = terminal;
           terminalRef.current = terminal;
@@ -276,6 +278,22 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           terminal.loadAddon(fitAddon);
           terminal.open(container);
           bumpTerminalReady();
+
+          // Setup pinch-to-zoom gesture for font size adjustment
+          const handleWheel = (event: WheelEvent) => {
+            // Only handle pinch zoom on touch devices (ctrlKey + wheel on trackpad)
+            if (event.ctrlKey || event.metaKey) {
+              event.preventDefault();
+              const delta = event.deltaY > 0 ? -1 : 1;
+              const newSize = Math.max(8, Math.min(32, fontSize + delta));
+              if (newSize !== fontSize) {
+                // Emit font size change event - parent component should listen
+                container.dispatchEvent(new CustomEvent('termfontchange', { detail: newSize }));
+              }
+            }
+          };
+          wheelHandlerRef.current = handleWheel;
+          container.addEventListener('wheel', handleWheel, { passive: false });
 
           const viewport = findScrollableViewport(container);
           if (viewport) {
@@ -326,6 +344,12 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           disposable.dispose();
         }
         localResizeObserver?.disconnect();
+
+        // Remove wheel event listener for pinch-to-zoom
+        if (wheelHandlerRef.current) {
+          container.removeEventListener('wheel', wheelHandlerRef.current);
+          wheelHandlerRef.current = null;
+        }
 
         localTerminal?.dispose();
         terminalRef.current = null;
@@ -508,6 +532,11 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                 }}
                 onKeyDown={(event) => {
                   if (event.key === 'Backspace') {
+                    // 如果 IME 正在组合字符，让输入法自然处理删除，不要干扰组合过程
+                    if (isComposingRef.current) {
+                      return;
+                    }
+
                     if (!event.currentTarget.value) {
                       inputHandlerRef.current('\x7f');
                     }

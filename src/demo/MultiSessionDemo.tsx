@@ -5,10 +5,10 @@ interface DemoProps {
   initialCwd?: string;
 }
 
-export const MultiSessionDemo: React.FC<DemoProps> = ({ initialCwd = '/' }) => {
+export const MultiSessionDemo: React.FC<DemoProps> = () => {
   return (
     <div className="h-screen w-full">
-      <MultiTerminalView defaultCwd={initialCwd} theme="dark" />
+      <MultiTerminalView theme="dark" />
     </div>
   );
 };

@@ -1,55 +1,39 @@
 import React from 'react';
-import { RiFolderLine, RiPaletteLine, RiTimerLine, RiSettings4Line, RiCloseLine } from '@remixicon/react';
+import { RiPaletteLine, RiTimerLine, RiSettings4Line, RiCloseLine, RiAddLine, RiSubtractLine } from '@remixicon/react';
 import type { CleanupDurationPreset } from '../../terminal/types';
 
 interface DesktopSettingsProps {
-  defaultCwd: string;
   theme: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   cleanupDurationPreset: CleanupDurationPreset | 'custom';
   customDurationInput: string;
+  fontSize: number;
   isMobileMenuOpen: boolean;
-  onCwdChange: (value: string) => void;
   onThemeChange: (value: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord') => void;
   onCleanupPresetChange: (value: CleanupDurationPreset | 'custom') => void;
   onCustomDurationChange: (value: string) => void;
   onCustomDurationBlur: () => void;
   onSetCustomDuration: (ms: number) => void;
+  onFontSizeChange: (size: number) => void;
   onToggleMenu: () => void;
 }
 
 export const DesktopSettings: React.FC<DesktopSettingsProps> = ({
-  defaultCwd,
   theme,
   cleanupDurationPreset,
   customDurationInput,
+  fontSize,
   isMobileMenuOpen,
-  onCwdChange,
   onThemeChange,
   onCleanupPresetChange,
   onCustomDurationChange,
   onCustomDurationBlur,
   onSetCustomDuration,
+  onFontSizeChange,
   onToggleMenu,
 }) => {
   return (
     <>
       <div className="hidden lg:flex items-center gap-3">
-        <div className="relative group">
-          <label htmlFor="desktop-cwd" className="absolute -top-1.5 left-2.5 bg-surface px-1 text-xs text-muted">
-            Directory
-          </label>
-          <div className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded bg-input text-foreground transition-colors focus-within:border-accent focus-within:ring-1 focus-within:ring-accent">
-            <RiFolderLine className="w-4 h-4 text-muted" />
-            <input
-              id="desktop-cwd"
-              type="text"
-              value={defaultCwd}
-              onChange={(e) => onCwdChange(e.target.value)}
-              placeholder="/path/to/dir"
-              className="bg-transparent border-none outline-none w-48"
-            />
-          </div>
-        </div>
         <div className="relative group">
           <label htmlFor="desktop-theme" className="absolute -top-1.5 left-2.5 bg-surface px-1 text-xs text-muted">
             Theme
@@ -118,8 +102,47 @@ export const DesktopSettings: React.FC<DesktopSettingsProps> = ({
                 placeholder="分钟数"
                 className="bg-transparent border-none outline-none w-20"
               />
-            </div>
+        </div>
+        <div className="relative group">
+          <label htmlFor="desktop-fontsize" className="absolute -top-1.5 left-2.5 bg-surface px-1 text-xs text-muted">
+            Font Size
+          </label>
+          <div className="flex items-center gap-1 px-3 py-1.5 text-sm border rounded bg-input text-foreground transition-colors focus-within:border-accent focus-within:ring-1 focus-within:ring-accent">
+            <button
+              type="button"
+              onClick={() => onFontSizeChange(fontSize - 1)}
+              className="p-0.5 rounded hover:bg-surface-elevated transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={fontSize <= 8}
+              aria-label="Decrease font size"
+            >
+              <RiSubtractLine className="w-3.5 h-3.5" />
+            </button>
+            <input
+              id="desktop-fontsize"
+              type="number"
+              min="8"
+              max="32"
+              value={fontSize}
+              onChange={(e) => {
+                const value = parseInt(e.target.value, 10);
+                if (!isNaN(value)) {
+                  onFontSizeChange(value);
+                }
+              }}
+              className="bg-transparent border-none outline-none w-12 text-center [-moz-appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+            />
+            <button
+              type="button"
+              onClick={() => onFontSizeChange(fontSize + 1)}
+              className="p-0.5 rounded hover:bg-surface-elevated transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={fontSize >= 32}
+              aria-label="Increase font size"
+            >
+              <RiAddLine className="w-3.5 h-3.5" />
+            </button>
           </div>
+        </div>
+      </div>
         )}
       </div>
 

@@ -8,6 +8,7 @@
   --surface: #161b22;
   --surface-elevated: #21262d;
   --muted: #6e7681;
+  --muted-foreground: #8b949e;
   --border: #30363d;
   --input: #0d1117;
   --primary: #238636;
@@ -248,4 +249,45 @@ body {
 
 .animate-slide-down {
   animation: slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Custom scrollbar for session tabs */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted) transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  height: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 3px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--muted);
+  border-radius: 3px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
+
+/* Smooth transitions */
+* {
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease, opacity 0.2s ease;
+}
+
+/* Gradient text utility */
+.text-gradient {
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Keyboard button active state delay - keeps active color longer for better feedback */
+.keyboard-button-active {
+  transition: background-color 0.15s ease-out;
 }

@@ -230,10 +230,10 @@ export const rateLimiters = {
     message: 'Too many terminal sessions created, please try again later.',
   }),
   
-  // 终端输入：限制为每秒10次
+  // 终端输入：限制为每秒50次
   terminalInput: new RateLimiter({
     windowMs: 1000, // 1秒
-    maxRequests: 10,
+    maxRequests: 50,
     message: 'Too many inputs, please slow down.',
   }),
   

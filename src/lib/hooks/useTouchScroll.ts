@@ -40,16 +40,16 @@ export const useTouchScroll = (
   config: TouchScrollConfig
 ) => {
   const {
-    scrollMultiplier = 3.0,
-    maxScrollBoost = 2.0,
-    boostDenominator = 30,
-    velocityAlpha = 0.18,
-    maxVelocity = 15,
-    minVelocity = 0.02,
-    deceleration = 0.008,
+    scrollMultiplier = 2.5,
+    maxScrollBoost = 1.5,
+    boostDenominator = 40,
+    velocityAlpha = 0.12,
+    maxVelocity = 20,
+    minVelocity = 0.5,
+    deceleration = 0.001,
     onScroll,
     onTap,
-    tapThreshold = 12,
+    tapThreshold = 8,
   } = config;
 
   const stateRef = React.useRef<TouchScrollState>({
@@ -64,6 +64,10 @@ export const useTouchScroll = (
     isCurrentlyScrolling: false,
   });
 
+  // 累积滚动量，用于 RAF 节流
+  const pendingScrollRef = React.useRef(0);
+  const rafIdRef = React.useRef<number | null>(null);
+
   const consecutiveNoScrollRef = React.useRef(0);
 
   /**
@@ -72,6 +76,34 @@ export const useTouchScroll = (
   const nowMs = React.useCallback(() => {
     return typeof performance !== 'undefined' ? performance.now() : Date.now();
   }, []);
+
+  /**
+   * RAF 节流的滚动处理函数
+   */
+  const processPendingScroll = React.useCallback(() => {
+    rafIdRef.current = null;
+    if (pendingScrollRef.current !== 0 && onScroll) {
+      onScroll(pendingScrollRef.current);
+      pendingScrollRef.current = 0;
+    }
+  }, [onScroll]);
+
+  /**
+   * 请求下一帧处理滚动（节流）
+   */
+  const requestScrollFrame = React.useCallback(() => {
+    if (rafIdRef.current === null && typeof window !== 'undefined') {
+      rafIdRef.current = window.requestAnimationFrame(processPendingScroll);
+    }
+  }, [processPendingScroll]);
+
+  /**
+   * 累积并请求滚动处理（用于节流）
+   */
+  const accumulateAndRequestScroll = React.useCallback((deltaPixels: number) => {
+    pendingScrollRef.current += deltaPixels;
+    requestScrollFrame();
+  }, [requestScrollFrame]);
 
   /**
    * 滚动指定像素数
@@ -102,6 +134,13 @@ export const useTouchScroll = (
       window.cancelAnimationFrame(state.rafId);
     }
     state.rafId = null;
+
+    // 同时停止 RAF 节流的滚动
+    if (rafIdRef.current !== null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(rafIdRef.current);
+    }
+    rafIdRef.current = null;
+    pendingScrollRef.current = 0;
   }, []);
 
   /**
@@ -121,6 +160,8 @@ export const useTouchScroll = (
         return;
       }
 
+      event.stopPropagation(); // 阻止事件冒泡，防止影响页面其他滚动区域
+
       state.pointerId = event.pointerId;
       state.startX = event.clientX;
       state.startY = event.clientY;
@@ -134,6 +175,8 @@ export const useTouchScroll = (
       if (event.pointerType !== 'touch' || state.pointerId !== event.pointerId) {
         return;
       }
+
+      event.stopPropagation(); // 阻止事件冒泡，防止影响页面其他滚动区域
 
       if (!state.lastY || !state.lastTime) {
         return;
@@ -157,18 +200,19 @@ export const useTouchScroll = (
         }
       }
 
-        // 应用滚动（deltaY 取反，使滑动方向符合直觉）
-        // 手指向上滑动(deltaY < 0)时，内容应向下滚动
-        if (Math.abs(deltaY) > 0.5) {
-          state.isCurrentlyScrolling = true;
-          
-          // 计算滚动乘数（速度越快，乘数越大）
-          const scrollMultiplierAdjusted = scrollMultiplier + 
-            Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
-          const deltaPixels = -deltaY * scrollMultiplierAdjusted;
-          
-          scrollByPixels(deltaPixels);
-        }
+      // 应用滚动（deltaY 取反，使滑动方向符合直觉）
+      // 手指向上滑动(deltaY < 0)时，内容应向下滚动
+      if (Math.abs(deltaY) > 1) {
+        state.isCurrentlyScrolling = true;
+
+        // 计算滚动乘数（速度越快，乘数越大）
+        const scrollMultiplierAdjusted = scrollMultiplier +
+          Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
+        const deltaPixels = -deltaY * scrollMultiplierAdjusted;
+
+        // 使用 RAF 节流累积滚动
+        accumulateAndRequestScroll(deltaPixels);
+      }
 
       state.lastY = event.clientY;
       state.lastTime = currentTime;
@@ -181,7 +225,9 @@ export const useTouchScroll = (
 
       state.isCurrentlyScrolling = false;
 
-      if (!state.didMove && onTap && state.startX !== null && state.startY !== null) {
+      // 检查是否应该触发 tap：需要同时满足 (1)没有移动 (2)没有在滚动/惯性滑动
+      const isScrolling = state.rafId !== null || rafIdRef.current !== null;
+      if (!state.didMove && !isScrolling && onTap && state.startX !== null && state.startY !== null) {
         onTap(state.startX, state.startY);
       }
 
@@ -259,6 +305,7 @@ export const useTouchScroll = (
     nowMs,
     stopKinetic,
     scrollByPixels,
+    accumulateAndRequestScroll,
     onTap,
     tapThreshold,
   ]);
@@ -280,6 +327,8 @@ export const useTouchScroll = (
         return;
       }
 
+      event.stopPropagation(); // 阻止事件冒泡，防止影响页面其他滚动区域
+
       state.isCurrentlyScrolling = false;
       state.lastY = event.touches[0].clientY;
       state.startX = event.touches[0].clientX;
@@ -292,6 +341,8 @@ export const useTouchScroll = (
       if (event.touches.length !== 1) {
         return;
       }
+
+      event.stopPropagation(); // 阻止事件冒泡，防止影响页面其他滚动区域
 
       const currentX = event.touches[0].clientX;
       const currentY = event.touches[0].clientY;
@@ -312,21 +363,22 @@ export const useTouchScroll = (
 
       const deltaY = currentY - state.lastY;
 
-      // 应用滚动（deltaY 取反，使滑动方向符合直觉）
-      // 手指向上滑动(deltaY < 0)时，内容应向下滚动
-      if (Math.abs(deltaY) > 0.5) {
-        state.isCurrentlyScrolling = true;
-        
-        // 计算滚动乘数
-        const scrollMultiplierAdjusted = scrollMultiplier + 
-          Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
-        const deltaPixels = -deltaY * scrollMultiplierAdjusted;
-        
-        scrollByPixels(deltaPixels);
-      }
+       // 应用滚动（deltaY 取反，使滑动方向符合直觉）
+       // 手指向上滑动(deltaY < 0)时，内容应向下滚动
+       if (Math.abs(deltaY) > 1) {
+         state.isCurrentlyScrolling = true;
 
-      state.lastY = currentY;
-    };
+         // 计算滚动乘数
+         const scrollMultiplierAdjusted = scrollMultiplier +
+           Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
+         const deltaPixels = -deltaY * scrollMultiplierAdjusted;
+
+         // 使用 RAF 节流累积滚动
+         accumulateAndRequestScroll(deltaPixels);
+       }
+
+       state.lastY = currentY;
+     };
 
     const handleTouchEnd = (event: TouchEvent) => {
       const point = event.changedTouches?.[0];
@@ -336,7 +388,9 @@ export const useTouchScroll = (
 
       state.isCurrentlyScrolling = false;
 
-      if (!state.didMove && onTap && state.startX !== null && state.startY !== null) {
+      // 检查是否应该触发 tap：需要同时满足 (1)没有移动 (2)没有在滚动/惯性滑动
+      const isScrolling = state.rafId !== null || rafIdRef.current !== null;
+      if (!state.didMove && !isScrolling && onTap && state.startX !== null && state.startY !== null) {
         onTap(state.startX, state.startY);
       }
 
@@ -395,6 +449,7 @@ export const useTouchScroll = (
     deceleration,
     stopKinetic,
     scrollByPixels,
+    accumulateAndRequestScroll,
     onTap,
     tapThreshold,
   ]);
@@ -423,7 +478,9 @@ export const useTouchScroll = (
    * 检查当前是否正在滚动
    */
   const isScrolling = React.useCallback(() => {
-    return stateRef.current.isCurrentlyScrolling || stateRef.current.rafId !== null;
+    return stateRef.current.isCurrentlyScrolling ||
+           stateRef.current.rafId !== null ||
+           rafIdRef.current !== null;
   }, []);
 
   /**

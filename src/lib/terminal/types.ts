@@ -19,7 +19,7 @@ export interface TerminalStreamEvent {
 
 // Create Session Options
 export interface CreateTerminalOptions {
-  cwd: string;
+  cwd?: string;
   cols?: number;
   rows?: number;
 }
@@ -126,4 +126,5 @@ export type CleanupDurationPreset = keyof typeof CLEANUP_DURATION_PRESETS;
 export interface TerminalSettings {
   cleanupDuration: DisconnectCleanupDuration;
   cleanupDurationPreset: CleanupDurationPreset | 'custom';
+  fontSize: number;  // 终端字体大小（像素）
 }

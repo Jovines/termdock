@@ -1,5 +1,6 @@
 import React from 'react';
 import { v4 as uuidv4 } from 'uuid';
+import os from 'os';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalStreamEvent } from '../../terminal';
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
@@ -38,15 +39,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   cwd: initialCwd,
   theme: themeName = 'dark',
   fontFamily = 'Menlo, Monaco, Consolas, monospace',
-  fontSize = TERMINAL_FONT_SIZE,
+  fontSize: initialFontSize = TERMINAL_FONT_SIZE,
   showDebug: externalShowDebug,
   onStatusChange,
 }) => {
+  // Local state for font size (supports pinch-to-zoom)
+  const [fontSize, setFontSize] = React.useState(initialFontSize);
   const terminal = React.useMemo(() => createWebTerminalAPI(), []);
 
   const [currentTheme, setCurrentTheme] = React.useState(getDefaultTheme);
   const [sessionId] = React.useState(initialSessionId || uuidv4());
-  const [cwd] = React.useState(initialCwd || process.cwd());
+  const [cwd] = React.useState(initialCwd || os.homedir() || process.cwd());
   const [isMobile, setIsMobile] = React.useState(false);
   const [isIOS, setIsIOS] = React.useState(false);
   const [keyboardHeight, setKeyboardHeight] = React.useState(0);
@@ -82,6 +85,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const terminalIdRef = React.useRef<string | null>(null);
   const sessionIdRef = React.useRef<string | null>(null);
   const terminalControllerRef = React.useRef<TerminalController | null>(null);
+
+  // Listen for font size changes from TerminalViewport (pinch-to-zoom)
+  React.useEffect(() => {
+    const handleFontChange = (event: Event) => {
+      const customEvent = event as CustomEvent<number>;
+      const newSize = customEvent.detail;
+      if (typeof newSize === 'number' && newSize >= 8 && newSize <= 32) {
+        setFontSize(newSize);
+      }
+    };
+
+    document.addEventListener('termfontchange', handleFontChange);
+    return () => document.removeEventListener('termfontchange', handleFontChange);
+  }, []);
 
   // iOS detection
   React.useEffect(() => {
@@ -618,7 +635,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         style={{ backgroundColor: xtermTheme.background }}
       >
         <div
-          className="h-full w-full box-border px-3 pt-3"
+          className="h-full w-full box-border px-2 pt-3"
           style={{
             height: isMobile && keyboardHeight > 0
               ? `calc(100% - ${keyboardHeight}px)`
@@ -663,6 +680,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           connectionError={connectionError}
           isFatalError={isFatalError}
           isRestarting={isRestarting}
+          isConnecting={isConnecting}
           onHardRestart={handleHardRestart}
         />
       </div>

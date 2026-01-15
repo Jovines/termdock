@@ -1,6 +1,7 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 
 const router = express.Router();
 
@@ -175,10 +176,8 @@ router.post('/create', async (req, res) => {
       return res.status(429).json({ error: 'Maximum terminal sessions reached' });
     }
 
-    const { cwd, cols, rows } = req.body;
-    if (!cwd) {
-      return res.status(400).json({ error: 'cwd is required' });
-    }
+    const { cwd: inputCwd, cols, rows } = req.body;
+    const cwd = inputCwd || os.homedir();
 
     if (!fs.existsSync(cwd)) {
       return res.status(400).json({ error: 'Invalid working directory' });
@@ -436,11 +435,8 @@ router.delete('/:sessionId', (req, res) => {
 
 router.post('/:sessionId/restart', async (req, res) => {
   const { sessionId } = req.params;
-  const { cwd, cols, rows } = req.body;
-
-  if (!cwd) {
-    return res.status(400).json({ error: 'cwd is required' });
-  }
+  const { cwd: inputCwd, cols, rows } = req.body;
+  const cwd = inputCwd || os.homedir();
 
   const existingSession = terminalSessions.get(sessionId);
   if (existingSession) {
