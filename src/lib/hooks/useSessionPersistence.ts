@@ -2,51 +2,51 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 
 const STORAGE_KEY = 'web-terminal-sessions';
 
-export interface PersistedTab {
-  tabId: string;
+export interface PersistedSession {
+  sessionId: string;  // 前端生成的 session ID
   cwd: string;
   name: string;
-  sessionId: string | null;  // 后端 sessionId，用于复用
+  backendSessionId: string | null;  // 后端 sessionId，用于复用
   createdAt: number;
   lastActivity: number;
 }
 
 interface UseSessionPersistenceReturn {
-  tabs: PersistedTab[];
-  activeTabId: string | null;
+  sessions: PersistedSession[];
+  activeSessionId: string | null;
   isLoading: boolean;
-  saveTab: (tab: Omit<PersistedTab, 'createdAt' | 'lastActivity' | 'sessionId'>, sessionId: string | null) => void;
-  removeTab: (tabId: string) => void;
-  updateTabActivity: (tabId: string) => void;
-  setActiveTab: (tabId: string | null) => void;
-  updateTabSessionId: (tabId: string, sessionId: string) => void;
-  clearAllTabs: () => void;
-  restoreTabs: () => Promise<PersistedTab[]>;
+  saveSession: (session: Omit<PersistedSession, 'createdAt' | 'lastActivity' | 'backendSessionId'>, backendSessionId: string | null) => void;
+  removeSession: (sessionId: string) => void;
+  updateSessionActivity: (sessionId: string) => void;
+  setActiveSession: (sessionId: string | null) => void;
+  updateSessionBackendId: (sessionId: string, backendSessionId: string) => void;
+  clearAllSessions: () => void;
+  restoreSessions: () => Promise<PersistedSession[]>;
 }
 
 export function useSessionPersistence(): UseSessionPersistenceReturn {
-  const [tabs, setTabs] = useState<PersistedTab[]>([]);
-  const [activeTabId, setActiveTabIdState] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<PersistedSession[]>([]);
+  const [activeSessionId, setActiveSessionIdState] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const initialized = useRef(false);
 
-  // 从 localStorage 读取标签页
-  const restoreTabs = useCallback(async (): Promise<PersistedTab[]> => {
+  // 从 localStorage 读取会话
+  const restoreSessions = useCallback(async (): Promise<PersistedSession[]> => {
     if (typeof window === 'undefined') return [];
 
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
         const data = JSON.parse(stored);
-        const tabList = data.tabs || [];
-        const activeId = data.activeTabId || null;
+        const sessionList = data.sessions || [];
+        const activeId = data.activeSessionId || null;
 
-        setTabs(tabList);
-        setActiveTabIdState(activeId);
-        return tabList;
+        setSessions(sessionList);
+        setActiveSessionIdState(activeId);
+        return sessionList;
       }
     } catch (error) {
-      console.error('Failed to restore tabs from localStorage:', error);
+      console.error('Failed to restore sessions from localStorage:', error);
     } finally {
       setIsLoading(false);
     }
@@ -54,115 +54,115 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     return [];
   }, []);
 
-  // 保存标签页到 localStorage
-  const persistTabs = useCallback((tabList: PersistedTab[], activeId: string | null) => {
+  // 保存会话到 localStorage
+  const persistSessions = useCallback((sessionList: PersistedSession[], activeId: string | null) => {
     if (typeof window === 'undefined') return;
 
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        tabs: tabList,
-        activeTabId: activeId,
+        sessions: sessionList,
+        activeSessionId: activeId,
       }));
     } catch (error) {
-      console.error('Failed to persist tabs to localStorage:', error);
+      console.error('Failed to persist sessions to localStorage:', error);
     }
   }, []);
 
-  // 保存新标签页
-  const saveTab = useCallback((tab: Omit<PersistedTab, 'createdAt' | 'lastActivity' | 'sessionId'>, sessionId: string | null) => {
+  // 保存新会话
+  const saveSession = useCallback((session: Omit<PersistedSession, 'createdAt' | 'lastActivity' | 'backendSessionId'>, backendSessionId: string | null) => {
     const now = Date.now();
-    const newTab: PersistedTab = {
-      ...tab,
-      sessionId,
+    const newSession: PersistedSession = {
+      ...session,
+      backendSessionId,
       createdAt: now,
       lastActivity: now,
     };
 
-    setTabs(prev => {
-      const updated = [...prev, newTab];
-      persistTabs(updated, tab.tabId);
+    setSessions(prev => {
+      const updated = [...prev, newSession];
+      persistSessions(updated, session.sessionId);
       return updated;
     });
 
-    setActiveTabIdState(tab.tabId);
-  }, [persistTabs]);
+    setActiveSessionIdState(session.sessionId);
+  }, [persistSessions]);
 
-  // 移除标签页
-  const removeTab = useCallback((tabId: string) => {
-    setTabs(prev => {
-      const updated = prev.filter(tab => tab.tabId !== tabId);
-      const newActiveId = updated.length > 0 ? updated[0].tabId : null;
-      persistTabs(updated, newActiveId);
+  // 移除会话
+  const removeSession = useCallback((sessionId: string) => {
+    setSessions(prev => {
+      const updated = prev.filter(s => s.sessionId !== sessionId);
+      const newActiveId = updated.length > 0 ? updated[0].sessionId : null;
+      persistSessions(updated, newActiveId);
       return updated;
     });
-  }, [persistTabs]);
+  }, [persistSessions]);
 
-  // 更新标签页活跃时间
-  const updateTabActivity = useCallback((tabId: string) => {
+  // 更新会话活跃时间
+  const updateSessionActivity = useCallback((sessionId: string) => {
     const now = Date.now();
-    setTabs(prev => {
-      const updated = prev.map(tab =>
-        tab.tabId === tabId ? { ...tab, lastActivity: now } : tab
+    setSessions(prev => {
+      const updated = prev.map(s =>
+        s.sessionId === sessionId ? { ...s, lastActivity: now } : s
       );
-      // 保持当前的 activeTabId 不变
-      const currentActive = prev.find(tab => tab.tabId === activeTabId);
-      const newActiveId = currentActive ? currentActive.tabId : (updated[0]?.tabId || null);
-      persistTabs(updated, newActiveId);
+      // 保持当前的 activeSessionId 不变
+      const currentActive = prev.find(s => s.sessionId === activeSessionId);
+      const newActiveId = currentActive ? currentActive.sessionId : (updated[0]?.sessionId || null);
+      persistSessions(updated, newActiveId);
       return updated;
     });
-  }, [activeTabId, persistTabs]);
+  }, [activeSessionId, persistSessions]);
 
-  // 设置活跃标签页
-  const setActiveTab = useCallback((tabId: string | null) => {
-    setActiveTabIdState(tabId);
-    setTabs(prev => {
-      persistTabs(prev, tabId);
+  // 设置活跃会话
+  const setActiveSession = useCallback((sessionId: string | null) => {
+    setActiveSessionIdState(sessionId);
+    setSessions(prev => {
+      persistSessions(prev, sessionId);
       return prev;
     });
-  }, [persistTabs]);
+  }, [persistSessions]);
 
-  // 清除所有标签页
-  const clearAllTabs = useCallback(() => {
-    setTabs([]);
-    setActiveTabIdState(null);
+  // 清除所有会话
+  const clearAllSessions = useCallback(() => {
+    setSessions([]);
+    setActiveSessionIdState(null);
     if (typeof window !== 'undefined') {
       localStorage.removeItem(STORAGE_KEY);
     }
   }, []);
 
-  // 更新标签页的 sessionId
-  const updateTabSessionId = useCallback((tabId: string, sessionId: string) => {
-    setTabs(prev => {
-      const updated = prev.map(tab =>
-        tab.tabId === tabId ? { ...tab, sessionId } : tab
+  // 更新会话的 backendSessionId
+  const updateSessionBackendId = useCallback((sessionId: string, backendSessionId: string) => {
+    setSessions(prev => {
+      const updated = prev.map(s =>
+        s.sessionId === sessionId ? { ...s, backendSessionId } : s
       );
-      // 保持当前的 activeTabId 不变
-      const currentActive = prev.find(tab => tab.tabId === activeTabId);
-      const newActiveId = currentActive ? currentActive.tabId : (updated[0]?.tabId || null);
-      persistTabs(updated, newActiveId);
+      // 保持当前的 activeSessionId 不变
+      const currentActive = prev.find(s => s.sessionId === activeSessionId);
+      const newActiveId = currentActive ? currentActive.sessionId : (updated[0]?.sessionId || null);
+      persistSessions(updated, newActiveId);
       return updated;
     });
-  }, [activeTabId, persistTabs]);
+  }, [activeSessionId, persistSessions]);
 
-  // 初始化时恢复标签页
+  // 初始化时恢复会话
   useEffect(() => {
     if (!initialized.current) {
       initialized.current = true;
-      restoreTabs();
+      restoreSessions();
     }
-  }, [restoreTabs]);
+  }, [restoreSessions]);
 
   return {
-    tabs,
-    activeTabId,
+    sessions,
+    activeSessionId,
     isLoading,
-    saveTab,
-    removeTab,
-    updateTabActivity,
-    setActiveTab,
-    updateTabSessionId,
-    clearAllTabs,
-    restoreTabs,
+    saveSession,
+    removeSession,
+    updateSessionActivity,
+    setActiveSession,
+    updateSessionBackendId,
+    clearAllSessions,
+    restoreSessions,
   };
 }
 

@@ -94,8 +94,9 @@ export interface ConnectStreamOptions {
 
 // Terminal Session State
 export interface TerminalSessionState {
+  sessionId: string;       // 前端 session ID
   directory: string;
-  terminalSessionId: string | null;
+  terminalSessionId: string | null;  // 后端 session ID
   isConnecting: boolean;
   buffer: string;
   bufferChunks: TerminalChunk[];

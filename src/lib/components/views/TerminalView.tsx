@@ -1,4 +1,5 @@
 import React from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import { RiArrowDownLine, RiArrowGoBackLine, RiArrowLeftLine, RiArrowRightLine, RiArrowUpLine, RiCommandLine } from '@remixicon/react';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalStreamEvent } from '../../terminal';
@@ -63,7 +64,8 @@ const getSequenceForKey = (key: MobileKey, modifier: Modifier | null): string | 
 };
 
 interface TerminalViewProps {
-  cwd?: string;
+  sessionId?: string;  // 前端 session ID，用于 store 键名
+  cwd?: string;        // 工作目录
   theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   fontFamily?: string;
   fontSize?: number;
@@ -72,6 +74,7 @@ interface TerminalViewProps {
 }
 
 export const TerminalView: React.FC<TerminalViewProps> = ({
+  sessionId: initialSessionId,
   cwd: initialCwd,
   theme: themeName = 'dark',
   fontFamily = 'Menlo, Monaco, Consolas, monospace',
@@ -82,6 +85,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const terminal = React.useMemo(() => createWebTerminalAPI(), []);
 
   const [currentTheme, setCurrentTheme] = React.useState(getDefaultTheme);
+  const [sessionId] = React.useState(initialSessionId || uuidv4());
   const [cwd] = React.useState(initialCwd || process.cwd());
   const [isMobile, setIsMobile] = React.useState(false);
 
@@ -95,9 +99,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const clearBuffer = terminalStore.clearBuffer;
 
   const terminalState = React.useMemo(() => {
-    if (!cwd) return undefined;
-    return terminalSessions.get(cwd);
-  }, [terminalSessions, cwd]);
+    if (!sessionId) return undefined;
+    return terminalSessions.get(sessionId);
+  }, [terminalSessions, sessionId]);
 
   const terminalSessionRef = terminalState?.terminalSessionId ?? null;
   const bufferChunks = terminalState?.bufferChunks ?? [];
@@ -121,7 +125,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const streamCleanupRef = React.useRef<(() => void) | null>(null);
   const activeTerminalIdRef = React.useRef<string | null>(null);
   const terminalIdRef = React.useRef<string | null>(null);
-  const directoryRef = React.useRef<string | null>(null);
+  const sessionIdRef = React.useRef<string | null>(null);
   const terminalControllerRef = React.useRef<TerminalController | null>(null);
 
   const isIOS = React.useMemo(() => {
@@ -203,8 +207,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [terminalSessionId]);
 
   React.useEffect(() => {
-    directoryRef.current = cwd;
-  }, [cwd]);
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   React.useEffect(() => {
     if (!isMobile && activeModifier !== null) {
@@ -273,8 +277,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         terminalId,
         {
           onEvent: (event: TerminalStreamEvent) => {
-            const directory = directoryRef.current;
-            if (!directory) return;
+            const storeSessionId = sessionId;
+            if (!storeSessionId) return;
 
             switch (event.type) {
               case 'connected': {
@@ -283,19 +287,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     `[Terminal] connected runtime=${event.runtime ?? 'unknown'} pty=${event.ptyBackend ?? 'unknown'}`
                   );
                 }
-                setConnecting(directory, false);
+                setConnecting(storeSessionId, false);
                 setConnectionError(null);
                 setIsFatalError(false);
 
                 // 恢复历史输出到 buffer
-                const sessionState = useTerminalStore.getState().getTerminalSession(directory);
+                const sessionState = useTerminalStore.getState().getTerminalSession(storeSessionId);
                 if (sessionState?.history && sessionState.history.length > 0) {
                   console.log(`[Terminal] Restoring ${sessionState.history.length} history chunks`);
                   sessionState.history.forEach(chunk => {
-                    appendToBuffer(directory, chunk);
+                    appendToBuffer(storeSessionId, chunk);
                   });
                   // 清除历史，避免重复填充
-                  useTerminalStore.getState().setSessionHistory(directory, []);
+                  useTerminalStore.getState().setSessionHistory(storeSessionId, []);
                 }
 
                 terminalControllerRef.current?.focus();
@@ -310,7 +314,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               }
               case 'data': {
                 if (event.data) {
-                  appendToBuffer(directory, event.data);
+                  appendToBuffer(storeSessionId, event.data);
                 }
                 break;
               }
@@ -319,13 +323,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   typeof event.exitCode === 'number' ? event.exitCode : null;
                 const signal = typeof event.signal === 'number' ? event.signal : null;
                 appendToBuffer(
-                  directory,
+                  storeSessionId,
                   `\r\n[Process exited${
                     exitCode !== null ? ` with code ${exitCode}` : ''
                   }${signal !== null ? ` (signal ${signal})` : ''}]\r\n`
                 );
-                clearTerminalSession(directory);
-                setConnecting(directory, false);
+                clearTerminalSession(storeSessionId);
+                setConnecting(storeSessionId, false);
                 setConnectionError('Terminal session ended');
                 setIsFatalError(false);
                 disconnectStream();
@@ -334,8 +338,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             }
           },
           onError: (error, fatal) => {
-            const directory = directoryRef.current;
-            if (!directory) return;
+            const storeSessionId = sessionId;
+            if (!storeSessionId) return;
 
             const errorMsg = fatal
               ? `Connection failed: ${error.message}`
@@ -346,7 +350,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             setIsFatalError(!!fatal);
 
             if (fatal) {
-              setConnecting(directory, false);
+              setConnecting(storeSessionId, false);
               disconnectStream();
             }
           },
@@ -375,31 +379,30 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
 
-    // 如果cwd改变了，允许重新初始化
-    if (directoryRef.current !== cwd) {
-      console.log(`[useEffect] cwd changed from ${directoryRef.current} to ${cwd}, allowing reinitialization`);
+    // 如果sessionId改变，允许重新初始化
+    if (sessionIdRef.current !== sessionId) {
+      console.log(`[useEffect] sessionId changed from ${sessionIdRef.current} to ${sessionId}, allowing reinitialization`);
       hasInitializedRef.current = false;
     }
 
     // 防止重复初始化
-    if (hasInitializedRef.current && directoryRef.current === cwd) {
-      console.log(`[useEffect] Already initialized for cwd=${cwd}, skipping`);
+    if (hasInitializedRef.current && sessionIdRef.current === sessionId) {
+      console.log(`[useEffect] Already initialized for sessionId=${sessionId}, skipping`);
       return;
     }
 
-    console.log(`[useEffect] Running ensureSession for cwd=${cwd}, hasInitialized=${hasInitializedRef.current}`);
+    console.log(`[useEffect] Running ensureSession for sessionId=${sessionId}, cwd=${cwd}, hasInitialized=${hasInitializedRef.current}`);
     hasInitializedRef.current = true;
 
     // 生成新的 run ID 并增加计数器
     const runId = ++currentRunIdRef.current;
 
     const ensureSession = async () => {
-      const directory = cwd;
-      console.log(`[ensureSession] Starting for directory=${directory}, directoryRef.current=${directoryRef.current}, runId=${runId}`);
+      console.log(`[ensureSession] Starting for sessionId=${sessionId}, cwd=${cwd}, runId=${runId}`);
 
-      // 检查 directory 是否变化，以及是否是当前 run
-      if (!directoryRef.current || directoryRef.current !== directory) {
-        console.log(`[ensureSession] Directory mismatch or stale run (current=${directoryRef.current}, target=${directory}), skipping`);
+      // 检查 sessionId 是否变化，以及是否是当前 run
+      if (!sessionIdRef.current || sessionIdRef.current !== sessionId) {
+        console.log(`[ensureSession] SessionId mismatch or stale run (current=${sessionIdRef.current}, target=${sessionId}), skipping`);
         return;
       }
 
@@ -411,7 +414,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       // 直接从store获取最新状态和函数，避免闭圈问题
       const store = useTerminalStore.getState();
-      const currentState = store.getTerminalSession(directory);
+      const currentState = store.getTerminalSession(sessionId);
       console.log(`[ensureSession] Current state from store:`, {
         terminalSessionId: currentState?.terminalSessionId,
         isConnecting: currentState?.isConnecting
@@ -431,7 +434,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             console.log(`[ensureSession] Health check details:`, health);
             shouldCreateNewSession = true;
             // 清理不健康的会话
-            store.clearTerminalSession(directory);
+            store.clearTerminalSession(sessionId);
             console.log(`[ensureSession] Cleared unhealthy session from store`);
           } else {
             console.log(`[ensureSession] Session ${terminalId} is healthy, reusing it, cwd=${health.cwd}, clients=${health.clients}, lastActivity=${Date.now() - (health.lastActivity || 0)}ms ago`);
@@ -455,14 +458,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         console.log(`[ensureSession] Creating new session, shouldCreateNewSession=${shouldCreateNewSession}, runId=${runId}`);
         setConnectionError(null);
         setIsFatalError(false);
-        store.setConnecting(directory, true);
+        store.setConnecting(sessionId, true);
 
         // 重新检查store，防止竞争条件：其他实例可能已经创建了会话
         const currentStore = useTerminalStore.getState();
-        const recheckedState = currentStore.getTerminalSession(directory);
+        const recheckedState = currentStore.getTerminalSession(sessionId);
         if (recheckedState?.terminalSessionId) {
           console.log(`[ensureSession] Race condition avoided: another instance already created session ${recheckedState.terminalSessionId}`);
-          store.setConnecting(directory, false); // 重置连接状态
+          store.setConnecting(sessionId, false); // 重置连接状态
           terminalId = recheckedState.terminalSessionId;
           shouldCreateNewSession = false;
           // 继续执行流程，使用现有会话
@@ -470,9 +473,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           // 继续创建新会话
           try {
             const session = await terminal.createSession({
-              cwd: directory,
+              cwd: cwd,
             });
-            console.log(`[ensureSession] Created new session ${session.sessionId}, cwd=${directory}`);
+            console.log(`[ensureSession] Created new session ${session.sessionId}, cwd=${cwd}`);
 
             // 检查是否是当前最新的 run，避免过期的 run 继续执行
             if (runId !== currentRunIdRef.current) {
@@ -483,7 +486,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               return;
             }
 
-            store.setTerminalSession(directory, session);
+            store.setTerminalSession(sessionId, session, cwd);
             console.log(`[ensureSession] Updated store with new session ${session.sessionId}`);
             terminalId = session.sessionId;
           } catch (error) {
@@ -498,7 +501,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 : 'Failed to start terminal session'
             );
             setIsFatalError(true);
-            store.setConnecting(directory, false);
+            store.setConnecting(sessionId, false);
             return;
           }
         }
@@ -518,7 +521,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       console.log(`[ensureSession] Starting stream for session ${terminalId}`);
       terminalIdRef.current = terminalId;
       startStream(terminalId);
-      console.log(`[ensureSession] ensureSession completed for directory=${directory}, terminalId=${terminalId}`);
+      console.log(`[ensureSession] ensureSession completed for sessionId=${sessionId}, cwd=${cwd}, terminalId=${terminalId}`);
     };
 
     void ensureSession();
@@ -526,14 +529,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => {
       // 只标记当前 run 为过期，不影响其他 run
       // 通过增加 run ID 来"取消"当前 run，这样当前 run 的异步操作会检查并自停止
-      console.log(`[useEffect] Cleanup for cwd=${cwd}, runId=${runId}`);
+      console.log(`[useEffect] Cleanup for sessionId=${sessionId}, cwd=${cwd}, runId=${runId}`);
       // 注意：这里不直接设置 cancelled，而是让异步操作通过比较 runId 来检测过期
       // 这样可以避免之前版本中的变量提升问题
     };
-  }, [cwd, startStream, disconnectStream, terminal]);
+  }, [sessionId, cwd, startStream, disconnectStream, terminal]);
 
   const handleHardRestart = React.useCallback(async () => {
-    if (!cwd) return;
+    if (!sessionId) return;
     if (isRestarting) return;
 
     setIsRestarting(true);
@@ -543,22 +546,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     try {
       if (terminal.forceKill) {
-        await terminal.forceKill({ cwd });
+        await terminal.forceKill({ sessionId });
       }
     } catch { /* ignored */ }
 
-    removeTerminalSession(cwd);
-    clearBuffer(cwd);
+    removeTerminalSession(sessionId);
+    clearBuffer(sessionId);
     terminalControllerRef.current?.clear();
 
     await new Promise(r => setTimeout(r, 100));
 
     try {
-      setConnecting(cwd, true);
+      setConnecting(sessionId, true);
       const session = await terminal.createSession({
         cwd,
       });
-      setTerminalSession(cwd, session);
+      setTerminalSession(sessionId, session, cwd);
       terminalIdRef.current = session.sessionId;
       startStream(session.sessionId);
     } catch (error) {
@@ -566,11 +569,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         error instanceof Error ? error.message : 'Failed to create terminal'
       );
       setIsFatalError(true);
-      setConnecting(cwd, false);
+      setConnecting(sessionId, false);
     } finally {
       setIsRestarting(false);
     }
-  }, [cwd, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream]);
+  }, [sessionId, cwd, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream]);
 
   const handleViewportInput = React.useCallback(
     (data: string) => {

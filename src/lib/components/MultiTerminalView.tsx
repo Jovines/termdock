@@ -46,33 +46,33 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [isMobile, setIsMobile] = useState(false);
 
   const {
-    tabs: persistedTabs,
-    activeTabId: persistedActiveId,
+    sessions: persistedSessions,
+    activeSessionId: persistedActiveId,
     isLoading,
-    saveTab,
-    removeTab,
-    setActiveTab,
-    updateTabSessionId,
+    saveSession,
+    removeSession,
+    setActiveSession,
+    updateSessionBackendId,
   } = useSessionPersistence();
 
-  // 尝试为单个 tab 恢复或创建 session
-  const restoreOrCreateSession = useCallback(async (tab: typeof persistedTabs[0]): Promise<TerminalSession> => {
-    const { tabId, cwd, name, sessionId } = tab;
+  // 尝试为单个 session 恢复或创建 session
+  const restoreOrCreateSession = useCallback(async (session: typeof persistedSessions[0]): Promise<TerminalSession> => {
+    const { sessionId, cwd, name, backendSessionId } = session;
 
-    // 如果有 sessionId，尝试重连
-    if (sessionId) {
+    // 如果有 backendSessionId，尝试重连
+    if (backendSessionId) {
       try {
-        const reconnected = await reconnectTerminalSession(sessionId);
-        console.log('[Session] Reconnected to existing session:', sessionId, 'history chunks:', reconnected.history?.length);
+        const reconnected = await reconnectTerminalSession(backendSessionId);
+        console.log('[Session] Reconnected to existing session:', backendSessionId, 'history chunks:', reconnected.history?.length);
         return {
-          id: tabId,
+          id: sessionId,
           cwd: reconnected.cwd,
           name,
           sessionId: reconnected.sessionId,
           history: reconnected.history,
         };
       } catch {
-        console.log('[Session] Reconnect failed, creating new session:', sessionId);
+        console.log('[Session] Reconnect failed, creating new session:', backendSessionId);
       }
     }
 
@@ -81,26 +81,26 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     console.log('[Session] Created new session:', newSession.sessionId);
 
     return {
-      id: tabId,
+      id: sessionId,
       cwd,
       name,
       sessionId: newSession.sessionId,
     };
   }, []);
 
-  // 恢复标签页（尝试复用现有 session）- 只执行一次
+  // 恢复会话（尝试复用现有 session）- 只执行一次
   useEffect(() => {
     if (isLoading) return;
     if (restoredRef.current) return;  // 防止重复执行
     restoredRef.current = true;
 
-    console.log('[Session] Restoring', persistedTabs.length, 'persisted tabs');
+    console.log('[Session] Restoring', persistedSessions.length, 'persisted sessions');
 
-    if (persistedTabs.length > 0) {
+    if (persistedSessions.length > 0) {
       // 并行恢复所有 session
-      Promise.all(persistedTabs.map(async (tab) => {
-        const session = await restoreOrCreateSession(tab);
-        return session;
+      Promise.all(persistedSessions.map(async (session) => {
+        const s = await restoreOrCreateSession(session);
+        return s;
       })).then((sessions) => {
         console.log('[Session] Restored sessions:', sessions.map(s => ({ id: s.id, cwd: s.cwd, sessionId: s.sessionId })));
         setSessions(sessions);
@@ -111,27 +111,27 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         const store = useTerminalStore.getState();
         sessions.forEach(session => {
           if (session.sessionId) {
-            updateTabSessionId(session.id, session.sessionId);
-            store.setTerminalSession(session.cwd, {
+            updateSessionBackendId(session.id, session.sessionId);
+            store.setTerminalSession(session.id, {
               sessionId: session.sessionId,
               cols: 80,
               rows: 24,
-            });
+            }, session.cwd);
             // 存储历史数据
             if (session.history && session.history.length > 0) {
-              store.setSessionHistory(session.cwd, session.history);
-              console.log('[Session] Stored history for cwd:', session.cwd, 'chunks:', session.history.length);
+              store.setSessionHistory(session.id, session.history);
+              console.log('[Session] Stored history for session:', session.id, 'chunks:', session.history.length);
             }
-            console.log('[Session] Updated useTerminalStore for cwd:', session.cwd, 'sessionId:', session.sessionId);
+            console.log('[Session] Updated useTerminalStore for session:', session.id, 'backendSessionId:', session.sessionId);
           }
         });
       }).catch((error) => {
         console.error('[Session] Failed to restore sessions:', error);
         // 即使失败也继续，使用空的 session
-        const fallbackSessions = persistedTabs.map((tab) => ({
-          id: tab.tabId,
-          cwd: tab.cwd,
-          name: tab.name,
+        const fallbackSessions = persistedSessions.map((session) => ({
+          id: session.sessionId,
+          cwd: session.cwd,
+          name: session.name,
           sessionId: null as string | null,
         }));
         setSessions(fallbackSessions);
@@ -142,20 +142,20 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       return;
     }
 
-    console.log('[Session] No persisted tabs');
+    console.log('[Session] No persisted sessions');
     setIsRestoring(false);
-  }, [isLoading, persistedTabs, persistedActiveId, restoreOrCreateSession, updateTabSessionId]);
+  }, [isLoading, persistedSessions, persistedActiveId, restoreOrCreateSession, updateSessionBackendId]);
 
-  // 创建新标签页
+  // 创建新会话
   const createSession = useCallback(async (cwd: string) => {
-    const tabId = uuidv4();
+    const sessionId = uuidv4();
     const name = generateSessionName();
 
     // 创建新 session
     const newTerminalSession = await createTerminalSession({ cwd });
 
     const newSession: TerminalSession = {
-      id: tabId,
+      id: sessionId,
       cwd,
       name,
       sessionId: newTerminalSession.sessionId,
@@ -166,20 +166,20 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       return updated;
     });
 
-    setActiveSessionId(tabId);
+    setActiveSessionId(sessionId);
 
-    // 持久化标签页
-    saveTab({ tabId, cwd, name }, newTerminalSession.sessionId);
+    // 持久化会话
+    saveSession({ sessionId, cwd, name }, newTerminalSession.sessionId);
 
-    return { tabId, sessionId: newTerminalSession.sessionId };
-  }, [saveTab]);
+    return { sessionId, backendSessionId: newTerminalSession.sessionId };
+  }, [saveSession]);
 
-  // 关闭标签页
-  const closeSession = useCallback((tabId: string) => {
+  // 关闭会话
+  const closeSession = useCallback((sessionId: string) => {
     setSessions((prev) => {
-      const filtered = prev.filter((s) => s.id !== tabId);
+      const filtered = prev.filter((s) => s.id !== sessionId);
       setActiveSessionId((currentId) => {
-        if (currentId === tabId) {
+        if (currentId === sessionId) {
           return filtered.length > 0 ? filtered[0].id : null;
         }
         return currentId;
@@ -188,14 +188,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     });
 
     // 移除持久化
-    removeTab(tabId);
-  }, [removeTab]);
+    removeSession(sessionId);
+  }, [removeSession]);
 
-  // 切换标签页
-  const switchSession = useCallback((tabId: string) => {
-    setActiveSessionId(tabId);
-    setActiveTab(tabId);
-  }, [setActiveTab]);
+  // 切换会话
+  const switchSession = useCallback((sessionId: string) => {
+    setActiveSessionId(sessionId);
+    setActiveSession(sessionId);
+  }, [setActiveSession]);
 
   // 移动端检测
   useEffect(() => {
@@ -259,6 +259,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         {activeSession && (
           <TerminalView
             key={activeSession.id}
+            sessionId={activeSession.id}
             cwd={activeSession.cwd}
             theme={theme}
             fontFamily={fontFamily}
