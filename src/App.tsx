@@ -158,7 +158,7 @@ function App() {
                   <button
                     type="button"
                     onClick={() => {
-                      handleNewSession();
+                      window.dispatchEvent(new CustomEvent('new-terminal-session'));
                       setIsDrawerOpen(false);
                     }}
                     className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm border border-dashed border-border rounded-lg hover:bg-surface-elevated transition-colors text-muted-foreground"

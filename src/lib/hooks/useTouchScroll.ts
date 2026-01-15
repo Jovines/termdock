@@ -40,13 +40,13 @@ export const useTouchScroll = (
   config: TouchScrollConfig
 ) => {
   const {
-    scrollMultiplier = 2.5,
-    maxScrollBoost = 1.5,
-    boostDenominator = 40,
-    velocityAlpha = 0.12,
-    maxVelocity = 20,
-    minVelocity = 0.5,
-    deceleration = 0.001,
+    scrollMultiplier = 1.2,  // 降低乘数，让内容滚动更跟手
+    maxScrollBoost = 0.8,   // 降低boost，减少快速滑动时的加速
+    boostDenominator = 50,  // 提高分母，让加速更平缓
+    velocityAlpha = 0.15,   // 稍微提高速度敏感度
+    maxVelocity = 15,       // 降低最大速度
+    minVelocity = 0.3,      // 降低最小速度阈值
+    deceleration = 0.0008,  // 稍微减小减速，让惯性滑动更持久
     onScroll,
     onTap,
     tapThreshold = 8,

@@ -43,9 +43,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   showDebug: externalShowDebug,
   onStatusChange,
 }) => {
-  // Local state for font size (supports pinch-to-zoom)
+  // Use external fontSize from props, with local override support for pinch-to-zoom
   const [fontSize, setFontSize] = React.useState(initialFontSize);
   const terminal = React.useMemo(() => createWebTerminalAPI(), []);
+
+  // Sync with external fontSize changes while allowing local pinch-to-zoom overrides
+  React.useEffect(() => {
+    setFontSize(initialFontSize);
+  }, [initialFontSize]);
 
   const [currentTheme, setCurrentTheme] = React.useState(getDefaultTheme);
   const [sessionId] = React.useState(initialSessionId || uuidv4());
@@ -632,18 +637,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       <div
         className="relative flex-1 overflow-hidden"
-        style={{ backgroundColor: xtermTheme.background }}
+        style={{
+          backgroundColor: xtermTheme.background,
+          height: isMobile && keyboardHeight > 0
+            ? `calc(100% - ${keyboardHeight}px)`
+            : undefined,
+        }}
       >
         <div
           className="h-full w-full box-border px-2 pt-3"
-          style={{
-            height: isMobile && keyboardHeight > 0
-              ? `calc(100% - ${keyboardHeight}px)`
-              : undefined,
-            paddingBottom: isMobile && keyboardHeight > 0
-              ? '16px'
-              : '16px',
-          }}
         >
           <ErrorBoundary
             fallback={

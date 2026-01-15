@@ -102,7 +102,9 @@ export const DesktopSettings: React.FC<DesktopSettingsProps> = ({
                 placeholder="分钟数"
                 className="bg-transparent border-none outline-none w-20"
               />
-        </div>
+            </div>
+          </div>
+        )}
         <div className="relative group">
           <label htmlFor="desktop-fontsize" className="absolute -top-1.5 left-2.5 bg-surface px-1 text-xs text-muted">
             Font Size
@@ -142,8 +144,6 @@ export const DesktopSettings: React.FC<DesktopSettingsProps> = ({
             </button>
           </div>
         </div>
-      </div>
-        )}
       </div>
 
       <button
