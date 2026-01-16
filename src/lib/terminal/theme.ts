@@ -265,51 +265,6 @@ export function convertThemeToXterm(theme: Theme): TerminalTheme {
   };
 }
 
-export function getGhosttyTerminalOptions(
-  fontFamily: string,
-  fontSize: number,
-  theme: TerminalTheme,
-  ghostty: any
-) {
-  const powerlineFallbacks =
-    '"JetBrainsMonoNL Nerd Font", "FiraCode Nerd Font", "Cascadia Code PL", "Fira Code", "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", "Courier New", monospace';
-  const augmentedFontFamily = `${fontFamily}, ${powerlineFallbacks}`;
-
-  return {
-    cursorBlink: true,
-    fontSize,
-    lineHeight: 1.15,
-    fontFamily: augmentedFontFamily,
-    allowTransparency: false,
-    theme: {
-      background: theme.background,
-      foreground: theme.foreground,
-      cursor: theme.cursor,
-      cursorAccent: theme.cursorAccent,
-      selectionBackground: theme.selectionBackground,
-      selectionForeground: theme.selectionForeground,
-      black: theme.black,
-      red: theme.red,
-      green: theme.green,
-      yellow: theme.yellow,
-      blue: theme.blue,
-      magenta: theme.magenta,
-      cyan: theme.cyan,
-      white: theme.white,
-      brightBlack: theme.brightBlack,
-      brightRed: theme.brightRed,
-      brightGreen: theme.brightGreen,
-      brightYellow: theme.brightYellow,
-      brightBlue: theme.brightBlue,
-      brightMagenta: theme.brightMagenta,
-      brightCyan: theme.brightCyan,
-      brightWhite: theme.brightWhite,
-    },
-    scrollback: 50_000,
-    ghostty,
-  };
-}
-
 export function getDefaultTheme(): Theme {
   return THEMES[0];
 }

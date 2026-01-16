@@ -1,21 +1,12 @@
 import React from 'react';
-import { Ghostty, Terminal as GhosttyTerminal } from 'ghostty-web';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
 import type { TerminalTheme } from '../../terminal';
-import { getGhosttyTerminalOptions } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
 import { useTouchScroll } from '../../hooks/useTouchScroll';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
-import { FitAddonNoScrollbar } from './FitAddonNoScrollbar';
-
-let ghosttyPromise: Promise<Ghostty> | null = null;
-
-function getGhostty(): Promise<Ghostty> {
-  if (!ghosttyPromise) {
-    ghosttyPromise = Ghostty.load();
-  }
-  return ghosttyPromise;
-}
 
 function findScrollableViewport(container: HTMLElement): HTMLElement | null {
   if (typeof window === 'undefined') {
@@ -64,6 +55,56 @@ interface TerminalViewportProps {
 
 type LoadingState = 'loading' | 'ready' | 'error';
 
+// NERD Font fallback chain for icons and symbols
+const getTerminalFontFamily = (userFontFamily: string): string => {
+  const nerdFonts = [
+    '"JetBrainsMonoNL Nerd Font"',
+    '"FiraCode Nerd Font"',
+    '"Cascadia Code PL"',
+    '"Fira Code"',
+    '"JetBrains Mono"',
+    '"SFMono-Regular"',
+    'Menlo',
+    'Consolas',
+    '"Liberation Mono"',
+    '"Courier New"',
+    'monospace',
+  ];
+  // If user already specified NERD fonts, just return as is
+  if (userFontFamily.toLowerCase().includes('nerd')) {
+    return userFontFamily;
+  }
+  return `${userFontFamily}, ${nerdFonts.join(', ')}`;
+};
+
+// Convert TerminalTheme to xterm.js theme format
+function convertTheme(theme: TerminalTheme): Record<string, string> {
+  return {
+    background: theme.background,
+    foreground: theme.foreground,
+    cursor: theme.cursor || theme.foreground,
+    cursorAccent: theme.cursorAccent || theme.background,
+    selectionBackground: theme.selectionBackground || 'rgba(0, 0, 0, 0.3)',
+    selectionForeground: theme.selectionForeground || theme.foreground,
+    black: theme.black || '#000000',
+    red: theme.red || '#cd3131',
+    green: theme.green || '#0dbc79',
+    yellow: theme.yellow || '#e5e510',
+    blue: theme.blue || '#2472c8',
+    magenta: theme.magenta || '#bc3fbc',
+    cyan: theme.cyan || '#11a8cd',
+    white: theme.white || '#e5e5e5',
+    brightBlack: theme.brightBlack || '#666666',
+    brightRed: theme.brightRed || '#f14c4c',
+    brightGreen: theme.brightGreen || '#23d18b',
+    brightYellow: theme.brightYellow || '#f5f543',
+    brightBlue: theme.brightBlue || '#3b8eea',
+    brightMagenta: theme.brightMagenta || '#d670d6',
+    brightCyan: theme.brightCyan || '#29b8db',
+    brightWhite: theme.brightWhite || '#ffffff',
+  };
+}
+
 export const TerminalViewport = React.forwardRef<TerminalController, TerminalViewportProps>(
   (
     { sessionKey, chunks, onInput, onResize, theme, fontFamily, fontSize, className, enableTouchScroll },
@@ -71,8 +112,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
   ) => {
     const containerRef = React.useRef<HTMLDivElement>(null);
     const viewportRef = React.useRef<HTMLElement | null>(null);
-    const terminalRef = React.useRef<GhosttyTerminal | null>(null);
-    const fitAddonRef = React.useRef<FitAddonNoScrollbar | null>(null);
+    const terminalRef = React.useRef<Terminal | null>(null);
+    const fitAddonRef = React.useRef<FitAddon | null>(null);
     const inputHandlerRef = React.useRef<(data: string) => void>(onInput);
     const resizeHandlerRef = React.useRef<(cols: number, rows: number) => void>(onResize);
     const lastReportedSizeRef = React.useRef<{ cols: number; rows: number } | null>(null);
@@ -81,16 +122,16 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const isWritingRef = React.useRef(false);
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
-  const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
-  const remainderPxRef = React.useRef(0);
-  const isComposingRef = React.useRef(false); // Track IME composition state
-  const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
-  const [, forceRender] = React.useReducer((x) => x + 1, 0);
-  const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
+    const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
+    const remainderPxRef = React.useRef(0);
+    const isComposingRef = React.useRef(false);
+    const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
+    const [, forceRender] = React.useReducer((x) => x + 1, 0);
+    const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
     const [loadingState, setLoadingState] = React.useState<LoadingState>('loading');
     const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
-    // 用于显示早期loading
+    // Early initialization loading indicator
     const [isInitializing, setIsInitializing] = React.useState(true);
 
     inputHandlerRef.current = onInput;
@@ -99,12 +140,12 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const handleScroll = React.useCallback((deltaPixels: number): boolean => {
       const terminal = terminalRef.current;
       if (!terminal) return false;
-      
+
       const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
       const total = remainderPxRef.current + deltaPixels;
       const lines = Math.trunc(total / lineHeightPx);
       remainderPxRef.current = total - lines * lineHeightPx;
-      
+
       if (lines !== 0) {
         terminal.scrollLines(lines);
         return true;
@@ -163,6 +204,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       const terminal = terminalRef.current;
       const container = containerRef.current;
       if (!fitAddon || !terminal || !container) {
+        return;
+      }
+      // Check if terminal element is attached and has dimensions
+      if (!terminal.element || !terminal.cols || !terminal.rows) {
         return;
       }
       const rect = container.getBoundingClientRect();
@@ -241,7 +286,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
     React.useEffect(() => {
       let disposed = false;
-      let localTerminal: GhosttyTerminal | null = null;
+      let localTerminal: Terminal | null = null;
       let localResizeObserver: ResizeObserver | null = null;
       let localDisposables: Array<{ dispose: () => void }> = [];
 
@@ -252,42 +297,42 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       container.tabIndex = 0;
 
-      const initialize = async () => {
+      const initialize = () => {
         setLoadingState('loading');
         setErrorMessage(null);
         setIsInitializing(true);
 
         try {
-          const ghostty = await getGhostty();
-          if (disposed) {
-            return;
-          }
+          // Create terminal with xterm.js
+          const terminal = new Terminal({
+            fontFamily: getTerminalFontFamily(fontFamily),
+            fontSize,
+            theme: convertTheme(theme),
+            cursorBlink: true,
+            cursorStyle: 'block',
+            scrollback: 1000,
+            allowTransparency: false,
+            convertEol: true,
+          });
 
-          setIsInitializing(false);
-
-          const options = getGhosttyTerminalOptions(fontFamily, fontSize, theme, ghostty);
-
-          const terminal = new GhosttyTerminal(options);
-
-          const fitAddon = new FitAddonNoScrollbar();
+          const fitAddon = new FitAddon();
+          terminal.loadAddon(fitAddon);
 
           localTerminal = terminal;
           terminalRef.current = terminal;
           fitAddonRef.current = fitAddon;
 
-          terminal.loadAddon(fitAddon);
           terminal.open(container);
+          setIsInitializing(false);
           bumpTerminalReady();
 
           // Setup pinch-to-zoom gesture for font size adjustment
           const handleWheel = (event: WheelEvent) => {
-            // Only handle pinch zoom on touch devices (ctrlKey + wheel on trackpad)
             if (event.ctrlKey || event.metaKey) {
               event.preventDefault();
               const delta = event.deltaY > 0 ? -1 : 1;
               const newSize = Math.max(8, Math.min(32, fontSize + delta));
               if (newSize !== fontSize) {
-                // Emit font size change event - parent component should listen
                 container.dispatchEvent(new CustomEvent('termfontchange', { detail: newSize }));
               }
             }
@@ -307,11 +352,19 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           fitTerminal();
           terminal.focus();
 
-          localDisposables = [
+          // Handle data input
+          localDisposables.push(
             terminal.onData((data: string) => {
               inputHandlerRef.current(data);
-            }),
-          ];
+            })
+          );
+
+          // Handle resize events
+          localDisposables.push(
+            terminal.onResize(({ cols, rows }) => {
+              resizeHandlerRef.current(cols, rows);
+            })
+          );
 
           localResizeObserver = new ResizeObserver(() => {
             fitTerminal();
@@ -333,10 +386,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         }
       };
 
-      void initialize();
+      initialize();
 
       return () => {
-        disposed = true;
+        void disposed;
         touchScrollCleanupRef.current?.();
         touchScrollCleanupRef.current = null;
 
@@ -345,7 +398,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         }
         localResizeObserver?.disconnect();
 
-        // Remove wheel event listener for pinch-to-zoom
         if (wheelHandlerRef.current) {
           container.removeEventListener('wheel', wheelHandlerRef.current);
           wheelHandlerRef.current = null;
@@ -359,7 +411,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         resetWriteState();
       };
     }, [fitTerminal, fontFamily, fontSize, theme, resetWriteState]);
-
 
     React.useEffect(() => {
       const terminal = terminalRef.current;
@@ -468,7 +519,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           }
         }}
       >
-        {/* Early initialization loading - shows before ghostty loads */}
+        {/* Early initialization loading - shows before xterm.js loads */}
         {isInitializing && <TerminalInitializing />}
 
         {/* Loading state */}
@@ -491,6 +542,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
               <textarea
                 ref={hiddenInputRef}
                 inputMode="text"
+                enterKeyHint="enter"
                 autoCapitalize="off"
                 autoComplete="off"
                 autoCorrect="off"
@@ -516,7 +568,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                   outline: 'none',
                 }}
                 onInput={(event) => {
-                  // Skip input events during IME composition to prevent intermediate characters
                   if (isComposingRef.current) {
                     return;
                   }
@@ -531,8 +582,15 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                   event.currentTarget.value = '';
                 }}
                 onKeyDown={(event) => {
+                  // Handle Enter key (including mobile keyboard confirm button)
+                  if (event.key === 'Enter' || event.key === 'Go' || event.key === 'done' || event.key === 'send') {
+                    event.preventDefault();
+                    inputHandlerRef.current('\r');
+                    event.currentTarget.value = '';
+                    return;
+                  }
+
                   if (event.key === 'Backspace') {
-                    // 如果 IME 正在组合字符，让输入法自然处理删除，不要干扰组合过程
                     if (isComposingRef.current) {
                       return;
                     }
@@ -551,7 +609,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                 onCompositionEnd={(event) => {
                   isComposingRef.current = false;
 
-                  // Send the composed text after composition ends
                   const raw = String(event.currentTarget.value || '');
                   if (raw) {
                     const value = raw.replace(/\r\n|\r|\n/g, '\r');
