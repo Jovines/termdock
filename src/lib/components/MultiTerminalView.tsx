@@ -25,7 +25,6 @@ import { RiTerminalBoxLine, RiDraggable } from '@remixicon/react';
 
 interface TerminalSession {
   id: string;
-  cwd: string;
   name: string;
   sessionId: string | null;
   history?: string[];
@@ -33,7 +32,6 @@ interface TerminalSession {
 
 export interface TerminalSessionInfo {
   id: string;
-  cwd: string;
   name: string;
 }
 
@@ -105,9 +103,6 @@ function SortableSessionItem({
       />
       <span className={`flex-1 truncate text-sm ${isActive ? 'text-primary' : ''}`}>
         {session.name}
-      </span>
-      <span className="text-xs text-muted-foreground truncate max-w-[80px]">
-        {session.cwd.replace(/^\/home\/[^/]+/, '~')}
       </span>
       <button
         type="button"
@@ -204,14 +199,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // Notify parent of session data changes
   useEffect(() => {
     onSessionDataUpdate?.({
-      sessions: sessions.map((s) => ({ id: s.id, cwd: s.cwd, name: s.name })),
+      sessions: sessions.map((s) => ({ id: s.id, name: s.name })),
       activeSessionId,
     });
   }, [sessions, activeSessionId, onSessionDataUpdate]);
 
   // 尝试为单个 session 恢复或创建 session
   const restoreOrCreateSession = useCallback(async (session: typeof persistedSessions[0]): Promise<TerminalSession> => {
-    const { sessionId, cwd, name, backendSessionId } = session;
+    const { sessionId, name, backendSessionId } = session;
 
     // 如果有 backendSessionId，尝试重连
     if (backendSessionId) {
@@ -220,7 +215,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         console.log('[Session] Reconnected to existing session:', backendSessionId);
         return {
           id: sessionId,
-          cwd: reconnected.cwd,
           name,
           sessionId: reconnected.sessionId,
           history: reconnected.history,
@@ -230,13 +224,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       }
     }
 
-    // 创建新 session
-    const newSession = await createTerminalSession({ cwd });
+    // 创建新 session（服务端会自动使用 home 目录）
+    const newSession = await createTerminalSession({});
     console.log('[Session] Created new session:', newSession.sessionId);
 
     return {
       id: sessionId,
-      cwd,
       name,
       sessionId: newSession.sessionId,
     };
@@ -270,7 +263,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               sessionId: session.sessionId,
               cols: 80,
               rows: 24,
-            }, session.cwd);
+            });
           }
         });
       }).catch((error) => {
@@ -278,7 +271,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         // 即使失败也继续，使用空的 session
         const fallbackSessions = persistedSessions.map((session) => ({
           id: session.sessionId,
-          cwd: session.cwd,
           name: session.name,
           sessionId: null as string | null,
         }));
@@ -304,7 +296,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
       const newSession: TerminalSession = {
         id: sessionId,
-        cwd: '/',  // 服务端实际使用的目录会不同，但前端显示不需要精确
         name,
         sessionId: newTerminalSession.sessionId,
       };
@@ -317,7 +308,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       setActiveSessionId(sessionId);
 
       // Persist the new session
-      saveSession({ sessionId, cwd: '/', name }, newTerminalSession.sessionId);
+      saveSession({ sessionId, name }, newTerminalSession.sessionId);
 
       // Update useTerminalStore with the new backend session
       const store = useTerminalStore.getState();
@@ -326,7 +317,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           sessionId: newTerminalSession.sessionId,
           cols: 80,
           rows: 24,
-        }, '/');
+        });
       }
 
       console.log('[Session] Created new session:', sessionId, newTerminalSession.sessionId);
@@ -599,7 +590,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           <TerminalView
             key={activeSession.id}
             sessionId={activeSession.id}
-            cwd={activeSession.cwd}
             theme={theme}
             fontFamily={fontFamily}
             fontSize={fontSize}

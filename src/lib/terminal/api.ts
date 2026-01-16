@@ -36,7 +36,6 @@ export async function createTerminalSession(
       'X-XSRF-TOKEN': csrfTokenHeader,
     },
     body: JSON.stringify({
-      cwd: options.cwd,
       cols: options.cols || 80,
       rows: options.rows || 24,
     }),

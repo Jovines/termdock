@@ -237,10 +237,10 @@ export const rateLimiters = {
     message: 'Too many inputs, please slow down.',
   }),
   
-  // 通用API：限制为每分钟100次
+  // 通用API：限制为每分钟5000次
   apiGeneral: new RateLimiter({
     windowMs: 60 * 1000, // 1分钟
-    maxRequests: 100,
+    maxRequests: 5000,
     message: 'Too many API requests, please try again later.',
   }),
   

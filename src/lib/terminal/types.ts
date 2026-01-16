@@ -19,7 +19,6 @@ export interface TerminalStreamEvent {
 
 // Create Session Options
 export interface CreateTerminalOptions {
-  cwd?: string;
   cols?: number;
   rows?: number;
 }

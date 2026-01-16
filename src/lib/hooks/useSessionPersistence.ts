@@ -4,7 +4,6 @@ const STORAGE_KEY = 'web-terminal-sessions';
 
 export interface PersistedSession {
   sessionId: string;  // 前端生成的 session ID
-  cwd: string;
   name: string;
   backendSessionId: string | null;  // 后端 sessionId，用于复用
   createdAt: number;

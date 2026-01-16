@@ -6,7 +6,7 @@ export interface TerminalStore {
   nextChunkId: number;
 
   getTerminalSession: (sessionId: string) => TerminalSessionState | undefined;
-  setTerminalSession: (sessionId: string, terminalSession: TerminalSession, directory: string) => void;
+  setTerminalSession: (sessionId: string, terminalSession: TerminalSession) => void;
   setSessionHistory: (sessionId: string, history: string[]) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string) => void;
@@ -18,10 +18,10 @@ export interface TerminalStore {
 
 const TERMINAL_BUFFER_LIMIT = 1_000_000;
 
-function createEmptySessionState(sessionId: string, directory: string): TerminalSessionState {
+function createEmptySessionState(sessionId: string): TerminalSessionState {
   return {
     sessionId,
-    directory,
+    directory: '',
     terminalSessionId: null,
     isConnecting: false,
     buffer: '',
@@ -39,7 +39,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     return get().sessions.get(sessionId);
   },
 
-  setTerminalSession: (sessionId: string, terminalSession: TerminalSession, directory: string) => {
+  setTerminalSession: (sessionId: string, terminalSession: TerminalSession) => {
     set((state) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
@@ -48,14 +48,13 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         existing.terminalSessionId !== terminalSession.sessionId;
 
       const baseState = shouldResetBuffer
-        ? createEmptySessionState(sessionId, directory)
-        : existing ?? createEmptySessionState(sessionId, directory);
+        ? createEmptySessionState(sessionId)
+        : existing ?? createEmptySessionState(sessionId);
 
       newSessions.set(sessionId, {
         ...baseState,
         terminalSessionId: terminalSession.sessionId,
         sessionId,
-        directory,
         isConnecting: false,
         updatedAt: Date.now(),
       });
@@ -67,7 +66,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
   setSessionHistory: (sessionId: string, history: string[]) => {
     set((state) => {
       const newSessions = new Map(state.sessions);
-      const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId, '');
+      const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
       newSessions.set(sessionId, {
         ...existing,
         history,
@@ -80,7 +79,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
   setConnecting: (sessionId: string, isConnecting: boolean) => {
     set((state) => {
       const newSessions = new Map(state.sessions);
-      const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId, '');
+      const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
       newSessions.set(sessionId, {
         ...existing,
         isConnecting,
@@ -97,7 +96,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
 
     set((state) => {
       const newSessions = new Map(state.sessions);
-      const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId, '');
+      const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
 
       const chunkId = state.nextChunkId;
       const chunkEntry: TerminalChunk = { id: chunkId, data: chunk };

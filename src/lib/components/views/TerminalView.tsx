@@ -1,6 +1,5 @@
 import React from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import os from 'os';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalStreamEvent } from '../../terminal';
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
@@ -26,7 +25,6 @@ const STREAM_OPTIONS = {
 
 interface TerminalViewProps {
   sessionId?: string;
-  cwd?: string;
   theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   fontFamily?: string;
   fontSize?: number;
@@ -36,7 +34,6 @@ interface TerminalViewProps {
 
 export const TerminalView: React.FC<TerminalViewProps> = ({
   sessionId: initialSessionId,
-  cwd: initialCwd,
   theme: themeName = 'dark',
   fontFamily = 'Menlo, Monaco, Consolas, monospace',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
@@ -54,7 +51,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const [currentTheme, setCurrentTheme] = React.useState(getDefaultTheme);
   const [sessionId] = React.useState(initialSessionId || uuidv4());
-  const [cwd] = React.useState(initialCwd || os.homedir() || process.cwd());
   const [isMobile, setIsMobile] = React.useState(false);
   const [isIOS, setIsIOS] = React.useState(false);
   const [keyboardHeight, setKeyboardHeight] = React.useState(0);
@@ -343,12 +339,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const currentRunIdRef = React.useRef(0);
 
   React.useEffect(() => {
-    if (!cwd) {
-      setConnectionError('No working directory available for terminal.');
-      disconnectStream();
-      return;
-    }
-
     if (sessionIdRef.current !== sessionId) {
       console.log(`[useEffect] sessionId changed from ${sessionIdRef.current} to ${sessionId}, allowing reinitialization`);
       hasInitializedRef.current = false;
@@ -359,13 +349,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
 
-    console.log(`[useEffect] Running ensureSession for sessionId=${sessionId}, cwd=${cwd}, hasInitialized=${hasInitializedRef.current}`);
+    console.log(`[useEffect] Running ensureSession for sessionId=${sessionId}, hasInitialized=${hasInitializedRef.current}`);
     hasInitializedRef.current = true;
 
     const runId = ++currentRunIdRef.current;
 
     const ensureSession = async () => {
-      console.log(`[ensureSession] Starting for sessionId=${sessionId}, cwd=${cwd}, runId=${runId}`);
+      console.log(`[ensureSession] Starting for sessionId=${sessionId}, runId=${runId}`);
 
       if (!sessionIdRef.current || sessionIdRef.current !== sessionId) {
         console.log(`[ensureSession] SessionId mismatch or stale run (current=${sessionIdRef.current}, target=${sessionId}), skipping`);
@@ -428,10 +418,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           shouldCreateNewSession = false;
         } else {
           try {
-            const session = await terminal.createSession({
-              cwd: cwd,
-            });
-            console.log(`[ensureSession] Created new session ${session.sessionId}, cwd=${cwd}`);
+            const session = await terminal.createSession({});
+            console.log(`[ensureSession] Created new session ${session.sessionId}`);
 
             if (runId !== currentRunIdRef.current) {
               console.log(`[ensureSession] Stale run after session creation (runId=${runId}, currentRunId=${currentRunIdRef.current}), closing session`);
@@ -441,7 +429,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               return;
             }
 
-            store.setTerminalSession(sessionId, session, cwd);
+            store.setTerminalSession(sessionId, session);
             console.log(`[ensureSession] Updated store with new session ${session.sessionId}`);
             terminalId = session.sessionId;
           } catch (error) {
@@ -474,15 +462,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       console.log(`[ensureSession] Starting stream for session ${terminalId}`);
       terminalIdRef.current = terminalId;
       startStream(terminalId);
-      console.log(`[ensureSession] ensureSession completed for sessionId=${sessionId}, cwd=${cwd}, terminalId=${terminalId}`);
+      console.log(`[ensureSession] ensureSession completed for sessionId=${sessionId}, terminalId=${terminalId}`);
     };
 
     void ensureSession();
 
     return () => {
-      console.log(`[useEffect] Cleanup for sessionId=${sessionId}, cwd=${cwd}, runId=${runId}`);
+      console.log(`[useEffect] Cleanup for sessionId=${sessionId}, runId=${runId}`);
     };
-  }, [sessionId, cwd, startStream, disconnectStream, terminal]);
+  }, [sessionId, startStream, disconnectStream, terminal]);
 
   const handleHardRestart = React.useCallback(async () => {
     if (!sessionId) return;
@@ -507,10 +495,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     try {
       setConnecting(sessionId, true);
-      const session = await terminal.createSession({
-        cwd,
-      });
-      setTerminalSession(sessionId, session, cwd);
+      const session = await terminal.createSession({});
+      setTerminalSession(sessionId, session);
       terminalIdRef.current = session.sessionId;
       startStream(session.sessionId);
     } catch (error) {
@@ -522,7 +508,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     } finally {
       setIsRestarting(false);
     }
-  }, [sessionId, cwd, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream]);
+  }, [sessionId, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream]);
 
   const handleViewportInput = React.useCallback(
     (data: string) => {
@@ -598,10 +584,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const xtermTheme = React.useMemo(() => convertThemeToXterm(currentTheme), [currentTheme]);
 
   const terminalSessionKey = React.useMemo(() => {
-    const directoryPart = cwd ?? 'no-dir';
     const terminalPart = terminalSessionId ?? 'pending';
-    return `${directoryPart}::${terminalPart}`;
-  }, [cwd, terminalSessionId]);
+    return `terminal::${terminalPart}`;
+  }, [terminalSessionId]);
 
   React.useEffect(() => {
     onStatusChange?.({
@@ -611,14 +596,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       sessionId: terminalSessionId,
     });
   }, [isConnecting, isRestarting, connectionError, terminalSessionId, onStatusChange]);
-
-  if (!cwd) {
-    return (
-      <div className="flex h-full items-center justify-center p-4 text-center text-sm text-muted-foreground">
-        No working directory available for terminal
-      </div>
-    );
-  }
 
   const quickKeysDisabled = !terminalSessionId || isConnecting || isRestarting;
 
