@@ -212,7 +212,15 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (backendSessionId) {
       try {
         const reconnected = await reconnectTerminalSession(backendSessionId);
-        console.log('[Session] Reconnected to existing session:', backendSessionId);
+        console.log('[Session] Reconnected to existing session:', {
+          backendSessionId,
+          frontendSessionId: sessionId,
+          reconnectedSessionId: reconnected.sessionId,
+          cwd: reconnected.cwd,
+          backend: reconnected.backend,
+          clients: reconnected.clients,
+          historyLength: reconnected.history?.length ?? 0,
+        });
         return {
           id: sessionId,
           name,
@@ -263,6 +271,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               sessionId: session.sessionId,
               cols: 80,
               rows: 24,
+              history: session.history,
+            });
+            console.log('[Session] Updated store for frontend session:', {
+              frontendId: session.id,
+              backendId: session.sessionId,
+              hasHistory: !!(session.history?.length),
+              historyLength: session.history?.length ?? 0,
             });
           }
         });

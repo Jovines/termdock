@@ -6,7 +6,7 @@ export interface TerminalStore {
   nextChunkId: number;
 
   getTerminalSession: (sessionId: string) => TerminalSessionState | undefined;
-  setTerminalSession: (sessionId: string, terminalSession: TerminalSession) => void;
+  setTerminalSession: (sessionId: string, terminalSession: TerminalSession & { history?: string[] }) => void;
   setSessionHistory: (sessionId: string, history: string[]) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string) => void;
@@ -39,7 +39,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     return get().sessions.get(sessionId);
   },
 
-  setTerminalSession: (sessionId: string, terminalSession: TerminalSession) => {
+  setTerminalSession: (sessionId: string, terminalSession: TerminalSession & { history?: string[] }) => {
     set((state) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
@@ -51,11 +51,15 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         ? createEmptySessionState(sessionId)
         : existing ?? createEmptySessionState(sessionId);
 
+      // Preserve history if provided, otherwise keep existing history
+      const history = terminalSession.history ?? existing?.history ?? [];
+
       newSessions.set(sessionId, {
         ...baseState,
         terminalSessionId: terminalSession.sessionId,
         sessionId,
         isConnecting: false,
+        history,
         updatedAt: Date.now(),
       });
 

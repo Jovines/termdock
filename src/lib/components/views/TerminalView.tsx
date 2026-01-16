@@ -238,9 +238,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const startStream = React.useCallback(
     (terminalId: string) => {
       if (activeTerminalIdRef.current === terminalId) {
+        console.log(`[startStream] Skipping - already connected to ${terminalId}`);
         return;
       }
 
+      console.log(`[startStream] Starting stream for frontendSessionId=${sessionId} backendSessionId=${terminalId}`);
       disconnectStream();
 
       const subscription = terminal.connect(
@@ -254,7 +256,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               case 'connected': {
                 if (event.runtime || event.ptyBackend) {
                   console.log(
-                    `[Terminal] connected runtime=${event.runtime ?? 'unknown'} pty=${event.ptyBackend ?? 'unknown'}`
+                    `[Terminal] connected frontendSessionId=${storeSessionId} backendSessionId=${terminalIdRef.current} runtime=${event.runtime ?? 'unknown'} pty=${event.ptyBackend ?? 'unknown'} cwd=${event.cwd ?? 'unknown'}`
                   );
                 }
                 setConnecting(storeSessionId, false);
@@ -262,12 +264,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setIsFatalError(false);
 
                 const sessionState = useTerminalStore.getState().getTerminalSession(storeSessionId);
+                console.log('[Terminal] Connected event received:', {
+                  frontendSessionId: storeSessionId,
+                  backendSessionId: terminalIdRef.current,
+                  storeHasState: !!sessionState,
+                  storeTerminalId: sessionState?.terminalSessionId,
+                  hasHistoryInStore: !!(sessionState?.history?.length),
+                  historyLength: sessionState?.history?.length ?? 0,
+                });
+
                 if (sessionState?.history && sessionState.history.length > 0) {
-                  console.log(`[Terminal] Restoring ${sessionState.history.length} history chunks`);
-                  sessionState.history.forEach(chunk => {
+                  console.log(`[Terminal] Restoring ${sessionState.history.length} history chunks to frontend session ${storeSessionId}`);
+                  sessionState.history.forEach((chunk) => {
                     appendToBuffer(storeSessionId, chunk);
                   });
                   useTerminalStore.getState().setSessionHistory(storeSessionId, []);
+                  console.log(`[Terminal] History restoration complete for ${storeSessionId}`);
+                } else {
+                  console.log(`[Terminal] No history to restore for ${storeSessionId}`);
                 }
 
                 terminalControllerRef.current?.focus();

@@ -15,6 +15,7 @@ export interface TerminalStreamEvent {
   maxAttempts?: number;
   runtime?: 'node' | 'bun';
   ptyBackend?: string;
+  cwd?: string;  // Current working directory from server
 }
 
 // Create Session Options
