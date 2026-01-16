@@ -2,7 +2,6 @@ import express from 'express';
 import { createServer } from 'http';
 import cookieParser from 'cookie-parser';
 import { csrfProtection } from './utils/csrfProtection.js';
-import { rateLimiters } from './utils/rateLimiter.js';
 import { pathValidator } from './utils/pathValidator.js';
 
 const PORT = process.env.PORT || 3001;
@@ -24,7 +23,7 @@ app.get('/health', (_req, res) => {
     timestamp: new Date().toISOString(),
     security: {
       csrfEnabled: true,
-      rateLimitingEnabled: true,
+      rateLimitingEnabled: false,
       pathValidationEnabled: true
     }
   });
@@ -48,11 +47,6 @@ import { homedir } from 'os';
 app.get('/api/home', (_req, res) => {
   res.json({ home: homedir() });
 });
-
-// 应用速率限制
-app.use('/api/terminal/create', rateLimiters.terminalCreate.middleware());
-app.use('/api/terminal/:sessionId/input', rateLimiters.terminalInput.middleware());
-app.use('/api', rateLimiters.apiGeneral.middleware());
 
 // 应用CSRF保护（在终端路由之前）
 app.use('/api/terminal', csrfProtection.verifyMiddleware());

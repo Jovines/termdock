@@ -4,36 +4,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
-import { useTouchScroll } from '../../hooks/useTouchScroll';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
-
-function findScrollableViewport(container: HTMLElement): HTMLElement | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  const candidates = [container, ...Array.from(container.querySelectorAll<HTMLElement>('*'))];
-  let fallback: HTMLElement | null = null;
-
-  for (const element of candidates) {
-    const style = window.getComputedStyle(element);
-    const overflowY = style.overflowY;
-    if (overflowY !== 'auto' && overflowY !== 'scroll') {
-      continue;
-    }
-
-    if (element.scrollHeight - element.clientHeight > 2) {
-      return element;
-    }
-
-    if (!fallback) {
-      fallback = element;
-    }
-  }
-
-  return fallback;
-}
 
 export type TerminalController = {
   focus: () => void;
@@ -50,7 +22,6 @@ interface TerminalViewportProps {
   fontFamily: string;
   fontSize: number;
   className?: string;
-  enableTouchScroll?: boolean;
 }
 
 type LoadingState = 'loading' | 'ready' | 'error';
@@ -107,11 +78,10 @@ function convertTheme(theme: TerminalTheme): Record<string, string> {
 
 export const TerminalViewport = React.forwardRef<TerminalController, TerminalViewportProps>(
   (
-    { sessionKey, chunks, onInput, onResize, theme, fontFamily, fontSize, className, enableTouchScroll },
+    { sessionKey, chunks, onInput, onResize, theme, fontFamily, fontSize, className },
     ref
   ) => {
     const containerRef = React.useRef<HTMLDivElement>(null);
-    const viewportRef = React.useRef<HTMLElement | null>(null);
     const terminalRef = React.useRef<Terminal | null>(null);
     const fitAddonRef = React.useRef<FitAddon | null>(null);
     const inputHandlerRef = React.useRef<(data: string) => void>(onInput);
@@ -121,11 +91,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const writeScheduledRef = React.useRef<number | null>(null);
     const isWritingRef = React.useRef(false);
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
-    const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
-    const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
-    const remainderPxRef = React.useRef(0);
-    const isComposingRef = React.useRef(false);
-    const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
     const [, forceRender] = React.useReducer((x) => x + 1, 0);
     const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
     const [loadingState, setLoadingState] = React.useState<LoadingState>('loading');
@@ -136,58 +101,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
     inputHandlerRef.current = onInput;
     resizeHandlerRef.current = onResize;
-
-    const handleScroll = React.useCallback((deltaPixels: number): boolean => {
-      const terminal = terminalRef.current;
-      if (!terminal) return false;
-
-      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
-      const total = remainderPxRef.current + deltaPixels;
-      const lines = Math.trunc(total / lineHeightPx);
-      remainderPxRef.current = total - lines * lineHeightPx;
-
-      if (lines !== 0) {
-        terminal.scrollLines(lines);
-        return true;
-      }
-      return false;
-    }, [fontSize]);
-
-    const focusHiddenInput = React.useCallback((clientX?: number, clientY?: number) => {
-      const input = hiddenInputRef.current;
-      const container = containerRef.current;
-      if (!input || !container) {
-        return;
-      }
-
-      const rect = container.getBoundingClientRect();
-      const fallbackX = rect.left + rect.width / 2;
-      const fallbackY = rect.top + rect.height - 12;
-      const x = typeof clientX === 'number' ? clientX : fallbackX;
-      const y = typeof clientY === 'number' ? clientY : fallbackY;
-
-      const padding = 8;
-      const left = Math.max(padding, Math.min(rect.width - padding, x - rect.left));
-      const top = Math.max(padding, Math.min(rect.height - padding, y - rect.top));
-
-      input.style.left = `${left}px`;
-      input.style.top = `${top}px`;
-      input.style.bottom = '';
-
-      try {
-        input.focus({ preventScroll: true });
-      } catch {
-        try {
-          input.focus();
-        } catch { /* ignored */ }
-      }
-    }, []);
-
-    const { setupTouchScroll, isScrolling } = useTouchScroll(containerRef, {
-      onScroll: handleScroll,
-      onTap: focusHiddenInput,
-      tapThreshold: 12,
-    });
 
     const resetWriteState = React.useCallback(() => {
       pendingWriteRef.current = '';
@@ -313,6 +226,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             scrollback: 1000,
             allowTransparency: false,
             convertEol: true,
+            // Enable mouse events for vim and other apps
+            mouseEvents: true,
           });
 
           const fitAddon = new FitAddon();
@@ -325,29 +240,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           terminal.open(container);
           setIsInitializing(false);
           bumpTerminalReady();
-
-          // Setup pinch-to-zoom gesture for font size adjustment
-          const handleWheel = (event: WheelEvent) => {
-            if (event.ctrlKey || event.metaKey) {
-              event.preventDefault();
-              const delta = event.deltaY > 0 ? -1 : 1;
-              const newSize = Math.max(8, Math.min(32, fontSize + delta));
-              if (newSize !== fontSize) {
-                container.dispatchEvent(new CustomEvent('termfontchange', { detail: newSize }));
-              }
-            }
-          };
-          wheelHandlerRef.current = handleWheel;
-          container.addEventListener('wheel', handleWheel, { passive: false });
-
-          const viewport = findScrollableViewport(container);
-          if (viewport) {
-            viewport.classList.add('overlay-scrollbar-target', 'overlay-scrollbar-container');
-            viewportRef.current = viewport;
-            forceRender();
-          } else {
-            viewportRef.current = null;
-          }
 
           fitTerminal();
           terminal.focus();
@@ -390,23 +282,15 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       return () => {
         void disposed;
-        touchScrollCleanupRef.current?.();
-        touchScrollCleanupRef.current = null;
 
         for (const disposable of localDisposables) {
           disposable.dispose();
         }
         localResizeObserver?.disconnect();
 
-        if (wheelHandlerRef.current) {
-          container.removeEventListener('wheel', wheelHandlerRef.current);
-          wheelHandlerRef.current = null;
-        }
-
         localTerminal?.dispose();
         terminalRef.current = null;
         fitAddonRef.current = null;
-        viewportRef.current = null;
         lastReportedSizeRef.current = null;
         resetWriteState();
       };
@@ -424,16 +308,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       terminal.focus();
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionKey, terminalReadyVersion, fitTerminal, resetWriteState]);
-
-    React.useEffect(() => {
-      if (!enableTouchScroll) return;
-      const cleanup = setupTouchScroll();
-      touchScrollCleanupRef.current = cleanup;
-      return () => {
-        cleanup();
-        touchScrollCleanupRef.current = null;
-      };
-    }, [enableTouchScroll, setupTouchScroll]);
 
     React.useEffect(() => {
       const terminal = terminalRef.current;
@@ -472,10 +346,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       ref,
       (): TerminalController => ({
         focus: () => {
-          if (enableTouchScroll) {
-            focusHiddenInput();
-            return;
-          }
           terminalRef.current?.focus();
         },
         clear: () => {
@@ -491,7 +361,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           fitTerminal();
         },
       }),
-      [enableTouchScroll, focusHiddenInput, fitTerminal, resetWriteState]
+      [fitTerminal, resetWriteState]
     );
 
     return (
@@ -501,21 +371,13 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         style={{ backgroundColor: theme.background }}
         role="button"
         tabIndex={0}
-        onClick={(event) => {
-          if (enableTouchScroll && !isScrolling()) {
-            focusHiddenInput(event.clientX, event.clientY);
-          } else if (!enableTouchScroll) {
-            terminalRef.current?.focus();
-          }
+        onClick={() => {
+          terminalRef.current?.focus();
         }}
         onKeyDown={(event) => {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
-            if (enableTouchScroll && !isScrolling()) {
-              focusHiddenInput();
-            } else if (!enableTouchScroll) {
-              terminalRef.current?.focus();
-            }
+            terminalRef.current?.focus();
           }
         }}
       >
@@ -536,93 +398,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         )}
 
         {/* Terminal content - only show when ready */}
-        {loadingState === 'ready' && (
-          <>
-            {enableTouchScroll ? (
-              <textarea
-                ref={hiddenInputRef}
-                inputMode="text"
-                enterKeyHint="enter"
-                autoCapitalize="off"
-                autoComplete="off"
-                autoCorrect="off"
-                spellCheck={false}
-                tabIndex={-1}
-                style={{
-                  position: 'absolute',
-                  left: 0,
-                  top: 0,
-                  width: 1,
-                  height: 1,
-                  opacity: 0,
-                  zIndex: 1,
-                  background: 'transparent',
-                  color: 'transparent',
-                  caretColor: 'transparent',
-                  resize: 'none',
-                  overflow: 'hidden',
-                  whiteSpace: 'nowrap',
-                  border: 'none',
-                  padding: 0,
-                  margin: 0,
-                  outline: 'none',
-                }}
-                onInput={(event) => {
-                  if (isComposingRef.current) {
-                    return;
-                  }
-
-                  const raw = String(event.currentTarget.value || '');
-                  if (!raw) {
-                    return;
-                  }
-
-                  const value = raw.replace(/\r\n|\r|\n/g, '\r');
-                  inputHandlerRef.current(value);
-                  event.currentTarget.value = '';
-                }}
-                onKeyDown={(event) => {
-                  // Handle Enter key (including mobile keyboard confirm button)
-                  if (event.key === 'Enter' || event.key === 'Go' || event.key === 'done' || event.key === 'send') {
-                    event.preventDefault();
-                    inputHandlerRef.current('\r');
-                    event.currentTarget.value = '';
-                    return;
-                  }
-
-                  if (event.key === 'Backspace') {
-                    if (isComposingRef.current) {
-                      return;
-                    }
-
-                    if (!event.currentTarget.value) {
-                      inputHandlerRef.current('\x7f');
-                    }
-                  }
-                }}
-                onCompositionStart={() => {
-                  isComposingRef.current = true;
-                }}
-                onCompositionUpdate={() => {
-                  isComposingRef.current = true;
-                }}
-                onCompositionEnd={(event) => {
-                  isComposingRef.current = false;
-
-                  const raw = String(event.currentTarget.value || '');
-                  if (raw) {
-                    const value = raw.replace(/\r\n|\r|\n/g, '\r');
-                    inputHandlerRef.current(value);
-                    event.currentTarget.value = '';
-                  }
-                }}
-              />
-            ) : null}
-            {viewportRef.current && !enableTouchScroll ? (
-              <div className="overlay-scrollbar overlay-scrollbar--flush overlay-scrollbar--dense overlay-scrollbar--zero" />
-            ) : null}
-          </>
-        )}
+        {loadingState === 'ready' && null}
       </div>
     );
   }

@@ -1,15 +1,9 @@
 import React, { useEffect, useCallback, useState } from 'react';
-import { MultiTerminalView } from './lib/components/MultiTerminalView';
+import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
 import { RiTerminalBoxLine, RiSettings4Line, RiAddLine, RiCloseLine } from '@remixicon/react';
 import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
 import type { CleanupDurationPreset } from './lib/terminal/types';
-
-interface TerminalSessionInfo {
-  id: string;
-  cwd: string;
-  name: string;
-}
 
 function App() {
   const [theme, setTheme] = React.useState<'dark' | 'light' | 'solarized' | 'dracula' | 'nord'>('dark');
@@ -136,9 +130,6 @@ function App() {
                       >
                         <RiTerminalBoxLine size={14} />
                         <span className="flex-1 truncate text-left">{session.name}</span>
-                        <span className="text-xs text-muted-foreground truncate max-w-[80px]">
-                          {session.cwd.replace(/^\/home\/[^/]+/, '~')}
-                        </span>
                         <button
                           type="button"
                           onClick={(e) => {

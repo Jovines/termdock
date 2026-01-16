@@ -650,7 +650,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               theme={xtermTheme}
               fontFamily={fontFamily}
               fontSize={fontSize}
-              enableTouchScroll={isMobile}
             />
           </ErrorBoundary>
         </div>
