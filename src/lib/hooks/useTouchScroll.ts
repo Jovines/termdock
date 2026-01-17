@@ -12,6 +12,7 @@ interface TouchScrollConfig {
   minVelocity?: number;
   deceleration?: number;
   onScroll?: (deltaPixels: number) => boolean;
+  onScrollWithCoords?: (deltaPixels: number, x: number, y: number) => boolean;
   onTap?: (x: number, y: number) => void;
   tapThreshold?: number;
 }
@@ -48,6 +49,7 @@ export const useTouchScroll = (
     minVelocity = 0.3,      // 降低最小速度阈值
     deceleration = 0.0008,  // 稍微减小减速，让惯性滑动更持久
     onScroll,
+    onScrollWithCoords,
     onTap,
     tapThreshold = 8,
   } = config;
@@ -66,6 +68,8 @@ export const useTouchScroll = (
 
   // 累积滚动量，用于 RAF 节流
   const pendingScrollRef = React.useRef(0);
+  const pendingXRef = React.useRef(0);
+  const pendingYRef = React.useRef(0);
   const rafIdRef = React.useRef<number | null>(null);
 
   const consecutiveNoScrollRef = React.useRef(0);
@@ -82,11 +86,17 @@ export const useTouchScroll = (
    */
   const processPendingScroll = React.useCallback(() => {
     rafIdRef.current = null;
-    if (pendingScrollRef.current !== 0 && onScroll) {
-      onScroll(pendingScrollRef.current);
+    if (pendingScrollRef.current !== 0) {
+      if (onScrollWithCoords && pendingXRef.current > 0 && pendingYRef.current > 0) {
+        onScrollWithCoords(pendingScrollRef.current, pendingXRef.current, pendingYRef.current);
+      } else if (onScroll) {
+        onScroll(pendingScrollRef.current);
+      }
       pendingScrollRef.current = 0;
+      pendingXRef.current = 0;
+      pendingYRef.current = 0;
     }
-  }, [onScroll]);
+  }, [onScroll, onScrollWithCoords]);
 
   /**
    * 请求下一帧处理滚动（节流）
@@ -100,8 +110,12 @@ export const useTouchScroll = (
   /**
    * 累积并请求滚动处理（用于节流）
    */
-  const accumulateAndRequestScroll = React.useCallback((deltaPixels: number) => {
+  const accumulateAndRequestScroll = React.useCallback((deltaPixels: number, x?: number, y?: number) => {
     pendingScrollRef.current += deltaPixels;
+    if (x !== undefined && y !== undefined) {
+      pendingXRef.current = x;
+      pendingYRef.current = y;
+    }
     requestScrollFrame();
   }, [requestScrollFrame]);
 
@@ -210,8 +224,8 @@ export const useTouchScroll = (
           Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
         const deltaPixels = -deltaY * scrollMultiplierAdjusted;
 
-        // 使用 RAF 节流累积滚动
-        accumulateAndRequestScroll(deltaPixels);
+        // 使用 RAF 节流累积滚动（传递当前触摸坐标）
+        accumulateAndRequestScroll(deltaPixels, event.clientX, event.clientY);
       }
 
       state.lastY = event.clientY;
@@ -373,9 +387,9 @@ export const useTouchScroll = (
            Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
          const deltaPixels = -deltaY * scrollMultiplierAdjusted;
 
-         // 使用 RAF 节流累积滚动
-         accumulateAndRequestScroll(deltaPixels);
-       }
+          // 使用 RAF 节流累积滚动
+          accumulateAndRequestScroll(deltaPixels, currentX, currentY);
+        }
 
        state.lastY = currentY;
      };

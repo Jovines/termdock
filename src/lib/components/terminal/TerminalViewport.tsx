@@ -137,21 +137,55 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     inputHandlerRef.current = onInput;
     resizeHandlerRef.current = onResize;
 
-    const handleScroll = React.useCallback((deltaPixels: number): boolean => {
+    /**
+     * 将屏幕像素坐标转换为终端字符网格坐标
+     * @param px 屏幕X坐标（像素）
+     * @param py 屏幕Y坐标（像素）
+     * @param terminal xterm.js Terminal实例
+     * @returns 字符网格坐标 {x, y}，1-based
+     */
+    const pixelToCharCoords = React.useCallback((
+      px: number,
+      py: number,
+      terminal: Terminal
+    ): { x: number; y: number } => {
+      const charWidth = (terminal.element?.offsetWidth || 0) / terminal.cols || 8;
+      const charHeight = (terminal.element?.offsetHeight || 0) / terminal.rows || 16;
+
+      const col = Math.max(1, Math.min(terminal.cols, Math.floor(px / charWidth) + 1));
+      const row = Math.max(1, Math.min(terminal.rows, Math.floor(py / charHeight) + 1));
+
+      return { x: col, y: row };
+    }, []);
+
+    const handleScroll = React.useCallback((deltaPixels: number, touchX?: number, touchY?: number): boolean => {
       const terminal = terminalRef.current;
       if (!terminal) return false;
 
       const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
       const lines = deltaPixels > 0 ? -1 : 1;
 
-      // // 情况1：程序启用了鼠标报告（vim中执行 :set mouse=a）
-      // // 发送按钮4/5的鼠标事件（滚轮上/下）
+      // 情况1：程序启用了鼠标报告（vim中执行 :set mouse=a）
+      // 使用SGR 1006协议发送滚轮事件
       if (terminal.modes.mouseTrackingMode !== 'none') {
-        const button = lines > 0 ? 65 : 64; // 65=滚轮下, 64=滚轮上
-        // xterm鼠标协议使用1-based坐标，+33转换为ASCII范围
-        const x = terminal.buffer.active.cursorX + 33;
-        const y = terminal.buffer.active.cursorY + 33;
-        const mouseEvent = `\x1b[M${String.fromCharCode(button)}${String.fromCharCode(x)}${String.fromCharCode(y)}`;
+        let charX: number;
+        let charY: number;
+
+        if (touchX !== undefined && touchY !== undefined) {
+          // 使用实际触摸坐标转换为字符网格坐标
+          const coords = pixelToCharCoords(touchX, touchY, terminal);
+          charX = coords.x;
+          charY = coords.y;
+        } else {
+          // 回退到光标位置（1-based）
+          charX = terminal.buffer.active.cursorX + 1;
+          charY = terminal.buffer.active.cursorY + 1;
+        }
+
+        // SGR 1006协议: \x1b[<button;x;yM
+        // 滚轮按钮: 64=wheel up, 65=wheel down
+        const button = lines > 0 ? 64 : 65;
+        const mouseEvent = `\x1b[<${button};${charX};${charY}M`;
         inputHandlerRef.current(mouseEvent);
         return true;
       }
@@ -174,7 +208,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         return true;
       }
       return false;
-    }, [fontSize]);
+    }, [fontSize, pixelToCharCoords]);
 
     const focusHiddenInput = React.useCallback((clientX?: number, clientY?: number) => {
       const input = hiddenInputRef.current;
@@ -208,6 +242,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
     const { setupTouchScroll, isScrolling } = useTouchScroll(containerRef, {
       onScroll: handleScroll,
+      onScrollWithCoords: handleScroll,
       onTap: focusHiddenInput,
       tapThreshold: 12,
     });
