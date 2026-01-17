@@ -8,6 +8,26 @@ import { useTouchScroll } from '../../hooks/useTouchScroll';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
 
+/**
+ * 清洗用户输入，处理各种特殊字符
+ * 1. 换行符统一转换为 CR (\r) - 终端标准
+ * 2. Unicode 空格变体转换为普通空格
+ * 3. 移除零宽字符
+ */
+function sanitizeTerminalInput(input: string): string {
+  if (!input) {
+    return '';
+  }
+
+  return input
+    // 换行符统一处理：LF (\n) 和 CR-LF (\r\n) → CR (\r)
+    .replace(/\r\n|\r|\n/g, '\r')
+    // 所有 Unicode 空格变体 → 普通空格
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    // 移除零宽字符
+    .replace(/[\u200B-\u200D\uFEFF]/g, '');
+}
+
 function findScrollableViewport(container: HTMLElement): HTMLElement | null {
   if (typeof window === 'undefined') {
     return null;
@@ -665,7 +685,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                     return;
                   }
 
-                  const value = raw.replace(/\r\n|\r|\n/g, '\r');
+                  const value = sanitizeTerminalInput(raw);
                   inputHandlerRef.current(value);
                   event.currentTarget.value = '';
                 }}
@@ -699,7 +719,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
                   const raw = String(event.currentTarget.value || '');
                   if (raw) {
-                    const value = raw.replace(/\r\n|\r|\n/g, '\r');
+                    const value = sanitizeTerminalInput(raw);
                     inputHandlerRef.current(value);
                     event.currentTarget.value = '';
                   }

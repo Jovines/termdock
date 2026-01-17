@@ -18,15 +18,14 @@ app.use(csrfProtection.tokenMiddleware());
 
 // 健康检查端点（不需要CSRF保护）
 app.get('/health', (_req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    security: {
-      csrfEnabled: true,
-      rateLimitingEnabled: false,
-      pathValidationEnabled: true
-    }
-  });
+    res.json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      security: {
+        csrfEnabled: true,
+        pathValidationEnabled: true
+      }
+    });
 });
 
 // CSRF令牌获取端点

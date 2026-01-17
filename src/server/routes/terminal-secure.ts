@@ -1,5 +1,4 @@
 import express from 'express';
-import fs from 'fs';
 import os from 'os';
 
 const router = express.Router();
@@ -483,7 +482,6 @@ router.get('/stats', (_req, res) => {
       pathValidation: true,
       inputSanitization: true,
       csrfProtection: true,
-      rateLimiting: true,
     }
   };
   
