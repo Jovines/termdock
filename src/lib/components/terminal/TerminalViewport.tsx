@@ -210,6 +210,33 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       return false;
     }, [fontSize, pixelToCharCoords]);
 
+    /**
+     * 处理点击事件，发送鼠标点击给TUI程序
+     * 使用SGR 1006协议发送：\x1b[<button;x;yM (press) 和 \x1b[<button;x;ym (release)
+     */
+    const handleClick = React.useCallback((clientX: number, clientY: number): void => {
+      const terminal = terminalRef.current;
+      if (!terminal) return;
+
+      // 如果程序启用了鼠标报告，发送鼠标点击事件
+      if (terminal.modes.mouseTrackingMode !== 'none') {
+        // 将屏幕坐标转换为字符网格坐标
+        const coords = pixelToCharCoords(clientX, clientY, terminal);
+        const charX = coords.x;
+        const charY = coords.y;
+
+        // SGR 1006协议：先发送按下事件，再发送释放事件
+        // 按钮0 = 左键按下
+        const buttonPress = `\x1b[<0;${charX};${charY}M`;
+        // 按钮编码3表示释放
+        const buttonRelease = `\x1b[<0;${charX};${charY}m`;
+
+        // 发送按下和释放事件
+        inputHandlerRef.current(buttonPress);
+        inputHandlerRef.current(buttonRelease);
+      }
+    }, [pixelToCharCoords]);
+
     const focusHiddenInput = React.useCallback((clientX?: number, clientY?: number) => {
       const input = hiddenInputRef.current;
       const container = containerRef.current;
@@ -243,6 +270,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const { setupTouchScroll, isScrolling } = useTouchScroll(containerRef, {
       onScroll: handleScroll,
       onScrollWithCoords: handleScroll,
+      onClickWithCoords: handleClick,
       onTap: focusHiddenInput,
       tapThreshold: 12,
     });

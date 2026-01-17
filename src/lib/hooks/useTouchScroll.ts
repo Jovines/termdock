@@ -14,6 +14,7 @@ interface TouchScrollConfig {
   onScroll?: (deltaPixels: number) => boolean;
   onScrollWithCoords?: (deltaPixels: number, x: number, y: number) => boolean;
   onTap?: (x: number, y: number) => void;
+  onClickWithCoords?: (x: number, y: number) => void;
   tapThreshold?: number;
 }
 
@@ -51,6 +52,7 @@ export const useTouchScroll = (
     onScroll,
     onScrollWithCoords,
     onTap,
+    onClickWithCoords,
     tapThreshold = 8,
   } = config;
 
@@ -245,6 +247,11 @@ export const useTouchScroll = (
         onTap(state.startX, state.startY);
       }
 
+      // 触发点击事件（传递坐标给TUI程序）
+      if (!state.didMove && !isScrolling && onClickWithCoords && state.startX !== null && state.startY !== null) {
+        onClickWithCoords(state.startX, state.startY);
+      }
+
       state.pointerId = null;
       state.startX = null;
       state.startY = null;
@@ -321,6 +328,7 @@ export const useTouchScroll = (
     scrollByPixels,
     accumulateAndRequestScroll,
     onTap,
+    onClickWithCoords,
     tapThreshold,
   ]);
 
@@ -408,6 +416,11 @@ export const useTouchScroll = (
         onTap(state.startX, state.startY);
       }
 
+      // 触发点击事件（传递坐标给TUI程序）
+      if (!state.didMove && !isScrolling && onClickWithCoords && state.startX !== null && state.startY !== null) {
+        onClickWithCoords(state.startX, state.startY);
+      }
+
       state.startX = null;
       state.startY = null;
 
@@ -465,6 +478,7 @@ export const useTouchScroll = (
     scrollByPixels,
     accumulateAndRequestScroll,
     onTap,
+    onClickWithCoords,
     tapThreshold,
   ]);
 
