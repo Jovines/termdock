@@ -142,12 +142,35 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       if (!terminal) return false;
 
       const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
-      const total = remainderPxRef.current + deltaPixels;
-      const lines = Math.trunc(total / lineHeightPx);
-      remainderPxRef.current = total - lines * lineHeightPx;
+      const lines = deltaPixels > 0 ? -1 : 1;
 
-      if (lines !== 0) {
-        terminal.scrollLines(lines);
+      // // 情况1：程序启用了鼠标报告（vim中执行 :set mouse=a）
+      // // 发送按钮4/5的鼠标事件（滚轮上/下）
+      if (terminal.modes.mouseTrackingMode !== 'none') {
+        const button = lines > 0 ? 65 : 64; // 65=滚轮下, 64=滚轮上
+        // xterm鼠标协议使用1-based坐标，+33转换为ASCII范围
+        const x = terminal.buffer.active.cursorX + 33;
+        const y = terminal.buffer.active.cursorY + 33;
+        const mouseEvent = `\x1b[M${String.fromCharCode(button)}${String.fromCharCode(x)}${String.fromCharCode(y)}`;
+        inputHandlerRef.current(mouseEvent);
+        return true;
+      }
+
+      // 情况2：在alternate模式（没有scrollback，如vim/less/man）
+      // 发送上下箭头键，模拟滚轮
+      if (terminal.buffer.active.type === 'alternate') {
+        const arrowKey = lines > 0 ? '\x1b[A' : '\x1b[B'; // 上箭头、下箭头
+        inputHandlerRef.current(arrowKey);
+        return true;
+      }
+
+      // 情况3：都不是，走正常触摸滑动逻辑（终端内容滚动）
+      const total = remainderPxRef.current + deltaPixels;
+      const scrollLines = Math.trunc(total / lineHeightPx);
+      remainderPxRef.current = total - scrollLines * lineHeightPx;
+
+      if (scrollLines !== 0) {
+        terminal.scrollLines(scrollLines);
         return true;
       }
       return false;
@@ -511,7 +534,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           }
         }}
         onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
+          if (event.key === 'Enter') {
             event.preventDefault();
             if (enableTouchScroll && !isScrolling()) {
               focusHiddenInput();
