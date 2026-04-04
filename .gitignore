@@ -15,3 +15,4 @@ npm-debug.log*
 *.sln
 *.sw?
 .terminal-sessions.json
+.dev-*.pid
