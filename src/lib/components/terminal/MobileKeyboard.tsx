@@ -70,11 +70,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
 
   return (
     <div
-      className="px-3 py-2 border-t border-border bg-background"
+      className="fixed inset-x-0 bottom-0 z-20 border-t border-border bg-background px-3 py-2"
       style={{
-        paddingBottom: keyboardHeight > 0
-          ? `${keyboardHeight}px`
-          : isIOS ? 'env(safe-area-inset-bottom, 0px)' : undefined,
+        paddingBottom: isIOS ? 'env(safe-area-inset-bottom, 0px)' : undefined,
       }}
     >
       <div className="flex flex-wrap items-center gap-1">

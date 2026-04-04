@@ -6,6 +6,10 @@ import { useFontSize } from './lib/hooks/useFontSize';
 import type { CleanupDurationPreset } from './lib/terminal/types';
 
 function App() {
+  const safeTopInset = 'env(safe-area-inset-top, 0px)';
+  const floatingTopOffset = `calc(${safeTopInset} + 0.75rem)`;
+  const drawerMaxHeight = `calc(var(--app-vh, 100dvh) - (${safeTopInset} + 1.5rem))`;
+
   const [theme, setTheme] = React.useState<'dark' | 'light' | 'solarized' | 'dracula' | 'nord'>('dark');
   const [showDebug, setShowDebug] = React.useState(false);
   const [debugInfo, setDebugInfo] = React.useState<Record<string, any>>({});
@@ -61,6 +65,42 @@ function App() {
     setDebugInfo(info);
   }, []);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    let rafId: number | null = null;
+
+    const updateViewportHeight = () => {
+      rafId = null;
+      const visualViewport = window.visualViewport;
+      const nextHeight = visualViewport?.height ?? window.innerHeight;
+      document.documentElement.style.setProperty('--app-vh', `${Math.round(nextHeight)}px`);
+    };
+
+    const scheduleUpdate = () => {
+      if (rafId !== null) return;
+      rafId = window.requestAnimationFrame(updateViewportHeight);
+    };
+
+    scheduleUpdate();
+
+    window.addEventListener('resize', scheduleUpdate);
+    window.addEventListener('orientationchange', scheduleUpdate);
+    window.visualViewport?.addEventListener('resize', scheduleUpdate);
+    window.visualViewport?.addEventListener('scroll', scheduleUpdate);
+
+    return () => {
+      window.removeEventListener('resize', scheduleUpdate);
+      window.removeEventListener('orientationchange', scheduleUpdate);
+      window.visualViewport?.removeEventListener('resize', scheduleUpdate);
+      window.visualViewport?.removeEventListener('scroll', scheduleUpdate);
+
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, []);
+
   const handleCustomDurationBlur = () => {
     const minutes = parseInt(customDurationInput, 10);
     if (isNaN(minutes) || minutes < 1) {
@@ -79,8 +119,11 @@ function App() {
   }, []);
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-background text-foreground overflow-hidden">
-      <main className="flex-1 overflow-hidden relative">
+    <div
+      className="w-screen flex flex-col bg-background text-foreground overflow-hidden"
+      style={{ height: 'var(--app-vh, 100dvh)' }}
+    >
+      <main className="relative min-h-0 flex-1 overflow-hidden" style={{ paddingTop: safeTopInset }}>
         <MultiTerminalView
           theme={theme}
           fontSize={fontSize}
@@ -93,7 +136,8 @@ function App() {
       <button
         type="button"
         onClick={() => setIsDrawerOpen(true)}
-        className="fixed top-3 right-3 z-30 p-2 text-muted-foreground hover:text-foreground transition-colors duration-200"
+        className="fixed right-3 z-30 p-2 text-muted-foreground hover:text-foreground transition-colors duration-200"
+        style={{ top: floatingTopOffset }}
         aria-label="Open sessions and settings"
       >
         <RiSettings4Line size={20} />
@@ -107,7 +151,10 @@ function App() {
             className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 animate-fade-in cursor-default"
             onClick={() => setIsDrawerOpen(false)}
           />
-          <div className="fixed top-3 right-3 bottom-auto left-auto z-50 w-72 bg-surface/95 backdrop-blur-xl border border-border/50 rounded-xl shadow-2xl animate-fade-in max-h-[calc(100vh-24px)] overflow-y-auto">
+          <div
+            className="fixed right-3 bottom-auto left-auto z-50 w-72 bg-surface/95 backdrop-blur-xl border border-border/50 rounded-xl shadow-2xl animate-fade-in overflow-y-auto"
+            style={{ top: floatingTopOffset, maxHeight: drawerMaxHeight }}
+          >
             <div className="p-4 space-y-3">
               {/* Sessions Section */}
               {sessions.length > 0 && (

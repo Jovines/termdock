@@ -31,6 +31,15 @@ body {
   color: var(--foreground);
 }
 
+html,
+body,
+#root {
+  height: var(--app-vh, 100dvh);
+  width: 100vw;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 .terminal-viewport-container {
   cursor: text;
   /* 触摸滚动优化 */
@@ -141,17 +150,6 @@ body {
   animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
-/* iOS safe area handling - allow content to respect safe areas */
-@supports (padding-bottom: env(safe-area-inset-bottom)) {
-  html {
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-
-  body {
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-}
-
 /* Prevent iOS Home Indicator from appearing */
 html {
   overscroll-behavior: none;
@@ -175,13 +173,13 @@ body {
 @media (max-width: 768px) {
   html {
     overflow: hidden;
-    height: 100vh;
+    height: var(--app-vh, 100dvh);
     width: 100vw;
   }
 
   body {
     overflow: hidden;
-    height: 100vh;
+    height: var(--app-vh, 100dvh);
     width: 100vw;
     /* Allow scrolling for terminal */
     touch-action: pan-y;
@@ -191,7 +189,8 @@ body {
   }
 
   .terminal-viewport-container {
-    touch-action: pan-y;
+    touch-action: none;
+    overscroll-behavior: contain;
   }
   
   /* Diagnostic overlay for debugging - always show on mobile */

@@ -192,6 +192,7 @@ export const useTouchScroll = (
         return;
       }
 
+      event.preventDefault();
       event.stopPropagation(); // 阻止事件冒泡，防止影响页面其他滚动区域
 
       if (!state.lastY || !state.lastTime) {
@@ -304,7 +305,7 @@ export const useTouchScroll = (
 
     // 保存原始touch-action样式
     const previousTouchAction = container.style.touchAction;
-    container.style.touchAction = 'pan-y';
+    container.style.touchAction = 'none';
 
     return () => {
       container.removeEventListener('pointerdown', handlePointerDown, listenerOptions);
@@ -364,6 +365,7 @@ export const useTouchScroll = (
         return;
       }
 
+      event.preventDefault();
       event.stopPropagation(); // 阻止事件冒泡，防止影响页面其他滚动区域
 
       const currentX = event.touches[0].clientX;
@@ -457,7 +459,7 @@ export const useTouchScroll = (
 
     // 保存原始touch-action样式
     const previousTouchAction = container.style.touchAction;
-    container.style.touchAction = 'pan-y';
+    container.style.touchAction = 'none';
 
     return () => {
       container.removeEventListener('touchstart', handleTouchStart, listenerOptions);

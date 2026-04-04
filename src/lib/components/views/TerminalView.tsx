@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalStreamEvent } from '../../terminal';
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
-import { convertThemeToXterm, getDefaultTheme } from '../../terminal';
+import { convertThemeToXterm, getDefaultTheme, THEMES } from '../../terminal';
 import { createWebTerminalAPI } from '../../terminal/factory';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
@@ -11,6 +11,8 @@ import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 
 const TERMINAL_FONT_SIZE = 13;
+const KEYBOARD_OPEN_THRESHOLD = 120;
+const KEYBOARD_CLOSE_THRESHOLD = 80;
 
 type Modifier = 'ctrl' | 'cmd';
 
@@ -35,7 +37,7 @@ interface TerminalViewProps {
 export const TerminalView: React.FC<TerminalViewProps> = ({
   sessionId: initialSessionId,
   theme: themeName = 'dark',
-  fontFamily = 'Menlo, Monaco, Consolas, monospace',
+  fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
   showDebug: externalShowDebug,
   onStatusChange,
@@ -86,6 +88,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const terminalIdRef = React.useRef<string | null>(null);
   const sessionIdRef = React.useRef<string | null>(null);
   const terminalControllerRef = React.useRef<TerminalController | null>(null);
+  const suppressInputUntilRef = React.useRef(0);
 
   // Listen for font size changes from TerminalViewport (pinch-to-zoom)
   React.useEffect(() => {
@@ -114,65 +117,75 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   // Keyboard detection
   React.useEffect(() => {
-    if (!isMobile || typeof window === 'undefined') return;
+    if (typeof window === 'undefined') return;
 
-    const KEYBOARD_MIN_HEIGHT = 100;
-    const KEYBOARD_DEBOUNCE_MS = 300;
+    if (!isMobile) {
+      setKeyboardHeight(0);
+      return;
+    }
 
     const state = {
-      debounceTimer: null as NodeJS.Timeout | null,
+      rafId: null as number | null,
       isKeyboardVisible: false,
+      lastEmittedHeight: 0,
     };
 
-    const updateKeyboardState = (visible: boolean, height: number) => {
-      if (state.debounceTimer) {
-        clearTimeout(state.debounceTimer);
-        state.debounceTimer = null;
-      }
-
-      if (visible) {
-        state.isKeyboardVisible = true;
-        setKeyboardHeight(height);
-      } else {
-        state.debounceTimer = setTimeout(() => {
-          const viewport = window.visualViewport;
-          if (viewport) {
-            const currentWindowHeight = window.innerHeight;
-            const currentKeyboardH = currentWindowHeight - viewport.height;
-            if (currentKeyboardH < KEYBOARD_MIN_HEIGHT) {
-              state.isKeyboardVisible = false;
-              setKeyboardHeight(0);
-            }
-          }
-          state.debounceTimer = null;
-        }, KEYBOARD_DEBOUNCE_MS);
-      }
+    const emitHeight = (nextHeight: number) => {
+      if (state.lastEmittedHeight === nextHeight) return;
+      state.lastEmittedHeight = nextHeight;
+      setKeyboardHeight(nextHeight);
     };
 
-    const handleVisualViewportChange = () => {
-      if (!window.visualViewport) return;
+    const measureKeyboardHeight = () => {
+      state.rafId = null;
 
       const viewport = window.visualViewport;
-      const windowHeight = window.innerHeight;
-      const keyboardH = windowHeight - viewport.height;
-
-      if (keyboardH >= KEYBOARD_MIN_HEIGHT) {
-        updateKeyboardState(true, keyboardH);
-      } else if (keyboardH < KEYBOARD_MIN_HEIGHT && state.isKeyboardVisible) {
-        updateKeyboardState(false, 0);
+      if (!viewport) {
+        state.isKeyboardVisible = false;
+        emitHeight(0);
+        return;
       }
+
+      const windowHeight = window.innerHeight;
+      const rawHeight = windowHeight - viewport.height - viewport.offsetTop;
+      const keyboardHeightNext = Math.max(0, Math.round(rawHeight));
+
+      if (state.isKeyboardVisible) {
+        if (keyboardHeightNext <= KEYBOARD_CLOSE_THRESHOLD) {
+          state.isKeyboardVisible = false;
+          emitHeight(0);
+          return;
+        }
+        emitHeight(keyboardHeightNext);
+        return;
+      }
+
+      if (keyboardHeightNext >= KEYBOARD_OPEN_THRESHOLD) {
+        state.isKeyboardVisible = true;
+        emitHeight(keyboardHeightNext);
+        return;
+      }
+
+      emitHeight(0);
     };
 
-    handleVisualViewportChange();
+    const scheduleMeasurement = () => {
+      if (state.rafId !== null) return;
+      state.rafId = window.requestAnimationFrame(measureKeyboardHeight);
+    };
 
-    window.visualViewport?.addEventListener('resize', handleVisualViewportChange);
-    window.visualViewport?.addEventListener('scroll', handleVisualViewportChange);
+    scheduleMeasurement();
+
+    window.addEventListener('resize', scheduleMeasurement);
+    window.visualViewport?.addEventListener('resize', scheduleMeasurement);
+    window.visualViewport?.addEventListener('scroll', scheduleMeasurement);
 
     return () => {
-      window.visualViewport?.removeEventListener('resize', handleVisualViewportChange);
-      window.visualViewport?.removeEventListener('scroll', handleVisualViewportChange);
-      if (state.debounceTimer) {
-        clearTimeout(state.debounceTimer);
+      window.removeEventListener('resize', scheduleMeasurement);
+      window.visualViewport?.removeEventListener('resize', scheduleMeasurement);
+      window.visualViewport?.removeEventListener('scroll', scheduleMeasurement);
+      if (state.rafId !== null) {
+        window.cancelAnimationFrame(state.rafId);
       }
     };
   }, [isMobile]);
@@ -224,9 +237,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       nord: 4,
     };
     const themeIndex = themes[themeName] ?? 0;
-    import('../../terminal/theme').then(({ THEMES }) => {
-      setCurrentTheme(THEMES[themeIndex]);
-    });
+    setCurrentTheme(THEMES[themeIndex]);
   }, [themeName]);
 
   const disconnectStream = React.useCallback(() => {
@@ -275,6 +286,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
                 if (sessionState?.history && sessionState.history.length > 0) {
                   console.log(`[Terminal] Restoring ${sessionState.history.length} history chunks to frontend session ${storeSessionId}`);
+                  const totalHistoryBytes = sessionState.history.reduce((total, chunk) => total + chunk.length, 0);
+                  const suppressionMs = Math.max(300, Math.min(2000, Math.ceil(totalHistoryBytes / 200)));
+                  suppressInputUntilRef.current = Date.now() + suppressionMs;
                   sessionState.history.forEach((chunk) => {
                     appendToBuffer(storeSessionId, chunk);
                   });
@@ -530,6 +544,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         return;
       }
 
+      if (Date.now() < suppressInputUntilRef.current) {
+        return;
+      }
+
       let payload = data;
       let modifierConsumed = false;
 
@@ -614,7 +632,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const quickKeysDisabled = !terminalSessionId || isConnecting || isRestarting;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-background">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
       {showDebug && (
         <DebugPanel
           isMobile={isMobile}
@@ -627,17 +645,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       )}
 
       <div
-        className="relative flex-1 overflow-hidden"
+        className="relative min-h-0 flex-1 overflow-hidden"
         style={{
           backgroundColor: xtermTheme.background,
-          height: isMobile && keyboardHeight > 0
-            ? `calc(100% - ${keyboardHeight}px)`
-            : undefined,
         }}
       >
-        <div
-          className="h-full w-full box-border px-2 pt-3"
-        >
+        <div className="h-full w-full box-border">
           <ErrorBoundary
             fallback={
               <div className="flex h-full items-center justify-center">

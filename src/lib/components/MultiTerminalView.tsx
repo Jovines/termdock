@@ -41,7 +41,10 @@ function SessionIndicator({
   if (sessions.length <= 1) return null;
 
   return (
-    <div className="fixed top-3 left-1/2 -translate-x-1/2 z-20">
+    <div
+      className="fixed left-1/2 -translate-x-1/2 z-20"
+      style={{ top: 'calc(env(safe-area-inset-top, 0px) + 0.75rem)' }}
+    >
       <div className="flex items-center gap-1.5 px-3 py-1.5 bg-surface/80 backdrop-blur-sm rounded-full border border-border/50 shadow-lg">
         {sessions.map((_, index) => (
           <div
@@ -63,7 +66,7 @@ function SessionIndicator({
 
 export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   theme = 'dark',
-  fontFamily = 'Menlo, Monaco, Consolas, monospace',
+  fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
   fontSize = 13,
   showDebug,
   onStatusChange,
