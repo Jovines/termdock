@@ -90,6 +90,20 @@ function clearHistory(sessionId: string): void {
   sessionHistory.delete(sessionId);
 }
 
+function resolveWorkingDirectory(req: express.Request, inputCwd?: string): string {
+  const requestedCwd = inputCwd || os.homedir();
+
+  if (req.pathValidator) {
+    return req.pathValidator.validate(requestedCwd);
+  }
+
+  if (!fs.existsSync(requestedCwd)) {
+    throw new Error('Invalid working directory');
+  }
+
+  return requestedCwd;
+}
+
 function persistSessions(sessions: PersistedSessionMeta[]): void {
   try {
     fs.writeFileSync(SESSION_STORAGE_FILE, JSON.stringify(sessions, null, 2));
@@ -177,9 +191,10 @@ router.post('/create', async (req, res) => {
     }
 
     const { cwd: inputCwd, cols, rows } = req.body;
-    const cwd = inputCwd || os.homedir();
-
-    if (!fs.existsSync(cwd)) {
+    let cwd: string;
+    try {
+      cwd = resolveWorkingDirectory(req, inputCwd);
+    } catch (error) {
       return res.status(400).json({ error: 'Invalid working directory' });
     }
 
@@ -436,7 +451,13 @@ router.delete('/:sessionId', (req, res) => {
 router.post('/:sessionId/restart', async (req, res) => {
   const { sessionId } = req.params;
   const { cwd: inputCwd, cols, rows } = req.body;
-  const cwd = inputCwd || os.homedir();
+  let cwd: string;
+
+  try {
+    cwd = resolveWorkingDirectory(req, inputCwd);
+  } catch (error) {
+    return res.status(400).json({ error: 'Invalid working directory' });
+  }
 
   const existingSession = terminalSessions.get(sessionId);
   if (existingSession) {
@@ -448,10 +469,6 @@ router.post('/:sessionId/restart', async (req, res) => {
   }
 
   try {
-    if (!fs.existsSync(cwd)) {
-      return res.status(400).json({ error: 'Invalid working directory' });
-    }
-
     const shell = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh');
 
     const newSessionId = Math.random().toString(36).substring(2, 15) +

@@ -243,7 +243,7 @@ export async function closeTerminal(sessionId: string): Promise<void> {
 
 export async function restartTerminalSession(
   currentSessionId: string,
-  options: { cwd: string; cols?: number; rows?: number }
+  options: { cwd?: string; cols?: number; rows?: number }
 ): Promise<TerminalSession> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/${currentSessionId}/restart`, {
@@ -253,7 +253,7 @@ export async function restartTerminalSession(
       'X-XSRF-TOKEN': csrfTokenHeader,
     },
     body: JSON.stringify({
-      cwd: options.cwd,
+      ...(options.cwd ? { cwd: options.cwd } : {}),
       cols: options.cols ?? 80,
       rows: options.rows ?? 24,
     }),

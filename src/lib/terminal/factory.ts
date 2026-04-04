@@ -46,7 +46,6 @@ export const createWebTerminalAPI = (): TerminalAPI => ({
     options: CreateTerminalOptions
   ): Promise<TerminalSession> {
     return restartTerminalSession(currentSessionId, {
-      cwd: options.cwd ?? '',
       cols: options.cols,
       rows: options.rows,
     });

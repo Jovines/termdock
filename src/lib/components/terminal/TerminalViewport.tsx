@@ -75,26 +75,8 @@ interface TerminalViewportProps {
 
 type LoadingState = 'loading' | 'ready' | 'error';
 
-// NERD Font fallback chain for icons and symbols
 const getTerminalFontFamily = (userFontFamily: string): string => {
-  const nerdFonts = [
-    '"JetBrainsMonoNL Nerd Font"',
-    '"FiraCode Nerd Font"',
-    '"Cascadia Code PL"',
-    '"Fira Code"',
-    '"JetBrains Mono"',
-    '"SFMono-Regular"',
-    'Menlo',
-    'Consolas',
-    '"Liberation Mono"',
-    '"Courier New"',
-    'monospace',
-  ];
-  // If user already specified NERD fonts, just return as is
-  if (userFontFamily.toLowerCase().includes('nerd')) {
-    return userFontFamily;
-  }
-  return `${userFontFamily}, ${nerdFonts.join(', ')}`;
+  return `${userFontFamily}, monospace`;
 };
 
 // Convert TerminalTheme to xterm.js theme format
@@ -122,6 +104,9 @@ function convertTheme(theme: TerminalTheme): Record<string, string> {
     brightMagenta: theme.brightMagenta || '#d670d6',
     brightCyan: theme.brightCyan || '#29b8db',
     brightWhite: theme.brightWhite || '#ffffff',
+    scrollbarSliderBackground: 'transparent',
+    scrollbarSliderHoverBackground: 'transparent',
+    scrollbarSliderActiveBackground: 'transparent',
   };
 }
 
@@ -419,6 +404,11 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             scrollback: 1000,
             allowTransparency: false,
             convertEol: true,
+            letterSpacing: 0,
+            lineHeight: 1,
+            overviewRuler: {
+              width: 2,
+            },
           });
 
           const fitAddon = new FitAddon();

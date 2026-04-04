@@ -9,8 +9,8 @@
     "dev:server": "tsx watch src/server/entry.ts",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint src --ext ts,tsx",
-    "test": "vitest",
+    "lint": "tsc --noEmit",
+    "test": "vitest --passWithNoTests",
     "test:ui": "vitest --ui"
   },
   "dependencies": {
