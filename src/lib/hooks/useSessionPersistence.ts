@@ -6,6 +6,7 @@ export interface PersistedSession {
   sessionId: string;  // 前端生成的 session ID
   name: string;
   backendSessionId: string | null;  // 后端 sessionId，用于复用
+  keepAliveMs: number | null;
   createdAt: number;
   lastActivity: number;
 }
@@ -19,9 +20,12 @@ interface UseSessionPersistenceReturn {
   updateSessionActivity: (sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
   updateSessionBackendId: (sessionId: string, backendSessionId: string) => void;
+  updateSessionKeepAliveMs: (sessionId: string, keepAliveMs: number | null) => void;
   clearAllSessions: () => void;
   restoreSessions: () => Promise<PersistedSession[]>;
 }
+
+const DEFAULT_KEEP_ALIVE_MS = 3 * 60 * 60 * 1000;
 
 export function useSessionPersistence(): UseSessionPersistenceReturn {
   const [sessions, setSessions] = useState<PersistedSession[]>([]);
@@ -37,7 +41,12 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
         const data = JSON.parse(stored);
-        const sessionList = data.sessions || [];
+        const sessionList = (data.sessions || []).map((session: Partial<PersistedSession> & { sessionId: string; name: string }) => ({
+          ...session,
+          keepAliveMs: Object.prototype.hasOwnProperty.call(session, 'keepAliveMs')
+            ? (session.keepAliveMs ?? null)
+            : DEFAULT_KEEP_ALIVE_MS,
+        })) as PersistedSession[];
         const activeId = data.activeSessionId || null;
 
         setSessions(sessionList);
@@ -70,9 +79,11 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   // 保存新会话
   const saveSession = useCallback((session: Omit<PersistedSession, 'createdAt' | 'lastActivity' | 'backendSessionId'>, backendSessionId: string | null) => {
     const now = Date.now();
+    const keepAliveMs = session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs;
     const newSession: PersistedSession = {
       ...session,
       backendSessionId,
+      keepAliveMs,
       createdAt: now,
       lastActivity: now,
     };
@@ -143,6 +154,18 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     });
   }, [activeSessionId, persistSessions]);
 
+  const updateSessionKeepAliveMs = useCallback((sessionId: string, keepAliveMs: number | null) => {
+    setSessions(prev => {
+      const updated = prev.map(s =>
+        s.sessionId === sessionId ? { ...s, keepAliveMs } : s
+      );
+      const currentActive = prev.find(s => s.sessionId === activeSessionId);
+      const newActiveId = currentActive ? currentActive.sessionId : (updated[0]?.sessionId || null);
+      persistSessions(updated, newActiveId);
+      return updated;
+    });
+  }, [activeSessionId, persistSessions]);
+
   // 初始化时恢复会话
   useEffect(() => {
     if (!initialized.current) {
@@ -160,9 +183,8 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     updateSessionActivity,
     setActiveSession,
     updateSessionBackendId,
+    updateSessionKeepAliveMs,
     clearAllSessions,
     restoreSessions,
   };
 }
-
-

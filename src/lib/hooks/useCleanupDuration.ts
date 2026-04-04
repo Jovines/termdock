@@ -3,7 +3,7 @@ import type { CleanupDurationPreset, TerminalSettings } from '../terminal/types'
 
 const SETTINGS_STORAGE_KEY = 'web-terminal-settings';
 const DEFAULT_SETTINGS: TerminalSettings = {
-  cleanupDuration: 5 * 60 * 1000,  // 默认5分钟
+  cleanupDuration: 3 * 60 * 60 * 1000,  // 默认3小时
   cleanupDurationPreset: 'default',
   fontSize: 13,  // 默认字体大小
 };
@@ -11,11 +11,12 @@ const DEFAULT_SETTINGS: TerminalSettings = {
 // 预设时长选项的显示名称
 export const CLEANUP_DURATION_LABELS: Record<CleanupDurationPreset | 'custom', string> = {
   'never': '永不清理',
-  'default': '默认（5分钟）',
+  'default': '默认（3小时）',
   '5min': '5分钟',
   '10min': '10分钟',
   '30min': '30分钟',
   '1hour': '1小时',
+  '3hours': '3小时',
   '2hours': '2小时',
   '1day': '1天',
   'custom': '自定义',
@@ -24,11 +25,12 @@ export const CLEANUP_DURATION_LABELS: Record<CleanupDurationPreset | 'custom', s
 // 预设时长选项的毫秒值
 const PRESET_VALUES: Record<CleanupDurationPreset, number> = {
   'never': Infinity,
-  'default': 5 * 60 * 1000,  // 默认5分钟（开发环境）
+  'default': 3 * 60 * 60 * 1000,
   '5min': 5 * 60 * 1000,
   '10min': 10 * 60 * 1000,
   '30min': 30 * 60 * 1000,
   '1hour': 60 * 60 * 1000,
+  '3hours': 3 * 60 * 60 * 1000,
   '2hours': 2 * 60 * 60 * 1000,
   '1day': 24 * 60 * 60 * 1000,
 } as const;

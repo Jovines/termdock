@@ -46,7 +46,6 @@ export function getSequenceForKey(key: MobileKey, modifier: Modifier | null): st
 }
 
 interface MobileKeyboardProps {
-  isMobile: boolean;
   keyboardHeight: number;
   isIOS: boolean;
   activeModifier: Modifier | null;
@@ -56,7 +55,6 @@ interface MobileKeyboardProps {
 }
 
 export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
-  isMobile,
   keyboardHeight,
   isIOS,
   activeModifier,
@@ -64,7 +62,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   onKeyPress,
   onModifierToggle,
 }) => {
-  if (!isMobile || keyboardHeight <= 0) {
+  if (keyboardHeight <= 0) {
     return null;
   }
 

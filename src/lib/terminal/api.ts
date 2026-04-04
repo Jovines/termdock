@@ -28,6 +28,9 @@ async function getCsrfToken(): Promise<string> {
 export async function createTerminalSession(
   options: CreateTerminalOptions
 ): Promise<TerminalSession> {
+  const keepAliveMs = Object.prototype.hasOwnProperty.call(options, 'keepAliveMs')
+    ? (options.keepAliveMs ?? null)
+    : 3 * 60 * 60 * 1000;
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/create', {
     method: 'POST',
@@ -38,6 +41,8 @@ export async function createTerminalSession(
     body: JSON.stringify({
       cols: options.cols || 80,
       rows: options.rows || 24,
+      shouldPersist: options.shouldPersist ?? true,
+      keepAliveMs,
     }),
   });
 
@@ -243,7 +248,7 @@ export async function closeTerminal(sessionId: string): Promise<void> {
 
 export async function restartTerminalSession(
   currentSessionId: string,
-  options: { cwd?: string; cols?: number; rows?: number }
+  options: { cwd?: string; cols?: number; rows?: number; keepAliveMs?: number | null }
 ): Promise<TerminalSession> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/${currentSessionId}/restart`, {
@@ -256,6 +261,7 @@ export async function restartTerminalSession(
       ...(options.cwd ? { cwd: options.cwd } : {}),
       cols: options.cols ?? 80,
       rows: options.rows ?? 24,
+      keepAliveMs: options.keepAliveMs,
     }),
   });
 
@@ -290,28 +296,100 @@ export async function checkTerminalHealth(sessionId: string): Promise<{
   return response.json();
 }
 
-// 重连到现有 session
-export async function reconnectTerminalSession(sessionId: string): Promise<{
+export interface PersistentTerminalProcess {
   sessionId: string;
   cwd: string;
+  createdAt: number;
+  lastActivity: number;
   backend: string;
   clients: number;
-  age: number;
-  history: string[];  // 历史输出数据
+  shouldPersist: boolean;
+  keepAliveMs: number | null;
+  isOrphan: boolean;
+  hasWrittenData: boolean;
+}
+
+export async function listTerminalProcesses(): Promise<{
+  reconnect: {
+    graceTime: number;
+    scrollback: number;
+    idleTimeout: number;
+  };
+  processes: PersistentTerminalProcess[];
 }> {
-  const response = await fetch(`/api/terminal/${sessionId}/reconnect`, {
+  const response = await fetch('/api/terminal/processes', {
     method: 'GET',
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to reconnect to terminal' }));
-    if (response.status === 404 || response.status === 410) {
-      throw new Error('SESSION_EXPIRED');
-    }
-    throw new Error(error.error || 'Failed to reconnect to terminal session');
+    const error = await response.json().catch(() => ({ error: 'Failed to list terminal processes' }));
+    throw new Error(error.error || 'Failed to list terminal processes');
   }
 
   return response.json();
+}
+
+export async function attachTerminalSession(sessionId: string): Promise<{
+  sessionId: string;
+  cwd: string;
+  backend: string;
+  clients: number;
+  history: string[];
+  shouldPersist: boolean;
+  keepAliveMs: number | null;
+}> {
+  const response = await fetch(`/api/terminal/${sessionId}/attach`, {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to attach terminal session' }));
+    if (response.status === 404) {
+      throw new Error('SESSION_NOT_FOUND');
+    }
+    throw new Error(error.error || 'Failed to attach terminal session');
+  }
+
+  return response.json();
+}
+
+export async function updateTerminalSessionPolicy(sessionId: string, policy: {
+  keepAliveMs?: number | null;
+  shouldPersist?: boolean;
+}): Promise<{ sessionId: string; keepAliveMs: number | null; shouldPersist: boolean; clients: number }> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/${sessionId}/policy`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
+    body: JSON.stringify(policy),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update terminal session policy' }));
+    throw new Error(error.error || 'Failed to update terminal session policy');
+  }
+
+  return response.json();
+}
+
+export async function detachTerminalSession(sessionId: string): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/${sessionId}/detach`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
+    body: JSON.stringify({}),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to detach terminal session' }));
+    throw new Error(error.error || 'Failed to detach terminal session');
+  }
 }
 
 export async function forceKillTerminal(options: {

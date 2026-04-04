@@ -3,6 +3,8 @@ export interface TerminalSession {
   sessionId: string;
   cols: number;
   rows: number;
+  shouldPersist?: boolean;
+  keepAliveMs?: number | null;
 }
 
 // Stream Event Types
@@ -22,6 +24,8 @@ export interface TerminalStreamEvent {
 export interface CreateTerminalOptions {
   cols?: number;
   rows?: number;
+  shouldPersist?: boolean;
+  keepAliveMs?: number | null;
 }
 
 // Stream Connection Options
@@ -111,11 +115,12 @@ export type DisconnectCleanupDuration = number;  // 清理时长（毫秒），I
 // 预设的清理时长选项（毫秒）
 export const CLEANUP_DURATION_PRESETS = {
   'never': Infinity,  // 永远不清理
-  'default': 5 * 60 * 1000,  // 默认5分钟（开发环境）
+  'default': 3 * 60 * 60 * 1000,  // 默认3小时
   '5min': 5 * 60 * 1000,      // 5分钟
   '10min': 10 * 60 * 1000,    // 10分钟
   '30min': 30 * 60 * 1000,    // 30分钟
   '1hour': 60 * 60 * 1000,    // 1小时
+  '3hours': 3 * 60 * 60 * 1000, // 3小时
   '2hours': 2 * 60 * 60 * 1000, // 2小时
   '1day': 24 * 60 * 60 * 1000,  // 1天
 } as const;

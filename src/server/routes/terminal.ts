@@ -1,6 +1,5 @@
 import express from 'express';
 import fs from 'fs';
-import path from 'path';
 import os from 'os';
 
 const router = express.Router();
@@ -36,8 +35,14 @@ interface TerminalSession {
   ptyBackend: string;
   cwd: string;
   lastActivity: number;
-  clients: Set<string>;
+  clients: Map<string, express.Response>;
   createdAt: number;
+  shouldPersist: boolean;
+  keepAliveMs: number | null;
+  lastDetachedAt: number | null;
+  hasWrittenData: boolean;
+  dataDisposable?: { dispose: () => void };
+  exitDisposable?: { dispose: () => void };
 }
 
 const terminalSessions = new Map<string, TerminalSession>();
@@ -47,16 +52,8 @@ const MAX_TERMINAL_SESSIONS = parseInt(process.env.MAX_TERMINAL_SESSIONS || '20'
 const isDevelopment = process.env.NODE_ENV === 'development';
 const TERMINAL_IDLE_TIMEOUT = parseInt(process.env.TERMINAL_IDLE_TIMEOUT || (isDevelopment ? '300000' : '1800000'), 10);
 const CLEANUP_INTERVAL = isDevelopment ? 60 * 1000 : 5 * 60 * 1000;
-
-// Session 持久化存储
-const SESSION_STORAGE_FILE = path.join(process.cwd(), '.terminal-sessions.json');
-
-interface PersistedSessionMeta {
-  sessionId: string;
-  cwd: string;
-  createdAt: number;
-  lastActivity: number;
-}
+const DEFAULT_KEEP_ALIVE_MS = parseInt(process.env.TERMINAL_DEFAULT_KEEPALIVE_MS || String(3 * 60 * 60 * 1000), 10);
+const RECONNECT_SCROLLBACK = parseInt(process.env.TERMINAL_RECONNECT_SCROLLBACK || '200', 10);
 
 // 输出历史缓冲区（限制大小）
 const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
@@ -90,6 +87,30 @@ function clearHistory(sessionId: string): void {
   sessionHistory.delete(sessionId);
 }
 
+function getReconnectionHistory(sessionId: string): string[] {
+  const history = getHistory(sessionId);
+  if (RECONNECT_SCROLLBACK <= 0 || history.length <= RECONNECT_SCROLLBACK) {
+    return history;
+  }
+  return history.slice(-RECONNECT_SCROLLBACK);
+}
+
+function normalizeKeepAliveMs(input: unknown): number | null {
+  if (input === null) {
+    return null;
+  }
+
+  if (typeof input !== 'number' || !Number.isFinite(input)) {
+    return DEFAULT_KEEP_ALIVE_MS;
+  }
+
+  if (input < 1000) {
+    return 1000;
+  }
+
+  return Math.floor(input);
+}
+
 function resolveWorkingDirectory(req: express.Request, inputCwd?: string): string {
   const requestedCwd = inputCwd || os.homedir();
 
@@ -104,26 +125,139 @@ function resolveWorkingDirectory(req: express.Request, inputCwd?: string): strin
   return requestedCwd;
 }
 
-function persistSessions(sessions: PersistedSessionMeta[]): void {
+function writeSse(res: express.Response, payload: unknown): void {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function closeClient(session: TerminalSession, clientId: string): void {
+  const client = session.clients.get(clientId);
+  if (!client) {
+    return;
+  }
+
+  session.clients.delete(clientId);
+  if (session.clients.size === 0) {
+    session.lastDetachedAt = Date.now();
+  }
+
   try {
-    fs.writeFileSync(SESSION_STORAGE_FILE, JSON.stringify(sessions, null, 2));
+    client.end();
   } catch {
-    // Ignore errors
+    // ignore
   }
 }
 
-setInterval(() => {
-  const sessionMetas: PersistedSessionMeta[] = [];
-  for (const [sessionId, session] of terminalSessions.entries()) {
-    sessionMetas.push({
-      sessionId,
-      cwd: session.cwd,
-      createdAt: session.createdAt,
-      lastActivity: session.lastActivity,
-    });
+function broadcastEvent(sessionId: string, payload: unknown): void {
+  const session = terminalSessions.get(sessionId);
+  if (!session) {
+    return;
   }
-  persistSessions(sessionMetas);
-}, 30000);
+
+  for (const [clientId, client] of session.clients.entries()) {
+    try {
+      writeSse(client, payload);
+    } catch {
+      closeClient(session, clientId);
+    }
+  }
+}
+
+function cleanupSession(sessionId: string, options: { killProcess: boolean; clearHistoryBuffer?: boolean }): void {
+  const session = terminalSessions.get(sessionId);
+  if (!session) {
+    return;
+  }
+
+  session.dataDisposable?.dispose();
+  session.exitDisposable?.dispose();
+
+  if (options.killProcess) {
+    try {
+      session.ptyProcess.kill();
+    } catch {
+      // ignore
+    }
+  }
+
+  for (const client of session.clients.values()) {
+    try {
+      client.end();
+    } catch {
+      // ignore
+    }
+  }
+
+  terminalSessions.delete(sessionId);
+
+  if (options.clearHistoryBuffer !== false) {
+    clearHistory(sessionId);
+  }
+}
+
+function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
+  session.dataDisposable = session.ptyProcess.onData((data: string) => {
+    session.lastActivity = Date.now();
+    session.hasWrittenData = true;
+    addToHistory(sessionId, data);
+    broadcastEvent(sessionId, { type: 'data', data });
+  });
+
+  session.exitDisposable = session.ptyProcess.onExit(({ exitCode, signal }) => {
+    console.log(`Terminal session ${sessionId} exited with code ${exitCode}, signal ${signal}`);
+    broadcastEvent(sessionId, { type: 'exit', exitCode, signal });
+    cleanupSession(sessionId, { killProcess: false });
+  });
+}
+
+async function spawnTerminalSession(req: express.Request, input: {
+  cwd?: string;
+  cols?: number;
+  rows?: number;
+  shouldPersist?: boolean;
+  keepAliveMs?: number | null;
+}): Promise<{ sessionId: string; session: TerminalSession; cols: number; rows: number }> {
+  const cwd = resolveWorkingDirectory(req, input.cwd);
+  const cols = input.cols || 80;
+  const rows = input.rows || 24;
+
+  const shell = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh');
+  const sessionId = Math.random().toString(36).substring(2, 15) +
+                    Math.random().toString(36).substring(2, 15);
+
+  const envPath = buildAugmentedPath();
+  const resolvedEnv = { ...process.env, PATH: envPath };
+
+  const pty = await getPtyProvider();
+  const ptyProcess = pty.spawn(shell, [], {
+    name: 'xterm-256color',
+    cols,
+    rows,
+    cwd,
+    env: {
+      ...resolvedEnv,
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+    },
+  });
+
+  const session: TerminalSession = {
+    ptyProcess,
+    ptyBackend: pty.backend,
+    cwd,
+    lastActivity: Date.now(),
+    clients: new Map(),
+    createdAt: Date.now(),
+    shouldPersist: input.shouldPersist !== false,
+    keepAliveMs: normalizeKeepAliveMs(input.keepAliveMs),
+    lastDetachedAt: null,
+    hasWrittenData: false,
+  };
+
+  terminalSessions.set(sessionId, session);
+  setupPtyHandlers(sessionId, session);
+
+  return { sessionId, session, cols, rows };
+}
 
 function buildAugmentedPath(): string {
   const pathEnv = process.env.PATH || '';
@@ -173,16 +307,67 @@ async function getPtyProvider(): Promise<PtyProvider> {
 setInterval(() => {
   const now = Date.now();
   for (const [sessionId, session] of terminalSessions.entries()) {
-    if (now - session.lastActivity > TERMINAL_IDLE_TIMEOUT) {
-      console.log(`Cleaning up idle terminal session: ${sessionId}`);
-      try {
-        session.ptyProcess.kill();
-      } catch (error) {
-      }
-      terminalSessions.delete(sessionId);
+    const idleTooLong = now - session.lastActivity > TERMINAL_IDLE_TIMEOUT;
+    const orphaned = session.clients.size === 0;
+    const graceWindow = session.keepAliveMs;
+    const graceExpired = orphaned
+      && session.lastDetachedAt !== null
+      && graceWindow !== null
+      && now - session.lastDetachedAt > graceWindow;
+
+    if (idleTooLong || (!session.shouldPersist && orphaned) || graceExpired) {
+      console.log(`Cleaning up terminal session: ${sessionId}, idleTooLong=${idleTooLong}, orphaned=${orphaned}, graceExpired=${graceExpired}`);
+      cleanupSession(sessionId, { killProcess: true });
     }
   }
 }, CLEANUP_INTERVAL);
+
+router.get('/processes', (_req, res) => {
+  const processes = Array.from(terminalSessions.entries()).map(([sessionId, session]) => ({
+    sessionId,
+    cwd: session.cwd,
+    createdAt: session.createdAt,
+    lastActivity: session.lastActivity,
+    backend: session.ptyBackend,
+    clients: session.clients.size,
+    shouldPersist: session.shouldPersist,
+    keepAliveMs: session.keepAliveMs,
+    isOrphan: session.clients.size === 0,
+    hasWrittenData: session.hasWrittenData,
+  }));
+
+  res.json({
+    reconnect: {
+      graceTime: DEFAULT_KEEP_ALIVE_MS,
+      scrollback: RECONNECT_SCROLLBACK,
+      idleTimeout: TERMINAL_IDLE_TIMEOUT,
+    },
+    processes,
+  });
+});
+
+router.post('/serialize-state', (req, res) => {
+  const ids = Array.isArray(req.body?.ids)
+    ? new Set((req.body.ids as unknown[]).filter((item): item is string => typeof item === 'string'))
+    : null;
+
+  const states = Array.from(terminalSessions.entries())
+    .filter(([sessionId, session]) => (ids ? ids.has(sessionId) : true) && session.shouldPersist)
+    .map(([sessionId, session]) => ({
+      sessionId,
+      cwd: session.cwd,
+      createdAt: session.createdAt,
+      lastActivity: session.lastActivity,
+      backend: session.ptyBackend,
+      keepAliveMs: session.keepAliveMs,
+      history: getReconnectionHistory(sessionId),
+    }));
+
+  res.json({
+    serialized: JSON.stringify({ version: 1, states }),
+    states,
+  });
+});
 
 router.post('/create', async (req, res) => {
   try {
@@ -190,53 +375,17 @@ router.post('/create', async (req, res) => {
       return res.status(429).json({ error: 'Maximum terminal sessions reached' });
     }
 
-    const { cwd: inputCwd, cols, rows } = req.body;
-    let cwd: string;
-    try {
-      cwd = resolveWorkingDirectory(req, inputCwd);
-    } catch (error) {
-      return res.status(400).json({ error: 'Invalid working directory' });
-    }
-
-    const shell = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh');
-
-    const sessionId = Math.random().toString(36).substring(2, 15) +
-                      Math.random().toString(36).substring(2, 15);
-
-    const envPath = buildAugmentedPath();
-    const resolvedEnv = { ...process.env, PATH: envPath };
-
-    const pty = await getPtyProvider();
-    const ptyProcess = pty.spawn(shell, [], {
-      name: 'xterm-256color',
-      cols: cols || 80,
-      rows: rows || 24,
-      cwd: cwd,
-      env: {
-        ...resolvedEnv,
-        TERM: 'xterm-256color',
-        COLORTERM: 'truecolor',
-      },
+    const { cwd: inputCwd, cols, rows, shouldPersist, keepAliveMs } = req.body;
+    const { sessionId, session } = await spawnTerminalSession(req, {
+      cwd: inputCwd,
+      cols,
+      rows,
+      shouldPersist,
+      keepAliveMs,
     });
 
-    const session: TerminalSession = {
-      ptyProcess,
-      ptyBackend: pty.backend,
-      cwd,
-      lastActivity: Date.now(),
-      clients: new Set(),
-      createdAt: Date.now(),
-    };
-
-    terminalSessions.set(sessionId, session);
-
-    ptyProcess.onExit(({ exitCode, signal }) => {
-      console.log(`Terminal session ${sessionId} exited with code ${exitCode}, signal ${signal}`);
-      terminalSessions.delete(sessionId);
-    });
-
-    console.log(`Created terminal session: ${sessionId} in ${cwd}`);
-    res.json({ sessionId, cols: cols || 80, rows: rows || 24 });
+    console.log(`Created terminal session: ${sessionId} in ${session.cwd}, shouldPersist=${session.shouldPersist}, keepAliveMs=${session.keepAliveMs ?? 'never'}`);
+    res.json({ sessionId, cols: cols || 80, rows: rows || 24, shouldPersist: session.shouldPersist, keepAliveMs: session.keepAliveMs });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('Failed to create terminal session:', errorMessage);
@@ -258,8 +407,9 @@ router.get('/:sessionId/stream', (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
 
   const clientId = Math.random().toString(36).substring(7);
-  session.clients.add(clientId);
+  session.clients.set(clientId, res);
   session.lastActivity = Date.now();
+  session.lastDetachedAt = null;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const runtime = (globalThis as any).Bun ? 'bun' : 'node';
@@ -275,47 +425,16 @@ router.get('/:sessionId/stream', (req, res) => {
     }
   }, 15000);
 
-  const dataHandler = (data: string) => {
-    try {
-      session.lastActivity = Date.now();
-      // Capture to history buffer
-      addToHistory(sessionId, data);
-      const ok = res.write(`data: ${JSON.stringify({ type: 'data', data })}\n\n`);
-      if (!ok && session.ptyProcess && typeof session.ptyProcess.pause === 'function') {
-        session.ptyProcess.pause();
-        res.once('drain', () => {
-          if (session.ptyProcess && typeof session.ptyProcess.resume === 'function') {
-            session.ptyProcess.resume();
-          }
-        });
-      }
-    } catch (error) {
-      console.error(`Error sending data to client ${clientId}:`, error);
-      cleanup();
+  if (req.query.replay === '1') {
+    const replayChunks = getReconnectionHistory(sessionId);
+    for (const chunk of replayChunks) {
+      writeSse(res, { type: 'data', data: chunk, replay: true });
     }
-  };
-
-  const exitHandler = ({ exitCode, signal }: { exitCode: number; signal: number | null }) => {
-    try {
-      res.write(`data: ${JSON.stringify({ type: 'exit', exitCode, signal })}\n\n`);
-      res.end();
-    } catch (error) {
-    }
-    cleanup();
-  };
-
-  const dataDisposable = session.ptyProcess.onData(dataHandler);
-  const exitDisposable = session.ptyProcess.onExit(exitHandler);
+  }
 
   const cleanup = () => {
     clearInterval(heartbeatInterval);
-    session.clients.delete(clientId);
-    dataDisposable.dispose();
-    exitDisposable.dispose();
-    try {
-      res.end();
-    } catch (error) {
-    }
+    closeClient(session, clientId);
     console.log(`Client ${clientId} disconnected from terminal session ${sessionId}`);
   };
 
@@ -325,7 +444,7 @@ router.get('/:sessionId/stream', (req, res) => {
   console.log(`Terminal connected: session=${sessionId} client=${clientId} runtime=${runtime} pty=${ptyBackend}`);
 });
 
- router.get('/:sessionId/health', (req, res) => {
+router.get('/:sessionId/health', (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
   
@@ -345,45 +464,77 @@ router.get('/:sessionId/stream', (req, res) => {
    });
  });
 
-  // 重连 API - 检查并返回现有 session 信息
-  router.get('/:sessionId/reconnect', (req, res) => {
-    const { sessionId } = req.params;
-    const session = terminalSessions.get(sessionId);
+router.get('/:sessionId/attach', (req, res) => {
+  const { sessionId } = req.params;
+  const session = terminalSessions.get(sessionId);
 
-    if (!session) {
-      clearHistory(sessionId);
-      return res.status(404).json({
-        error: 'Session not found or expired',
-        expired: true
-      });
-    }
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
 
-    // 检查是否超时
-    const age = Date.now() - session.lastActivity;
-    if (age > TERMINAL_IDLE_TIMEOUT) {
-      console.log(`Reconnect rejected: session ${sessionId} expired (age: ${age}ms)`);
-      terminalSessions.delete(sessionId);
-      clearHistory(sessionId);
-      return res.status(410).json({
-        error: 'Session expired',
-        expired: true
-      });
-    }
+  session.lastDetachedAt = null;
+  session.lastActivity = Date.now();
 
-    // 返回 session 信息和历史数据
-    const history = getHistory(sessionId);
-    console.log(`Reconnect accepted: session=${sessionId} cwd=${session.cwd}, historySize=${history.length} chunks, ${history.join('').length} bytes`);
-    res.json({
-      sessionId,
-      cwd: session.cwd,
-      backend: session.ptyBackend,
-      clients: session.clients.size,
-      age,
-      history
-    });
+  res.json({
+    sessionId,
+    cwd: session.cwd,
+    backend: session.ptyBackend,
+    clients: session.clients.size,
+    history: getReconnectionHistory(sessionId),
+    shouldPersist: session.shouldPersist,
+    keepAliveMs: session.keepAliveMs,
   });
+});
 
- router.post('/:sessionId/input', express.text({ type: '*/*' }), (req, res) => {
+router.patch('/:sessionId/policy', (req, res) => {
+  const { sessionId } = req.params;
+  const session = terminalSessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  if (Object.prototype.hasOwnProperty.call(req.body, 'shouldPersist')) {
+    session.shouldPersist = req.body.shouldPersist !== false;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(req.body, 'keepAliveMs')) {
+    session.keepAliveMs = normalizeKeepAliveMs(req.body.keepAliveMs);
+  }
+
+  if (session.clients.size === 0) {
+    session.lastDetachedAt = Date.now();
+  }
+
+  return res.json({
+    sessionId,
+    shouldPersist: session.shouldPersist,
+    keepAliveMs: session.keepAliveMs,
+    clients: session.clients.size,
+  });
+});
+
+router.post('/:sessionId/detach', (req, res) => {
+  const { sessionId } = req.params;
+  const session = terminalSessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  if (session.clients.size === 0) {
+    session.lastDetachedAt = Date.now();
+  }
+
+  res.json({
+    sessionId,
+    detachedAt: session.lastDetachedAt,
+    clients: session.clients.size,
+    shouldPersist: session.shouldPersist,
+  });
+});
+
+router.post('/:sessionId/input', express.text({ type: '*/*' }), (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
 
@@ -437,8 +588,7 @@ router.delete('/:sessionId', (req, res) => {
   }
 
   try {
-    session.ptyProcess.kill();
-    terminalSessions.delete(sessionId);
+    cleanupSession(sessionId, { killProcess: true });
     console.log(`Closed terminal session: ${sessionId}`);
     res.json({ success: true });
   } catch (error) {
@@ -450,64 +600,24 @@ router.delete('/:sessionId', (req, res) => {
 
 router.post('/:sessionId/restart', async (req, res) => {
   const { sessionId } = req.params;
-  const { cwd: inputCwd, cols, rows } = req.body;
-  let cwd: string;
-
-  try {
-    cwd = resolveWorkingDirectory(req, inputCwd);
-  } catch (error) {
-    return res.status(400).json({ error: 'Invalid working directory' });
-  }
+  const { cwd: inputCwd, cols, rows, shouldPersist, keepAliveMs } = req.body;
 
   const existingSession = terminalSessions.get(sessionId);
   if (existingSession) {
-    try {
-      existingSession.ptyProcess.kill();
-    } catch (error) {
-    }
-    terminalSessions.delete(sessionId);
+    cleanupSession(sessionId, { killProcess: true });
   }
 
   try {
-    const shell = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh');
-
-    const newSessionId = Math.random().toString(36).substring(2, 15) +
-                        Math.random().toString(36).substring(2, 15);
-
-    const envPath = buildAugmentedPath();
-    const resolvedEnv = { ...process.env, PATH: envPath };
-
-    const pty = await getPtyProvider();
-    const ptyProcess = pty.spawn(shell, [], {
-      name: 'xterm-256color',
-      cols: cols || 80,
-      rows: rows || 24,
-      cwd: cwd,
-      env: {
-        ...resolvedEnv,
-        TERM: 'xterm-256color',
-        COLORTERM: 'truecolor',
-      },
+    const { sessionId: newSessionId, session } = await spawnTerminalSession(req, {
+      cwd: inputCwd,
+      cols,
+      rows,
+      shouldPersist,
+      keepAliveMs,
     });
 
-    const session: TerminalSession = {
-      ptyProcess,
-      ptyBackend: pty.backend,
-      cwd,
-      lastActivity: Date.now(),
-      clients: new Set(),
-      createdAt: Date.now(),
-    };
-
-    terminalSessions.set(newSessionId, session);
-
-    ptyProcess.onExit(({ exitCode, signal }) => {
-      console.log(`Terminal session ${newSessionId} exited with code ${exitCode}, signal ${signal}`);
-      terminalSessions.delete(newSessionId);
-    });
-
-    console.log(`Restarted terminal session: ${sessionId} -> ${newSessionId} in ${cwd}`);
-    res.json({ sessionId: newSessionId, cols: cols || 80, rows: rows || 24 });
+    console.log(`Restarted terminal session: ${sessionId} -> ${newSessionId} in ${session.cwd}`);
+    res.json({ sessionId: newSessionId, cols: cols || 80, rows: rows || 24, shouldPersist: session.shouldPersist, keepAliveMs: session.keepAliveMs });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('Failed to restart terminal session:', errorMessage);
@@ -522,31 +632,19 @@ router.post('/force-kill', (req, res) => {
   if (sessionId) {
     const session = terminalSessions.get(sessionId);
     if (session) {
-      try {
-        session.ptyProcess.kill();
-      } catch (error) {
-      }
-      terminalSessions.delete(sessionId);
+      cleanupSession(sessionId, { killProcess: true });
       killedCount++;
     }
   } else if (cwd) {
     for (const [id, session] of terminalSessions) {
       if (session.cwd === cwd) {
-        try {
-          session.ptyProcess.kill();
-        } catch (error) {
-        }
-        terminalSessions.delete(id);
+        cleanupSession(id, { killProcess: true });
         killedCount++;
       }
     }
   } else {
-    for (const [id, session] of terminalSessions) {
-      try {
-        session.ptyProcess.kill();
-      } catch (error) {
-      }
-      terminalSessions.delete(id);
+    for (const [id] of terminalSessions) {
+      cleanupSession(id, { killProcess: true });
       killedCount++;
     }
   }

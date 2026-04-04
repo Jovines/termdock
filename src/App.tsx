@@ -5,6 +5,30 @@ import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
 import type { CleanupDurationPreset } from './lib/terminal/types';
 
+const SESSION_KEEPALIVE_PRESETS: Array<{ value: CleanupDurationPreset | 'custom'; label: string; ms: number | null }> = [
+  { value: 'never', label: 'Never', ms: null },
+  { value: '30min', label: '30 minutes', ms: 30 * 60 * 1000 },
+  { value: '1hour', label: '1 hour', ms: 60 * 60 * 1000 },
+  { value: '2hours', label: '2 hours', ms: 2 * 60 * 60 * 1000 },
+  { value: '3hours', label: '3 hours', ms: 3 * 60 * 60 * 1000 },
+  { value: '1day', label: '1 day', ms: 24 * 60 * 60 * 1000 },
+  { value: 'custom', label: 'Custom', ms: null },
+];
+
+function formatKeepAliveLabel(ms: number | null): string {
+  if (ms === null) return 'Never';
+  const minutes = Math.round(ms / 60000);
+  if (minutes >= 60 * 24) return `${Math.round(minutes / 60 / 24)}d`;
+  if (minutes >= 60) return `${Math.round(minutes / 60)}h`;
+  return `${minutes}m`;
+}
+
+function getPresetByDuration(ms: number | null): CleanupDurationPreset | 'custom' {
+  if (ms === null) return 'never';
+  const matched = SESSION_KEEPALIVE_PRESETS.find((preset) => preset.ms === ms);
+  return (matched?.value ?? 'custom') as CleanupDurationPreset | 'custom';
+}
+
 function App() {
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
   const floatingTopOffset = `calc(${safeTopInset} + 0.75rem)`;
@@ -19,6 +43,7 @@ function App() {
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
 
   const {
+    cleanupDurationMs,
     cleanupDurationPreset,
     customDurationMs,
     setCleanupDurationPreset,
@@ -26,6 +51,8 @@ function App() {
   } = useCleanupDuration();
 
   const [customDurationInput, setCustomDurationInput] = React.useState<string>('');
+  const [activeKeepAlivePreset, setActiveKeepAlivePreset] = React.useState<CleanupDurationPreset | 'custom'>('3hours');
+  const [activeKeepAliveCustomInput, setActiveKeepAliveCustomInput] = React.useState<string>('180');
 
   useEffect(() => {
     if (cleanupDurationPreset === 'custom' && customDurationMs !== null) {
@@ -116,6 +143,31 @@ function App() {
     }
   };
 
+  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
+
+  useEffect(() => {
+    if (!activeSession) return;
+    const preset = getPresetByDuration(activeSession.keepAliveMs);
+    setActiveKeepAlivePreset(preset);
+    if (preset === 'custom') {
+      if (activeSession.keepAliveMs === null) {
+        setActiveKeepAliveCustomInput('180');
+      } else {
+        setActiveKeepAliveCustomInput(String(Math.max(1, Math.round(activeSession.keepAliveMs / 60000))));
+      }
+    }
+  }, [activeSession?.id, activeSession?.keepAliveMs]);
+
+  const applyActiveSessionKeepAlive = useCallback((keepAliveMs: number | null) => {
+    if (!activeSessionId) return;
+    window.dispatchEvent(new CustomEvent('update-terminal-session-policy', {
+      detail: {
+        sessionId: activeSessionId,
+        keepAliveMs,
+      },
+    }));
+  }, [activeSessionId]);
+
   // Listen for session updates from MultiTerminalView
   const handleSessionDataUpdate = useCallback((data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => {
     setSessions(data.sessions);
@@ -181,6 +233,7 @@ function App() {
                       >
                         <RiTerminalBoxLine size={14} />
                         <span className="flex-1 truncate text-left">{session.name}</span>
+                        <span className="text-[10px] text-muted-foreground">{formatKeepAliveLabel(session.keepAliveMs)}</span>
                         <button
                           type="button"
                           onClick={(e) => {
@@ -200,7 +253,11 @@ function App() {
                   <button
                     type="button"
                     onClick={() => {
-                      window.dispatchEvent(new CustomEvent('new-terminal-session'));
+                      window.dispatchEvent(new CustomEvent('new-terminal-session', {
+                        detail: {
+                          keepAliveMs: cleanupDurationMs === Infinity ? null : cleanupDurationMs,
+                        },
+                      }));
                       setIsDrawerOpen(false);
                     }}
                     className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm border border-dashed border-border rounded-lg hover:bg-surface-elevated transition-colors text-muted-foreground"
@@ -248,20 +305,21 @@ function App() {
                   />
                 </div>
 
-                {/* Cleanup Duration */}
+                {/* New Session Keepalive */}
                 <div className="space-y-1.5">
-                  <span className="text-xs text-muted-foreground">Cleanup</span>
+                  <span className="text-xs text-muted-foreground">New Session Keepalive</span>
                   <select
                     value={cleanupDurationPreset}
-                    onChange={(e) => setCleanupDurationPreset(e.target.value as CleanupDurationPreset)}
+                    onChange={(e) => setCleanupDurationPreset(e.target.value as CleanupDurationPreset | 'custom')}
                     className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
                   >
                     <option value="never">Never</option>
-                    <option value="default">Default (5min)</option>
+                    <option value="default">Default (3h)</option>
                     <option value="5min">5 minutes</option>
                     <option value="10min">10 minutes</option>
                     <option value="30min">30 minutes</option>
                     <option value="1hour">1 hour</option>
+                    <option value="3hours">3 hours</option>
                     <option value="2hours">2 hours</option>
                     <option value="1day">1 day</option>
                     <option value="custom">Custom</option>
@@ -279,6 +337,53 @@ function App() {
                     />
                   )}
                 </div>
+
+                {activeSession && (
+                  <div className="space-y-1.5">
+                    <span className="text-xs text-muted-foreground">Active Session Keepalive</span>
+                    <select
+                      value={activeKeepAlivePreset}
+                      onChange={(e) => {
+                        const preset = e.target.value as CleanupDurationPreset | 'custom';
+                        setActiveKeepAlivePreset(preset);
+                        if (preset === 'custom') {
+                          if (!activeKeepAliveCustomInput) {
+                            setActiveKeepAliveCustomInput('180');
+                          }
+                          return;
+                        }
+                        const selected = SESSION_KEEPALIVE_PRESETS.find((item) => item.value === preset);
+                        applyActiveSessionKeepAlive(selected?.ms ?? 3 * 60 * 60 * 1000);
+                      }}
+                      className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
+                    >
+                      <option value="never">Never</option>
+                      <option value="30min">30 minutes</option>
+                      <option value="1hour">1 hour</option>
+                      <option value="2hours">2 hours</option>
+                      <option value="3hours">3 hours</option>
+                      <option value="1day">1 day</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                    {activeKeepAlivePreset === 'custom' && (
+                      <input
+                        type="number"
+                        min="1"
+                        max="10080"
+                        value={activeKeepAliveCustomInput}
+                        onChange={(e) => setActiveKeepAliveCustomInput(e.target.value)}
+                        onBlur={() => {
+                          const minutes = parseInt(activeKeepAliveCustomInput, 10);
+                          const normalized = Number.isFinite(minutes) ? Math.min(10080, Math.max(1, minutes)) : 180;
+                          setActiveKeepAliveCustomInput(String(normalized));
+                          applyActiveSessionKeepAlive(normalized * 60000);
+                        }}
+                        placeholder="Minutes"
+                        className="w-full px-3 py-2 text-sm border rounded bg-input mt-2"
+                      />
+                    )}
+                  </div>
+                )}
 
                 {/* Debug Toggle */}
                 <div className="flex items-center justify-between pt-2">

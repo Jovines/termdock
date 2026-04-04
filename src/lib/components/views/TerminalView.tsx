@@ -119,7 +119,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    if (!isMobile) {
+    const hasTouchDevice = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+    if (!hasTouchDevice) {
       setKeyboardHeight(0);
       return;
     }
@@ -128,6 +129,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       rafId: null as number | null,
       isKeyboardVisible: false,
       lastEmittedHeight: 0,
+      baselineHeight: 0,
     };
 
     const emitHeight = (nextHeight: number) => {
@@ -146,9 +148,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         return;
       }
 
-      const windowHeight = window.innerHeight;
-      const rawHeight = windowHeight - viewport.height - viewport.offsetTop;
-      const keyboardHeightNext = Math.max(0, Math.round(rawHeight));
+      const viewportHeight = Math.round(viewport.height);
+      if (state.baselineHeight === 0) {
+        state.baselineHeight = viewportHeight;
+      }
+      if (!state.isKeyboardVisible && viewportHeight > state.baselineHeight) {
+        state.baselineHeight = viewportHeight;
+      }
+
+      const keyboardHeightNext = Math.max(0, state.baselineHeight - viewportHeight);
 
       if (state.isKeyboardVisible) {
         if (keyboardHeightNext <= KEYBOARD_CLOSE_THRESHOLD) {
@@ -188,7 +196,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         window.cancelAnimationFrame(state.rafId);
       }
     };
-  }, [isMobile]);
+  }, []);
 
   React.useEffect(() => {
     terminalIdRef.current = terminalSessionId;
@@ -692,7 +700,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       </div>
 
       <MobileKeyboard
-        isMobile={isMobile}
         keyboardHeight={keyboardHeight}
         isIOS={isIOS}
         activeModifier={activeModifier}

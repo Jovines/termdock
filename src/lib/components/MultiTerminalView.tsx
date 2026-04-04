@@ -2,20 +2,33 @@ import React, { useEffect, useCallback, useState, useRef, useMemo } from 'react'
 import { v4 as uuidv4 } from 'uuid';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
-import { reconnectTerminalSession, createTerminalSession, closeTerminal } from '../terminal/api';
+import { attachTerminalSession, listTerminalProcesses, createTerminalSession, closeTerminal, updateTerminalSessionPolicy } from '../terminal/api';
 import { useTerminalStore } from '../stores/useTerminalStore';
 
 interface TerminalSession {
   id: string;
   name: string;
   sessionId: string | null;
+  keepAliveMs: number | null;
   history?: string[];
 }
 
 export interface TerminalSessionInfo {
   id: string;
   name: string;
+  keepAliveMs: number | null;
 }
+
+interface NewSessionEventDetail {
+  keepAliveMs?: number | null;
+}
+
+interface UpdateSessionPolicyEventDetail {
+  sessionId: string;
+  keepAliveMs?: number | null;
+}
+
+const DEFAULT_KEEP_ALIVE_MS = 3 * 60 * 60 * 1000;
 
 interface MultiTerminalViewProps {
   theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
@@ -83,6 +96,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     isLoading,
     saveSession,
     updateSessionBackendId,
+    updateSessionKeepAliveMs,
     removeSession: removePersistedSession,
   } = useSessionPersistence();
 
@@ -95,47 +109,53 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // Notify parent of session data changes
   useEffect(() => {
     onSessionDataUpdate?.({
-      sessions: sessions.map((s) => ({ id: s.id, name: s.name })),
+      sessions: sessions.map((s) => ({ id: s.id, name: s.name, keepAliveMs: s.keepAliveMs })),
       activeSessionId,
     });
   }, [sessions, activeSessionId, onSessionDataUpdate]);
 
   // 尝试为单个 session 恢复或创建 session
-  const restoreOrCreateSession = useCallback(async (session: typeof persistedSessions[0]): Promise<TerminalSession> => {
+  const restoreOrCreateSession = useCallback(async (
+    session: typeof persistedSessions[0],
+    availableProcessIds: Set<string> | null
+  ): Promise<TerminalSession> => {
     const { sessionId, name, backendSessionId } = session;
+    const keepAliveMs = session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs;
 
-    // 如果有 backendSessionId，尝试重连
-    if (backendSessionId) {
+    // 如果有 backendSessionId，优先附着到现有持久进程
+    if (backendSessionId && (!availableProcessIds || availableProcessIds.has(backendSessionId))) {
       try {
-        const reconnected = await reconnectTerminalSession(backendSessionId);
-        console.log('[Session] Reconnected to existing session:', {
+        const attached = await attachTerminalSession(backendSessionId);
+        console.log('[Session] Attached to existing session:', {
           backendSessionId,
           frontendSessionId: sessionId,
-          reconnectedSessionId: reconnected.sessionId,
-          cwd: reconnected.cwd,
-          backend: reconnected.backend,
-          clients: reconnected.clients,
-          historyLength: reconnected.history?.length ?? 0,
+          attachedSessionId: attached.sessionId,
+          cwd: attached.cwd,
+          backend: attached.backend,
+          clients: attached.clients,
+          historyLength: attached.history?.length ?? 0,
         });
         return {
           id: sessionId,
           name,
-          sessionId: reconnected.sessionId,
-          history: reconnected.history,
+          sessionId: attached.sessionId,
+          keepAliveMs: attached.keepAliveMs,
+          history: attached.history,
         };
       } catch {
-        console.log('[Session] Reconnect failed, creating new session:', backendSessionId);
+        console.log('[Session] Attach failed, creating new session:', backendSessionId);
       }
     }
 
     // 创建新 session（服务端会自动使用 home 目录）
-    const newSession = await createTerminalSession({});
+    const newSession = await createTerminalSession({ keepAliveMs });
     console.log('[Session] Created new session:', newSession.sessionId);
 
     return {
       id: sessionId,
       name,
       sessionId: newSession.sessionId,
+      keepAliveMs,
     };
   }, []);
 
@@ -147,22 +167,68 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     console.log('[Session] Restoring', persistedSessions.length, 'persisted sessions');
 
-    if (persistedSessions.length > 0) {
-      // 并行恢复所有 session
-      Promise.all(persistedSessions.map(async (session) => {
-        const s = await restoreOrCreateSession(session);
-        return s;
-      })).then((sessions) => {
-        console.log('[Session] Restored sessions:', sessions.length);
-        setSessions(sessions);
-        setActiveSessionId(persistedActiveId || sessions[0]?.id || null);
-        setIsRestoring(false);
+    const restore = async () => {
+      try {
+        let availableProcessIds: Set<string> | null = null;
+        let orphanBackendIds: string[] = [];
 
-        // Update localStorage and useTerminalStore
+        try {
+          const processInfo = await listTerminalProcesses();
+          availableProcessIds = new Set(processInfo.processes.map((process) => process.sessionId));
+
+          const knownBackendIds = new Set(
+            persistedSessions
+              .map((session) => session.backendSessionId)
+              .filter((id): id is string => !!id)
+          );
+
+          orphanBackendIds = processInfo.processes
+            .filter((process) => process.isOrphan && !knownBackendIds.has(process.sessionId))
+            .map((process) => process.sessionId);
+
+          console.log('[Session] Process snapshot:', {
+            total: processInfo.processes.length,
+            orphanCandidates: orphanBackendIds.length,
+          });
+        } catch (error) {
+          console.warn('[Session] Failed to list terminal processes, fallback to persisted session mapping only:', error);
+        }
+
+        const restoredPersisted = await Promise.all(
+          persistedSessions.map(async (session) => restoreOrCreateSession(session, availableProcessIds))
+        );
+
+        const adoptedSessions = await Promise.all(
+          orphanBackendIds.map(async (backendSessionId) => {
+            try {
+              const attached = await attachTerminalSession(backendSessionId);
+              const frontendSessionId = uuidv4();
+              const name = generateSessionName();
+              saveSession({ sessionId: frontendSessionId, name, keepAliveMs: attached.keepAliveMs }, attached.sessionId);
+              return {
+                id: frontendSessionId,
+                name,
+                sessionId: attached.sessionId,
+                keepAliveMs: attached.keepAliveMs,
+                history: attached.history,
+              } as TerminalSession;
+            } catch {
+              return null;
+            }
+          })
+        );
+
+        const restored = [...restoredPersisted, ...adoptedSessions.filter((s): s is TerminalSession => s !== null)];
+
+        console.log('[Session] Restored sessions:', restored.length);
+        setSessions(restored);
+        setActiveSessionId(persistedActiveId || restored[0]?.id || null);
+
         const store = useTerminalStore.getState();
-        sessions.forEach(session => {
+        restored.forEach((session) => {
           if (session.sessionId) {
             updateSessionBackendId(session.id, session.sessionId);
+            updateSessionKeepAliveMs(session.id, session.keepAliveMs);
             store.setTerminalSession(session.id, {
               sessionId: session.sessionId,
               cols: 80,
@@ -177,31 +243,32 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             });
           }
         });
-      }).catch((error) => {
+      } catch (error) {
         console.error('[Session] Failed to restore sessions:', error);
-        // 即使失败也继续，使用空的 session
         const fallbackSessions = persistedSessions.map((session) => ({
           id: session.sessionId,
           name: session.name,
           sessionId: null as string | null,
+          keepAliveMs: session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs,
         }));
         setSessions(fallbackSessions);
         setActiveSessionId(persistedActiveId || fallbackSessions[0]?.id || null);
+      } finally {
         setIsRestoring(false);
-      });
+      }
+    };
 
-      return;
-    }
-
-    console.log('[Session] No persisted sessions');
-    setIsRestoring(false);
-  }, [isLoading, persistedSessions, persistedActiveId, restoreOrCreateSession, updateSessionBackendId]);
+    void restore();
+  }, [isLoading, persistedSessions, persistedActiveId, restoreOrCreateSession, updateSessionBackendId, updateSessionKeepAliveMs]);
 
   // Handle new session creation from custom event
-  const handleNewSession = useCallback(async () => {
+  const handleNewSession = useCallback(async (options?: NewSessionEventDetail) => {
     try {
+      const keepAliveMs = options && Object.prototype.hasOwnProperty.call(options, 'keepAliveMs')
+        ? (options.keepAliveMs ?? null)
+        : DEFAULT_KEEP_ALIVE_MS;
       // 服务端会自动使用 home 目录，不需要客户端传递
-      const newTerminalSession = await createTerminalSession({});
+      const newTerminalSession = await createTerminalSession({ keepAliveMs });
       const sessionId = uuidv4();
       const name = generateSessionName();
 
@@ -209,6 +276,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         id: sessionId,
         name,
         sessionId: newTerminalSession.sessionId,
+        keepAliveMs: newTerminalSession.keepAliveMs ?? keepAliveMs,
       };
 
       setSessions((prev) => {
@@ -219,7 +287,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       setActiveSessionId(sessionId);
 
       // Persist the new session
-      saveSession({ sessionId, name }, newTerminalSession.sessionId);
+      saveSession({ sessionId, name, keepAliveMs: newSession.keepAliveMs }, newTerminalSession.sessionId);
 
       // Update useTerminalStore with the new backend session
       const store = useTerminalStore.getState();
@@ -231,11 +299,35 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         });
       }
 
-      console.log('[Session] Created new session:', sessionId, newTerminalSession.sessionId);
+      console.log('[Session] Created new session:', sessionId, newTerminalSession.sessionId, 'keepAliveMs=', newSession.keepAliveMs);
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);
     }
   }, [saveSession]);
+
+  const handleUpdateSessionPolicy = useCallback(async (detail: UpdateSessionPolicyEventDetail) => {
+    const target = sessions.find((session) => session.id === detail.sessionId);
+    if (!target?.sessionId) {
+      return;
+    }
+
+    const keepAliveMs = Object.prototype.hasOwnProperty.call(detail, 'keepAliveMs')
+      ? (detail.keepAliveMs ?? null)
+      : target.keepAliveMs;
+
+    try {
+      const updated = await updateTerminalSessionPolicy(target.sessionId, { keepAliveMs });
+      setSessions((prev) => prev.map((session) => (
+        session.id === detail.sessionId
+          ? { ...session, keepAliveMs: updated.keepAliveMs }
+          : session
+      )));
+      updateSessionKeepAliveMs(detail.sessionId, updated.keepAliveMs);
+      console.log('[Session] Updated policy:', detail.sessionId, updated.keepAliveMs);
+    } catch (error) {
+      console.error('[Session] Failed to update session policy:', error);
+    }
+  }, [sessions, updateSessionKeepAliveMs]);
 
   // Handle session switching from custom event
   const handleSwitchSession = useCallback((sessionId: string) => {
@@ -277,8 +369,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   // Set up event listeners for session management
   useEffect(() => {
-    const handleNewSessionEvent = () => {
-      handleNewSession();
+    const handleNewSessionEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<NewSessionEventDetail | undefined>;
+      handleNewSession(customEvent.detail);
     };
 
     const handleSwitchSessionEvent = (event: Event) => {
@@ -291,16 +384,26 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       handleCloseSession(customEvent.detail);
     };
 
+    const handleUpdateSessionPolicyEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<UpdateSessionPolicyEventDetail>;
+      if (!customEvent.detail?.sessionId) {
+        return;
+      }
+      void handleUpdateSessionPolicy(customEvent.detail);
+    };
+
     window.addEventListener('new-terminal-session', handleNewSessionEvent);
     window.addEventListener('switch-terminal-session', handleSwitchSessionEvent);
     window.addEventListener('close-terminal-session', handleCloseSessionEvent);
+    window.addEventListener('update-terminal-session-policy', handleUpdateSessionPolicyEvent);
 
     return () => {
       window.removeEventListener('new-terminal-session', handleNewSessionEvent);
       window.removeEventListener('switch-terminal-session', handleSwitchSessionEvent);
       window.removeEventListener('close-terminal-session', handleCloseSessionEvent);
+      window.removeEventListener('update-terminal-session-policy', handleUpdateSessionPolicyEvent);
     };
-  }, [handleNewSession, handleSwitchSession, handleCloseSession]);
+  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleUpdateSessionPolicy]);
 
   // 没有会话时创建新的
   useEffect(() => {
