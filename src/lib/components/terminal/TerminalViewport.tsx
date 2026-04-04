@@ -242,26 +242,11 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       }
     }, [pixelToCharCoords]);
 
-    const focusHiddenInput = React.useCallback((clientX?: number, clientY?: number) => {
+    const focusHiddenInput = React.useCallback((_clientX?: number, _clientY?: number) => {
       const input = hiddenInputRef.current;
-      const container = containerRef.current;
-      if (!input || !container) {
+      if (!input) {
         return;
       }
-
-      const rect = container.getBoundingClientRect();
-      const fallbackX = rect.left + rect.width / 2;
-      const fallbackY = rect.top + rect.height - 12;
-      const x = typeof clientX === 'number' ? clientX : fallbackX;
-      const y = typeof clientY === 'number' ? clientY : fallbackY;
-
-      const padding = 8;
-      const left = Math.max(padding, Math.min(rect.width - padding, x - rect.left));
-      const top = Math.max(padding, Math.min(rect.height - padding, y - rect.top));
-
-      input.style.left = `${left}px`;
-      input.style.top = `${top}px`;
-      input.style.bottom = '';
 
       try {
         input.focus({ preventScroll: true });
@@ -647,19 +632,21 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                 spellCheck={false}
                 tabIndex={-1}
                 style={{
-                  position: 'absolute',
+                  position: 'fixed',
                   left: 0,
                   top: 0,
                   width: 1,
                   height: 1,
                   opacity: 0,
-                  zIndex: 1,
+                  zIndex: -1,
+                  pointerEvents: 'none',
                   background: 'transparent',
                   color: 'transparent',
                   caretColor: 'transparent',
                   resize: 'none',
                   overflow: 'hidden',
                   whiteSpace: 'nowrap',
+                  fontSize: '16px',
                   border: 'none',
                   padding: 0,
                   margin: 0,

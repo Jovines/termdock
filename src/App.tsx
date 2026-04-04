@@ -75,6 +75,10 @@ function App() {
       const visualViewport = window.visualViewport;
       const nextHeight = visualViewport?.height ?? window.innerHeight;
       document.documentElement.style.setProperty('--app-vh', `${Math.round(nextHeight)}px`);
+
+      if (window.scrollX !== 0 || window.scrollY !== 0) {
+        window.scrollTo(0, 0);
+      }
     };
 
     const scheduleUpdate = () => {
