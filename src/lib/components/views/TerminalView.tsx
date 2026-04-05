@@ -9,11 +9,13 @@ import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
 import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
+import { createDebugLogger } from '../../utils/debug';
+import type { TerminalRendererMode } from '../../terminal/renderer';
+import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 
 const TERMINAL_FONT_SIZE = 13;
-const KEYBOARD_OPEN_THRESHOLD = 120;
-const KEYBOARD_CLOSE_THRESHOLD = 80;
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
+const RESIZE_THROTTLE_MS = 90;
 
 type Modifier = 'ctrl' | 'alt';
 
@@ -31,6 +33,7 @@ interface TerminalViewProps {
   theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   fontFamily?: string;
   fontSize?: number;
+  rendererMode?: TerminalRendererMode;
   isActive?: boolean;
   focusRequestToken?: number;
   onKeyboardVisibilityChange?: (sessionId: string, isOpen: boolean) => void;
@@ -43,6 +46,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   theme: themeName = 'dark',
   fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
+  rendererMode = 'auto',
   isActive = true,
   focusRequestToken = 0,
   onKeyboardVisibilityChange,
@@ -52,6 +56,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // Use external fontSize from props, with local override support for pinch-to-zoom
   const [fontSize, setFontSize] = React.useState(initialFontSize);
   const terminal = React.useMemo(() => createWebTerminalAPI(), []);
+  const debugSession = React.useMemo(() => createDebugLogger('session'), []);
+  const debugKeyboard = React.useMemo(() => createDebugLogger('keyboard'), []);
 
   // Sync with external fontSize changes while allowing local pinch-to-zoom overrides
   React.useEffect(() => {
@@ -62,7 +68,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [sessionId] = React.useState(initialSessionId || uuidv4());
   const [isMobile, setIsMobile] = React.useState(false);
   const [isIOS, setIsIOS] = React.useState(false);
-  const [keyboardHeight, setKeyboardHeight] = React.useState(0);
+  const [isInputFocused, setIsInputFocused] = React.useState(false);
+  const {
+    isOpen: isViewportKeyboardOpen,
+    keyboardHeight: viewportKeyboardHeight,
+  } = useViewportKeyboardState({
+    enabled: isMobile && isActive,
+  });
   const [activeModifier, setActiveModifier] = React.useState<Modifier | null>(null);
   const [lockedModifier, setLockedModifier] = React.useState<Modifier | null>(null);
 
@@ -104,6 +116,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const modifierTapRef = React.useRef<{ modifier: Modifier; timestamp: number } | null>(null);
   const lastFocusRequestTokenRef = React.useRef(0);
   const streamVersionRef = React.useRef(0);
+  const resizeStateRef = React.useRef<{
+    timerId: number | null;
+    pending: { cols: number; rows: number } | null;
+    lastSent: { cols: number; rows: number } | null;
+  }>({
+    timerId: null,
+    pending: null,
+    lastSent: null,
+  });
 
   const focusTerminalIfActive = React.useCallback(() => {
     if (!isActive) {
@@ -137,96 +158,59 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     setIsIOS(ios);
   }, []);
 
-  // Keyboard detection
   React.useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const hasTouchDevice = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
-    if (!hasTouchDevice) {
-      setKeyboardHeight(0);
-      return;
+    if (!isActive || !isMobile) {
+      setIsInputFocused(false);
     }
-
-    const state = {
-      rafId: null as number | null,
-      isKeyboardVisible: false,
-      lastEmittedHeight: 0,
-      baselineHeight: 0,
-    };
-
-    const emitHeight = (nextHeight: number) => {
-      if (state.lastEmittedHeight === nextHeight) return;
-      state.lastEmittedHeight = nextHeight;
-      setKeyboardHeight(nextHeight);
-    };
-
-    const measureKeyboardHeight = () => {
-      state.rafId = null;
-
-      const viewport = window.visualViewport;
-      if (!viewport) {
-        state.isKeyboardVisible = false;
-        emitHeight(0);
-        return;
-      }
-
-      const viewportHeight = Math.round(viewport.height);
-      if (state.baselineHeight === 0) {
-        state.baselineHeight = viewportHeight;
-      }
-      if (!state.isKeyboardVisible && viewportHeight > state.baselineHeight) {
-        state.baselineHeight = viewportHeight;
-      }
-
-      const keyboardHeightNext = Math.max(0, state.baselineHeight - viewportHeight);
-
-      if (state.isKeyboardVisible) {
-        if (keyboardHeightNext <= KEYBOARD_CLOSE_THRESHOLD) {
-          state.isKeyboardVisible = false;
-          emitHeight(0);
-          return;
-        }
-        emitHeight(keyboardHeightNext);
-        return;
-      }
-
-      if (keyboardHeightNext >= KEYBOARD_OPEN_THRESHOLD) {
-        state.isKeyboardVisible = true;
-        emitHeight(keyboardHeightNext);
-        return;
-      }
-
-      emitHeight(0);
-    };
-
-    const scheduleMeasurement = () => {
-      if (state.rafId !== null) return;
-      state.rafId = window.requestAnimationFrame(measureKeyboardHeight);
-    };
-
-    scheduleMeasurement();
-
-    window.addEventListener('resize', scheduleMeasurement);
-    window.visualViewport?.addEventListener('resize', scheduleMeasurement);
-    window.visualViewport?.addEventListener('scroll', scheduleMeasurement);
-
-    return () => {
-      window.removeEventListener('resize', scheduleMeasurement);
-      window.visualViewport?.removeEventListener('resize', scheduleMeasurement);
-      window.visualViewport?.removeEventListener('scroll', scheduleMeasurement);
-      if (state.rafId !== null) {
-        window.cancelAnimationFrame(state.rafId);
-      }
-    };
-  }, []);
+  }, [isActive, isMobile]);
 
   React.useEffect(() => {
     terminalIdRef.current = terminalSessionId;
   }, [terminalSessionId]);
 
   React.useEffect(() => {
-    onKeyboardVisibilityChange?.(sessionId, isActive && keyboardHeight > 0);
-  }, [onKeyboardVisibilityChange, sessionId, isActive, keyboardHeight]);
+    const resizeState = resizeStateRef.current;
+    resizeState.lastSent = null;
+    resizeState.pending = null;
+    if (resizeState.timerId !== null) {
+      window.clearTimeout(resizeState.timerId);
+      resizeState.timerId = null;
+    }
+  }, [terminalSessionId]);
+
+  React.useEffect(() => {
+    return () => {
+      const resizeState = resizeStateRef.current;
+      if (resizeState.timerId !== null) {
+        window.clearTimeout(resizeState.timerId);
+        resizeState.timerId = null;
+      }
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const visible = isActive && isMobile && (isInputFocused || isViewportKeyboardOpen);
+
+    debugKeyboard('visibility signal', {
+      sessionId,
+      isActive,
+      isMobile,
+      isInputFocused,
+      isViewportKeyboardOpen,
+      viewportKeyboardHeight,
+      visible,
+    });
+    onKeyboardVisibilityChange?.(sessionId, visible);
+  }, [
+    onKeyboardVisibilityChange,
+    sessionId,
+    isActive,
+    isInputFocused,
+    isMobile,
+    isViewportKeyboardOpen,
+    viewportKeyboardHeight,
+    debugKeyboard,
+  ]);
 
   React.useEffect(() => {
     if (!isActive) {
@@ -303,11 +287,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const startStream = React.useCallback(
     (terminalId: string) => {
       if (activeTerminalIdRef.current === terminalId) {
-        console.log(`[startStream] Skipping - already connected to ${terminalId}`);
+        debugSession(`[startStream] Skipping - already connected to ${terminalId}`);
         return;
       }
 
-      console.log(`[startStream] Starting stream for frontendSessionId=${sessionId} backendSessionId=${terminalId}`);
+      debugSession(`[startStream] Starting stream for frontendSessionId=${sessionId} backendSessionId=${terminalId}`);
       disconnectStream();
       const streamVersion = streamVersionRef.current + 1;
       streamVersionRef.current = streamVersion;
@@ -326,7 +310,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             switch (event.type) {
               case 'connected': {
                 if (event.runtime || event.ptyBackend) {
-                  console.log(
+                  debugSession(
                     `[Terminal] connected frontendSessionId=${storeSessionId} backendSessionId=${terminalIdRef.current} runtime=${event.runtime ?? 'unknown'} pty=${event.ptyBackend ?? 'unknown'} cwd=${event.cwd ?? 'unknown'}`
                   );
                 }
@@ -349,7 +333,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   setTmuxLayout(null);
                 }
 
-                console.log('[Terminal] Connected event received:', {
+                debugSession('[Terminal] Connected event received:', {
                   frontendSessionId: storeSessionId,
                   backendSessionId: terminalIdRef.current,
                   storeHasState: !!sessionState,
@@ -359,7 +343,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 });
 
                 if (sessionState?.history && sessionState.history.length > 0) {
-                  console.log(`[Terminal] Restoring ${sessionState.history.length} history chunks to frontend session ${storeSessionId}`);
+                  debugSession(`[Terminal] Restoring ${sessionState.history.length} history chunks to frontend session ${storeSessionId}`);
                   const totalHistoryBytes = sessionState.history.reduce((total, chunk) => total + chunk.length, 0);
                   const suppressionMs = Math.max(300, Math.min(2000, Math.ceil(totalHistoryBytes / 200)));
                   suppressInputUntilRef.current = Date.now() + suppressionMs;
@@ -367,9 +351,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     appendToBuffer(storeSessionId, chunk);
                   });
                   useTerminalStore.getState().setSessionHistory(storeSessionId, []);
-                  console.log(`[Terminal] History restoration complete for ${storeSessionId}`);
+                  debugSession(`[Terminal] History restoration complete for ${storeSessionId}`);
                 } else {
-                  console.log(`[Terminal] No history to restore for ${storeSessionId}`);
+                  debugSession(`[Terminal] No history to restore for ${storeSessionId}`);
                 }
                 break;
               }
@@ -443,7 +427,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearTerminalSession, disconnectStream, setConnecting, terminal, sessionId]
+    [appendToBuffer, clearTerminalSession, debugSession, disconnectStream, setConnecting, terminal, sessionId]
   );
 
   const hasInitializedRef = React.useRef(false);
@@ -459,36 +443,36 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   React.useEffect(() => {
     if (sessionIdRef.current !== sessionId) {
-      console.log(`[useEffect] sessionId changed from ${sessionIdRef.current} to ${sessionId}, allowing reinitialization`);
+      debugSession(`[useEffect] sessionId changed from ${sessionIdRef.current} to ${sessionId}, allowing reinitialization`);
       hasInitializedRef.current = false;
     }
 
     if (hasInitializedRef.current && sessionIdRef.current === sessionId) {
-      console.log(`[useEffect] Already initialized for sessionId=${sessionId}, skipping`);
+      debugSession(`[useEffect] Already initialized for sessionId=${sessionId}, skipping`);
       return;
     }
 
-    console.log(`[useEffect] Running ensureSession for sessionId=${sessionId}, hasInitialized=${hasInitializedRef.current}`);
+    debugSession(`[useEffect] Running ensureSession for sessionId=${sessionId}, hasInitialized=${hasInitializedRef.current}`);
     hasInitializedRef.current = true;
 
     const runId = ++currentRunIdRef.current;
 
     const ensureSession = async () => {
-      console.log(`[ensureSession] Starting for sessionId=${sessionId}, runId=${runId}`);
+      debugSession(`[ensureSession] Starting for sessionId=${sessionId}, runId=${runId}`);
 
       if (!sessionIdRef.current || sessionIdRef.current !== sessionId) {
-        console.log(`[ensureSession] SessionId mismatch or stale run (current=${sessionIdRef.current}, target=${sessionId}), skipping`);
+        debugSession(`[ensureSession] SessionId mismatch or stale run (current=${sessionIdRef.current}, target=${sessionId}), skipping`);
         return;
       }
 
       if (runId !== currentRunIdRef.current) {
-        console.log(`[ensureSession] Stale run detected (runId=${runId}, currentRunId=${currentRunIdRef.current}), skipping`);
+        debugSession(`[ensureSession] Stale run detected (runId=${runId}, currentRunId=${currentRunIdRef.current}), skipping`);
         return;
       }
 
       const store = useTerminalStore.getState();
       const currentState = store.getTerminalSession(sessionId);
-      console.log(`[ensureSession] Current state from store:`, {
+      debugSession(`[ensureSession] Current state from store:`, {
         terminalSessionId: currentState?.terminalSessionId,
         isConnecting: currentState?.isConnecting
       });
@@ -497,18 +481,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       let shouldCreateNewSession = !terminalId;
 
       if (terminalId && terminal.checkHealth) {
-        console.log(`[ensureSession] Checking health of existing session ${terminalId}`);
+        debugSession(`[ensureSession] Checking health of existing session ${terminalId}`);
         try {
           const health = await terminal.checkHealth(terminalId);
-          console.log(`[ensureSession] Health check result:`, health);
+          debugSession(`[ensureSession] Health check result:`, health);
           if (!health.healthy) {
-            console.log(`[ensureSession] Session ${terminalId} is NOT healthy (healthy=${health.healthy}), will create new session`);
-            console.log(`[ensureSession] Health check details:`, health);
+            debugSession(`[ensureSession] Session ${terminalId} is NOT healthy (healthy=${health.healthy}), will create new session`);
+            debugSession(`[ensureSession] Health check details:`, health);
             shouldCreateNewSession = true;
             store.clearTerminalSession(sessionId);
-            console.log(`[ensureSession] Cleared unhealthy session from store`);
+            debugSession(`[ensureSession] Cleared unhealthy session from store`);
           } else {
-            console.log(`[ensureSession] Session ${terminalId} is healthy, reusing it, cwd=${health.cwd}, clients=${health.clients}, lastActivity=${Date.now() - (health.lastActivity || 0)}ms ago`);
+            debugSession(`[ensureSession] Session ${terminalId} is healthy, reusing it, cwd=${health.cwd}, clients=${health.clients}, lastActivity=${Date.now() - (health.lastActivity || 0)}ms ago`);
             if (health.mode && currentState?.terminalSessionId) {
               store.setTerminalSession(sessionId, {
                 sessionId: currentState.terminalSessionId,
@@ -518,21 +502,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 tmuxSessionName: health.tmuxSessionName ?? null,
               });
             }
-            console.log(`[ensureSession] Setting terminalIdRef to ${terminalId} and starting stream`);
+            debugSession(`[ensureSession] Setting terminalIdRef to ${terminalId} and starting stream`);
             terminalIdRef.current = terminalId;
             startStream(terminalId);
-            console.log(`[ensureSession] Successfully reused healthy session ${terminalId}, returning early`);
+            debugSession(`[ensureSession] Successfully reused healthy session ${terminalId}, returning early`);
             return;
           }
         } catch (error) {
-          console.warn(`[ensureSession] Failed to check health of session ${terminalId}:`, error);
-          console.warn(`[ensureSession] Health check API call failed, proceeding as if session might be unhealthy`);
+          debugSession(`[ensureSession] Failed to check health of session ${terminalId}:`, error);
+          debugSession(`[ensureSession] Health check API call failed, proceeding as if session might be unhealthy`);
         }
       }
 
-      console.log(`[ensureSession] Decision: shouldCreateNewSession=${shouldCreateNewSession}, terminalId=${terminalId}`);
+      debugSession(`[ensureSession] Decision: shouldCreateNewSession=${shouldCreateNewSession}, terminalId=${terminalId}`);
       if (shouldCreateNewSession) {
-        console.log(`[ensureSession] Creating new session, shouldCreateNewSession=${shouldCreateNewSession}, runId=${runId}`);
+        debugSession(`[ensureSession] Creating new session, shouldCreateNewSession=${shouldCreateNewSession}, runId=${runId}`);
         setConnectionError(null);
         setIsFatalError(false);
         store.setConnecting(sessionId, true);
@@ -540,7 +524,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         const currentStore = useTerminalStore.getState();
         const recheckedState = currentStore.getTerminalSession(sessionId);
         if (recheckedState?.terminalSessionId) {
-          console.log(`[ensureSession] Race condition avoided: another instance already created session ${recheckedState.terminalSessionId}`);
+          debugSession(`[ensureSession] Race condition avoided: another instance already created session ${recheckedState.terminalSessionId}`);
           store.setConnecting(sessionId, false);
           terminalId = recheckedState.terminalSessionId;
           shouldCreateNewSession = false;
@@ -552,10 +536,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               mode: modeForNewSession,
               tmuxSessionName: modeForNewSession === 'tmux' ? tmuxSessionNameForNewSession : undefined,
             });
-            console.log(`[ensureSession] Created new session ${session.sessionId}`);
+            debugSession(`[ensureSession] Created new session ${session.sessionId}`);
 
             if (runId !== currentRunIdRef.current) {
-              console.log(`[ensureSession] Stale run after session creation (runId=${runId}, currentRunId=${currentRunIdRef.current}), closing session`);
+              debugSession(`[ensureSession] Stale run after session creation (runId=${runId}, currentRunId=${currentRunIdRef.current}), closing session`);
               try {
                 await terminal.close(session.sessionId);
               } catch { /* ignored */ }
@@ -563,11 +547,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             }
 
             store.setTerminalSession(sessionId, session);
-            console.log(`[ensureSession] Updated store with new session ${session.sessionId}`);
+            debugSession(`[ensureSession] Updated store with new session ${session.sessionId}`);
             terminalId = session.sessionId;
           } catch (error) {
             if (runId !== currentRunIdRef.current) {
-              console.log(`[ensureSession] Stale run after session creation failed, skipping error handling`);
+              debugSession(`[ensureSession] Stale run after session creation failed, skipping error handling`);
               return;
             }
             setConnectionError(
@@ -583,27 +567,27 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
 
       if (runId !== currentRunIdRef.current) {
-        console.log(`[ensureSession] Stale run before starting stream (runId=${runId}, currentRunId=${currentRunIdRef.current}), skipping`);
+        debugSession(`[ensureSession] Stale run before starting stream (runId=${runId}, currentRunId=${currentRunIdRef.current}), skipping`);
         return;
       }
 
       if (!terminalId) {
-        console.log(`[ensureSession] No terminalId, terminalId=${terminalId}`);
+        debugSession(`[ensureSession] No terminalId, terminalId=${terminalId}`);
         return;
       }
 
-      console.log(`[ensureSession] Starting stream for session ${terminalId}`);
+      debugSession(`[ensureSession] Starting stream for session ${terminalId}`);
       terminalIdRef.current = terminalId;
       startStream(terminalId);
-      console.log(`[ensureSession] ensureSession completed for sessionId=${sessionId}, terminalId=${terminalId}`);
+      debugSession(`[ensureSession] ensureSession completed for sessionId=${sessionId}, terminalId=${terminalId}`);
     };
 
     void ensureSession();
 
     return () => {
-      console.log(`[useEffect] Cleanup for sessionId=${sessionId}, runId=${runId}`);
+      debugSession(`[useEffect] Cleanup for sessionId=${sessionId}, runId=${runId}`);
     };
-  }, [sessionId, startStream, disconnectStream, terminal]);
+  }, [sessionId, startStream, disconnectStream, terminal, debugSession]);
 
   const handleHardRestart = React.useCallback(async () => {
     if (!sessionId) return;
@@ -705,15 +689,72 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     [activeModifier, focusTerminalIfActive, isActive, lockedModifier, terminal]
   );
 
+  const flushPendingResize = React.useCallback(() => {
+    const resizeState = resizeStateRef.current;
+    resizeState.timerId = null;
+
+    const pending = resizeState.pending;
+    if (!pending) {
+      return;
+    }
+
+    const terminalId = terminalIdRef.current;
+    if (!terminalId) {
+      return;
+    }
+
+    const lastSent = resizeState.lastSent;
+    if (lastSent && lastSent.cols === pending.cols && lastSent.rows === pending.rows) {
+      resizeState.pending = null;
+      debugKeyboard('resize skipped (duplicate)', pending);
+      return;
+    }
+
+    resizeState.lastSent = pending;
+    resizeState.pending = null;
+
+    debugKeyboard('resize flush', pending);
+
+    void terminal.resize({ sessionId: terminalId, cols: pending.cols, rows: pending.rows }).catch(() => {
+
+    });
+  }, [terminal, debugKeyboard]);
+
+  const queueViewportResize = React.useCallback((cols: number, rows: number) => {
+    const resizeState = resizeStateRef.current;
+    const pending = resizeState.pending;
+    if (pending && pending.cols === cols && pending.rows === rows) {
+      return;
+    }
+
+    resizeState.pending = { cols, rows };
+
+    debugKeyboard('resize queued', {
+      cols,
+      rows,
+      immediate: resizeState.lastSent === null,
+      hasTimer: resizeState.timerId !== null,
+    });
+
+    if (resizeState.lastSent === null) {
+      flushPendingResize();
+      return;
+    }
+
+    if (resizeState.timerId !== null) {
+      window.clearTimeout(resizeState.timerId);
+    }
+
+    resizeState.timerId = window.setTimeout(() => {
+      flushPendingResize();
+    }, RESIZE_THROTTLE_MS);
+  }, [flushPendingResize, debugKeyboard]);
+
   const handleViewportResize = React.useCallback(
     (cols: number, rows: number) => {
-      const terminalId = terminalIdRef.current;
-      if (!terminalId) return;
-      void terminal.resize({ sessionId: terminalId, cols, rows }).catch(() => {
-
-      });
+      queueViewportResize(cols, rows);
     },
-    [terminal]
+    [queueViewportResize]
   );
 
   const sendTmuxAction = React.useCallback(async (payload: TmuxActionPayload) => {
@@ -795,6 +836,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     focusTerminalIfActive();
   }, [focusTerminalIfActive]);
 
+  const handleInputFocusChange = React.useCallback((focused: boolean) => {
+    debugKeyboard('input focus changed', {
+      focused,
+      isActive,
+      isMobile,
+    });
+    if (!isMobile || !isActive) {
+      setIsInputFocused(false);
+      return;
+    }
+    setIsInputFocused((current) => (current === focused ? current : focused));
+  }, [isActive, isMobile, debugKeyboard]);
+
   const handleMobileKeyPress = React.useCallback(
     (key: 'esc' | 'tab' | 'enter' | 'home' | 'end' | 'ctrl-c' | 'ctrl-d' | 'arrow-up' | 'arrow-down' | 'arrow-left' | 'arrow-right') => {
       const sequence = getSequenceForKey(key, activeModifier);
@@ -836,13 +890,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const quickKeysDisabled = !terminalSessionId || isConnecting || isRestarting;
   const showTmuxControls = isTmuxMode && tmuxLayout !== null;
   const tmuxInCopyMode = tmuxLayout?.inCopyMode ?? false;
+  const isKeyboardVisible = isActive && isMobile && (isInputFocused || isViewportKeyboardOpen);
 
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background">
       {showDebug && (
         <DebugPanel
           isMobile={isMobile}
-          keyboardHeight={keyboardHeight}
+          isInputFocused={isInputFocused}
           isIOS={isIOS}
           isConnecting={isConnecting}
           connectionError={connectionError}
@@ -880,6 +935,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               chunks={bufferChunks}
               onInput={handleViewportInput}
               onResize={handleViewportResize}
+              onInputFocusChange={handleInputFocusChange}
+              rendererMode={rendererMode}
               theme={xtermTheme}
               fontFamily={fontFamily}
               fontSize={fontSize}
@@ -1029,7 +1086,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       </div>
 
       <MobileKeyboard
-        keyboardHeight={isActive ? keyboardHeight : 0}
+        visible={isKeyboardVisible}
         activeModifier={activeModifier}
         lockedModifier={lockedModifier}
         disabled={quickKeysDisabled}

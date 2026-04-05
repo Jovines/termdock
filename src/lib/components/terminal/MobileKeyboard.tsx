@@ -59,7 +59,7 @@ export function getSequenceForKey(key: MobileKey, modifier: Modifier | null): st
 }
 
 interface MobileKeyboardProps {
-  keyboardHeight: number;
+  visible: boolean;
   activeModifier: Modifier | null;
   lockedModifier: Modifier | null;
   disabled: boolean;
@@ -69,7 +69,7 @@ interface MobileKeyboardProps {
 }
 
 export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
-  keyboardHeight,
+  visible,
   activeModifier,
   lockedModifier,
   disabled,
@@ -78,6 +78,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   onPressStart,
 }) => {
   const [showExtended, setShowExtended] = React.useState(false);
+  const toolbarDisabled = disabled || !visible;
   const repeatStateRef = React.useRef<{
     key: RepeatableMobileKey | null;
     pointerId: number | null;
@@ -92,7 +93,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
 
   const preventToolbarButtonFocus = React.useCallback(
     (event: React.MouseEvent<HTMLDivElement> | React.PointerEvent<HTMLDivElement>) => {
-      if (disabled) {
+      if (toolbarDisabled) {
         return;
       }
       const target = event.target;
@@ -104,7 +105,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         onPressStart();
       }
     },
-    [disabled, onPressStart]
+    [onPressStart, toolbarDisabled]
   );
 
   const preventContextMenu = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
@@ -114,6 +115,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   const handleToolbarButtonFocus = React.useCallback(
     (event: React.FocusEvent<HTMLDivElement>) => {
       const target = event.target;
+      if (toolbarDisabled) {
+        return;
+      }
       if (!(target instanceof HTMLElement)) {
         return;
       }
@@ -123,7 +127,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       target.blur();
       onPressStart();
     },
-    [onPressStart]
+    [onPressStart, toolbarDisabled]
   );
 
   const stopKeyRepeat = React.useCallback(() => {
@@ -145,14 +149,21 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   }, [stopKeyRepeat]);
 
   React.useEffect(() => {
-    if (disabled) {
+    if (toolbarDisabled) {
       stopKeyRepeat();
     }
-  }, [disabled, stopKeyRepeat]);
+  }, [stopKeyRepeat, toolbarDisabled]);
+
+  React.useEffect(() => {
+    if (visible) {
+      return;
+    }
+    setShowExtended(false);
+  }, [visible]);
 
   const handleRepeatPointerDown = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>, key: RepeatableMobileKey) => {
-      if (disabled) {
+      if (toolbarDisabled) {
         return;
       }
       event.preventDefault();
@@ -177,14 +188,14 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         }
         repeatStateRef.current.intervalTimer = window.setInterval(() => {
           const currentKey = repeatStateRef.current.key;
-          if (!currentKey || disabled) {
+          if (!currentKey || toolbarDisabled) {
             return;
           }
           onKeyPress(currentKey);
         }, REPEAT_INTERVAL_MS);
       }, REPEAT_START_DELAY_MS);
     },
-    [disabled, onKeyPress, onPressStart, stopKeyRepeat]
+    [onKeyPress, onPressStart, stopKeyRepeat, toolbarDisabled]
   );
 
   const handleRepeatPointerEnd = React.useCallback(
@@ -204,48 +215,48 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
 
   const handleSinglePointerDown = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>, key: Exclude<MobileKey, RepeatableMobileKey>) => {
-      if (disabled) {
+      if (toolbarDisabled) {
         return;
       }
       event.preventDefault();
       onPressStart();
       onKeyPress(key);
     },
-    [disabled, onKeyPress, onPressStart]
+    [onKeyPress, onPressStart, toolbarDisabled]
   );
 
   const handleModifierPointerDown = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>, modifier: Modifier) => {
-      if (disabled) {
+      if (toolbarDisabled) {
         return;
       }
       event.preventDefault();
       onPressStart();
       onModifierToggle(modifier);
     },
-    [disabled, onModifierToggle, onPressStart]
+    [onModifierToggle, onPressStart, toolbarDisabled]
   );
 
   const handleToggleExtendedPointerDown = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>) => {
-      if (disabled) {
+      if (toolbarDisabled) {
         return;
       }
       event.preventDefault();
       onPressStart();
       setShowExtended((current) => !current);
     },
-    [disabled, onPressStart]
+    [onPressStart, toolbarDisabled]
   );
-
-  if (keyboardHeight <= 0) {
-    return null;
-  }
 
   return (
     <div
       data-mobile-keyboard="true"
-      className="z-20 border-t border-border bg-background px-3 py-2 select-none"
+      className={`z-20 select-none overflow-hidden bg-background transition-all duration-150 ease-out ${
+        visible
+          ? 'max-h-40 border-t border-border px-3 py-2 opacity-100 translate-y-0 pointer-events-auto'
+          : 'max-h-0 border-t-0 px-3 py-0 opacity-0 translate-y-1 pointer-events-none'
+      }`}
       onMouseDownCapture={preventToolbarButtonFocus}
       onPointerDownCapture={preventToolbarButtonFocus}
       onContextMenuCapture={preventContextMenu}
@@ -256,7 +267,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'esc')}
           tabIndex={-1}
-          disabled={disabled}
+          disabled={toolbarDisabled}
           className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
         >
           Esc
@@ -265,7 +276,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'tab')}
           tabIndex={-1}
-          disabled={disabled}
+          disabled={toolbarDisabled}
           className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
         >
           Tab
@@ -274,7 +285,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={(event) => handleModifierPointerDown(event, 'ctrl')}
           tabIndex={-1}
-          disabled={disabled}
+          disabled={toolbarDisabled}
           className={`h-6 w-full border rounded text-xs disabled:opacity-50 flex items-center justify-center ${
             activeModifier === 'ctrl' ? 'bg-primary text-primary-foreground' : ''
           } ${
@@ -290,7 +301,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           onPointerCancel={handleRepeatPointerEnd}
           onPointerLeave={handleRepeatPointerEnd}
           tabIndex={-1}
-          disabled={disabled}
+          disabled={toolbarDisabled}
           className="h-6 w-full border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowLeftLine size={16} />
@@ -302,7 +313,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           onPointerCancel={handleRepeatPointerEnd}
           onPointerLeave={handleRepeatPointerEnd}
           tabIndex={-1}
-          disabled={disabled}
+          disabled={toolbarDisabled}
           className="h-6 w-full border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowUpLine size={16} />
@@ -314,7 +325,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           onPointerCancel={handleRepeatPointerEnd}
           onPointerLeave={handleRepeatPointerEnd}
           tabIndex={-1}
-          disabled={disabled}
+          disabled={toolbarDisabled}
           className="h-6 w-full border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowDownLine size={16} />
@@ -326,7 +337,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           onPointerCancel={handleRepeatPointerEnd}
           onPointerLeave={handleRepeatPointerEnd}
           tabIndex={-1}
-          disabled={disabled}
+          disabled={toolbarDisabled}
           className="h-6 w-full border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowRightLine size={16} />
@@ -335,7 +346,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={handleToggleExtendedPointerDown}
           tabIndex={-1}
-          disabled={disabled}
+          disabled={toolbarDisabled}
           className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
         >
           {showExtended ? 'Less' : 'More'}
@@ -348,7 +359,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
             type="button"
             onPointerDown={(event) => handleModifierPointerDown(event, 'alt')}
             tabIndex={-1}
-            disabled={disabled}
+            disabled={toolbarDisabled}
             className={`h-6 w-full border rounded text-xs disabled:opacity-50 flex items-center justify-center ${
               activeModifier === 'alt' ? 'bg-primary text-primary-foreground' : ''
             } ${
@@ -361,7 +372,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
             type="button"
             onPointerDown={(event) => handleSinglePointerDown(event, 'enter')}
             tabIndex={-1}
-            disabled={disabled}
+            disabled={toolbarDisabled}
             className="h-6 w-full border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
           >
             <RiArrowGoBackLine size={16} />
@@ -370,7 +381,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
             type="button"
             onPointerDown={(event) => handleSinglePointerDown(event, 'home')}
             tabIndex={-1}
-            disabled={disabled}
+            disabled={toolbarDisabled}
             className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
           >
             Home
@@ -379,7 +390,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
             type="button"
             onPointerDown={(event) => handleSinglePointerDown(event, 'end')}
             tabIndex={-1}
-            disabled={disabled}
+            disabled={toolbarDisabled}
             className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
           >
             End
@@ -388,7 +399,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
             type="button"
             onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-c')}
             tabIndex={-1}
-            disabled={disabled}
+            disabled={toolbarDisabled}
             className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
           >
             Ctrl-C
@@ -397,7 +408,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
             type="button"
             onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-d')}
             tabIndex={-1}
-            disabled={disabled}
+            disabled={toolbarDisabled}
             className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
           >
             Ctrl-D

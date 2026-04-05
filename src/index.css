@@ -171,6 +171,12 @@ body {
 
 /* Mobile-specific styles - Ensure visibility */
 @media (max-width: 768px) {
+  body,
+  #root {
+    position: fixed;
+    inset: 0;
+  }
+
   html {
     overflow: hidden;
     height: var(--app-vh, 100dvh);
@@ -277,6 +283,12 @@ body {
 /* Smooth transitions */
 * {
   transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease, opacity 0.2s ease;
+}
+
+.xterm,
+.xterm *,
+.xterm canvas {
+  transition: none !important;
 }
 
 /* Gradient text utility */

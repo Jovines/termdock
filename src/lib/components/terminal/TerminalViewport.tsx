@@ -5,9 +5,11 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
+import type { TerminalRendererMode } from '../../terminal/renderer';
 import { useTouchScroll } from '../../hooks/useTouchScroll';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
+import { createDebugLogger } from '../../utils/debug';
 
 /**
  * 清洗用户输入，处理各种特殊字符
@@ -131,6 +133,8 @@ interface TerminalViewportProps {
   chunks: TerminalChunk[];
   onInput: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
+  onInputFocusChange?: (isFocused: boolean) => void;
+  rendererMode?: TerminalRendererMode;
   theme: TerminalTheme;
   fontFamily: string;
   fontSize: number;
@@ -140,6 +144,10 @@ interface TerminalViewportProps {
 }
 
 type LoadingState = 'loading' | 'ready' | 'error';
+const TEXTURE_ATLAS_REFRESH_DELAY_MS = 120;
+const INPUT_BLUR_GUARD_ACTIVE_MS = 260;
+const INPUT_BLUR_GUARD_RELEASE_MS = 140;
+const KEYBOARD_OPEN_THRESHOLD_PX = 80;
 
 const getTerminalFontFamily = (userFontFamily: string): string => {
   return `${userFontFamily}, monospace`;
@@ -178,7 +186,20 @@ function convertTheme(theme: TerminalTheme): Record<string, string> {
 
 export const TerminalViewport = React.forwardRef<TerminalController, TerminalViewportProps>(
   (
-    { sessionKey, chunks, onInput, onResize, theme, fontFamily, fontSize, className, enableTouchScroll, autoFocus = true },
+    {
+      sessionKey,
+      chunks,
+      onInput,
+      onResize,
+      onInputFocusChange,
+      rendererMode = 'auto',
+      theme,
+      fontFamily,
+      fontSize,
+      className,
+      enableTouchScroll,
+      autoFocus = true,
+    },
     ref
   ) => {
     const containerRef = React.useRef<HTMLDivElement>(null);
@@ -187,6 +208,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const fitAddonRef = React.useRef<FitAddon | null>(null);
     const inputHandlerRef = React.useRef<(data: string) => void>(onInput);
     const resizeHandlerRef = React.useRef<(cols: number, rows: number) => void>(onResize);
+    const inputFocusHandlerRef = React.useRef<typeof onInputFocusChange>(onInputFocusChange);
     const lastReportedSizeRef = React.useRef<{ cols: number; rows: number } | null>(null);
     const pendingWriteRef = React.useRef('');
     const writeScheduledRef = React.useRef<number | null>(null);
@@ -197,18 +219,36 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const remainderPxRef = React.useRef(0);
     const osc52RemainderRef = React.useRef('');
     const webglAddonRef = React.useRef<WebglAddon | null>(null);
+    const webglContextLossDisposableRef = React.useRef<{ dispose: () => void } | null>(null);
+    const textureAtlasRefreshTimerRef = React.useRef<number | null>(null);
+    const lastDevicePixelRatioRef = React.useRef(
+      typeof window !== 'undefined' ? window.devicePixelRatio : 1
+    );
     const isComposingRef = React.useRef(false);
     const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
+    const keepInputFocusUntilRef = React.useRef(0);
+    const lastTouchInteractionAtRef = React.useRef(0);
     const [, forceRender] = React.useReducer((x) => x + 1, 0);
     const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
     const [loadingState, setLoadingState] = React.useState<LoadingState>('loading');
     const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+    const debugTerminal = React.useMemo(() => createDebugLogger('terminal'), []);
 
     // Early initialization loading indicator
     const [isInitializing, setIsInitializing] = React.useState(true);
 
     inputHandlerRef.current = onInput;
     resizeHandlerRef.current = onResize;
+    inputFocusHandlerRef.current = onInputFocusChange;
+
+    const shouldUseWebgl = rendererMode !== 'canvas';
+
+    React.useEffect(() => {
+      if (enableTouchScroll) {
+        return;
+      }
+      inputFocusHandlerRef.current?.(false);
+    }, [enableTouchScroll]);
 
     /**
      * 将屏幕像素坐标转换为终端字符网格坐标
@@ -310,6 +350,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       }
     }, [pixelToCharCoords]);
 
+    const nowMs = React.useCallback(() => {
+      return typeof performance !== 'undefined' ? performance.now() : Date.now();
+    }, []);
+
     const focusHiddenInput = React.useCallback((_clientX?: number, _clientY?: number) => {
       const input = hiddenInputRef.current;
       if (!input) {
@@ -329,13 +373,182 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       }
     }, []);
 
-    const { setupTouchScroll, isScrolling } = useTouchScroll(containerRef, {
+    const isHiddenInputFocused = React.useCallback(() => {
+      const input = hiddenInputRef.current;
+      if (!input || typeof document === 'undefined') {
+        return false;
+      }
+      return document.activeElement === input;
+    }, []);
+
+    const isViewportKeyboardLikelyOpen = React.useCallback(() => {
+      if (typeof window === 'undefined' || !window.visualViewport) {
+        return false;
+      }
+
+      const keyboardApproxHeight = Math.max(
+        0,
+        Math.round(window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop)
+      );
+
+      return keyboardApproxHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
+    }, []);
+
+    const markInputBlurGuard = React.useCallback((durationMs: number) => {
+      keepInputFocusUntilRef.current = nowMs() + durationMs;
+    }, [nowMs]);
+
+    const shouldGuardInputBlur = React.useCallback(() => {
+      if (!enableTouchScroll) {
+        return false;
+      }
+      return nowMs() <= keepInputFocusUntilRef.current;
+    }, [enableTouchScroll, nowMs]);
+
+    const shouldPreventDefaultForTouch = React.useCallback(() => {
+      if (!enableTouchScroll) {
+        return false;
+      }
+      return isHiddenInputFocused() || isViewportKeyboardLikelyOpen();
+    }, [enableTouchScroll, isHiddenInputFocused, isViewportKeyboardLikelyOpen]);
+
+    const handlePointerDownCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+      if (!enableTouchScroll || event.pointerType !== 'touch') {
+        return;
+      }
+
+      lastTouchInteractionAtRef.current = nowMs();
+
+      if (!shouldPreventDefaultForTouch()) {
+        return;
+      }
+
+      markInputBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
+
+    const handlePointerMoveCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+      if (!enableTouchScroll || event.pointerType !== 'touch') {
+        return;
+      }
+
+      lastTouchInteractionAtRef.current = nowMs();
+
+      if (!shouldPreventDefaultForTouch()) {
+        return;
+      }
+
+      markInputBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
+    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
+
+    const handlePointerEndCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+      if (!enableTouchScroll || event.pointerType !== 'touch') {
+        return;
+      }
+
+      lastTouchInteractionAtRef.current = nowMs();
+
+      if (!shouldPreventDefaultForTouch()) {
+        return;
+      }
+
+      markInputBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS);
+    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
+
+    const handleTouchStartCapture = React.useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+      if (!enableTouchScroll) {
+        return;
+      }
+
+      lastTouchInteractionAtRef.current = nowMs();
+
+      if (!shouldPreventDefaultForTouch()) {
+        return;
+      }
+
+      markInputBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
+
+    const handleTouchMoveCapture = React.useCallback(() => {
+      if (!enableTouchScroll) {
+        return;
+      }
+
+      lastTouchInteractionAtRef.current = nowMs();
+
+      if (!shouldPreventDefaultForTouch()) {
+        return;
+      }
+
+      markInputBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
+    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
+
+    const handleTouchEndCapture = React.useCallback(() => {
+      if (!enableTouchScroll) {
+        return;
+      }
+
+      lastTouchInteractionAtRef.current = nowMs();
+
+      if (!shouldPreventDefaultForTouch()) {
+        return;
+      }
+
+      markInputBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS);
+    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
+
+    const { setupTouchScroll } = useTouchScroll(containerRef, {
+      shouldCaptureTouch: shouldPreventDefaultForTouch,
       onScroll: handleScroll,
       onScrollWithCoords: handleScroll,
       onClickWithCoords: handleClick,
       onTap: focusHiddenInput,
       tapThreshold: 12,
     });
+
+    React.useEffect(() => {
+      if (!enableTouchScroll) {
+        return;
+      }
+
+      const container = containerRef.current;
+      if (!container) {
+        return;
+      }
+
+      const handleCompatMouseCapture = (event: MouseEvent) => {
+        if (!shouldPreventDefaultForTouch()) {
+          return;
+        }
+
+        const sourceCaps = event as MouseEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } };
+        const fromTouch = sourceCaps.sourceCapabilities?.firesTouchEvents === true;
+        const recentlyTouched = nowMs() - lastTouchInteractionAtRef.current <= 1200;
+
+        if (!fromTouch && !recentlyTouched) {
+          return;
+        }
+
+        if (event.cancelable) {
+          event.preventDefault();
+        }
+        event.stopImmediatePropagation();
+        event.stopPropagation();
+      };
+
+      container.addEventListener('mousedown', handleCompatMouseCapture, { capture: true, passive: false });
+      container.addEventListener('click', handleCompatMouseCapture, { capture: true, passive: false });
+
+      return () => {
+        container.removeEventListener('mousedown', handleCompatMouseCapture, true);
+        container.removeEventListener('click', handleCompatMouseCapture, true);
+      };
+    }, [enableTouchScroll, shouldPreventDefaultForTouch, nowMs]);
 
     const resetWriteState = React.useCallback(() => {
       pendingWriteRef.current = '';
@@ -348,7 +561,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       osc52RemainderRef.current = '';
     }, []);
 
-    const fitTerminal = React.useCallback(() => {
+    const fitTerminal = React.useCallback((reason: string = 'unknown') => {
       const fitAddon = fitAddonRef.current;
       const terminal = terminalRef.current;
       const container = containerRef.current;
@@ -361,18 +574,140 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       }
       const rect = container.getBoundingClientRect();
       if (rect.width < 24 || rect.height < 24) {
+        debugTerminal('skip fit: container too small', {
+          reason,
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        });
         return;
       }
       try {
+        const before = { cols: terminal.cols, rows: terminal.rows };
         fitAddon.fit();
         const next = { cols: terminal.cols, rows: terminal.rows };
         const previous = lastReportedSizeRef.current;
+
+        debugTerminal('fit', {
+          reason,
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+          before,
+          next,
+          changed: before.cols !== next.cols || before.rows !== next.rows,
+        });
+
         if (!previous || previous.cols !== next.cols || previous.rows !== next.rows) {
           lastReportedSizeRef.current = next;
           resizeHandlerRef.current(next.cols, next.rows);
         }
       } catch { /* ignored */ }
+    }, [debugTerminal]);
+
+    const clearTextureAtlasRefreshTimer = React.useCallback(() => {
+      if (textureAtlasRefreshTimerRef.current === null) {
+        return;
+      }
+      window.clearTimeout(textureAtlasRefreshTimerRef.current);
+      textureAtlasRefreshTimerRef.current = null;
     }, []);
+
+    const scheduleTextureAtlasRefresh = React.useCallback((reason: string) => {
+      if (typeof window === 'undefined') {
+        return;
+      }
+
+      clearTextureAtlasRefreshTimer();
+
+      textureAtlasRefreshTimerRef.current = window.setTimeout(() => {
+        textureAtlasRefreshTimerRef.current = null;
+
+        const addon = webglAddonRef.current;
+        const terminal = terminalRef.current;
+        if (!addon || !terminal) {
+          return;
+        }
+
+        try {
+          addon.clearTextureAtlas();
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+          debugTerminal('texture atlas refreshed', {
+            reason,
+            cols: terminal.cols,
+            rows: terminal.rows,
+          });
+        } catch (error) {
+          debugTerminal('texture atlas refresh failed', { reason, error });
+        }
+      }, TEXTURE_ATLAS_REFRESH_DELAY_MS);
+    }, [clearTextureAtlasRefreshTimer, debugTerminal]);
+
+    const disposeWebglRenderer = React.useCallback((reason: string): boolean => {
+      clearTextureAtlasRefreshTimer();
+
+      const contextLossDisposable = webglContextLossDisposableRef.current;
+      if (contextLossDisposable) {
+        try {
+          contextLossDisposable.dispose();
+        } catch { /* ignored */ }
+        webglContextLossDisposableRef.current = null;
+      }
+
+      const addon = webglAddonRef.current;
+      if (!addon) {
+        return false;
+      }
+
+      try {
+        addon.dispose();
+      } catch { /* ignored */ }
+
+      webglAddonRef.current = null;
+      debugTerminal('renderer disposed', { type: 'webgl', reason });
+      return true;
+    }, [clearTextureAtlasRefreshTimer, debugTerminal]);
+
+    const enableWebglRenderer = React.useCallback((terminal: Terminal, reason: string): boolean => {
+      if (webglAddonRef.current) {
+        return true;
+      }
+
+      try {
+        const webglAddon = new WebglAddon();
+
+        webglContextLossDisposableRef.current = webglAddon.onContextLoss(() => {
+          debugTerminal('webgl context loss', { reason: 'onContextLoss' });
+          disposeWebglRenderer('context-loss');
+          fitTerminal('webgl-context-loss');
+        });
+
+        terminal.loadAddon(webglAddon);
+        webglAddonRef.current = webglAddon;
+
+        debugTerminal('renderer', {
+          type: 'webgl',
+          reason,
+          mobile: enableTouchScroll,
+          mode: rendererMode,
+        });
+        scheduleTextureAtlasRefresh(`webgl-enabled:${reason}`);
+        return true;
+      } catch (error) {
+        debugTerminal('webgl load failed, fallback to canvas', {
+          reason,
+          error,
+          mobile: enableTouchScroll,
+          mode: rendererMode,
+        });
+        return false;
+      }
+    }, [
+      debugTerminal,
+      disposeWebglRenderer,
+      enableTouchScroll,
+      fitTerminal,
+      rendererMode,
+      scheduleTextureAtlasRefresh,
+    ]);
 
     const flushWrites = React.useCallback(() => {
       if (isWritingRef.current) {
@@ -444,7 +779,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         return;
       }
 
-      container.tabIndex = 0;
+      container.tabIndex = enableTouchScroll ? -1 : 0;
 
       const initialize = () => {
         setLoadingState('loading');
@@ -462,6 +797,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             scrollback: 1000,
             allowTransparency: false,
             convertEol: true,
+            customGlyphs: true,
+            rescaleOverlappingGlyphs: true,
             letterSpacing: 0,
             lineHeight: 1,
             overviewRuler: {
@@ -475,14 +812,18 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           localTerminal = terminal;
           terminalRef.current = terminal;
           fitAddonRef.current = fitAddon;
+          lastDevicePixelRatioRef.current = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
 
           terminal.open(container);
-          try {
-            const webglAddon = new WebglAddon();
-            terminal.loadAddon(webglAddon);
-            webglAddonRef.current = webglAddon;
-          } catch {
-            webglAddonRef.current = null;
+          if (shouldUseWebgl) {
+            enableWebglRenderer(terminal, 'init');
+          } else {
+            debugTerminal('renderer', {
+              type: 'canvas',
+              reason: 'renderer-mode-canvas',
+              mobile: enableTouchScroll,
+              mode: rendererMode,
+            });
           }
           setIsInitializing(false);
           bumpTerminalReady();
@@ -512,7 +853,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             viewportRef.current = null;
           }
 
-          fitTerminal();
+          fitTerminal('init');
           if (autoFocus) {
             terminal.focus();
           }
@@ -562,21 +903,31 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             })
           );
 
-          // Handle resize events
-          localDisposables.push(
-            terminal.onResize(({ cols, rows }) => {
-              resizeHandlerRef.current(cols, rows);
-            })
-          );
+          localResizeObserver = new ResizeObserver((entries) => {
+            const firstEntry = entries[0];
+            if (firstEntry) {
+              debugTerminal('resize observer', {
+                width: Math.round(firstEntry.contentRect.width),
+                height: Math.round(firstEntry.contentRect.height),
+              });
+            }
 
-          localResizeObserver = new ResizeObserver(() => {
-            fitTerminal();
+            const nextDevicePixelRatio = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
+            if (Math.abs(nextDevicePixelRatio - lastDevicePixelRatioRef.current) > 0.001) {
+              lastDevicePixelRatioRef.current = nextDevicePixelRatio;
+              debugTerminal('device pixel ratio changed', { value: nextDevicePixelRatio });
+              scheduleTextureAtlasRefresh('device-pixel-ratio-change');
+            }
+
+            fitTerminal('resize-observer');
+            scheduleTextureAtlasRefresh('resize-observer');
           });
           localResizeObserver.observe(container);
 
           if (typeof window !== 'undefined') {
             window.setTimeout(() => {
-              fitTerminal();
+              fitTerminal('post-init-timeout');
+              scheduleTextureAtlasRefresh('post-init-timeout');
             }, 0);
           }
 
@@ -593,6 +944,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       return () => {
         void disposed;
+        inputFocusHandlerRef.current?.(false);
         touchScrollCleanupRef.current?.();
         touchScrollCleanupRef.current = null;
 
@@ -606,15 +958,31 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           wheelHandlerRef.current = null;
         }
 
+        disposeWebglRenderer('component-unmount');
         localTerminal?.dispose();
-        webglAddonRef.current = null;
+        clearTextureAtlasRefreshTimer();
         terminalRef.current = null;
         fitAddonRef.current = null;
         viewportRef.current = null;
         lastReportedSizeRef.current = null;
         resetWriteState();
       };
-    }, [fitTerminal, fontFamily, fontSize, theme, resetWriteState, enableTouchScroll]);
+    }, [
+      fitTerminal,
+      fontFamily,
+      fontSize,
+      theme,
+      resetWriteState,
+      enableTouchScroll,
+      shouldUseWebgl,
+      rendererMode,
+      autoFocus,
+      enableWebglRenderer,
+      scheduleTextureAtlasRefresh,
+      disposeWebglRenderer,
+      clearTextureAtlasRefreshTimer,
+      debugTerminal,
+    ]);
 
     React.useEffect(() => {
       const terminal = terminalRef.current;
@@ -624,7 +992,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       terminal.reset();
       resetWriteState();
       lastReportedSizeRef.current = null;
-      fitTerminal();
+      fitTerminal('session-reset');
       if (autoFocus) {
         terminal.focus();
       }
@@ -651,7 +1019,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         if (lastProcessedChunkIdRef.current !== null) {
           terminal.reset();
           resetWriteState();
-          fitTerminal();
+          fitTerminal('buffer-reset');
         }
         return;
       }
@@ -697,10 +1065,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           }
           terminal.reset();
           resetWriteState();
-          fitTerminal();
+          fitTerminal('imperative-clear');
         },
         fit: () => {
-          fitTerminal();
+          fitTerminal('imperative-fit');
         },
       }),
       [enableTouchScroll, focusHiddenInput, fitTerminal, resetWriteState]
@@ -712,22 +1080,24 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         className={`relative h-full w-full terminal-viewport-container ${className || ''}`}
         style={{ backgroundColor: theme.background }}
         role="button"
-        tabIndex={0}
-        onClick={(event) => {
-          if (enableTouchScroll && !isScrolling()) {
-            focusHiddenInput(event.clientX, event.clientY);
-          } else if (!enableTouchScroll) {
+        tabIndex={enableTouchScroll ? -1 : 0}
+        onPointerDownCapture={handlePointerDownCapture}
+        onPointerMoveCapture={handlePointerMoveCapture}
+        onPointerUpCapture={handlePointerEndCapture}
+        onPointerCancelCapture={handlePointerEndCapture}
+        onTouchStartCapture={handleTouchStartCapture}
+        onTouchMoveCapture={handleTouchMoveCapture}
+        onTouchEndCapture={handleTouchEndCapture}
+        onTouchCancelCapture={handleTouchEndCapture}
+        onClick={() => {
+          if (!enableTouchScroll) {
             terminalRef.current?.focus();
           }
         }}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') {
+          if (!enableTouchScroll && event.key === 'Enter') {
             event.preventDefault();
-            if (enableTouchScroll && !isScrolling()) {
-              focusHiddenInput();
-            } else if (!enableTouchScroll) {
-              terminalRef.current?.focus();
-            }
+            terminalRef.current?.focus();
           }
         }}
       >
@@ -753,6 +1123,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             {enableTouchScroll ? (
               <textarea
                 ref={hiddenInputRef}
+                aria-hidden="true"
+                data-terminal-input-anchor="true"
                 inputMode="text"
                 enterKeyHint="enter"
                 autoCapitalize="off"
@@ -761,13 +1133,13 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                 spellCheck={false}
                 tabIndex={-1}
                 style={{
-                  position: 'fixed',
-                  left: 0,
-                  top: 0,
+                  position: 'absolute',
+                  left: 8,
+                  top: 8,
                   width: 1,
                   height: 1,
                   opacity: 0,
-                  zIndex: -1,
+                  zIndex: 0,
                   pointerEvents: 'none',
                   background: 'transparent',
                   color: 'transparent',
@@ -780,6 +1152,43 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                   padding: 0,
                   margin: 0,
                   outline: 'none',
+                }}
+                onFocus={() => {
+                  debugTerminal('input anchor focus');
+                  scheduleTextureAtlasRefresh('input-focus');
+                  inputFocusHandlerRef.current?.(true);
+                }}
+                onBlur={() => {
+                  const guarded = shouldGuardInputBlur();
+                  const activeElement = typeof document !== 'undefined'
+                    ? document.activeElement as HTMLElement | null
+                    : null;
+                  debugTerminal('input anchor blur', {
+                    guarded,
+                    activeTag: activeElement?.tagName ?? null,
+                    activeClass: activeElement?.className ?? null,
+                  });
+                  scheduleTextureAtlasRefresh('input-blur');
+
+                  if (!guarded) {
+                    inputFocusHandlerRef.current?.(false);
+                    return;
+                  }
+
+                  if (typeof window === 'undefined') {
+                    inputFocusHandlerRef.current?.(false);
+                    return;
+                  }
+
+                  window.setTimeout(() => {
+                    if (isHiddenInputFocused()) {
+                      return;
+                    }
+
+                    if (!isViewportKeyboardLikelyOpen()) {
+                      inputFocusHandlerRef.current?.(false);
+                    }
+                  }, INPUT_BLUR_GUARD_RELEASE_MS);
                 }}
                 onBeforeInput={(event) => {
                   if (isComposingRef.current) {

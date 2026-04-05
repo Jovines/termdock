@@ -2,7 +2,7 @@ import React from 'react';
 
 interface DebugPanelProps {
   isMobile: boolean;
-  keyboardHeight: number;
+  isInputFocused: boolean;
   isIOS: boolean;
   isConnecting: boolean;
   connectionError: string | null;
@@ -11,7 +11,7 @@ interface DebugPanelProps {
 
 export const DebugPanel: React.FC<DebugPanelProps> = ({
   isMobile,
-  keyboardHeight,
+  isInputFocused,
   isIOS,
   isConnecting,
   connectionError,
@@ -20,6 +20,10 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
   if (typeof window === 'undefined') {
     return null;
   }
+
+  const keyboardApproxHeight = window.visualViewport
+    ? Math.max(0, Math.round(window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop))
+    : 0;
 
   return (
     <div className="px-3 py-2 bg-blue-900/90 text-white text-xs border-b border-blue-700">
@@ -37,7 +41,8 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
             ? Math.round(window.visualViewport.height)
             : 'N/A'}
         </div>
-        <div>keyboardH: {keyboardHeight}px</div>
+        <div>inputFocused: {String(isInputFocused)}</div>
+        <div>keyboard~: {keyboardApproxHeight}px</div>
         <div>
           connecting:{' '}
           <span className={isConnecting ? 'text-yellow-400' : 'text-green-400'}>

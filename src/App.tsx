@@ -3,7 +3,10 @@ import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/Mu
 import { RiTerminalBoxLine, RiSettings4Line, RiAddLine, RiCloseLine } from '@remixicon/react';
 import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
+import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
+import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import type { CleanupDurationPreset } from './lib/terminal/types';
+import type { TerminalRendererMode } from './lib/terminal/renderer';
 
 const SESSION_KEEPALIVE_PRESETS: Array<{ value: CleanupDurationPreset | 'custom'; label: string; ms: number | null }> = [
   { value: 'never', label: 'Never', ms: null },
@@ -34,10 +37,13 @@ function App() {
   const floatingTopOffset = `calc(${safeTopInset} + 0.75rem)`;
   const drawerMaxHeight = `calc(var(--app-vh, 100dvh) - (${safeTopInset} + 1.5rem))`;
 
+  useViewportHeight();
+
   const [theme, setTheme] = React.useState<'dark' | 'light' | 'solarized' | 'dracula' | 'nord'>('dark');
   const [showDebug, setShowDebug] = React.useState(false);
   const [debugInfo, setDebugInfo] = React.useState<Record<string, any>>({});
   const { fontSize, setFontSize } = useFontSize();
+  const { rendererMode, setRendererMode } = useTerminalRenderer();
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
@@ -94,46 +100,6 @@ function App() {
     setDebugInfo(info);
   }, []);
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    let rafId: number | null = null;
-
-    const updateViewportHeight = () => {
-      rafId = null;
-      const visualViewport = window.visualViewport;
-      const nextHeight = visualViewport?.height ?? window.innerHeight;
-      document.documentElement.style.setProperty('--app-vh', `${Math.round(nextHeight)}px`);
-
-      if (window.scrollX !== 0 || window.scrollY !== 0) {
-        window.scrollTo(0, 0);
-      }
-    };
-
-    const scheduleUpdate = () => {
-      if (rafId !== null) return;
-      rafId = window.requestAnimationFrame(updateViewportHeight);
-    };
-
-    scheduleUpdate();
-
-    window.addEventListener('resize', scheduleUpdate);
-    window.addEventListener('orientationchange', scheduleUpdate);
-    window.visualViewport?.addEventListener('resize', scheduleUpdate);
-    window.visualViewport?.addEventListener('scroll', scheduleUpdate);
-
-    return () => {
-      window.removeEventListener('resize', scheduleUpdate);
-      window.removeEventListener('orientationchange', scheduleUpdate);
-      window.visualViewport?.removeEventListener('resize', scheduleUpdate);
-      window.visualViewport?.removeEventListener('scroll', scheduleUpdate);
-
-      if (rafId !== null) {
-        window.cancelAnimationFrame(rafId);
-      }
-    };
-  }, []);
-
   const handleCustomDurationBlur = () => {
     const minutes = parseInt(customDurationInput, 10);
     if (isNaN(minutes) || minutes < 1) {
@@ -185,6 +151,7 @@ function App() {
         <MultiTerminalView
           theme={theme}
           fontSize={fontSize}
+          rendererMode={rendererMode}
           showDebug={showDebug}
           defaultSessionMode={newSessionMode}
           defaultTmuxSessionName={newSessionTmuxName}
@@ -310,6 +277,20 @@ function App() {
                     className="w-full"
                     aria-label="Font size"
                   />
+                </div>
+
+                {/* Terminal Renderer */}
+                <div className="space-y-1.5">
+                  <span className="text-xs text-muted-foreground">Terminal Renderer</span>
+                  <select
+                    value={rendererMode}
+                    onChange={(e) => setRendererMode(e.target.value as TerminalRendererMode)}
+                    className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
+                  >
+                    <option value="auto">Auto</option>
+                    <option value="webgl">WebGL (Sharper)</option>
+                    <option value="canvas">Canvas (Stable)</option>
+                  </select>
                 </div>
 
                 {/* New Session Keepalive */}

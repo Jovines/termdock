@@ -17,8 +17,8 @@ Use this skill when mobile soft keyboard behavior causes layout jumps, parent sc
    - Root container height must use `var(--app-vh, 100dvh)`.
 
 2. Keyboard state is state only
-   - Keyboard height formula: `innerHeight - visualViewport.height - visualViewport.offsetTop`.
-   - Use hysteresis thresholds to avoid flicker (open >= 120, close <= 80).
+   - Prefer input-focus state from a terminal input anchor for toolbar visibility.
+   - Use viewport delta only as debugging/fallback signal, not primary toolbar switch.
    - Do not apply a second `calc(100% - keyboardHeight)` on terminal wrappers.
 
 3. Lock page scroll chain
@@ -43,7 +43,7 @@ Use this skill when mobile soft keyboard behavior causes layout jumps, parent sc
 - [ ] `--app-vh` updater listens to `resize`, `orientationchange`, and `visualViewport` events.
 - [ ] Root/app wrappers use `--app-vh` and cannot scroll.
 - [ ] Terminal view has no duplicate height subtraction.
-- [ ] Mobile keyboard bar is `fixed` at bottom and uses only safe-area bottom padding.
+- [ ] Mobile keyboard bar stays in normal layout flow (not `fixed`/`absolute`).
 - [ ] Touch scrolling never moves parent page.
 - [ ] iOS repeated open/close does not push terminal view out of screen.
 

@@ -11,6 +11,7 @@ interface TouchScrollConfig {
   maxVelocity?: number;
   minVelocity?: number;
   deceleration?: number;
+  shouldCaptureTouch?: () => boolean;
   onScroll?: (deltaPixels: number) => boolean;
   onScrollWithCoords?: (deltaPixels: number, x: number, y: number) => boolean;
   onTap?: (x: number, y: number) => void;
@@ -50,6 +51,7 @@ const {
     maxVelocity = 15,       // 降低最大速度
     minVelocity = 0.3,      // 降低最小速度阈值
     deceleration = 0.0008,  // 稍微减小减速，让惯性滑动更持久
+    shouldCaptureTouch,
     onScroll,
     onScrollWithCoords,
     onTap,
@@ -180,6 +182,10 @@ const {
         return;
       }
 
+      if ((shouldCaptureTouch?.() ?? true) && event.cancelable) {
+        event.preventDefault();
+      }
+
       state.pointerId = event.pointerId;
       state.startX = event.clientX;
       state.startY = event.clientY;
@@ -232,6 +238,9 @@ const {
         }
 
         if (state.gestureAxis === null) {
+          if ((shouldCaptureTouch?.() ?? false) && event.cancelable) {
+            event.preventDefault();
+          }
           state.lastY = currentY;
           state.lastTime = currentTime;
           return;
@@ -363,6 +372,7 @@ const {
     onTap,
     onClickWithCoords,
     tapThreshold,
+    shouldCaptureTouch,
   ]);
 
   /**
@@ -380,6 +390,10 @@ const {
     const handleTouchStart = (event: TouchEvent) => {
       if (event.touches.length !== 1) {
         return;
+      }
+
+      if ((shouldCaptureTouch?.() ?? true) && event.cancelable) {
+        event.preventDefault();
       }
 
       state.isCurrentlyScrolling = false;
@@ -425,6 +439,9 @@ const {
         }
 
         if (state.gestureAxis === null) {
+          if ((shouldCaptureTouch?.() ?? false) && event.cancelable) {
+            event.preventDefault();
+          }
           state.lastY = currentY;
           return;
         }
@@ -537,6 +554,7 @@ const {
     onTap,
     onClickWithCoords,
     tapThreshold,
+    shouldCaptureTouch,
   ]);
 
   /**

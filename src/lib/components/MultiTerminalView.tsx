@@ -7,7 +7,9 @@ import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
 import { attachTerminalSession, listTerminalProcesses, createTerminalSession, closeTerminal, updateTerminalSessionPolicy } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
+import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
+import { createDebugLogger } from '../utils/debug';
 
 interface TerminalSession {
   id: string;
@@ -45,6 +47,7 @@ interface MultiTerminalViewProps {
   theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   fontFamily?: string;
   fontSize?: number;
+  rendererMode?: TerminalRendererMode;
   showDebug?: boolean;
   defaultSessionMode?: TerminalMode;
   defaultTmuxSessionName?: string;
@@ -90,12 +93,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   theme = 'dark',
   fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
   fontSize = 13,
+  rendererMode = 'auto',
   showDebug,
   defaultSessionMode = 'shell',
   defaultTmuxSessionName = 'main',
   onStatusChange,
   onSessionDataUpdate,
 }) => {
+  const debugSession = useMemo(() => createDebugLogger('session'), []);
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
@@ -228,7 +233,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (backendSessionId && (!availableProcessIds || availableProcessIds.has(backendSessionId))) {
       try {
         const attached = await attachTerminalSession(backendSessionId);
-        console.log('[Session] Attached to existing session:', {
+        debugSession('[Session] Attached to existing session:', {
           backendSessionId,
           frontendSessionId: sessionId,
           attachedSessionId: attached.sessionId,
@@ -247,7 +252,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           history: attached.history,
         };
       } catch {
-        console.log('[Session] Attach failed, creating new session:', backendSessionId);
+        debugSession('[Session] Attach failed, creating new session:', backendSessionId);
       }
     }
 
@@ -257,7 +262,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       mode,
       tmuxSessionName: tmuxSessionName ?? undefined,
     });
-    console.log('[Session] Created new session:', newSession.sessionId);
+    debugSession('[Session] Created new session:', newSession.sessionId);
 
     return {
       id: sessionId,
@@ -275,7 +280,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (restoredRef.current) return;  // 防止重复执行
     restoredRef.current = true;
 
-    console.log('[Session] Restoring', persistedSessions.length, 'persisted sessions');
+    debugSession('[Session] Restoring', persistedSessions.length, 'persisted sessions');
 
     const restore = async () => {
       try {
@@ -296,12 +301,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             .filter((process) => process.isOrphan && !knownBackendIds.has(process.sessionId))
             .map((process) => process.sessionId);
 
-          console.log('[Session] Process snapshot:', {
+          debugSession('[Session] Process snapshot:', {
             total: processInfo.processes.length,
             orphanCandidates: orphanBackendIds.length,
           });
         } catch (error) {
-          console.warn('[Session] Failed to list terminal processes, fallback to persisted session mapping only:', error);
+          debugSession('[Session] Failed to list terminal processes, fallback to persisted session mapping only:', error);
         }
 
         const restoredPersisted = await Promise.all(
@@ -338,7 +343,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
         const restored = [...restoredPersisted, ...adoptedSessions.filter((s): s is TerminalSession => s !== null)];
 
-        console.log('[Session] Restored sessions:', restored.length);
+        debugSession('[Session] Restored sessions:', restored.length);
         setSessions(restored);
         setActiveSessionId(persistedActiveId || restored[0]?.id || null);
 
@@ -355,7 +360,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               tmuxSessionName: session.tmuxSessionName,
               history: session.history,
             });
-            console.log('[Session] Updated store for frontend session:', {
+            debugSession('[Session] Updated store for frontend session:', {
               frontendId: session.id,
               backendId: session.sessionId,
               hasHistory: !!(session.history?.length),
@@ -381,7 +386,16 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     };
 
     void restore();
-  }, [isLoading, persistedSessions, persistedActiveId, restoreOrCreateSession, updateSessionBackendId, updateSessionKeepAliveMs, defaultSessionMode]);
+  }, [
+    isLoading,
+    persistedSessions,
+    persistedActiveId,
+    restoreOrCreateSession,
+    updateSessionBackendId,
+    updateSessionKeepAliveMs,
+    defaultSessionMode,
+    debugSession,
+  ]);
 
   // Handle new session creation from custom event
   const handleNewSession = useCallback(async (options?: NewSessionEventDetail) => {
@@ -441,11 +455,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         });
       }
 
-      console.log('[Session] Created new session:', sessionId, newTerminalSession.sessionId, 'keepAliveMs=', newSession.keepAliveMs);
+      debugSession('[Session] Created new session:', sessionId, newTerminalSession.sessionId, 'keepAliveMs=', newSession.keepAliveMs);
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);
     }
-  }, [defaultSessionMode, defaultTmuxSessionName, saveSession]);
+  }, [defaultSessionMode, defaultTmuxSessionName, saveSession, debugSession]);
 
   const handleUpdateSessionPolicy = useCallback(async (detail: UpdateSessionPolicyEventDetail) => {
     const target = sessions.find((session) => session.id === detail.sessionId);
@@ -465,20 +479,20 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           : session
       )));
       updateSessionKeepAliveMs(detail.sessionId, updated.keepAliveMs);
-      console.log('[Session] Updated policy:', detail.sessionId, updated.keepAliveMs);
+      debugSession('[Session] Updated policy:', detail.sessionId, updated.keepAliveMs);
     } catch (error) {
       console.error('[Session] Failed to update session policy:', error);
     }
-  }, [sessions, updateSessionKeepAliveMs]);
+  }, [sessions, updateSessionKeepAliveMs, debugSession]);
 
   // Handle session switching from custom event
   const handleSwitchSession = useCallback((sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
       setActiveSessionId(sessionId);
-      console.log('[Session] Switched to session:', sessionId);
+      debugSession('[Session] Switched to session:', sessionId);
     }
-  }, [sessions]);
+  }, [sessions, debugSession]);
 
   // Handle session closing from custom event
   const handleCloseSession = useCallback(async (sessionId: string) => {
@@ -489,7 +503,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       // Close the backend terminal session if it exists
       if (session.sessionId) {
         await closeTerminal(session.sessionId);
-        console.log('[Session] Closed backend terminal:', session.sessionId);
+        debugSession('[Session] Closed backend terminal:', session.sessionId);
       }
     } catch (error) {
       console.error('[Session] Failed to close backend terminal:', error);
@@ -507,8 +521,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     removePersistedSession(sessionId);
     delete keyboardOpenBySessionRef.current[sessionId];
 
-    console.log('[Session] Closed session:', sessionId);
-  }, [sessions, removePersistedSession]);
+    debugSession('[Session] Closed session:', sessionId);
+  }, [sessions, removePersistedSession, debugSession]);
 
   // Set up event listeners for session management
   useEffect(() => {
@@ -630,6 +644,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                     theme={theme}
                     fontFamily={fontFamily}
                     fontSize={fontSize}
+                    rendererMode={rendererMode}
                     isActive={index === activeSessionIndex}
                     focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
                     onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
