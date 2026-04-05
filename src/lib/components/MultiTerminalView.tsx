@@ -1,5 +1,8 @@
 import React, { useEffect, useCallback, useState, useRef, useMemo } from 'react';
 import { v4 as uuidv4 } from 'uuid';
+import { Swiper, SwiperSlide } from 'swiper/react';
+import type { Swiper as SwiperInstance } from 'swiper';
+import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
 import { attachTerminalSession, listTerminalProcesses, createTerminalSession, closeTerminal, updateTerminalSessionPolicy } from '../terminal/api';
@@ -29,6 +32,7 @@ interface UpdateSessionPolicyEventDetail {
 }
 
 const DEFAULT_KEEP_ALIVE_MS = 3 * 60 * 60 * 1000;
+const SWIPE_ANIMATION_SPEED_MS = 320;
 
 interface MultiTerminalViewProps {
   theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
@@ -44,34 +48,30 @@ let sessionCounter = 1;
 function generateSessionName(): string {
   return `terminal-${sessionCounter++}`;
 }
-function SessionIndicator({
-  sessions,
+function SessionLineIndicator({
+  sessionCount,
   activeIndex,
 }: {
-  sessions: TerminalSession[];
+  sessionCount: number;
   activeIndex: number;
 }) {
-  if (sessions.length <= 1) return null;
+  if (sessionCount <= 1) {
+    return null;
+  }
+
+  const safeActiveIndex = Math.max(0, Math.min(activeIndex, sessionCount - 1));
+  const segmentWidthPercent = 100 / sessionCount;
 
   return (
-    <div
-      className="fixed left-1/2 -translate-x-1/2 z-20"
-      style={{ top: 'calc(env(safe-area-inset-top, 0px) + 0.75rem)' }}
-    >
-      <div className="flex items-center gap-1.5 px-3 py-1.5 bg-surface/80 backdrop-blur-sm rounded-full border border-border/50 shadow-lg">
-        {sessions.map((_, index) => (
-          <div
-            key={index}
-            className={`w-2 h-2 rounded-full transition-all ${
-              index === activeIndex
-                ? 'bg-primary w-4'
-                : 'bg-muted-foreground/30'
-            }`}
-          />
-        ))}
-        <span className="ml-2 text-xs text-muted-foreground font-medium">
-          {activeIndex + 1}/{sessions.length}
-        </span>
+    <div className="px-3 pt-1 pb-0.5 shrink-0">
+      <div className="relative h-px overflow-hidden rounded-full bg-border/60">
+        <div
+          className="absolute inset-y-0 left-0 rounded-full bg-primary transition-transform duration-300 ease-out"
+          style={{
+            width: `${segmentWidthPercent}%`,
+            transform: `translateX(${safeActiveIndex * 100}%)`,
+          }}
+        />
       </div>
     </div>
   );
@@ -88,23 +88,102 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
+  const [showRestoreLoader, setShowRestoreLoader] = useState(false);
   const restoredRef = useRef(false);
+  const swiperRef = useRef<SwiperInstance | null>(null);
+  const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
+  const [focusTransferRequest, setFocusTransferRequest] = useState<{ sessionId: string; token: number } | null>(null);
+  const isTouchSwipeRef = useRef(false);
 
   const {
     sessions: persistedSessions,
     activeSessionId: persistedActiveId,
     isLoading,
     saveSession,
+    setActiveSession,
     updateSessionBackendId,
     updateSessionKeepAliveMs,
     removeSession: removePersistedSession,
   } = useSessionPersistence();
 
+  useEffect(() => {
+    if (isLoading || isRestoring) {
+      return;
+    }
+    if (activeSessionId === persistedActiveId) {
+      return;
+    }
+    setActiveSession(activeSessionId);
+  }, [activeSessionId, isLoading, isRestoring, persistedActiveId, setActiveSession]);
+
   // Get active session index
   const activeSessionIndex = useMemo(() => {
-    if (!activeSessionId) return 0;
-    return sessions.findIndex((s) => s.id === activeSessionId);
+    if (sessions.length === 0) {
+      return 0;
+    }
+    if (!activeSessionId) {
+      return 0;
+    }
+    const foundIndex = sessions.findIndex((s) => s.id === activeSessionId);
+    return foundIndex >= 0 ? foundIndex : 0;
   }, [sessions, activeSessionId]);
+
+  useEffect(() => {
+    if (sessions.length === 0) {
+      if (activeSessionId !== null) {
+        setActiveSessionId(null);
+      }
+      return;
+    }
+
+    if (!activeSessionId) {
+      setActiveSessionId(sessions[0].id);
+      return;
+    }
+
+    const exists = sessions.some((session) => session.id === activeSessionId);
+    if (!exists) {
+      setActiveSessionId(sessions[0].id);
+    }
+  }, [sessions, activeSessionId]);
+
+  const handleKeyboardVisibilityChange = useCallback((sessionId: string, isOpen: boolean) => {
+    keyboardOpenBySessionRef.current[sessionId] = isOpen;
+  }, []);
+
+  const handleSwiperChange = useCallback((instance: SwiperInstance) => {
+    const nextSessionId = sessions[instance.activeIndex]?.id;
+    if (!nextSessionId || nextSessionId === activeSessionId) {
+      return;
+    }
+
+    const shouldTransferFocus =
+      isTouchSwipeRef.current &&
+      !!activeSessionId &&
+      keyboardOpenBySessionRef.current[activeSessionId] === true;
+
+    setActiveSessionId(nextSessionId);
+    if (shouldTransferFocus) {
+      setFocusTransferRequest({ sessionId: nextSessionId, token: Date.now() });
+      return;
+    }
+    setFocusTransferRequest(null);
+  }, [sessions, activeSessionId]);
+
+  useEffect(() => {
+    const swiper = swiperRef.current;
+    if (!swiper) {
+      return;
+    }
+
+    if (activeSessionIndex < 0 || activeSessionIndex >= sessions.length) {
+      return;
+    }
+
+    if (swiper.activeIndex !== activeSessionIndex) {
+      swiper.slideTo(activeSessionIndex, SWIPE_ANIMATION_SPEED_MS);
+    }
+  }, [activeSessionIndex, sessions.length]);
 
   // Notify parent of session data changes
   useEffect(() => {
@@ -363,6 +442,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     // Remove from persistence
     removePersistedSession(sessionId);
+    delete keyboardOpenBySessionRef.current[sessionId];
 
     console.log('[Session] Closed session:', sessionId);
   }, [sessions, removePersistedSession]);
@@ -407,27 +487,31 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   // 没有会话时创建新的
   useEffect(() => {
-    console.log('[Debug] useEffect triggered:', {
-      isRestoring,
-      sessionsLength: sessions.length,
-      sessions: sessions.map(s => ({ id: s.id, name: s.name, sessionId: s.sessionId })),
-    });
-    
     if (!isRestoring && sessions.length === 0) {
-      console.log('[Debug] About to call handleNewSession');
       handleNewSession();
-    } else {
-      console.log('[Debug] Skipping handleNewSession:', { 
-        isRestoring, 
-        sessionsLength: sessions.length,
-        condition: !isRestoring && sessions.length === 0 
-      });
     }
   }, [isRestoring, sessions.length, handleNewSession]);
 
-  const activeSession = sessions.find((s) => s.id === activeSessionId) || sessions[0];
+  useEffect(() => {
+    if (!isRestoring) {
+      setShowRestoreLoader(false);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setShowRestoreLoader(true);
+    }, 260);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [isRestoring]);
 
   if (isRestoring) {
+    if (!showRestoreLoader) {
+      return <div className="h-full bg-background" />;
+    }
+
     return (
       <div className="h-full flex items-center justify-center bg-background text-muted">
         <div className="flex flex-col items-center gap-2">
@@ -440,21 +524,62 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   return (
     <div className="h-full flex flex-col">
-      {/* Session Indicator */}
-      <SessionIndicator sessions={sessions} activeIndex={activeSessionIndex} />
+      <SessionLineIndicator sessionCount={sessions.length} activeIndex={activeSessionIndex} />
 
       <div className="flex-1 overflow-hidden">
-        {activeSession && (
-          <TerminalView
-            key={activeSession.id}
-            sessionId={activeSession.id}
-            theme={theme}
-            fontFamily={fontFamily}
-            fontSize={fontSize}
-            showDebug={showDebug}
-            onStatusChange={onStatusChange}
-          />
-        )}
+        <Swiper
+          onSwiper={(instance) => {
+            swiperRef.current = instance;
+          }}
+          onSlideChange={handleSwiperChange}
+          onTouchStart={() => {
+            isTouchSwipeRef.current = true;
+          }}
+          onTouchEnd={() => {
+            const swiper = swiperRef.current;
+            if (!swiper || !swiper.animating) {
+              isTouchSwipeRef.current = false;
+            }
+          }}
+          onTransitionEnd={() => {
+            isTouchSwipeRef.current = false;
+          }}
+          initialSlide={Math.max(0, activeSessionIndex)}
+          speed={SWIPE_ANIMATION_SPEED_MS}
+          slidesPerView={1}
+          resistanceRatio={0.82}
+          threshold={8}
+          longSwipesRatio={0.2}
+          touchAngle={30}
+          touchStartPreventDefault={false}
+          noSwiping
+          noSwipingSelector="[data-mobile-keyboard='true']"
+          allowTouchMove={sessions.length > 1}
+          className="h-full"
+        >
+          {sessions.map((session, index) => {
+            const isNearActive = Math.abs(index - activeSessionIndex) <= 1;
+            return (
+              <SwiperSlide key={session.id} className="h-full">
+                {isNearActive ? (
+                  <TerminalView
+                    sessionId={session.id}
+                    theme={theme}
+                    fontFamily={fontFamily}
+                    fontSize={fontSize}
+                    isActive={index === activeSessionIndex}
+                    focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
+                    onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
+                    showDebug={showDebug}
+                    onStatusChange={index === activeSessionIndex ? onStatusChange : undefined}
+                  />
+                ) : (
+                  <div className="h-full bg-background" />
+                )}
+              </SwiperSlide>
+            );
+          })}
+        </Swiper>
       </div>
     </div>
   );
