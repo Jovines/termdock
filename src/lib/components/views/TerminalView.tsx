@@ -1,7 +1,7 @@
 import React from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { useTerminalStore } from '../../stores/useTerminalStore';
-import type { TerminalStreamEvent } from '../../terminal';
+import type { TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
 import { convertThemeToXterm, getDefaultTheme, THEMES } from '../../terminal';
 import { createWebTerminalAPI } from '../../terminal/factory';
@@ -81,6 +81,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [terminalSessions, sessionId]);
 
   const terminalSessionRef = terminalState?.terminalSessionId ?? null;
+  const sessionMode = terminalState?.mode ?? 'shell';
+  const preferredTmuxSessionName = terminalState?.tmuxSessionName || 'main';
+  const isTmuxMode = sessionMode === 'tmux';
   const bufferChunks = terminalState?.bufferChunks ?? [];
   const isConnecting = terminalState?.isConnecting ?? false;
   const terminalSessionId = terminalSessionRef;
@@ -88,6 +91,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [connectionError, setConnectionError] = React.useState<string | null>(null);
   const [isFatalError, setIsFatalError] = React.useState(false);
   const [isRestarting, setIsRestarting] = React.useState(false);
+  const [tmuxLayout, setTmuxLayout] = React.useState<TmuxLayout | null>(null);
   const showDebug = externalShowDebug !== undefined ? externalShowDebug : false;
 
   // 流清理和活动终端引用
@@ -331,6 +335,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setIsFatalError(false);
 
                 const sessionState = useTerminalStore.getState().getTerminalSession(storeSessionId);
+                if (sessionState?.terminalSessionId && event.mode) {
+                  useTerminalStore.getState().setTerminalSession(storeSessionId, {
+                    sessionId: sessionState.terminalSessionId,
+                    cols: 80,
+                    rows: 24,
+                    mode: event.mode,
+                    tmuxSessionName: event.tmuxSessionName ?? null,
+                  });
+                }
+
+                if (event.mode !== 'tmux') {
+                  setTmuxLayout(null);
+                }
+
                 console.log('[Terminal] Connected event received:', {
                   frontendSessionId: storeSessionId,
                   backendSessionId: terminalIdRef.current,
@@ -368,6 +386,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 }
                 break;
               }
+              case 'tmux-layout': {
+                setTmuxLayout(event.layout ?? null);
+                break;
+              }
               case 'exit': {
                 const exitCode =
                   typeof event.exitCode === 'number' ? event.exitCode : null;
@@ -382,6 +404,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setConnecting(storeSessionId, false);
                 setConnectionError('Terminal session ended');
                 setIsFatalError(false);
+                setTmuxLayout(null);
                 disconnectStream();
                 break;
               }
@@ -486,6 +509,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             console.log(`[ensureSession] Cleared unhealthy session from store`);
           } else {
             console.log(`[ensureSession] Session ${terminalId} is healthy, reusing it, cwd=${health.cwd}, clients=${health.clients}, lastActivity=${Date.now() - (health.lastActivity || 0)}ms ago`);
+            if (health.mode && currentState?.terminalSessionId) {
+              store.setTerminalSession(sessionId, {
+                sessionId: currentState.terminalSessionId,
+                cols: 80,
+                rows: 24,
+                mode: health.mode,
+                tmuxSessionName: health.tmuxSessionName ?? null,
+              });
+            }
             console.log(`[ensureSession] Setting terminalIdRef to ${terminalId} and starting stream`);
             terminalIdRef.current = terminalId;
             startStream(terminalId);
@@ -514,7 +546,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           shouldCreateNewSession = false;
         } else {
           try {
-            const session = await terminal.createSession({});
+            const modeForNewSession = currentState?.mode ?? 'shell';
+            const tmuxSessionNameForNewSession = currentState?.tmuxSessionName || 'main';
+            const session = await terminal.createSession({
+              mode: modeForNewSession,
+              tmuxSessionName: modeForNewSession === 'tmux' ? tmuxSessionNameForNewSession : undefined,
+            });
             console.log(`[ensureSession] Created new session ${session.sessionId}`);
 
             if (runId !== currentRunIdRef.current) {
@@ -591,8 +628,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     try {
       setConnecting(sessionId, true);
-      const session = await terminal.createSession({});
-      setTerminalSession(sessionId, session);
+      const session = await terminal.createSession({
+        mode: sessionMode,
+        tmuxSessionName: sessionMode === 'tmux' ? preferredTmuxSessionName : undefined,
+      });
+      setTerminalSession(sessionId, {
+        ...session,
+        mode: session.mode ?? sessionMode,
+        tmuxSessionName: session.tmuxSessionName ?? (sessionMode === 'tmux' ? preferredTmuxSessionName : null),
+      });
       terminalIdRef.current = session.sessionId;
       startStream(session.sessionId);
     } catch (error) {
@@ -604,7 +648,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     } finally {
       setIsRestarting(false);
     }
-  }, [sessionId, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream]);
+  }, [sessionId, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream, sessionMode, preferredTmuxSessionName]);
 
   const handleViewportInput = React.useCallback(
     (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean }) => {
@@ -671,6 +715,46 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     },
     [terminal]
   );
+
+  const sendTmuxAction = React.useCallback(async (payload: TmuxActionPayload) => {
+    const terminalId = terminalIdRef.current;
+    if (!terminalId || !terminal.tmuxAction) {
+      return;
+    }
+
+    try {
+      const result = await terminal.tmuxAction(terminalId, payload);
+      if (result.layout) {
+        setTmuxLayout(result.layout);
+      }
+    } catch (error) {
+      setConnectionError(error instanceof Error ? error.message : 'Failed to execute tmux action');
+    }
+  }, [terminal]);
+
+  const handleTmuxAction = React.useCallback((payload: TmuxActionPayload) => {
+    void sendTmuxAction(payload).finally(() => {
+      focusTerminalIfActive();
+    });
+  }, [focusTerminalIfActive, sendTmuxAction]);
+
+  const activeTmuxWindow = React.useMemo(() => {
+    if (!tmuxLayout) {
+      return null;
+    }
+    return tmuxLayout.windows.find((windowItem) => windowItem.id === tmuxLayout.activeWindowId) ?? null;
+  }, [tmuxLayout]);
+
+  const tmuxPaneScale = React.useMemo(() => {
+    if (!activeTmuxWindow || activeTmuxWindow.panes.length === 0) {
+      return { width: 1, height: 1 };
+    }
+
+    return {
+      width: activeTmuxWindow.panes.reduce((max, pane) => Math.max(max, pane.left + pane.width), 1),
+      height: activeTmuxWindow.panes.reduce((max, pane) => Math.max(max, pane.top + pane.height), 1),
+    };
+  }, [activeTmuxWindow]);
 
   const handleModifierToggle = React.useCallback(
     (modifier: Modifier) => {
@@ -743,7 +827,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     });
   }, [isConnecting, isRestarting, connectionError, terminalSessionId, onStatusChange]);
 
+  React.useEffect(() => {
+    if (!isTmuxMode) {
+      setTmuxLayout(null);
+    }
+  }, [isTmuxMode]);
+
   const quickKeysDisabled = !terminalSessionId || isConnecting || isRestarting;
+  const showTmuxControls = isTmuxMode && tmuxLayout !== null;
+  const tmuxInCopyMode = tmuxLayout?.inCopyMode ?? false;
 
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background">
@@ -759,7 +851,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       )}
 
       <div
-        className="relative min-h-0 flex-1 overflow-hidden"
+        className={`relative min-h-0 flex-1 overflow-hidden ${showTmuxControls && !isMobile ? 'pr-64' : ''} ${showTmuxControls && isMobile ? 'pb-12' : ''}`}
         style={{
           backgroundColor: xtermTheme.background,
         }}
@@ -804,6 +896,136 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           isConnecting={isConnecting}
           onHardRestart={handleHardRestart}
         />
+
+        {showTmuxControls && tmuxLayout && !isMobile && (
+          <aside className="absolute inset-y-0 right-0 z-10 w-64 border-l border-border bg-surface/95 backdrop-blur">
+            <div className="flex h-full flex-col gap-3 overflow-y-auto p-3">
+              <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                tmux {tmuxLayout.sessionName}
+              </div>
+
+              <div className="flex flex-wrap gap-1">
+                {tmuxLayout.windows.map((windowItem) => (
+                  <button
+                    key={windowItem.id}
+                    type="button"
+                    onClick={() => handleTmuxAction({ action: 'select-window', windowId: windowItem.id })}
+                    className={`rounded border px-2 py-1 text-[11px] ${windowItem.id === tmuxLayout.activeWindowId ? 'border-primary bg-primary/20 text-primary' : 'border-border text-muted-foreground hover:text-foreground'}`}
+                  >
+                    {windowItem.index}:{windowItem.name || 'shell'}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => handleTmuxAction({ action: 'new-window' })}
+                  className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                  +
+                </button>
+              </div>
+
+              <div className="relative h-36 overflow-hidden rounded border border-border bg-background/60">
+                {(activeTmuxWindow?.panes ?? []).map((pane) => {
+                  const left = (pane.left / tmuxPaneScale.width) * 100;
+                  const top = (pane.top / tmuxPaneScale.height) * 100;
+                  const width = (pane.width / tmuxPaneScale.width) * 100;
+                  const height = (pane.height / tmuxPaneScale.height) * 100;
+
+                  return (
+                    <button
+                      key={pane.id}
+                      type="button"
+                      title={pane.command}
+                      onClick={() => handleTmuxAction({ action: 'select-pane', paneId: pane.id })}
+                      className={`absolute overflow-hidden rounded border text-[10px] ${pane.id === tmuxLayout.activePaneId ? 'border-primary bg-primary/25 text-primary' : 'border-border bg-background/70 text-muted-foreground'}`}
+                      style={{
+                        left: `${left}%`,
+                        top: `${top}%`,
+                        width: `${width}%`,
+                        height: `${height}%`,
+                      }}
+                    >
+                      {pane.index}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleTmuxAction({ action: 'split-pane', direction: 'h' })}
+                  className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                  Split H
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTmuxAction({ action: 'split-pane', direction: 'v' })}
+                  className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                  Split V
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTmuxAction({ action: 'copy-mode', enabled: !tmuxInCopyMode })}
+                  className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                  {tmuxInCopyMode ? 'Exit Copy' : 'Copy Mode'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!tmuxLayout.activePaneId) {
+                      return;
+                    }
+                    handleTmuxAction({ action: 'close-pane', paneId: tmuxLayout.activePaneId });
+                  }}
+                  className="rounded border border-red-500/50 px-2 py-1 text-[11px] text-red-400 hover:text-red-300"
+                >
+                  Close Pane
+                </button>
+              </div>
+            </div>
+          </aside>
+        )}
+
+        {showTmuxControls && tmuxLayout && isMobile && (
+          <div className="absolute inset-x-0 bottom-0 z-10 grid grid-cols-4 gap-1 border-t border-border bg-surface/95 p-1.5 backdrop-blur">
+            <button
+              type="button"
+              disabled={quickKeysDisabled}
+              onClick={() => handleTmuxAction({ action: 'split-pane', direction: 'h' })}
+              className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground disabled:opacity-50"
+            >
+              H
+            </button>
+            <button
+              type="button"
+              disabled={quickKeysDisabled}
+              onClick={() => handleTmuxAction({ action: 'split-pane', direction: 'v' })}
+              className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground disabled:opacity-50"
+            >
+              V
+            </button>
+            <button
+              type="button"
+              disabled={quickKeysDisabled}
+              onClick={() => handleTmuxAction({ action: 'new-window' })}
+              className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground disabled:opacity-50"
+            >
+              New
+            </button>
+            <button
+              type="button"
+              disabled={quickKeysDisabled}
+              onClick={() => handleTmuxAction({ action: 'copy-mode', enabled: !tmuxInCopyMode })}
+              className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground disabled:opacity-50"
+            >
+              {tmuxInCopyMode ? 'Run' : 'Copy'}
+            </button>
+          </div>
+        )}
       </div>
 
       <MobileKeyboard

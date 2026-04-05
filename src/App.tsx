@@ -51,6 +51,8 @@ function App() {
   } = useCleanupDuration();
 
   const [customDurationInput, setCustomDurationInput] = React.useState<string>('');
+  const [newSessionMode, setNewSessionMode] = React.useState<'shell' | 'tmux'>('shell');
+  const [newSessionTmuxName, setNewSessionTmuxName] = React.useState('main');
   const [activeKeepAlivePreset, setActiveKeepAlivePreset] = React.useState<CleanupDurationPreset | 'custom'>('3hours');
   const [activeKeepAliveCustomInput, setActiveKeepAliveCustomInput] = React.useState<string>('180');
 
@@ -184,6 +186,8 @@ function App() {
           theme={theme}
           fontSize={fontSize}
           showDebug={showDebug}
+          defaultSessionMode={newSessionMode}
+          defaultTmuxSessionName={newSessionTmuxName}
           onSessionDataUpdate={handleSessionDataUpdate}
         />
       </main>
@@ -233,6 +237,7 @@ function App() {
                       >
                         <RiTerminalBoxLine size={14} />
                         <span className="flex-1 truncate text-left">{session.name}</span>
+                        <span className="text-[10px] text-muted-foreground uppercase">{session.mode === 'tmux' ? 'tmux' : 'shell'}</span>
                         <span className="text-[10px] text-muted-foreground">{formatKeepAliveLabel(session.keepAliveMs)}</span>
                         <button
                           type="button"
@@ -256,6 +261,8 @@ function App() {
                       window.dispatchEvent(new CustomEvent('new-terminal-session', {
                         detail: {
                           keepAliveMs: cleanupDurationMs === Infinity ? null : cleanupDurationMs,
+                          mode: newSessionMode,
+                          tmuxSessionName: newSessionMode === 'tmux' ? newSessionTmuxName : undefined,
                         },
                       }));
                       setIsDrawerOpen(false);
@@ -334,6 +341,33 @@ function App() {
                       onBlur={handleCustomDurationBlur}
                       placeholder="Minutes"
                       className="w-full px-3 py-2 text-sm border rounded bg-input mt-2"
+                    />
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <span className="text-xs text-muted-foreground">New Session Mode</span>
+                  <select
+                    value={newSessionMode}
+                    onChange={(e) => setNewSessionMode(e.target.value as 'shell' | 'tmux')}
+                    className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
+                  >
+                    <option value="shell">Standard Shell</option>
+                    <option value="tmux">Tmux Window Mode</option>
+                  </select>
+                  {newSessionMode === 'tmux' && (
+                    <input
+                      type="text"
+                      value={newSessionTmuxName}
+                      onChange={(e) => setNewSessionTmuxName(e.target.value)}
+                      onBlur={() => {
+                        const next = newSessionTmuxName.trim();
+                        if (!next) {
+                          setNewSessionTmuxName('main');
+                        }
+                      }}
+                      placeholder="Tmux session name"
+                      className="w-full px-3 py-2 text-sm border rounded bg-input"
                     />
                   )}
                 </div>

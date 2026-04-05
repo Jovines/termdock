@@ -1,31 +1,78 @@
+export type TerminalMode = 'shell' | 'tmux';
+
+export interface TmuxPane {
+  id: string;
+  index: number;
+  active: boolean;
+  width: number;
+  height: number;
+  top: number;
+  left: number;
+  command: string;
+  title: string;
+}
+
+export interface TmuxWindow {
+  id: string;
+  name: string;
+  index: number;
+  active: boolean;
+  panes: TmuxPane[];
+}
+
+export interface TmuxLayout {
+  sessionId: string;
+  sessionName: string;
+  windows: TmuxWindow[];
+  activeWindowId: string;
+  activePaneId: string;
+  inCopyMode: boolean;
+}
+
 // Terminal Session Types
 export interface TerminalSession {
   sessionId: string;
   cols: number;
   rows: number;
+  mode?: TerminalMode;
+  tmuxSessionName?: string | null;
   shouldPersist?: boolean;
   keepAliveMs?: number | null;
 }
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout';
   data?: string;
+  layout?: TmuxLayout;
   exitCode?: number;
   signal?: number | null;
   attempt?: number;
   maxAttempts?: number;
   runtime?: 'node' | 'bun';
   ptyBackend?: string;
-  cwd?: string;  // Current working directory from server
+  cwd?: string;
+  mode?: TerminalMode;
+  tmuxSessionName?: string | null;
 }
 
 // Create Session Options
 export interface CreateTerminalOptions {
   cols?: number;
   rows?: number;
+  mode?: TerminalMode;
+  tmuxSessionName?: string;
   shouldPersist?: boolean;
   keepAliveMs?: number | null;
+}
+
+export interface TmuxActionPayload {
+  action: 'select-pane' | 'select-window' | 'split-pane' | 'close-pane' | 'copy-mode' | 'scroll' | 'new-window';
+  paneId?: string;
+  windowId?: string;
+  direction?: 'h' | 'v' | 'up' | 'down';
+  enabled?: boolean;
+  lines?: number;
 }
 
 // Stream Connection Options
@@ -68,6 +115,7 @@ export interface TerminalAPI {
   close(sessionId: string): Promise<void>;
   restartSession?(currentSessionId: string, options: CreateTerminalOptions): Promise<TerminalSession>;
   forceKill?(options: ForceKillOptions): Promise<void>;
+  tmuxAction?(sessionId: string, payload: TmuxActionPayload): Promise<{ success: boolean; layout?: TmuxLayout }>;
   checkHealth?(sessionId: string): Promise<{
     healthy: boolean;
     sessionId: string;
@@ -75,6 +123,8 @@ export interface TerminalAPI {
     clients?: number;
     lastActivity?: number;
     backend?: string;
+    mode?: TerminalMode;
+    tmuxSessionName?: string | null;
   }>;
 }
 
@@ -101,6 +151,8 @@ export interface TerminalSessionState {
   sessionId: string;       // 前端 session ID
   directory: string;
   terminalSessionId: string | null;  // 后端 session ID
+  mode: TerminalMode;
+  tmuxSessionName: string | null;
   isConnecting: boolean;
   buffer: string;
   bufferChunks: TerminalChunk[];

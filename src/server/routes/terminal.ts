@@ -1,8 +1,42 @@
 import express from 'express';
 import fs from 'fs';
 import os from 'os';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 
 const router = express.Router();
+const execFileAsync = promisify(execFile);
+
+type TerminalMode = 'shell' | 'tmux';
+
+interface TmuxPane {
+  id: string;
+  index: number;
+  active: boolean;
+  width: number;
+  height: number;
+  top: number;
+  left: number;
+  command: string;
+  title: string;
+}
+
+interface TmuxWindow {
+  id: string;
+  name: string;
+  index: number;
+  active: boolean;
+  panes: TmuxPane[];
+}
+
+interface TmuxLayout {
+  sessionId: string;
+  sessionName: string;
+  windows: TmuxWindow[];
+  activeWindowId: string;
+  activePaneId: string;
+  inCopyMode: boolean;
+}
 
 // PTY backend abstraction
 interface PtyProvider {
@@ -34,6 +68,8 @@ interface TerminalSession {
   ptyProcess: PtyProcess;
   ptyBackend: string;
   cwd: string;
+  mode: TerminalMode;
+  tmuxSessionName: string | null;
   lastActivity: number;
   clients: Map<string, express.Response>;
   createdAt: number;
@@ -54,6 +90,8 @@ const TERMINAL_IDLE_TIMEOUT = parseInt(process.env.TERMINAL_IDLE_TIMEOUT || (isD
 const CLEANUP_INTERVAL = isDevelopment ? 60 * 1000 : 5 * 60 * 1000;
 const DEFAULT_KEEP_ALIVE_MS = parseInt(process.env.TERMINAL_DEFAULT_KEEPALIVE_MS || String(3 * 60 * 60 * 1000), 10);
 const RECONNECT_SCROLLBACK = parseInt(process.env.TERMINAL_RECONNECT_SCROLLBACK || '200', 10);
+const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10);
+const TMUX_DELIMITER = '\x1f';
 
 // 输出历史缓冲区（限制大小）
 const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
@@ -109,6 +147,123 @@ function normalizeKeepAliveMs(input: unknown): number | null {
   }
 
   return Math.floor(input);
+}
+
+function normalizeMode(input: unknown): TerminalMode {
+  return input === 'tmux' ? 'tmux' : 'shell';
+}
+
+function normalizeTmuxSessionName(input: unknown): string {
+  if (typeof input !== 'string') {
+    return 'main';
+  }
+  const normalized = input.trim();
+  return normalized.length > 0 ? normalized : 'main';
+}
+
+async function runTmux(args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('tmux', args, {
+    timeout: 5000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  return stdout;
+}
+
+function parseDelimitedRow(line: string, expected: number): string[] | null {
+  const parts = line.split(TMUX_DELIMITER);
+  if (parts.length < expected) {
+    return null;
+  }
+  if (parts.length === expected) {
+    return parts;
+  }
+  const merged = parts.slice(0, expected - 1);
+  merged.push(parts.slice(expected - 1).join(TMUX_DELIMITER));
+  return merged;
+}
+
+async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
+  const sessionInfoRaw = (await runTmux([
+    'display-message',
+    '-t',
+    sessionName,
+    '-p',
+    `#{session_id}${TMUX_DELIMITER}#{session_name}${TMUX_DELIMITER}#{window_id}${TMUX_DELIMITER}#{pane_id}${TMUX_DELIMITER}#{pane_in_mode}`,
+  ])).trim();
+
+  const sessionInfo = parseDelimitedRow(sessionInfoRaw, 5);
+  if (!sessionInfo) {
+    throw new Error(`Failed to parse tmux session info: ${sessionInfoRaw}`);
+  }
+
+  const [sessionId, resolvedSessionName, activeWindowId, activePaneId, paneInMode] = sessionInfo;
+
+  const windowsRaw = await runTmux([
+    'list-windows',
+    '-t',
+    sessionName,
+    '-F',
+    `#{window_id}${TMUX_DELIMITER}#{window_name}${TMUX_DELIMITER}#{window_index}${TMUX_DELIMITER}#{window_active}`,
+  ]);
+
+  const windows: TmuxWindow[] = [];
+
+  for (const line of windowsRaw.trim().split('\n')) {
+    if (!line) {
+      continue;
+    }
+
+    const row = parseDelimitedRow(line, 4);
+    if (!row) {
+      continue;
+    }
+
+    const [windowId, windowName, windowIndexRaw, windowActiveRaw] = row;
+    const panesRaw = await runTmux([
+      'list-panes',
+      '-t',
+      windowId,
+      '-F',
+      `#{pane_id}${TMUX_DELIMITER}#{pane_index}${TMUX_DELIMITER}#{pane_active}${TMUX_DELIMITER}#{pane_width}${TMUX_DELIMITER}#{pane_height}${TMUX_DELIMITER}#{pane_top}${TMUX_DELIMITER}#{pane_left}${TMUX_DELIMITER}#{pane_current_command}${TMUX_DELIMITER}#{pane_title}`,
+    ]);
+
+    const panes: TmuxPane[] = panesRaw.trim().split('\n').filter(Boolean).map((paneLine) => {
+      const paneRow = parseDelimitedRow(paneLine, 9);
+      if (!paneRow) {
+        return null;
+      }
+
+      const [paneId, paneIndexRaw, paneActiveRaw, widthRaw, heightRaw, topRaw, leftRaw, command, title] = paneRow;
+      return {
+        id: paneId,
+        index: parseInt(paneIndexRaw || '0', 10),
+        active: paneActiveRaw === '1',
+        width: parseInt(widthRaw || '0', 10),
+        height: parseInt(heightRaw || '0', 10),
+        top: parseInt(topRaw || '0', 10),
+        left: parseInt(leftRaw || '0', 10),
+        command: command || '',
+        title: title || '',
+      } as TmuxPane;
+    }).filter((pane): pane is TmuxPane => pane !== null);
+
+    windows.push({
+      id: windowId,
+      name: windowName || '',
+      index: parseInt(windowIndexRaw || '0', 10),
+      active: windowActiveRaw === '1',
+      panes,
+    });
+  }
+
+  return {
+    sessionId,
+    sessionName: resolvedSessionName,
+    windows,
+    activeWindowId,
+    activePaneId,
+    inCopyMode: paneInMode === '1',
+  };
 }
 
 function resolveWorkingDirectory(req: express.Request, inputCwd?: string): string {
@@ -213,22 +368,31 @@ async function spawnTerminalSession(req: express.Request, input: {
   cwd?: string;
   cols?: number;
   rows?: number;
+  mode?: TerminalMode;
+  tmuxSessionName?: string;
   shouldPersist?: boolean;
   keepAliveMs?: number | null;
 }): Promise<{ sessionId: string; session: TerminalSession; cols: number; rows: number }> {
   const cwd = resolveWorkingDirectory(req, input.cwd);
   const cols = input.cols || 80;
   const rows = input.rows || 24;
-
-  const shell = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh');
   const sessionId = Math.random().toString(36).substring(2, 15) +
                     Math.random().toString(36).substring(2, 15);
+  const mode = normalizeMode(input.mode);
+  const tmuxSessionName = mode === 'tmux' ? normalizeTmuxSessionName(input.tmuxSessionName) : null;
+
+  const command = mode === 'tmux'
+    ? (process.env.TMUX_BIN || 'tmux')
+    : (process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh'));
+  const args = mode === 'tmux' && tmuxSessionName
+    ? ['new-session', '-A', '-s', tmuxSessionName]
+    : [];
 
   const envPath = buildAugmentedPath();
   const resolvedEnv = { ...process.env, PATH: envPath };
 
   const pty = await getPtyProvider();
-  const ptyProcess = pty.spawn(shell, [], {
+  const ptyProcess = pty.spawn(command, args, {
     name: 'xterm-256color',
     cols,
     rows,
@@ -244,6 +408,8 @@ async function spawnTerminalSession(req: express.Request, input: {
     ptyProcess,
     ptyBackend: pty.backend,
     cwd,
+    mode,
+    tmuxSessionName,
     lastActivity: Date.now(),
     clients: new Map(),
     createdAt: Date.now(),
@@ -330,6 +496,8 @@ router.get('/processes', (_req, res) => {
     lastActivity: session.lastActivity,
     backend: session.ptyBackend,
     clients: session.clients.size,
+    mode: session.mode,
+    tmuxSessionName: session.tmuxSessionName,
     shouldPersist: session.shouldPersist,
     keepAliveMs: session.keepAliveMs,
     isOrphan: session.clients.size === 0,
@@ -359,6 +527,8 @@ router.post('/serialize-state', (req, res) => {
       createdAt: session.createdAt,
       lastActivity: session.lastActivity,
       backend: session.ptyBackend,
+      mode: session.mode,
+      tmuxSessionName: session.tmuxSessionName,
       keepAliveMs: session.keepAliveMs,
       history: getReconnectionHistory(sessionId),
     }));
@@ -375,17 +545,27 @@ router.post('/create', async (req, res) => {
       return res.status(429).json({ error: 'Maximum terminal sessions reached' });
     }
 
-    const { cwd: inputCwd, cols, rows, shouldPersist, keepAliveMs } = req.body;
+    const { cwd: inputCwd, cols, rows, mode, tmuxSessionName, shouldPersist, keepAliveMs } = req.body;
     const { sessionId, session } = await spawnTerminalSession(req, {
       cwd: inputCwd,
       cols,
       rows,
+      mode,
+      tmuxSessionName,
       shouldPersist,
       keepAliveMs,
     });
 
     console.log(`Created terminal session: ${sessionId} in ${session.cwd}, shouldPersist=${session.shouldPersist}, keepAliveMs=${session.keepAliveMs ?? 'never'}`);
-    res.json({ sessionId, cols: cols || 80, rows: rows || 24, shouldPersist: session.shouldPersist, keepAliveMs: session.keepAliveMs });
+    res.json({
+      sessionId,
+      cols: cols || 80,
+      rows: rows || 24,
+      mode: session.mode,
+      tmuxSessionName: session.tmuxSessionName,
+      shouldPersist: session.shouldPersist,
+      keepAliveMs: session.keepAliveMs,
+    });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('Failed to create terminal session:', errorMessage);
@@ -414,7 +594,42 @@ router.get('/:sessionId/stream', (req, res) => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const runtime = (globalThis as any).Bun ? 'bun' : 'node';
   const ptyBackend = session.ptyBackend || 'unknown';
-  res.write(`data: ${JSON.stringify({ type: 'connected', runtime, ptyBackend })}\n\n`);
+  writeSse(res, {
+    type: 'connected',
+    runtime,
+    ptyBackend,
+    mode: session.mode,
+    tmuxSessionName: session.tmuxSessionName,
+  });
+
+  let tmuxInterval: ReturnType<typeof setInterval> | null = null;
+  let lastTmuxLayoutSnapshot = '';
+
+  const sendTmuxLayout = async () => {
+    if (session.mode !== 'tmux' || !session.tmuxSessionName) {
+      return;
+    }
+
+    try {
+      const layout = await getTmuxLayout(session.tmuxSessionName);
+      const snapshot = JSON.stringify(layout);
+      if (snapshot === lastTmuxLayoutSnapshot) {
+        return;
+      }
+      lastTmuxLayoutSnapshot = snapshot;
+      writeSse(res, { type: 'tmux-layout', layout });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.warn(`Failed to fetch tmux layout for ${session.tmuxSessionName}: ${errorMessage}`);
+    }
+  };
+
+  if (session.mode === 'tmux' && session.tmuxSessionName) {
+    void sendTmuxLayout();
+    tmuxInterval = setInterval(() => {
+      void sendTmuxLayout();
+    }, TMUX_POLL_INTERVAL);
+  }
 
   const heartbeatInterval = setInterval(() => {
     try {
@@ -434,6 +649,9 @@ router.get('/:sessionId/stream', (req, res) => {
 
   const cleanup = () => {
     clearInterval(heartbeatInterval);
+    if (tmuxInterval) {
+      clearInterval(tmuxInterval);
+    }
     closeClient(session, clientId);
     console.log(`Client ${clientId} disconnected from terminal session ${sessionId}`);
   };
@@ -457,11 +675,13 @@ router.get('/:sessionId/health', (req, res) => {
    res.json({ 
      healthy: true, 
      sessionId,
-     cwd: session.cwd,
-     clients: session.clients.size,
-     lastActivity: session.lastActivity,
-     backend: session.ptyBackend
-   });
+      cwd: session.cwd,
+      clients: session.clients.size,
+      lastActivity: session.lastActivity,
+      backend: session.ptyBackend,
+      mode: session.mode,
+      tmuxSessionName: session.tmuxSessionName,
+    });
  });
 
 router.get('/:sessionId/attach', (req, res) => {
@@ -480,6 +700,8 @@ router.get('/:sessionId/attach', (req, res) => {
     cwd: session.cwd,
     backend: session.ptyBackend,
     clients: session.clients.size,
+    mode: session.mode,
+    tmuxSessionName: session.tmuxSessionName,
     history: getReconnectionHistory(sessionId),
     shouldPersist: session.shouldPersist,
     keepAliveMs: session.keepAliveMs,
@@ -579,6 +801,88 @@ router.post('/:sessionId/resize', (req, res) => {
   }
 });
 
+router.post('/:sessionId/tmux', async (req, res) => {
+  const { sessionId } = req.params;
+  const session = terminalSessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Terminal session not found' });
+  }
+
+  if (session.mode !== 'tmux' || !session.tmuxSessionName) {
+    return res.status(400).json({ error: 'Terminal session is not in tmux mode' });
+  }
+
+  const { action } = req.body ?? {};
+
+  try {
+    switch (action) {
+      case 'select-pane': {
+        const paneId = typeof req.body?.paneId === 'string' ? req.body.paneId : '';
+        if (!paneId) {
+          return res.status(400).json({ error: 'paneId is required' });
+        }
+        await runTmux(['select-pane', '-t', paneId]);
+        break;
+      }
+      case 'select-window': {
+        const windowId = typeof req.body?.windowId === 'string' ? req.body.windowId : '';
+        if (!windowId) {
+          return res.status(400).json({ error: 'windowId is required' });
+        }
+        await runTmux(['select-window', '-t', windowId]);
+        break;
+      }
+      case 'split-pane': {
+        const direction = req.body?.direction === 'h' ? '-h' : '-v';
+        await runTmux(['split-window', '-t', session.tmuxSessionName, direction]);
+        break;
+      }
+      case 'close-pane': {
+        const paneId = typeof req.body?.paneId === 'string' ? req.body.paneId : '';
+        if (!paneId) {
+          return res.status(400).json({ error: 'paneId is required' });
+        }
+        await runTmux(['kill-pane', '-t', paneId]);
+        break;
+      }
+      case 'copy-mode': {
+        const enabled = req.body?.enabled !== false;
+        if (enabled) {
+          await runTmux(['copy-mode', '-t', session.tmuxSessionName]);
+        } else {
+          await runTmux(['send-keys', '-t', session.tmuxSessionName, '-X', 'cancel']);
+        }
+        break;
+      }
+      case 'scroll': {
+        const direction = req.body?.direction === 'down' ? 'down' : 'up';
+        const lines = Math.max(1, Math.min(50, Math.floor(Number(req.body?.lines) || 1)));
+        const tmuxKey = direction === 'up' ? 'scroll-up' : 'scroll-down';
+        for (let i = 0; i < lines; i += 1) {
+          await runTmux(['send-keys', '-t', session.tmuxSessionName, '-X', tmuxKey]);
+        }
+        break;
+      }
+      case 'new-window': {
+        await runTmux(['new-window', '-t', session.tmuxSessionName]);
+        break;
+      }
+      default:
+        return res.status(400).json({ error: 'Unsupported tmux action' });
+    }
+
+    session.lastActivity = Date.now();
+    const layout = await getTmuxLayout(session.tmuxSessionName);
+    broadcastEvent(sessionId, { type: 'tmux-layout', layout });
+    return res.json({ success: true, layout });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`Failed to execute tmux action ${action}:`, errorMessage);
+    return res.status(500).json({ error: errorMessage || 'Failed to execute tmux action' });
+  }
+});
+
 router.delete('/:sessionId', (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
@@ -600,7 +904,7 @@ router.delete('/:sessionId', (req, res) => {
 
 router.post('/:sessionId/restart', async (req, res) => {
   const { sessionId } = req.params;
-  const { cwd: inputCwd, cols, rows, shouldPersist, keepAliveMs } = req.body;
+  const { cwd: inputCwd, cols, rows, mode, tmuxSessionName, shouldPersist, keepAliveMs } = req.body;
 
   const existingSession = terminalSessions.get(sessionId);
   if (existingSession) {
@@ -612,12 +916,22 @@ router.post('/:sessionId/restart', async (req, res) => {
       cwd: inputCwd,
       cols,
       rows,
+      mode,
+      tmuxSessionName,
       shouldPersist,
       keepAliveMs,
     });
 
     console.log(`Restarted terminal session: ${sessionId} -> ${newSessionId} in ${session.cwd}`);
-    res.json({ sessionId: newSessionId, cols: cols || 80, rows: rows || 24, shouldPersist: session.shouldPersist, keepAliveMs: session.keepAliveMs });
+    res.json({
+      sessionId: newSessionId,
+      cols: cols || 80,
+      rows: rows || 24,
+      mode: session.mode,
+      tmuxSessionName: session.tmuxSessionName,
+      shouldPersist: session.shouldPersist,
+      keepAliveMs: session.keepAliveMs,
+    });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('Failed to restart terminal session:', errorMessage);

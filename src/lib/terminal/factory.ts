@@ -1,5 +1,5 @@
-import type { TerminalAPI, TerminalHandlers, TerminalStreamOptions, CreateTerminalOptions, ResizeTerminalPayload, TerminalSession, ForceKillOptions } from './types';
-import { createTerminalSession, connectTerminalStream, sendTerminalInput, resizeTerminal, closeTerminal, restartTerminalSession, forceKillTerminal, checkTerminalHealth } from './api';
+import type { TerminalAPI, TerminalHandlers, TerminalStreamOptions, CreateTerminalOptions, ResizeTerminalPayload, TerminalSession, ForceKillOptions, TmuxActionPayload } from './types';
+import { createTerminalSession, connectTerminalStream, sendTerminalInput, resizeTerminal, closeTerminal, restartTerminalSession, forceKillTerminal, checkTerminalHealth, sendTmuxAction } from './api';
 
 const getRetryPolicy = (options?: TerminalStreamOptions) => {
   const retry = options?.retry;
@@ -48,11 +48,17 @@ export const createWebTerminalAPI = (): TerminalAPI => ({
     return restartTerminalSession(currentSessionId, {
       cols: options.cols,
       rows: options.rows,
+      mode: options.mode,
+      tmuxSessionName: options.tmuxSessionName,
     });
   },
 
   async forceKill(options: ForceKillOptions): Promise<void> {
     await forceKillTerminal(options);
+  },
+
+  async tmuxAction(sessionId: string, payload: TmuxActionPayload): Promise<{ success: boolean }> {
+    return sendTmuxAction(sessionId, payload);
   },
 
   async checkHealth(sessionId: string): Promise<{
@@ -62,6 +68,8 @@ export const createWebTerminalAPI = (): TerminalAPI => ({
     clients?: number;
     lastActivity?: number;
     backend?: string;
+    mode?: 'shell' | 'tmux';
+    tmuxSessionName?: string | null;
   }> {
     return checkTerminalHealth(sessionId);
   },

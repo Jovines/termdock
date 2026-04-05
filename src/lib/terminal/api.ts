@@ -3,6 +3,8 @@ import type {
   TerminalStreamEvent,
   CreateTerminalOptions,
   ConnectStreamOptions,
+  TmuxActionPayload,
+  TmuxLayout,
 } from './types';
 
 let csrfToken: string | null = null;
@@ -41,6 +43,8 @@ export async function createTerminalSession(
     body: JSON.stringify({
       cols: options.cols || 80,
       rows: options.rows || 24,
+      mode: options.mode || 'shell',
+      tmuxSessionName: options.tmuxSessionName,
       shouldPersist: options.shouldPersist ?? true,
       keepAliveMs,
     }),
@@ -248,7 +252,7 @@ export async function closeTerminal(sessionId: string): Promise<void> {
 
 export async function restartTerminalSession(
   currentSessionId: string,
-  options: { cwd?: string; cols?: number; rows?: number; keepAliveMs?: number | null }
+  options: { cwd?: string; cols?: number; rows?: number; keepAliveMs?: number | null; mode?: 'shell' | 'tmux'; tmuxSessionName?: string }
 ): Promise<TerminalSession> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/${currentSessionId}/restart`, {
@@ -261,6 +265,8 @@ export async function restartTerminalSession(
       ...(options.cwd ? { cwd: options.cwd } : {}),
       cols: options.cols ?? 80,
       rows: options.rows ?? 24,
+      mode: options.mode,
+      tmuxSessionName: options.tmuxSessionName,
       keepAliveMs: options.keepAliveMs,
     }),
   });
@@ -280,6 +286,8 @@ export async function checkTerminalHealth(sessionId: string): Promise<{
   clients?: number;
   lastActivity?: number;
   backend?: string;
+  mode?: 'shell' | 'tmux';
+  tmuxSessionName?: string | null;
 }> {
   const response = await fetch(`/api/terminal/${sessionId}/health`, {
     method: 'GET',
@@ -303,6 +311,8 @@ export interface PersistentTerminalProcess {
   lastActivity: number;
   backend: string;
   clients: number;
+  mode: 'shell' | 'tmux';
+  tmuxSessionName: string | null;
   shouldPersist: boolean;
   keepAliveMs: number | null;
   isOrphan: boolean;
@@ -334,6 +344,8 @@ export async function attachTerminalSession(sessionId: string): Promise<{
   cwd: string;
   backend: string;
   clients: number;
+  mode: 'shell' | 'tmux';
+  tmuxSessionName: string | null;
   history: string[];
   shouldPersist: boolean;
   keepAliveMs: number | null;
@@ -410,4 +422,26 @@ export async function forceKillTerminal(options: {
     const error = await response.json().catch(() => ({ error: 'Failed to force kill terminal' }));
     throw new Error(error.error || 'Failed to force kill terminal');
   }
+}
+
+export async function sendTmuxAction(
+  sessionId: string,
+  payload: TmuxActionPayload
+): Promise<{ success: boolean; layout?: TmuxLayout }> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/${sessionId}/tmux`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to execute tmux action' }));
+    throw new Error(error.error || 'Failed to execute tmux action');
+  }
+
+  return response.json();
 }

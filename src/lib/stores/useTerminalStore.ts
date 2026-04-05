@@ -23,6 +23,8 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     sessionId,
     directory: '',
     terminalSessionId: null,
+    mode: 'shell',
+    tmuxSessionName: null,
     isConnecting: false,
     buffer: '',
     bufferChunks: [],
@@ -57,6 +59,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       newSessions.set(sessionId, {
         ...baseState,
         terminalSessionId: terminalSession.sessionId,
+        mode: terminalSession.mode ?? baseState.mode,
+        tmuxSessionName: terminalSession.tmuxSessionName ?? baseState.tmuxSessionName,
         sessionId,
         isConnecting: false,
         history,

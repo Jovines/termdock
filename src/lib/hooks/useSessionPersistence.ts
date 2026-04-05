@@ -6,6 +6,8 @@ export interface PersistedSession {
   sessionId: string;  // 前端生成的 session ID
   name: string;
   backendSessionId: string | null;  // 后端 sessionId，用于复用
+  mode: 'shell' | 'tmux';
+  tmuxSessionName: string | null;
   keepAliveMs: number | null;
   createdAt: number;
   lastActivity: number;
@@ -43,6 +45,8 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
         const data = JSON.parse(stored);
         const sessionList = (data.sessions || []).map((session: Partial<PersistedSession> & { sessionId: string; name: string }) => ({
           ...session,
+          mode: session.mode === 'tmux' ? 'tmux' : 'shell',
+          tmuxSessionName: session.tmuxSessionName ?? null,
           keepAliveMs: Object.prototype.hasOwnProperty.call(session, 'keepAliveMs')
             ? (session.keepAliveMs ?? null)
             : DEFAULT_KEEP_ALIVE_MS,
@@ -83,6 +87,8 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     const newSession: PersistedSession = {
       ...session,
       backendSessionId,
+      mode: session.mode === 'tmux' ? 'tmux' : 'shell',
+      tmuxSessionName: session.tmuxSessionName ?? null,
       keepAliveMs,
       createdAt: now,
       lastActivity: now,

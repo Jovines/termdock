@@ -6,12 +6,15 @@ import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
 import { attachTerminalSession, listTerminalProcesses, createTerminalSession, closeTerminal, updateTerminalSessionPolicy } from '../terminal/api';
+import type { TerminalMode } from '../terminal';
 import { useTerminalStore } from '../stores/useTerminalStore';
 
 interface TerminalSession {
   id: string;
   name: string;
   sessionId: string | null;
+  mode: TerminalMode;
+  tmuxSessionName: string | null;
   keepAliveMs: number | null;
   history?: string[];
 }
@@ -19,11 +22,15 @@ interface TerminalSession {
 export interface TerminalSessionInfo {
   id: string;
   name: string;
+  mode: TerminalMode;
+  tmuxSessionName: string | null;
   keepAliveMs: number | null;
 }
 
 interface NewSessionEventDetail {
   keepAliveMs?: number | null;
+  mode?: TerminalMode;
+  tmuxSessionName?: string;
 }
 
 interface UpdateSessionPolicyEventDetail {
@@ -39,6 +46,8 @@ interface MultiTerminalViewProps {
   fontFamily?: string;
   fontSize?: number;
   showDebug?: boolean;
+  defaultSessionMode?: TerminalMode;
+  defaultTmuxSessionName?: string;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
   onSessionDataUpdate?: (data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => void;
 }
@@ -82,6 +91,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
   fontSize = 13,
   showDebug,
+  defaultSessionMode = 'shell',
+  defaultTmuxSessionName = 'main',
   onStatusChange,
   onSessionDataUpdate,
 }) => {
@@ -188,7 +199,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // Notify parent of session data changes
   useEffect(() => {
     onSessionDataUpdate?.({
-      sessions: sessions.map((s) => ({ id: s.id, name: s.name, keepAliveMs: s.keepAliveMs })),
+      sessions: sessions.map((s) => ({
+        id: s.id,
+        name: s.name,
+        mode: s.mode,
+        tmuxSessionName: s.tmuxSessionName,
+        keepAliveMs: s.keepAliveMs,
+      })),
       activeSessionId,
     });
   }, [sessions, activeSessionId, onSessionDataUpdate]);
@@ -199,6 +216,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     availableProcessIds: Set<string> | null
   ): Promise<TerminalSession> => {
     const { sessionId, name, backendSessionId } = session;
+    const mode: TerminalMode = session.mode === 'tmux' || session.mode === 'shell'
+      ? session.mode
+      : defaultSessionMode;
+    const tmuxSessionName = mode === 'tmux'
+      ? (session.tmuxSessionName || defaultTmuxSessionName)
+      : null;
     const keepAliveMs = session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs;
 
     // 如果有 backendSessionId，优先附着到现有持久进程
@@ -218,6 +241,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           id: sessionId,
           name,
           sessionId: attached.sessionId,
+          mode: attached.mode ?? mode,
+          tmuxSessionName: attached.tmuxSessionName ?? tmuxSessionName,
           keepAliveMs: attached.keepAliveMs,
           history: attached.history,
         };
@@ -227,16 +252,22 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
 
     // 创建新 session（服务端会自动使用 home 目录）
-    const newSession = await createTerminalSession({ keepAliveMs });
+    const newSession = await createTerminalSession({
+      keepAliveMs,
+      mode,
+      tmuxSessionName: tmuxSessionName ?? undefined,
+    });
     console.log('[Session] Created new session:', newSession.sessionId);
 
     return {
       id: sessionId,
       name,
       sessionId: newSession.sessionId,
+      mode: newSession.mode ?? mode,
+      tmuxSessionName: newSession.tmuxSessionName ?? tmuxSessionName,
       keepAliveMs,
     };
-  }, []);
+  }, [defaultSessionMode, defaultTmuxSessionName]);
 
   // 恢复会话（尝试复用现有 session）- 只执行一次
   useEffect(() => {
@@ -283,11 +314,19 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               const attached = await attachTerminalSession(backendSessionId);
               const frontendSessionId = uuidv4();
               const name = generateSessionName();
-              saveSession({ sessionId: frontendSessionId, name, keepAliveMs: attached.keepAliveMs }, attached.sessionId);
+              saveSession({
+                sessionId: frontendSessionId,
+                name,
+                mode: attached.mode ?? 'shell',
+                tmuxSessionName: attached.tmuxSessionName ?? null,
+                keepAliveMs: attached.keepAliveMs,
+              }, attached.sessionId);
               return {
                 id: frontendSessionId,
                 name,
                 sessionId: attached.sessionId,
+                mode: attached.mode ?? 'shell',
+                tmuxSessionName: attached.tmuxSessionName ?? null,
                 keepAliveMs: attached.keepAliveMs,
                 history: attached.history,
               } as TerminalSession;
@@ -312,6 +351,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               sessionId: session.sessionId,
               cols: 80,
               rows: 24,
+              mode: session.mode,
+              tmuxSessionName: session.tmuxSessionName,
               history: session.history,
             });
             console.log('[Session] Updated store for frontend session:', {
@@ -328,6 +369,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           id: session.sessionId,
           name: session.name,
           sessionId: null as string | null,
+          mode: session.mode === 'tmux' || session.mode === 'shell' ? session.mode : defaultSessionMode,
+          tmuxSessionName: session.tmuxSessionName ?? null,
           keepAliveMs: session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs,
         }));
         setSessions(fallbackSessions);
@@ -338,7 +381,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     };
 
     void restore();
-  }, [isLoading, persistedSessions, persistedActiveId, restoreOrCreateSession, updateSessionBackendId, updateSessionKeepAliveMs]);
+  }, [isLoading, persistedSessions, persistedActiveId, restoreOrCreateSession, updateSessionBackendId, updateSessionKeepAliveMs, defaultSessionMode]);
 
   // Handle new session creation from custom event
   const handleNewSession = useCallback(async (options?: NewSessionEventDetail) => {
@@ -346,8 +389,18 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       const keepAliveMs = options && Object.prototype.hasOwnProperty.call(options, 'keepAliveMs')
         ? (options.keepAliveMs ?? null)
         : DEFAULT_KEEP_ALIVE_MS;
+      const mode: TerminalMode = options?.mode === 'tmux' || options?.mode === 'shell'
+        ? options.mode
+        : defaultSessionMode;
+      const tmuxSessionName = mode === 'tmux'
+        ? (options?.tmuxSessionName?.trim() || defaultTmuxSessionName)
+        : null;
       // 服务端会自动使用 home 目录，不需要客户端传递
-      const newTerminalSession = await createTerminalSession({ keepAliveMs });
+      const newTerminalSession = await createTerminalSession({
+        keepAliveMs,
+        mode,
+        tmuxSessionName: tmuxSessionName ?? undefined,
+      });
       const sessionId = uuidv4();
       const name = generateSessionName();
 
@@ -355,6 +408,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         id: sessionId,
         name,
         sessionId: newTerminalSession.sessionId,
+        mode: newTerminalSession.mode ?? mode,
+        tmuxSessionName: newTerminalSession.tmuxSessionName ?? tmuxSessionName,
         keepAliveMs: newTerminalSession.keepAliveMs ?? keepAliveMs,
       };
 
@@ -366,7 +421,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       setActiveSessionId(sessionId);
 
       // Persist the new session
-      saveSession({ sessionId, name, keepAliveMs: newSession.keepAliveMs }, newTerminalSession.sessionId);
+      saveSession({
+        sessionId,
+        name,
+        mode: newSession.mode,
+        tmuxSessionName: newSession.tmuxSessionName,
+        keepAliveMs: newSession.keepAliveMs,
+      }, newTerminalSession.sessionId);
 
       // Update useTerminalStore with the new backend session
       const store = useTerminalStore.getState();
@@ -375,6 +436,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           sessionId: newTerminalSession.sessionId,
           cols: 80,
           rows: 24,
+          mode: newSession.mode,
+          tmuxSessionName: newSession.tmuxSessionName,
         });
       }
 
@@ -382,7 +445,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);
     }
-  }, [saveSession]);
+  }, [defaultSessionMode, defaultTmuxSessionName, saveSession]);
 
   const handleUpdateSessionPolicy = useCallback(async (detail: UpdateSessionPolicyEventDetail) => {
     const target = sessions.find((session) => session.id === detail.sessionId);

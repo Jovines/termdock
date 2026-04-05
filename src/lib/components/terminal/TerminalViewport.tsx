@@ -1,6 +1,7 @@
 import React from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
@@ -26,6 +27,70 @@ function sanitizeTerminalInput(input: string): string {
     .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
     // 移除零宽字符
     .replace(/[\u200B-\u200D\uFEFF]/g, '');
+}
+
+function decodeBase64Utf8(base64Data: string): string | null {
+  try {
+    const raw = atob(base64Data);
+    const bytes = Uint8Array.from(raw, (ch) => ch.charCodeAt(0));
+    return new TextDecoder('utf-8').decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function processOsc52Clipboard(data: string): { cleaned: string; remainder: string } {
+  const osc52Prefix = '\u001b]52;';
+  let index = 0;
+  let cleaned = '';
+
+  while (index < data.length) {
+    const start = data.indexOf(osc52Prefix, index);
+    if (start === -1) {
+      cleaned += data.slice(index);
+      return { cleaned, remainder: '' };
+    }
+
+    cleaned += data.slice(index, start);
+
+    let end = -1;
+    let terminatorLength = 1;
+
+    for (let i = start + osc52Prefix.length; i < data.length; i += 1) {
+      const code = data.charCodeAt(i);
+      if (code === 0x07) {
+        end = i;
+        terminatorLength = 1;
+        break;
+      }
+      if (code === 0x1b && i + 1 < data.length && data[i + 1] === '\\') {
+        end = i;
+        terminatorLength = 2;
+        break;
+      }
+    }
+
+    if (end === -1) {
+      return { cleaned, remainder: data.slice(start) };
+    }
+
+    const content = data.slice(start + osc52Prefix.length, end);
+    const separatorIndex = content.indexOf(';');
+    if (separatorIndex >= 0) {
+      const payload = content.slice(separatorIndex + 1);
+      if (payload && payload !== '?') {
+        const text = decodeBase64Utf8(payload);
+        if (text !== null) {
+          navigator.clipboard?.writeText(text).catch(() => {
+          });
+        }
+      }
+    }
+
+    index = end + terminatorLength;
+  }
+
+  return { cleaned, remainder: '' };
 }
 
 function findScrollableViewport(container: HTMLElement): HTMLElement | null {
@@ -130,6 +195,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
     const remainderPxRef = React.useRef(0);
+    const osc52RemainderRef = React.useRef('');
+    const webglAddonRef = React.useRef<WebglAddon | null>(null);
     const isComposingRef = React.useRef(false);
     const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
     const [, forceRender] = React.useReducer((x) => x + 1, 0);
@@ -278,6 +345,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       writeScheduledRef.current = null;
       isWritingRef.current = false;
       lastProcessedChunkIdRef.current = null;
+      osc52RemainderRef.current = '';
     }, []);
 
     const fitTerminal = React.useCallback(() => {
@@ -409,6 +477,13 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           fitAddonRef.current = fitAddon;
 
           terminal.open(container);
+          try {
+            const webglAddon = new WebglAddon();
+            terminal.loadAddon(webglAddon);
+            webglAddonRef.current = webglAddon;
+          } catch {
+            webglAddonRef.current = null;
+          }
           setIsInitializing(false);
           bumpTerminalReady();
 
@@ -441,6 +516,44 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           if (autoFocus) {
             terminal.focus();
           }
+
+          terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+            if (event.type !== 'keydown') {
+              return true;
+            }
+
+            const key = event.key.toLowerCase();
+            const hasPrimaryModifier = event.metaKey || event.ctrlKey;
+
+            if (!hasPrimaryModifier || event.altKey) {
+              return true;
+            }
+
+            if (key === 'c') {
+              const selected = terminal.getSelection();
+              if (!selected) {
+                return true;
+              }
+              event.preventDefault();
+              navigator.clipboard?.writeText(selected).catch(() => {
+              });
+              return false;
+            }
+
+            if (key === 'v') {
+              event.preventDefault();
+              navigator.clipboard?.readText().then((text) => {
+                if (!text) {
+                  return;
+                }
+                inputHandlerRef.current(sanitizeTerminalInput(text));
+              }).catch(() => {
+              });
+              return false;
+            }
+
+            return true;
+          });
 
           // Handle data input
           localDisposables.push(
@@ -494,6 +607,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         }
 
         localTerminal?.dispose();
+        webglAddonRef.current = null;
         terminalRef.current = null;
         fitAddonRef.current = null;
         viewportRef.current = null;
@@ -553,7 +667,13 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       }
 
       if (pending.length > 0) {
-        enqueueWrite(pending.map((chunk) => chunk.data).join(''));
+        const rawChunk = pending.map((chunk) => chunk.data).join('');
+        const merged = osc52RemainderRef.current + rawChunk;
+        const { cleaned, remainder } = processOsc52Clipboard(merged);
+        osc52RemainderRef.current = remainder;
+        if (cleaned) {
+          enqueueWrite(cleaned);
+        }
       }
 
       lastProcessedChunkIdRef.current = chunks[chunks.length - 1].id;
