@@ -31,6 +31,7 @@ interface TouchScrollState {
   didMove: boolean;
   pointerId: number | null;
   isCurrentlyScrolling: boolean;
+  gestureAxis: 'x' | 'y' | null;
 }
 
 /**
@@ -41,7 +42,7 @@ export const useTouchScroll = (
   containerRef: React.RefObject<HTMLElement>,
   config: TouchScrollConfig
 ) => {
-  const {
+const {
     scrollMultiplier = 1.2,  // 降低乘数，让内容滚动更跟手
     maxScrollBoost = 0.8,   // 降低boost，减少快速滑动时的加速
     boostDenominator = 50,  // 提高分母，让加速更平缓
@@ -53,8 +54,10 @@ export const useTouchScroll = (
     onScrollWithCoords,
     onTap,
     onClickWithCoords,
-    tapThreshold = 8,
+  tapThreshold = 8,
   } = config;
+
+  const axisLockRatio = 1.12;
 
   const stateRef = React.useRef<TouchScrollState>({
     lastY: null,
@@ -66,6 +69,7 @@ export const useTouchScroll = (
     didMove: false,
     pointerId: null,
     isCurrentlyScrolling: false,
+    gestureAxis: null,
   });
 
   // 累积滚动量，用于 RAF 节流
@@ -176,14 +180,14 @@ export const useTouchScroll = (
         return;
       }
 
-      event.stopPropagation(); // 阻止事件冒泡，防止影响页面其他滚动区域
-
       state.pointerId = event.pointerId;
       state.startX = event.clientX;
       state.startY = event.clientY;
       state.didMove = false;
+      state.gestureAxis = null;
       state.lastY = event.clientY;
       state.lastTime = nowMs();
+      state.velocity = 0;
       stopKinetic();
     };
 
@@ -192,30 +196,54 @@ export const useTouchScroll = (
         return;
       }
 
-      event.preventDefault();
-      event.stopPropagation(); // 阻止事件冒泡，防止影响页面其他滚动区域
-
       if (!state.lastY || !state.lastTime) {
         return;
       }
 
+      const currentX = event.clientX;
+      const currentY = event.clientY;
       const currentTime = nowMs();
       const deltaTime = currentTime - state.lastTime;
-      const deltaY = event.clientY - state.lastY;
+      const deltaY = currentY - state.lastY;
+
+      if (state.startX !== null && state.startY !== null) {
+        const totalDx = currentX - state.startX;
+        const totalDy = currentY - state.startY;
+
+        if (!state.didMove && Math.hypot(totalDx, totalDy) >= tapThreshold) {
+          state.didMove = true;
+        }
+
+        if (state.gestureAxis === null && state.didMove) {
+          const absDx = Math.abs(totalDx);
+          const absDy = Math.abs(totalDy);
+          if (absDx > absDy * axisLockRatio) {
+            state.gestureAxis = 'x';
+          } else if (absDy > absDx * axisLockRatio) {
+            state.gestureAxis = 'y';
+          }
+        }
+
+        if (state.gestureAxis === 'x') {
+          state.isCurrentlyScrolling = false;
+          state.lastY = currentY;
+          state.lastTime = currentTime;
+          return;
+        }
+
+        if (state.gestureAxis === null) {
+          state.lastY = currentY;
+          state.lastTime = currentTime;
+          return;
+        }
+      }
+
+      event.preventDefault();
 
       // 计算速度（指数移动平均）
       const instantaneousVelocity = deltaY / Math.max(deltaTime, 1);
       state.velocity = state.velocity * (1 - velocityAlpha) + instantaneousVelocity * velocityAlpha;
       state.velocity = Math.max(-maxVelocity, Math.min(maxVelocity, state.velocity));
-
-      // 检查是否超过移动阈值
-      if (state.startX !== null && state.startY !== null && !state.didMove) {
-        const dx = event.clientX - state.startX;
-        const dy = event.clientY - state.startY;
-        if (Math.hypot(dx, dy) >= tapThreshold) {
-          state.didMove = true;
-        }
-      }
 
       // 应用滚动（deltaY 取反，使滑动方向符合直觉）
       // 手指向上滑动(deltaY < 0)时，内容应向下滚动
@@ -228,10 +256,10 @@ export const useTouchScroll = (
         const deltaPixels = -deltaY * scrollMultiplierAdjusted;
 
         // 使用 RAF 节流累积滚动（传递当前触摸坐标）
-        accumulateAndRequestScroll(deltaPixels, event.clientX, event.clientY);
+        accumulateAndRequestScroll(deltaPixels, currentX, currentY);
       }
 
-      state.lastY = event.clientY;
+      state.lastY = currentY;
       state.lastTime = currentTime;
     };
 
@@ -257,8 +285,11 @@ export const useTouchScroll = (
       state.startX = null;
       state.startY = null;
 
+      const endedHorizontalGesture = state.gestureAxis === 'x';
+      state.gestureAxis = null;
+
       // 开始惯性滚动
-      if (Math.abs(state.velocity) > minVelocity && state.didMove) {
+      if (!endedHorizontalGesture && Math.abs(state.velocity) > minVelocity && state.didMove) {
         const animate = () => {
           const currentTime = nowMs();
           const dt = currentTime - (state.lastTime || currentTime);
@@ -295,6 +326,7 @@ export const useTouchScroll = (
       state.pointerId = null;
       state.startX = null;
       state.startY = null;
+      state.gestureAxis = null;
       stopKinetic();
     };
 
@@ -350,13 +382,13 @@ export const useTouchScroll = (
         return;
       }
 
-      event.stopPropagation(); // 阻止事件冒泡，防止影响页面其他滚动区域
-
       state.isCurrentlyScrolling = false;
+      state.gestureAxis = null;
       state.lastY = event.touches[0].clientY;
       state.startX = event.touches[0].clientX;
       state.startY = event.touches[0].clientY;
       state.didMove = false;
+      state.velocity = 0;
       stopKinetic();
     };
 
@@ -365,20 +397,40 @@ export const useTouchScroll = (
         return;
       }
 
-      event.preventDefault();
-      event.stopPropagation(); // 阻止事件冒泡，防止影响页面其他滚动区域
-
       const currentX = event.touches[0].clientX;
       const currentY = event.touches[0].clientY;
 
-      // 检查是否超过移动阈值
-      if (state.startX !== null && state.startY !== null && !state.didMove) {
-        const dx = currentX - state.startX;
-        const dy = currentY - state.startY;
-        if (Math.hypot(dx, dy) >= tapThreshold) {
+      if (state.startX !== null && state.startY !== null) {
+        const totalDx = currentX - state.startX;
+        const totalDy = currentY - state.startY;
+
+        if (!state.didMove && Math.hypot(totalDx, totalDy) >= tapThreshold) {
           state.didMove = true;
         }
+
+        if (state.gestureAxis === null && state.didMove) {
+          const absDx = Math.abs(totalDx);
+          const absDy = Math.abs(totalDy);
+          if (absDx > absDy * axisLockRatio) {
+            state.gestureAxis = 'x';
+          } else if (absDy > absDx * axisLockRatio) {
+            state.gestureAxis = 'y';
+          }
+        }
+
+        if (state.gestureAxis === 'x') {
+          state.isCurrentlyScrolling = false;
+          state.lastY = currentY;
+          return;
+        }
+
+        if (state.gestureAxis === null) {
+          state.lastY = currentY;
+          return;
+        }
       }
+
+      event.preventDefault();
 
       if (!state.lastY) {
         state.lastY = currentY;
@@ -426,8 +478,11 @@ export const useTouchScroll = (
       state.startX = null;
       state.startY = null;
 
+      const endedHorizontalGesture = state.gestureAxis === 'x';
+      state.gestureAxis = null;
+
       // 简单惯性滚动（velocity 取反，使方向符合直觉）
-      if (state.didMove && Math.abs(state.velocity) > minVelocity) {
+      if (!endedHorizontalGesture && state.didMove && Math.abs(state.velocity) > minVelocity) {
         const animate = () => {
           const dt = 16; // 假设60fps
           state.velocity *= (1 - deceleration * dt);
@@ -491,11 +546,9 @@ export const useTouchScroll = (
     // 清理之前的监听器
     stopKinetic();
 
-    // 尝试使用PointerEvents（更现代）
-    const cleanupPointerEvents = setupPointerEvents();
-    
-    // 同时设置触摸事件作为备用
-    const cleanupTouchEvents = setupTouchEvents();
+    const supportsPointerEvents = typeof window !== 'undefined' && 'PointerEvent' in window;
+    const cleanupPointerEvents = supportsPointerEvents ? setupPointerEvents() : () => {};
+    const cleanupTouchEvents = supportsPointerEvents ? () => {} : setupTouchEvents();
 
     return () => {
       cleanupPointerEvents();

@@ -13,8 +13,9 @@ import { ConnectionStatus } from '../terminal/ConnectionStatus';
 const TERMINAL_FONT_SIZE = 13;
 const KEYBOARD_OPEN_THRESHOLD = 120;
 const KEYBOARD_CLOSE_THRESHOLD = 80;
+const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 
-type Modifier = 'ctrl' | 'cmd';
+type Modifier = 'ctrl' | 'alt';
 
 const STREAM_OPTIONS = {
   retry: {
@@ -30,6 +31,9 @@ interface TerminalViewProps {
   theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   fontFamily?: string;
   fontSize?: number;
+  isActive?: boolean;
+  focusRequestToken?: number;
+  onKeyboardVisibilityChange?: (sessionId: string, isOpen: boolean) => void;
   showDebug?: boolean;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
 }
@@ -39,6 +43,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   theme: themeName = 'dark',
   fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
+  isActive = true,
+  focusRequestToken = 0,
+  onKeyboardVisibilityChange,
   showDebug: externalShowDebug,
   onStatusChange,
 }) => {
@@ -57,6 +64,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isIOS, setIsIOS] = React.useState(false);
   const [keyboardHeight, setKeyboardHeight] = React.useState(0);
   const [activeModifier, setActiveModifier] = React.useState<Modifier | null>(null);
+  const [lockedModifier, setLockedModifier] = React.useState<Modifier | null>(null);
 
   const terminalStore = useTerminalStore();
   const terminalSessions = terminalStore.sessions;
@@ -89,6 +97,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const sessionIdRef = React.useRef<string | null>(null);
   const terminalControllerRef = React.useRef<TerminalController | null>(null);
   const suppressInputUntilRef = React.useRef(0);
+  const modifierTapRef = React.useRef<{ modifier: Modifier; timestamp: number } | null>(null);
+  const lastFocusRequestTokenRef = React.useRef(0);
+  const streamVersionRef = React.useRef(0);
+
+  const focusTerminalIfActive = React.useCallback(() => {
+    if (!isActive) {
+      return;
+    }
+    terminalControllerRef.current?.focus();
+  }, [isActive]);
 
   // Listen for font size changes from TerminalViewport (pinch-to-zoom)
   React.useEffect(() => {
@@ -203,20 +221,42 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [terminalSessionId]);
 
   React.useEffect(() => {
+    onKeyboardVisibilityChange?.(sessionId, isActive && keyboardHeight > 0);
+  }, [onKeyboardVisibilityChange, sessionId, isActive, keyboardHeight]);
+
+  React.useEffect(() => {
+    if (!isActive) {
+      return;
+    }
+    if (!focusRequestToken) {
+      return;
+    }
+    if (focusRequestToken === lastFocusRequestTokenRef.current) {
+      return;
+    }
+    lastFocusRequestTokenRef.current = focusRequestToken;
+    focusTerminalIfActive();
+  }, [focusRequestToken, focusTerminalIfActive, isActive]);
+
+  React.useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
   React.useEffect(() => {
-    if (!isMobile && activeModifier !== null) {
+    if (!isMobile && (activeModifier !== null || lockedModifier !== null)) {
       setActiveModifier(null);
+      setLockedModifier(null);
+      modifierTapRef.current = null;
     }
-  }, [isMobile, activeModifier]);
+  }, [isMobile, activeModifier, lockedModifier]);
 
   React.useEffect(() => {
-    if (!terminalSessionId && activeModifier !== null) {
+    if (!terminalSessionId && (activeModifier !== null || lockedModifier !== null)) {
       setActiveModifier(null);
+      setLockedModifier(null);
+      modifierTapRef.current = null;
     }
-  }, [terminalSessionId, activeModifier]);
+  }, [terminalSessionId, activeModifier, lockedModifier]);
 
   React.useEffect(() => {
     const checkIsMobile = () => {
@@ -249,9 +289,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [themeName]);
 
   const disconnectStream = React.useCallback(() => {
-    streamCleanupRef.current?.();
+    streamVersionRef.current += 1;
+    const cleanup = streamCleanupRef.current;
     streamCleanupRef.current = null;
     activeTerminalIdRef.current = null;
+    cleanup?.();
   }, []);
 
   const startStream = React.useCallback(
@@ -263,11 +305,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       console.log(`[startStream] Starting stream for frontendSessionId=${sessionId} backendSessionId=${terminalId}`);
       disconnectStream();
+      const streamVersion = streamVersionRef.current + 1;
+      streamVersionRef.current = streamVersion;
 
       const subscription = terminal.connect(
         terminalId,
         {
           onEvent: (event: TerminalStreamEvent) => {
+            if (streamVersionRef.current !== streamVersion) {
+              return;
+            }
+
             const storeSessionId = sessionId;
             if (!storeSessionId) return;
 
@@ -305,8 +353,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 } else {
                   console.log(`[Terminal] No history to restore for ${storeSessionId}`);
                 }
-
-                terminalControllerRef.current?.focus();
                 break;
               }
               case 'reconnecting': {
@@ -342,6 +388,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             }
           },
           onError: (error, fatal) => {
+            if (streamVersionRef.current !== streamVersion) {
+              return;
+            }
+
             const storeSessionId = sessionId;
             if (!storeSessionId) return;
 
@@ -364,15 +414,25 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       streamCleanupRef.current = () => {
         subscription.close();
-        activeTerminalIdRef.current = null;
+        if (streamVersionRef.current === streamVersion) {
+          activeTerminalIdRef.current = null;
+        }
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearTerminalSession, disconnectStream, removeTerminalSession, setConnecting, terminal, sessionId]
+    [appendToBuffer, clearTerminalSession, disconnectStream, setConnecting, terminal, sessionId]
   );
 
   const hasInitializedRef = React.useRef(false);
   const currentRunIdRef = React.useRef(0);
+
+  React.useEffect(() => {
+    return () => {
+      currentRunIdRef.current += 1;
+      hasInitializedRef.current = false;
+      disconnectStream();
+    };
+  }, [disconnectStream]);
 
   React.useEffect(() => {
     if (sessionIdRef.current !== sessionId) {
@@ -547,7 +607,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [sessionId, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream]);
 
   const handleViewportInput = React.useCallback(
-    (data: string) => {
+    (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean }) => {
+      if (!isActive) {
+        return;
+      }
+
       if (!data) {
         return;
       }
@@ -557,19 +621,25 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
 
       let payload = data;
-      let modifierConsumed = false;
+      let modifierConsumed = options?.consumeModifier ?? false;
 
-      if (activeModifier && data.length > 0) {
+      if (!options?.skipModifierTransform && activeModifier && data.length > 0) {
         const firstChar = data[0];
         if (firstChar.length === 1 && /[a-zA-Z]/.test(firstChar)) {
           const upper = firstChar.toUpperCase();
-          if (activeModifier === 'ctrl' || activeModifier === 'cmd') {
+          if (activeModifier === 'ctrl') {
             payload = String.fromCharCode(upper.charCodeAt(0) & 0b11111);
+            modifierConsumed = true;
+          } else if (activeModifier === 'alt') {
+            payload = `\u001b${data}`;
             modifierConsumed = true;
           }
         }
 
         if (!modifierConsumed) {
+          if (activeModifier === 'alt') {
+            payload = `\u001b${data}`;
+          }
           modifierConsumed = true;
         }
       }
@@ -582,11 +652,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       });
 
       if (modifierConsumed) {
-        setActiveModifier(null);
-        terminalControllerRef.current?.focus();
+        if (!lockedModifier) {
+          setActiveModifier(null);
+        }
+        focusTerminalIfActive();
       }
     },
-    [activeModifier, terminal]
+    [activeModifier, focusTerminalIfActive, isActive, lockedModifier, terminal]
   );
 
   const handleViewportResize = React.useCallback(
@@ -602,23 +674,57 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const handleModifierToggle = React.useCallback(
     (modifier: Modifier) => {
+      const now = Date.now();
+      const lastTap = modifierTapRef.current;
+      const isDoubleTap =
+        lastTap !== null &&
+        lastTap.modifier === modifier &&
+        now - lastTap.timestamp <= MODIFIER_DOUBLE_TAP_WINDOW_MS;
+
+      modifierTapRef.current = { modifier, timestamp: now };
+
+      if (lockedModifier === modifier) {
+        setLockedModifier(null);
+        setActiveModifier(null);
+        focusTerminalIfActive();
+        return;
+      }
+
+      if (isDoubleTap) {
+        setLockedModifier(modifier);
+        setActiveModifier(modifier);
+        focusTerminalIfActive();
+        return;
+      }
+
+      if (lockedModifier !== null && lockedModifier !== modifier) {
+        setLockedModifier(null);
+      }
+
       setActiveModifier((current) => (current === modifier ? null : modifier));
-      terminalControllerRef.current?.focus();
+      focusTerminalIfActive();
     },
-    []
+    [focusTerminalIfActive, lockedModifier]
   );
 
+  const handleMobileToolbarPressStart = React.useCallback(() => {
+    focusTerminalIfActive();
+  }, [focusTerminalIfActive]);
+
   const handleMobileKeyPress = React.useCallback(
-    (key: 'esc' | 'tab' | 'enter' | 'arrow-up' | 'arrow-down' | 'arrow-left' | 'arrow-right') => {
+    (key: 'esc' | 'tab' | 'enter' | 'home' | 'end' | 'ctrl-c' | 'ctrl-d' | 'arrow-up' | 'arrow-down' | 'arrow-left' | 'arrow-right') => {
       const sequence = getSequenceForKey(key, activeModifier);
       if (!sequence) {
         return;
       }
-      handleViewportInput(sequence);
-      setActiveModifier(null);
-      terminalControllerRef.current?.focus();
+      const shouldConsumeModifier = activeModifier !== null;
+      handleViewportInput(sequence, {
+        skipModifierTransform: true,
+        consumeModifier: shouldConsumeModifier,
+      });
+      focusTerminalIfActive();
     },
-    [activeModifier, handleViewportInput]
+    [activeModifier, focusTerminalIfActive, handleViewportInput]
   );
 
   const xtermTheme = React.useMemo(() => convertThemeToXterm(currentTheme), [currentTheme]);
@@ -640,7 +746,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const quickKeysDisabled = !terminalSessionId || isConnecting || isRestarting;
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background">
       {showDebug && (
         <DebugPanel
           isMobile={isMobile}
@@ -686,6 +792,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               fontFamily={fontFamily}
               fontSize={fontSize}
               enableTouchScroll={isMobile}
+              autoFocus={!isMobile && isActive}
             />
           </ErrorBoundary>
         </div>
@@ -700,12 +807,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       </div>
 
       <MobileKeyboard
-        keyboardHeight={keyboardHeight}
-        isIOS={isIOS}
+        keyboardHeight={isActive ? keyboardHeight : 0}
         activeModifier={activeModifier}
+        lockedModifier={lockedModifier}
         disabled={quickKeysDisabled}
         onKeyPress={handleMobileKeyPress}
         onModifierToggle={handleModifierToggle}
+        onPressStart={handleMobileToolbarPressStart}
       />
     </div>
   );

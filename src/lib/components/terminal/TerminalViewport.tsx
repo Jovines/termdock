@@ -71,6 +71,7 @@ interface TerminalViewportProps {
   fontSize: number;
   className?: string;
   enableTouchScroll?: boolean;
+  autoFocus?: boolean;
 }
 
 type LoadingState = 'loading' | 'ready' | 'error';
@@ -112,7 +113,7 @@ function convertTheme(theme: TerminalTheme): Record<string, string> {
 
 export const TerminalViewport = React.forwardRef<TerminalController, TerminalViewportProps>(
   (
-    { sessionKey, chunks, onInput, onResize, theme, fontFamily, fontSize, className, enableTouchScroll },
+    { sessionKey, chunks, onInput, onResize, theme, fontFamily, fontSize, className, enableTouchScroll, autoFocus = true },
     ref
   ) => {
     const containerRef = React.useRef<HTMLDivElement>(null);
@@ -245,6 +246,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const focusHiddenInput = React.useCallback((_clientX?: number, _clientY?: number) => {
       const input = hiddenInputRef.current;
       if (!input) {
+        return;
+      }
+
+      if (typeof document !== 'undefined' && document.activeElement === input) {
         return;
       }
 
@@ -433,7 +438,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           }
 
           fitTerminal();
-          terminal.focus();
+          if (autoFocus) {
+            terminal.focus();
+          }
 
           // Handle data input
           localDisposables.push(
@@ -504,7 +511,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       resetWriteState();
       lastReportedSizeRef.current = null;
       fitTerminal();
-      terminal.focus();
+      if (autoFocus) {
+        terminal.focus();
+      }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionKey, terminalReadyVersion, fitTerminal, resetWriteState]);
 
@@ -651,6 +660,30 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                   padding: 0,
                   margin: 0,
                   outline: 'none',
+                }}
+                onBeforeInput={(event) => {
+                  if (isComposingRef.current) {
+                    return;
+                  }
+
+                  const nativeEvent = event.nativeEvent;
+                  if (!(nativeEvent instanceof InputEvent)) {
+                    return;
+                  }
+
+                  if (nativeEvent.inputType === 'insertLineBreak') {
+                    event.preventDefault();
+                    inputHandlerRef.current('\r');
+                    event.currentTarget.value = '';
+                    return;
+                  }
+
+                  if (nativeEvent.inputType === 'deleteContentBackward') {
+                    event.preventDefault();
+                    if (!event.currentTarget.value) {
+                      inputHandlerRef.current('\x7f');
+                    }
+                  }
                 }}
                 onInput={(event) => {
                   if (isComposingRef.current) {
