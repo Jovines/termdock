@@ -187,6 +187,23 @@ async function runTmux(args: string[]): Promise<string> {
   return stdout;
 }
 
+async function enableTmuxMouse(sessionName: string): Promise<void> {
+  let lastError: unknown;
+
+  // A newly attached session can race briefly with the client startup.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await runTmux(['set-option', '-t', sessionName, 'mouse', 'on']);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -560,6 +577,14 @@ async function spawnTerminalSession(req: express.Request, input: {
 
   terminalSessions.set(sessionId, session);
   setupPtyHandlers(sessionId, session);
+
+  if (mode === 'tmux' && tmuxSessionName) {
+    try {
+      await enableTmuxMouse(tmuxSessionName);
+    } catch (error) {
+      console.warn(`Failed to enable tmux mouse for ${tmuxSessionName}: ${getErrorMessage(error)}`);
+    }
+  }
 
   return { sessionId, session, cols, rows };
 }

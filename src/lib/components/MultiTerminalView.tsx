@@ -331,7 +331,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             try {
               const attached = await attachTerminalSession(backendSessionId);
               const frontendSessionId = uuidv4();
-              const name = generateSessionName();
+              const name = attached.tmuxSessionName
+                ? `tmux:${attached.tmuxSessionName}`
+                : generateSessionName();
               saveSession({
                 sessionId: frontendSessionId,
                 name,
@@ -431,14 +433,17 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         tmuxSessionName: tmuxSessionName ?? undefined,
       });
       const sessionId = uuidv4();
-      const name = generateSessionName();
+      const effectiveTmuxSessionName = newTerminalSession.tmuxSessionName ?? tmuxSessionName;
+      const name = effectiveTmuxSessionName
+        ? `tmux:${effectiveTmuxSessionName}`
+        : generateSessionName();
 
       const newSession: TerminalSession = {
         id: sessionId,
         name,
         sessionId: newTerminalSession.sessionId,
         mode: newTerminalSession.mode ?? mode,
-        tmuxSessionName: newTerminalSession.tmuxSessionName ?? tmuxSessionName,
+        tmuxSessionName: effectiveTmuxSessionName,
         keepAliveMs: newTerminalSession.keepAliveMs ?? keepAliveMs,
       };
 

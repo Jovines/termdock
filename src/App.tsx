@@ -1,12 +1,13 @@
 import React, { useEffect, useCallback, useState } from 'react';
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
-import { RiTerminalBoxLine, RiSettings4Line, RiAddLine, RiCloseLine } from '@remixicon/react';
+import { RiTerminalBoxLine, RiSettings4Line, RiAddLine, RiCloseLine, RiArrowDownSLine, RiArrowRightSLine } from '@remixicon/react';
 import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
-import type { CleanupDurationPreset } from './lib/terminal/types';
+import type { CleanupDurationPreset, TmuxSessionSummary } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
+import { listTmuxSessions } from './lib/terminal/api';
 
 const SESSION_KEEPALIVE_PRESETS: Array<{ value: CleanupDurationPreset | 'custom'; label: string; ms: number | null }> = [
   { value: 'never', label: 'Never', ms: null },
@@ -47,6 +48,8 @@ function App() {
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
+  const [tmuxSessions, setTmuxSessions] = useState<TmuxSessionSummary[]>([]);
+  const [tmuxSectionCollapsed, setTmuxSectionCollapsed] = useState(true);
 
   const {
     cleanupDurationMs,
@@ -141,6 +144,30 @@ function App() {
     setSessions(data.sessions);
     setActiveSessionId(data.activeSessionId);
   }, []);
+
+  // Auto-refresh tmux sessions when drawer is open
+  useEffect(() => {
+    if (!isDrawerOpen) return;
+
+    let cancelled = false;
+    const fetchSessions = async () => {
+      try {
+        const sessions = await listTmuxSessions();
+        if (!cancelled) {
+          setTmuxSessions(sessions);
+        }
+      } catch {
+        // ignore fetch errors
+      }
+    };
+
+    void fetchSessions();
+    const interval = setInterval(() => { void fetchSessions(); }, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isDrawerOpen]);
 
   return (
     <div
@@ -244,6 +271,53 @@ function App() {
                   <div className="border-t border-border/50" />
                 </>
               )}
+
+              {/* Tmux Server Sessions - Collapsible */}
+              {(() => {
+                const connectedTmuxNames = new Set(
+                  sessions.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName)
+                );
+                const availableTmuxSessions = tmuxSessions.filter((t) => !connectedTmuxNames.has(t.name));
+                if (availableTmuxSessions.length === 0) return null;
+                return (
+                  <div className="space-y-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setTmuxSectionCollapsed((c) => !c)}
+                      className="w-full flex items-center gap-2 px-1 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      {tmuxSectionCollapsed ? <RiArrowRightSLine size={14} /> : <RiArrowDownSLine size={14} />}
+                      <span className="uppercase tracking-wider">tmux sessions</span>
+                      <span className="text-[10px]">({availableTmuxSessions.length})</span>
+                    </button>
+                    {!tmuxSectionCollapsed && (
+                      <div className="space-y-1 pl-1">
+                        {availableTmuxSessions.map((tmux) => (
+                          <button
+                            key={tmux.name}
+                            type="button"
+                            onClick={() => {
+                              window.dispatchEvent(new CustomEvent('new-terminal-session', {
+                                detail: {
+                                  keepAliveMs: cleanupDurationMs === Infinity ? null : cleanupDurationMs,
+                                  mode: 'tmux',
+                                  tmuxSessionName: tmux.name,
+                                },
+                              }));
+                              setIsDrawerOpen(false);
+                            }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-sm rounded-lg transition-colors hover:bg-surface-elevated"
+                          >
+                            <RiTerminalBoxLine size={14} />
+                            <span className="flex-1 truncate text-left">{tmux.name}</span>
+                            <span className="text-[10px] text-muted-foreground">{tmux.windows}w</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Settings Section */}
               <div className="space-y-3">

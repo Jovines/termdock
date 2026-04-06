@@ -280,31 +280,37 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
       const lines = deltaPixels > 0 ? -1 : 1;
 
-      // 情况1：程序启用了鼠标报告（vim中执行 :set mouse=a）
-      // 使用SGR 1006协议发送滚轮事件
+      // Prefer standard mouse wheel reports when the foreground program asked for them.
       if (terminal.modes.mouseTrackingMode !== 'none') {
         let charX: number;
         let charY: number;
 
         if (touchX !== undefined && touchY !== undefined) {
-          // 使用实际触摸坐标转换为字符网格坐标
+          // Map the touch point into the terminal grid when available.
           const coords = pixelToCharCoords(touchX, touchY, terminal);
           charX = coords.x;
           charY = coords.y;
         } else {
-          // 回退到光标位置（1-based）
+          // Fall back to the cursor position (1-based).
           charX = terminal.buffer.active.cursorX + 1;
           charY = terminal.buffer.active.cursorY + 1;
         }
 
-        // SGR 1006协议: \x1b[<button;x;yM
-        // 滚轮按钮: 64=wheel up, 65=wheel down
+        // SGR 1006: \x1b[<button;x;yM with 64/65 for wheel up/down.
         const button = lines > 0 ? 64 : 65;
         const mouseEvent = `\x1b[<${button};${charX};${charY}M`;
         inputHandlerRef.current(mouseEvent);
         return true;
       }
 
+      // Full-screen apps like less/man often expect key-based scrolling instead.
+      if (terminal.buffer.active.type === 'alternate') {
+        const arrowKey = lines > 0 ? '\x1b[A' : '\x1b[B';
+        inputHandlerRef.current(arrowKey);
+        return true;
+      }
+
+      // Plain tmux shell history still needs copy-mode scrolling.
       if (onTmuxScroll) {
         const total = remainderPxRef.current + deltaPixels;
         const scrollLines = Math.trunc(total / lineHeightPx);
@@ -319,15 +325,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         return false;
       }
 
-      // 情况2：在alternate模式（没有scrollback，如vim/less/man）
-      // 发送上下箭头键，模拟滚轮
-      if (terminal.buffer.active.type === 'alternate') {
-        const arrowKey = lines > 0 ? '\x1b[A' : '\x1b[B'; // 上箭头、下箭头
-        inputHandlerRef.current(arrowKey);
-        return true;
-      }
-
-      // 情况3：都不是，走正常触摸滑动逻辑（终端内容滚动）
+      // Otherwise fall back to the terminal's local scrollback.
       const total = remainderPxRef.current + deltaPixels;
       const scrollLines = Math.trunc(total / lineHeightPx);
       remainderPxRef.current = total - scrollLines * lineHeightPx;
