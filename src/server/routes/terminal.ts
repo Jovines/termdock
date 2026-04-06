@@ -62,6 +62,7 @@ interface PtyProcess {
   kill(): void;
   pause?(): void;
   resume?(): void;
+  pid?: number;
 }
 
 interface TerminalSession {
@@ -92,6 +93,17 @@ const DEFAULT_KEEP_ALIVE_MS = parseInt(process.env.TERMINAL_DEFAULT_KEEPALIVE_MS
 const RECONNECT_SCROLLBACK = parseInt(process.env.TERMINAL_RECONNECT_SCROLLBACK || '200', 10);
 const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10);
 const TMUX_DELIMITER = '\x1f';
+const DEFAULT_TMUX_RESTORE_SCROLLBACK_LINES = 3000;
+const TMUX_RESTORE_SCROLLBACK_LINES = (() => {
+  const parsed = Number.parseInt(
+    process.env.TMUX_RESTORE_SCROLLBACK_LINES || String(DEFAULT_TMUX_RESTORE_SCROLLBACK_LINES),
+    10,
+  );
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_TMUX_RESTORE_SCROLLBACK_LINES;
+  }
+  return Math.max(0, Math.min(parsed, 20000));
+})();
 
 // 输出历史缓冲区（限制大小）
 const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
@@ -153,12 +165,18 @@ function normalizeMode(input: unknown): TerminalMode {
   return input === 'tmux' ? 'tmux' : 'shell';
 }
 
+function generateTmuxSessionName(): string {
+  const timePart = Date.now().toString(36);
+  const randomPart = Math.random().toString(36).slice(2, 8);
+  return `wt-${timePart}${randomPart}`;
+}
+
 function normalizeTmuxSessionName(input: unknown): string {
   if (typeof input !== 'string') {
-    return 'main';
+    return generateTmuxSessionName();
   }
   const normalized = input.trim();
-  return normalized.length > 0 ? normalized : 'main';
+  return normalized.length > 0 ? normalized : generateTmuxSessionName();
 }
 
 async function runTmux(args: string[]): Promise<string> {
@@ -169,8 +187,28 @@ async function runTmux(args: string[]): Promise<string> {
   return stdout;
 }
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isAlreadyInCopyModeError(message: string): boolean {
+  return /already in.*mode/i.test(message);
+}
+
+function isNotInCopyModeError(message: string): boolean {
+  return /not in (a )?mode/i.test(message);
+}
+
 function parseDelimitedRow(line: string, expected: number): string[] | null {
-  const parts = line.split(TMUX_DELIMITER);
+  let normalizedLine = line;
+  if (normalizedLine.includes('\\037')) {
+    normalizedLine = normalizedLine.split('\\037').join(TMUX_DELIMITER);
+  }
+  if (normalizedLine.includes('\\x1f')) {
+    normalizedLine = normalizedLine.split('\\x1f').join(TMUX_DELIMITER);
+  }
+
+  const parts = normalizedLine.split(TMUX_DELIMITER);
   if (parts.length < expected) {
     return null;
   }
@@ -180,6 +218,57 @@ function parseDelimitedRow(line: string, expected: number): string[] | null {
   const merged = parts.slice(0, expected - 1);
   merged.push(parts.slice(expected - 1).join(TMUX_DELIMITER));
   return merged;
+}
+
+function getPtyProcessPid(ptyProcess: PtyProcess): number | null {
+  if (typeof ptyProcess.pid === 'number' && Number.isFinite(ptyProcess.pid)) {
+    return ptyProcess.pid;
+  }
+  return null;
+}
+
+async function resolveTmuxClientTty(sessionName: string, preferredClientPid: number | null): Promise<string | null> {
+  const clientsRaw = await runTmux([
+    'list-clients',
+    '-t',
+    sessionName,
+    '-F',
+    `#{client_pid}${TMUX_DELIMITER}#{client_tty}`,
+  ]);
+
+  const rows = clientsRaw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => parseDelimitedRow(line, 2))
+    .filter((row): row is string[] => row !== null);
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  if (preferredClientPid !== null) {
+    const matched = rows.find(([clientPid]) => clientPid === String(preferredClientPid));
+    if (matched?.[1]) {
+      return matched[1];
+    }
+  }
+
+  return rows[0][1] || null;
+}
+
+async function ensureTmuxSessionExists(sessionName: string): Promise<void> {
+  try {
+    await runTmux(['has-session', '-t', sessionName]);
+    return;
+  } catch (error) {
+    const errorMessage = getErrorMessage(error);
+    if (!/can't find session|no server running/i.test(errorMessage)) {
+      throw error;
+    }
+  }
+
+  await runTmux(['new-session', '-d', '-s', sessionName]);
 }
 
 async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
@@ -264,6 +353,56 @@ async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
     activePaneId,
     inCopyMode: paneInMode === '1',
   };
+}
+
+async function captureTmuxPaneHistory(sessionName: string, lines: number): Promise<string[]> {
+  if (lines <= 0) {
+    return [];
+  }
+
+  const paneId = (await runTmux([
+    'display-message',
+    '-t',
+    sessionName,
+    '-p',
+    '#{pane_id}',
+  ])).trim();
+
+  if (!paneId) {
+    return [];
+  }
+
+  const captured = await runTmux([
+    'capture-pane',
+    '-p',
+    '-J',
+    '-S',
+    `-${lines}`,
+    '-t',
+    paneId,
+  ]);
+
+  if (!captured) {
+    return [];
+  }
+
+  return [captured.endsWith('\n') ? captured : `${captured}\n`];
+}
+
+async function getRestoreHistory(sessionId: string, session: TerminalSession): Promise<string[]> {
+  if (session.mode === 'tmux' && session.tmuxSessionName) {
+    try {
+      const tmuxHistory = await captureTmuxPaneHistory(session.tmuxSessionName, TMUX_RESTORE_SCROLLBACK_LINES);
+      if (tmuxHistory.length > 0) {
+        return tmuxHistory;
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.warn(`Failed to capture tmux scrollback for ${session.tmuxSessionName}: ${errorMessage}`);
+    }
+  }
+
+  return getReconnectionHistory(sessionId);
 }
 
 function resolveWorkingDirectory(req: express.Request, inputCwd?: string): string {
@@ -514,24 +653,57 @@ router.get('/processes', (_req, res) => {
   });
 });
 
-router.post('/serialize-state', (req, res) => {
+router.get('/tmux/sessions', async (_req, res) => {
+  try {
+    const raw = await runTmux([
+      'list-sessions',
+      '-F',
+      `#{session_name}${TMUX_DELIMITER}#{session_windows}${TMUX_DELIMITER}#{session_attached}`,
+    ]);
+
+    const sessions = raw
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => parseDelimitedRow(line, 3))
+      .filter((row): row is string[] => row !== null)
+      .map(([name, windowsRaw, attachedRaw]) => ({
+        name,
+        windows: Number.parseInt(windowsRaw || '0', 10) || 0,
+        attached: Number.parseInt(attachedRaw || '0', 10) || 0,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    return res.json({ sessions });
+  } catch (error) {
+    const errorMessage = getErrorMessage(error);
+    if (/no server running/i.test(errorMessage)) {
+      return res.json({ sessions: [] });
+    }
+    return res.status(500).json({ error: errorMessage || 'Failed to list tmux sessions' });
+  }
+});
+
+router.post('/serialize-state', async (req, res) => {
   const ids = Array.isArray(req.body?.ids)
     ? new Set((req.body.ids as unknown[]).filter((item): item is string => typeof item === 'string'))
     : null;
 
-  const states = Array.from(terminalSessions.entries())
-    .filter(([sessionId, session]) => (ids ? ids.has(sessionId) : true) && session.shouldPersist)
-    .map(([sessionId, session]) => ({
-      sessionId,
-      cwd: session.cwd,
-      createdAt: session.createdAt,
-      lastActivity: session.lastActivity,
-      backend: session.ptyBackend,
-      mode: session.mode,
-      tmuxSessionName: session.tmuxSessionName,
-      keepAliveMs: session.keepAliveMs,
-      history: getReconnectionHistory(sessionId),
-    }));
+  const states = await Promise.all(
+    Array.from(terminalSessions.entries())
+      .filter(([sessionId, session]) => (ids ? ids.has(sessionId) : true) && session.shouldPersist)
+      .map(async ([sessionId, session]) => ({
+        sessionId,
+        cwd: session.cwd,
+        createdAt: session.createdAt,
+        lastActivity: session.lastActivity,
+        backend: session.ptyBackend,
+        mode: session.mode,
+        tmuxSessionName: session.tmuxSessionName,
+        keepAliveMs: session.keepAliveMs,
+        history: await getRestoreHistory(sessionId, session),
+      }))
+  );
 
   res.json({
     serialized: JSON.stringify({ version: 1, states }),
@@ -684,7 +856,7 @@ router.get('/:sessionId/health', (req, res) => {
     });
  });
 
-router.get('/:sessionId/attach', (req, res) => {
+router.get('/:sessionId/attach', async (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
 
@@ -695,6 +867,8 @@ router.get('/:sessionId/attach', (req, res) => {
   session.lastDetachedAt = null;
   session.lastActivity = Date.now();
 
+  const history = await getRestoreHistory(sessionId, session);
+
   res.json({
     sessionId,
     cwd: session.cwd,
@@ -702,7 +876,7 @@ router.get('/:sessionId/attach', (req, res) => {
     clients: session.clients.size,
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
-    history: getReconnectionHistory(sessionId),
+    history,
     shouldPersist: session.shouldPersist,
     keepAliveMs: session.keepAliveMs,
   });
@@ -816,6 +990,9 @@ router.post('/:sessionId/tmux', async (req, res) => {
   const { action } = req.body ?? {};
 
   try {
+    let shouldBroadcastLayout = true;
+    let tmuxTarget = session.tmuxSessionName;
+
     switch (action) {
       case 'select-pane': {
         const paneId = typeof req.body?.paneId === 'string' ? req.body.paneId : '';
@@ -835,7 +1012,7 @@ router.post('/:sessionId/tmux', async (req, res) => {
       }
       case 'split-pane': {
         const direction = req.body?.direction === 'h' ? '-h' : '-v';
-        await runTmux(['split-window', '-t', session.tmuxSessionName, direction]);
+        await runTmux(['split-window', '-t', tmuxTarget, direction]);
         break;
       }
       case 'close-pane': {
@@ -849,23 +1026,116 @@ router.post('/:sessionId/tmux', async (req, res) => {
       case 'copy-mode': {
         const enabled = req.body?.enabled !== false;
         if (enabled) {
-          await runTmux(['copy-mode', '-t', session.tmuxSessionName]);
+          try {
+            await runTmux(['copy-mode', '-t', tmuxTarget]);
+          } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            if (!isAlreadyInCopyModeError(errorMessage)) {
+              throw error;
+            }
+          }
         } else {
-          await runTmux(['send-keys', '-t', session.tmuxSessionName, '-X', 'cancel']);
+          try {
+            await runTmux(['send-keys', '-t', tmuxTarget, '-X', 'cancel']);
+          } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            if (!isNotInCopyModeError(errorMessage)) {
+              throw error;
+            }
+          }
         }
         break;
       }
       case 'scroll': {
         const direction = req.body?.direction === 'down' ? 'down' : 'up';
         const lines = Math.max(1, Math.min(50, Math.floor(Number(req.body?.lines) || 1)));
-        const tmuxKey = direction === 'up' ? 'scroll-up' : 'scroll-down';
-        for (let i = 0; i < lines; i += 1) {
-          await runTmux(['send-keys', '-t', session.tmuxSessionName, '-X', tmuxKey]);
+
+        const paneInModeRaw = (await runTmux([
+          'display-message',
+          '-t',
+          tmuxTarget,
+          '-p',
+          '#{pane_in_mode}',
+        ])).trim();
+
+        if (paneInModeRaw !== '1') {
+          try {
+            await runTmux(['copy-mode', '-t', tmuxTarget]);
+          } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            if (!isAlreadyInCopyModeError(errorMessage)) {
+              throw error;
+            }
+          }
         }
+
+        const primaryCommand = direction === 'up' ? 'scroll-up' : 'scroll-down';
+        const fallbackCommands = direction === 'up'
+          ? ['up-line', 'cursor-up']
+          : ['down-line', 'cursor-down'];
+
+        let scrollSucceeded = false;
+        let lastError: unknown = null;
+
+        const tryCommand = async (command: string): Promise<boolean> => {
+          try {
+            await runTmux([
+              'send-keys',
+              '-t',
+              tmuxTarget,
+              '-X',
+              '-N',
+              String(lines),
+              command,
+            ]);
+            return true;
+          } catch (error) {
+            lastError = error;
+            return false;
+          }
+        };
+
+        scrollSucceeded = await tryCommand(primaryCommand);
+        if (!scrollSucceeded) {
+          for (const fallback of fallbackCommands) {
+            scrollSucceeded = await tryCommand(fallback);
+            if (scrollSucceeded) {
+              break;
+            }
+          }
+        }
+
+        if (!scrollSucceeded && lastError) {
+          throw lastError;
+        }
+
+        shouldBroadcastLayout = false;
         break;
       }
       case 'new-window': {
-        await runTmux(['new-window', '-t', session.tmuxSessionName]);
+        await runTmux(['new-window', '-t', tmuxTarget]);
+        break;
+      }
+      case 'switch-session': {
+        const targetSessionName = typeof req.body?.tmuxSessionName === 'string'
+          ? req.body.tmuxSessionName.trim()
+          : '';
+
+        if (!targetSessionName) {
+          return res.status(400).json({ error: 'tmuxSessionName is required' });
+        }
+
+        const preferredClientPid = getPtyProcessPid(session.ptyProcess);
+        const clientTty = await resolveTmuxClientTty(tmuxTarget, preferredClientPid);
+
+        if (!clientTty) {
+          return res.status(500).json({ error: 'No tmux client available for current session' });
+        }
+
+        await ensureTmuxSessionExists(targetSessionName);
+        await runTmux(['switch-client', '-c', clientTty, '-t', targetSessionName]);
+        session.tmuxSessionName = targetSessionName;
+        tmuxTarget = targetSessionName;
         break;
       }
       default:
@@ -873,11 +1143,16 @@ router.post('/:sessionId/tmux', async (req, res) => {
     }
 
     session.lastActivity = Date.now();
-    const layout = await getTmuxLayout(session.tmuxSessionName);
-    broadcastEvent(sessionId, { type: 'tmux-layout', layout });
-    return res.json({ success: true, layout });
+
+    if (shouldBroadcastLayout) {
+      const layout = await getTmuxLayout(tmuxTarget);
+      broadcastEvent(sessionId, { type: 'tmux-layout', layout });
+      return res.json({ success: true, layout });
+    }
+
+    return res.json({ success: true });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = getErrorMessage(error);
     console.error(`Failed to execute tmux action ${action}:`, errorMessage);
     return res.status(500).json({ error: errorMessage || 'Failed to execute tmux action' });
   }
