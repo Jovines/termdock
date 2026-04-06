@@ -93,18 +93,6 @@ const DEFAULT_KEEP_ALIVE_MS = parseInt(process.env.TERMINAL_DEFAULT_KEEPALIVE_MS
 const RECONNECT_SCROLLBACK = parseInt(process.env.TERMINAL_RECONNECT_SCROLLBACK || '200', 10);
 const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10);
 const TMUX_DELIMITER = '\x1f';
-const DEFAULT_TMUX_RESTORE_SCROLLBACK_LINES = 3000;
-const TMUX_RESTORE_SCROLLBACK_LINES = (() => {
-  const parsed = Number.parseInt(
-    process.env.TMUX_RESTORE_SCROLLBACK_LINES || String(DEFAULT_TMUX_RESTORE_SCROLLBACK_LINES),
-    10,
-  );
-  if (!Number.isFinite(parsed)) {
-    return DEFAULT_TMUX_RESTORE_SCROLLBACK_LINES;
-  }
-  return Math.max(0, Math.min(parsed, 20000));
-})();
-
 // 输出历史缓冲区（限制大小）
 const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
 const sessionHistory = new Map<string, { chunks: string[]; size: number }>();
@@ -372,51 +360,10 @@ async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
   };
 }
 
-async function captureTmuxPaneHistory(sessionName: string, lines: number): Promise<string[]> {
-  if (lines <= 0) {
-    return [];
-  }
-
-  const paneId = (await runTmux([
-    'display-message',
-    '-t',
-    sessionName,
-    '-p',
-    '#{pane_id}',
-  ])).trim();
-
-  if (!paneId) {
-    return [];
-  }
-
-  const captured = await runTmux([
-    'capture-pane',
-    '-p',
-    '-J',
-    '-S',
-    `-${lines}`,
-    '-t',
-    paneId,
-  ]);
-
-  if (!captured) {
-    return [];
-  }
-
-  return [captured.endsWith('\n') ? captured : `${captured}\n`];
-}
-
 async function getRestoreHistory(sessionId: string, session: TerminalSession): Promise<string[]> {
-  if (session.mode === 'tmux' && session.tmuxSessionName) {
-    try {
-      const tmuxHistory = await captureTmuxPaneHistory(session.tmuxSessionName, TMUX_RESTORE_SCROLLBACK_LINES);
-      if (tmuxHistory.length > 0) {
-        return tmuxHistory;
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.warn(`Failed to capture tmux scrollback for ${session.tmuxSessionName}: ${errorMessage}`);
-    }
+  // In tmux mode, scrollback belongs to tmux itself rather than the app layer.
+  if (session.mode === 'tmux') {
+    return [];
   }
 
   return getReconnectionHistory(sessionId);
@@ -509,7 +456,9 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
   session.dataDisposable = session.ptyProcess.onData((data: string) => {
     session.lastActivity = Date.now();
     session.hasWrittenData = true;
-    addToHistory(sessionId, data);
+    if (session.mode === 'shell') {
+      addToHistory(sessionId, data);
+    }
     broadcastEvent(sessionId, { type: 'data', data });
   });
 
@@ -838,9 +787,11 @@ router.get('/:sessionId/stream', (req, res) => {
   }, 15000);
 
   if (req.query.replay === '1') {
-    const replayChunks = getReconnectionHistory(sessionId);
-    for (const chunk of replayChunks) {
-      writeSse(res, { type: 'data', data: chunk, replay: true });
+    if (session.mode === 'shell') {
+      const replayChunks = getReconnectionHistory(sessionId);
+      for (const chunk of replayChunks) {
+        writeSse(res, { type: 'data', data: chunk, replay: true });
+      }
     }
   }
 

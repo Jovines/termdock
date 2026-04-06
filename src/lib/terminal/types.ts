@@ -166,7 +166,7 @@ export interface TerminalSessionState {
   bufferChunks: TerminalChunk[];
   bufferLength: number;
   updatedAt: number;
-  history?: string[];  // 从后端恢复的历史输出
+  history?: string[];  // 从后端恢复的历史输出，仅 shell 模式使用
 }
 
 // 断联清理时长配置类型
