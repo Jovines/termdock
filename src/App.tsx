@@ -58,7 +58,7 @@ function App() {
 
   const [customDurationInput, setCustomDurationInput] = React.useState<string>('');
   const [newSessionMode, setNewSessionMode] = React.useState<'shell' | 'tmux'>('shell');
-  const [newSessionTmuxName, setNewSessionTmuxName] = React.useState('main');
+  const [newSessionTmuxName, setNewSessionTmuxName] = React.useState('');
   const [activeKeepAlivePreset, setActiveKeepAlivePreset] = React.useState<CleanupDurationPreset | 'custom'>('3hours');
   const [activeKeepAliveCustomInput, setActiveKeepAliveCustomInput] = React.useState<string>('180');
 
@@ -229,7 +229,7 @@ function App() {
                         detail: {
                           keepAliveMs: cleanupDurationMs === Infinity ? null : cleanupDurationMs,
                           mode: newSessionMode,
-                          tmuxSessionName: newSessionMode === 'tmux' ? newSessionTmuxName : undefined,
+                          tmuxSessionName: newSessionMode === 'tmux' ? (newSessionTmuxName.trim() || undefined) : undefined,
                         },
                       }));
                       setIsDrawerOpen(false);
@@ -341,13 +341,8 @@ function App() {
                       type="text"
                       value={newSessionTmuxName}
                       onChange={(e) => setNewSessionTmuxName(e.target.value)}
-                      onBlur={() => {
-                        const next = newSessionTmuxName.trim();
-                        if (!next) {
-                          setNewSessionTmuxName('main');
-                        }
-                      }}
-                      placeholder="Tmux session name"
+                      onBlur={() => setNewSessionTmuxName((prev) => prev.trim())}
+                      placeholder="Tmux session name (empty = auto)"
                       className="w-full px-3 py-2 text-sm border rounded bg-input"
                     />
                   )}

@@ -60,6 +60,17 @@ let sessionCounter = 1;
 function generateSessionName(): string {
   return `terminal-${sessionCounter++}`;
 }
+
+function generateTmuxSessionName(seed?: string): string {
+  const normalizedSeed = (seed || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 12);
+  if (normalizedSeed) {
+    return `wt-${normalizedSeed}`;
+  }
+  const timePart = Date.now().toString(36);
+  const randomPart = Math.random().toString(36).slice(2, 8);
+  return `wt-${timePart}${randomPart}`;
+}
+
 function SessionLineIndicator({
   sessionCount,
   activeIndex,
@@ -96,7 +107,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   rendererMode = 'auto',
   showDebug,
   defaultSessionMode = 'shell',
-  defaultTmuxSessionName = 'main',
+  defaultTmuxSessionName = '',
   onStatusChange,
   onSessionDataUpdate,
 }) => {
@@ -224,8 +235,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const mode: TerminalMode = session.mode === 'tmux' || session.mode === 'shell'
       ? session.mode
       : defaultSessionMode;
+    const configuredDefaultTmuxName = defaultTmuxSessionName.trim();
+    const persistedTmuxName = (session.tmuxSessionName || '').trim();
     const tmuxSessionName = mode === 'tmux'
-      ? (session.tmuxSessionName || defaultTmuxSessionName)
+      ? (persistedTmuxName || configuredDefaultTmuxName || generateTmuxSessionName(sessionId))
       : null;
     const keepAliveMs = session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs;
 
@@ -406,8 +419,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       const mode: TerminalMode = options?.mode === 'tmux' || options?.mode === 'shell'
         ? options.mode
         : defaultSessionMode;
+      const requestedTmuxName = (options?.tmuxSessionName || '').trim();
+      const configuredDefaultTmuxName = defaultTmuxSessionName.trim();
       const tmuxSessionName = mode === 'tmux'
-        ? (options?.tmuxSessionName?.trim() || defaultTmuxSessionName)
+        ? (requestedTmuxName || configuredDefaultTmuxName || generateTmuxSessionName())
         : null;
       // 服务端会自动使用 home 目录，不需要客户端传递
       const newTerminalSession = await createTerminalSession({

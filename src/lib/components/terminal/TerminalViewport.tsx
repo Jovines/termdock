@@ -133,6 +133,7 @@ interface TerminalViewportProps {
   chunks: TerminalChunk[];
   onInput: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
+  onTmuxScroll?: (direction: 'up' | 'down', lines: number) => void;
   onInputFocusChange?: (isFocused: boolean) => void;
   rendererMode?: TerminalRendererMode;
   theme: TerminalTheme;
@@ -191,6 +192,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       chunks,
       onInput,
       onResize,
+      onTmuxScroll,
       onInputFocusChange,
       rendererMode = 'auto',
       theme,
@@ -303,6 +305,20 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         return true;
       }
 
+      if (onTmuxScroll) {
+        const total = remainderPxRef.current + deltaPixels;
+        const scrollLines = Math.trunc(total / lineHeightPx);
+        remainderPxRef.current = total - scrollLines * lineHeightPx;
+
+        if (scrollLines !== 0) {
+          const direction = scrollLines > 0 ? 'down' : 'up';
+          onTmuxScroll(direction, Math.max(1, Math.min(Math.abs(scrollLines), 40)));
+          return true;
+        }
+
+        return false;
+      }
+
       // 情况2：在alternate模式（没有scrollback，如vim/less/man）
       // 发送上下箭头键，模拟滚轮
       if (terminal.buffer.active.type === 'alternate') {
@@ -321,7 +337,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         return true;
       }
       return false;
-    }, [fontSize, pixelToCharCoords]);
+    }, [fontSize, onTmuxScroll, pixelToCharCoords]);
 
     /**
      * 处理点击事件，发送鼠标点击给TUI程序
