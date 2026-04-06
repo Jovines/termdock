@@ -29,6 +29,12 @@ export interface TmuxLayout {
   inCopyMode: boolean;
 }
 
+export interface TmuxSessionSummary {
+  name: string;
+  windows: number;
+  attached: number;
+}
+
 // Terminal Session Types
 export interface TerminalSession {
   sessionId: string;
@@ -67,12 +73,13 @@ export interface CreateTerminalOptions {
 }
 
 export interface TmuxActionPayload {
-  action: 'select-pane' | 'select-window' | 'split-pane' | 'close-pane' | 'copy-mode' | 'scroll' | 'new-window';
+  action: 'select-pane' | 'select-window' | 'split-pane' | 'close-pane' | 'copy-mode' | 'scroll' | 'new-window' | 'switch-session';
   paneId?: string;
   windowId?: string;
   direction?: 'h' | 'v' | 'up' | 'down';
   enabled?: boolean;
   lines?: number;
+  tmuxSessionName?: string;
 }
 
 // Stream Connection Options
@@ -116,6 +123,7 @@ export interface TerminalAPI {
   restartSession?(currentSessionId: string, options: CreateTerminalOptions): Promise<TerminalSession>;
   forceKill?(options: ForceKillOptions): Promise<void>;
   tmuxAction?(sessionId: string, payload: TmuxActionPayload): Promise<{ success: boolean; layout?: TmuxLayout }>;
+  listTmuxSessions?(): Promise<TmuxSessionSummary[]>;
   checkHealth?(sessionId: string): Promise<{
     healthy: boolean;
     sessionId: string;

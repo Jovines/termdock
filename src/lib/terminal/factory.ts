@@ -1,5 +1,5 @@
 import type { TerminalAPI, TerminalHandlers, TerminalStreamOptions, CreateTerminalOptions, ResizeTerminalPayload, TerminalSession, ForceKillOptions, TmuxActionPayload } from './types';
-import { createTerminalSession, connectTerminalStream, sendTerminalInput, resizeTerminal, closeTerminal, restartTerminalSession, forceKillTerminal, checkTerminalHealth, sendTmuxAction } from './api';
+import { createTerminalSession, connectTerminalStream, sendTerminalInput, resizeTerminal, closeTerminal, restartTerminalSession, forceKillTerminal, checkTerminalHealth, sendTmuxAction, listTmuxSessions } from './api';
 
 const getRetryPolicy = (options?: TerminalStreamOptions) => {
   const retry = options?.retry;
@@ -59,6 +59,10 @@ export const createWebTerminalAPI = (): TerminalAPI => ({
 
   async tmuxAction(sessionId: string, payload: TmuxActionPayload): Promise<{ success: boolean }> {
     return sendTmuxAction(sessionId, payload);
+  },
+
+  async listTmuxSessions() {
+    return listTmuxSessions();
   },
 
   async checkHealth(sessionId: string): Promise<{

@@ -5,6 +5,7 @@ import type {
   ConnectStreamOptions,
   TmuxActionPayload,
   TmuxLayout,
+  TmuxSessionSummary,
 } from './types';
 
 let csrfToken: string | null = null;
@@ -444,4 +445,18 @@ export async function sendTmuxAction(
   }
 
   return response.json();
+}
+
+export async function listTmuxSessions(): Promise<TmuxSessionSummary[]> {
+  const response = await fetch('/api/terminal/tmux/sessions', {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to list tmux sessions' }));
+    throw new Error(error.error || 'Failed to list tmux sessions');
+  }
+
+  const payload = await response.json() as { sessions?: TmuxSessionSummary[] };
+  return Array.isArray(payload.sessions) ? payload.sessions : [];
 }
