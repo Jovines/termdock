@@ -21,7 +21,7 @@
     "dev:server": "tsx watch src/server/entry.ts",
     "build": "npm run clean && npm run build:client && npm run build:server",
     "build:client": "vite build",
-    "build:server": "tsc -p tsconfig.server.json",
+    "build:server": "tsc -p tsconfig.server.json && chmod +x dist/server/cli.js",
     "generate:pwa-assets": "pwa-assets-generator --config pwa-assets.config.ts",
     "preview": "vite preview",
     "start": "node dist/server/cli.js",

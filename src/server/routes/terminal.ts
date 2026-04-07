@@ -561,6 +561,12 @@ function resolveWorkingDirectory(req: express.Request, inputCwd?: string): strin
     throw new Error('Invalid working directory');
   }
 
+  try {
+    fs.accessSync(requestedCwd, fs.constants.R_OK | fs.constants.X_OK);
+  } catch {
+    throw new Error(`Working directory is not accessible: ${requestedCwd}`);
+  }
+
   return requestedCwd;
 }
 
@@ -573,10 +579,11 @@ function isExecutable(filePath: string): boolean {
   }
 }
 
-function resolveShellCommand(): string {
+function resolveShellCandidates(): string[] {
+  const candidates: string[] = [];
   const configuredShell = process.env.SHELL;
   if (configuredShell && isExecutable(configuredShell)) {
-    return configuredShell;
+    candidates.push(configuredShell);
   }
 
   const fallbackShells = [
@@ -588,12 +595,22 @@ function resolveShellCommand(): string {
     '/usr/bin/sh',
   ];
 
-  const resolvedFallback = fallbackShells.find((candidate) => isExecutable(candidate));
-  if (resolvedFallback) {
-    return resolvedFallback;
+  for (const candidate of fallbackShells) {
+    if (isExecutable(candidate) && !candidates.includes(candidate)) {
+      candidates.push(candidate);
+    }
   }
 
-  throw new Error('No usable shell found. Set SHELL to an installed shell such as /bin/bash or /bin/sh.');
+  if (candidates.length === 0) {
+    throw new Error('No usable shell found. Set SHELL to an installed shell such as /bin/bash or /bin/sh.');
+  }
+
+  return candidates;
+}
+
+function shouldRetryShellSpawn(error: unknown): boolean {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  return /posix_spawnp failed|ENOENT|EACCES/i.test(errorMessage);
 }
 
 function writeSse(res: express.Response, payload: unknown): void {
@@ -701,7 +718,7 @@ async function spawnTerminalSession(req: express.Request, input: {
 
   const command = mode === 'tmux'
     ? (process.env.TMUX_BIN || 'tmux')
-    : (process.platform === 'win32' ? 'powershell.exe' : resolveShellCommand());
+    : (process.platform === 'win32' ? 'powershell.exe' : resolveShellCandidates()[0]);
   const args = mode === 'tmux' && tmuxSessionName
     ? ['new-session', '-A', '-s', tmuxSessionName]
     : [];
@@ -710,7 +727,7 @@ async function spawnTerminalSession(req: express.Request, input: {
   const resolvedEnv = { ...process.env, PATH: envPath };
 
   const pty = await getPtyProvider();
-  const ptyProcess = pty.spawn(command, args, {
+  const spawnOptions = {
     name: 'xterm-256color',
     cols,
     rows,
@@ -720,7 +737,31 @@ async function spawnTerminalSession(req: express.Request, input: {
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
     },
-  });
+  };
+
+  let ptyProcess: PtyProcess;
+
+  if (mode === 'shell' && process.platform !== 'win32') {
+    const shellCandidates = resolveShellCandidates();
+    let lastError: unknown = null;
+
+    ptyProcess = (() => {
+      for (const shellCandidate of shellCandidates) {
+        try {
+          return pty.spawn(shellCandidate, [], spawnOptions);
+        } catch (error) {
+          lastError = error;
+          if (!shouldRetryShellSpawn(error)) {
+            throw error;
+          }
+        }
+      }
+
+      throw lastError ?? new Error('Failed to start shell');
+    })();
+  } else {
+    ptyProcess = pty.spawn(command, args, spawnOptions);
+  }
 
   const session: TerminalSession = {
     ptyProcess,
