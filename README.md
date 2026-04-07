@@ -63,8 +63,11 @@ npm install --include=dev
 脚本会自动执行：
 
 - `npm install`
+- `npm rebuild node-pty --build-from-source`
 - `npm run build`
 - `npm install -g .`
+
+在 macOS 上，脚本还会检查 `node-pty` 的 `spawn-helper` 是否成功生成；如果没有，会直接报错提示你先安装 Xcode Command Line Tools。
 
 安装完成后可直接运行：
 
