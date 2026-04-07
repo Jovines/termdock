@@ -61,7 +61,7 @@ Test on iOS Safari and Android Chrome:
 When diagnosing keyboard animation issues, enable scoped debug channels:
 
 - URL query: `?debug=keyboard,viewport,terminal`
-- Or localStorage: `localStorage.setItem('web-terminal:debug', 'keyboard,viewport,terminal')`
+- Or localStorage: `localStorage.setItem('termdock:debug', 'keyboard,viewport,terminal')`
 - Reload page after changing debug channels.
 
 Current channel coverage:

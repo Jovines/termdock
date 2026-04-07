@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { CleanupDurationPreset, TerminalSettings } from '../terminal/types';
 
-const SETTINGS_STORAGE_KEY = 'web-terminal-settings';
+const SETTINGS_STORAGE_KEY = 'termdock-settings';
 const DEFAULT_SETTINGS: TerminalSettings = {
   cleanupDuration: 3 * 60 * 60 * 1000,  // 默认3小时
   cleanupDurationPreset: 'default',

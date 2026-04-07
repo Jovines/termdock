@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { clearTerminalClientState, getTerminalClientState, replaceTerminalClientState, type PersistedTerminalClientSession } from '../terminal/api';
 
-const LEGACY_STORAGE_KEY = 'web-terminal-sessions';
+const LEGACY_STORAGE_KEY = 'termdock-sessions';
 
 function writeLegacyLocalState(sessionList: PersistedSession[], activeSessionId: string | null): void {
   if (typeof window === 'undefined') {

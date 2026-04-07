@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-const SETTINGS_STORAGE_KEY = 'web-terminal-settings';
+const SETTINGS_STORAGE_KEY = 'termdock-settings';
 const DEFAULT_FONT_SIZE = 13;  // 默认字体大小（像素）
 const MIN_FONT_SIZE = 8;
 const MAX_FONT_SIZE = 32;

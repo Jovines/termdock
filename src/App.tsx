@@ -11,7 +11,7 @@ import { listTmuxSessions } from './lib/terminal/api';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import { createDefaultToolbarPresets, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 
-const TOOLBAR_PRESETS_STORAGE_KEY = 'web-terminal:toolbar-presets';
+const TOOLBAR_PRESETS_STORAGE_KEY = 'termdock:toolbar-presets';
 
 const SESSION_KEEPALIVE_PRESETS: Array<{ value: CleanupDurationPreset | 'custom'; label: string; ms: number | null }> = [
   { value: 'never', label: 'Never', ms: null },

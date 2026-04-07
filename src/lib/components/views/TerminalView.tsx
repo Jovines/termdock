@@ -4,7 +4,7 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
 import { convertThemeToXterm, getDefaultTheme, THEMES } from '../../terminal';
-import { createWebTerminalAPI } from '../../terminal/factory';
+import { createTermdockAPI } from '../../terminal/factory';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
 import { buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
@@ -17,8 +17,8 @@ import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 const TERMINAL_FONT_SIZE = 13;
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const RESIZE_THROTTLE_MS = 90;
-const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'web-terminal:mobile-keyboard-expanded';
-const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'web-terminal:mobile-keyboard-preset-mode';
+const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
+const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'termdock:mobile-keyboard-preset-mode';
 
 type Modifier = 'ctrl' | 'alt';
 
@@ -60,7 +60,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 }) => {
   // Use external fontSize from props, with local override support for pinch-to-zoom
   const [fontSize, setFontSize] = React.useState(initialFontSize);
-  const terminal = React.useMemo(() => createWebTerminalAPI(), []);
+  const terminal = React.useMemo(() => createTermdockAPI(), []);
   const debugSession = React.useMemo(() => createDebugLogger('session'), []);
   const debugKeyboard = React.useMemo(() => createDebugLogger('keyboard'), []);
 

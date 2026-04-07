@@ -11,7 +11,7 @@ const getRetryPolicy = (options?: TerminalStreamOptions) => {
   };
 };
 
-export const createWebTerminalAPI = (): TerminalAPI => ({
+export const createTermdockAPI = (): TerminalAPI => ({
   async createSession(options: CreateTerminalOptions): Promise<TerminalSession> {
     return createTerminalSession(options);
   },

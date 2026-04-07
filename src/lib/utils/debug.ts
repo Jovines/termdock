@@ -1,7 +1,7 @@
 type DebugChannel = 'keyboard' | 'viewport' | 'terminal' | 'session';
 
 const DEBUG_QUERY_KEY = 'debug';
-const DEBUG_STORAGE_KEY = 'web-terminal:debug';
+const DEBUG_STORAGE_KEY = 'termdock:debug';
 
 function parseChannels(raw: string | null): Set<string> {
   if (!raw) {

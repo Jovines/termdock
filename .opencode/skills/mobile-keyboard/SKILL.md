@@ -4,7 +4,7 @@ description: Diagnose and fix mobile soft-keyboard toolbar placement and termina
 compatibility: opencode
 metadata:
   audience: maintainers
-  scope: web-terminal
+  scope: termdock
 ---
 
 ## What this skill does
