@@ -7,6 +7,7 @@ declare global {
       body: any;
       params: { [key: string]: string };
       query: { [key: string]: string };
+      clientId?: string;
       pathValidator?: PathValidator;
     }
   }
