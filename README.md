@@ -1,4 +1,4 @@
-# Web Terminal
+# Termdock
 
 一个完整的、功能丰富的 Web 终端应用程序，基于现代技术栈构建。
 
@@ -25,10 +25,57 @@
 
 ## 快速开始
 
+### 一行命令启动
+
+发布到 npm 后，用户可以直接运行：
+
+```bash
+npx termdock
+```
+
+默认监听 `0.0.0.0:43888`，并且默认后台运行，也支持：
+
+```bash
+npx termdock --host 127.0.0.1 --port 4000
+```
+
+查看状态或停止服务：
+
+```bash
+termdock --status
+termdock --stop
+```
+
 ### 安装依赖
 
 ```bash
 npm install --include=dev
+```
+
+### 从源码一键安装命令
+
+克隆仓库后可直接运行：
+
+```bash
+./install-local.sh
+```
+
+脚本会自动执行：
+
+- `npm install`
+- `npm run build`
+- `npm install -g .`
+
+安装完成后可直接运行：
+
+```bash
+termdock
+```
+
+如需卸载：
+
+```bash
+./uninstall-local.sh
 ```
 
 ### 开发模式
@@ -37,7 +84,7 @@ npm install --include=dev
 # 启动前端开发服务器 (端口 5173)
 npm run dev:client
 
-# 启动后端服务器 (端口 3001)
+# 启动后端服务器 (端口 43888)
 npm run dev:server
 
 # 或者同时启动前后端
@@ -50,16 +97,27 @@ npm run dev
 npm run build
 ```
 
+构建结果：
+
+- `dist/client`: 前端静态资源
+- `dist/server`: Node.js 服务端与 CLI 入口
+
 ### 预览生产版本
 
 ```bash
-npm run preview
+npm start
+```
+
+也可以直接运行：
+
+```bash
+node dist/server/cli.js
 ```
 
 ## 项目结构
 
 ```
-web-terminal/
+termdock/
 ├── src/
 │   ├── main.tsx                 # 应用入口
 │   ├── App.tsx                  # 根组件
@@ -169,7 +227,7 @@ web-terminal/
 通过环境变量配置：
 
 ```bash
-PORT=3001                      # 服务器端口 (默认 3001)
+PORT=43888                     # 服务器端口 (默认 43888)
 NODE_ENV=development           # 运行环境
 TERM=xterm-256color            # 终端类型
 SHELL=/bin/bash                # 默认 shell
@@ -178,6 +236,33 @@ TERMINAL_IDLE_TIMEOUT=1800000  # 空闲超时 (毫秒)
 ROWS=24                        # 默认行数
 COLS=80                        # 默认列数
 ```
+
+CLI 也支持以下参数：
+
+```bash
+--host <host>                  # 覆盖 HOST
+--port <port>                  # 覆盖 PORT
+--foreground                   # 前台运行
+--status                       # 查看后台服务状态
+--stop                         # 停止后台服务
+```
+
+## 发布 npm 包
+
+```bash
+npm publish
+```
+
+发布前会自动执行 `prepublishOnly`，即：
+
+```bash
+npm run build
+```
+
+建议在发布前确认：
+
+- npm 包名可用
+- `repository`、`homepage`、`bugs` 字段已替换为真实仓库地址
 
 ## 浏览器支持
 

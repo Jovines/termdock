@@ -122,7 +122,7 @@ start_service() {
   fi
 }
 
-echo "Restarting web-terminal dev services in background..."
+echo "Restarting termdock dev services in background..."
 
 stop_by_pid_file "$SERVER_PID_FILE" "server"
 stop_by_pid_file "$CLIENT_PID_FILE" "client"
@@ -130,7 +130,7 @@ stop_by_pid_file "$CLIENT_PID_FILE" "client"
 kill_matching_processes "$ROOT_DIR/node_modules/.bin/tsx watch src/server/entry.ts" "server"
 kill_matching_processes "$ROOT_DIR/node_modules/.bin/vite" "client"
 
-ensure_port_available_for_project 3001
+ensure_port_available_for_project 43888
 ensure_port_available_for_project 5173
 
 start_service "server" "npm run dev:server" "$SERVER_PID_FILE" "$SERVER_LOG_FILE"
