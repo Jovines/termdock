@@ -8,6 +8,7 @@ export interface TerminalStore {
   getTerminalSession: (sessionId: string) => TerminalSessionState | undefined;
   setTerminalSession: (sessionId: string, terminalSession: TerminalSession & { history?: string[] }) => void;
   setSessionHistory: (sessionId: string, history: string[]) => void;
+  setSessionActiveProgram: (sessionId: string, activeProgram: string | null, activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string) => void;
   clearTerminalSession: (sessionId: string) => void;
@@ -25,6 +26,8 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     terminalSessionId: null,
     mode: 'shell',
     tmuxSessionName: null,
+    activeProgram: null,
+    activeProgramSource: null,
     isConnecting: false,
     buffer: '',
     bufferChunks: [],
@@ -61,6 +64,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         terminalSessionId: terminalSession.sessionId,
         mode: terminalSession.mode ?? baseState.mode,
         tmuxSessionName: terminalSession.tmuxSessionName ?? baseState.tmuxSessionName,
+        activeProgram: terminalSession.activeProgram ?? baseState.activeProgram,
+        activeProgramSource: terminalSession.activeProgramSource ?? baseState.activeProgramSource,
         sessionId,
         isConnecting: false,
         history,
@@ -78,6 +83,20 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       newSessions.set(sessionId, {
         ...existing,
         history,
+        updatedAt: Date.now(),
+      });
+      return { sessions: newSessions };
+    });
+  },
+
+  setSessionActiveProgram: (sessionId: string, activeProgram: string | null, activeProgramSource = null) => {
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
+      newSessions.set(sessionId, {
+        ...existing,
+        activeProgram,
+        activeProgramSource,
         updatedAt: Date.now(),
       });
       return { sessions: newSessions };
@@ -142,6 +161,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         newSessions.set(sessionId, {
           ...existing,
           terminalSessionId: null,
+          activeProgram: null,
+          activeProgramSource: null,
           isConnecting: false,
           updatedAt: Date.now(),
         });

@@ -74,6 +74,8 @@ export const createWebTerminalAPI = (): TerminalAPI => ({
     backend?: string;
     mode?: 'shell' | 'tmux';
     tmuxSessionName?: string | null;
+    activeProgram?: string | null;
+    activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   }> {
     return checkTerminalHealth(sessionId);
   },

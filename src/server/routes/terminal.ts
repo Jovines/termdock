@@ -78,11 +78,34 @@ interface TerminalSession {
   keepAliveMs: number | null;
   lastDetachedAt: number | null;
   hasWrittenData: boolean;
+  activeProgram: {
+    command: string | null;
+    source: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown';
+    updatedAt: number;
+  } | null;
   dataDisposable?: { dispose: () => void };
   exitDisposable?: { dispose: () => void };
 }
 
+interface PersistedClientSession {
+  sessionId: string;
+  name: string;
+  backendSessionId: string | null;
+  mode: TerminalMode;
+  tmuxSessionName: string | null;
+  keepAliveMs: number | null;
+  createdAt: number;
+  lastActivity: number;
+}
+
+interface ClientTerminalState {
+  sessions: PersistedClientSession[];
+  activeSessionId: string | null;
+  updatedAt: number;
+}
+
 const terminalSessions = new Map<string, TerminalSession>();
+const clientTerminalStates = new Map<string, ClientTerminalState>();
 const MAX_TERMINAL_SESSIONS = parseInt(process.env.MAX_TERMINAL_SESSIONS || '20', 10);
 
 // 开发模式下使用更激进的清理策略
@@ -92,6 +115,7 @@ const CLEANUP_INTERVAL = isDevelopment ? 60 * 1000 : 5 * 60 * 1000;
 const DEFAULT_KEEP_ALIVE_MS = parseInt(process.env.TERMINAL_DEFAULT_KEEPALIVE_MS || String(3 * 60 * 60 * 1000), 10);
 const RECONNECT_SCROLLBACK = parseInt(process.env.TERMINAL_RECONNECT_SCROLLBACK || '200', 10);
 const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10);
+const ACTIVE_PROGRAM_POLL_INTERVAL = parseInt(process.env.TERMINAL_ACTIVE_PROGRAM_POLL_INTERVAL || '1200', 10);
 const TMUX_DELIMITER = '\x1f';
 // 输出历史缓冲区（限制大小）
 const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
@@ -151,6 +175,58 @@ function normalizeKeepAliveMs(input: unknown): number | null {
 
 function normalizeMode(input: unknown): TerminalMode {
   return input === 'tmux' ? 'tmux' : 'shell';
+}
+
+function normalizePersistedClientSession(input: unknown): PersistedClientSession | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+
+  const candidate = input as Partial<PersistedClientSession>;
+  if (typeof candidate.sessionId !== 'string' || typeof candidate.name !== 'string') {
+    return null;
+  }
+
+  return {
+    sessionId: candidate.sessionId,
+    name: candidate.name,
+    backendSessionId: typeof candidate.backendSessionId === 'string' && candidate.backendSessionId.trim().length > 0
+      ? candidate.backendSessionId
+      : null,
+    mode: normalizeMode(candidate.mode),
+    tmuxSessionName: typeof candidate.tmuxSessionName === 'string' && candidate.tmuxSessionName.trim().length > 0
+      ? candidate.tmuxSessionName
+      : null,
+    keepAliveMs: normalizeKeepAliveMs(candidate.keepAliveMs),
+    createdAt: typeof candidate.createdAt === 'number' && Number.isFinite(candidate.createdAt)
+      ? Math.floor(candidate.createdAt)
+      : Date.now(),
+    lastActivity: typeof candidate.lastActivity === 'number' && Number.isFinite(candidate.lastActivity)
+      ? Math.floor(candidate.lastActivity)
+      : Date.now(),
+  };
+}
+
+function normalizeClientTerminalState(input: unknown): ClientTerminalState {
+  if (!input || typeof input !== 'object') {
+    return { sessions: [], activeSessionId: null, updatedAt: Date.now() };
+  }
+
+  const candidate = input as Partial<ClientTerminalState> & { sessions?: unknown[] };
+  const sessions = Array.isArray(candidate.sessions)
+    ? candidate.sessions
+      .map((session) => normalizePersistedClientSession(session))
+      .filter((session): session is PersistedClientSession => session !== null)
+    : [];
+  const activeSessionId = typeof candidate.activeSessionId === 'string' && candidate.activeSessionId.trim().length > 0
+    ? candidate.activeSessionId
+    : null;
+
+  return {
+    sessions,
+    activeSessionId,
+    updatedAt: Date.now(),
+  };
 }
 
 function generateTmuxSessionName(): string {
@@ -230,6 +306,111 @@ function getPtyProcessPid(ptyProcess: PtyProcess): number | null {
     return ptyProcess.pid;
   }
   return null;
+}
+
+function normalizeProgramName(command: string | null | undefined): string | null {
+  if (typeof command !== 'string') {
+    return null;
+  }
+
+  const normalized = command.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const lastSegment = normalized.split(/[\\/]/).pop()?.trim();
+  return lastSegment && lastSegment.length > 0 ? lastSegment : normalized;
+}
+
+function getActiveProgramFromTmuxLayout(layout: TmuxLayout): { command: string | null; source: 'tmux-pane'; updatedAt: number } | null {
+  const activeWindow = layout.windows.find((window) => window.id === layout.activeWindowId);
+  const activePane = activeWindow?.panes.find((pane) => pane.id === layout.activePaneId);
+  const command = normalizeProgramName(activePane?.command);
+
+  if (!command) {
+    return null;
+  }
+
+  return {
+    command,
+    source: 'tmux-pane',
+    updatedAt: Date.now(),
+  };
+}
+
+async function detectShellActiveProgram(session: TerminalSession): Promise<{
+  command: string | null;
+  source: 'shell-tty' | 'shell-pid' | 'unknown';
+  updatedAt: number;
+} | null> {
+  const pid = getPtyProcessPid(session.ptyProcess);
+  if (pid === null) {
+    return null;
+  }
+
+  try {
+    const ttyPath = await fs.promises.readlink(`/proc/${pid}/fd/0`);
+    const ttyName = ttyPath.startsWith('/dev/') ? ttyPath.slice('/dev/'.length) : ttyPath;
+
+    const { stdout } = await execFileAsync('ps', [
+      '-t',
+      ttyName,
+      '-o',
+      'pid=,ppid=,pgid=,tpgid=,stat=,comm=',
+    ], {
+      timeout: 3000,
+      maxBuffer: 512 * 1024,
+    });
+
+    const rows = stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const match = line.match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(.+)$/);
+        if (!match) {
+          return null;
+        }
+
+        return {
+          pid: Number.parseInt(match[1] || '0', 10),
+          pgid: Number.parseInt(match[3] || '0', 10),
+          tpgid: Number.parseInt(match[4] || '0', 10),
+          stat: match[5] || '',
+          command: normalizeProgramName(match[6]),
+        };
+      })
+      .filter((row): row is { pid: number; pgid: number; tpgid: number; stat: string; command: string | null } => row !== null);
+
+    if (rows.length > 0) {
+      const foregroundRows = rows.filter((row) => row.command && row.tpgid > 0 && row.pgid === row.tpgid && !row.stat.startsWith('Z'));
+      const preferredForeground = foregroundRows.find((row) => row.pid !== pid) ?? foregroundRows[foregroundRows.length - 1];
+      if (preferredForeground?.command) {
+        return {
+          command: preferredForeground.command,
+          source: 'shell-tty',
+          updatedAt: Date.now(),
+        };
+      }
+
+      const shellRow = rows.find((row) => row.pid === pid && row.command);
+      if (shellRow?.command) {
+        return {
+          command: shellRow.command,
+          source: 'shell-pid',
+          updatedAt: Date.now(),
+        };
+      }
+    }
+  } catch {
+    // Fall through to shell fallback.
+  }
+
+  return {
+    command: normalizeProgramName(process.env.SHELL || '/bin/sh'),
+    source: 'unknown',
+    updatedAt: Date.now(),
+  };
 }
 
 async function resolveTmuxClientTty(sessionName: string, preferredClientPid: number | null): Promise<string | null> {
@@ -522,6 +703,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     keepAliveMs: normalizeKeepAliveMs(input.keepAliveMs),
     lastDetachedAt: null,
     hasWrittenData: false,
+    activeProgram: null,
   };
 
   terminalSessions.set(sessionId, session);
@@ -615,6 +797,8 @@ router.get('/processes', (_req, res) => {
     keepAliveMs: session.keepAliveMs,
     isOrphan: session.clients.size === 0,
     hasWrittenData: session.hasWrittenData,
+    activeProgram: session.activeProgram?.command ?? null,
+    activeProgramSource: session.activeProgram?.source ?? null,
   }));
 
   res.json({
@@ -685,6 +869,41 @@ router.post('/serialize-state', async (req, res) => {
   });
 });
 
+router.get('/client-state', (req, res) => {
+  const clientId = req.clientId;
+  if (!clientId) {
+    return res.status(500).json({ error: 'Client identity is not available' });
+  }
+
+  const state = clientTerminalStates.get(clientId) ?? {
+    sessions: [],
+    updatedAt: Date.now(),
+  };
+
+  res.json(state);
+});
+
+router.put('/client-state', (req, res) => {
+  const clientId = req.clientId;
+  if (!clientId) {
+    return res.status(500).json({ error: 'Client identity is not available' });
+  }
+
+  const state = normalizeClientTerminalState(req.body);
+  clientTerminalStates.set(clientId, state);
+  res.json(state);
+});
+
+router.delete('/client-state', (req, res) => {
+  const clientId = req.clientId;
+  if (!clientId) {
+    return res.status(500).json({ error: 'Client identity is not available' });
+  }
+
+  clientTerminalStates.delete(clientId);
+  res.status(204).send();
+});
+
 router.post('/create', async (req, res) => {
   try {
     if (terminalSessions.size >= MAX_TERMINAL_SESSIONS) {
@@ -711,6 +930,8 @@ router.post('/create', async (req, res) => {
       tmuxSessionName: session.tmuxSessionName,
       shouldPersist: session.shouldPersist,
       keepAliveMs: session.keepAliveMs,
+      activeProgram: session.activeProgram?.command ?? null,
+      activeProgramSource: session.activeProgram?.source ?? null,
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -746,10 +967,29 @@ router.get('/:sessionId/stream', (req, res) => {
     ptyBackend,
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
+    activeProgram: session.activeProgram?.command ?? null,
+    activeProgramSource: session.activeProgram?.source ?? null,
   });
 
   let tmuxInterval: ReturnType<typeof setInterval> | null = null;
+  let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
   let lastTmuxLayoutSnapshot = '';
+  let lastActiveProgramSnapshot = JSON.stringify(session.activeProgram ?? null);
+
+  const maybeWriteActiveProgram = (activeProgram: TerminalSession['activeProgram']) => {
+    const snapshot = JSON.stringify(activeProgram ?? null);
+    if (snapshot === lastActiveProgramSnapshot) {
+      return;
+    }
+
+    lastActiveProgramSnapshot = snapshot;
+    session.activeProgram = activeProgram;
+    writeSse(res, {
+      type: 'active-program',
+      activeProgram: activeProgram?.command ?? null,
+      activeProgramSource: activeProgram?.source ?? null,
+    });
+  };
 
   const sendTmuxLayout = async () => {
     if (session.mode !== 'tmux' || !session.tmuxSessionName) {
@@ -758,6 +998,7 @@ router.get('/:sessionId/stream', (req, res) => {
 
     try {
       const layout = await getTmuxLayout(session.tmuxSessionName);
+      maybeWriteActiveProgram(getActiveProgramFromTmuxLayout(layout));
       const snapshot = JSON.stringify(layout);
       if (snapshot === lastTmuxLayoutSnapshot) {
         return;
@@ -770,11 +1011,29 @@ router.get('/:sessionId/stream', (req, res) => {
     }
   };
 
+  const sendShellActiveProgram = async () => {
+    if (session.mode !== 'shell') {
+      return;
+    }
+
+    try {
+      maybeWriteActiveProgram(await detectShellActiveProgram(session));
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.warn(`Failed to detect active shell program for ${sessionId}: ${errorMessage}`);
+    }
+  };
+
   if (session.mode === 'tmux' && session.tmuxSessionName) {
     void sendTmuxLayout();
     tmuxInterval = setInterval(() => {
       void sendTmuxLayout();
     }, TMUX_POLL_INTERVAL);
+  } else {
+    void sendShellActiveProgram();
+    activeProgramInterval = setInterval(() => {
+      void sendShellActiveProgram();
+    }, ACTIVE_PROGRAM_POLL_INTERVAL);
   }
 
   const heartbeatInterval = setInterval(() => {
@@ -799,6 +1058,9 @@ router.get('/:sessionId/stream', (req, res) => {
     clearInterval(heartbeatInterval);
     if (tmuxInterval) {
       clearInterval(tmuxInterval);
+    }
+    if (activeProgramInterval) {
+      clearInterval(activeProgramInterval);
     }
     closeClient(session, clientId);
     console.log(`Client ${clientId} disconnected from terminal session ${sessionId}`);
@@ -829,6 +1091,8 @@ router.get('/:sessionId/health', (req, res) => {
       backend: session.ptyBackend,
       mode: session.mode,
       tmuxSessionName: session.tmuxSessionName,
+      activeProgram: session.activeProgram?.command ?? null,
+      activeProgramSource: session.activeProgram?.source ?? null,
     });
  });
 
@@ -855,6 +1119,8 @@ router.get('/:sessionId/attach', async (req, res) => {
     history,
     shouldPersist: session.shouldPersist,
     keepAliveMs: session.keepAliveMs,
+    activeProgram: session.activeProgram?.command ?? null,
+    activeProgramSource: session.activeProgram?.source ?? null,
   });
 });
 

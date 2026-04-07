@@ -289,6 +289,8 @@ export async function checkTerminalHealth(sessionId: string): Promise<{
   backend?: string;
   mode?: 'shell' | 'tmux';
   tmuxSessionName?: string | null;
+  activeProgram?: string | null;
+  activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }> {
   const response = await fetch(`/api/terminal/${sessionId}/health`, {
     method: 'GET',
@@ -318,6 +320,8 @@ export interface PersistentTerminalProcess {
   keepAliveMs: number | null;
   isOrphan: boolean;
   hasWrittenData: boolean;
+  activeProgram: string | null;
+  activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }
 
 export async function listTerminalProcesses(): Promise<{
@@ -350,6 +354,8 @@ export async function attachTerminalSession(sessionId: string): Promise<{
   history: string[];
   shouldPersist: boolean;
   keepAliveMs: number | null;
+  activeProgram: string | null;
+  activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }> {
   const response = await fetch(`/api/terminal/${sessionId}/attach`, {
     method: 'GET',
@@ -459,4 +465,68 @@ export async function listTmuxSessions(): Promise<TmuxSessionSummary[]> {
 
   const payload = await response.json() as { sessions?: TmuxSessionSummary[] };
   return Array.isArray(payload.sessions) ? payload.sessions : [];
+}
+
+export interface PersistedTerminalClientSession {
+  sessionId: string;
+  name: string;
+  backendSessionId: string | null;
+  mode: 'shell' | 'tmux';
+  tmuxSessionName: string | null;
+  keepAliveMs: number | null;
+  createdAt: number;
+  lastActivity: number;
+}
+
+export interface TerminalClientState {
+  sessions: PersistedTerminalClientSession[];
+  activeSessionId?: string | null;
+  updatedAt?: number;
+}
+
+export async function getTerminalClientState(): Promise<TerminalClientState> {
+  const response = await fetch('/api/terminal/client-state', {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to load terminal client state' }));
+    throw new Error(error.error || 'Failed to load terminal client state');
+  }
+
+  return response.json();
+}
+
+export async function replaceTerminalClientState(state: TerminalClientState): Promise<TerminalClientState> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/client-state', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
+    body: JSON.stringify(state),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to save terminal client state' }));
+    throw new Error(error.error || 'Failed to save terminal client state');
+  }
+
+  return response.json();
+}
+
+export async function clearTerminalClientState(): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/client-state', {
+    method: 'DELETE',
+    headers: {
+      'X-XSRF-TOKEN': csrfTokenHeader,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to clear terminal client state' }));
+    throw new Error(error.error || 'Failed to clear terminal client state');
+  }
 }

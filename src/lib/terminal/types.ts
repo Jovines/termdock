@@ -44,11 +44,13 @@ export interface TerminalSession {
   tmuxSessionName?: string | null;
   shouldPersist?: boolean;
   keepAliveMs?: number | null;
+  activeProgram?: string | null;
+  activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -60,6 +62,8 @@ export interface TerminalStreamEvent {
   cwd?: string;
   mode?: TerminalMode;
   tmuxSessionName?: string | null;
+  activeProgram?: string | null;
+  activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }
 
 // Create Session Options
@@ -133,6 +137,8 @@ export interface TerminalAPI {
     backend?: string;
     mode?: TerminalMode;
     tmuxSessionName?: string | null;
+    activeProgram?: string | null;
+    activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   }>;
 }
 
@@ -161,6 +167,8 @@ export interface TerminalSessionState {
   terminalSessionId: string | null;  // 后端 session ID
   mode: TerminalMode;
   tmuxSessionName: string | null;
+  activeProgram: string | null;
+  activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   isConnecting: boolean;
   buffer: string;
   bufferChunks: TerminalChunk[];
