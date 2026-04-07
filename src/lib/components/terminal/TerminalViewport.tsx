@@ -535,16 +535,24 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         return;
       }
 
-      const handleCompatMouseCapture = (event: MouseEvent) => {
-        if (!shouldPreventDefaultForTouch()) {
-          return;
-        }
-
+      const shouldBlockCompatMouseEvent = (event: MouseEvent) => {
         const sourceCaps = event as MouseEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } };
         const fromTouch = sourceCaps.sourceCapabilities?.firesTouchEvents === true;
         const recentlyTouched = nowMs() - lastTouchInteractionAtRef.current <= 1200;
 
         if (!fromTouch && !recentlyTouched) {
+          return false;
+        }
+
+        if (container.contains(event.target as Node | null)) {
+          return true;
+        }
+
+        return shouldPreventDefaultForTouch();
+      };
+
+      const handleCompatMouseCapture = (event: MouseEvent) => {
+        if (!shouldBlockCompatMouseEvent(event)) {
           return;
         }
 
@@ -556,11 +564,15 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       };
 
       container.addEventListener('mousedown', handleCompatMouseCapture, { capture: true, passive: false });
+      container.addEventListener('mouseup', handleCompatMouseCapture, { capture: true, passive: false });
       container.addEventListener('click', handleCompatMouseCapture, { capture: true, passive: false });
+      document.addEventListener('mouseup', handleCompatMouseCapture, { capture: true, passive: false });
 
       return () => {
         container.removeEventListener('mousedown', handleCompatMouseCapture, true);
+        container.removeEventListener('mouseup', handleCompatMouseCapture, true);
         container.removeEventListener('click', handleCompatMouseCapture, true);
+        document.removeEventListener('mouseup', handleCompatMouseCapture, true);
       };
     }, [enableTouchScroll, shouldPreventDefaultForTouch, nowMs]);
 
@@ -1137,7 +1149,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             {enableTouchScroll ? (
               <textarea
                 ref={hiddenInputRef}
-                aria-hidden="true"
+                aria-label="Terminal input"
                 data-terminal-input-anchor="true"
                 inputMode="text"
                 enterKeyHint="enter"
