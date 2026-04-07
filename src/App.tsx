@@ -86,6 +86,9 @@ function App() {
     }
   });
   const [selectedToolbarPresetId, setSelectedToolbarPresetId] = React.useState<string>('default');
+  const keepAliveSummary = cleanupDurationMs === Infinity
+    ? 'without expiry'
+    : `for ${formatKeepAliveLabel(cleanupDurationMs)}`;
 
   useEffect(() => {
     window.localStorage.setItem(TOOLBAR_PRESETS_STORAGE_KEY, JSON.stringify(toolbarPresets));
@@ -104,6 +107,12 @@ function App() {
       setCustomDurationInput('');
     }
   }, [cleanupDurationPreset, customDurationMs]);
+
+  useEffect(() => {
+    if (!tmuxStatus.available && newSessionMode === 'tmux') {
+      setNewSessionMode('shell');
+    }
+  }, [newSessionMode, tmuxStatus.available]);
 
   useEffect(() => {
     const info: Record<string, any> = {};
@@ -322,21 +331,12 @@ function App() {
                     sessions.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName)
                   );
                   const availableTmuxSessions = tmuxSessions.filter((t) => !connectedTmuxNames.has(t.name));
-                  if (!tmuxStatus.available) {
-                    return (
-                      <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-xs text-amber-100">
-                        <div className="font-medium text-amber-50">tmux optional feature</div>
-                        <div>{tmuxStatus.reason ?? 'tmux is unavailable on this machine.'}</div>
-                        <div className="text-amber-200/90">Install `tmux` to enable session reuse, attach to named tmux sessions, and use tmux window mode here. The UI checks automatically and will enable tmux without a restart once it is available.</div>
-                      </div>
-                    );
-                  }
                   if (availableTmuxSessions.length === 0) return null;
-                 return (
-                   <div className="space-y-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setTmuxSectionCollapsed((c) => !c)}
+                  return (
+                    <div className="space-y-1.5">
+                     <button
+                       type="button"
+                       onClick={() => setTmuxSectionCollapsed((c) => !c)}
                       className="w-full flex items-center gap-2 px-1 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
                     >
                       {tmuxSectionCollapsed ? <RiArrowRightSLine size={14} /> : <RiArrowDownSLine size={14} />}
@@ -368,9 +368,9 @@ function App() {
                         ))}
                       </div>
                     )}
-                  </div>
-                );
-              })()}
+                    </div>
+                  );
+                })()}
 
               {/* Settings Section */}
               <div className="space-y-3">
@@ -455,22 +455,56 @@ function App() {
 
                 <div className="space-y-1.5">
                   <span className="text-xs text-muted-foreground">New Session Mode</span>
-                  <select
-                    value={newSessionMode}
-                    onChange={(e) => setNewSessionMode(e.target.value as 'shell' | 'tmux')}
-                    className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
-                  >
-                    <option value="shell">Standard Shell</option>
-                    <option value="tmux" disabled={!tmuxStatus.available}>Tmux Window Mode</option>
-                  </select>
-                  {!tmuxStatus.available && (
-                    <p className="text-xs text-amber-400">
-                      tmux is not installed yet. Install it and keep this drawer open; Termdock will detect it automatically.
-                    </p>
-                  )}
-                  {tmuxStatus.available && tmuxStatus.version && (
-                    <p className="text-xs text-muted-foreground">Detected: {tmuxStatus.version}</p>
-                  )}
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={() => setNewSessionMode('shell')}
+                      className={`w-full rounded-lg border px-3 py-3 text-left transition-colors ${
+                        newSessionMode === 'shell'
+                          ? 'border-primary/40 bg-primary/10'
+                          : 'border-border bg-input hover:bg-surface-elevated'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium">Shell</span>
+                        <span className="text-[10px] uppercase tracking-wider text-emerald-400">Recommended</span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Best for most people. With keepalive set {keepAliveSummary}, you can usually close the page and come back later without needing tmux.
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (tmuxStatus.available) {
+                          setNewSessionMode('tmux');
+                        }
+                      }}
+                      className={`w-full rounded-lg border px-3 py-3 text-left transition-colors ${
+                        newSessionMode === 'tmux'
+                          ? 'border-primary/40 bg-primary/10'
+                          : 'border-border bg-input hover:bg-surface-elevated'
+                      } ${tmuxStatus.available ? '' : 'opacity-80'}`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium">tmux</span>
+                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                          {tmuxStatus.available ? 'Available' : 'Optional'}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Better for named sessions, multi-pane layouts, and longer-running workflows that you want to reattach across browser sessions.
+                      </p>
+                      {!tmuxStatus.available ? (
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          Not installed right now. Shell mode already covers the common "come back later" workflow. If you install `tmux`, Termdock will detect it automatically while this panel stays open.
+                        </p>
+                      ) : tmuxStatus.version ? (
+                        <p className="mt-2 text-xs text-muted-foreground">Detected: {tmuxStatus.version}</p>
+                      ) : null}
+                    </button>
+                  </div>
                   {newSessionMode === 'tmux' && (
                     <input
                       type="text"
