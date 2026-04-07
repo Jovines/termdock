@@ -10,6 +10,7 @@ import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { createDebugLogger } from '../utils/debug';
+import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
 
 interface TerminalSession {
   id: string;
@@ -48,6 +49,7 @@ interface MultiTerminalViewProps {
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
+  toolbarPresets?: ToolbarPresetDefinition[];
   showDebug?: boolean;
   defaultSessionMode?: TerminalMode;
   defaultTmuxSessionName?: string;
@@ -105,6 +107,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
   fontSize = 13,
   rendererMode = 'auto',
+  toolbarPresets = [],
   showDebug,
   defaultSessionMode = 'shell',
   defaultTmuxSessionName = '',
@@ -527,6 +530,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       }
     } catch (error) {
       console.error('[Session] Failed to close backend terminal:', error);
+      return;
     }
 
     // Remove from local state
@@ -665,6 +669,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                     fontFamily={fontFamily}
                     fontSize={fontSize}
                     rendererMode={rendererMode}
+                    toolbarPresets={toolbarPresets}
                     isActive={index === activeSessionIndex}
                     focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
                     onKeyboardVisibilityChange={handleKeyboardVisibilityChange}

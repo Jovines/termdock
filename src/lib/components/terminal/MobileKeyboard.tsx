@@ -1,5 +1,7 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { RiArrowDownLine, RiArrowGoBackLine, RiArrowLeftLine, RiArrowRightLine, RiArrowUpLine } from '@remixicon/react';
+import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
 
 type Modifier = 'ctrl' | 'alt';
 type MobileKey =
@@ -16,10 +18,18 @@ type MobileKey =
   | 'arrow-right';
 
 type RepeatableMobileKey = 'arrow-up' | 'arrow-down' | 'arrow-left' | 'arrow-right';
+type ExpandedItem =
+  | { id: 'preset'; kind: 'preset' }
+  | { id: 'alt'; kind: 'alt' }
+  | { id: 'enter'; kind: 'key'; keyName: 'enter' }
+  | { id: 'home'; kind: 'key'; keyName: 'home' }
+  | { id: 'end'; kind: 'key'; keyName: 'end' }
+  | { id: 'ctrl-c'; kind: 'key'; keyName: 'ctrl-c' }
+  | { id: 'ctrl-d'; kind: 'key'; keyName: 'ctrl-d' }
+  | { id: string; kind: 'text'; action: MobileToolbarAction };
 
 const REPEAT_START_DELAY_MS = 280;
 const REPEAT_INTERVAL_MS = 70;
-
 const BASE_KEY_SEQUENCES: Record<MobileKey, string> = {
   esc: '\u001b',
   tab: '\t',
@@ -63,8 +73,19 @@ interface MobileKeyboardProps {
   activeModifier: Modifier | null;
   lockedModifier: Modifier | null;
   disabled: boolean;
+  defaultShowExtended?: boolean;
+  presetLabel: string;
+  presetModeLabel: string;
+  presetMode: ToolbarPresetMode;
+  presetOptions: ToolbarPresetOption[];
+  includeAlt: boolean;
+  presetRowLayout: number[];
+  extraActions: MobileToolbarAction[];
   onKeyPress: (key: MobileKey) => void;
+  onTextPress: (sequence: string) => void;
   onModifierToggle: (modifier: Modifier) => void;
+  onPresetSelect: (mode: ToolbarPresetMode) => void;
+  onExpandedChange?: (expanded: boolean) => void;
   onPressStart: () => void;
 }
 
@@ -73,12 +94,26 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   activeModifier,
   lockedModifier,
   disabled,
+  defaultShowExtended = false,
+  presetLabel,
+  presetModeLabel,
+  presetMode,
+  presetOptions,
+  includeAlt,
+  presetRowLayout,
+  extraActions,
   onKeyPress,
+  onTextPress,
   onModifierToggle,
+  onPresetSelect,
+  onExpandedChange,
   onPressStart,
 }) => {
-  const [showExtended, setShowExtended] = React.useState(false);
+  const [showExtended, setShowExtended] = React.useState(defaultShowExtended);
+  const [showPresetMenu, setShowPresetMenu] = React.useState(false);
+  const [presetMenuPosition, setPresetMenuPosition] = React.useState<{ top: number; left: number } | null>(null);
   const toolbarDisabled = disabled || !visible;
+  const presetButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const repeatStateRef = React.useRef<{
     key: RepeatableMobileKey | null;
     pointerId: number | null;
@@ -149,8 +184,18 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   }, [stopKeyRepeat]);
 
   React.useEffect(() => {
+    setShowExtended(defaultShowExtended);
+  }, [defaultShowExtended]);
+
+  React.useEffect(() => {
+    onExpandedChange?.(showExtended);
+  }, [onExpandedChange, showExtended]);
+
+  React.useEffect(() => {
     if (toolbarDisabled) {
       stopKeyRepeat();
+      setShowPresetMenu(false);
+      setPresetMenuPosition(null);
     }
   }, [stopKeyRepeat, toolbarDisabled]);
 
@@ -158,8 +203,34 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     if (visible) {
       return;
     }
-    setShowExtended(false);
+    setShowPresetMenu(false);
+    setPresetMenuPosition(null);
   }, [visible]);
+
+  React.useEffect(() => {
+    if (!showPresetMenu) {
+      return;
+    }
+
+    const updatePosition = () => {
+      const rect = presetButtonRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+      setPresetMenuPosition({
+        left: Math.max(8, rect.left),
+        top: Math.max(8, rect.top - 8),
+      });
+    };
+
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [showPresetMenu]);
 
   const handleRepeatPointerDown = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>, key: RepeatableMobileKey) => {
@@ -249,19 +320,116 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     [onPressStart, toolbarDisabled]
   );
 
+  const handleTextPointerDown = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>, sequence: string) => {
+      if (toolbarDisabled) {
+        return;
+      }
+      event.preventDefault();
+      onPressStart();
+      onTextPress(sequence);
+    },
+    [onPressStart, onTextPress, toolbarDisabled]
+  );
+
+  const handlePresetCyclePointerDown = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (toolbarDisabled) {
+        return;
+      }
+      event.preventDefault();
+      onPressStart();
+      const rect = event.currentTarget.getBoundingClientRect();
+      setPresetMenuPosition({
+        left: Math.max(8, rect.left),
+        top: Math.max(8, rect.top - 8),
+      });
+      setShowPresetMenu((current) => !current);
+    },
+    [onPressStart, toolbarDisabled]
+  );
+
+  const handlePresetOptionPointerDown = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>, mode: ToolbarPresetMode) => {
+      if (toolbarDisabled) {
+        return;
+      }
+      event.preventDefault();
+      onPressStart();
+      setShowPresetMenu(false);
+      setPresetMenuPosition(null);
+      onPresetSelect(mode);
+    },
+    [onPressStart, onPresetSelect, toolbarDisabled]
+  );
+
+  const hasPresetActions = extraActions.length > 0;
+  const expandedItems = React.useMemo(() => {
+    const defaultItems: ExpandedItem[] = [
+      { id: 'preset', kind: 'preset' },
+    ];
+
+    if (includeAlt) {
+      defaultItems.push({ id: 'alt', kind: 'alt' });
+    }
+
+    if (hasPresetActions) {
+      return defaultItems.concat(extraActions.map((action) => ({ id: action.id, kind: 'text' as const, action })));
+    }
+
+    return defaultItems.concat([
+      { id: 'enter', kind: 'key', keyName: 'enter' as const },
+      { id: 'home', kind: 'key', keyName: 'home' as const },
+      { id: 'end', kind: 'key', keyName: 'end' as const },
+      { id: 'ctrl-c', kind: 'key', keyName: 'ctrl-c' as const },
+      { id: 'ctrl-d', kind: 'key', keyName: 'ctrl-d' as const },
+    ]);
+  }, [extraActions, hasPresetActions, includeAlt]);
+  const expandedRows = React.useMemo(() => splitButtonsIntoRows(expandedItems, presetRowLayout), [expandedItems, presetRowLayout]);
+  const presetMenu = showPresetMenu && presetMenuPosition
+    ? createPortal(
+      <div
+        className="fixed z-[200] min-w-28 -translate-y-full rounded border border-border bg-background p-1 shadow-2xl"
+        style={{ left: presetMenuPosition.left, top: presetMenuPosition.top }}
+      >
+        <div className="grid gap-1">
+          {presetOptions.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              onPointerDown={(event) => handlePresetOptionPointerDown(event, option.id)}
+              tabIndex={-1}
+              disabled={toolbarDisabled}
+              className={`h-7 rounded px-2 text-left text-xs transition-colors disabled:opacity-50 ${
+                option.id === presetMode
+                  ? 'bg-primary text-primary-foreground'
+                  : 'border border-transparent hover:bg-accent'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>,
+      document.body
+    )
+    : null;
+
   return (
-    <div
-      data-mobile-keyboard="true"
-      className={`z-20 select-none overflow-hidden bg-background transition-all duration-150 ease-out ${
-        visible
-          ? 'max-h-40 border-t border-border px-3 py-2 opacity-100 translate-y-0 pointer-events-auto'
-          : 'max-h-0 border-t-0 px-3 py-0 opacity-0 translate-y-1 pointer-events-none'
-      }`}
-      onMouseDownCapture={preventToolbarButtonFocus}
-      onPointerDownCapture={preventToolbarButtonFocus}
-      onContextMenuCapture={preventContextMenu}
-      onFocusCapture={handleToolbarButtonFocus}
-    >
+    <>
+      {presetMenu}
+      <div
+        data-mobile-keyboard="true"
+        className={`z-20 select-none overflow-hidden bg-background transition-all duration-150 ease-out ${
+          visible
+            ? 'max-h-40 border-t border-border px-3 py-2 opacity-100 translate-y-0 pointer-events-auto'
+            : 'max-h-0 border-t-0 px-3 py-0 opacity-0 translate-y-1 pointer-events-none'
+        }`}
+        onMouseDownCapture={preventToolbarButtonFocus}
+        onPointerDownCapture={preventToolbarButtonFocus}
+        onContextMenuCapture={preventContextMenu}
+        onFocusCapture={handleToolbarButtonFocus}
+      >
       <div className="grid grid-cols-8 gap-1">
         <button
           type="button"
@@ -354,67 +522,83 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       </div>
 
       {showExtended && (
-        <div className="mt-1 grid grid-cols-3 gap-1">
-          <button
-            type="button"
-            onPointerDown={(event) => handleModifierPointerDown(event, 'alt')}
-            tabIndex={-1}
-            disabled={toolbarDisabled}
-            className={`h-6 w-full border rounded text-xs disabled:opacity-50 flex items-center justify-center ${
-              activeModifier === 'alt' ? 'bg-primary text-primary-foreground' : ''
-            } ${
-              lockedModifier === 'alt' ? 'ring-1 ring-primary' : ''
-            }`}
-          >
-            <span className="font-medium">{lockedModifier === 'alt' ? 'Alt*' : 'Alt'}</span>
-          </button>
-          <button
-            type="button"
-            onPointerDown={(event) => handleSinglePointerDown(event, 'enter')}
-            tabIndex={-1}
-            disabled={toolbarDisabled}
-            className="h-6 w-full border rounded active:bg-accent transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
-          >
-            <RiArrowGoBackLine size={16} />
-          </button>
-          <button
-            type="button"
-            onPointerDown={(event) => handleSinglePointerDown(event, 'home')}
-            tabIndex={-1}
-            disabled={toolbarDisabled}
-            className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
-          >
-            Home
-          </button>
-          <button
-            type="button"
-            onPointerDown={(event) => handleSinglePointerDown(event, 'end')}
-            tabIndex={-1}
-            disabled={toolbarDisabled}
-            className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
-          >
-            End
-          </button>
-          <button
-            type="button"
-            onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-c')}
-            tabIndex={-1}
-            disabled={toolbarDisabled}
-            className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
-          >
-            Ctrl-C
-          </button>
-          <button
-            type="button"
-            onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-d')}
-            tabIndex={-1}
-            disabled={toolbarDisabled}
-            className="h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
-          >
-            Ctrl-D
-          </button>
+        <div className="mt-1 space-y-1">
+          {expandedRows.map((row: { columns: number; items: ExpandedItem[] }, rowIndex: number) => (
+            <div
+              key={`row-${rowIndex}`}
+              className="relative grid gap-1"
+              style={{ gridTemplateColumns: `repeat(${Math.max(2, row.columns)}, minmax(0, 1fr))` }}
+            >
+              {row.items.map((item: ExpandedItem) => {
+                if (item.kind === 'preset') {
+                  return (
+                    <button
+                      key={item.id}
+                      ref={item.id === 'preset' ? presetButtonRef : undefined}
+                      type="button"
+                      onPointerDown={handlePresetCyclePointerDown}
+                      tabIndex={-1}
+                      disabled={toolbarDisabled}
+                      className="h-6 w-full border rounded px-1 text-[10px] active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
+                      title={presetModeLabel}
+                    >
+                      {presetLabel}
+                    </button>
+                  );
+                }
+
+                if (item.kind === 'alt') {
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onPointerDown={(event) => handleModifierPointerDown(event, 'alt')}
+                      tabIndex={-1}
+                      disabled={toolbarDisabled}
+                      className={`h-6 w-full border rounded text-xs disabled:opacity-50 flex items-center justify-center ${
+                        activeModifier === 'alt' ? 'bg-primary text-primary-foreground' : ''
+                      } ${lockedModifier === 'alt' ? 'ring-1 ring-primary' : ''}`}
+                    >
+                      <span className="font-medium">{lockedModifier === 'alt' ? 'Alt*' : 'Alt'}</span>
+                    </button>
+                  );
+                }
+
+                if (item.kind === 'text') {
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onPointerDown={(event) => handleTextPointerDown(event, item.action.sequence)}
+                      tabIndex={-1}
+                      disabled={toolbarDisabled}
+                      className="h-6 w-full border rounded px-1 text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50"
+                    >
+                      {item.action.label}
+                    </button>
+                  );
+                }
+
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onPointerDown={(event) => handleSinglePointerDown(event, item.keyName)}
+                    tabIndex={-1}
+                    disabled={toolbarDisabled}
+                    className={`h-6 w-full border rounded text-xs active:bg-accent transition-all keyboard-button-active disabled:opacity-50 ${
+                      item.keyName === 'enter' ? 'flex items-center justify-center' : ''
+                    }`}
+                  >
+                    {item.keyName === 'enter' ? <RiArrowGoBackLine size={16} /> : item.keyName === 'ctrl-c' ? 'Ctrl-C' : item.keyName === 'ctrl-d' ? 'Ctrl-D' : item.keyName === 'home' ? 'Home' : 'End'}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 };

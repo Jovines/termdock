@@ -7,6 +7,7 @@ import { convertThemeToXterm, getDefaultTheme, THEMES } from '../../terminal';
 import { createWebTerminalAPI } from '../../terminal/factory';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
+import { buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
 import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
@@ -16,6 +17,8 @@ import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 const TERMINAL_FONT_SIZE = 13;
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const RESIZE_THROTTLE_MS = 90;
+const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'web-terminal:mobile-keyboard-expanded';
+const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'web-terminal:mobile-keyboard-preset-mode';
 
 type Modifier = 'ctrl' | 'alt';
 
@@ -34,6 +37,7 @@ interface TerminalViewProps {
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
+  toolbarPresets?: ToolbarPresetDefinition[];
   isActive?: boolean;
   focusRequestToken?: number;
   onKeyboardVisibilityChange?: (sessionId: string, isOpen: boolean) => void;
@@ -47,6 +51,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
   rendererMode = 'auto',
+  toolbarPresets: configuredToolbarPresets = [],
   isActive = true,
   focusRequestToken = 0,
   onKeyboardVisibilityChange,
@@ -77,6 +82,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   });
   const [activeModifier, setActiveModifier] = React.useState<Modifier | null>(null);
   const [lockedModifier, setLockedModifier] = React.useState<Modifier | null>(null);
+  const [showExtendedKeyboard, setShowExtendedKeyboard] = React.useState<boolean>(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+
+    return window.localStorage.getItem(MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY) === 'true';
+  });
+  const [toolbarPresetMode, setToolbarPresetMode] = React.useState<ToolbarPresetMode>(() => {
+    if (typeof window === 'undefined') {
+      return 'auto';
+    }
+
+    const stored = window.localStorage.getItem(MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY);
+    return stored && stored.length > 0 ? stored : 'auto';
+  });
 
   const terminalStore = useTerminalStore();
   const terminalSessions = terminalStore.sessions;
@@ -86,6 +106,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const clearTerminalSession = terminalStore.clearTerminalSession;
   const removeTerminalSession = terminalStore.removeTerminalSession;
   const clearBuffer = terminalStore.clearBuffer;
+  const setSessionActiveProgram = terminalStore.setSessionActiveProgram;
 
   const terminalState = React.useMemo(() => {
     if (!sessionId) return undefined;
@@ -97,6 +118,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const terminalSessionRef = terminalState?.terminalSessionId ?? null;
   const sessionMode = terminalState?.mode ?? 'shell';
   const preferredTmuxSessionName = terminalState?.tmuxSessionName || fallbackTmuxSessionName;
+  const detectedActiveProgram = terminalState?.activeProgram ?? null;
+  const toolbarPresets = React.useMemo(() => sanitizeToolbarPresets(configuredToolbarPresets), [configuredToolbarPresets]);
   const isTmuxMode = sessionMode === 'tmux';
   const bufferChunks = terminalState?.bufferChunks ?? [];
   const isConnecting = terminalState?.isConnecting ?? false;
@@ -256,6 +279,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [terminalSessionId, activeModifier, lockedModifier]);
 
   React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY, showExtendedKeyboard ? 'true' : 'false');
+  }, [showExtendedKeyboard]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY, toolbarPresetMode);
+  }, [toolbarPresetMode]);
+
+  React.useEffect(() => {
     const checkIsMobile = () => {
       if (typeof window === 'undefined') return false;
       const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
@@ -383,6 +422,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setTmuxLayout(event.layout ?? null);
                 break;
               }
+              case 'active-program': {
+                setSessionActiveProgram(
+                  storeSessionId,
+                  event.activeProgram ?? null,
+                  event.activeProgramSource ?? null
+                );
+                break;
+              }
               case 'exit': {
                 const exitCode =
                   typeof event.exitCode === 'number' ? event.exitCode : null;
@@ -436,7 +483,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearTerminalSession, debugSession, disconnectStream, setConnecting, terminal, sessionId]
+    [appendToBuffer, clearTerminalSession, debugSession, disconnectStream, setConnecting, setSessionActiveProgram, terminal, sessionId]
   );
 
   const hasInitializedRef = React.useRef(false);
@@ -890,6 +937,51 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     [activeModifier, focusTerminalIfActive, handleViewportInput]
   );
 
+  const handleToolbarTextPress = React.useCallback((sequence: string) => {
+    handleViewportInput(decodeToolbarSequence(sequence), {
+      skipModifierTransform: true,
+      consumeModifier: activeModifier !== null,
+    });
+    focusTerminalIfActive();
+  }, [activeModifier, focusTerminalIfActive, handleViewportInput]);
+
+  const detectedPreset = React.useMemo(() => detectToolbarPreset(detectedActiveProgram, toolbarPresets), [detectedActiveProgram, toolbarPresets]);
+  const effectivePresetId = toolbarPresetMode === 'auto' ? detectedPreset : toolbarPresetMode;
+  const toolbarPreset = React.useMemo(() => getToolbarPreset(toolbarPresets, effectivePresetId), [effectivePresetId, toolbarPresets]);
+  const runtimeToolbarActions = React.useMemo(
+    () => toolbarPreset.actions
+      .filter((action: { sequence: string }) => action.sequence.trim().length > 0)
+      .map((action: { id: string; label: string; sequence: string }, index: number) => ({
+        ...action,
+        label: getToolbarActionLabel(action, index),
+      })),
+    [toolbarPreset.actions]
+  );
+  const activeProgramLabel = React.useMemo(() => normalizeActiveProgram(detectedActiveProgram), [detectedActiveProgram]);
+  const presetLabel = React.useMemo(() => {
+    if (toolbarPresetMode !== 'auto') {
+      return toolbarPreset.label;
+    }
+
+    return activeProgramLabel ? `Auto:${toolbarPreset.label}` : 'Auto';
+  }, [activeProgramLabel, toolbarPreset.label, toolbarPresetMode]);
+  const presetModeLabel = React.useMemo(() => {
+    if (toolbarPresetMode !== 'auto') {
+      return `Manual preset: ${toolbarPreset.label}`;
+    }
+
+    return activeProgramLabel
+      ? `Auto preset from ${activeProgramLabel}`
+      : 'Auto preset';
+  }, [activeProgramLabel, toolbarPreset.label, toolbarPresetMode]);
+  const handlePresetSelect = React.useCallback((mode: ToolbarPresetMode) => {
+    setToolbarPresetMode(mode);
+  }, []);
+  const handleExpandedChange = React.useCallback((nextExpanded: boolean) => {
+    setShowExtendedKeyboard(nextExpanded);
+  }, []);
+  const presetOptions = React.useMemo(() => buildToolbarPresetOptions(toolbarPresets), [toolbarPresets]);
+
   const xtermTheme = React.useMemo(() => convertThemeToXterm(currentTheme), [currentTheme]);
 
   const terminalSessionKey = React.useMemo(() => {
@@ -987,8 +1079,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         activeModifier={activeModifier}
         lockedModifier={lockedModifier}
         disabled={quickKeysDisabled}
+        defaultShowExtended={showExtendedKeyboard}
+        presetLabel={presetLabel}
+        presetModeLabel={presetModeLabel}
+        presetMode={toolbarPresetMode}
+        presetOptions={presetOptions}
+        includeAlt={toolbarPreset.includeAlt}
+        presetRowLayout={toolbarPreset.rowLayout}
+        extraActions={runtimeToolbarActions}
         onKeyPress={handleMobileKeyPress}
+        onTextPress={handleToolbarTextPress}
         onModifierToggle={handleModifierToggle}
+        onPresetSelect={handlePresetSelect}
+        onExpandedChange={handleExpandedChange}
         onPressStart={handleMobileToolbarPressStart}
       />
     </div>

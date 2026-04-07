@@ -8,6 +8,10 @@ import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import type { CleanupDurationPreset, TmuxSessionSummary } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { listTmuxSessions } from './lib/terminal/api';
+import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
+import { createDefaultToolbarPresets, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
+
+const TOOLBAR_PRESETS_STORAGE_KEY = 'web-terminal:toolbar-presets';
 
 const SESSION_KEEPALIVE_PRESETS: Array<{ value: CleanupDurationPreset | 'custom'; label: string; ms: number | null }> = [
   { value: 'never', label: 'Never', ms: null },
@@ -64,6 +68,33 @@ function App() {
   const [newSessionTmuxName, setNewSessionTmuxName] = React.useState('');
   const [activeKeepAlivePreset, setActiveKeepAlivePreset] = React.useState<CleanupDurationPreset | 'custom'>('3hours');
   const [activeKeepAliveCustomInput, setActiveKeepAliveCustomInput] = React.useState<string>('180');
+  const [isToolbarPresetsOpen, setIsToolbarPresetsOpen] = React.useState(false);
+  const [toolbarPresets, setToolbarPresets] = React.useState<ToolbarPresetDefinition[]>(() => {
+    if (typeof window === 'undefined') {
+      return createDefaultToolbarPresets();
+    }
+
+    try {
+      const raw = window.localStorage.getItem(TOOLBAR_PRESETS_STORAGE_KEY);
+      if (!raw) {
+        return createDefaultToolbarPresets();
+      }
+      return sanitizeToolbarPresets(JSON.parse(raw) as ToolbarPresetDefinition[]);
+    } catch {
+      return createDefaultToolbarPresets();
+    }
+  });
+  const [selectedToolbarPresetId, setSelectedToolbarPresetId] = React.useState<string>('default');
+
+  useEffect(() => {
+    window.localStorage.setItem(TOOLBAR_PRESETS_STORAGE_KEY, JSON.stringify(toolbarPresets));
+  }, [toolbarPresets]);
+
+  useEffect(() => {
+    if (!toolbarPresets.some((preset) => preset.id === selectedToolbarPresetId)) {
+      setSelectedToolbarPresetId(toolbarPresets[0]?.id ?? 'default');
+    }
+  }, [selectedToolbarPresetId, toolbarPresets]);
 
   useEffect(() => {
     if (cleanupDurationPreset === 'custom' && customDurationMs !== null) {
@@ -179,6 +210,7 @@ function App() {
           theme={theme}
           fontSize={fontSize}
           rendererMode={rendererMode}
+          toolbarPresets={toolbarPresets}
           showDebug={showDebug}
           defaultSessionMode={newSessionMode}
           defaultTmuxSessionName={newSessionTmuxName}
@@ -215,36 +247,40 @@ function App() {
                 <>
                   <div className="space-y-1.5">
                     {sessions.map((session) => (
-                      <button
+                      <div
                         key={session.id}
-                        type="button"
-                        onClick={() => {
-                          const event = new CustomEvent('switch-terminal-session', { detail: session.id });
-                          window.dispatchEvent(event);
-                          setIsDrawerOpen(false);
-                        }}
                         className={`w-full flex items-center gap-2 px-3 py-2 text-sm rounded-lg transition-colors ${
                           session.id === activeSessionId
                             ? 'bg-primary/15 text-primary border border-primary/30'
                             : 'hover:bg-surface-elevated'
                         }`}
                       >
-                        <RiTerminalBoxLine size={14} />
-                        <span className="flex-1 truncate text-left">{session.name}</span>
-                        <span className="text-[10px] text-muted-foreground uppercase">{session.mode === 'tmux' ? 'tmux' : 'shell'}</span>
-                        <span className="text-[10px] text-muted-foreground">{formatKeepAliveLabel(session.keepAliveMs)}</span>
                         <button
                           type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
+                          onClick={() => {
+                            const event = new CustomEvent('switch-terminal-session', { detail: session.id });
+                            window.dispatchEvent(event);
+                            setIsDrawerOpen(false);
+                          }}
+                          className="min-w-0 flex flex-1 items-center gap-2 text-left"
+                        >
+                          <RiTerminalBoxLine size={14} />
+                          <span className="flex-1 truncate">{session.name}</span>
+                          <span className="text-[10px] text-muted-foreground uppercase">{session.mode === 'tmux' ? 'tmux' : 'shell'}</span>
+                          <span className="text-[10px] text-muted-foreground">{formatKeepAliveLabel(session.keepAliveMs)}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
                             const event = new CustomEvent('close-terminal-session', { detail: session.id });
                             window.dispatchEvent(event);
                           }}
-                          className="p-1 rounded hover:bg-red-500/20 hover:text-red-500"
+                          className="shrink-0 p-1 rounded hover:bg-red-500/20 hover:text-red-500"
+                          aria-label={`Close ${session.name}`}
                         >
                           <RiCloseLine size={14} />
                         </button>
-                      </button>
+                      </div>
                     ))}
                   </div>
 
@@ -482,7 +518,77 @@ function App() {
                     {showDebug ? 'On' : 'Off'}
                   </button>
                 </div>
+
+                <div className="border-t border-border/50 pt-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsToolbarPresetsOpen(true)}
+                    className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm text-left hover:bg-surface-elevated transition-colors"
+                  >
+                    Edit Toolbar Presets
+                  </button>
+                </div>
               </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {isToolbarPresetsOpen && (
+        <>
+          <button
+            type="button"
+            className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm cursor-default"
+            onClick={() => setIsToolbarPresetsOpen(false)}
+          />
+          <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto max-w-4xl overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <div>
+                <h2 className="text-sm font-medium">Toolbar Presets</h2>
+                <p className="text-xs text-muted-foreground">Configure program-specific mobile toolbar buttons with live preview.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsToolbarPresetsOpen(false)}
+                className="rounded-lg p-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
+                aria-label="Close toolbar presets"
+              >
+                <RiCloseLine size={18} />
+              </button>
+            </div>
+            <div className="h-[calc(100%-65px)] overflow-y-auto p-4">
+              <ToolbarPresetSettings
+                presets={toolbarPresets}
+                selectedPresetId={selectedToolbarPresetId}
+                onSelectPreset={setSelectedToolbarPresetId}
+                onUpdatePreset={(presetId, updater) => {
+                  setToolbarPresets((current) => sanitizeToolbarPresets(current.map((preset) => (
+                    preset.id === presetId ? updater(preset) : preset
+                  ))));
+                }}
+                onAddPreset={() => {
+                  const presetId = `preset-${Date.now()}`;
+                  setToolbarPresets((current) => sanitizeToolbarPresets([
+                    ...current,
+                    {
+                      id: presetId,
+                      label: `Preset ${current.length}`,
+                      programs: [],
+                      includeAlt: false,
+                      rowLayout: [3, 3],
+                      actions: [],
+                    },
+                  ]));
+                  setSelectedToolbarPresetId(presetId);
+                }}
+                onRemovePreset={(presetId) => {
+                  setToolbarPresets((current) => sanitizeToolbarPresets(current.filter((preset) => preset.id !== presetId)));
+                }}
+                onResetDefaults={() => {
+                  setToolbarPresets(createDefaultToolbarPresets());
+                  setSelectedToolbarPresetId('default');
+                }}
+              />
             </div>
           </div>
         </>
