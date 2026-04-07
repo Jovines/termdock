@@ -564,6 +564,38 @@ function resolveWorkingDirectory(req: express.Request, inputCwd?: string): strin
   return requestedCwd;
 }
 
+function isExecutable(filePath: string): boolean {
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveShellCommand(): string {
+  const configuredShell = process.env.SHELL;
+  if (configuredShell && isExecutable(configuredShell)) {
+    return configuredShell;
+  }
+
+  const fallbackShells = [
+    '/bin/bash',
+    '/usr/bin/bash',
+    '/bin/zsh',
+    '/usr/bin/zsh',
+    '/bin/sh',
+    '/usr/bin/sh',
+  ];
+
+  const resolvedFallback = fallbackShells.find((candidate) => isExecutable(candidate));
+  if (resolvedFallback) {
+    return resolvedFallback;
+  }
+
+  throw new Error('No usable shell found. Set SHELL to an installed shell such as /bin/bash or /bin/sh.');
+}
+
 function writeSse(res: express.Response, payload: unknown): void {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
@@ -669,7 +701,7 @@ async function spawnTerminalSession(req: express.Request, input: {
 
   const command = mode === 'tmux'
     ? (process.env.TMUX_BIN || 'tmux')
-    : (process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh'));
+    : (process.platform === 'win32' ? 'powershell.exe' : resolveShellCommand());
   const args = mode === 'tmux' && tmuxSessionName
     ? ['new-session', '-A', '-s', tmuxSessionName]
     : [];
