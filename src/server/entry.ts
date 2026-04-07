@@ -1,44 +1,60 @@
 import express from 'express';
 import { createServer } from 'http';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { homedir } from 'os';
 import cookieParser from 'cookie-parser';
+import { fileURLToPath } from 'url';
+import terminalRoutes from './routes/terminal.js';
 import { csrfProtection } from './utils/csrfProtection.js';
 import { pathValidator } from './utils/pathValidator.js';
 
-const PORT = process.env.PORT || 3001;
-const HOST = process.env.HOST || '0.0.0.0';
-const CLIENT_STATE_COOKIE = 'web-terminal-client';
+const CLIENT_STATE_COOKIE = 'termdock-client';
+export const DEFAULT_PORT = 43888;
+const DEFAULT_HOST = '0.0.0.0';
 
-const app = express();
+const currentFilePath = fileURLToPath(import.meta.url);
+const currentDirPath = path.dirname(currentFilePath);
+const clientDistPath = path.resolve(currentDirPath, '../client');
+const clientIndexPath = path.join(clientDistPath, 'index.html');
 
-// 基础中间件
-app.use(express.json());
-app.use(cookieParser());
+export interface ServerOptions {
+  host?: string;
+  port?: number;
+}
 
-app.use((req, res, next) => {
-  const existingClientId = req.cookies?.[CLIENT_STATE_COOKIE];
-  const clientId = typeof existingClientId === 'string' && existingClientId.trim().length > 0
-    ? existingClientId
-    : crypto.randomUUID();
+export function createApp(): express.Express {
+  const app = express();
 
-  if (existingClientId !== clientId) {
-    res.cookie(CLIENT_STATE_COOKIE, clientId, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 30 * 24 * 60 * 60 * 1000,
-    });
-  }
+  // 基础中间件
+  app.use(express.json());
+  app.use(cookieParser());
 
-  req.clientId = clientId;
-  next();
-});
+  app.use((req, res, next) => {
+    const existingClientId = req.cookies?.[CLIENT_STATE_COOKIE];
+    const clientId = typeof existingClientId === 'string' && existingClientId.trim().length > 0
+      ? existingClientId
+      : crypto.randomUUID();
 
-// 安全中间件：CSRF令牌生成（在所有路由之前）
-app.use(csrfProtection.tokenMiddleware());
+    if (existingClientId !== clientId) {
+      res.cookie(CLIENT_STATE_COOKIE, clientId, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+      });
+    }
 
-// 健康检查端点（不需要CSRF保护）
-app.get('/health', (_req, res) => {
+    req.clientId = clientId;
+    next();
+  });
+
+  // 安全中间件：CSRF令牌生成（在所有路由之前）
+  app.use(csrfProtection.tokenMiddleware());
+
+  // 健康检查端点（不需要CSRF保护）
+  app.get('/health', (_req, res) => {
     res.json({ 
       status: 'ok', 
       timestamp: new Date().toISOString(),
@@ -47,41 +63,58 @@ app.get('/health', (_req, res) => {
         pathValidationEnabled: true
       }
     });
-});
+  });
 
-// CSRF令牌获取端点
-app.get('/api/csrf-token', csrfProtection.getTokenHandler());
+  // CSRF令牌获取端点
+  app.get('/api/csrf-token', csrfProtection.getTokenHandler());
 
-// 安全中间件：将路径验证器注入到请求对象中
-app.use((req, _res, next) => {
-  req.pathValidator = pathValidator;
-  next();
-});
+  // 安全中间件：将路径验证器注入到请求对象中
+  app.use((req, _res, next) => {
+    req.pathValidator = pathValidator;
+    next();
+  });
 
-// Import the terminal routes
-import terminalRoutes from './routes/terminal.js';
+  app.get('/api/home', (_req, res) => {
+    res.json({ home: homedir() });
+  });
 
-// Home directory endpoint
-import { homedir } from 'os';
+  // 应用CSRF保护（在终端路由之前）
+  app.use('/api/terminal', csrfProtection.verifyMiddleware());
 
-app.get('/api/home', (_req, res) => {
-  res.json({ home: homedir() });
-});
+  // 终端路由
+  app.use('/api/terminal', terminalRoutes);
 
-// 应用CSRF保护（在终端路由之前）
-app.use('/api/terminal', csrfProtection.verifyMiddleware());
+  if (fs.existsSync(clientIndexPath)) {
+    app.use(express.static(clientDistPath));
+    app.get(/^(?!\/api(?:\/|$)|\/health$).*/, (_req, res) => {
+      res.sendFile(clientIndexPath);
+    });
+  }
 
-// 终端路由
-app.use('/api/terminal', terminalRoutes);
+  return app;
+}
 
-const server = createServer(app);
+export function startServer(options: ServerOptions = {}) {
+  const port = options.port ?? Number(process.env.PORT || DEFAULT_PORT);
+  const host = options.host ?? (process.env.HOST || DEFAULT_HOST);
+  const app = createApp();
+  const server = createServer(app);
 
-server.listen(Number(PORT), HOST, () => {
-  console.log(`Web Terminal Server running at http://${HOST}:${PORT}`);
-  console.log(`Health check: http://${HOST}:${PORT}/health`);
-});
+  server.listen(port, host, () => {
+    console.log(`Termdock server running at http://${host}:${port}`);
+    console.log(`Health check: http://${host}:${port}/health`);
+  });
 
-server.on('error', (error) => {
-  console.error('Server error:', error);
-  process.exit(1);
-});
+  server.on('error', (error) => {
+    console.error('Server error:', error);
+    process.exit(1);
+  });
+
+  return server;
+}
+
+const isDirectExecution = process.argv[1] && path.resolve(process.argv[1]) === currentFilePath;
+
+if (isDirectExecution) {
+  startServer();
+}
