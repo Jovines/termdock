@@ -191,19 +191,33 @@ function App() {
     if (!isDrawerOpen) return;
 
     let cancelled = false;
+    let pollingDisabled = false;
     const fetchSessions = async () => {
+      if (pollingDisabled) {
+        return;
+      }
+
       try {
-        const [status, sessions] = await Promise.all([
-          getTmuxStatus(),
-          listTmuxSessions(),
-        ]);
+        const status = await getTmuxStatus();
         if (!cancelled) {
           setTmuxStatus(status);
+        }
+
+        if (!status.available) {
+          if (!cancelled) {
+            setTmuxSessions([]);
+          }
+          return;
+        }
+
+        const sessions = await listTmuxSessions();
+        if (!cancelled) {
           setTmuxSessions(sessions);
         }
       } catch {
+        pollingDisabled = true;
         if (!cancelled) {
-          setTmuxStatus({ available: false, version: null, reason: 'Failed to query tmux status.' });
+          setTmuxStatus({ available: false, version: null, reason: 'tmux integration is unavailable with the current server build.' });
           setTmuxSessions([]);
         }
       }
