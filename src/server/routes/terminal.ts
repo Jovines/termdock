@@ -4,7 +4,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
-const router = express.Router();
+const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
 
 type TerminalMode = 'shell' | 'tmux';

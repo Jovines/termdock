@@ -1,18 +1,34 @@
 {
-  "name": "web-terminal",
+  "name": "termdock",
   "version": "1.0.0",
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
+  "bin": {
+    "termdock": "dist/server/cli.js"
+  },
+  "exports": {
+    ".": "./dist/server/entry.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "clean": "rm -rf dist",
     "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
     "dev:client": "vite",
     "dev:server": "tsx watch src/server/entry.ts",
-    "build": "vite build",
+    "build": "npm run clean && npm run build:client && npm run build:server",
+    "build:client": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
     "generate:pwa-assets": "pwa-assets-generator --config pwa-assets.config.ts",
     "preview": "vite preview",
+    "start": "node dist/server/cli.js",
     "lint": "tsc --noEmit",
     "test": "vitest --passWithNoTests",
-    "test:ui": "vitest --ui"
+    "test:ui": "vitest --ui",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -58,5 +74,21 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "keywords": [
+    "terminal",
+    "termdock",
+    "xterm",
+    "express",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jovines/termdock.git"
+  },
+  "homepage": "https://github.com/Jovines/termdock#readme",
+  "bugs": {
+    "url": "https://github.com/Jovines/termdock/issues"
   }
 }

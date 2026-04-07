@@ -17,8 +17,8 @@ export default defineConfig({
         'robots.txt',
       ],
       manifest: {
-        name: 'Web Terminal',
-        short_name: 'Terminal',
+        name: 'Termdock',
+        short_name: 'Termdock',
         description: 'A complete web-based terminal application',
         theme_color: '#0d1117',
         background_color: '#0d1117',
@@ -88,7 +88,7 @@ export default defineConfig({
     host: '0.0.0.0',
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        target: 'http://localhost:43888',
         changeOrigin: true,
         configure: (proxy, options) => {
           proxy.on('proxyRes', (proxyRes, req, res) => {
@@ -103,8 +103,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: 'dist',
-    sourcemap: true,
+    outDir: 'dist/client',
     rollupOptions: {
       output: {
         manualChunks: {
