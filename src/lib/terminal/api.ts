@@ -6,6 +6,7 @@ import type {
   TmuxActionPayload,
   TmuxLayout,
   TmuxSessionSummary,
+  TmuxStatus,
 } from './types';
 
 let csrfToken: string | null = null;
@@ -465,6 +466,19 @@ export async function listTmuxSessions(): Promise<TmuxSessionSummary[]> {
 
   const payload = await response.json() as { sessions?: TmuxSessionSummary[] };
   return Array.isArray(payload.sessions) ? payload.sessions : [];
+}
+
+export async function getTmuxStatus(): Promise<TmuxStatus> {
+  const response = await fetch('/api/terminal/tmux/status', {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get tmux status' }));
+    throw new Error(error.error || 'Failed to get tmux status');
+  }
+
+  return response.json() as Promise<TmuxStatus>;
 }
 
 export interface PersistedTerminalClientSession {

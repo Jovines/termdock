@@ -35,6 +35,12 @@ export interface TmuxSessionSummary {
   attached: number;
 }
 
+export interface TmuxStatus {
+  available: boolean;
+  version: string | null;
+  reason: string | null;
+}
+
 // Terminal Session Types
 export interface TerminalSession {
   sessionId: string;
@@ -128,6 +134,7 @@ export interface TerminalAPI {
   forceKill?(options: ForceKillOptions): Promise<void>;
   tmuxAction?(sessionId: string, payload: TmuxActionPayload): Promise<{ success: boolean; layout?: TmuxLayout }>;
   listTmuxSessions?(): Promise<TmuxSessionSummary[]>;
+  getTmuxStatus?(): Promise<TmuxStatus>;
   checkHealth?(sessionId: string): Promise<{
     healthy: boolean;
     sessionId: string;

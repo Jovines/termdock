@@ -5,9 +5,9 @@ import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
-import type { CleanupDurationPreset, TmuxSessionSummary } from './lib/terminal/types';
+import type { CleanupDurationPreset, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { listTmuxSessions } from './lib/terminal/api';
+import { getTmuxStatus, listTmuxSessions } from './lib/terminal/api';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import { createDefaultToolbarPresets, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 
@@ -53,6 +53,7 @@ function App() {
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
   const [tmuxSessions, setTmuxSessions] = useState<TmuxSessionSummary[]>([]);
+  const [tmuxStatus, setTmuxStatus] = useState<TmuxStatus>({ available: true, version: null, reason: null });
   const [tmuxSectionCollapsed, setTmuxSectionCollapsed] = useState(true);
 
   const {
@@ -183,12 +184,19 @@ function App() {
     let cancelled = false;
     const fetchSessions = async () => {
       try {
-        const sessions = await listTmuxSessions();
+        const [status, sessions] = await Promise.all([
+          getTmuxStatus(),
+          listTmuxSessions(),
+        ]);
         if (!cancelled) {
+          setTmuxStatus(status);
           setTmuxSessions(sessions);
         }
       } catch {
-        // ignore fetch errors
+        if (!cancelled) {
+          setTmuxStatus({ available: false, version: null, reason: 'Failed to query tmux status.' });
+          setTmuxSessions([]);
+        }
       }
     };
 
@@ -308,15 +316,24 @@ function App() {
                 </>
               )}
 
-              {/* Tmux Server Sessions - Collapsible */}
-              {(() => {
-                const connectedTmuxNames = new Set(
-                  sessions.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName)
-                );
-                const availableTmuxSessions = tmuxSessions.filter((t) => !connectedTmuxNames.has(t.name));
-                if (availableTmuxSessions.length === 0) return null;
-                return (
-                  <div className="space-y-1.5">
+                {/* Tmux Server Sessions - Collapsible */}
+                {(() => {
+                  const connectedTmuxNames = new Set(
+                    sessions.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName)
+                  );
+                  const availableTmuxSessions = tmuxSessions.filter((t) => !connectedTmuxNames.has(t.name));
+                  if (!tmuxStatus.available) {
+                    return (
+                      <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-xs text-amber-100">
+                        <div className="font-medium text-amber-50">tmux optional feature</div>
+                        <div>{tmuxStatus.reason ?? 'tmux is unavailable on this machine.'}</div>
+                        <div className="text-amber-200/90">Install `tmux` to enable session reuse, attach to named tmux sessions, and use tmux window mode here. The UI checks automatically and will enable tmux without a restart once it is available.</div>
+                      </div>
+                    );
+                  }
+                  if (availableTmuxSessions.length === 0) return null;
+                 return (
+                   <div className="space-y-1.5">
                     <button
                       type="button"
                       onClick={() => setTmuxSectionCollapsed((c) => !c)}
@@ -444,8 +461,16 @@ function App() {
                     className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
                   >
                     <option value="shell">Standard Shell</option>
-                    <option value="tmux">Tmux Window Mode</option>
+                    <option value="tmux" disabled={!tmuxStatus.available}>Tmux Window Mode</option>
                   </select>
+                  {!tmuxStatus.available && (
+                    <p className="text-xs text-amber-400">
+                      tmux is not installed yet. Install it and keep this drawer open; Termdock will detect it automatically.
+                    </p>
+                  )}
+                  {tmuxStatus.available && tmuxStatus.version && (
+                    <p className="text-xs text-muted-foreground">Detected: {tmuxStatus.version}</p>
+                  )}
                   {newSessionMode === 'tmux' && (
                     <input
                       type="text"

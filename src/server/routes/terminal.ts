@@ -251,6 +251,36 @@ async function runTmux(args: string[]): Promise<string> {
   return stdout;
 }
 
+function isTmuxUnavailableMessage(errorMessage: string): boolean {
+  return /no such file or directory|not found|enoent/i.test(errorMessage);
+}
+
+async function getTmuxStatus(): Promise<{ available: boolean; version: string | null; reason: string | null }> {
+  try {
+    const raw = await runTmux(['-V']);
+    return {
+      available: true,
+      version: raw.trim() || null,
+      reason: null,
+    };
+  } catch (error) {
+    const errorMessage = getErrorMessage(error);
+    if (isTmuxUnavailableMessage(errorMessage)) {
+      return {
+        available: false,
+        version: null,
+        reason: 'tmux is not installed or not available in PATH.',
+      };
+    }
+
+    return {
+      available: false,
+      version: null,
+      reason: errorMessage || 'Failed to detect tmux availability',
+    };
+  }
+}
+
 async function enableTmuxMouse(sessionName: string): Promise<void> {
   let lastError: unknown;
 
@@ -911,8 +941,16 @@ router.get('/tmux/sessions', async (_req, res) => {
     if (/no server running/i.test(errorMessage)) {
       return res.json({ sessions: [] });
     }
+    if (isTmuxUnavailableMessage(errorMessage)) {
+      return res.json({ sessions: [], available: false, reason: 'tmux is not installed or not available in PATH.' });
+    }
     return res.status(500).json({ error: errorMessage || 'Failed to list tmux sessions' });
   }
+});
+
+router.get('/tmux/status', async (_req, res) => {
+  const status = await getTmuxStatus();
+  res.json(status);
 });
 
 router.post('/serialize-state', async (req, res) => {
