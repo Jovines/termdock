@@ -298,6 +298,66 @@ async function enableTmuxMouse(sessionName: string): Promise<void> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+async function disableTmuxStatus(sessionName: string): Promise<void> {
+  let lastError: unknown;
+
+  // A newly attached session can race briefly with the client startup.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await runTmux(['set-option', '-t', sessionName, 'status', 'off']);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function captureTmuxPane(sessionName: string): Promise<string> {
+  let lastError: unknown;
+
+  // An attached session can briefly race with tmux pane availability.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const paneId = (await runTmux([
+        'display-message',
+        '-t',
+        sessionName,
+        '-p',
+        '#{pane_id}',
+      ])).trim();
+
+      return await runTmux([
+        'capture-pane',
+        '-p',
+        '-e',
+        '-J',
+        '-t',
+        paneId || sessionName,
+      ]);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function isTmuxPaneInMode(target: string): Promise<boolean> {
+  const paneInModeRaw = (await runTmux([
+    'display-message',
+    '-t',
+    target,
+    '-p',
+    '#{pane_in_mode}',
+  ])).trim();
+
+  return paneInModeRaw === '1';
+}
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -572,9 +632,22 @@ async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
 }
 
 async function getRestoreHistory(sessionId: string, session: TerminalSession): Promise<string[]> {
-  // In tmux mode, scrollback belongs to tmux itself rather than the app layer.
+  // In tmux mode, scrollback belongs to tmux itself rather than the app layer,
+  // so capture the active pane to rebuild the visible screen on refresh.
   if (session.mode === 'tmux') {
-    return [];
+    if (!session.tmuxSessionName) {
+      return [];
+    }
+
+    try {
+      const snapshot = await captureTmuxPane(session.tmuxSessionName);
+      return snapshot
+        ? ['\u001b[H\u001b[2J\u001b[3J', snapshot]
+        : [];
+    } catch (error) {
+      console.warn(`Failed to capture tmux pane for ${session.tmuxSessionName}: ${getErrorMessage(error)}`);
+      return [];
+    }
   }
 
   return getReconnectionHistory(sessionId);
@@ -813,6 +886,12 @@ async function spawnTerminalSession(req: express.Request, input: {
   setupPtyHandlers(sessionId, session);
 
   if (mode === 'tmux' && tmuxSessionName) {
+    try {
+      await disableTmuxStatus(tmuxSessionName);
+    } catch (error) {
+      console.warn(`Failed to disable tmux status for ${tmuxSessionName}: ${getErrorMessage(error)}`);
+    }
+
     try {
       await enableTmuxMouse(tmuxSessionName);
     } catch (error) {
@@ -1403,15 +1482,9 @@ router.post('/:sessionId/tmux', async (req, res) => {
         const direction = req.body?.direction === 'down' ? 'down' : 'up';
         const lines = Math.max(1, Math.min(50, Math.floor(Number(req.body?.lines) || 1)));
 
-        const paneInModeRaw = (await runTmux([
-          'display-message',
-          '-t',
-          tmuxTarget,
-          '-p',
-          '#{pane_in_mode}',
-        ])).trim();
+        let inCopyMode = await isTmuxPaneInMode(tmuxTarget);
 
-        if (paneInModeRaw !== '1') {
+        if (!inCopyMode) {
           try {
             await runTmux(['copy-mode', '-t', tmuxTarget]);
           } catch (error) {
@@ -1420,6 +1493,13 @@ router.post('/:sessionId/tmux', async (req, res) => {
               throw error;
             }
           }
+
+          inCopyMode = await isTmuxPaneInMode(tmuxTarget);
+        }
+
+        if (!inCopyMode) {
+          shouldBroadcastLayout = false;
+          return res.json({ success: true, skipped: 'pane-not-in-copy-mode' });
         }
 
         const primaryCommand = direction === 'up' ? 'scroll-up' : 'scroll-down';

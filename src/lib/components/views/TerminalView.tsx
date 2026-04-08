@@ -221,7 +221,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, []);
 
   React.useEffect(() => {
-    const visible = isActive && isMobile && (isInputFocused || isViewportKeyboardOpen);
+    const visible = isActive && isMobile && isViewportKeyboardOpen;
 
     debugKeyboard('visibility signal', {
       sessionId,
@@ -237,7 +237,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     onKeyboardVisibilityChange,
     sessionId,
     isActive,
-    isInputFocused,
     isMobile,
     isViewportKeyboardOpen,
     viewportKeyboardHeight,
@@ -1007,7 +1006,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const normalizedLines = Math.max(1, Math.min(Math.floor(lines) || 1, 40));
     handleTmuxScroll(direction, normalizedLines);
   }, [handleTmuxScroll, quickKeysDisabled]);
-  const isKeyboardVisible = isActive && isMobile && (isInputFocused || isViewportKeyboardOpen);
+  const isKeyboardVisible = isActive && isMobile && isViewportKeyboardOpen;
 
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background">
