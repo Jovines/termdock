@@ -1,6 +1,6 @@
 import React, { useEffect, useCallback, useState } from 'react';
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
-import { RiTerminalBoxLine, RiSettings4Line, RiAddLine, RiCloseLine, RiArrowDownSLine, RiArrowRightSLine } from '@remixicon/react';
+import { RiTerminalBoxLine, RiSettings4Line, RiAddLine, RiCloseLine, RiArrowDownSLine, RiArrowRightSLine, RiLayoutGridLine } from '@remixicon/react';
 import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
@@ -37,10 +37,13 @@ function getPresetByDuration(ms: number | null): CleanupDurationPreset | 'custom
   return (matched?.value ?? 'custom') as CleanupDurationPreset | 'custom';
 }
 
+function getSessionModeLabel(mode: 'shell' | 'tmux'): string {
+  return mode === 'tmux' ? 'tmux' : 'shell';
+}
+
 function App() {
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
-  const floatingTopOffset = `calc(${safeTopInset} + 0.75rem)`;
-  const drawerMaxHeight = `calc(var(--app-vh, 100dvh) - (${safeTopInset} + 1.5rem))`;
+  const safeBottomInset = 'env(safe-area-inset-bottom, 0px)';
 
   useViewportHeight();
 
@@ -55,6 +58,7 @@ function App() {
   const [tmuxSessions, setTmuxSessions] = useState<TmuxSessionSummary[]>([]);
   const [tmuxStatus, setTmuxStatus] = useState<TmuxStatus>({ available: true, version: null, reason: null });
   const [tmuxSectionCollapsed, setTmuxSectionCollapsed] = useState(true);
+  const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
 
   const {
     cleanupDurationMs,
@@ -156,6 +160,22 @@ function App() {
   };
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
+  const activeSessionIndex = activeSessionId
+    ? sessions.findIndex((session) => session.id === activeSessionId)
+    : -1;
+  const activeSessionModeLabel = activeSession ? getSessionModeLabel(activeSession.mode) : null;
+  const activeSessionKeepAliveLabel = activeSession ? formatKeepAliveLabel(activeSession.keepAliveMs) : null;
+  const activeSessionPositionLabel = sessions.length > 0 && activeSessionIndex >= 0
+    ? `${activeSessionIndex + 1}/${sessions.length}`
+    : `${sessions.length}`;
+  const connectedTmuxNames = React.useMemo(
+    () => new Set(sessions.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName)),
+    [sessions],
+  );
+  const availableTmuxSessions = React.useMemo(
+    () => tmuxSessions.filter((t) => !connectedTmuxNames.has(t.name)),
+    [connectedTmuxNames, tmuxSessions],
+  );
 
   useEffect(() => {
     if (!activeSession) return;
@@ -169,6 +189,18 @@ function App() {
       }
     }
   }, [activeSession?.id, activeSession?.keepAliveMs]);
+
+  useEffect(() => {
+    activeSessionTabRef.current?.scrollIntoView({
+      inline: 'center',
+      block: 'nearest',
+      behavior: 'smooth',
+    });
+  }, [activeSessionId]);
+
+  const switchSession = useCallback((sessionId: string) => {
+    window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
+  }, []);
 
   const applyActiveSessionKeepAlive = useCallback((keepAliveMs: number | null) => {
     if (!activeSessionId) return;
@@ -233,57 +265,140 @@ function App() {
 
   return (
     <div
-      className="w-screen flex flex-col bg-background text-foreground overflow-hidden"
+      className="w-screen flex flex-col overflow-hidden bg-background text-foreground"
       style={{ height: 'var(--app-vh, 100dvh)' }}
     >
-      <main className="relative min-h-0 flex-1 overflow-hidden" style={{ paddingTop: safeTopInset }}>
-        <MultiTerminalView
-          theme={theme}
-          fontSize={fontSize}
-          rendererMode={rendererMode}
-          toolbarPresets={toolbarPresets}
-          showDebug={showDebug}
-          defaultSessionMode={newSessionMode}
-          defaultTmuxSessionName={newSessionTmuxName}
-          onSessionDataUpdate={handleSessionDataUpdate}
-        />
-      </main>
+      <main className="relative min-h-0 flex-1 overflow-hidden px-0 pb-0 pt-0 sm:px-5 sm:pb-5 sm:pt-5">
+        <div className="mx-auto flex h-full w-full max-w-[1440px] min-h-0 flex-col overflow-visible border-t border-border bg-surface sm:rounded-[28px] sm:border sm:shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
+          <div
+            className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border/80 bg-background/80 px-2 backdrop-blur-xl sm:h-11 sm:px-3"
+          >
+            <div className="scrollbar-thin flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
+              {sessions.map((session) => {
+                const isActive = session.id === activeSessionId;
+                return (
+                  <button
+                    key={session.id}
+                    ref={isActive ? activeSessionTabRef : null}
+                    type="button"
+                    onClick={() => switchSession(session.id)}
+                    className={`max-w-[8.75rem] shrink-0 truncate border-b px-2 py-1.5 text-[11px] transition sm:max-w-[12rem] ${
+                      isActive
+                        ? 'border-foreground text-foreground'
+                        : 'border-transparent text-muted-foreground hover:text-foreground'
+                    }`}
+                    title={session.name}
+                  >
+                    <span className="inline-flex min-w-0 items-center gap-1.5">
+                      {session.mode === 'tmux' && <RiLayoutGridLine size={12} className="shrink-0" />}
+                      <span className="truncate">{session.name}</span>
+                    </span>
+                  </button>
+                );
+              })}
+              {sessions.length === 0 && (
+                <span className="truncate px-2 text-xs text-muted-foreground">Starting terminal session</span>
+              )}
+              <div className="hidden items-center gap-2 pl-2 lg:flex">
+                {activeSessionModeLabel && (
+                  <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+                    {activeSessionModeLabel}
+                  </span>
+                )}
+                {activeSessionKeepAliveLabel && (
+                  <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+                    keepalive {activeSessionKeepAliveLabel}
+                  </span>
+                )}
+                <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+                  {theme}
+                </span>
+                <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+                  {fontSize}px
+                </span>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <span
+                className="inline-flex shrink-0 items-center px-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground sm:text-[11px]"
+                title={sessions.length > 0 && activeSessionIndex >= 0 ? `Session ${activeSessionIndex + 1} of ${sessions.length}` : `${sessions.length} sessions`}
+              >
+                {activeSessionPositionLabel}
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsDrawerOpen(true)}
+                className="inline-flex h-8 shrink-0 items-center justify-center px-2 text-muted-foreground transition hover:text-hover sm:h-9 sm:px-2.5"
+                aria-label="Open sessions and settings"
+              >
+                <RiSettings4Line size={16} />
+                <span className="ml-2 hidden text-xs sm:inline">Settings</span>
+              </button>
+            </div>
+          </div>
 
-      {/* Settings/Sessions Button - Top Right */}
-      <button
-        type="button"
-        onClick={() => setIsDrawerOpen(true)}
-        className="fixed right-3 z-30 p-2 text-muted-foreground hover:text-foreground transition-colors duration-200"
-        style={{ top: floatingTopOffset }}
-        aria-label="Open sessions and settings"
-      >
-        <RiSettings4Line size={20} />
-      </button>
+          <div className="min-h-0 flex-1 overflow-hidden bg-background-subtle">
+            <MultiTerminalView
+              theme={theme}
+              fontSize={fontSize}
+              rendererMode={rendererMode}
+              toolbarPresets={toolbarPresets}
+              showDebug={showDebug}
+              defaultSessionMode={newSessionMode}
+              defaultTmuxSessionName={newSessionTmuxName}
+              showSessionStrip={false}
+              onSessionDataUpdate={handleSessionDataUpdate}
+            />
+          </div>
+        </div>
+      </main>
 
       {/* Combined Drawer - Sessions + Settings */}
       {isDrawerOpen && (
         <>
           <button
             type="button"
-            className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 animate-fade-in cursor-default"
+            className="fixed inset-0 z-40 bg-[rgba(38,37,30,0.26)] backdrop-blur-sm animate-fade-in cursor-default"
             onClick={() => setIsDrawerOpen(false)}
           />
           <div
-            className="fixed right-3 bottom-auto left-auto z-50 w-72 bg-surface/95 backdrop-blur-xl border border-border/50 rounded-xl shadow-2xl animate-fade-in overflow-y-auto"
-            style={{ top: floatingTopOffset, maxHeight: drawerMaxHeight }}
+            className="fixed inset-y-0 right-0 z-50 w-full max-w-[30rem] overflow-y-auto border-l border-border bg-background/96 backdrop-blur-xl animate-fade-in"
+            style={{ paddingTop: safeTopInset, paddingBottom: safeBottomInset }}
           >
-            <div className="p-4 space-y-3">
+            <div className="space-y-6 p-4 sm:p-6">
+              <div className="flex items-start justify-between gap-4 border-b border-border/80 pb-4">
+                <div>
+                  <div className="ui-kicker">Workspace controls</div>
+                  <h2 className="section-title mt-2">Sessions and settings</h2>
+                  <p className="mt-2 max-w-md text-sm text-muted-foreground">
+                    Switch sessions, shape persistence, and tune the terminal surface without leaving the active pane.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsDrawerOpen(false)}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-border bg-surface text-muted-foreground transition hover:text-hover"
+                  aria-label="Close sessions and settings"
+                >
+                  <RiCloseLine size={18} />
+                </button>
+              </div>
+
               {/* Sessions Section */}
               {sessions.length > 0 && (
                 <>
-                  <div className="space-y-1.5">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="ui-kicker">Open sessions</span>
+                      <span className="text-xs text-muted-foreground">Swipe in the workspace or jump directly here.</span>
+                    </div>
                     {sessions.map((session) => (
                       <div
                         key={session.id}
-                        className={`w-full flex items-center gap-2 px-3 py-2 text-sm rounded-lg transition-colors ${
+                        className={`flex w-full items-center gap-2 rounded-2xl border px-3 py-3 text-sm transition ${
                           session.id === activeSessionId
-                            ? 'bg-primary/15 text-primary border border-primary/30'
-                            : 'hover:bg-surface-elevated'
+                            ? 'border-border-strong bg-surface text-foreground shadow-[0_10px_30px_rgba(0,0,0,0.06)]'
+                            : 'border-border bg-transparent text-foreground hover:bg-surface-2'
                         }`}
                       >
                         <button
@@ -293,12 +408,18 @@ function App() {
                             window.dispatchEvent(event);
                             setIsDrawerOpen(false);
                           }}
-                          className="min-w-0 flex flex-1 items-center gap-2 text-left"
+                          className="min-w-0 flex flex-1 items-center gap-3 text-left"
                         >
-                          <RiTerminalBoxLine size={14} />
-                          <span className="flex-1 truncate">{session.name}</span>
-                          <span className="text-[10px] text-muted-foreground uppercase">{session.mode === 'tmux' ? 'tmux' : 'shell'}</span>
-                          <span className="text-[10px] text-muted-foreground">{formatKeepAliveLabel(session.keepAliveMs)}</span>
+                          <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
+                            <RiTerminalBoxLine size={16} />
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm text-foreground">{session.name}</span>
+                            <span className="mt-1 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                              <span>{getSessionModeLabel(session.mode)}</span>
+                              <span>keepalive {formatKeepAliveLabel(session.keepAliveMs)}</span>
+                            </span>
+                          </span>
                         </button>
                         <button
                           type="button"
@@ -306,7 +427,7 @@ function App() {
                             const event = new CustomEvent('close-terminal-session', { detail: session.id });
                             window.dispatchEvent(event);
                           }}
-                          className="shrink-0 p-1 rounded hover:bg-red-500/20 hover:text-red-500"
+                          className="shrink-0 rounded-full p-2 text-muted-foreground transition hover:bg-[rgba(207,45,86,0.10)] hover:text-hover"
                           aria-label={`Close ${session.name}`}
                         >
                           <RiCloseLine size={14} />
@@ -328,40 +449,36 @@ function App() {
                       }));
                       setIsDrawerOpen(false);
                     }}
-                    className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm border border-dashed border-border rounded-lg hover:bg-surface-elevated transition-colors text-muted-foreground"
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-border bg-surface px-4 py-3 text-sm text-foreground transition hover:border-border-strong hover:text-hover"
                   >
                     <RiAddLine size={14} />
                     <span>New Session</span>
                   </button>
 
                   {/* Divider */}
-                  <div className="border-t border-border/50" />
+                  <div className="border-t border-border/80" />
                 </>
               )}
 
                 {/* Tmux Server Sessions - Collapsible */}
                 {(() => {
-                  const connectedTmuxNames = new Set(
-                    sessions.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName)
-                  );
-                  const availableTmuxSessions = tmuxSessions.filter((t) => !connectedTmuxNames.has(t.name));
                   if (availableTmuxSessions.length === 0) return null;
                   return (
-                    <div className="space-y-1.5">
+                    <div className="space-y-2">
                      <button
-                       type="button"
-                       onClick={() => setTmuxSectionCollapsed((c) => !c)}
-                      className="w-full flex items-center gap-2 px-1 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                    >
-                      {tmuxSectionCollapsed ? <RiArrowRightSLine size={14} /> : <RiArrowDownSLine size={14} />}
-                      <span className="uppercase tracking-wider">tmux sessions</span>
+                        type="button"
+                        onClick={() => setTmuxSectionCollapsed((c) => !c)}
+                       className="flex w-full items-center gap-2 px-1 py-1 text-left text-xs text-muted-foreground transition hover:text-hover"
+                     >
+                       {tmuxSectionCollapsed ? <RiArrowRightSLine size={14} /> : <RiArrowDownSLine size={14} />}
+                       <span className="uppercase tracking-wider">tmux sessions</span>
                       <span className="text-[10px]">({availableTmuxSessions.length})</span>
                     </button>
                     {!tmuxSectionCollapsed && (
-                      <div className="space-y-1 pl-1">
-                        {availableTmuxSessions.map((tmux) => (
-                          <button
-                            key={tmux.name}
+                       <div className="space-y-2 pl-1">
+                         {availableTmuxSessions.map((tmux) => (
+                           <button
+                             key={tmux.name}
                             type="button"
                             onClick={() => {
                               window.dispatchEvent(new CustomEvent('new-terminal-session', {
@@ -373,30 +490,32 @@ function App() {
                               }));
                               setIsDrawerOpen(false);
                             }}
-                            className="w-full flex items-center gap-2 px-3 py-2 text-sm rounded-lg transition-colors hover:bg-surface-elevated"
-                          >
-                            <RiTerminalBoxLine size={14} />
-                            <span className="flex-1 truncate text-left">{tmux.name}</span>
-                            <span className="text-[10px] text-muted-foreground">{tmux.windows}w</span>
-                          </button>
-                        ))}
-                      </div>
+                             className="flex w-full items-center gap-3 rounded-2xl border border-border px-3 py-3 text-sm transition hover:bg-surface-2"
+                           >
+                             <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
+                               <RiTerminalBoxLine size={16} />
+                             </span>
+                             <span className="flex-1 truncate text-left">{tmux.name}</span>
+                             <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{tmux.windows}w</span>
+                           </button>
+                         ))}
+                       </div>
                     )}
                     </div>
                   );
                 })()}
 
               {/* Settings Section */}
-              <div className="space-y-3">
-                <span className="text-xs text-muted-foreground uppercase tracking-wider">Settings</span>
+              <div className="space-y-4">
+                <span className="ui-kicker">Settings</span>
 
                 {/* Theme */}
-                <div className="space-y-1.5">
-                  <span className="text-xs text-muted-foreground">Theme</span>
+                <div className="space-y-2">
+                  <span className="ui-label">Theme</span>
                   <select
                     value={theme}
                     onChange={(e) => setTheme(e.target.value as any)}
-                    className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
+                    className="ui-input w-full appearance-none"
                   >
                     <option value="dark">Dark</option>
                     <option value="light">Light</option>
@@ -407,8 +526,8 @@ function App() {
                 </div>
 
                 {/* Font Size */}
-                <div className="space-y-1.5">
-                  <span className="text-xs text-muted-foreground">Font Size: {fontSize}px</span>
+                <div className="space-y-2">
+                  <span className="ui-label">Font Size: {fontSize}px</span>
                   <input
                     type="range"
                     min="8"
@@ -421,12 +540,12 @@ function App() {
                 </div>
 
                 {/* Terminal Renderer */}
-                <div className="space-y-1.5">
-                  <span className="text-xs text-muted-foreground">Terminal Renderer</span>
+                <div className="space-y-2">
+                  <span className="ui-label">Terminal Renderer</span>
                   <select
                     value={rendererMode}
                     onChange={(e) => setRendererMode(e.target.value as TerminalRendererMode)}
-                    className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
+                    className="ui-input w-full appearance-none"
                   >
                     <option value="auto">Auto</option>
                     <option value="webgl">WebGL (Sharper)</option>
@@ -435,12 +554,12 @@ function App() {
                 </div>
 
                 {/* New Session Keepalive */}
-                <div className="space-y-1.5">
-                  <span className="text-xs text-muted-foreground">New Session Keepalive</span>
+                <div className="space-y-2">
+                  <span className="ui-label">New Session Keepalive</span>
                   <select
                     value={cleanupDurationPreset}
                     onChange={(e) => setCleanupDurationPreset(e.target.value as CleanupDurationPreset | 'custom')}
-                    className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
+                    className="ui-input w-full appearance-none"
                   >
                     <option value="never">Never</option>
                     <option value="default">Default (3h)</option>
@@ -462,28 +581,28 @@ function App() {
                       onChange={(e) => setCustomDurationInput(e.target.value)}
                       onBlur={handleCustomDurationBlur}
                       placeholder="Minutes"
-                      className="w-full px-3 py-2 text-sm border rounded bg-input mt-2"
+                      className="ui-input mt-2 w-full"
                     />
                   )}
                 </div>
 
-                <div className="space-y-1.5">
-                  <span className="text-xs text-muted-foreground">New Session Mode</span>
+                <div className="space-y-2">
+                  <span className="ui-label">New Session Mode</span>
                   <div className="space-y-2">
                     <button
                       type="button"
                       onClick={() => setNewSessionMode('shell')}
-                      className={`w-full rounded-lg border px-3 py-3 text-left transition-colors ${
+                      className={`w-full rounded-[20px] border px-4 py-4 text-left transition ${
                         newSessionMode === 'shell'
-                          ? 'border-primary/40 bg-primary/10'
-                          : 'border-border bg-input hover:bg-surface-elevated'
+                          ? 'border-border-strong bg-surface'
+                          : 'border-border bg-transparent hover:bg-surface-2'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-medium">Shell</span>
-                        <span className="text-[10px] uppercase tracking-wider text-emerald-400">Recommended</span>
+                        <span className="text-sm font-medium text-foreground">Shell</span>
+                        <span className="text-[10px] uppercase tracking-[0.16em] text-accent">Recommended</span>
                       </div>
-                      <p className="mt-1 text-xs text-muted-foreground">
+                      <p className="mt-2 text-xs text-muted-foreground">
                         Best for most people. With keepalive set {keepAliveSummary}, you can usually close the page and come back later without needing tmux.
                       </p>
                     </button>
@@ -495,19 +614,19 @@ function App() {
                           setNewSessionMode('tmux');
                         }
                       }}
-                      className={`w-full rounded-lg border px-3 py-3 text-left transition-colors ${
+                      className={`w-full rounded-[20px] border px-4 py-4 text-left transition ${
                         newSessionMode === 'tmux'
-                          ? 'border-primary/40 bg-primary/10'
-                          : 'border-border bg-input hover:bg-surface-elevated'
+                          ? 'border-border-strong bg-surface'
+                          : 'border-border bg-transparent hover:bg-surface-2'
                       } ${tmuxStatus.available ? '' : 'opacity-80'}`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-medium">tmux</span>
-                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                        <span className="text-sm font-medium text-foreground">tmux</span>
+                        <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
                           {tmuxStatus.available ? 'Available' : 'Optional'}
                         </span>
                       </div>
-                      <p className="mt-1 text-xs text-muted-foreground">
+                      <p className="mt-2 text-xs text-muted-foreground">
                         Better for named sessions, multi-pane layouts, and longer-running workflows that you want to reattach across browser sessions.
                       </p>
                       {!tmuxStatus.available ? (
@@ -526,14 +645,14 @@ function App() {
                       onChange={(e) => setNewSessionTmuxName(e.target.value)}
                       onBlur={() => setNewSessionTmuxName((prev) => prev.trim())}
                       placeholder="Tmux session name (empty = auto)"
-                      className="w-full px-3 py-2 text-sm border rounded bg-input"
+                      className="ui-input w-full"
                     />
                   )}
                 </div>
 
                 {activeSession && (
-                  <div className="space-y-1.5">
-                    <span className="text-xs text-muted-foreground">Active Session Keepalive</span>
+                  <div className="space-y-2">
+                    <span className="ui-label">Active Session Keepalive</span>
                     <select
                       value={activeKeepAlivePreset}
                       onChange={(e) => {
@@ -548,7 +667,7 @@ function App() {
                         const selected = SESSION_KEEPALIVE_PRESETS.find((item) => item.value === preset);
                         applyActiveSessionKeepAlive(selected?.ms ?? 3 * 60 * 60 * 1000);
                       }}
-                      className="w-full px-3 py-2 text-sm border rounded bg-input appearance-none cursor-pointer"
+                      className="ui-input w-full appearance-none"
                     >
                       <option value="never">Never</option>
                       <option value="30min">30 minutes</option>
@@ -572,7 +691,7 @@ function App() {
                           applyActiveSessionKeepAlive(normalized * 60000);
                         }}
                         placeholder="Minutes"
-                        className="w-full px-3 py-2 text-sm border rounded bg-input mt-2"
+                        className="ui-input mt-2 w-full"
                       />
                     )}
                   </div>
@@ -580,23 +699,23 @@ function App() {
 
                 {/* Debug Toggle */}
                 <div className="flex items-center justify-between pt-2">
-                  <span className="text-xs text-muted-foreground">Debug Mode</span>
+                  <span className="ui-label">Debug Mode</span>
                   <button
                     type="button"
                     onClick={() => setShowDebug(!showDebug)}
-                    className={`px-3 py-1 text-xs rounded transition-colors ${
-                      showDebug ? 'bg-primary text-primary-foreground' : 'bg-surface-elevated'
+                    className={`rounded-full px-4 py-2 text-xs transition ${
+                      showDebug ? 'bg-foreground text-background' : 'border border-border bg-surface text-foreground'
                     }`}
                   >
                     {showDebug ? 'On' : 'Off'}
                   </button>
                 </div>
 
-                <div className="border-t border-border/50 pt-3">
+                <div className="border-t border-border/80 pt-4">
                   <button
                     type="button"
                     onClick={() => setIsToolbarPresetsOpen(true)}
-                    className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm text-left hover:bg-surface-elevated transition-colors"
+                    className="w-full rounded-full border border-border bg-surface px-4 py-3 text-left text-sm text-foreground transition hover:border-border-strong hover:text-hover"
                   >
                     Edit Toolbar Presets
                   </button>
@@ -611,25 +730,26 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm cursor-default"
+            className="fixed inset-0 z-[60] bg-[rgba(38,37,30,0.30)] backdrop-blur-sm cursor-default"
             onClick={() => setIsToolbarPresetsOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto max-w-4xl overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl">
-            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto max-w-4xl overflow-hidden rounded-[28px] border border-border bg-background shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
+            <div className="flex items-center justify-between border-b border-border px-4 py-4 sm:px-6">
               <div>
-                <h2 className="text-sm font-medium">Toolbar Presets</h2>
-                <p className="text-xs text-muted-foreground">Configure program-specific mobile toolbar buttons with live preview.</p>
+                <div className="ui-kicker">Mobile keyboard</div>
+                <h2 className="section-title mt-2">Toolbar presets</h2>
+                <p className="mt-2 text-sm text-muted-foreground">Configure program-specific mobile toolbar buttons with live preview.</p>
               </div>
               <button
                 type="button"
                 onClick={() => setIsToolbarPresetsOpen(false)}
-                className="rounded-lg p-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
+                className="rounded-full border border-border bg-surface p-2 text-muted-foreground transition hover:text-hover"
                 aria-label="Close toolbar presets"
               >
                 <RiCloseLine size={18} />
               </button>
             </div>
-            <div className="h-[calc(100%-65px)] overflow-y-auto p-4">
+            <div className="h-[calc(100%-89px)] overflow-y-auto p-4 sm:p-6">
               <ToolbarPresetSettings
                 presets={toolbarPresets}
                 selectedPresetId={selectedToolbarPresetId}
@@ -669,13 +789,13 @@ function App() {
 
       {/* Debug Info Panel */}
       {showDebug && (
-        <div className="fixed bottom-0 left-0 right-0 bg-surface/95 backdrop-blur-xl border-t border-border/50 p-3 z-40 animate-fade-in max-h-48 overflow-y-auto">
+        <div className="fixed bottom-0 left-0 right-0 z-40 max-h-48 overflow-y-auto border-t border-border bg-background/95 p-3 backdrop-blur-xl animate-fade-in">
           <div className="flex items-center justify-between mb-2">
-            <h4 className="text-xs font-medium text-muted-foreground">Debug Info</h4>
+            <h4 className="ui-kicker">Debug Info</h4>
             <button
               type="button"
               onClick={() => setShowDebug(false)}
-              className="text-xs text-muted-foreground hover:text-foreground"
+              className="text-xs text-muted-foreground hover:text-hover"
             >
               Close
             </button>

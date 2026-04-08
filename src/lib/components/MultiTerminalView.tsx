@@ -53,6 +53,7 @@ interface MultiTerminalViewProps {
   showDebug?: boolean;
   defaultSessionMode?: TerminalMode;
   defaultTmuxSessionName?: string;
+  showSessionStrip?: boolean;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
   onSessionDataUpdate?: (data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => void;
 }
@@ -73,30 +74,51 @@ function generateTmuxSessionName(seed?: string): string {
   return `wt-${timePart}${randomPart}`;
 }
 
-function SessionLineIndicator({
-  sessionCount,
-  activeIndex,
+function SessionTabStrip({
+  sessions,
+  activeSessionId,
+  onSelect,
 }: {
-  sessionCount: number;
-  activeIndex: number;
+  sessions: Array<Pick<TerminalSession, 'id' | 'name'>>;
+  activeSessionId: string | null;
+  onSelect: (sessionId: string) => void;
 }) {
-  if (sessionCount <= 1) {
+  const activeTabRef = React.useRef<HTMLButtonElement | null>(null);
+
+  React.useEffect(() => {
+    activeTabRef.current?.scrollIntoView({
+      inline: 'center',
+      block: 'nearest',
+      behavior: 'smooth',
+    });
+  }, [activeSessionId]);
+
+  if (sessions.length <= 1) {
     return null;
   }
 
-  const safeActiveIndex = Math.max(0, Math.min(activeIndex, sessionCount - 1));
-  const segmentWidthPercent = 100 / sessionCount;
-
   return (
-    <div className="px-3 pt-1 pb-0.5 shrink-0">
-      <div className="relative h-px overflow-hidden rounded-full bg-border/60">
-        <div
-          className="absolute inset-y-0 left-0 rounded-full bg-primary transition-transform duration-300 ease-out"
-          style={{
-            width: `${segmentWidthPercent}%`,
-            transform: `translateX(${safeActiveIndex * 100}%)`,
-          }}
-        />
+    <div className="shrink-0 border-b border-border/70 bg-background/72 px-1 py-1 backdrop-blur-xl sm:px-2">
+      <div className="scrollbar-thin flex items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
+        {sessions.map((session) => {
+          const isActive = session.id === activeSessionId;
+          return (
+            <button
+              key={session.id}
+              ref={isActive ? activeTabRef : null}
+              type="button"
+              onClick={() => onSelect(session.id)}
+              className={`max-w-[11rem] shrink-0 truncate rounded-full px-3 py-1.5 text-[11px] transition sm:max-w-[13rem] ${
+                isActive
+                  ? 'bg-surface text-foreground shadow-[0_8px_20px_rgba(0,0,0,0.06)]'
+                  : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+              }`}
+              title={session.name}
+            >
+              {session.name}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -111,6 +133,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   showDebug,
   defaultSessionMode = 'shell',
   defaultTmuxSessionName = '',
+  showSessionStrip = true,
   onStatusChange,
   onSessionDataUpdate,
 }) => {
@@ -625,7 +648,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   return (
     <div className="h-full flex flex-col">
-      <SessionLineIndicator sessionCount={sessions.length} activeIndex={activeSessionIndex} />
+      {showSessionStrip && (
+        <SessionTabStrip
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          onSelect={handleSwitchSession}
+        />
+      )}
 
       <div className="flex-1 overflow-hidden">
         <Swiper
