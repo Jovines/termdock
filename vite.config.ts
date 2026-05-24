@@ -83,12 +83,12 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    port: 9833,
     strictPort: true,
     host: '0.0.0.0',
     proxy: {
       '/api': {
-        target: 'http://localhost:43888',
+        target: 'http://localhost:9834',
         changeOrigin: true,
         configure: (proxy, options) => {
           proxy.on('proxyRes', (proxyRes, req, res) => {

@@ -7,7 +7,7 @@ import { spawn } from 'child_process';
 import { startServer } from './entry.js';
 
 const DEFAULT_HOST = '0.0.0.0';
-const DEFAULT_PORT = 43888;
+const DEFAULT_PORT = 9834;
 const stateDir = path.join(os.homedir(), '.termdock');
 const stateFilePath = path.join(stateDir, 'server.json');
 const logFilePath = path.join(stateDir, 'server.log');

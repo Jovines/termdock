@@ -11,7 +11,7 @@ import { csrfProtection } from './utils/csrfProtection.js';
 import { pathValidator } from './utils/pathValidator.js';
 
 const CLIENT_STATE_COOKIE = 'termdock-client';
-export const DEFAULT_PORT = 43888;
+export const DEFAULT_PORT = 9834;
 const DEFAULT_HOST = '0.0.0.0';
 
 const currentFilePath = fileURLToPath(import.meta.url);
