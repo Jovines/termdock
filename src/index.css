@@ -3,21 +3,25 @@
 @tailwind utilities;
 
 :root {
-  --background: #0d1117;
-  --foreground: #f0f6fc;
-  --surface: #161b22;
-  --surface-elevated: #21262d;
-  --muted: #6e7681;
-  --muted-foreground: #8b949e;
-  --border: #30363d;
-  --input: #0d1117;
-  --primary: #238636;
-  --primary-foreground: #ffffff;
-  --accent: #1f6feb;
-  --accent-foreground: #ffffff;
-  --destructive: #da3633;
-  --destructive-foreground: #ffffff;
-  --ring: #1f6feb;
+  --background: #1C1B1A;
+  --foreground: #CECDC3;
+  --surface: #222120;
+  --surface-2: #282726;
+  --surface-elevated: #343331;
+  --background-subtle: #1E1D1C;
+  --muted: #6F6E69;
+  --muted-foreground: #9F9D96;
+  --border: #403E3C;
+  --border-strong: #575653;
+  --input: #222120;
+  --primary: #66800B;
+  --primary-foreground: #FFFCF0;
+  --accent: #4385BE;
+  --accent-foreground: #FFFCF0;
+  --destructive: #AF3029;
+  --destructive-foreground: #FFFCF0;
+  --ring: #4385BE;
+  --hover: #E6E4D9;
 }
 
 body {
@@ -124,6 +128,44 @@ body,
   opacity: 0.5;
 }
 
+/* Custom UI utility classes */
+.ui-kicker {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--muted-foreground);
+}
+
+.ui-label {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.ui-input {
+  width: 100%;
+  padding: 0.625rem 1rem;
+  border-radius: 9999px;
+  background-color: var(--surface);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ui-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(67, 133, 190, 0.3);
+}
+
+.section-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--foreground);
+}
+
 @keyframes spin {
   from {
     transform: rotate(0deg);
@@ -190,7 +232,7 @@ body {
     /* Allow scrolling for terminal */
     touch-action: pan-y;
     /* Ensure visibility even if something goes wrong */
-    background-color: #0d1117 !important;
+    background-color: #1C1B1A !important;
     color: white !important;
   }
 
@@ -282,7 +324,7 @@ body {
 
 /* Smooth transitions */
 * {
-  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease, opacity 0.2s ease;
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease, opacity 0.2s ease, box-shadow 0.2s ease;
 }
 
 .xterm,

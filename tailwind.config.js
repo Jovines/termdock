@@ -5,9 +5,12 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Terminal-specific colors will be defined in theme system
         background: 'var(--background)',
         foreground: 'var(--foreground)',
+        surface: 'var(--surface)',
+        'surface-2': 'var(--surface-2)',
+        'surface-elevated': 'var(--surface-elevated)',
+        'background-subtle': 'var(--background-subtle)',
         primary: {
           DEFAULT: 'var(--primary)',
           foreground: 'var(--primary-foreground)',
@@ -25,8 +28,10 @@ export default {
           foreground: 'var(--destructive-foreground)',
         },
         border: 'var(--border)',
+        'border-strong': 'var(--border-strong)',
         input: 'var(--input)',
         ring: 'var(--ring)',
+        hover: 'var(--hover)',
       },
       fontFamily: {
         mono: ['var(--font-mono)', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],

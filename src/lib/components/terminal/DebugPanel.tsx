@@ -26,11 +26,11 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
     : 0;
 
   return (
-    <div className="px-3 py-2 bg-blue-900/90 text-white text-xs border-b border-blue-700">
-      <div className="font-bold mb-2">🔧 Debug Info</div>
+    <div className="px-3 py-2 bg-surface text-foreground text-xs border-b border-border/15">
+      <div className="font-bold mb-2">Debug Info</div>
       <div className="grid grid-cols-2 gap-1 font-mono">
         <div>
-          isMobile: <span className={isMobile ? 'text-green-400' : 'text-red-400'}>{String(isMobile)}</span>
+          isMobile: <span className={isMobile ? 'text-accent' : 'text-destructive'}>{String(isMobile)}</span>
         </div>
         <div>touchPoints: {navigator.maxTouchPoints}</div>
         <div>innerWidth: {window.innerWidth}</div>
@@ -45,31 +45,31 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
         <div>keyboard~: {keyboardApproxHeight}px</div>
         <div>
           connecting:{' '}
-          <span className={isConnecting ? 'text-yellow-400' : 'text-green-400'}>
+          <span className={isConnecting ? 'text-muted-foreground' : 'text-accent'}>
             {String(isConnecting)}
           </span>
         </div>
         <div>
           sessionId:{' '}
-          <span className={terminalSessionId ? 'text-green-400' : 'text-red-400'}>
+          <span className={terminalSessionId ? 'text-accent' : 'text-destructive'}>
             {terminalSessionId ? '✓' : '✗'}
           </span>
         </div>
         <div>
           error:{' '}
-          <span className={connectionError ? 'text-red-400' : 'text-green-400'}>
+          <span className={connectionError ? 'text-destructive' : 'text-accent'}>
             {connectionError ? 'Yes' : 'No'}
           </span>
         </div>
         <div>
           isIOS:{' '}
-          <span className={isIOS ? 'text-yellow-400' : 'text-green-400'}>
+          <span className={isIOS ? 'text-muted-foreground' : 'text-accent'}>
             {String(isIOS)}
           </span>
         </div>
       </div>
-      <div className="mt-2 pt-2 border-t border-blue-700">
-        <div>💡 Tip: 连续点击上方状态栏3次可切换调试面板</div>
+      <div className="mt-2 pt-2 border-t border-border/15">
+        <div>Tip: Tap the status bar 3 times to toggle debug panel</div>
       </div>
     </div>
   );

@@ -15,35 +15,35 @@ export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
   isConnecting,
   onHardRestart,
 }) => {
-  // Show loading state when connecting (no error)
   if (isConnecting && !connectionError) {
     return (
-      <div className="absolute inset-x-0 bottom-0 bg-emerald-500/80 px-3 py-2 text-xs text-white flex items-center justify-center gap-2">
-        <span className="animate-pulse">Connecting...</span>
+      <div className="absolute inset-x-0 bottom-0 flex items-end justify-center pb-2 pointer-events-none">
+        <span className="text-[11px] text-muted-foreground/60 animate-pulse tracking-wide">
+          Reconnecting...
+        </span>
       </div>
     );
   }
 
-  // Show error state
   if (connectionError) {
     return (
-      <div className="absolute inset-x-0 bottom-0 bg-red-500/90 px-3 py-2 text-xs text-white flex items-center justify-between gap-2">
-        <span>{connectionError}</span>
-        {isFatalError && (
-          <button
-            type="button"
-            onClick={onHardRestart}
-            disabled={isRestarting}
-            title="Force kill and create fresh session"
-            className="h-6 px-2 py-0 text-xs bg-white/20 hover:bg-white/30 rounded disabled:opacity-50"
-          >
-            Hard Restart
-          </button>
-        )}
+      <div className="absolute inset-x-0 bottom-0 flex items-end justify-center pb-2">
+        <div className="flex items-center gap-2 text-[11px] text-destructive/70">
+          <span>{connectionError}</span>
+          {isFatalError && (
+            <button
+              type="button"
+              onClick={onHardRestart}
+              disabled={isRestarting}
+              className="text-[11px] text-destructive/90 hover:text-destructive underline underline-offset-2 transition-colors disabled:opacity-40"
+            >
+              Retry
+            </button>
+          )}
+        </div>
       </div>
     );
   }
 
-  // Normal state - nothing shown
   return null;
 };

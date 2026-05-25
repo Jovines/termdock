@@ -45,7 +45,6 @@ const DEFAULT_KEEP_ALIVE_MS = 3 * 60 * 60 * 1000;
 const SWIPE_ANIMATION_SPEED_MS = 320;
 
 interface MultiTerminalViewProps {
-  theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
@@ -98,7 +97,7 @@ function SessionTabStrip({
   }
 
   return (
-    <div className="shrink-0 border-b border-border/70 bg-background/72 px-1 py-1 backdrop-blur-xl sm:px-2">
+    <div className="shrink-0 bg-background-2/50 px-1 py-1 sm:px-2">
       <div className="scrollbar-thin flex items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
         {sessions.map((session) => {
           const isActive = session.id === activeSessionId;
@@ -108,10 +107,10 @@ function SessionTabStrip({
               ref={isActive ? activeTabRef : null}
               type="button"
               onClick={() => onSelect(session.id)}
-              className={`max-w-[11rem] shrink-0 truncate rounded-full px-3 py-1.5 text-[11px] transition sm:max-w-[13rem] ${
+              className={`shrink-0 truncate rounded-full px-3 py-1.5 text-[11px] transition max-w-[16rem] ${
                 isActive
-                  ? 'bg-surface text-foreground shadow-[0_8px_20px_rgba(0,0,0,0.06)]'
-                  : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+                  ? 'bg-background-elevated text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:bg-background-elevated/50 hover:text-foreground'
               }`}
               title={session.name}
             >
@@ -125,7 +124,6 @@ function SessionTabStrip({
 }
 
 export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
-  theme = 'dark',
   fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
   fontSize = 13,
   rendererMode = 'auto',
@@ -637,10 +635,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
 
     return (
-      <div className="h-full flex items-center justify-center bg-background text-muted">
-        <div className="flex flex-col items-center gap-2">
-          <div className="w-6 h-6 border-2 border-border border-t-accent rounded-full animate-spin" />
-          <span className="text-sm">Restoring sessions...</span>
+      <div className="h-full flex items-center justify-center bg-background">
+        <div className="rounded-full bg-background-2 px-4 py-2 flex items-center gap-3 shadow-sm">
+          <div className="w-5 h-5 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
+          <span className="text-sm text-muted-foreground">Restoring sessions...</span>
         </div>
       </div>
     );
@@ -694,7 +692,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                 {isNearActive ? (
                   <TerminalView
                     sessionId={session.id}
-                    theme={theme}
                     fontFamily={fontFamily}
                     fontSize={fontSize}
                     rendererMode={rendererMode}

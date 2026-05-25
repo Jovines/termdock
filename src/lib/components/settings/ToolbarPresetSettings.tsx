@@ -14,7 +14,7 @@ interface ToolbarPresetSettingsProps {
 
 function PreviewButton({ label }: { label: string }) {
   return (
-    <div className="h-6 rounded border border-border px-2 text-xs leading-6 text-center bg-input text-foreground">
+    <div className="h-7 rounded-full bg-surface-2 px-3 text-xs leading-7 text-center text-muted-foreground">
       {label}
     </div>
   );
@@ -72,7 +72,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
           <button
             type="button"
             onClick={onAddPreset}
-            className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-surface-elevated"
+            className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-3 py-1.5 text-xs hover:bg-surface-elevated transition-colors"
           >
             <RiAddLine size={12} />
             Add
@@ -80,7 +80,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
           <button
             type="button"
             onClick={onResetDefaults}
-            className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-surface-elevated"
+            className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-3 py-1.5 text-xs hover:bg-surface-elevated transition-colors"
           >
             <RiRefreshLine size={12} />
             Reset
@@ -94,10 +94,10 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
             key={preset.id}
             type="button"
             onClick={() => onSelectPreset(preset.id)}
-            className={`rounded px-2 py-1 text-xs border transition-colors ${
+            className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
               preset.id === selectedPreset.id
-                ? 'border-primary bg-primary/15 text-primary'
-                : 'border-border hover:bg-surface-elevated'
+                ? 'bg-primary/20 text-primary'
+                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated'
             }`}
           >
             {preset.label}
@@ -105,7 +105,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
         ))}
       </div>
 
-      <div className="space-y-3 rounded-lg border border-border/60 bg-surface-elevated/40 p-3">
+      <div className="space-y-3 rounded-2xl bg-surface p-4">
         <div className="space-y-1.5">
           <span className="text-xs text-muted-foreground">Preset Label</span>
           <div className="flex items-center gap-2">
@@ -113,14 +113,14 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
               type="text"
               value={selectedPreset.label}
               onChange={(event) => onUpdatePreset(selectedPreset.id, (preset) => ({ ...preset, label: event.target.value }))}
-              className="w-full rounded border bg-input px-3 py-2 text-base sm:text-sm"
+              className="w-full rounded-full bg-surface px-4 py-2.5 text-base sm:text-sm placeholder:text-muted/60"
               placeholder="Preset label"
             />
             {selectedPreset.id !== 'default' && (
               <button
                 type="button"
                 onClick={() => onRemovePreset(selectedPreset.id)}
-                className="shrink-0 rounded border border-red-500/30 px-2 py-2 text-red-500 hover:bg-red-500/10"
+                className="shrink-0 rounded-full bg-surface-2 px-3 py-2 text-destructive hover:bg-destructive/15"
                 aria-label={`Remove ${selectedPreset.label}`}
               >
                 <RiDeleteBinLine size={14} />
@@ -138,14 +138,14 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
               ...preset,
               programs: event.target.value.split(',').map((item) => item.trim()).filter(Boolean),
             }))}
-            className="w-full rounded border bg-input px-3 py-2 text-base sm:text-sm"
+            className="w-full rounded-full bg-surface px-4 py-2.5 text-base sm:text-sm placeholder:text-muted/60"
             placeholder="vim, nvim, opencode"
           />
           <p className="text-[11px] text-muted-foreground">Use exact program names, comma separated.</p>
         </div>
 
         <div className="space-y-2">
-          <label className="flex items-center justify-between rounded border border-border/60 bg-background/60 px-3 py-2 text-sm">
+          <label className="flex items-center justify-between rounded-2xl bg-surface-2 px-4 py-2.5 text-sm">
             <span>Include Alt</span>
             <input
               type="checkbox"
@@ -195,7 +195,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                       ...preset,
                       rowLayout: preset.rowLayout.filter((_, index) => index !== rowIndex),
                     }))}
-                    className="rounded border border-border px-2 py-1 text-xs hover:bg-surface-elevated"
+                    className="rounded-full bg-surface-2 px-2.5 py-1 text-xs hover:bg-surface-elevated"
                   >
                     Del
                   </button>
@@ -242,7 +242,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                 }
                 setDraggingActionId(null);
               }}
-              className={`rounded-lg border p-2 transition-colors ${draggingActionId === action.id ? 'border-primary bg-primary/5' : 'border-border/60 bg-background/60'}`}
+              className={`rounded-2xl bg-surface-2 p-3 transition-colors ${draggingActionId === action.id ? 'ring-2 ring-accent/40' : 'hover:bg-surface-elevated'}`}
             >
               <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
                 <RiDraggable size={14} />
@@ -256,7 +256,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                   ...preset,
                   actions: preset.actions.map((item) => item.id === action.id ? { ...item, label: event.target.value } : item),
                 }))}
-                className="rounded border bg-input px-3 py-2 text-base sm:text-sm"
+                className="rounded-full bg-surface border border-border/15 px-4 py-2.5 text-base sm:text-sm placeholder:text-muted/60"
                 placeholder="Label"
               />
               <input
@@ -266,7 +266,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                   ...preset,
                   actions: preset.actions.map((item) => item.id === action.id ? { ...item, sequence: event.target.value } : item),
                 }))}
-                className="rounded border bg-input px-3 py-2 text-base sm:text-sm"
+                className="rounded-full bg-surface border border-border/15 px-4 py-2.5 text-base sm:text-sm placeholder:text-muted/60"
                 placeholder="Sequence, eg /undo or \t"
               />
               <button
@@ -275,7 +275,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                   ...preset,
                   actions: preset.actions.filter((item) => item.id !== action.id),
                 }))}
-                className="rounded border border-border px-2 py-2 text-muted-foreground hover:text-foreground"
+                className="rounded-full bg-surface-2 p-2.5 text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
                 aria-label={`Remove ${action.label}`}
               >
                 <RiDeleteBinLine size={14} />
@@ -289,7 +289,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
           )}
         </div>
 
-        <div className="space-y-2 rounded-lg border border-border/60 bg-background/70 p-3">
+        <div className="space-y-2 rounded-2xl bg-surface-2/60 p-3">
           <span className="text-xs text-muted-foreground">Live Preview</span>
           <div className="space-y-1">
             {previewRows.map((row, rowIndex) => (

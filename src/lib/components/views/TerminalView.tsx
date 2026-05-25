@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
-import { convertThemeToXterm, getDefaultTheme, THEMES } from '../../terminal';
+import { FLEXOKI_DARK } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
@@ -33,7 +33,6 @@ const STREAM_OPTIONS = {
 
 interface TerminalViewProps {
   sessionId?: string;
-  theme?: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
@@ -47,7 +46,6 @@ interface TerminalViewProps {
 
 export const TerminalView: React.FC<TerminalViewProps> = ({
   sessionId: initialSessionId,
-  theme: themeName = 'dark',
   fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
   rendererMode = 'auto',
@@ -69,7 +67,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     setFontSize(initialFontSize);
   }, [initialFontSize]);
 
-  const [currentTheme, setCurrentTheme] = React.useState(getDefaultTheme);
   const [sessionId] = React.useState(initialSessionId || uuidv4());
   const [isMobile, setIsMobile] = React.useState(false);
   const [isIOS, setIsIOS] = React.useState(false);
@@ -310,18 +307,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
-
-  React.useEffect(() => {
-    const themes = {
-      dark: 0,
-      light: 1,
-      solarized: 2,
-      dracula: 3,
-      nord: 4,
-    };
-    const themeIndex = themes[themeName] ?? 0;
-    setCurrentTheme(THEMES[themeIndex]);
-  }, [themeName]);
 
   const disconnectStream = React.useCallback(() => {
     streamVersionRef.current += 1;
@@ -981,7 +966,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, []);
   const presetOptions = React.useMemo(() => buildToolbarPresetOptions(toolbarPresets), [toolbarPresets]);
 
-  const xtermTheme = React.useMemo(() => convertThemeToXterm(currentTheme), [currentTheme]);
+  const xtermTheme = FLEXOKI_DARK;
 
   const terminalSessionKey = React.useMemo(() => {
     const terminalPart = terminalSessionId ?? 'pending';
@@ -1009,7 +994,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const isKeyboardVisible = isActive && isMobile && isViewportKeyboardOpen;
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background">
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden">
       {showDebug && (
         <DebugPanel
           isMobile={isMobile}
@@ -1030,10 +1015,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         <div className="h-full w-full box-border">
           <ErrorBoundary
             fallback={
-              <div className="flex h-full items-center justify-center">
-                <div className="flex flex-col items-center gap-3 text-center">
-                  <div className="w-10 h-10 rounded-full bg-red-500/10 flex items-center justify-center">
-                    <svg className="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <div className="flex h-full items-center justify-center bg-background">
+                <div className="flex flex-col items-center gap-3 text-center rounded-2xl bg-surface-2 px-6 py-5 shadow-sm">
+                  <div className="w-10 h-10 rounded-full bg-destructive/15 flex items-center justify-center">
+                    <svg className="w-5 h-5 text-destructive" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                     </svg>
                   </div>

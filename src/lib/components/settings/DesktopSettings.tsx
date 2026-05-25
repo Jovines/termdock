@@ -1,14 +1,12 @@
 import React from 'react';
-import { RiPaletteLine, RiTimerLine, RiSettings4Line, RiCloseLine, RiAddLine, RiSubtractLine } from '@remixicon/react';
+import { RiTimerLine, RiSettings4Line, RiCloseLine, RiAddLine, RiSubtractLine } from '@remixicon/react';
 import type { CleanupDurationPreset } from '../../terminal/types';
 
 interface DesktopSettingsProps {
-  theme: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord';
   cleanupDurationPreset: CleanupDurationPreset | 'custom';
   customDurationInput: string;
   fontSize: number;
   isMobileMenuOpen: boolean;
-  onThemeChange: (value: 'dark' | 'light' | 'solarized' | 'dracula' | 'nord') => void;
   onCleanupPresetChange: (value: CleanupDurationPreset | 'custom') => void;
   onCustomDurationChange: (value: string) => void;
   onCustomDurationBlur: () => void;
@@ -18,12 +16,10 @@ interface DesktopSettingsProps {
 }
 
 export const DesktopSettings: React.FC<DesktopSettingsProps> = ({
-  theme,
   cleanupDurationPreset,
   customDurationInput,
   fontSize,
   isMobileMenuOpen,
-  onThemeChange,
   onCleanupPresetChange,
   onCustomDurationChange,
   onCustomDurationBlur,
@@ -35,30 +31,10 @@ export const DesktopSettings: React.FC<DesktopSettingsProps> = ({
     <>
       <div className="hidden lg:flex items-center gap-3">
         <div className="relative group">
-          <label htmlFor="desktop-theme" className="absolute -top-1.5 left-2.5 bg-surface px-1 text-xs text-muted">
-            Theme
-          </label>
-          <div className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded bg-input text-foreground transition-colors focus-within:border-accent focus-within:ring-1 focus-within:ring-accent">
-            <RiPaletteLine className="w-4 h-4 text-muted" />
-            <select
-              id="desktop-theme"
-              value={theme}
-              onChange={(e) => onThemeChange(e.target.value as any)}
-              className="bg-transparent border-none outline-none appearance-none cursor-pointer"
-            >
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
-              <option value="solarized">Solarized</option>
-              <option value="dracula">Dracula</option>
-              <option value="nord">Nord</option>
-            </select>
-          </div>
-        </div>
-        <div className="relative group">
           <label htmlFor="desktop-cleanup" className="absolute -top-1.5 left-2.5 bg-surface px-1 text-xs text-muted">
             Cleanup
           </label>
-          <div className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded bg-input text-foreground transition-colors focus-within:border-accent focus-within:ring-1 focus-within:ring-accent">
+          <div className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-full bg-surface text-foreground transition-colors focus-within:ring-2 focus-within:ring-accent/40">
             <RiTimerLine className="w-4 h-4 text-muted" />
             <select
               id="desktop-cleanup"
@@ -83,7 +59,7 @@ export const DesktopSettings: React.FC<DesktopSettingsProps> = ({
             <label htmlFor="desktop-custom-cleanup" className="absolute -top-1.5 left-2.5 bg-surface px-1 text-xs text-muted">
               Minutes
             </label>
-            <div className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded bg-input text-foreground transition-colors focus-within:border-accent focus-within:ring-1 focus-within:ring-accent">
+            <div className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-full bg-surface text-foreground transition-colors focus-within:ring-2 focus-within:ring-accent/40">
               <input
                 id="desktop-custom-cleanup"
                 type="number"
@@ -109,11 +85,11 @@ export const DesktopSettings: React.FC<DesktopSettingsProps> = ({
           <label htmlFor="desktop-fontsize" className="absolute -top-1.5 left-2.5 bg-surface px-1 text-xs text-muted">
             Font Size
           </label>
-          <div className="flex items-center gap-1 px-3 py-1.5 text-sm border rounded bg-input text-foreground transition-colors focus-within:border-accent focus-within:ring-1 focus-within:ring-accent">
+          <div className="flex items-center gap-1 px-3 py-1.5 text-sm border border-border/15 rounded-full bg-surface text-foreground transition-colors focus-within:ring-2 focus-within:ring-accent/40">
             <button
               type="button"
               onClick={() => onFontSizeChange(fontSize - 1)}
-              className="p-0.5 rounded hover:bg-surface-elevated transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="p-1 rounded-full hover:bg-surface-elevated transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               disabled={fontSize <= 8}
               aria-label="Decrease font size"
             >
@@ -136,7 +112,7 @@ export const DesktopSettings: React.FC<DesktopSettingsProps> = ({
             <button
               type="button"
               onClick={() => onFontSizeChange(fontSize + 1)}
-              className="p-0.5 rounded hover:bg-surface-elevated transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="p-1 rounded-full hover:bg-surface-elevated transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               disabled={fontSize >= 32}
               aria-label="Increase font size"
             >
@@ -149,7 +125,7 @@ export const DesktopSettings: React.FC<DesktopSettingsProps> = ({
       <button
         type="button"
         onClick={onToggleMenu}
-        className="hidden lg:flex p-2 -mr-2 rounded-lg hover:bg-surface-elevated transition-colors focus:outline-none focus:ring-2 focus:ring-accent min-w-[44px] min-h-[44px] items-center justify-center"
+        className="hidden lg:flex p-2 -mr-2 rounded-full hover:bg-surface-2 transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 min-w-[44px] min-h-[44px] items-center justify-center"
         aria-label="Toggle settings menu"
         aria-expanded={isMobileMenuOpen}
       >
