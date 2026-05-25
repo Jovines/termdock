@@ -368,24 +368,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       return typeof performance !== 'undefined' ? performance.now() : Date.now();
     }, []);
 
-    const focusHiddenInput = React.useCallback((_clientX?: number, _clientY?: number) => {
-      const input = hiddenInputRef.current;
-      if (!input) {
-        return;
-      }
-
-      try {
-        // If iOS dismissed the keyboard (e.g. via the keyboard's own dismiss
-        // button) but kept the input focused, a plain focus() is a no-op.
-        // Blur + focus synchronously within the same user gesture to force
-        // iOS to re-open the keyboard.
-        if (typeof document !== 'undefined' && document.activeElement === input) {
-          input.blur();
-        }
-        input.focus();
-      } catch { /* ignored */ }
-    }, []);
-
     const isHiddenInputFocused = React.useCallback(() => {
       const input = hiddenInputRef.current;
       if (!input || typeof document === 'undefined') {
@@ -406,6 +388,26 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       return keyboardApproxHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
     }, []);
+
+    const focusHiddenInput = React.useCallback((_clientX?: number, _clientY?: number) => {
+      const input = hiddenInputRef.current;
+      if (!input) {
+        return;
+      }
+
+      try {
+        // When iOS dismissed the keyboard via its own dismiss button, the
+        // textarea stays focused but the keyboard is gone — plain focus() is
+        // a no-op.  Only in that specific case do we blur first.
+        const alreadyFocused = typeof document !== 'undefined' && document.activeElement === input;
+        const keyboardGone = alreadyFocused && !isViewportKeyboardLikelyOpen();
+
+        if (keyboardGone) {
+          input.blur();
+        }
+        input.focus();
+      } catch { /* ignored */ }
+    }, [isViewportKeyboardLikelyOpen]);
 
     const markInputBlurGuard = React.useCallback((durationMs: number) => {
       keepInputFocusUntilRef.current = nowMs() + durationMs;
