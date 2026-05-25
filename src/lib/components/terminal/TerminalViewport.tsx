@@ -219,7 +219,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
     const remainderPxRef = React.useRef(0);
-    const tmuxRemainderPxRef = React.useRef(0);
     const osc52RemainderRef = React.useRef('');
     const webglAddonRef = React.useRef<WebglAddon | null>(null);
     const webglContextLossDisposableRef = React.useRef<{ dispose: () => void } | null>(null);
@@ -313,9 +312,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       // Plain tmux shell history still needs copy-mode scrolling.
       if (onTmuxScroll) {
-        const total = tmuxRemainderPxRef.current + deltaPixels;
+        const total = remainderPxRef.current + deltaPixels;
         const scrollLines = Math.trunc(total / lineHeightPx);
-        tmuxRemainderPxRef.current = total - scrollLines * lineHeightPx;
+        remainderPxRef.current = total - scrollLines * lineHeightPx;
 
         if (scrollLines !== 0) {
           const direction = scrollLines > 0 ? 'down' : 'up';
@@ -364,23 +363,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         inputHandlerRef.current(buttonRelease);
       }
     }, [pixelToCharCoords]);
-
-    // Immediate tmux scroll handler — fires synchronously in pointermove
-    // (before the RAF-batched path) so tmux scrolls feel more responsive.
-    const handleTmuxScrollImmediate = React.useCallback(
-      (deltaPixels: number) => {
-        if (!onTmuxScroll) return;
-        const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
-        const total = tmuxRemainderPxRef.current + deltaPixels;
-        const scrollLines = Math.trunc(total / lineHeightPx);
-        tmuxRemainderPxRef.current = total - scrollLines * lineHeightPx;
-        if (scrollLines !== 0) {
-          const direction = scrollLines > 0 ? 'down' : 'up';
-          onTmuxScroll(direction, Math.max(1, Math.min(Math.abs(scrollLines), 40)));
-        }
-      },
-      [fontSize, onTmuxScroll],
-    );
 
     const nowMs = React.useCallback(() => {
       return typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -452,7 +434,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       shouldCaptureTouch: () => false,
       onScroll: handleScroll,
       onScrollWithCoords: handleScroll,
-      onScrollImmediate: handleTmuxScrollImmediate,
       onClickWithCoords: handleClick,
       onTap: focusHiddenInput,
       tapThreshold: 12,
