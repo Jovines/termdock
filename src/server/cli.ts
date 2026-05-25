@@ -226,4 +226,5 @@ if (options.foreground) {
   console.log(`URL: http://${childHost}:${childPort}`);
   console.log(`PID: ${child.pid}`);
   console.log(`Log: ${logFilePath}`);
+  process.exit(0);
 }

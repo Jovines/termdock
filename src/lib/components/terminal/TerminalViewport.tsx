@@ -374,17 +374,16 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         return;
       }
 
-      if (typeof document !== 'undefined' && document.activeElement === input) {
-        return;
-      }
-
       try {
-        input.focus({ preventScroll: true });
-      } catch {
-        try {
-          input.focus();
-        } catch { /* ignored */ }
-      }
+        // If iOS dismissed the keyboard (e.g. via the keyboard's own dismiss
+        // button) but kept the input focused, a plain focus() is a no-op.
+        // Blur + focus synchronously within the same user gesture to force
+        // iOS to re-open the keyboard.
+        if (typeof document !== 'undefined' && document.activeElement === input) {
+          input.blur();
+        }
+        input.focus();
+      } catch { /* ignored */ }
     }, []);
 
     const isHiddenInputFocused = React.useCallback(() => {
@@ -419,105 +418,18 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       return nowMs() <= keepInputFocusUntilRef.current;
     }, [enableTouchScroll, nowMs]);
 
-    const shouldPreventDefaultForTouch = React.useCallback(() => {
-      if (!enableTouchScroll) {
-        return false;
-      }
-      return isHiddenInputFocused() || isViewportKeyboardLikelyOpen();
-    }, [enableTouchScroll, isHiddenInputFocused, isViewportKeyboardLikelyOpen]);
-
-    const handlePointerDownCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-      if (!enableTouchScroll || event.pointerType !== 'touch') {
-        return;
-      }
-
+    // With the full-size textarea covering the entire terminal, touch events
+    // naturally target the textarea.  touch-action:none on the textarea prevents
+    // browser scroll/pinch — all custom scroll is handled by useTouchScroll.
+    // We only extend the blur guard so transient touch interactions don't
+    // prematurely report focus loss to the parent component.
+    const extendBlurGuard = React.useCallback((durationMs: number) => {
+      markInputBlurGuard(durationMs);
       lastTouchInteractionAtRef.current = nowMs();
-
-      if (!shouldPreventDefaultForTouch()) {
-        return;
-      }
-
-      markInputBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
-      if (event.cancelable) {
-        event.preventDefault();
-      }
-    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
-
-    const handlePointerMoveCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-      if (!enableTouchScroll || event.pointerType !== 'touch') {
-        return;
-      }
-
-      lastTouchInteractionAtRef.current = nowMs();
-
-      if (!shouldPreventDefaultForTouch()) {
-        return;
-      }
-
-      markInputBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
-    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
-
-    const handlePointerEndCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-      if (!enableTouchScroll || event.pointerType !== 'touch') {
-        return;
-      }
-
-      lastTouchInteractionAtRef.current = nowMs();
-
-      if (!shouldPreventDefaultForTouch()) {
-        return;
-      }
-
-      markInputBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS);
-    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
-
-    const handleTouchStartCapture = React.useCallback((event: React.TouchEvent<HTMLDivElement>) => {
-      if (!enableTouchScroll) {
-        return;
-      }
-
-      lastTouchInteractionAtRef.current = nowMs();
-
-      if (!shouldPreventDefaultForTouch()) {
-        return;
-      }
-
-      markInputBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
-      if (event.cancelable) {
-        event.preventDefault();
-      }
-    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
-
-    const handleTouchMoveCapture = React.useCallback(() => {
-      if (!enableTouchScroll) {
-        return;
-      }
-
-      lastTouchInteractionAtRef.current = nowMs();
-
-      if (!shouldPreventDefaultForTouch()) {
-        return;
-      }
-
-      markInputBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
-    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
-
-    const handleTouchEndCapture = React.useCallback(() => {
-      if (!enableTouchScroll) {
-        return;
-      }
-
-      lastTouchInteractionAtRef.current = nowMs();
-
-      if (!shouldPreventDefaultForTouch()) {
-        return;
-      }
-
-      markInputBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS);
-    }, [enableTouchScroll, markInputBlurGuard, shouldPreventDefaultForTouch]);
+    }, [markInputBlurGuard, nowMs]);
 
     const { setupTouchScroll } = useTouchScroll(containerRef, {
-      shouldCaptureTouch: shouldPreventDefaultForTouch,
+      shouldCaptureTouch: () => false,
       onScroll: handleScroll,
       onScrollWithCoords: handleScroll,
       onClickWithCoords: handleClick,
@@ -544,11 +456,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           return false;
         }
 
-        if (container.contains(event.target as Node | null)) {
-          return true;
-        }
-
-        return shouldPreventDefaultForTouch();
+        return container.contains(event.target as Node | null);
       };
 
       const handleCompatMouseCapture = (event: MouseEvent) => {
@@ -574,7 +482,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         container.removeEventListener('click', handleCompatMouseCapture, true);
         document.removeEventListener('mouseup', handleCompatMouseCapture, true);
       };
-    }, [enableTouchScroll, shouldPreventDefaultForTouch, nowMs]);
+    }, [enableTouchScroll, nowMs]);
 
     const resetWriteState = React.useCallback(() => {
       pendingWriteRef.current = '';
@@ -1107,14 +1015,14 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         style={{ backgroundColor: theme.background }}
         role="button"
         tabIndex={enableTouchScroll ? -1 : 0}
-        onPointerDownCapture={handlePointerDownCapture}
-        onPointerMoveCapture={handlePointerMoveCapture}
-        onPointerUpCapture={handlePointerEndCapture}
-        onPointerCancelCapture={handlePointerEndCapture}
-        onTouchStartCapture={handleTouchStartCapture}
-        onTouchMoveCapture={handleTouchMoveCapture}
-        onTouchEndCapture={handleTouchEndCapture}
-        onTouchCancelCapture={handleTouchEndCapture}
+        onPointerDownCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
+        onPointerMoveCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
+        onPointerUpCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
+        onPointerCancelCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
+        onTouchStartCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
+        onTouchMoveCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
+        onTouchEndCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
+        onTouchCancelCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
         onClick={() => {
           if (!enableTouchScroll) {
             terminalRef.current?.focus();
@@ -1160,19 +1068,15 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                 tabIndex={-1}
                 style={{
                   position: 'absolute',
-                  left: 8,
-                  top: 8,
-                  width: 1,
-                  height: 1,
+                  inset: 0,
                   opacity: 0,
-                  zIndex: 0,
-                  pointerEvents: 'none',
+                  zIndex: 20,
+                  touchAction: 'none',
                   background: 'transparent',
                   color: 'transparent',
                   caretColor: 'transparent',
                   resize: 'none',
                   overflow: 'hidden',
-                  whiteSpace: 'nowrap',
                   fontSize: '16px',
                   border: 'none',
                   padding: 0,
