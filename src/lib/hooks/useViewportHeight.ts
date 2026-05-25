@@ -39,6 +39,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
   }, []);
 
   const [viewportHeight, setViewportHeight] = React.useState(getViewportHeight);
+  const heightBufRef = React.useRef<number[]>([]);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') {
@@ -47,30 +48,43 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
     let rafId: number | null = null;
 
+    const medianOf3 = (a: number, b: number, c: number) =>
+      [a, b, c].sort((x, y) => x - y)[1];
+
     const syncViewportHeight = () => {
       rafId = null;
       const nextHeight = getViewportHeight();
       const nextOffsetTop = Math.round(window.visualViewport?.offsetTop ?? 0);
       const rawViewportHeight = Math.round(window.visualViewport?.height ?? window.innerHeight);
       const innerHeight = Math.round(window.innerHeight);
+
+      // Median-of-3 filter: buffer the last 3 raw heights, apply the median.
+      // Single-frame outliers (transient spikes during iOS keyboard animation)
+      // are naturally discarded while genuine trends pass through with zero lag.
+      const buf = heightBufRef.current;
+      buf.push(nextHeight);
+      if (buf.length > 3) buf.shift();
+      const filteredHeight = buf.length === 3
+        ? medianOf3(buf[0], buf[1], buf[2])
+        : nextHeight;
+
+      setViewportHeight((current) => (current === nextHeight ? current : nextHeight));
+      document.documentElement.style.setProperty(cssVarName, `${filteredHeight}px`);
+      document.documentElement.style.setProperty('--app-vv-offset-top', `${nextOffsetTop}px`);
+
       const previousHeight = Number.parseInt(
         document.documentElement.style.getPropertyValue(cssVarName) || '0',
         10
       );
-      const heightChanged = previousHeight !== nextHeight;
-
-      setViewportHeight((current) => (current === nextHeight ? current : nextHeight));
-      document.documentElement.style.setProperty(cssVarName, `${nextHeight}px`);
-      document.documentElement.style.setProperty('--app-vv-offset-top', `${nextOffsetTop}px`);
-
-      if (heightChanged || nextOffsetTop > 0) {
+      if (previousHeight !== filteredHeight || nextOffsetTop > 0) {
         debugViewport('sync', {
           cssVarName,
           innerHeight,
           rawViewportHeight,
           offsetTop: nextOffsetTop,
-          appliedHeight: nextHeight,
-          compensated: nextHeight !== rawViewportHeight,
+          rawHeight: nextHeight,
+          appliedHeight: filteredHeight,
+          filtered: filteredHeight !== nextHeight,
         });
       }
     };
