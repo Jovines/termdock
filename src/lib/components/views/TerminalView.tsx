@@ -1052,6 +1052,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onInput={handleViewportInput}
               onResize={handleViewportResize}
               onTmuxScroll={isTmuxMode ? handleViewportTmuxScroll : undefined}
+              tmuxScrollSensitivity={0.5}
               onInputFocusChange={handleInputFocusChange}
               rendererMode={rendererMode}
               theme={xtermTheme}

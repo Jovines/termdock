@@ -134,6 +134,7 @@ interface TerminalViewportProps {
   onInput: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
   onTmuxScroll?: (direction: 'up' | 'down', lines: number) => void;
+  tmuxScrollSensitivity?: number;
   onInputFocusChange?: (isFocused: boolean) => void;
   rendererMode?: TerminalRendererMode;
   theme: TerminalTheme;
@@ -193,6 +194,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       onInput,
       onResize,
       onTmuxScroll,
+      tmuxScrollSensitivity = 0.5,
       onInputFocusChange,
       rendererMode = 'auto',
       theme,
@@ -312,9 +314,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       // Plain tmux shell history still needs copy-mode scrolling.
       if (onTmuxScroll) {
+        const effectiveLineHeight = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
         const total = remainderPxRef.current + deltaPixels;
-        const scrollLines = Math.trunc(total / lineHeightPx);
-        remainderPxRef.current = total - scrollLines * lineHeightPx;
+        const scrollLines = Math.trunc(total / effectiveLineHeight);
+        remainderPxRef.current = total - scrollLines * effectiveLineHeight;
 
         if (scrollLines !== 0) {
           const direction = scrollLines > 0 ? 'down' : 'up';
@@ -335,7 +338,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         return true;
       }
       return false;
-    }, [fontSize, onTmuxScroll, pixelToCharCoords]);
+    }, [fontSize, onTmuxScroll, tmuxScrollSensitivity, pixelToCharCoords]);
 
     /**
      * 处理点击事件，发送鼠标点击给TUI程序
