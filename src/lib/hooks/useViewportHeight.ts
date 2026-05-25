@@ -47,30 +47,46 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
     let rafId: number | null = null;
 
+    const MAX_DECREASE_PER_FRAME = 40;
+    let prevAppliedHeight = getViewportHeight();
+
     const syncViewportHeight = () => {
       rafId = null;
       const nextHeight = getViewportHeight();
       const nextOffsetTop = Math.round(window.visualViewport?.offsetTop ?? 0);
       const rawViewportHeight = Math.round(window.visualViewport?.height ?? window.innerHeight);
       const innerHeight = Math.round(window.innerHeight);
+
+      // Per-frame rate limit on decreases to filter transient outlier values
+      // that iOS can report during keyboard animation.  Normal keyboard
+      // animation changes ~16 px/frame at 60 fps — a 40 px floor allows more
+      // than double that before clamping.  Only decreases are clamped because
+      // a transient too-small height is the distracting case; increases
+      // (keyboard closing) should be applied immediately.
+      let appliedHeight = nextHeight;
+      if (nextHeight < prevAppliedHeight - MAX_DECREASE_PER_FRAME) {
+        appliedHeight = prevAppliedHeight - MAX_DECREASE_PER_FRAME;
+      }
+      prevAppliedHeight = appliedHeight;
+      const clamped = appliedHeight !== nextHeight;
+
+      setViewportHeight((current) => (current === nextHeight ? current : nextHeight));
+      document.documentElement.style.setProperty(cssVarName, `${appliedHeight}px`);
+      document.documentElement.style.setProperty('--app-vv-offset-top', `${nextOffsetTop}px`);
+
       const previousHeight = Number.parseInt(
         document.documentElement.style.getPropertyValue(cssVarName) || '0',
         10
       );
-      const heightChanged = previousHeight !== nextHeight;
-
-      setViewportHeight((current) => (current === nextHeight ? current : nextHeight));
-      document.documentElement.style.setProperty(cssVarName, `${nextHeight}px`);
-      document.documentElement.style.setProperty('--app-vv-offset-top', `${nextOffsetTop}px`);
-
-      if (heightChanged || nextOffsetTop > 0) {
+      if (previousHeight !== appliedHeight || nextOffsetTop > 0) {
         debugViewport('sync', {
           cssVarName,
           innerHeight,
           rawViewportHeight,
           offsetTop: nextOffsetTop,
-          appliedHeight: nextHeight,
-          compensated: nextHeight !== rawViewportHeight,
+          rawHeight: nextHeight,
+          appliedHeight,
+          clamped,
         });
       }
     };
