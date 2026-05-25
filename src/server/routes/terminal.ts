@@ -1511,21 +1511,30 @@ router.post('/:sessionId/tmux', async (req, res) => {
         let lastError: unknown = null;
 
         const tryCommand = async (command: string): Promise<boolean> => {
+          // Try with -N first (tmux >= 3.3).  If that fails, repeat the
+          // command N times without -N for older tmux versions.
           try {
             await runTmux([
-              'send-keys',
-              '-t',
-              tmuxTarget,
-              '-X',
-              '-N',
-              String(lines),
-              command,
+              'send-keys', '-t', tmuxTarget, '-X',
+              '-N', String(lines), command,
             ]);
             return true;
-          } catch (error) {
-            lastError = error;
-            return false;
+          } catch (_errorWithN) {
+            lastError = _errorWithN;
           }
+
+          // Fallback: loop the command lines times
+          for (let i = 0; i < lines; i += 1) {
+            try {
+              await runTmux([
+                'send-keys', '-t', tmuxTarget, '-X', command,
+              ]);
+            } catch (error) {
+              lastError = error;
+              return false;
+            }
+          }
+          return true;
         };
 
         scrollSucceeded = await tryCommand(primaryCommand);

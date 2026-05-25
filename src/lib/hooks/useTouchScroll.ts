@@ -14,6 +14,7 @@ interface TouchScrollConfig {
   shouldCaptureTouch?: () => boolean;
   onScroll?: (deltaPixels: number) => boolean;
   onScrollWithCoords?: (deltaPixels: number, x: number, y: number) => boolean;
+  onScrollImmediate?: (deltaPixels: number) => void;
   onTap?: (x: number, y: number) => void;
   onClickWithCoords?: (x: number, y: number) => void;
   tapThreshold?: number;
@@ -54,6 +55,7 @@ const {
     shouldCaptureTouch,
     onScroll,
     onScrollWithCoords,
+    onScrollImmediate,
     onTap,
     onClickWithCoords,
   tapThreshold = 8,
@@ -264,6 +266,10 @@ const {
           Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
         const deltaPixels = -deltaY * scrollMultiplierAdjusted;
 
+        // Fast path: deliver immediately for consumers that need
+        // low latency (e.g. tmux scroll via HTTP).
+        onScrollImmediate?.(deltaPixels);
+
         // 使用 RAF 节流累积滚动（传递当前触摸坐标）
         accumulateAndRequestScroll(deltaPixels, currentX, currentY);
       }
@@ -465,6 +471,9 @@ const {
          const scrollMultiplierAdjusted = scrollMultiplier +
            Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
          const deltaPixels = -deltaY * scrollMultiplierAdjusted;
+
+          // Fast path for low-latency consumers (e.g. tmux scroll).
+          onScrollImmediate?.(deltaPixels);
 
           // 使用 RAF 节流累积滚动
           accumulateAndRequestScroll(deltaPixels, currentX, currentY);
