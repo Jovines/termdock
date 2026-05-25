@@ -18,7 +18,7 @@ export default defineConfig({
       ...minimal2023Preset.maskable,
       padding: 0,
       resizeOptions: {
-        background: '#0d1117',
+        background: '#1C1B1A',
         fit: 'contain',
       },
     },
@@ -26,14 +26,14 @@ export default defineConfig({
       ...minimal2023Preset.apple,
       padding: 0,
       resizeOptions: {
-        background: '#0d1117',
+        background: '#1C1B1A',
         fit: 'contain',
       },
     },
   }, {
     padding: 0.3,
     resizeOptions: {
-      background: '#0d1117',
+      background: '#1C1B1A',
       fit: 'contain',
     },
     linkMediaOptions: {

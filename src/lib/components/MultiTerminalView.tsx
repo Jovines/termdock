@@ -139,7 +139,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
-  const [showRestoreLoader, setShowRestoreLoader] = useState(false);
   const restoredRef = useRef(false);
   const swiperRef = useRef<SwiperInstance | null>(null);
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
@@ -614,30 +613,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
   }, [isRestoring, sessions.length, handleNewSession]);
 
-  useEffect(() => {
-    if (!isRestoring) {
-      setShowRestoreLoader(false);
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      setShowRestoreLoader(true);
-    }, 260);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [isRestoring]);
-
   if (isRestoring) {
-    if (!showRestoreLoader) {
-      return <div className="h-full bg-background" />;
-    }
-
     return (
       <div className="h-full flex items-center justify-center bg-background">
-        <div className="rounded-full bg-background-2 px-4 py-2 flex items-center gap-3 shadow-sm">
-          <div className="w-5 h-5 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
+        <div className="rounded-full bg-surface-2 px-4 py-2 flex items-center gap-3 shadow-sm">
+          <div className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
           <span className="text-sm text-muted-foreground">Restoring sessions...</span>
         </div>
       </div>

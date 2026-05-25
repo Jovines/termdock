@@ -20,10 +20,9 @@ export default defineConfig({
         name: 'Termdock',
         short_name: 'Termdock',
         description: 'A complete web-based terminal application',
-        theme_color: '#0d1117',
-        background_color: '#0d1117',
+        theme_color: '#1C1B1A',
+        background_color: '#1C1B1A',
         display: 'standalone',
-        orientation: 'portrait',
         scope: '/',
         start_url: '/',
         icons: [

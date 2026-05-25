@@ -233,29 +233,12 @@ body {
     touch-action: pan-y;
     /* Ensure visibility even if something goes wrong */
     background-color: #1C1B1A !important;
-    color: white !important;
+    color: var(--foreground) !important;
   }
 
   .terminal-viewport-container {
     touch-action: none;
     overscroll-behavior: contain;
-  }
-  
-  /* Diagnostic overlay for debugging - always show on mobile */
-  #mobile-debug-overlay {
-    position: fixed !important;
-    top: 10px !important;
-    left: 10px !important;
-    right: 10px !important;
-    background: rgba(0, 0, 0, 0.9) !important;
-    color: white !important;
-    padding: 10px !important;
-    font-family: monospace !important;
-    font-size: 12px !important;
-    z-index: 99999 !important;
-    border: 2px solid red !important;
-    border-radius: 5px !important;
-    display: block !important;
   }
 }
 
