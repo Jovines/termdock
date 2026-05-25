@@ -58,15 +58,16 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       const rawViewportHeight = Math.round(window.visualViewport?.height ?? window.innerHeight);
       const innerHeight = Math.round(window.innerHeight);
 
-      // Median-of-3 filter: buffer the last 3 raw heights, apply the median.
-      // Single-frame outliers (transient spikes during iOS keyboard animation)
-      // are naturally discarded while genuine trends pass through with zero lag.
+      // Median-of-3 filter only during decreases (keyboard opening).
+      // Single-frame outlier lows are discarded.  Increases (keyboard
+      // closing) are applied immediately so the layout recovers fully.
       const buf = heightBufRef.current;
       buf.push(nextHeight);
       if (buf.length > 3) buf.shift();
-      const filteredHeight = buf.length === 3
-        ? medianOf3(buf[0], buf[1], buf[2])
-        : nextHeight;
+      let filteredHeight = nextHeight;
+      if (buf.length === 3 && nextHeight <= buf[0]) {
+        filteredHeight = medianOf3(buf[0], buf[1], buf[2]);
+      }
 
       setViewportHeight((current) => (current === nextHeight ? current : nextHeight));
       document.documentElement.style.setProperty(cssVarName, `${filteredHeight}px`);
