@@ -306,6 +306,12 @@ export async function sendTmuxAction(
 ): Promise<{ success: boolean; layout?: TmuxLayout }> {
   const conn = wsConnections.get(sessionId);
   if (conn && conn.ws.readyState === WebSocket.OPEN) {
+    const isFireAndForget = payload.action === 'scroll' || payload.action === 'copy-mode';
+    if (isFireAndForget) {
+      // Scroll and copy-mode actions don't wait for a server response.
+      conn.ws.send(JSON.stringify({ type: 'tmux', ...payload }));
+      return { success: true };
+    }
     return new Promise((resolve, reject) => {
       const reqId = Math.random().toString(36).substring(7);
       pendingTmuxRequests.set(reqId, { resolve, reject });
