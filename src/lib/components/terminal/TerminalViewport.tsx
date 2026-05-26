@@ -546,6 +546,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       let didScroll = false;
       let rafId: number | null = null;
       let velocity = 0;
+      let instantSpeed = 0;
 
       const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
       const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
@@ -557,29 +558,38 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         }
       };
 
+      // Speed-adjusted effective line height: at rest (speed=0) use the
+      // full eff for controlled slow-scroll feel.  At high speed, reduce
+      // eff so the terminal content keeps up with the finger instead of
+      // falling behind.  The scaling factor saturates at ~4x.
+      const dynamicEff = () => {
+        const factor = 1 + instantSpeed * 0.05;
+        return eff / Math.min(4, factor);
+      };
+
       // rAF loop: consume accumulated remainder at a steady 60 fps so
       // scroll commands are spaced evenly in time regardless of how
       // irregularly touch events fire.
       const tick = () => {
         rafId = null;
 
-        // Consume up to 4 lines per frame to avoid low-framerate feel
-        // during fast swipes, while still keeping jumps small.
+        const deff = dynamicEff();
+        // Consume up to 3 lines per frame to keep up with fast swipes.
         let consumed = 0;
-        while (consumed < 4 && remainder >= eff) {
-          remainder -= eff;
+        while (consumed < 3 && remainder >= deff) {
+          remainder -= deff;
           onTmuxScroll('down', 1);
           consumed++;
         }
-        while (consumed < 4 && remainder <= -eff) {
-          remainder += eff;
+        while (consumed < 3 && remainder <= -deff) {
+          remainder += deff;
           onTmuxScroll('up', 1);
           consumed++;
         }
 
         if (consumed > 0) {
           rafId = requestAnimationFrame(tick);
-        } else if (pointerId !== null && Math.abs(remainder) >= eff / 2) {
+        } else if (pointerId !== null && Math.abs(remainder) >= deff / 3) {
           // Finger still down with a meaningful fraction — flush it.
           const dir = remainder > 0 ? 'down' : 'up';
           remainder = 0;
@@ -602,6 +612,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         lastY = e.clientY;
         remainder = 0;
         velocity = 0;
+        instantSpeed = 0;
         didScroll = false;
       };
 
@@ -618,10 +629,11 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         // Negate to match useTouchScroll direction convention.
         const deltaPixels = -deltaY;
         remainder += deltaPixels;
+        instantSpeed = Math.abs(deltaPixels);
         // EMA-smoothed velocity for light inertia on finger lift.
-        velocity = velocity * 0.5 + deltaPixels * 0.5;
+        velocity = velocity * 0.45 + deltaPixels * 0.55;
 
-        if (Math.abs(remainder) >= eff / 2) {
+        if (Math.abs(remainder) >= eff / 3) {
           didScroll = true;
           scheduleTick();
         }
@@ -634,12 +646,16 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
         // Light inertia: decay velocity and feed into remainder over
         // several frames after finger lift for a subtle glide feel.
-        if (didScroll && Math.abs(velocity) > eff * 0.15) {
+        if (didScroll && Math.abs(velocity) > eff * 0.05) {
           const decay = () => {
-            velocity *= 0.94;
+            velocity *= 0.96;
             remainder += velocity;
-            if (Math.abs(velocity) < eff * 0.10) {
-              if (Math.abs(remainder) >= eff / 2) {
+            // Use velocity-based dynamic eff so fast swipes produce more
+            // lines per frame during inertia.
+            const factor = 1 + Math.abs(velocity) * 0.05;
+            const deff = eff / Math.min(4, factor);
+            if (Math.abs(velocity) < eff * 0.08) {
+              if (Math.abs(remainder) >= deff / 3) {
                 const dir = remainder > 0 ? 'down' : 'up';
                 onTmuxScroll(dir, 1);
                 remainder = 0;
@@ -648,15 +664,22 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
               rafId = null;
               return;
             }
-            if (Math.abs(remainder) >= eff) {
-              const dir = remainder > 0 ? 'down' : 'up';
-              remainder -= remainder > 0 ? eff : -eff;
-              onTmuxScroll(dir, 1);
+            // Consume up to 3 lines per frame.
+            let consumed = 0;
+            while (consumed < 3 && remainder >= deff) {
+              remainder -= deff;
+              onTmuxScroll('down', 1);
+              consumed++;
+            }
+            while (consumed < 3 && remainder <= -deff) {
+              remainder += deff;
+              onTmuxScroll('up', 1);
+              consumed++;
             }
             rafId = requestAnimationFrame(decay);
           };
           rafId = requestAnimationFrame(decay);
-        } else if (Math.abs(remainder) >= eff / 2) {
+        } else if (Math.abs(remainder) >= eff / 3) {
           // No meaningful velocity, just drain the remainder.
           scheduleTick();
         }

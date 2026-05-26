@@ -871,7 +871,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     // Flush any pending batch first, then send the new one.
     if (pending) {
-      void sendTmuxAction({ action: 'scroll', direction: pending.direction, lines: pending.lines }).finally(() => {
+      void sendTmuxAction({ action: 'scroll', direction: pending.direction, lines: pending.lines }).catch(() => {}).finally(() => {
         focusTerminalIfActive();
       });
     }
@@ -884,7 +884,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const p = tmuxScrollPendingRef.current;
       if (p) {
         tmuxScrollPendingRef.current = null;
-        void sendTmuxAction({ action: 'scroll', direction: p.direction, lines: p.lines }).finally(() => {
+        void sendTmuxAction({ action: 'scroll', direction: p.direction, lines: p.lines }).catch(() => {}).finally(() => {
           focusTerminalIfActive();
         });
       }
@@ -1075,7 +1075,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onInput={handleViewportInput}
               onResize={handleViewportResize}
               onTmuxScroll={isTmuxMode ? handleViewportTmuxScroll : undefined}
-              tmuxScrollSensitivity={0.9}
+              tmuxScrollSensitivity={0.38}
               onInputFocusChange={handleInputFocusChange}
               rendererMode={rendererMode}
               theme={xtermTheme}
