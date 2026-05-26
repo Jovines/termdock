@@ -1459,7 +1459,7 @@ router.post('/:sessionId/tmux', async (req, res) => {
         const enabled = req.body?.enabled !== false;
         if (enabled) {
           try {
-            await runTmux(['copy-mode', '-t', tmuxTarget]);
+            await runTmux(['copy-mode', '-e', '-t', tmuxTarget]);
           } catch (error) {
             const errorMessage = getErrorMessage(error);
             if (!isAlreadyInCopyModeError(errorMessage)) {
@@ -1486,7 +1486,7 @@ router.post('/:sessionId/tmux', async (req, res) => {
 
         if (!inCopyMode) {
           try {
-            await runTmux(['copy-mode', '-t', tmuxTarget]);
+            await runTmux(['copy-mode', '-e', '-t', tmuxTarget]);
           } catch (error) {
             const errorMessage = getErrorMessage(error);
             if (!isAlreadyInCopyModeError(errorMessage)) {

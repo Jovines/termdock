@@ -3,7 +3,7 @@ import React from 'react';
 /**
  * 触摸滚动配置
  */
-interface TouchScrollConfig {
+export interface TouchScrollConfig {
   scrollMultiplier?: number;
   maxScrollBoost?: number;
   boostDenominator?: number;
@@ -11,6 +11,7 @@ interface TouchScrollConfig {
   maxVelocity?: number;
   minVelocity?: number;
   deceleration?: number;
+  enableKinetic?: boolean;
   shouldCaptureTouch?: () => boolean;
   onScroll?: (deltaPixels: number) => boolean;
   onScrollWithCoords?: (deltaPixels: number, x: number, y: number) => boolean;
@@ -51,6 +52,7 @@ const {
     maxVelocity = 15,       // 降低最大速度
     minVelocity = 0.3,      // 降低最小速度阈值
     deceleration = 0.0008,  // 稍微减小减速，让惯性滑动更持久
+    enableKinetic = true,
     shouldCaptureTouch,
     onScroll,
     onScrollWithCoords,
@@ -298,7 +300,7 @@ const {
       state.gestureAxis = null;
 
       // 开始惯性滚动
-      if (!endedHorizontalGesture && Math.abs(state.velocity) > minVelocity && state.didMove) {
+      if (enableKinetic && !endedHorizontalGesture && Math.abs(state.velocity) > minVelocity && state.didMove) {
         const animate = () => {
           const currentTime = nowMs();
           const dt = currentTime - (state.lastTime || currentTime);
@@ -499,7 +501,7 @@ const {
       state.gestureAxis = null;
 
       // 简单惯性滚动（velocity 取反，使方向符合直觉）
-      if (!endedHorizontalGesture && state.didMove && Math.abs(state.velocity) > minVelocity) {
+      if (enableKinetic && !endedHorizontalGesture && state.didMove && Math.abs(state.velocity) > minVelocity) {
         const animate = () => {
           const dt = 16; // 假设60fps
           state.velocity *= (1 - deceleration * dt);

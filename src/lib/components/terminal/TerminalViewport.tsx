@@ -6,7 +6,7 @@ import '@xterm/xterm/css/xterm.css';
 import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
 import type { TerminalRendererMode } from '../../terminal/renderer';
-import { useTouchScroll } from '../../hooks/useTouchScroll';
+import { useTouchScroll, type TouchScrollConfig } from '../../hooks/useTouchScroll';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
 import { createDebugLogger } from '../../utils/debug';
@@ -134,6 +134,7 @@ interface TerminalViewportProps {
   onInput: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
   onTmuxScroll?: (direction: 'up' | 'down', lines: number) => void;
+  tmuxScrollSensitivity?: number;
   onInputFocusChange?: (isFocused: boolean) => void;
   rendererMode?: TerminalRendererMode;
   theme: TerminalTheme;
@@ -193,6 +194,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       onInput,
       onResize,
       onTmuxScroll,
+      tmuxScrollSensitivity = 0.55,
       onInputFocusChange,
       rendererMode = 'auto',
       theme,
@@ -273,59 +275,47 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       return { x: col, y: row };
     }, []);
 
-    const handleScroll = React.useCallback((deltaPixels: number, touchX?: number, touchY?: number): boolean => {
+    // Shared pre-checks: mouse tracking and alternate buffer modes
+    // apply equally to normal and tmux scrolling.  Returns true/false if
+    // the event was consumed; null means "continue to mode-specific handler".
+    const handleScrollPreChecks = React.useCallback((deltaPixels: number, touchX?: number, touchY?: number): boolean | null => {
       const terminal = terminalRef.current;
       if (!terminal) return false;
 
-      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
       const lines = deltaPixels > 0 ? -1 : 1;
 
-      // Prefer standard mouse wheel reports when the foreground program asked for them.
       if (terminal.modes.mouseTrackingMode !== 'none') {
         let charX: number;
         let charY: number;
-
         if (touchX !== undefined && touchY !== undefined) {
-          // Map the touch point into the terminal grid when available.
           const coords = pixelToCharCoords(touchX, touchY, terminal);
           charX = coords.x;
           charY = coords.y;
         } else {
-          // Fall back to the cursor position (1-based).
           charX = terminal.buffer.active.cursorX + 1;
           charY = terminal.buffer.active.cursorY + 1;
         }
-
-        // SGR 1006: \x1b[<button;x;yM with 64/65 for wheel up/down.
         const button = lines > 0 ? 64 : 65;
         const mouseEvent = `\x1b[<${button};${charX};${charY}M`;
         inputHandlerRef.current(mouseEvent);
         return true;
       }
 
-      // Full-screen apps like less/man often expect key-based scrolling instead.
       if (terminal.buffer.active.type === 'alternate') {
         const arrowKey = lines > 0 ? '\x1b[A' : '\x1b[B';
         inputHandlerRef.current(arrowKey);
         return true;
       }
 
-      // Plain tmux shell history still needs copy-mode scrolling.
-      if (onTmuxScroll) {
-        const total = remainderPxRef.current + deltaPixels;
-        const scrollLines = Math.trunc(total / lineHeightPx);
-        remainderPxRef.current = total - scrollLines * lineHeightPx;
+      return null;
+    }, [pixelToCharCoords]);
 
-        if (scrollLines !== 0) {
-          const direction = scrollLines > 0 ? 'down' : 'up';
-          onTmuxScroll(direction, Math.max(1, Math.min(Math.abs(scrollLines), 40)));
-          return true;
-        }
+    // --- Normal mode: xterm.js local scrollback ---
+    const handleNormalScroll = React.useCallback((deltaPixels: number): boolean => {
+      const terminal = terminalRef.current;
+      if (!terminal) return false;
 
-        return false;
-      }
-
-      // Otherwise fall back to the terminal's local scrollback.
+      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
       const total = remainderPxRef.current + deltaPixels;
       const scrollLines = Math.trunc(total / lineHeightPx);
       remainderPxRef.current = total - scrollLines * lineHeightPx;
@@ -335,7 +325,56 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         return true;
       }
       return false;
-    }, [fontSize, onTmuxScroll, pixelToCharCoords]);
+    }, [fontSize]);
+
+    // --- Tmux mode: server-side copy-mode scrolling ---
+    const handleTmuxScrollInternal = React.useCallback((deltaPixels: number): boolean => {
+      const terminal = terminalRef.current;
+      if (!terminal) return false;
+
+      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+      const effectiveLineHeight = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
+      const total = remainderPxRef.current + deltaPixels;
+      let scrollLines = Math.trunc(total / effectiveLineHeight);
+      remainderPxRef.current = total - scrollLines * effectiveLineHeight;
+
+      // Short swipes may not accumulate a full line — give at least 1 line
+      // of feedback when a meaningful fraction of the effective height has
+      // accumulated, so slow finger movements still produce visible scroll.
+      if (scrollLines === 0 && Math.abs(total) >= effectiveLineHeight / 3) {
+        scrollLines = total > 0 ? 1 : -1;
+        remainderPxRef.current = 0;
+      }
+
+      if (scrollLines === 0) return false;
+
+      const direction = scrollLines > 0 ? 'down' : 'up';
+      onTmuxScroll!(direction, Math.max(1, Math.min(Math.abs(scrollLines), 10)));
+      return true;
+    }, [fontSize, onTmuxScroll, tmuxScrollSensitivity]);
+
+    // Stash the latest mode-specific handlers in refs so the top-level
+    // handleScroll has a stable identity.  This prevents useTouchScroll
+    // from tearing down and rebuilding event listeners on every render,
+    // which can cause state corruption during keyboard open/close cycles.
+    const handleScrollPreChecksRef = React.useRef(handleScrollPreChecks);
+    handleScrollPreChecksRef.current = handleScrollPreChecks;
+    const handleNormalScrollRef = React.useRef(handleNormalScroll);
+    handleNormalScrollRef.current = handleNormalScroll;
+    const handleTmuxScrollInternalRef = React.useRef(handleTmuxScrollInternal);
+    handleTmuxScrollInternalRef.current = handleTmuxScrollInternal;
+    const onTmuxScrollRef = React.useRef(onTmuxScroll);
+    onTmuxScrollRef.current = onTmuxScroll;
+
+    // Top-level dispatch: pre-checks first, then mode-specific handler.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const handleScroll = React.useCallback((deltaPixels: number, touchX?: number, touchY?: number): boolean => {
+      const pre = handleScrollPreChecksRef.current(deltaPixels, touchX, touchY);
+      if (pre !== null) return pre;
+      return onTmuxScrollRef.current
+        ? handleTmuxScrollInternalRef.current(deltaPixels)
+        : handleNormalScrollRef.current(deltaPixels);
+    }, []);
 
     /**
      * 处理点击事件，发送鼠标点击给TUI程序
@@ -430,8 +469,19 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       lastTouchInteractionAtRef.current = nowMs();
     }, [markInputBlurGuard, nowMs]);
 
+    // ---- Normal-mode touch scroll (useTouchScroll) ----
+    // Only active when NOT in tmux mode; tmux mode uses its own dedicated
+    // touch handler below so the two scroll systems never share state.
+    const touchScrollConfig: TouchScrollConfig = React.useMemo(
+      () => ({ enableKinetic: true }),
+      [],
+    );
+
+    const noCaptureRef = React.useRef(() => false);
+
     const { setupTouchScroll } = useTouchScroll(containerRef, {
-      shouldCaptureTouch: () => false,
+      ...touchScrollConfig,
+      shouldCaptureTouch: noCaptureRef.current,
       onScroll: handleScroll,
       onScrollWithCoords: handleScroll,
       onClickWithCoords: handleClick,
@@ -440,35 +490,29 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     });
 
     React.useEffect(() => {
-      if (!enableTouchScroll) {
-        return;
-      }
+      if (!enableTouchScroll) return;
+      const cleanup = setupTouchScroll();
+      return () => { cleanup(); };
+    }, [enableTouchScroll, setupTouchScroll]);
+
+    // Compat mouse event blocking (shared by both modes).
+    React.useEffect(() => {
+      if (!enableTouchScroll) return;
 
       const container = containerRef.current;
-      if (!container) {
-        return;
-      }
+      if (!container) return;
 
       const shouldBlockCompatMouseEvent = (event: MouseEvent) => {
         const sourceCaps = event as MouseEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } };
         const fromTouch = sourceCaps.sourceCapabilities?.firesTouchEvents === true;
         const recentlyTouched = nowMs() - lastTouchInteractionAtRef.current <= 1200;
-
-        if (!fromTouch && !recentlyTouched) {
-          return false;
-        }
-
+        if (!fromTouch && !recentlyTouched) return false;
         return container.contains(event.target as Node | null);
       };
 
       const handleCompatMouseCapture = (event: MouseEvent) => {
-        if (!shouldBlockCompatMouseEvent(event)) {
-          return;
-        }
-
-        if (event.cancelable) {
-          event.preventDefault();
-        }
+        if (!shouldBlockCompatMouseEvent(event)) return;
+        if (event.cancelable) event.preventDefault();
         event.stopImmediatePropagation();
         event.stopPropagation();
       };
@@ -485,6 +529,119 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         document.removeEventListener('mouseup', handleCompatMouseCapture, true);
       };
     }, [enableTouchScroll, nowMs]);
+
+    // ---- Tmux-mode touch scroll (fully independent) ----
+    // Capture-phase pointer listeners that fire before useTouchScroll's
+    // bubble-phase handlers.  stopImmediatePropagation() prevents the
+    // normal-mode system from ever seeing touch events intended for tmux.
+    React.useEffect(() => {
+      if (!enableTouchScroll || !onTmuxScroll) return;
+
+      const container = containerRef.current;
+      if (!container) return;
+
+      let pointerId: number | null = null;
+      let lastY: number | null = null;
+      let remainder = 0;
+      let didScroll = false;
+      let rafId: number | null = null;
+
+      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+      const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
+
+      const stopRaf = () => {
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+      };
+
+      // rAF loop: consume accumulated remainder at a steady 60 fps so
+      // scroll commands are spaced evenly in time regardless of how
+      // irregularly touch events fire.
+      const tick = () => {
+        rafId = null;
+
+        if (remainder >= eff) {
+          remainder -= eff;
+          onTmuxScroll('down', 1);
+          rafId = requestAnimationFrame(tick);
+        } else if (remainder <= -eff) {
+          remainder += eff;
+          onTmuxScroll('up', 1);
+          rafId = requestAnimationFrame(tick);
+        } else if (pointerId !== null && Math.abs(remainder) >= eff / 2) {
+          // Finger still down with a meaningful fraction — flush it.
+          const dir = remainder > 0 ? 'down' : 'up';
+          remainder = 0;
+          onTmuxScroll(dir, 1);
+          rafId = requestAnimationFrame(tick);
+        }
+        // else: stop ticking until more delta arrives
+      };
+
+      const scheduleTick = () => {
+        if (rafId === null && typeof requestAnimationFrame !== 'undefined') {
+          rafId = requestAnimationFrame(tick);
+        }
+      };
+
+      const onDown = (e: PointerEvent) => {
+        if (e.pointerType !== 'touch') return;
+        stopRaf();
+        pointerId = e.pointerId;
+        lastY = e.clientY;
+        remainder = 0;
+        didScroll = false;
+      };
+
+      const onMove = (e: PointerEvent) => {
+        if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
+        if (lastY == null) return;
+
+        e.preventDefault();
+        e.stopImmediatePropagation();
+
+        const deltaY = e.clientY - lastY;
+        lastY = e.clientY;
+
+        // Negate to match useTouchScroll direction convention.
+        const deltaPixels = -deltaY;
+        remainder += deltaPixels;
+
+        if (Math.abs(remainder) >= eff / 2) {
+          didScroll = true;
+          scheduleTick();
+        }
+      };
+
+      const onUp = (e: PointerEvent) => {
+        if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
+        pointerId = null;
+        lastY = null;
+        // Drain any leftover remainder on finger lift so the scroll
+        // doesn't feel truncated.
+        if (Math.abs(remainder) >= eff / 2) {
+          scheduleTick();
+        }
+        if (didScroll) {
+          e.stopImmediatePropagation();
+        }
+      };
+
+      container.addEventListener('pointerdown', onDown, { capture: true, passive: false });
+      container.addEventListener('pointermove', onMove, { capture: true, passive: false });
+      container.addEventListener('pointerup', onUp, { capture: true, passive: false });
+      container.addEventListener('pointercancel', onUp, { capture: true, passive: false });
+
+      return () => {
+        stopRaf();
+        container.removeEventListener('pointerdown', onDown, true);
+        container.removeEventListener('pointermove', onMove, true);
+        container.removeEventListener('pointerup', onUp, true);
+        container.removeEventListener('pointercancel', onUp, true);
+      };
+    }, [enableTouchScroll, onTmuxScroll != null, fontSize, tmuxScrollSensitivity]);
 
     const resetWriteState = React.useCallback(() => {
       pendingWriteRef.current = '';
@@ -534,6 +691,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
         if (!previous || previous.cols !== next.cols || previous.rows !== next.rows) {
           lastReportedSizeRef.current = next;
+          remainderPxRef.current = 0;
           resizeHandlerRef.current(next.cols, next.rows);
         }
       } catch { /* ignored */ }
@@ -730,6 +888,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             theme: convertTheme(theme),
             cursorBlink: true,
             cursorStyle: 'block',
+            cursorInactiveStyle: 'block',
             scrollback: 1000,
             allowTransparency: false,
             convertEol: true,
