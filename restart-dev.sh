@@ -41,7 +41,7 @@ kill_matching_processes() {
   done
 }
 
-ensure_port_available_for_project() {
+ensure_port_available() {
   port="$1"
   pids=$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
 
@@ -50,19 +50,8 @@ ensure_port_available_for_project() {
   fi
 
   for pid in $pids; do
-    cmd=$(ps -p "$pid" -o args= 2>/dev/null || true)
-    case "$cmd" in
-      *"$ROOT_DIR"*)
-        echo "Stopping existing project process on port $port (pid=$pid)..."
-        kill_pid_and_children "$pid"
-        ;;
-      *)
-        echo "Port $port is occupied by an external process (pid=$pid):"
-        echo "  $cmd"
-        echo "Please stop it and rerun dev.sh."
-        exit 1
-        ;;
-    esac
+    echo "Port $port is in use (pid=$pid), stopping old process..."
+    kill_pid_and_children "$pid"
   done
 }
 
@@ -115,8 +104,8 @@ do_restart() {
 
   do_stop
 
-  ensure_port_available_for_project 9834
-  ensure_port_available_for_project 9833
+  ensure_port_available 9834
+  ensure_port_available 9833
 
   start_service "server" "npm run dev:server" "$SERVER_PID_FILE" "$SERVER_LOG_FILE"
   start_service "client" "npm run dev:client" "$CLIENT_PID_FILE" "$CLIENT_LOG_FILE"

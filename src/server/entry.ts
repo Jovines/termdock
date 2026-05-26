@@ -1,5 +1,6 @@
 import express from 'express';
 import { createServer } from 'http';
+import { execSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -94,6 +95,18 @@ export function createApp(): express.Express {
   return app;
 }
 
+function killPort(port: number) {
+  try {
+    const pids = execSync(`lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null || true`, { encoding: 'utf8' })
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    for (const pid of pids) {
+      try { process.kill(Number(pid), 'SIGTERM'); } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
+
 export function startServer(options: ServerOptions = {}) {
   const port = options.port ?? Number(process.env.PORT || DEFAULT_PORT);
   const host = options.host ?? (process.env.HOST || DEFAULT_HOST);
@@ -106,7 +119,18 @@ export function startServer(options: ServerOptions = {}) {
     console.log(`Health check: http://${displayHost}:${port}/health`);
   });
 
-  server.on('error', (error) => {
+  server.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') {
+      console.log(`Port ${port} is in use, stopping old process...`);
+      killPort(port);
+      setTimeout(() => {
+        server.listen(port, host, () => {
+          const displayHost = host === '0.0.0.0' ? 'localhost' : host;
+          console.log(`Termdock server running at http://${displayHost}:${port}`);
+        });
+      }, 500);
+      return;
+    }
     console.error('Server error:', error);
     process.exit(1);
   });
