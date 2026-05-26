@@ -89,6 +89,7 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:9834',
         changeOrigin: true,
+        ws: true,
         configure: (proxy, options) => {
           proxy.on('proxyRes', (proxyRes, req, res) => {
             // CORS headers for cookies to work across ports

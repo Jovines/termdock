@@ -760,18 +760,20 @@ function closeClient(session: TerminalSession, sessionId: string, clientId: stri
 }
 
 function broadcastEvent(sessionId: string, payload: unknown): void {
+  // SSE clients
   const session = terminalSessions.get(sessionId);
-  if (!session) {
-    return;
-  }
-
-  for (const [clientId, client] of session.clients.entries()) {
-    try {
-      writeSse(client, payload);
-    } catch {
-      closeClient(session, sessionId, clientId);
+  if (session) {
+    for (const [clientId, client] of session.clients.entries()) {
+      try {
+        writeSse(client, payload);
+      } catch {
+        closeClient(session, sessionId, clientId);
+      }
     }
   }
+
+  // WebSocket clients
+  broadcastJsonWs(sessionId, payload);
 }
 
 function cleanupSession(sessionId: string, options: { killProcess: boolean; clearHistoryBuffer?: boolean }): void {
@@ -833,13 +835,11 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
       addToHistory(sessionId, data);
     }
     broadcastEvent(sessionId, { type: 'data', data });
-    broadcastJsonWs(sessionId, { type: 'data', data });
   });
 
   session.exitDisposable = session.ptyProcess.onExit(({ exitCode, signal }) => {
     console.log(`Terminal session ${sessionId} exited with code ${exitCode}, signal ${signal}`);
     broadcastEvent(sessionId, { type: 'exit', exitCode, signal });
-    broadcastJsonWs(sessionId, { type: 'exit', exitCode, signal });
     cleanupSession(sessionId, { killProcess: false });
   });
 }
