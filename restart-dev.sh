@@ -49,10 +49,16 @@ ensure_port_available() {
     return
   fi
 
+  echo "Port $port is in use by:"
   for pid in $pids; do
-    echo "Port $port is in use (pid=$pid), stopping old process..."
-    kill_pid_and_children "$pid"
+    echo "  pid=$pid  $(ps -p "$pid" -o args= 2>/dev/null || true)"
   done
+  echo ""
+  echo "Run the following to free it:"
+  for pid in $pids; do
+    echo "  kill $pid"
+  done
+  exit 1
 }
 
 stop_by_pid_file() {
