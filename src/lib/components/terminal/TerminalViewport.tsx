@@ -545,6 +545,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       let remainder = 0;
       let didScroll = false;
       let rafId: number | null = null;
+      let velocity = 0;
 
       const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
       const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
@@ -562,13 +563,21 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       const tick = () => {
         rafId = null;
 
-        if (remainder >= eff) {
+        // Consume up to 4 lines per frame to avoid low-framerate feel
+        // during fast swipes, while still keeping jumps small.
+        let consumed = 0;
+        while (consumed < 4 && remainder >= eff) {
           remainder -= eff;
           onTmuxScroll('down', 1);
-          rafId = requestAnimationFrame(tick);
-        } else if (remainder <= -eff) {
+          consumed++;
+        }
+        while (consumed < 4 && remainder <= -eff) {
           remainder += eff;
           onTmuxScroll('up', 1);
+          consumed++;
+        }
+
+        if (consumed > 0) {
           rafId = requestAnimationFrame(tick);
         } else if (pointerId !== null && Math.abs(remainder) >= eff / 2) {
           // Finger still down with a meaningful fraction — flush it.
@@ -592,6 +601,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         pointerId = e.pointerId;
         lastY = e.clientY;
         remainder = 0;
+        velocity = 0;
         didScroll = false;
       };
 
@@ -608,6 +618,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         // Negate to match useTouchScroll direction convention.
         const deltaPixels = -deltaY;
         remainder += deltaPixels;
+        // EMA-smoothed velocity for light inertia on finger lift.
+        velocity = velocity * 0.5 + deltaPixels * 0.5;
 
         if (Math.abs(remainder) >= eff / 2) {
           didScroll = true;
@@ -619,11 +631,36 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
         pointerId = null;
         lastY = null;
-        // Drain any leftover remainder on finger lift so the scroll
-        // doesn't feel truncated.
-        if (Math.abs(remainder) >= eff / 2) {
+
+        // Light inertia: decay velocity and feed into remainder over
+        // several frames after finger lift for a subtle glide feel.
+        if (didScroll && Math.abs(velocity) > eff * 0.15) {
+          const decay = () => {
+            velocity *= 0.94;
+            remainder += velocity;
+            if (Math.abs(velocity) < eff * 0.10) {
+              if (Math.abs(remainder) >= eff / 2) {
+                const dir = remainder > 0 ? 'down' : 'up';
+                onTmuxScroll(dir, 1);
+                remainder = 0;
+              }
+              velocity = 0;
+              rafId = null;
+              return;
+            }
+            if (Math.abs(remainder) >= eff) {
+              const dir = remainder > 0 ? 'down' : 'up';
+              remainder -= remainder > 0 ? eff : -eff;
+              onTmuxScroll(dir, 1);
+            }
+            rafId = requestAnimationFrame(decay);
+          };
+          rafId = requestAnimationFrame(decay);
+        } else if (Math.abs(remainder) >= eff / 2) {
+          // No meaningful velocity, just drain the remainder.
           scheduleTick();
         }
+
         if (didScroll) {
           e.stopImmediatePropagation();
         }

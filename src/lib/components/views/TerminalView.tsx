@@ -136,8 +136,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const terminalControllerRef = React.useRef<TerminalController | null>(null);
   const suppressInputUntilRef = React.useRef(0);
   const shouldExitTmuxCopyModeOnInputRef = React.useRef(false);
-  const tmuxScrollInFlightRef = React.useRef(false);
   const tmuxScrollPendingRef = React.useRef<{ direction: 'up' | 'down'; lines: number } | null>(null);
+  const tmuxScrollFlushTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const modifierTapRef = React.useRef<{ modifier: Modifier; timestamp: number } | null>(null);
   const lastFocusRequestTokenRef = React.useRef(0);
   const streamVersionRef = React.useRef(0);
@@ -196,8 +196,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   React.useEffect(() => {
     if (!isTmuxMode) {
       shouldExitTmuxCopyModeOnInputRef.current = false;
-      tmuxScrollInFlightRef.current = false;
       tmuxScrollPendingRef.current = null;
+      if (tmuxScrollFlushTimerRef.current) {
+        clearTimeout(tmuxScrollFlushTimerRef.current);
+        tmuxScrollFlushTimerRef.current = null;
+      }
     }
   }, [isTmuxMode]);
 
@@ -853,40 +856,40 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     handleViewportResize(activePane.width, activePane.height);
   }, [_tmuxLayout, handleViewportResize]);
 
-  const sendQueuedTmuxScroll = React.useCallback(() => {
-    const pending = tmuxScrollPendingRef.current;
-    if (!pending) {
-      tmuxScrollInFlightRef.current = false;
-      focusTerminalIfActive();
-      return;
-    }
-    tmuxScrollPendingRef.current = null;
-    void sendTmuxAction({ action: 'scroll', direction: pending.direction, lines: pending.lines }).finally(() => {
-      sendQueuedTmuxScroll();
-    });
-  }, [focusTerminalIfActive, sendTmuxAction]);
-
   const handleTmuxScroll = React.useCallback((direction: 'up' | 'down', lines = 5) => {
     const normalizedLines = Math.max(1, Math.min(Math.floor(lines) || 1, 40));
     shouldExitTmuxCopyModeOnInputRef.current = true;
 
-    if (tmuxScrollInFlightRef.current) {
-      const pending = tmuxScrollPendingRef.current;
-      if (pending && pending.direction === direction) {
-        // Accumulate: same direction, add lines.
-        pending.lines = Math.min(pending.lines + normalizedLines, 40);
-      } else {
-        // Different direction or no pending: replace.
-        tmuxScrollPendingRef.current = { direction, lines: normalizedLines };
-      }
+    // Batch consecutive same-direction scrolls into one request to reduce
+    // tmux command overhead, but cap the batch low so content moves in
+    // small, smooth increments instead of large visible jumps.
+    const pending = tmuxScrollPendingRef.current;
+    if (pending && pending.direction === direction && pending.lines < 2) {
+      pending.lines += normalizedLines;
       return;
     }
 
-    tmuxScrollInFlightRef.current = true;
-    void sendTmuxAction({ action: 'scroll', direction, lines: normalizedLines }).finally(() => {
-      sendQueuedTmuxScroll();
-    });
-  }, [focusTerminalIfActive, sendTmuxAction, sendQueuedTmuxScroll]);
+    // Flush any pending batch first, then send the new one.
+    if (pending) {
+      void sendTmuxAction({ action: 'scroll', direction: pending.direction, lines: pending.lines }).finally(() => {
+        focusTerminalIfActive();
+      });
+    }
+    tmuxScrollPendingRef.current = { direction, lines: normalizedLines };
+
+    // Flush after a short idle window so the last scroll in a gesture
+    // doesn't get stuck in the pending buffer.
+    if (tmuxScrollFlushTimerRef.current) clearTimeout(tmuxScrollFlushTimerRef.current);
+    tmuxScrollFlushTimerRef.current = setTimeout(() => {
+      const p = tmuxScrollPendingRef.current;
+      if (p) {
+        tmuxScrollPendingRef.current = null;
+        void sendTmuxAction({ action: 'scroll', direction: p.direction, lines: p.lines }).finally(() => {
+          focusTerminalIfActive();
+        });
+      }
+    }, 16);
+  }, [focusTerminalIfActive, sendTmuxAction]);
 
   const handleModifierToggle = React.useCallback(
     (modifier: Modifier) => {
@@ -1072,7 +1075,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onInput={handleViewportInput}
               onResize={handleViewportResize}
               onTmuxScroll={isTmuxMode ? handleViewportTmuxScroll : undefined}
-              tmuxScrollSensitivity={2.5}
+              tmuxScrollSensitivity={0.9}
               onInputFocusChange={handleInputFocusChange}
               rendererMode={rendererMode}
               theme={xtermTheme}

@@ -11,6 +11,10 @@ const execFileAsync = promisify(execFile);
 // WebSocket clients per session (separate from SSE clients).
 const wsClients = new Map<string, Map<string, WebSocket>>();
 
+// Sessions where copy-mode -e just auto-exited at the bottom.
+// Prevents immediate re-entry on subsequent scroll-down commands.
+const exitedAtBottom = new Set<string>();
+
 type TerminalMode = 'shell' | 'tmux';
 
 interface TmuxPane {
@@ -1524,6 +1528,17 @@ router.post('/:sessionId/tmux', async (req, res) => {
         const direction = req.body?.direction === 'down' ? 'down' : 'up';
         const lines = Math.max(1, Math.min(50, Math.floor(Number(req.body?.lines) || 1)));
 
+        // If tmux just auto-exited copy mode at the bottom via the -e flag,
+        // suppress further scroll-down requests so they don't re-enter
+        // copy mode and cause a flicker loop.  Scroll-up clears the flag.
+        if (direction === 'down' && exitedAtBottom.has(tmuxTarget)) {
+          shouldBroadcastLayout = false;
+          return res.json({ success: true, skipped: 'already-at-bottom' });
+        }
+        if (direction === 'up') {
+          exitedAtBottom.delete(tmuxTarget);
+        }
+
         let inCopyMode = await isTmuxPaneInMode(tmuxTarget);
 
         if (!inCopyMode) {
@@ -1582,6 +1597,19 @@ router.post('/:sessionId/tmux', async (req, res) => {
 
         if (!scrollSucceeded && lastError) {
           throw lastError;
+        }
+
+        // After a scroll-down with -e, tmux may have auto-exited copy mode
+        // at the bottom.  Mark the session so the next scroll-down doesn't
+        // immediately re-enter and cause a flicker loop.
+        if (direction === 'down') {
+          const stillInCopyMode = await isTmuxPaneInMode(tmuxTarget);
+          if (!stillInCopyMode) {
+            exitedAtBottom.add(tmuxTarget);
+          }
+        } else {
+          // Scroll-up: clear the flag so re-entry is allowed again.
+          exitedAtBottom.delete(tmuxTarget);
         }
 
         shouldBroadcastLayout = false;
@@ -1771,6 +1799,14 @@ async function executeTmuxAction(
       const direction = body.direction === 'down' ? 'down' : 'up';
       const lines = Math.max(1, Math.min(50, Math.floor(Number(body.lines) || 1)));
 
+      if (direction === 'down' && exitedAtBottom.has(tmuxTarget)) {
+        shouldBroadcastLayout = false;
+        break;
+      }
+      if (direction === 'up') {
+        exitedAtBottom.delete(tmuxTarget);
+      }
+
       let inCopyMode = await isTmuxPaneInMode(tmuxTarget);
       if (!inCopyMode) {
         try {
@@ -1803,6 +1839,14 @@ async function executeTmuxAction(
         }
       }
       if (!scrollSucceeded && lastError) throw lastError;
+
+      if (direction === 'down') {
+        const stillInCopyMode = await isTmuxPaneInMode(tmuxTarget);
+        if (!stillInCopyMode) {
+          exitedAtBottom.add(tmuxTarget);
+        }
+      }
+
       shouldBroadcastLayout = false;
       break;
     }
