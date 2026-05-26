@@ -295,9 +295,6 @@ function App() {
                   </button>
                 );
               })}
-              {sessions.length === 0 && (
-                <span className="truncate px-2 text-xs text-muted-foreground">Starting terminal session</span>
-              )}
               <div className="hidden items-center gap-1.5 pl-2 lg:flex">
                 {activeSessionModeLabel && (
                   <span className="rounded-full bg-surface-2 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
@@ -315,12 +312,14 @@ function App() {
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              {sessions.length > 0 && (
               <span
                 className="inline-flex shrink-0 items-center px-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground sm:text-[11px]"
-                title={sessions.length > 0 && activeSessionIndex >= 0 ? `Session ${activeSessionIndex + 1} of ${sessions.length}` : `${sessions.length} sessions`}
+                title={`Session ${activeSessionIndex + 1} of ${sessions.length}`}
               >
                 {activeSessionPositionLabel}
               </span>
+              )}
               <button
                 type="button"
                 onClick={() => setIsDrawerOpen(true)}
