@@ -3,9 +3,13 @@ import fs from 'fs';
 import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import type { WebSocket } from 'ws';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
+
+// WebSocket clients per session (separate from SSE clients).
+const wsClients = new Map<string, Map<string, WebSocket>>();
 
 type TerminalMode = 'shell' | 'tmux';
 
@@ -720,14 +724,31 @@ function writeSse(res: express.Response, payload: unknown): void {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
-function closeClient(session: TerminalSession, clientId: string): void {
+function getTotalClients(sessionId: string): number {
+  let count = 0;
+  const session = terminalSessions.get(sessionId);
+  if (session) count += session.clients.size;
+  const ws = wsClients.get(sessionId);
+  if (ws) count += ws.size;
+  return count;
+}
+
+function sessionIsOrphaned(sessionId: string): boolean {
+  const session = terminalSessions.get(sessionId);
+  if (!session) return true;
+  if (session.clients.size > 0) return false;
+  const ws = wsClients.get(sessionId);
+  return !ws || ws.size === 0;
+}
+
+function closeClient(session: TerminalSession, sessionId: string, clientId: string): void {
   const client = session.clients.get(clientId);
   if (!client) {
     return;
   }
 
   session.clients.delete(clientId);
-  if (session.clients.size === 0) {
+  if (sessionIsOrphaned(sessionId)) {
     session.lastDetachedAt = Date.now();
   }
 
@@ -748,7 +769,7 @@ function broadcastEvent(sessionId: string, payload: unknown): void {
     try {
       writeSse(client, payload);
     } catch {
-      closeClient(session, clientId);
+      closeClient(session, sessionId, clientId);
     }
   }
 }
@@ -785,6 +806,25 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   }
 }
 
+function broadcastToWs(sessionId: string, data: string): void {
+  const clients = wsClients.get(sessionId);
+  if (!clients) return;
+  for (const ws of clients.values()) {
+    try { ws.send(data); } catch { clients.delete(getWsClientKey(ws, clients)); }
+  }
+}
+
+function getWsClientKey(ws: WebSocket, map: Map<string, WebSocket>): string {
+  for (const [key, value] of map.entries()) {
+    if (value === ws) return key;
+  }
+  return '';
+}
+
+function broadcastJsonWs(sessionId: string, payload: unknown): void {
+  broadcastToWs(sessionId, JSON.stringify(payload));
+}
+
 function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
   session.dataDisposable = session.ptyProcess.onData((data: string) => {
     session.lastActivity = Date.now();
@@ -793,11 +833,13 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
       addToHistory(sessionId, data);
     }
     broadcastEvent(sessionId, { type: 'data', data });
+    broadcastJsonWs(sessionId, { type: 'data', data });
   });
 
   session.exitDisposable = session.ptyProcess.onExit(({ exitCode, signal }) => {
     console.log(`Terminal session ${sessionId} exited with code ${exitCode}, signal ${signal}`);
     broadcastEvent(sessionId, { type: 'exit', exitCode, signal });
+    broadcastJsonWs(sessionId, { type: 'exit', exitCode, signal });
     cleanupSession(sessionId, { killProcess: false });
   });
 }
@@ -951,7 +993,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [sessionId, session] of terminalSessions.entries()) {
     const idleTooLong = now - session.lastActivity > TERMINAL_IDLE_TIMEOUT;
-    const orphaned = session.clients.size === 0;
+    const orphaned = sessionIsOrphaned(sessionId);
     const graceWindow = session.keepAliveMs;
     const graceExpired = orphaned
       && session.lastDetachedAt !== null
@@ -972,12 +1014,12 @@ router.get('/processes', (_req, res) => {
     createdAt: session.createdAt,
     lastActivity: session.lastActivity,
     backend: session.ptyBackend,
-    clients: session.clients.size,
+    clients: getTotalClients(sessionId),
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
     shouldPersist: session.shouldPersist,
     keepAliveMs: session.keepAliveMs,
-    isOrphan: session.clients.size === 0,
+    isOrphan: sessionIsOrphaned(sessionId),
     hasWrittenData: session.hasWrittenData,
     activeProgram: session.activeProgram?.command ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
@@ -1252,7 +1294,7 @@ router.get('/:sessionId/stream', (req, res) => {
     if (activeProgramInterval) {
       clearInterval(activeProgramInterval);
     }
-    closeClient(session, clientId);
+    closeClient(session, sessionId, clientId);
     console.log(`Client ${clientId} disconnected from terminal session ${sessionId}`);
   };
 
@@ -1271,12 +1313,12 @@ router.get('/:sessionId/health', (req, res) => {
     return res.status(404).json({ healthy: false, error: 'Session not found' });
   }
   
-  console.log(`Health check: session ${sessionId} healthy, cwd=${session.cwd}, clients=${session.clients.size}, lastActivity=${Date.now() - session.lastActivity}ms ago`);
+  console.log(`Health check: session ${sessionId} healthy, cwd=${session.cwd}, clients=${getTotalClients(sessionId)}, lastActivity=${Date.now() - session.lastActivity}ms ago`);
    res.json({ 
      healthy: true, 
      sessionId,
       cwd: session.cwd,
-      clients: session.clients.size,
+      clients: getTotalClients(sessionId),
       lastActivity: session.lastActivity,
       backend: session.ptyBackend,
       mode: session.mode,
@@ -1303,7 +1345,7 @@ router.get('/:sessionId/attach', async (req, res) => {
     sessionId,
     cwd: session.cwd,
     backend: session.ptyBackend,
-    clients: session.clients.size,
+    clients: getTotalClients(sessionId),
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
     history,
@@ -1330,7 +1372,7 @@ router.patch('/:sessionId/policy', (req, res) => {
     session.keepAliveMs = normalizeKeepAliveMs(req.body.keepAliveMs);
   }
 
-  if (session.clients.size === 0) {
+  if (sessionIsOrphaned(sessionId)) {
     session.lastDetachedAt = Date.now();
   }
 
@@ -1338,7 +1380,7 @@ router.patch('/:sessionId/policy', (req, res) => {
     sessionId,
     shouldPersist: session.shouldPersist,
     keepAliveMs: session.keepAliveMs,
-    clients: session.clients.size,
+    clients: getTotalClients(sessionId),
   });
 });
 
@@ -1350,14 +1392,14 @@ router.post('/:sessionId/detach', (req, res) => {
     return res.status(404).json({ error: 'Session not found' });
   }
 
-  if (session.clients.size === 0) {
+  if (sessionIsOrphaned(sessionId)) {
     session.lastDetachedAt = Date.now();
   }
 
   res.json({
     sessionId,
     detachedAt: session.lastDetachedAt,
-    clients: session.clients.size,
+    clients: getTotalClients(sessionId),
     shouldPersist: session.shouldPersist,
   });
 });
@@ -1674,5 +1716,284 @@ router.post('/force-kill', (req, res) => {
   console.log(`Force killed ${killedCount} terminal session(s)`);
   res.json({ success: true, killedCount });
 });
+
+// ---- WebSocket handler (replaces SSE + HTTP POST for terminal I/O) ----
+
+async function executeTmuxAction(
+  tmuxTarget: string,
+  action: string,
+  body: Record<string, unknown>
+): Promise<{ shouldBroadcastLayout: boolean; error?: string }> {
+  let shouldBroadcastLayout = true;
+
+  switch (action) {
+    case 'select-pane': {
+      const paneId = typeof body.paneId === 'string' ? body.paneId : '';
+      if (!paneId) return { shouldBroadcastLayout: false, error: 'paneId is required' };
+      await runTmux(['select-pane', '-t', paneId]);
+      break;
+    }
+    case 'select-window': {
+      const windowId = typeof body.windowId === 'string' ? body.windowId : '';
+      if (!windowId) return { shouldBroadcastLayout: false, error: 'windowId is required' };
+      await runTmux(['select-window', '-t', windowId]);
+      break;
+    }
+    case 'split-pane': {
+      const dir = body.direction === 'h' ? '-h' : '-v';
+      await runTmux(['split-window', '-t', tmuxTarget, dir]);
+      break;
+    }
+    case 'close-pane': {
+      const paneId = typeof body.paneId === 'string' ? body.paneId : '';
+      if (!paneId) return { shouldBroadcastLayout: false, error: 'paneId is required' };
+      await runTmux(['kill-pane', '-t', paneId]);
+      break;
+    }
+    case 'copy-mode': {
+      const enabled = body.enabled !== false;
+      if (enabled) {
+        try {
+          await runTmux(['copy-mode', '-e', '-t', tmuxTarget]);
+        } catch (error) {
+          if (!isAlreadyInCopyModeError(getErrorMessage(error))) throw error;
+        }
+      } else {
+        try {
+          await runTmux(['send-keys', '-t', tmuxTarget, '-X', 'cancel']);
+        } catch (error) {
+          if (!isNotInCopyModeError(getErrorMessage(error))) throw error;
+        }
+      }
+      break;
+    }
+    case 'scroll': {
+      const direction = body.direction === 'down' ? 'down' : 'up';
+      const lines = Math.max(1, Math.min(50, Math.floor(Number(body.lines) || 1)));
+
+      let inCopyMode = await isTmuxPaneInMode(tmuxTarget);
+      if (!inCopyMode) {
+        try {
+          await runTmux(['copy-mode', '-e', '-t', tmuxTarget]);
+        } catch (error) {
+          if (!isAlreadyInCopyModeError(getErrorMessage(error))) throw error;
+        }
+        inCopyMode = await isTmuxPaneInMode(tmuxTarget);
+      }
+      if (!inCopyMode) {
+        shouldBroadcastLayout = false;
+        break;
+      }
+
+      const primaryCommand = direction === 'up' ? 'scroll-up' : 'scroll-down';
+      const fallbackCommands = direction === 'up'
+        ? ['up-line', 'cursor-up']
+        : ['down-line', 'cursor-down'];
+
+      let scrollSucceeded = false;
+      let lastError: unknown = null;
+
+      for (const cmd of [primaryCommand, ...fallbackCommands]) {
+        try {
+          await runTmux(['send-keys', '-t', tmuxTarget, '-X', '-N', String(lines), cmd]);
+          scrollSucceeded = true;
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (!scrollSucceeded && lastError) throw lastError;
+      shouldBroadcastLayout = false;
+      break;
+    }
+    case 'new-window': {
+      await runTmux(['new-window', '-t', tmuxTarget]);
+      break;
+    }
+    case 'switch-session': {
+      const targetSessionName = typeof body.tmuxSessionName === 'string'
+        ? body.tmuxSessionName.trim()
+        : '';
+      if (!targetSessionName) {
+        return { shouldBroadcastLayout: false, error: 'tmuxSessionName is required' };
+      }
+      await runTmux(['switch-client', '-t', targetSessionName]);
+      break;
+    }
+    default:
+      return { shouldBroadcastLayout: false, error: `Unknown tmux action: ${action}` };
+  }
+
+  return { shouldBroadcastLayout };
+}
+
+export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, clientId: string): void {
+  const session = terminalSessions.get(sessionId);
+  if (!session) {
+    ws.close(4001, 'Session not found');
+    return;
+  }
+
+  // Register client
+  let clients = wsClients.get(sessionId);
+  if (!clients) {
+    clients = new Map();
+    wsClients.set(sessionId, clients);
+  }
+  clients.set(clientId, ws);
+  session.lastActivity = Date.now();
+  session.lastDetachedAt = null;
+
+  // Send connected event
+  const runtime = (globalThis as Record<string, unknown>).Bun ? 'bun' : 'node';
+  ws.send(JSON.stringify({
+    type: 'connected',
+    runtime,
+    ptyBackend: session.ptyBackend || 'unknown',
+    mode: session.mode,
+    tmuxSessionName: session.tmuxSessionName,
+    activeProgram: session.activeProgram?.command ?? null,
+    activeProgramSource: session.activeProgram?.source ?? null,
+  }));
+
+  // Tmux layout polling (per-client, like the SSE stream does)
+  let tmuxInterval: ReturnType<typeof setInterval> | null = null;
+  let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
+
+  if (session.mode === 'tmux' && session.tmuxSessionName) {
+    let lastTmuxLayoutSnapshot = '';
+    let lastActiveProgramSnapshot = JSON.stringify(session.activeProgram ?? null);
+
+    const sendTmuxLayout = async () => {
+      if (ws.readyState !== ws.OPEN) return;
+      try {
+        const layout = await getTmuxLayout(session.tmuxSessionName!);
+        // Update active program
+        const ap = getActiveProgramFromTmuxLayout(layout);
+        const apSnapshot = JSON.stringify(ap ?? null);
+        if (apSnapshot !== lastActiveProgramSnapshot) {
+          lastActiveProgramSnapshot = apSnapshot;
+          session.activeProgram = ap;
+          ws.send(JSON.stringify({
+            type: 'active-program',
+            activeProgram: ap?.command ?? null,
+            activeProgramSource: ap?.source ?? null,
+          }));
+        }
+        const snapshot = JSON.stringify(layout);
+        if (snapshot !== lastTmuxLayoutSnapshot) {
+          lastTmuxLayoutSnapshot = snapshot;
+          ws.send(JSON.stringify({ type: 'tmux-layout', layout }));
+        }
+      } catch { /* ignore polling errors */ }
+    };
+
+    sendTmuxLayout();
+    tmuxInterval = setInterval(sendTmuxLayout, TMUX_POLL_INTERVAL);
+  }
+
+  // Active program polling (shell mode)
+  if (session.mode === 'shell') {
+    let lastApSnapshot = JSON.stringify(session.activeProgram ?? null);
+
+    const pollActiveProgram = async () => {
+      if (ws.readyState !== ws.OPEN) return;
+      try {
+        const ap = await detectShellActiveProgram(session);
+        const snapshot = JSON.stringify(ap ?? null);
+        if (snapshot !== lastApSnapshot) {
+          lastApSnapshot = snapshot;
+          session.activeProgram = ap;
+          ws.send(JSON.stringify({
+            type: 'active-program',
+            activeProgram: ap?.command ?? null,
+            activeProgramSource: ap?.source ?? null,
+          }));
+        }
+      } catch { /* ignore */ }
+    };
+
+    activeProgramInterval = setInterval(pollActiveProgram, ACTIVE_PROGRAM_POLL_INTERVAL);
+  }
+
+  // Handle client → server messages
+  ws.on('message', async (raw) => {
+    let msg: { type: string; [key: string]: unknown };
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
+
+    try {
+      switch (msg.type) {
+        case 'input': {
+          if (typeof msg.data === 'string' && msg.data.length > 0) {
+            session.lastActivity = Date.now();
+            session.ptyProcess.write(msg.data);
+          }
+          break;
+        }
+        case 'resize': {
+          const cols = Number(msg.cols);
+          const rows = Number(msg.rows);
+          if (cols > 0 && rows > 0) {
+            session.ptyProcess.resize(cols, rows);
+          }
+          break;
+        }
+        case 'tmux': {
+          const reqId = msg.reqId as string | undefined;
+          if (session.mode !== 'tmux' || !session.tmuxSessionName) {
+            ws.send(JSON.stringify({ type: 'tmux-result', reqId, success: false, error: 'Not in tmux mode' }));
+            break;
+          }
+          const result = await executeTmuxAction(
+            session.tmuxSessionName,
+            msg.action as string,
+            msg as unknown as Record<string, unknown>,
+          );
+          ws.send(JSON.stringify({ type: 'tmux-result', reqId, success: !result.error, error: result.error }));
+          if (result.shouldBroadcastLayout && session.tmuxSessionName) {
+            try {
+              const layout = await getTmuxLayout(session.tmuxSessionName);
+              broadcastJsonWs(sessionId, { type: 'tmux-layout', layout });
+            } catch { /* ignore */ }
+          }
+          break;
+        }
+        case 'ping': {
+          ws.send(JSON.stringify({ type: 'pong' }));
+          break;
+        }
+      }
+    } catch (error) {
+      ws.send(JSON.stringify({
+        type: 'error',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      }));
+    }
+  });
+
+  // Cleanup on close
+  ws.on('close', () => {
+    if (tmuxInterval) clearInterval(tmuxInterval);
+    if (activeProgramInterval) clearInterval(activeProgramInterval);
+    const clients = wsClients.get(sessionId);
+    if (clients) {
+      clients.delete(clientId);
+      if (clients.size === 0) {
+        wsClients.delete(sessionId);
+        if (sessionIsOrphaned(sessionId)) {
+          session.lastDetachedAt = Date.now();
+        }
+      }
+    }
+  });
+
+  ws.on('error', () => {
+    // close handler will clean up
+  });
+}
 
 export default router;

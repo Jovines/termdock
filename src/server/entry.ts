@@ -6,7 +6,8 @@ import path from 'path';
 import { homedir } from 'os';
 import cookieParser from 'cookie-parser';
 import { fileURLToPath } from 'url';
-import terminalRoutes from './routes/terminal.js';
+import { WebSocketServer } from 'ws';
+import terminalRoutes, { handleTerminalWebSocket } from './routes/terminal.js';
 import { csrfProtection } from './utils/csrfProtection.js';
 import { pathValidator } from './utils/pathValidator.js';
 
@@ -99,6 +100,30 @@ export function startServer(options: ServerOptions = {}) {
   const host = options.host ?? (process.env.HOST || DEFAULT_HOST);
   const app = createApp();
   const server = createServer(app);
+
+  // WebSocket for bidirectional terminal communication.
+  // Replaces SSE (server→client) + HTTP POST (client→server) with a single
+  // persistent connection per terminal session.
+  const wss = new WebSocketServer({ noServer: true });
+
+  const WS_PATH_RE = /^\/api\/terminal\/([^/]+)\/ws$/;
+
+  server.on('upgrade', (request, socket, head) => {
+    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+    const match = url.pathname.match(WS_PATH_RE);
+
+    if (!match) {
+      socket.destroy();
+      return;
+    }
+
+    const sessionId = match[1];
+    const clientId = crypto.randomUUID();
+
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      handleTerminalWebSocket(ws, sessionId, clientId);
+    });
+  });
 
   server.listen(port, host, () => {
     const displayHost = host === '0.0.0.0' ? 'localhost' : host;
