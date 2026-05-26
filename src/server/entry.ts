@@ -101,8 +101,9 @@ export function startServer(options: ServerOptions = {}) {
   const server = createServer(app);
 
   server.listen(port, host, () => {
-    console.log(`Termdock server running at http://${host}:${port}`);
-    console.log(`Health check: http://${host}:${port}/health`);
+    const displayHost = host === '0.0.0.0' ? 'localhost' : host;
+    console.log(`Termdock server running at http://${displayHost}:${port}`);
+    console.log(`Health check: http://${displayHost}:${port}/health`);
   });
 
   server.on('error', (error) => {

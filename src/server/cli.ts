@@ -91,7 +91,8 @@ function writeState(state: ServerState) {
 function printRunningState(state: ServerState) {
   console.log(`Termdock is running in background.`);
   console.log(`PID: ${state.pid}`);
-  console.log(`URL: http://${state.host}:${state.port}`);
+  const displayHost = state.host === '0.0.0.0' ? 'localhost' : state.host;
+  console.log(`URL: http://${displayHost}:${state.port}`);
   console.log(`Log: ${state.logFile}`);
 }
 
@@ -223,7 +224,7 @@ if (options.foreground) {
   });
 
   console.log('Termdock started in background.');
-  console.log(`URL: http://${childHost}:${childPort}`);
+  console.log(`URL: http://${childHost === '0.0.0.0' ? 'localhost' : childHost}:${childPort}`);
   console.log(`PID: ${child.pid}`);
   console.log(`Log: ${logFilePath}`);
   process.exit(0);

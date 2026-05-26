@@ -45,5 +45,16 @@ npm run build
 printf 'Installing termdock CLI globally from local source...\n'
 npm install -g .
 
-printf '\nDone. You can now run:\n'
-printf '  termdock\n'
+printf '\nDone. Termdock installed globally.\n'
+printf '\n'
+printf 'Quick start:\n'
+printf '  termdock                 Start server in background\n'
+printf '  termdock --foreground    Run in foreground (for debugging)\n'
+printf '  termdock --status        Show running server status\n'
+printf '  termdock --stop          Stop background server\n'
+printf '  termdock --help          Show all options\n'
+printf '\n'
+printf 'After starting, open:\n'
+printf '  http://localhost:9834\n'
+printf '\n'
+printf 'Logs: ~/.termdock/server.log\n'
