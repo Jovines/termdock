@@ -130,8 +130,8 @@ stop_by_pid_file "$CLIENT_PID_FILE" "client"
 kill_matching_processes "$ROOT_DIR/node_modules/.bin/tsx watch src/server/entry.ts" "server"
 kill_matching_processes "$ROOT_DIR/node_modules/.bin/vite" "client"
 
-ensure_port_available_for_project 43888
-ensure_port_available_for_project 5173
+ensure_port_available_for_project 9834
+ensure_port_available_for_project 9833
 
 start_service "server" "npm run dev:server" "$SERVER_PID_FILE" "$SERVER_LOG_FILE"
 start_service "client" "npm run dev:client" "$CLIENT_PID_FILE" "$CLIENT_LOG_FILE"
