@@ -66,27 +66,6 @@ ensure_port_available_for_project() {
   done
 }
 
-extract_local_url() {
-  log_file="$1"
-
-  if [ ! -f "$log_file" ]; then
-    return
-  fi
-
-  while IFS= read -r line; do
-    case "$line" in
-      *"Local:"*)
-        candidate=${line#*Local:}
-        set -- $candidate
-        if [ -n "${1:-}" ]; then
-          printf '%s\n' "$1"
-          return
-        fi
-        ;;
-    esac
-  done < "$log_file"
-}
-
 stop_by_pid_file() {
   pid_file="$1"
   name="$2"
@@ -147,23 +126,7 @@ do_restart() {
   echo "Client PID: $(cat "$CLIENT_PID_FILE")"
   echo "Server log: $SERVER_LOG_FILE"
   echo "Client log: $CLIENT_LOG_FILE"
-
-  client_url=""
-  attempt=0
-  while [ "$attempt" -lt 30 ]; do
-    client_url=$(extract_local_url "$CLIENT_LOG_FILE" || true)
-    if [ -n "$client_url" ]; then
-      break
-    fi
-    sleep 1
-    attempt=$((attempt + 1))
-  done
-
-  if [ -z "$client_url" ]; then
-    client_url="http://localhost:9833"
-  fi
-
-  echo "Open: $client_url"
+  echo "Open: http://localhost:9833"
 }
 
 case "${1:-}" in
