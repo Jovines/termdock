@@ -59,7 +59,7 @@ ensure_port_available_for_project() {
       *)
         echo "Port $port is occupied by an external process (pid=$pid):"
         echo "  $cmd"
-        echo "Please stop it and rerun restart-dev.sh."
+        echo "Please stop it and rerun dev.sh."
         exit 1
         ;;
     esac
@@ -122,39 +122,54 @@ start_service() {
   fi
 }
 
-echo "Restarting termdock dev services in background..."
+do_stop() {
+  echo "Stopping termdock dev services..."
+  stop_by_pid_file "$SERVER_PID_FILE" "server"
+  stop_by_pid_file "$CLIENT_PID_FILE" "client"
+  kill_matching_processes "$ROOT_DIR/node_modules/.bin/tsx watch src/server/entry.ts" "server"
+  kill_matching_processes "$ROOT_DIR/node_modules/.bin/vite" "client"
+  echo "Done."
+}
 
-stop_by_pid_file "$SERVER_PID_FILE" "server"
-stop_by_pid_file "$CLIENT_PID_FILE" "client"
+do_restart() {
+  echo "Restarting termdock dev services in background..."
 
-kill_matching_processes "$ROOT_DIR/node_modules/.bin/tsx watch src/server/entry.ts" "server"
-kill_matching_processes "$ROOT_DIR/node_modules/.bin/vite" "client"
+  do_stop
 
-ensure_port_available_for_project 9834
-ensure_port_available_for_project 9833
+  ensure_port_available_for_project 9834
+  ensure_port_available_for_project 9833
 
-start_service "server" "npm run dev:server" "$SERVER_PID_FILE" "$SERVER_LOG_FILE"
-start_service "client" "npm run dev:client" "$CLIENT_PID_FILE" "$CLIENT_LOG_FILE"
+  start_service "server" "npm run dev:server" "$SERVER_PID_FILE" "$SERVER_LOG_FILE"
+  start_service "client" "npm run dev:client" "$CLIENT_PID_FILE" "$CLIENT_LOG_FILE"
 
-echo "Done."
-echo "Server PID: $(cat "$SERVER_PID_FILE")"
-echo "Client PID: $(cat "$CLIENT_PID_FILE")"
-echo "Server log: $SERVER_LOG_FILE"
-echo "Client log: $CLIENT_LOG_FILE"
+  echo "Done."
+  echo "Server PID: $(cat "$SERVER_PID_FILE")"
+  echo "Client PID: $(cat "$CLIENT_PID_FILE")"
+  echo "Server log: $SERVER_LOG_FILE"
+  echo "Client log: $CLIENT_LOG_FILE"
 
-client_url=""
-attempt=0
-while [ "$attempt" -lt 30 ]; do
-  client_url=$(extract_local_url "$CLIENT_LOG_FILE" || true)
-  if [ -n "$client_url" ]; then
-    break
+  client_url=""
+  attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    client_url=$(extract_local_url "$CLIENT_LOG_FILE" || true)
+    if [ -n "$client_url" ]; then
+      break
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+
+  if [ -z "$client_url" ]; then
+    client_url="http://localhost:9833"
   fi
-  sleep 1
-  attempt=$((attempt + 1))
-done
 
-if [ -z "$client_url" ]; then
-  client_url="http://localhost:5173"
-fi
+  echo "Open: $client_url"
+}
 
-echo "Open: $client_url"
+case "${1:-}" in
+  stop)    do_stop ;;
+  restart) do_restart ;;
+  *)
+    do_restart
+    ;;
+esac
