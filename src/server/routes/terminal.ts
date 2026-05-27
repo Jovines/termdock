@@ -488,6 +488,59 @@ async function enableTmuxMouse(sessionName: string): Promise<void> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+async function configureTmuxWheelBindings(): Promise<void> {
+  // Pass mouse events through to TUI programs when they request mouse
+  // reporting (vim with mouse=a, htop, etc.).  When only the alternate
+  // screen is active (less, man without mouse), send arrow keys instead.
+  // Otherwise fall back to tmux copy-mode for scrollback history.
+  //
+  // Each tmux command token is a separate array element (execFile bypasses
+  // the shell, so #{format} strings and {} grouping tokens are safe).
+  const upArgs = [
+    'bind-key', '-n', 'WheelUpPane',
+    'if', '-F', '#{||:#{pane_in_mode},#{mouse_any_flag}}',
+    '{', 'send', '-M', '}',
+    '{', 'if', '-F', '#{alternate_on}',
+    '{', 'send-keys', '-N', '5', 'Up', '}',
+    '{', 'copy-mode', '-e', '}',
+    '}',
+  ];
+
+  const downArgs = [
+    'bind-key', '-n', 'WheelDownPane',
+    'if', '-F', '#{||:#{pane_in_mode},#{mouse_any_flag}}',
+    '{', 'send', '-M', '}',
+    '{', 'if', '-F', '#{alternate_on}',
+    '{', 'send-keys', '-N', '5', 'Down', '}',
+    '{', 'copy-mode', '-e', '}',
+    '}',
+  ];
+
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await runTmux(upArgs);
+      break;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await runTmux(downArgs);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 async function disableTmuxStatus(sessionName: string): Promise<void> {
   let lastError: unknown;
 
@@ -1130,6 +1183,12 @@ async function spawnTerminalSession(req: express.Request, input: {
       await enableTmuxMouse(tmuxSessionName);
     } catch (error) {
       console.warn(`Failed to enable tmux mouse for ${tmuxSessionName}: ${getErrorMessage(error)}`);
+    }
+
+    try {
+      await configureTmuxWheelBindings();
+    } catch (error) {
+      console.warn(`Failed to configure tmux wheel bindings: ${getErrorMessage(error)}`);
     }
 
     // Spawn a persistent control-mode connection so scroll commands

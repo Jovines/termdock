@@ -578,6 +578,12 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     // Capture-phase pointer listeners that fire before useTouchScroll's
     // bubble-phase handlers.  stopImmediatePropagation() prevents the
     // normal-mode system from ever seeing touch events intended for tmux.
+    //
+    // Sends SGR (1006) mouse wheel escape sequences directly through the
+    // PTY instead of server-side tmux copy-mode commands.  tmux's own
+    // WheelUpPane / WheelDownPane bindings then conditionally pass the
+    // events through to the TUI program (send -M when the program has
+    // mouse reporting enabled) or fall back to copy-mode scrollback.
     React.useEffect(() => {
       if (!enableTouchScroll || !onTmuxScroll) return;
 
@@ -585,6 +591,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       if (!container) return;
 
       let pointerId: number | null = null;
+      let lastX: number | null = null;
       let lastY: number | null = null;
       let remainder = 0;
       let didScroll = false;
@@ -602,6 +609,30 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         }
       };
 
+      // Build an SGR (1006) mouse wheel escape sequence relative to the
+      // terminal element.  Button 64 = scroll up, 65 = scroll down.
+      const buildSgrScroll = (direction: 'up' | 'down'): string | null => {
+        const term = terminalRef.current;
+        if (!term || !term.element || !term.cols || !term.rows) return null;
+        const rect = term.element.getBoundingClientRect();
+        const rx = (lastX ?? rect.left + rect.width / 2) - rect.left;
+        const ry = (lastY ?? rect.top + rect.height / 2) - rect.top;
+        const charW = term.element.offsetWidth / term.cols || 8;
+        const charH = term.element.offsetHeight / term.rows || 16;
+        const col = Math.max(1, Math.min(term.cols, Math.floor(rx / charW) + 1));
+        const row = Math.max(1, Math.min(term.rows, Math.floor(ry / charH) + 1));
+        const button = direction === 'up' ? 64 : 65;
+        return `\x1b[<${button};${col};${row}M`;
+      };
+
+      const sendSgrScroll = (direction: 'up' | 'down', count: number) => {
+        const seq = buildSgrScroll(direction);
+        if (!seq) return;
+        for (let i = 0; i < count; i++) {
+          inputHandlerRef.current(seq);
+        }
+      };
+
       // Speed-adjusted effective line height: at rest (speed=0) use the
       // full eff for controlled slow-scroll feel.  At high speed, reduce
       // eff so the terminal content keeps up with the finger instead of
@@ -612,9 +643,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       };
 
       // rAF loop: consume accumulated remainder at a steady 60 fps so
-      // scroll commands are spaced evenly in time regardless of how
-      // irregularly touch events fire.  Lines are batched per frame and
-      // sent as a single call per direction to minimise round-trips.
+      // scroll events are spaced evenly in time regardless of how
+      // irregularly touch events fire.  Each SGR event translates to one
+      // wheel "click" forwarded through tmux's WheelUpPane binding.
       const tick = () => {
         rafId = null;
 
@@ -631,8 +662,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           linesUp++;
         }
 
-        if (linesDown > 0) onTmuxScroll('down', linesDown);
-        if (linesUp > 0) onTmuxScroll('up', linesUp);
+        if (linesDown > 0) sendSgrScroll('down', linesDown);
+        if (linesUp > 0) sendSgrScroll('up', linesUp);
 
         const consumed = linesUp + linesDown;
         if (consumed > 0) {
@@ -641,7 +672,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           // Finger still down with a meaningful fraction — flush it.
           const dir = remainder > 0 ? 'down' : 'up';
           remainder = 0;
-          onTmuxScroll(dir, 1);
+          sendSgrScroll(dir, 1);
           rafId = requestAnimationFrame(tick);
         }
         // else: stop ticking until more delta arrives
@@ -657,6 +688,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         if (e.pointerType !== 'touch') return;
         stopRaf();
         pointerId = e.pointerId;
+        lastX = e.clientX;
         lastY = e.clientY;
         remainder = 0;
         velocity = 0;
@@ -672,6 +704,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         e.stopImmediatePropagation();
 
         const deltaY = e.clientY - lastY;
+        lastX = e.clientX;
         lastY = e.clientY;
 
         // Negate to match useTouchScroll direction convention.
@@ -691,6 +724,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
         stopRaf();
         pointerId = null;
+        lastX = null;
         lastY = null;
         instantSpeed = 0;
 
@@ -701,21 +735,20 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             velocity *= 0.96;
             remainder += velocity;
             // Use velocity-based dynamic eff so fast swipes produce more
-            // lines per frame during inertia.  Lines are batched and sent
-            // as a single call per direction.
+            // wheel events per frame during inertia.
             const factor = 1 + Math.abs(velocity) * 0.10;
             const deff = eff / Math.min(6, factor);
             if (Math.abs(velocity) < eff * 0.08) {
               if (Math.abs(remainder) >= deff / 3) {
                 const dir = remainder > 0 ? 'down' : 'up';
-                onTmuxScroll(dir, 1);
+                sendSgrScroll(dir, 1);
                 remainder = 0;
               }
               velocity = 0;
               rafId = null;
               return;
             }
-            // Consume up to 8 lines per frame.
+            // Consume up to 8 events per frame.
             let linesUp = 0;
             let linesDown = 0;
             while ((linesUp + linesDown) < 8 && remainder >= deff) {
@@ -726,8 +759,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
               remainder += deff;
               linesUp++;
             }
-            if (linesDown > 0) onTmuxScroll('down', linesDown);
-            if (linesUp > 0) onTmuxScroll('up', linesUp);
+            if (linesDown > 0) sendSgrScroll('down', linesDown);
+            if (linesUp > 0) sendSgrScroll('up', linesUp);
             rafId = requestAnimationFrame(decay);
           };
           rafId = requestAnimationFrame(decay);
