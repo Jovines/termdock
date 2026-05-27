@@ -61,7 +61,7 @@ const {
   tapThreshold = 8,
   } = config;
 
-  const axisLockRatio = 1.12;
+  const axisLockRatio = 1.06;
 
   const stateRef = React.useRef<TouchScrollState>({
     lastY: null,

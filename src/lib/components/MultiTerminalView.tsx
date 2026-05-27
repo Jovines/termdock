@@ -658,7 +658,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           resistanceRatio={0.82}
           threshold={8}
           longSwipesRatio={0.2}
-          touchAngle={30}
+          touchAngle={15}
           touchStartPreventDefault={false}
           noSwiping
           noSwipingSelector="[data-mobile-keyboard='true']"

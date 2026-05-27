@@ -593,6 +593,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       let pointerId: number | null = null;
       let lastX: number | null = null;
       let lastY: number | null = null;
+      let startX: number | null = null;
+      let startY: number | null = null;
+      let gestureAxis: 'x' | 'y' | null = null;
       let remainder = 0;
       let didScroll = false;
       let rafId: number | null = null;
@@ -690,6 +693,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         pointerId = e.pointerId;
         lastX = e.clientX;
         lastY = e.clientY;
+        startX = e.clientX;
+        startY = e.clientY;
+        gestureAxis = null;
         remainder = 0;
         velocity = 0;
         instantSpeed = 0;
@@ -699,6 +705,35 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       const onMove = (e: PointerEvent) => {
         if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
         if (lastY == null) return;
+
+        // Axis lock: detect horizontal swipes and let them pass through
+        // to Swiper for page-flipping between terminal sessions.
+        if (gestureAxis === null && startX !== null && startY !== null) {
+          const absDx = Math.abs(e.clientX - startX);
+          const absDy = Math.abs(e.clientY - startY);
+          const axisThreshold = 8;
+          if (absDx > axisThreshold || absDy > axisThreshold) {
+            if (absDx > absDy * 1.06) {
+              gestureAxis = 'x';
+            } else if (absDy > absDx * 1.06) {
+              gestureAxis = 'y';
+            }
+          }
+        }
+
+        if (gestureAxis === 'x') {
+          // Let horizontal swipes reach Swiper for page flipping
+          lastX = e.clientX;
+          lastY = e.clientY;
+          return;
+        }
+
+        if (gestureAxis === null) {
+          // Direction still ambiguous — don't consume yet
+          lastX = e.clientX;
+          lastY = e.clientY;
+          return;
+        }
 
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -726,7 +761,16 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         pointerId = null;
         lastX = null;
         lastY = null;
+        startX = null;
+        startY = null;
         instantSpeed = 0;
+
+        // Horizontal gestures are handled by Swiper — skip inertia
+        if (gestureAxis === 'x') {
+          gestureAxis = null;
+          return;
+        }
+        gestureAxis = null;
 
         // Light inertia: decay velocity and feed into remainder over
         // several frames after finger lift for a subtle glide feel.
