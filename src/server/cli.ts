@@ -5,9 +5,8 @@ import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
 import { startServer } from './entry.js';
+import { PORT, DEFAULT_HOST } from './config.js';
 
-const DEFAULT_HOST = '0.0.0.0';
-const DEFAULT_PORT = 9834;
 const stateDir = path.join(os.homedir(), '.termdock');
 const stateFilePath = path.join(stateDir, 'server.json');
 const logFilePath = path.join(stateDir, 'server.log');
@@ -33,7 +32,7 @@ function printHelp() {
 
 Options:
   --host <host>    Host to bind to (default: ${DEFAULT_HOST})
-  --port <port>    Port to listen on (default: ${DEFAULT_PORT})
+  --port <port>    Port to listen on (default: ${PORT.backend})
   --foreground     Run in the foreground
   --status         Show background server status
   --stop           Stop the background server
@@ -197,7 +196,7 @@ if (options.foreground) {
   const logFileFd = fs.openSync(logFilePath, 'a');
   const childArgs = [path.resolve(process.argv[1]), '--foreground'];
   const childHost = options.host ?? DEFAULT_HOST;
-  const childPort = options.port ?? DEFAULT_PORT;
+  const childPort = options.port ?? PORT.backend;
 
   if (options.host) {
     childArgs.push('--host', options.host);

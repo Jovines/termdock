@@ -2,6 +2,10 @@
 
 set -eu
 
+# 端口配置 (与 src/shared/config.ts 保持一致)
+FRONTEND_PORT=9833
+BACKEND_PORT=9834
+
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 SERVER_PID_FILE="$ROOT_DIR/.dev-server.pid"
@@ -110,8 +114,8 @@ do_restart() {
 
   do_stop
 
-  ensure_port_available 9834
-  ensure_port_available 9833
+  ensure_port_available "$BACKEND_PORT"
+  ensure_port_available "$FRONTEND_PORT"
 
   start_service "server" "npm run dev:server" "$SERVER_PID_FILE" "$SERVER_LOG_FILE"
   start_service "client" "npm run dev:client" "$CLIENT_PID_FILE" "$CLIENT_LOG_FILE"
@@ -121,7 +125,7 @@ do_restart() {
   echo "Client PID: $(cat "$CLIENT_PID_FILE")"
   echo "Server log: $SERVER_LOG_FILE"
   echo "Client log: $CLIENT_LOG_FILE"
-  echo "Open: http://localhost:9833"
+  echo "Open: http://localhost:$FRONTEND_PORT"
 }
 
 case "${1:-}" in

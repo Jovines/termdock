@@ -11,9 +11,10 @@ import terminalRoutes, { handleTerminalWebSocket } from './routes/terminal.js';
 import { csrfProtection } from './utils/csrfProtection.js';
 import { pathValidator } from './utils/pathValidator.js';
 
+import { PORT, DEFAULT_HOST } from './config.js';
+
 const CLIENT_STATE_COOKIE = 'termdock-client';
-export const DEFAULT_PORT = 9834;
-const DEFAULT_HOST = '0.0.0.0';
+export const DEFAULT_PORT = PORT.backend;
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDirPath = path.dirname(currentFilePath);

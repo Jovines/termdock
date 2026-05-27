@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { VitePWA } from 'vite-plugin-pwa';
+import { PORT, DEFAULT_HOST } from './src/server/config';
 
 export default defineConfig({
   plugins: [
@@ -82,12 +83,12 @@ export default defineConfig({
     },
   },
   server: {
-    port: 9833,
+    port: PORT.frontend,
     strictPort: true,
-    host: '0.0.0.0',
+    host: DEFAULT_HOST,
     proxy: {
       '/api': {
-        target: 'http://localhost:9834',
+        target: `http://localhost:${PORT.backend}`,
         changeOrigin: true,
         ws: true,
         configure: (proxy, options) => {

@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# 端口配置 (与 src/shared/config.ts 保持一致)
+BACKEND_PORT=9834
+
 NODE_PTY_RELEASE_DIR="node_modules/node-pty/build/Release"
 NODE_PTY_HELPER="$NODE_PTY_RELEASE_DIR/spawn-helper"
 NODE_PTY_NATIVE="$NODE_PTY_RELEASE_DIR/pty.node"
@@ -55,6 +58,6 @@ printf '  termdock --stop          Stop background server\n'
 printf '  termdock --help          Show all options\n'
 printf '\n'
 printf 'After starting, open:\n'
-printf '  http://localhost:9834\n'
+printf '  http://localhost:%s\n' "$BACKEND_PORT"
 printf '\n'
 printf 'Logs: ~/.termdock/server.log\n'
