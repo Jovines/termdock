@@ -273,13 +273,13 @@ function App() {
 
   return (
     <div
-      className="w-screen flex flex-col overflow-hidden bg-background text-foreground"
+      className="w-screen flex flex-col bg-background text-foreground"
       style={{ height: 'var(--app-vh, 100dvh)' }}
     >
-      <main className="relative min-h-0 flex-1 overflow-hidden px-0 pb-0 pt-0 sm:px-5 sm:pb-5 sm:pt-5">
-        <div className="mx-auto flex h-full w-full max-w-[1440px] min-h-0 flex-col overflow-visible bg-background sm:rounded-[28px] sm:shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
+      <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
+        <div className="mx-auto flex h-full w-full max-w-[1440px] min-h-0 flex-col overflow-visible bg-background">
           <div
-            className="flex h-10 shrink-0 items-center justify-between gap-2 bg-background px-2 sm:h-11 sm:px-3"
+            className="flex h-6 shrink-0 items-center justify-between gap-1.5 bg-background px-1.5 sm:h-7 sm:px-2"
           >
             <div className="scrollbar-thin flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
               {sessions.map((session) => {
@@ -290,7 +290,7 @@ function App() {
                     ref={isActive ? activeSessionTabRef : null}
                     type="button"
                     onClick={() => switchSession(session.id)}
-                    className={`shrink-0 truncate rounded-full px-3 py-1.5 text-[11px] transition max-w-[14rem] ${
+                    className={`shrink-0 truncate rounded-full px-2 py-0.5 text-[11px] transition max-w-[14rem] ${
                       isActive
                         ? 'bg-surface-elevated text-foreground'
                         : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
@@ -332,7 +332,7 @@ function App() {
               <button
                 type="button"
                 onClick={() => setIsDrawerOpen(true)}
-                className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-surface-2 px-3 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground sm:h-9"
+                className="inline-flex h-5 shrink-0 items-center justify-center gap-1 rounded-full bg-surface-2 px-2.5 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground sm:h-6"
                 aria-label="Open sessions and settings"
               >
                 <RiSettings4Line size={16} />

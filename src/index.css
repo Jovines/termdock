@@ -35,13 +35,24 @@ body {
   color: var(--foreground);
 }
 
-html,
-body,
-#root {
+html {
+  height: var(--app-vh, 100dvh);
+  width: 100vw;
+  overscroll-behavior: none;
+}
+
+body {
   height: var(--app-vh, 100dvh);
   width: 100vw;
   overflow: hidden;
   overscroll-behavior: none;
+}
+
+#root {
+  height: var(--app-vh, 100dvh);
+  width: 100vw;
+  overscroll-behavior: none;
+  padding-top: max(0px, env(safe-area-inset-top, 0px) - 24px);
 }
 
 .terminal-viewport-container {
@@ -220,7 +231,6 @@ body {
   }
 
   html {
-    overflow: hidden;
     height: var(--app-vh, 100dvh);
     width: 100vw;
   }
@@ -229,9 +239,7 @@ body {
     overflow: hidden;
     height: var(--app-vh, 100dvh);
     width: 100vw;
-    /* Allow scrolling for terminal */
     touch-action: pan-y;
-    /* Ensure visibility even if something goes wrong */
     background-color: #1C1B1A !important;
     color: var(--foreground) !important;
   }
