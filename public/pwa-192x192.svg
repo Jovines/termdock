@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
-  <rect width="192" height="192" fill="#0d1117"/>
-  <text x="96" y="110" font-family="monospace" font-size="48" fill="#58a6ff" text-anchor="middle">&gt;_</text>
-  <text x="96" y="140" font-family="monospace" font-size="14" fill="#8b949e" text-anchor="middle">Web Terminal</text>
+  <rect width="192" height="192" fill="#1C1B1A"/>
+  <text x="96" y="110" font-family="monospace" font-size="48" fill="#66800B" text-anchor="middle">&gt;_</text>
+  <text x="96" y="140" font-family="monospace" font-size="14" fill="#CECDC3" text-anchor="middle">Termdock</text>
 </svg>
