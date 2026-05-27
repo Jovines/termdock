@@ -493,6 +493,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       }
 
       try {
+        // Synchronously remove readonly so iOS shows the keyboard.
+        // React state is async — can't use setTextareaReadOnly here.
+        input.removeAttribute('readonly');
+
         // When iOS dismissed the keyboard via its own dismiss button, the
         // textarea stays focused but the keyboard is gone — plain focus() is
         // a no-op.  Only in that specific case do we blur first.
@@ -552,6 +556,12 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const onDoubleTapRef = React.useRef(onDoubleTap);
     onDoubleTapRef.current = onDoubleTap;
 
+    const notifyGestureLock = React.useCallback((locked: boolean) => {
+      document.dispatchEvent(
+        new CustomEvent('termdock:gesture-lock', { detail: { locked } })
+      );
+    }, []);
+
     const { setupTouchScroll } = useTouchScroll(containerRef, {
       ...touchScrollConfig,
       shouldCaptureTouch: noCaptureRef.current,
@@ -564,6 +574,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
     React.useEffect(() => {
       if (!enableTouchScroll) return;
+      // Prevent iOS magnifying glass on long-press by starting in readonly.
+      // Removed synchronously in focusHiddenInput, restored on blur.
+      hiddenInputRef.current?.setAttribute('readonly', '');
       const cleanup = setupTouchScroll();
       return () => { cleanup(); };
     }, [enableTouchScroll, setupTouchScroll]);
@@ -586,6 +599,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         if (wasOpen && !nowOpen) {
           const input = hiddenInputRef.current;
           if (input && typeof document !== 'undefined' && document.activeElement === input) {
+            input.setAttribute('readonly', '');
             input.blur();
           }
         }
@@ -904,7 +918,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       const LONG_PRESS_DURATION_MS = 500;
       const LONG_PRESS_MOVE_THRESHOLD_PX = 12;
-      const ARROW_GRID_STEP_PX = 15;
+      const ARROW_GRID_STEP_PX = 25;
       const TAP_MOVE_THRESHOLD_PX = 10;
       const DOUBLE_TAP_WINDOW_MS = 150;
       const DOUBLE_TAP_DISTANCE_PX = 25;
@@ -959,6 +973,19 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         if (e.pointerType !== 'touch') return;
         if (!isTargetInside(e.target)) return;
 
+        // While in arrow mode, block all new touches to prevent Swiper
+        // page-flipping or other handlers from hijacking the gesture.
+        if (mode === 'arrow') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          return;
+        }
+
+        // Suppress iOS magnifying glass / text selection loupe on long-press.
+        // Without this, iOS fires its native loupe when the user holds on the
+        // hidden textarea, which conflicts with our long-press gesture.
+        e.preventDefault();
+
         // Double-tap detection fires in pointerdown so we can block the
         // event BEFORE the textarea / useTouchScroll / Swiper see it.
         if (onDoubleTapRef.current) {
@@ -975,6 +1002,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             e.stopImmediatePropagation();
             hapticLight();
             onDoubleTapRef.current?.();
+            // Flash Tab indicator
+            setTabIndicator(true);
+            if (tabIndicatorTimerRef.current) clearTimeout(tabIndicatorTimerRef.current);
+            tabIndicatorTimerRef.current = setTimeout(() => setTabIndicator(false), 400);
             lastTapTime = 0;
             return;
           }
@@ -996,12 +1027,31 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           if (mode === 'holding') {
             mode = 'arrow';
             hapticLight();
+            notifyGestureLock(true);
+            // Show arrow indicator at the touch origin
+            setArrowIndicator({ visible: true, activeDir: '' });
+            const el = arrowIndicatorRef.current;
+            if (el) {
+              el.style.left = originX + 'px';
+              el.style.top = (originY - 100) + 'px';
+            }
           }
         }, LONG_PRESS_DURATION_MS);
       };
 
       const onMove = (e: PointerEvent) => {
-        if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
+        if (e.pointerType !== 'touch') return;
+
+        // Arrow mode: block ALL touches from reaching Swiper/useTouchScroll.
+        // We consume every touchmove at document capture regardless of pointerId.
+        if (mode === 'arrow') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          if (e.pointerId !== pointerId) return;
+          // Fall through to arrow handling below (matching pointerId only)
+        } else {
+          if (e.pointerId !== pointerId) return;
+        }
 
         // Track whether this touch moved enough to disqualify a tap
         const totalDx = e.clientX - tapStartX;
@@ -1011,6 +1061,12 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         }
 
         if (mode === 'holding') {
+          // Block ALL touch movement from reaching Swiper during the hold.
+          // Even the very first pointermove must not reach Swiper, otherwise
+          // it starts tracking and a horizontal swipe will flip pages.
+          e.preventDefault();
+          e.stopImmediatePropagation();
+
           const dx = e.clientX - originX;
           const dy = e.clientY - originY;
           if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_THRESHOLD_PX) {
@@ -1021,8 +1077,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         }
 
         if (mode === 'arrow') {
-          e.preventDefault();
-          e.stopImmediatePropagation();
+          // (preventDefault + stopImmediatePropagation already called above)
 
           const dx = e.clientX - originX;
           const dy = e.clientY - originY;
@@ -1030,34 +1085,62 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           const gridX = Math.round(dx / ARROW_GRID_STEP_PX);
           const gridY = Math.round(dy / ARROW_GRID_STEP_PX);
 
+          // Axis lock: once committed, ignore the other axis unless it
+          // clearly dominates (1.6x displacement ratio).  Within the same
+          // axis, no threshold — continuous movement fires immediately.
+          const prevDir = arrowIndicator.activeDir;
+          const lockedX = prevDir === 'left' || prevDir === 'right';
+          const lockedY = prevDir === 'up' || prevDir === 'down';
+          const xDominant = !lockedY && (lockedX || Math.abs(dx) > Math.abs(dy) * 1.6);
+          const yDominant = !lockedX && (lockedY || Math.abs(dy) > Math.abs(dx) * 1.6);
+
           let keysSent = 0;
 
-          if (gridX > lastGridX) {
-            for (let i = lastGridX + 1; i <= gridX; i++) {
-              inputHandlerRef.current(ARROW_SEQUENCES.right);
-              keysSent++;
+          if (xDominant) {
+            if (gridX > lastGridX) {
+              for (let i = lastGridX + 1; i <= gridX; i++) {
+                inputHandlerRef.current(ARROW_SEQUENCES.right);
+                keysSent++;
+              }
+            } else if (gridX < lastGridX) {
+              for (let i = gridX; i < lastGridX; i++) {
+                inputHandlerRef.current(ARROW_SEQUENCES.left);
+                keysSent++;
+              }
             }
-          } else if (gridX < lastGridX) {
-            for (let i = gridX; i < lastGridX; i++) {
-              inputHandlerRef.current(ARROW_SEQUENCES.left);
-              keysSent++;
-            }
-          }
-
-          if (gridY > lastGridY) {
-            for (let i = lastGridY + 1; i <= gridY; i++) {
-              inputHandlerRef.current(ARROW_SEQUENCES.down);
-              keysSent++;
-            }
-          } else if (gridY < lastGridY) {
-            for (let i = gridY; i < lastGridY; i++) {
-              inputHandlerRef.current(ARROW_SEQUENCES.up);
-              keysSent++;
+          } else if (yDominant) {
+            if (gridY > lastGridY) {
+              for (let i = lastGridY + 1; i <= gridY; i++) {
+                inputHandlerRef.current(ARROW_SEQUENCES.down);
+                keysSent++;
+              }
+            } else if (gridY < lastGridY) {
+              for (let i = gridY; i < lastGridY; i++) {
+                inputHandlerRef.current(ARROW_SEQUENCES.up);
+                keysSent++;
+              }
             }
           }
 
           if (keysSent > 0) {
             hapticLight();
+          }
+
+          let activeDir = prevDir;
+          if (!lockedX && !lockedY) {
+            // First move — lock to whichever axis crosses a grid step
+            if (gridX > lastGridX) activeDir = 'right';
+            else if (gridX < lastGridX) activeDir = 'left';
+            else if (gridY > lastGridY) activeDir = 'down';
+            else if (gridY < lastGridY) activeDir = 'up';
+          } else if (xDominant && gridX !== lastGridX) {
+            activeDir = dx > 0 ? 'right' : 'left';
+          } else if (yDominant && gridY !== lastGridY) {
+            activeDir = dy > 0 ? 'down' : 'up';
+          }
+
+          if (activeDir) {
+            setArrowIndicator({ visible: true, activeDir });
           }
 
           lastGridX = gridX;
@@ -1071,6 +1154,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         if (mode === 'arrow') {
           e.preventDefault();
           e.stopImmediatePropagation();
+          notifyGestureLock(false);
+          setArrowIndicator({ visible: false, activeDir: '' });
           resetGestureState();
           return;
         }
@@ -1655,7 +1740,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       <div
         ref={containerRef}
         className={`relative h-full w-full terminal-viewport-container ${className || ''}`}
-        style={{ backgroundColor: theme.background }}
+        style={{
+          backgroundColor: theme.background,
+          touchAction: arrowIndicator.visible ? 'none' : undefined,
+        }}
         role="button"
         tabIndex={enableTouchScroll ? -1 : 0}
         onPointerDownCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
@@ -1747,6 +1835,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                   scheduleTextureAtlasRefresh('input-blur');
 
                   if (!guarded) {
+                    hiddenInputRef.current?.setAttribute('readonly', '');
                     inputFocusHandlerRef.current?.(false);
                     return;
                   }
@@ -1762,6 +1851,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                     }
 
                     if (!isViewportKeyboardLikelyOpen()) {
+                      hiddenInputRef.current?.setAttribute('readonly', '');
                       inputFocusHandlerRef.current?.(false);
                     }
                   }, INPUT_BLUR_GUARD_RELEASE_MS);
@@ -1842,6 +1932,63 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             {viewportRef.current && !enableTouchScroll ? (
               <div className="overlay-scrollbar overlay-scrollbar--flush overlay-scrollbar--dense overlay-scrollbar--zero" />
             ) : null}
+
+            {/* Double-tap Tab indicator */}
+            <div
+              aria-hidden
+              className="absolute left-1/2 -translate-x-1/2 top-6 z-30 pointer-events-none
+                         rounded-full bg-white/90 px-4 py-1.5 text-sm font-semibold text-gray-900
+                         shadow-lg transition-all duration-150 ease-out"
+              style={{
+                opacity: tabIndicator ? 1 : 0,
+                transform: tabIndicator
+                  ? 'translate(-50%, 0) scale(1)'
+                  : 'translate(-50%, -8px) scale(0.9)',
+              }}
+            >
+              Tab
+            </div>
+
+            {/* Long-press arrow drag indicator */}
+            <div
+              ref={arrowIndicatorRef}
+              aria-hidden
+              className="fixed z-30 pointer-events-none transition-opacity duration-150 ease-out"
+              style={{
+                opacity: arrowIndicator.visible ? 1 : 0,
+                transform: 'translate(-50%, -50%)',
+              }}
+            >
+              {arrowIndicator.visible && (() => {
+                const { activeDir } = arrowIndicator;
+                const A = (d: string) => activeDir === d;
+
+                return (
+                  <div className="flex flex-col items-center gap-1 rounded-2xl bg-black/75 backdrop-blur-sm shadow-xl px-2.5 py-2">
+                    {/* Up */}
+                    <div className={`w-10 h-10 flex items-center justify-center rounded-xl transition-colors ${A('up') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M7 11l5-5 5 5"/></svg>
+                    </div>
+                    {/* Left / Right */}
+                    <div className="flex items-center gap-1">
+                      <div className={`w-10 h-10 flex items-center justify-center rounded-xl transition-colors ${A('left') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                      </div>
+                      <div className="w-10 h-10 flex items-center justify-center rounded-xl text-white/15">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4"/></svg>
+                      </div>
+                      <div className={`w-10 h-10 flex items-center justify-center rounded-xl transition-colors ${A('right') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                      </div>
+                    </div>
+                    {/* Down */}
+                    <div className={`w-10 h-10 flex items-center justify-center rounded-xl transition-colors ${A('down') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
           </>
         )}
       </div>

@@ -126,8 +126,6 @@ interface ClientTerminalState {
 
 const terminalSessions = new Map<string, TerminalSession>();
 const clientTerminalStates = new Map<string, ClientTerminalState>();
-const MAX_TERMINAL_SESSIONS = parseInt(process.env.MAX_TERMINAL_SESSIONS || '20', 10);
-
 // ── 持久化 clientTerminalStates 到磁盘，防止服务重启后丢失 ──
 const CLIENT_STATES_FILE = `${os.homedir()}/.termdock/client-states.json`;
 let persistClientStatesTimer: ReturnType<typeof setTimeout> | null = null;
@@ -228,24 +226,30 @@ loadClientStatesFromDisk();
 
 // 清理磁盘恢复后后端已不存在的 session 引用。
 // 服务重启时 terminalSessions 是空的，持久化的 client states
-// 全部指向已销毁的 session，必须清掉，否则客户端重连时会不断
-// 创建新 session 直到打满 MAX_TERMINAL_SESSIONS。
+// 全部指向已销毁的 session，必须清掉，否则客户端重连时会不断创建新 session。
 (function pruneOrphanClientSessions(): void {
   let changed = false;
   for (const [clientId, state] of clientTerminalStates.entries()) {
-    const valid = state.sessions.filter(
-      (s) => s.backendSessionId != null && terminalSessions.has(s.backendSessionId),
-    );
-    if (valid.length === state.sessions.length) continue;
+    let sessionChanged = false;
+    const cleaned = state.sessions.map((s) => {
+      if (s.backendSessionId != null && !terminalSessions.has(s.backendSessionId)) {
+        sessionChanged = true;
+        return { ...s, backendSessionId: null };
+      }
+      return s;
+    });
+
+    if (!sessionChanged) continue;
     changed = true;
-    if (valid.length === 0) {
+
+    if (cleaned.length === 0) {
       clientTerminalStates.delete(clientId);
     } else {
       const activeOk = state.activeSessionId != null &&
-        valid.some((s) => s.sessionId === state.activeSessionId);
+        cleaned.some((s) => s.sessionId === state.activeSessionId);
       clientTerminalStates.set(clientId, {
-        sessions: valid,
-        activeSessionId: activeOk ? state.activeSessionId : valid[0]?.sessionId ?? null,
+        sessions: cleaned,
+        activeSessionId: activeOk ? state.activeSessionId : cleaned[0]?.sessionId ?? null,
         updatedAt: Date.now(),
       });
     }
@@ -1644,10 +1648,6 @@ router.post('/create', async (req, res) => {
           });
         }
       }
-    }
-
-    if (terminalSessions.size >= MAX_TERMINAL_SESSIONS) {
-      return res.status(429).json({ error: 'Maximum terminal sessions reached' });
     }
 
     const spawned = await spawnTerminalSession(req, {

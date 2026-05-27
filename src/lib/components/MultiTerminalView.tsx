@@ -189,6 +189,21 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
   const [focusTransferRequest, setFocusTransferRequest] = useState<{ sessionId: string; token: number } | null>(null);
   const isTouchSwipeRef = useRef(false);
+  const handleNewSessionRef = useRef<((options?: NewSessionEventDetail) => Promise<void>) | null>(null);
+  // Listen for gesture-lock events from TerminalViewport to disable Swiper.
+  // Directly mutates the Swiper instance so allowTouchMove takes effect
+  // synchronously — React state (via prop) is too slow for touch sequences
+  // already in flight.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent<{ locked: boolean }>;
+      if (swiperRef.current) {
+        swiperRef.current.allowTouchMove = !ce.detail.locked;
+      }
+    };
+    document.addEventListener('termdock:gesture-lock', handler);
+    return () => document.removeEventListener('termdock:gesture-lock', handler);
+  }, []);
 
   const {
     sessions: persistedSessions,
@@ -368,6 +383,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     debugSession('[Session] Restoring', persistedSessions.length, 'persisted sessions');
 
     const restore = async () => {
+      let sessionCount = 0;
       try {
         let availableProcessIds: Set<string> | null = null;
         let orphanBackendIds: string[] = [];
@@ -458,6 +474,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             ), ...adopted]
           : [...restoredPersisted, ...adopted];
 
+        sessionCount = restored.length;
         debugSession('[Session] Restored sessions:', restored.length);
         setSessions(restored);
         setActiveSessionId(persistedActiveId || restored[0]?.id || null);
@@ -495,8 +512,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           keepAliveMs: session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs,
         }));
         setSessions(fallbackSessions);
+        sessionCount = fallbackSessions.length;
         setActiveSessionId(persistedActiveId || fallbackSessions[0]?.id || null);
       } finally {
+        // 恢复后若没有任何 session，在设置 isRestoring=false 之前
+        // 同步等待创建完成，确保外部 effect 不会同时触发创建。
+        if (sessionCount === 0) {
+          await handleNewSessionRef.current?.();
+        }
         setIsRestoring(false);
       }
     };
@@ -583,6 +606,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       console.error('[Session] Failed to create new session:', error);
     }
   }, [defaultSessionMode, defaultTmuxSessionName, saveSession, debugSession]);
+  handleNewSessionRef.current = handleNewSession;
 
   const handleUpdateSessionPolicy = useCallback(async (detail: UpdateSessionPolicyEventDetail) => {
     const target = sessions.find((session) => session.id === detail.sessionId);
@@ -738,6 +762,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         <Swiper
           onSwiper={(instance) => {
             swiperRef.current = instance;
+            instance.allowTouchMove = sessions.length > 1;
           }}
           onSlideChange={handleSwiperChange}
           onTouchStart={() => {
@@ -762,7 +787,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           touchStartPreventDefault={false}
           noSwiping
           noSwipingSelector="[data-mobile-keyboard='true']"
-          allowTouchMove={sessions.length > 1}
           className="h-full"
         >
           {sessions.map((session, index) => (
