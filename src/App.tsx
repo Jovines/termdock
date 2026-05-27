@@ -57,7 +57,15 @@ function App() {
   const [tmuxSessions, setTmuxSessions] = useState<TmuxSessionSummary[]>([]);
   const [tmuxStatus, setTmuxStatus] = useState<TmuxStatus>({ available: true, version: null, reason: null });
   const [tmuxSectionCollapsed, setTmuxSectionCollapsed] = useState(true);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
+  const clickTimerRef = React.useRef<{ sessionId: string; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const renameSession = useCallback((sessionId: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    window.dispatchEvent(new CustomEvent('rename-terminal-session', { detail: { sessionId, name: trimmed } }));
+  }, []);
 
   const {
     cleanupDurationMs,
@@ -206,9 +214,36 @@ function App() {
     });
   }, [activeSessionId]);
 
+  useEffect(() => {
+    if (editingSessionId && renameInputRef.current) {
+      renameInputRef.current.select();
+    }
+  }, [editingSessionId]);
+
   const switchSession = useCallback((sessionId: string) => {
     window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
   }, []);
+
+  const handleTabClick = useCallback((sessionId: string) => {
+    if (clickTimerRef.current?.sessionId === sessionId) {
+      clearTimeout(clickTimerRef.current.timer);
+      clickTimerRef.current = null;
+      setEditingSessionId(sessionId);
+      return;
+    }
+
+    if (clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current.timer);
+    }
+
+    clickTimerRef.current = {
+      sessionId,
+      timer: setTimeout(() => {
+        clickTimerRef.current = null;
+        switchSession(sessionId);
+      }, 350),
+    };
+  }, [switchSession]);
 
   const applyActiveSessionKeepAlive = useCallback((keepAliveMs: number | null) => {
     if (!activeSessionId) return;
@@ -284,12 +319,44 @@ function App() {
             <div className="scrollbar-thin flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
               {sessions.map((session) => {
                 const isActive = session.id === activeSessionId;
+                const isEditing = session.id === editingSessionId;
+
+                if (isEditing) {
+                  const commitRename = (sessionId: string, value: string) => {
+                    const trimmed = value.trim();
+                    if (trimmed) {
+                      renameSession(sessionId, trimmed);
+                    }
+                    setEditingSessionId(null);
+                  };
+
+                  return (
+                    <input
+                      key={session.id}
+                      ref={renameInputRef}
+                      type="text"
+                      defaultValue={session.name}
+                      maxLength={48}
+                      className="shrink-0 rounded-full px-2 py-0.5 text-[11px] outline-none bg-surface-elevated text-foreground ring-1 ring-primary/50 min-w-[6rem]"
+                      style={{ width: `${Math.min(Math.max(session.name.length, 6), 24)}ch` }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          commitRename(session.id, (e.target as HTMLInputElement).value);
+                        } else if (e.key === 'Escape') {
+                          setEditingSessionId(null);
+                        }
+                      }}
+                      onBlur={(e) => commitRename(session.id, e.target.value)}
+                    />
+                  );
+                }
+
                 return (
                   <button
                     key={session.id}
                     ref={isActive ? activeSessionTabRef : null}
                     type="button"
-                    onClick={() => switchSession(session.id)}
+                    onClick={() => handleTabClick(session.id)}
                     className={`shrink-0 truncate rounded-full px-2 py-0.5 text-[11px] transition max-w-[14rem] ${
                       isActive
                         ? 'bg-surface-elevated text-foreground'

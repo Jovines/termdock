@@ -32,6 +32,7 @@ interface UseSessionPersistenceReturn {
   setActiveSession: (sessionId: string | null) => void;
   updateSessionBackendId: (sessionId: string, backendSessionId: string) => void;
   updateSessionKeepAliveMs: (sessionId: string, keepAliveMs: number | null) => void;
+  renameSession: (sessionId: string, newName: string) => void;
   clearAllSessions: () => void;
   restoreSessions: () => Promise<PersistedSession[]>;
 }
@@ -203,6 +204,20 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     queuePersist(sessions, sessionId);
   }, [queuePersist, sessions]);
 
+  // 重命名会话
+  const renameSession = useCallback((sessionId: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+
+    setSessions(prev => {
+      const updated = prev.map(s =>
+        s.sessionId === sessionId ? { ...s, name: trimmed } : s
+      );
+      queuePersist(updated);
+      return updated;
+    });
+  }, [queuePersist]);
+
   // 清除所有会话
   const clearAllSessions = useCallback(() => {
     setSessions([]);
@@ -252,6 +267,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     setActiveSession,
     updateSessionBackendId,
     updateSessionKeepAliveMs,
+    renameSession,
     clearAllSessions,
     restoreSessions,
   };

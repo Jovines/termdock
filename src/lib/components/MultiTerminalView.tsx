@@ -77,12 +77,16 @@ function SessionTabStrip({
   sessions,
   activeSessionId,
   onSelect,
+  onRename,
 }: {
   sessions: Array<Pick<TerminalSession, 'id' | 'name'>>;
   activeSessionId: string | null;
   onSelect: (sessionId: string) => void;
+  onRename: (sessionId: string, newName: string) => void;
 }) {
   const activeTabRef = React.useRef<HTMLButtonElement | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   React.useEffect(() => {
     activeTabRef.current?.scrollIntoView({
@@ -92,7 +96,21 @@ function SessionTabStrip({
     });
   }, [activeSessionId]);
 
-  if (sessions.length <= 1) {
+  useEffect(() => {
+    if (editingId && inputRef.current) {
+      inputRef.current.select();
+    }
+  }, [editingId]);
+
+  const commitRename = useCallback((sessionId: string, value: string) => {
+    const trimmed = value.trim();
+    if (trimmed) {
+      onRename(sessionId, trimmed);
+    }
+    setEditingId(null);
+  }, [onRename]);
+
+  if (sessions.length === 0) {
     return null;
   }
 
@@ -101,12 +119,37 @@ function SessionTabStrip({
       <div className="scrollbar-thin flex items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
         {sessions.map((session) => {
           const isActive = session.id === activeSessionId;
+          const isEditing = session.id === editingId;
+
+          if (isEditing) {
+            return (
+              <input
+                key={session.id}
+                ref={inputRef}
+                type="text"
+                defaultValue={session.name}
+                maxLength={48}
+                className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] outline-none bg-background-elevated text-foreground shadow-sm ring-1 ring-primary/50 min-w-[6rem]`}
+                style={{ width: `${Math.min(Math.max(session.name.length, 6), 28)}ch` }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    commitRename(session.id, (e.target as HTMLInputElement).value);
+                  } else if (e.key === 'Escape') {
+                    setEditingId(null);
+                  }
+                }}
+                onBlur={(e) => commitRename(session.id, e.target.value)}
+              />
+            );
+          }
+
           return (
             <button
               key={session.id}
               ref={isActive ? activeTabRef : null}
               type="button"
               onClick={() => onSelect(session.id)}
+              onDoubleClick={() => setEditingId(session.id)}
               className={`shrink-0 truncate rounded-full px-3 py-1.5 text-[11px] transition max-w-[16rem] ${
                 isActive
                   ? 'bg-background-elevated text-foreground shadow-sm'
@@ -154,6 +197,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     updateSessionBackendId,
     updateSessionKeepAliveMs,
     removeSession: removePersistedSession,
+    renameSession,
   } = useSessionPersistence();
 
   useEffect(() => {
@@ -537,6 +581,15 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
   }, [sessions, debugSession]);
 
+  // Handle session rename
+  const handleRenameSession = useCallback((sessionId: string, newName: string) => {
+    if (!newName.trim()) return;
+    setSessions((prev) =>
+      prev.map((s) => (s.id === sessionId ? { ...s, name: newName.trim() } : s))
+    );
+    renameSession(sessionId, newName.trim());
+  }, [renameSession]);
+
   // Handle session closing from custom event
   const handleCloseSession = useCallback(async (sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
@@ -593,18 +646,28 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       void handleUpdateSessionPolicy(customEvent.detail);
     };
 
+    const handleRenameSessionEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<{ sessionId: string; name: string }>;
+      if (!customEvent.detail?.sessionId || !customEvent.detail?.name) {
+        return;
+      }
+      handleRenameSession(customEvent.detail.sessionId, customEvent.detail.name);
+    };
+
     window.addEventListener('new-terminal-session', handleNewSessionEvent);
     window.addEventListener('switch-terminal-session', handleSwitchSessionEvent);
     window.addEventListener('close-terminal-session', handleCloseSessionEvent);
     window.addEventListener('update-terminal-session-policy', handleUpdateSessionPolicyEvent);
+    window.addEventListener('rename-terminal-session', handleRenameSessionEvent);
 
     return () => {
       window.removeEventListener('new-terminal-session', handleNewSessionEvent);
       window.removeEventListener('switch-terminal-session', handleSwitchSessionEvent);
       window.removeEventListener('close-terminal-session', handleCloseSessionEvent);
       window.removeEventListener('update-terminal-session-policy', handleUpdateSessionPolicyEvent);
+      window.removeEventListener('rename-terminal-session', handleRenameSessionEvent);
     };
-  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleUpdateSessionPolicy]);
+  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleUpdateSessionPolicy, handleRenameSession]);
 
   // 没有会话时创建新的
   useEffect(() => {
@@ -631,6 +694,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           sessions={sessions}
           activeSessionId={activeSessionId}
           onSelect={handleSwitchSession}
+          onRename={handleRenameSession}
         />
       )}
 
