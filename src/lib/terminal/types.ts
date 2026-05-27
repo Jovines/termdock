@@ -178,6 +178,7 @@ export interface TerminalSessionState {
   activeProgram: string | null;
   activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   cwd: string | null;
+  inCopyMode: boolean;
   isConnecting: boolean;
   buffer: string;
   bufferChunks: TerminalChunk[];

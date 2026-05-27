@@ -2447,4 +2447,8 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
 // so existing tmux sessions pick up the latest copy-mode flags.
 configureTmuxWheelBindings().catch(() => {});
 
+// Give copy mode a distinct visual cue so users can tell when they're in
+// scrollback mode even without the default [N/M] position indicator.
+runTmux(['set-option', '-gw', 'mode-style', 'bg=blue,fg=white,bold']).catch(() => {});
+
 export default router;

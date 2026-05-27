@@ -105,6 +105,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const clearBuffer = terminalStore.clearBuffer;
   const setSessionActiveProgram = terminalStore.setSessionActiveProgram;
   const setSessionCwd = terminalStore.setSessionCwd;
+  const setSessionCopyMode = terminalStore.setSessionCopyMode;
 
   const terminalState = React.useMemo(() => {
     if (!sessionId) return undefined;
@@ -193,6 +194,26 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     };
     document.addEventListener('visibilitychange', handleVisibility);
     return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [isActive]);
+
+  // 切换回当前 session 时：
+  //  - 重置 resize 状态以覆盖其他设备的窗口尺寸（多设备复用同一 session 场景）
+  //  - 刷新 WebGL 纹理图集修复静态内容乱码
+  const prevIsActiveRef = React.useRef(isActive);
+  React.useEffect(() => {
+    const wasInactive = !prevIsActiveRef.current;
+    prevIsActiveRef.current = isActive;
+
+    if (!isActive || !wasInactive) return;
+
+    resizeStateRef.current.lastSent = null;
+    tmuxSessionResizedRef.current = null;
+    skipLayoutResizeRef.current = true;
+    const raf = requestAnimationFrame(() => {
+      terminalControllerRef.current?.fit();
+      terminalControllerRef.current?.refreshTextureAtlas();
+    });
+    return () => cancelAnimationFrame(raf);
   }, [isActive]);
 
   // iOS detection
@@ -394,6 +415,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
                 if (event.mode !== 'tmux') {
                   setTmuxLayout(null);
+                  setSessionCopyMode(storeSessionId, false);
                 } else {
                   // 进入/重连 tmux 后强制 resize，绕过所有去重逻辑
                   resizeStateRef.current.lastSent = null;
@@ -450,6 +472,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               }
               case 'tmux-layout': {
                 setTmuxLayout(event.layout ?? null);
+                if (event.layout) {
+                  setSessionCopyMode(storeSessionId, event.layout.inCopyMode);
+                }
                 break;
               }
               case 'active-program': {
@@ -479,6 +504,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setConnectionError('Terminal session ended');
                 setIsFatalError(false);
                 setTmuxLayout(null);
+                setSessionCopyMode(storeSessionId, false);
                 disconnectStream();
                 break;
               }

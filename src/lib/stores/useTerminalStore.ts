@@ -10,6 +10,7 @@ export interface TerminalStore {
   setSessionHistory: (sessionId: string, history: string[]) => void;
   setSessionActiveProgram: (sessionId: string, activeProgram: string | null, activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null) => void;
   setSessionCwd: (sessionId: string, cwd: string | null) => void;
+  setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string) => void;
   clearTerminalSession: (sessionId: string) => void;
@@ -30,6 +31,7 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     activeProgram: null,
     activeProgramSource: null,
     cwd: null,
+    inCopyMode: false,
     isConnecting: false,
     buffer: '',
     bufferChunks: [],
@@ -115,6 +117,16 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         cwd,
         updatedAt: Date.now(),
       });
+      return { sessions: newSessions };
+    });
+  },
+
+  setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => {
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      const existing = newSessions.get(sessionId);
+      if (!existing || existing.inCopyMode === inCopyMode) return state;
+      newSessions.set(sessionId, { ...existing, inCopyMode, updatedAt: Date.now() });
       return { sessions: newSessions };
     });
   },

@@ -126,6 +126,7 @@ export type TerminalController = {
   focus: () => void;
   clear: () => void;
   fit: () => void;
+  refreshTextureAtlas: () => void;
 };
 
 interface TerminalViewportProps {
@@ -1399,8 +1400,11 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         fit: () => {
           fitTerminal('imperative-fit');
         },
+        refreshTextureAtlas: () => {
+          scheduleTextureAtlasRefresh('imperative-refresh');
+        },
       }),
-      [enableTouchScroll, focusHiddenInput, fitTerminal, resetWriteState]
+      [enableTouchScroll, focusHiddenInput, fitTerminal, resetWriteState, scheduleTextureAtlasRefresh]
     );
 
     return (

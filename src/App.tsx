@@ -387,7 +387,12 @@ function App() {
                     title={tooltip}
                   >
                     <span className="inline-flex min-w-0 items-center gap-1">
-                      {session.mode === 'tmux' && <RiLayoutGridLine size={12} className="shrink-0" />}
+                      {session.mode === 'tmux' && (
+                        <RiLayoutGridLine
+                          size={12}
+                          className={`shrink-0 ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}
+                        />
+                      )}
                       <span className="truncate">{displayName}</span>
                     </span>
                   </button>
