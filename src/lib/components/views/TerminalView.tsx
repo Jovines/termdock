@@ -173,6 +173,28 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => document.removeEventListener('termfontchange', handleFontChange);
   }, []);
 
+  // 页面从后台恢复可见时，强制发送 resize 修正 tmux 窗口大小
+  React.useEffect(() => {
+    const handleVisibility = () => {
+      if (!document.hidden && isActive) {
+        // 重置所有状态，强制用本地尺寸覆盖 tmux 的其他客户端窗口大小
+        resizeStateRef.current.lastSent = null;
+        tmuxSessionResizedRef.current = null;
+        skipLayoutResizeRef.current = true;
+        let attempts = 0;
+        const tryFit = () => {
+          attempts++;
+          if (attempts > 15) return;
+          terminalControllerRef.current?.fit();
+          if (attempts < 8) setTimeout(tryFit, attempts < 4 ? 100 : 250);
+        };
+        setTimeout(tryFit, 150);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [isActive]);
+
   // iOS detection
   React.useEffect(() => {
     if (typeof window === 'undefined') {
@@ -372,6 +394,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
                 if (event.mode !== 'tmux') {
                   setTmuxLayout(null);
+                } else {
+                  // 进入/重连 tmux 后强制 resize，绕过所有去重逻辑
+                  resizeStateRef.current.lastSent = null;
+                  tmuxSessionResizedRef.current = null;
+                  skipLayoutResizeRef.current = true;
+                  let attempts = 0;
+                  const tryFit = () => {
+                    attempts++;
+                    if (attempts > 20) return;
+                    terminalControllerRef.current?.fit();
+                    if (attempts < 10) {
+                      setTimeout(tryFit, attempts < 5 ? 80 : 200);
+                    }
+                  };
+                  setTimeout(tryFit, 100);
                 }
 
                 debugSession('[Terminal] Connected event received:', {
@@ -851,10 +888,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [sessionId, setTerminalSession, terminal]);
 
   const tmuxSessionResizedRef = React.useRef<string | null>(null);
+  const skipLayoutResizeRef = React.useRef(false); // 重连时跳过 layout resize，优先用本地尺寸
   React.useEffect(() => {
     if (!_tmuxLayout) return;
     const layoutSessionId = _tmuxLayout.sessionId;
     if (tmuxSessionResizedRef.current === layoutSessionId) return;
+    // 重连后跳过 layout 尺寸，因为那是其他客户端的窗口大小
+    if (skipLayoutResizeRef.current) {
+      skipLayoutResizeRef.current = false;
+      return;
+    }
     tmuxSessionResizedRef.current = layoutSessionId;
     const activeWindow = _tmuxLayout.windows.find((w) => w.id === _tmuxLayout.activeWindowId);
     const activePane = activeWindow?.panes.find((p) => p.id === _tmuxLayout.activePaneId);
