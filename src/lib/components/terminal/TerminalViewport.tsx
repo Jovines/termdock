@@ -523,13 +523,24 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
     const noCaptureRef = React.useRef(() => false);
 
+    // Ref-stabilize callbacks so useTouchScroll never tears down and rebuilds
+    // event listeners due to a new closure identity on re-render.  This is
+    // critical during keyboard open/close cycles where intermediate renders
+    // would otherwise re-install listeners and risk dropping pointerup events,
+    // leaving the state machine in a dirty state that blocks all gestures.
+    const onTapRef = React.useRef(focusHiddenInput);
+    onTapRef.current = focusHiddenInput;
+    const stableOnTap = React.useCallback((x: number, y: number) => {
+      onTapRef.current(x, y);
+    }, []);
+
     const { setupTouchScroll } = useTouchScroll(containerRef, {
       ...touchScrollConfig,
       shouldCaptureTouch: noCaptureRef.current,
       onScroll: handleScroll,
       onScrollWithCoords: handleScroll,
       onClickWithCoords: handleClick,
-      onTap: focusHiddenInput,
+      onTap: stableOnTap,
       tapThreshold: 12,
     });
 
@@ -538,6 +549,36 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       const cleanup = setupTouchScroll();
       return () => { cleanup(); };
     }, [enableTouchScroll, setupTouchScroll]);
+
+    // When the soft keyboard closes, iOS keeps the textarea focused but
+    // with the keyboard gone.  A focused textarea — even with keyboard
+    // dismissed — pulls iOS into text-selection touch handling: the
+    // browser intercepts horizontal pointermove events for cursor
+    // placement / selection handles, which starves Swiper of the
+    // events it needs to detect page-flipping swipes.  Blurring the
+    // textarea on keyboard close drops iOS out of that mode so
+    // subsequent gestures reach Swiper unmodified.
+    React.useEffect(() => {
+      if (!enableTouchScroll) return;
+
+      let wasOpen = isViewportKeyboardLikelyOpen();
+
+      const handleViewportChange = () => {
+        const nowOpen = isViewportKeyboardLikelyOpen();
+        if (wasOpen && !nowOpen) {
+          const input = hiddenInputRef.current;
+          if (input && typeof document !== 'undefined' && document.activeElement === input) {
+            input.blur();
+          }
+        }
+        wasOpen = nowOpen;
+      };
+
+      window.visualViewport?.addEventListener('resize', handleViewportChange);
+      return () => {
+        window.visualViewport?.removeEventListener('resize', handleViewportChange);
+      };
+    }, [enableTouchScroll, isViewportKeyboardLikelyOpen]);
 
     // Compat mouse event blocking (shared by both modes).
     React.useEffect(() => {
@@ -1426,6 +1467,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                   opacity: 0,
                   zIndex: 20,
                   touchAction: 'none',
+                  userSelect: 'none',
+                  WebkitUserSelect: 'none',
+                  WebkitTouchCallout: 'none',
                   background: 'transparent',
                   color: 'transparent',
                   caretColor: 'transparent',
