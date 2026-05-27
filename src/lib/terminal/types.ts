@@ -52,11 +52,12 @@ export interface TerminalSession {
   keepAliveMs?: number | null;
   activeProgram?: string | null;
   activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+  cwd?: string | null;
 }
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -65,7 +66,7 @@ export interface TerminalStreamEvent {
   maxAttempts?: number;
   runtime?: 'node' | 'bun';
   ptyBackend?: string;
-  cwd?: string;
+  cwd?: string | null;
   mode?: TerminalMode;
   tmuxSessionName?: string | null;
   activeProgram?: string | null;
@@ -176,6 +177,7 @@ export interface TerminalSessionState {
   tmuxSessionName: string | null;
   activeProgram: string | null;
   activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+  cwd: string | null;
   isConnecting: boolean;
   buffer: string;
   bufferChunks: TerminalChunk[];

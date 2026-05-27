@@ -14,6 +14,7 @@ function writeLegacyLocalState(sessionList: PersistedSession[], activeSessionId:
 export interface PersistedSession {
   sessionId: string;  // 前端生成的 session ID
   name: string;
+  customName: boolean;
   backendSessionId: string | null;  // 后端 sessionId，用于复用
   mode: 'shell' | 'tmux';
   tmuxSessionName: string | null;
@@ -56,6 +57,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
       ...session,
       mode: session.mode === 'tmux' ? 'tmux' : 'shell',
       tmuxSessionName: session.tmuxSessionName ?? null,
+      customName: (session as any).customName === true,
       keepAliveMs: Object.prototype.hasOwnProperty.call(session, 'keepAliveMs')
         ? (session.keepAliveMs ?? null)
         : DEFAULT_KEEP_ALIVE_MS,
@@ -160,6 +162,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
       mode: session.mode === 'tmux' ? 'tmux' : 'shell',
       tmuxSessionName: session.tmuxSessionName ?? null,
       keepAliveMs,
+      customName: session.customName ?? false,
       createdAt: now,
       lastActivity: now,
     };
@@ -211,7 +214,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
     setSessions(prev => {
       const updated = prev.map(s =>
-        s.sessionId === sessionId ? { ...s, name: trimmed } : s
+        s.sessionId === sessionId ? { ...s, name: trimmed, customName: true } : s
       );
       queuePersist(updated);
       return updated;

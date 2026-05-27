@@ -15,6 +15,7 @@ import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
 interface TerminalSession {
   id: string;
   name: string;
+  customName: boolean;
   sessionId: string | null;
   mode: TerminalMode;
   tmuxSessionName: string | null;
@@ -25,6 +26,7 @@ interface TerminalSession {
 export interface TerminalSessionInfo {
   id: string;
   name: string;
+  customName: boolean;
   mode: TerminalMode;
   tmuxSessionName: string | null;
   keepAliveMs: number | null;
@@ -285,6 +287,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       sessions: sessions.map((s) => ({
         id: s.id,
         name: s.name,
+        customName: s.customName,
         mode: s.mode,
         tmuxSessionName: s.tmuxSessionName,
         keepAliveMs: s.keepAliveMs,
@@ -325,6 +328,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         return {
           id: sessionId,
           name,
+          customName: session.customName === true,
           sessionId: attached.sessionId,
           mode: attached.mode ?? mode,
           tmuxSessionName: attached.tmuxSessionName ?? tmuxSessionName,
@@ -347,6 +351,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     return {
       id: sessionId,
       name,
+      customName: session.customName === true,
       sessionId: newSession.sessionId,
       mode: newSession.mode ?? mode,
       tmuxSessionName: newSession.tmuxSessionName ?? tmuxSessionName,
@@ -404,6 +409,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               saveSession({
                 sessionId: frontendSessionId,
                 name,
+                customName: false,
                 mode: attached.mode ?? 'shell',
                 tmuxSessionName: attached.tmuxSessionName ?? null,
                 keepAliveMs: attached.keepAliveMs,
@@ -411,6 +417,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               return {
                 id: frontendSessionId,
                 name,
+                customName: false,
                 sessionId: attached.sessionId,
                 mode: attached.mode ?? 'shell',
                 tmuxSessionName: attached.tmuxSessionName ?? null,
@@ -455,6 +462,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         const fallbackSessions = persistedSessions.map((session) => ({
           id: session.sessionId,
           name: session.name,
+          customName: session.customName === true,
           sessionId: null as string | null,
           mode: session.mode === 'tmux' || session.mode === 'shell' ? session.mode : defaultSessionMode,
           tmuxSessionName: session.tmuxSessionName ?? null,
@@ -508,6 +516,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       const newSession: TerminalSession = {
         id: sessionId,
         name,
+        customName: false,
         sessionId: newTerminalSession.sessionId,
         mode: newTerminalSession.mode ?? mode,
         tmuxSessionName: effectiveTmuxSessionName,
@@ -525,6 +534,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       saveSession({
         sessionId,
         name,
+        customName: false,
         mode: newSession.mode,
         tmuxSessionName: newSession.tmuxSessionName,
         keepAliveMs: newSession.keepAliveMs,
@@ -585,7 +595,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const handleRenameSession = useCallback((sessionId: string, newName: string) => {
     if (!newName.trim()) return;
     setSessions((prev) =>
-      prev.map((s) => (s.id === sessionId ? { ...s, name: newName.trim() } : s))
+      prev.map((s) => (s.id === sessionId ? { ...s, name: newName.trim(), customName: true } : s))
     );
     renameSession(sessionId, newName.trim());
   }, [renameSession]);

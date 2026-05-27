@@ -746,6 +746,39 @@ async function detectShellActiveProgram(session: TerminalSession): Promise<{
   };
 }
 
+async function detectShellCwd(session: TerminalSession): Promise<string | null> {
+  const pid = getPtyProcessPid(session.ptyProcess);
+  if (pid === null) {
+    return null;
+  }
+
+  try {
+    const cwd = await fs.promises.readlink(`/proc/${pid}/cwd`);
+    return cwd || null;
+  } catch {
+    return null;
+  }
+}
+
+async function detectTmuxCwd(session: TerminalSession): Promise<string | null> {
+  if (!session.tmuxSessionName) {
+    return null;
+  }
+
+  try {
+    const { stdout } = await execFileAsync('tmux', [
+      'display-message',
+      '-t', session.tmuxSessionName,
+      '-p',
+      '#{pane_current_path}',
+    ], { timeout: 3000, maxBuffer: 64 * 1024 });
+    const cwd = (stdout || '').trim();
+    return cwd || null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveTmuxClientTty(sessionName: string, preferredClientPid: number | null): Promise<string | null> {
   const clientsRaw = await runTmux([
     'list-clients',
@@ -1466,6 +1499,7 @@ router.get('/:sessionId/stream', (req, res) => {
     ptyBackend,
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
+    cwd: session.cwd ?? null,
     activeProgram: session.activeProgram?.command ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
   });
@@ -1474,6 +1508,20 @@ router.get('/:sessionId/stream', (req, res) => {
   let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
   let lastTmuxLayoutSnapshot = '';
   let lastActiveProgramSnapshot = JSON.stringify(session.activeProgram ?? null);
+  let lastCwdSnapshot = session.cwd ?? '';
+
+  const maybeWriteCwd = async () => {
+    try {
+      const cwd = session.mode === 'tmux'
+        ? await detectTmuxCwd(session)
+        : await detectShellCwd(session);
+      if (cwd && cwd !== lastCwdSnapshot) {
+        lastCwdSnapshot = cwd;
+        session.cwd = cwd;
+        writeSse(res, { type: 'cwd', cwd });
+      }
+    } catch { /* ignore */ }
+  };
 
   const maybeWriteActiveProgram = (activeProgram: TerminalSession['activeProgram']) => {
     const snapshot = JSON.stringify(activeProgram ?? null);
@@ -1535,6 +1583,12 @@ router.get('/:sessionId/stream', (req, res) => {
     }, ACTIVE_PROGRAM_POLL_INTERVAL);
   }
 
+  // CWD polling for both shell and tmux modes
+  void maybeWriteCwd();
+  const cwdInterval = setInterval(() => {
+    void maybeWriteCwd();
+  }, ACTIVE_PROGRAM_POLL_INTERVAL);
+
   const heartbeatInterval = setInterval(() => {
     try {
       res.write(': heartbeat\n\n');
@@ -1560,6 +1614,9 @@ router.get('/:sessionId/stream', (req, res) => {
     }
     if (activeProgramInterval) {
       clearInterval(activeProgramInterval);
+    }
+    if (cwdInterval) {
+      clearInterval(cwdInterval);
     }
     closeClient(session, sessionId, clientId);
     console.log(`Client ${clientId} disconnected from terminal session ${sessionId}`);
@@ -2032,6 +2089,7 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
     ptyBackend: session.ptyBackend || 'unknown',
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
+    cwd: session.cwd ?? null,
     activeProgram: session.activeProgram?.command ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
   }));
@@ -2039,6 +2097,8 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
   // Tmux layout polling (per-client, like the SSE stream does)
   let tmuxInterval: ReturnType<typeof setInterval> | null = null;
   let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
+  let cwdInterval: ReturnType<typeof setInterval> | null = null;
+  let lastWsCwdSnapshot = session.cwd ?? '';
 
   if (session.mode === 'tmux' && session.tmuxSessionName) {
     let lastTmuxLayoutSnapshot = '';
@@ -2095,6 +2155,22 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
 
     activeProgramInterval = setInterval(pollActiveProgram, ACTIVE_PROGRAM_POLL_INTERVAL);
   }
+
+  // CWD polling for both shell and tmux modes
+  const pollCwd = async () => {
+    if (ws.readyState !== ws.OPEN) return;
+    try {
+      const cwd = session.mode === 'tmux'
+        ? await detectTmuxCwd(session)
+        : await detectShellCwd(session);
+      if (cwd && cwd !== lastWsCwdSnapshot) {
+        lastWsCwdSnapshot = cwd;
+        session.cwd = cwd;
+        ws.send(JSON.stringify({ type: 'cwd', cwd }));
+      }
+    } catch { /* ignore */ }
+  };
+  cwdInterval = setInterval(pollCwd, ACTIVE_PROGRAM_POLL_INTERVAL);
 
   // Handle client → server messages
   ws.on('message', async (raw) => {
@@ -2160,6 +2236,7 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
   ws.on('close', () => {
     if (tmuxInterval) clearInterval(tmuxInterval);
     if (activeProgramInterval) clearInterval(activeProgramInterval);
+    if (cwdInterval) clearInterval(cwdInterval);
     const clients = wsClients.get(sessionId);
     if (clients) {
       clients.delete(clientId);

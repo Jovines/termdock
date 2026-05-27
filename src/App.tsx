@@ -8,6 +8,7 @@ import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import type { CleanupDurationPreset, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, listTmuxSessions } from './lib/terminal/api';
+import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import { createDefaultToolbarPresets, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 
@@ -41,6 +42,23 @@ function getSessionModeLabel(mode: 'shell' | 'tmux'): string {
   return mode === 'tmux' ? 'tmux' : 'shell';
 }
 
+const SHELL_NAMES = new Set(['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu']);
+
+function getTabDisplayName(
+  session: { name: string; customName?: boolean },
+  activeProgram: string | null,
+  cwd: string | null,
+): string {
+  if (session.customName) return session.name;
+  if (activeProgram && !SHELL_NAMES.has(activeProgram)) return activeProgram;
+  if (cwd) {
+    if (cwd === '/') return '/';
+    const segments = cwd.replace(/\/+$/, '').split('/');
+    return segments[segments.length - 1] || cwd;
+  }
+  return session.name;
+}
+
 function App() {
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
   const safeBottomInset = 'env(safe-area-inset-bottom, 0px)';
@@ -54,6 +72,7 @@ function App() {
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
+  const terminalSessions = useTerminalStore((s) => s.sessions);
   const [tmuxSessions, setTmuxSessions] = useState<TmuxSessionSummary[]>([]);
   const [tmuxStatus, setTmuxStatus] = useState<TmuxStatus>({ available: true, version: null, reason: null });
   const [tmuxSectionCollapsed, setTmuxSectionCollapsed] = useState(true);
@@ -320,6 +339,9 @@ function App() {
               {sessions.map((session) => {
                 const isActive = session.id === activeSessionId;
                 const isEditing = session.id === editingSessionId;
+                const ts = terminalSessions.get(session.id);
+                const displayName = getTabDisplayName(session, ts?.activeProgram ?? null, ts?.cwd ?? null);
+                const tooltip = ts?.cwd || session.name;
 
                 if (isEditing) {
                   const commitRename = (sessionId: string, value: string) => {
@@ -357,16 +379,16 @@ function App() {
                     ref={isActive ? activeSessionTabRef : null}
                     type="button"
                     onClick={() => handleTabClick(session.id)}
-                    className={`shrink-0 truncate rounded-full px-2 py-0.5 text-[11px] transition max-w-[14rem] ${
+                    className={`inline-flex items-center shrink-0 truncate rounded-full px-2 py-0.5 text-[11px] transition max-w-[14rem] ${
                       isActive
                         ? 'bg-surface-elevated text-foreground'
                         : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
                     }`}
-                    title={session.name}
+                    title={tooltip}
                   >
-                    <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <span className="inline-flex min-w-0 items-center gap-1">
                       {session.mode === 'tmux' && <RiLayoutGridLine size={12} className="shrink-0" />}
-                      <span className="truncate">{session.name}</span>
+                      <span className="truncate">{displayName}</span>
                     </span>
                   </button>
                 );

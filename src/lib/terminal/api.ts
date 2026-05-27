@@ -184,6 +184,12 @@ export function connectTerminalStream(
           return;
         }
 
+        // Handle cwd broadcast
+        if (msg.type === 'cwd') {
+          onEvent({ type: 'cwd', cwd: msg.cwd });
+          return;
+        }
+
         // Standard stream events
         const event_ = msg as TerminalStreamEvent;
 

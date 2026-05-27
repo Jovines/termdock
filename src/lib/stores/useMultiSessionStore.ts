@@ -7,6 +7,7 @@ export interface TerminalSessionInfo {
   cwd: string;
   sessionId: string | null;
   name: string;
+  customName: boolean;
   createdAt: number;
   lastActivity: number;
 }
@@ -61,6 +62,7 @@ export const useMultiSessionStore = create<MultiSessionStore>((set, get) => ({
       cwd,
       sessionId: null,
       name: sessionName,
+      customName: false,
       createdAt: timestamp,
       lastActivity: timestamp,
     };

@@ -104,6 +104,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const removeTerminalSession = terminalStore.removeTerminalSession;
   const clearBuffer = terminalStore.clearBuffer;
   const setSessionActiveProgram = terminalStore.setSessionActiveProgram;
+  const setSessionCwd = terminalStore.setSessionCwd;
 
   const terminalState = React.useMemo(() => {
     if (!sessionId) return undefined;
@@ -365,6 +366,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     rows: 24,
                     mode: event.mode,
                     tmuxSessionName: event.tmuxSessionName ?? null,
+                    cwd: event.cwd ?? null,
                   });
                 }
 
@@ -419,6 +421,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   event.activeProgram ?? null,
                   event.activeProgramSource ?? null
                 );
+                break;
+              }
+              case 'cwd': {
+                setSessionCwd(storeSessionId, event.cwd ?? null);
                 break;
               }
               case 'exit': {
