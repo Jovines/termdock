@@ -506,7 +506,7 @@ function App() {
                             <RiTerminalBoxLine size={16} />
                           </span>
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm text-foreground">{session.name}</span>
+                            <span className="block truncate text-sm text-foreground">{getTabDisplayName(session, terminalSessions.get(session.id)?.activeProgram ?? null, terminalSessions.get(session.id)?.cwd ?? null)}</span>
                             <span className="mt-1 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
                               <span>{getSessionModeLabel(session.mode)}</span>
                               <span>keepalive {formatKeepAliveLabel(session.keepAliveMs)}</span>
@@ -520,7 +520,7 @@ function App() {
                             window.dispatchEvent(event);
                           }}
                           className="shrink-0 rounded-full p-2 text-muted-foreground transition hover:bg-destructive/15 hover:text-destructive"
-                          aria-label={`Close ${session.name}`}
+                          aria-label={`Close ${getTabDisplayName(session, terminalSessions.get(session.id)?.activeProgram ?? null, terminalSessions.get(session.id)?.cwd ?? null)}`}
                         >
                           <RiCloseLine size={14} />
                         </button>

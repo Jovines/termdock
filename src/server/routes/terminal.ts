@@ -103,6 +103,8 @@ interface TerminalSession {
   dataDisposable?: { dispose: () => void };
   exitDisposable?: { dispose: () => void };
   tmuxControl?: TmuxControl;
+  oscSniffBuf: string;
+  lastOscCwd: string | null;
 }
 
 interface PersistedClientSession {
@@ -125,6 +127,47 @@ interface ClientTerminalState {
 const terminalSessions = new Map<string, TerminalSession>();
 const clientTerminalStates = new Map<string, ClientTerminalState>();
 const MAX_TERMINAL_SESSIONS = parseInt(process.env.MAX_TERMINAL_SESSIONS || '20', 10);
+
+// ── 持久化 clientTerminalStates 到磁盘，防止服务重启后丢失 ──
+const CLIENT_STATES_FILE = `${os.homedir()}/.termdock/client-states.json`;
+let persistClientStatesTimer: ReturnType<typeof setTimeout> | null = null;
+
+function loadClientStatesFromDisk(): void {
+  try {
+    if (fs.existsSync(CLIENT_STATES_FILE)) {
+      const raw = fs.readFileSync(CLIENT_STATES_FILE, 'utf-8');
+      const data = JSON.parse(raw) as Record<string, ClientTerminalState>;
+      for (const [key, value] of Object.entries(data)) {
+        clientTerminalStates.set(key, value);
+      }
+      console.log(`[session-persist] Loaded ${clientTerminalStates.size} client states from disk`);
+    }
+  } catch (error) {
+    console.warn('[session-persist] Failed to load client states:', getErrorMessage(error));
+  }
+}
+
+function schedulePersistClientStates(): void {
+  if (persistClientStatesTimer) clearTimeout(persistClientStatesTimer);
+  persistClientStatesTimer = setTimeout(() => {
+    try {
+      const dir = `${os.homedir()}/.termdock`;
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const obj: Record<string, ClientTerminalState> = {};
+      for (const [key, value] of clientTerminalStates.entries()) {
+        obj[key] = value;
+      }
+      fs.writeFileSync(CLIENT_STATES_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+    } catch (error) {
+      console.warn('[session-persist] Failed to persist client states:', getErrorMessage(error));
+    }
+  }, 2000); // 2 秒防抖
+}
+
+// 服务启动时从磁盘加载
+loadClientStatesFromDisk();
+
+// ── end persistence ──
 
 // 开发模式下使用更激进的清理策略
 const isDevelopment = process.env.NODE_ENV === 'development';
@@ -655,6 +698,57 @@ function normalizeProgramName(command: string | null | undefined): string | null
   return lastSegment && lastSegment.length > 0 ? lastSegment : normalized;
 }
 
+// ── OSC 0/2 title sniffing for CWD tracking ──
+
+const OSC_SNIFF_CAP = 32768; // 32 KB rolling buffer
+const OSC_PATTERN = /\x1b\][02];([^\x07\x1b]*)(\x07|\x1b\\)/g;
+
+function parseTitleCwd(title: string, home: string): string | null {
+  // Format: user@host:/path/to/dir
+  const atIdx = title.lastIndexOf('@');
+  if (atIdx >= 0) {
+    const afterAt = title.slice(atIdx + 1);
+    const colonIdx = afterAt.indexOf(':');
+    if (colonIdx >= 0) {
+      const pathPart = afterAt.slice(colonIdx + 1).trim();
+      if (!pathPart) return null;
+      if (pathPart.startsWith('~/')) return home + pathPart.slice(1);
+      if (pathPart === '~') return home;
+      if (pathPart.startsWith('/')) return pathPart;
+      return home + '/' + pathPart;
+    }
+  }
+
+  // Direct path format
+  const trimmed = title.trim();
+  if (trimmed.startsWith('/')) return trimmed;
+  if (trimmed.startsWith('~/')) return home + trimmed.slice(1);
+  if (trimmed === '~') return home;
+
+  return null;
+}
+
+function sniffCwdFromOsc(buf: string, home: string): { cwd: string | null; remaining: string } {
+  let match: RegExpExecArray | null;
+  let lastCwd: string | null = null;
+  let lastMatchEnd = 0;
+
+  // Reset lastIndex since we're passing a concatenated string each time
+  OSC_PATTERN.lastIndex = 0;
+
+  while ((match = OSC_PATTERN.exec(buf)) !== null) {
+    lastCwd = parseTitleCwd(match[1] || '', home) || lastCwd;
+    lastMatchEnd = match.index + match[0].length;
+  }
+
+  // Keep the tail that might contain an incomplete OSC sequence
+  const remaining = buf.slice(lastMatchEnd).slice(-128); // keep at most 128 bytes of tail
+
+  return { cwd: lastCwd, remaining };
+}
+
+// ── end OSC sniffing ──
+
 function getActiveProgramFromTmuxLayout(layout: TmuxLayout): { command: string | null; source: 'tmux-pane'; updatedAt: number } | null {
   const activeWindow = layout.windows.find((window) => window.id === layout.activeWindowId);
   const activePane = activeWindow?.panes.find((pane) => pane.id === layout.activePaneId);
@@ -744,39 +838,6 @@ async function detectShellActiveProgram(session: TerminalSession): Promise<{
     source: 'unknown',
     updatedAt: Date.now(),
   };
-}
-
-async function detectShellCwd(session: TerminalSession): Promise<string | null> {
-  const pid = getPtyProcessPid(session.ptyProcess);
-  if (pid === null) {
-    return null;
-  }
-
-  try {
-    const cwd = await fs.promises.readlink(`/proc/${pid}/cwd`);
-    return cwd || null;
-  } catch {
-    return null;
-  }
-}
-
-async function detectTmuxCwd(session: TerminalSession): Promise<string | null> {
-  if (!session.tmuxSessionName) {
-    return null;
-  }
-
-  try {
-    const { stdout } = await execFileAsync('tmux', [
-      'display-message',
-      '-t', session.tmuxSessionName,
-      '-p',
-      '#{pane_current_path}',
-    ], { timeout: 3000, maxBuffer: 64 * 1024 });
-    const cwd = (stdout || '').trim();
-    return cwd || null;
-  } catch {
-    return null;
-  }
 }
 
 async function resolveTmuxClientTty(sessionName: string, preferredClientPid: number | null): Promise<string | null> {
@@ -1106,12 +1167,31 @@ function broadcastJsonWs(sessionId: string, payload: unknown): void {
 }
 
 function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
+  const home = (process.env.HOME || '/root').replace(/\/+$/, '') || '/';
+
   session.dataDisposable = session.ptyProcess.onData((data: string) => {
     session.lastActivity = Date.now();
     session.hasWrittenData = true;
     if (session.mode === 'shell') {
       addToHistory(sessionId, data);
     }
+
+    // Sniff OSC 0/2 sequences for CWD tracking
+    try {
+      const buf = session.oscSniffBuf + data;
+      if (buf.length > OSC_SNIFF_CAP) {
+        session.oscSniffBuf = buf.slice(-OSC_SNIFF_CAP / 4); // trim
+      }
+      const { cwd, remaining } = sniffCwdFromOsc(buf, home);
+      session.oscSniffBuf = remaining;
+      if (cwd && cwd !== session.lastOscCwd) {
+        session.lastOscCwd = cwd;
+        session.cwd = cwd;
+        console.log(`[osc-cwd] session=${sessionId} cwd=${cwd}`);
+        broadcastEvent(sessionId, { type: 'cwd', cwd });
+      }
+    } catch { /* sniff failure should never block data */ }
+
     broadcastEvent(sessionId, { type: 'data', data });
   });
 
@@ -1150,16 +1230,10 @@ async function spawnTerminalSession(req: express.Request, input: {
   const resolvedEnv = { ...process.env, PATH: envPath };
 
   const pty = await getPtyProvider();
-  const spawnOptions = {
-    name: 'xterm-256color',
-    cols,
-    rows,
-    cwd,
-    env: {
-      ...resolvedEnv,
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor',
-    },
+  const baseEnv = {
+    ...resolvedEnv,
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor',
   };
 
   let ptyProcess: PtyProcess;
@@ -1171,7 +1245,15 @@ async function spawnTerminalSession(req: express.Request, input: {
     ptyProcess = (() => {
       for (const shellCandidate of shellCandidates) {
         try {
-          return pty.spawn(shellCandidate, [], spawnOptions);
+          const env = injectShellTitleHooks(shellCandidate, baseEnv);
+          console.log(`[osc-cwd] spawning shell=${shellCandidate} env.PROMPT_COMMAND=${env.PROMPT_COMMAND ? 'set' : 'unset'} env.ZDOTDIR=${env.ZDOTDIR ? 'set' : 'unset'}`);
+          return pty.spawn(shellCandidate, [], {
+            name: 'xterm-256color',
+            cols,
+            rows,
+            cwd,
+            env,
+          });
         } catch (error) {
           lastError = error;
           if (!shouldRetryShellSpawn(error)) {
@@ -1183,7 +1265,13 @@ async function spawnTerminalSession(req: express.Request, input: {
       throw lastError ?? new Error('Failed to start shell');
     })();
   } else {
-    ptyProcess = pty.spawn(command, args, spawnOptions);
+    ptyProcess = pty.spawn(command, args, {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      cwd,
+      env: baseEnv,
+    });
   }
 
   const session: TerminalSession = {
@@ -1200,6 +1288,8 @@ async function spawnTerminalSession(req: express.Request, input: {
     lastDetachedAt: null,
     hasWrittenData: false,
     activeProgram: null,
+    oscSniffBuf: '',
+    lastOscCwd: null,
   };
 
   terminalSessions.set(sessionId, session);
@@ -1242,6 +1332,45 @@ async function spawnTerminalSession(req: express.Request, input: {
   }
 
   return { sessionId, session, cols, rows };
+}
+
+function detectShellType(shellPath: string): 'bash' | 'zsh' | 'fish' | 'other' {
+  const base = shellPath.split('/').pop()?.toLowerCase() || '';
+  if (base.includes('bash')) return 'bash';
+  if (base.includes('zsh')) return 'zsh';
+  if (base.includes('fish')) return 'fish';
+  return 'other';
+}
+
+function injectShellTitleHooks(shellPath: string, baseEnv: Record<string, string>): Record<string, string> {
+  const shellType = detectShellType(shellPath);
+  const home = (process.env.HOME || '/root').replace(/\/+$/, '') || '/';
+  const env = { ...baseEnv };
+
+  // Emit full PWD path in OSC 0 — parser resolves absolute paths directly
+  if (shellType === 'bash') {
+    env.PROMPT_COMMAND = 'printf "\\033]0;%s@%s:%s\\007" "${USER}" "${HOSTNAME%%.*}" "${PWD}"';
+  } else if (shellType === 'zsh') {
+    const zdotdir = '/tmp/dinotty-zsh-' + String(process.pid);
+    try {
+      fs.mkdirSync(zdotdir, { recursive: true });
+      fs.writeFileSync(zdotdir + '/.zshenv',
+        '[[ -f "' + home + '/.zshenv" ]] && source "' + home + '/.zshenv"\n');
+      fs.writeFileSync(zdotdir + '/.zshrc',
+        'ZDOTDIR=\n' +
+        '[[ -f "' + home + '/.zshrc" ]] && source "' + home + '/.zshrc"\n' +
+        'function _wt_precmd { printf "\\033]0;%s@%s:%s\\007" "${USER}" "${HOST%%.*}" "${PWD}"; }\n' +
+        'function _wt_preexec { printf "\\033]0;%s\\007" "$1"; }\n' +
+        'if [[ -z "${precmd_functions[(r)_wt_precmd]}" ]]; then precmd_functions+=(_wt_precmd); fi\n' +
+        'if [[ -z "${preexec_functions[(r)_wt_preexec]}" ]]; then preexec_functions+=(_wt_preexec); fi\n');
+      env.ZDOTDIR = zdotdir;
+    } catch {
+      // Fallback: rely on user's zsh config for title
+    }
+  }
+  // fish already sets terminal title by default via fish_title function
+
+  return env;
 }
 
 function buildAugmentedPath(): string {
@@ -1423,6 +1552,7 @@ router.put('/client-state', (req, res) => {
 
   const state = normalizeClientTerminalState(req.body);
   clientTerminalStates.set(clientId, state);
+  schedulePersistClientStates();
   res.json(state);
 });
 
@@ -1433,6 +1563,7 @@ router.delete('/client-state', (req, res) => {
   }
 
   clientTerminalStates.delete(clientId);
+  schedulePersistClientStates();
   res.status(204).send();
 });
 
@@ -1472,13 +1603,25 @@ router.post('/create', async (req, res) => {
   }
 });
 
-router.get('/:sessionId/stream', (req, res) => {
+router.get('/:sessionId/stream', async (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
 
   if (!session) {
     return res.status(404).json({ error: 'Terminal session not found' });
   }
+
+  // 连接时立即检测一次 activeProgram，避免前端首次显示闪烁
+  try {
+    if (session.mode === 'shell') {
+      const ap = await detectShellActiveProgram(session);
+      if (ap) session.activeProgram = ap;
+    } else if (session.mode === 'tmux' && session.tmuxSessionName) {
+      const layout = await getTmuxLayout(session.tmuxSessionName);
+      const ap = getActiveProgramFromTmuxLayout(layout);
+      if (ap) session.activeProgram = ap;
+    }
+  } catch { /* ignore */ }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -1508,20 +1651,6 @@ router.get('/:sessionId/stream', (req, res) => {
   let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
   let lastTmuxLayoutSnapshot = '';
   let lastActiveProgramSnapshot = JSON.stringify(session.activeProgram ?? null);
-  let lastCwdSnapshot = session.cwd ?? '';
-
-  const maybeWriteCwd = async () => {
-    try {
-      const cwd = session.mode === 'tmux'
-        ? await detectTmuxCwd(session)
-        : await detectShellCwd(session);
-      if (cwd && cwd !== lastCwdSnapshot) {
-        lastCwdSnapshot = cwd;
-        session.cwd = cwd;
-        writeSse(res, { type: 'cwd', cwd });
-      }
-    } catch { /* ignore */ }
-  };
 
   const maybeWriteActiveProgram = (activeProgram: TerminalSession['activeProgram']) => {
     const snapshot = JSON.stringify(activeProgram ?? null);
@@ -1583,12 +1712,6 @@ router.get('/:sessionId/stream', (req, res) => {
     }, ACTIVE_PROGRAM_POLL_INTERVAL);
   }
 
-  // CWD polling for both shell and tmux modes
-  void maybeWriteCwd();
-  const cwdInterval = setInterval(() => {
-    void maybeWriteCwd();
-  }, ACTIVE_PROGRAM_POLL_INTERVAL);
-
   const heartbeatInterval = setInterval(() => {
     try {
       res.write(': heartbeat\n\n');
@@ -1614,9 +1737,6 @@ router.get('/:sessionId/stream', (req, res) => {
     }
     if (activeProgramInterval) {
       clearInterval(activeProgramInterval);
-    }
-    if (cwdInterval) {
-      clearInterval(cwdInterval);
     }
     closeClient(session, sessionId, clientId);
     console.log(`Client ${clientId} disconnected from terminal session ${sessionId}`);
@@ -2081,24 +2201,36 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
   session.lastActivity = Date.now();
   session.lastDetachedAt = null;
 
-  // Send connected event
-  const runtime = (globalThis as Record<string, unknown>).Bun ? 'bun' : 'node';
-  ws.send(JSON.stringify({
-    type: 'connected',
-    runtime,
-    ptyBackend: session.ptyBackend || 'unknown',
-    mode: session.mode,
-    tmuxSessionName: session.tmuxSessionName,
-    cwd: session.cwd ?? null,
-    activeProgram: session.activeProgram?.command ?? null,
-    activeProgramSource: session.activeProgram?.source ?? null,
-  }));
+  void (async () => {
+    // 连接时立即检测一次 activeProgram，避免前端首次显示闪烁
+    try {
+      if (session.mode === 'shell') {
+        const ap = await detectShellActiveProgram(session);
+        if (ap) session.activeProgram = ap;
+      } else if (session.mode === 'tmux' && session.tmuxSessionName) {
+        const layout = await getTmuxLayout(session.tmuxSessionName);
+        const ap = getActiveProgramFromTmuxLayout(layout);
+        if (ap) session.activeProgram = ap;
+      }
+    } catch { /* ignore */ }
+
+    // Send connected event (after initial detection)
+    const runtime = (globalThis as Record<string, unknown>).Bun ? 'bun' : 'node';
+    ws.send(JSON.stringify({
+      type: 'connected',
+      runtime,
+      ptyBackend: session.ptyBackend || 'unknown',
+      mode: session.mode,
+      tmuxSessionName: session.tmuxSessionName,
+      cwd: session.cwd ?? null,
+      activeProgram: session.activeProgram?.command ?? null,
+      activeProgramSource: session.activeProgram?.source ?? null,
+    }));
+  })();
 
   // Tmux layout polling (per-client, like the SSE stream does)
   let tmuxInterval: ReturnType<typeof setInterval> | null = null;
   let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
-  let cwdInterval: ReturnType<typeof setInterval> | null = null;
-  let lastWsCwdSnapshot = session.cwd ?? '';
 
   if (session.mode === 'tmux' && session.tmuxSessionName) {
     let lastTmuxLayoutSnapshot = '';
@@ -2155,22 +2287,6 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
 
     activeProgramInterval = setInterval(pollActiveProgram, ACTIVE_PROGRAM_POLL_INTERVAL);
   }
-
-  // CWD polling for both shell and tmux modes
-  const pollCwd = async () => {
-    if (ws.readyState !== ws.OPEN) return;
-    try {
-      const cwd = session.mode === 'tmux'
-        ? await detectTmuxCwd(session)
-        : await detectShellCwd(session);
-      if (cwd && cwd !== lastWsCwdSnapshot) {
-        lastWsCwdSnapshot = cwd;
-        session.cwd = cwd;
-        ws.send(JSON.stringify({ type: 'cwd', cwd }));
-      }
-    } catch { /* ignore */ }
-  };
-  cwdInterval = setInterval(pollCwd, ACTIVE_PROGRAM_POLL_INTERVAL);
 
   // Handle client → server messages
   ws.on('message', async (raw) => {
@@ -2236,7 +2352,6 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
   ws.on('close', () => {
     if (tmuxInterval) clearInterval(tmuxInterval);
     if (activeProgramInterval) clearInterval(activeProgramInterval);
-    if (cwdInterval) clearInterval(cwdInterval);
     const clients = wsClients.get(sessionId);
     if (clients) {
       clients.delete(clientId);
