@@ -229,6 +229,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       typeof window !== 'undefined' ? window.devicePixelRatio : 1
     );
     const isComposingRef = React.useRef(false);
+    const sentValueRef = React.useRef('');
     const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
     const keepInputFocusUntilRef = React.useRef(0);
     const lastTouchInteractionAtRef = React.useRef(0);
@@ -427,6 +428,49 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       return keyboardApproxHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
     }, []);
+
+    const syncTextareaToPty = React.useCallback(
+      (textarea: HTMLTextAreaElement) => {
+        const raw = textarea.value;
+        const sanitized = sanitizeTerminalInput(raw);
+        const sent = sentValueRef.current;
+
+        if (sanitized === sent) return;
+
+        let commonLen = 0;
+        while (commonLen < sent.length && commonLen < sanitized.length && sent[commonLen] === sanitized[commonLen]) {
+          commonLen++;
+        }
+
+        // Send backspaces for characters no longer present
+        // (user deletion via keyboard or voice autocorrect both flow through here)
+        const toDelete = sent.length - commonLen;
+        if (toDelete > 0) {
+          for (let i = 0; i < toDelete; i++) {
+            inputHandlerRef.current('\x7f');
+          }
+        }
+
+        // Send new content
+        const newPart = sanitized.slice(commonLen);
+        if (newPart) {
+          inputHandlerRef.current(newPart);
+        }
+
+        sentValueRef.current = sanitized;
+      },
+      []
+    );
+
+    const flushAndSendEnter = React.useCallback(
+      (textarea: HTMLTextAreaElement) => {
+        syncTextareaToPty(textarea);
+        inputHandlerRef.current('\r');
+        textarea.value = '';
+        sentValueRef.current = '';
+      },
+      [syncTextareaToPty]
+    );
 
     const focusHiddenInput = React.useCallback((_clientX?: number, _clientY?: number) => {
       const input = hiddenInputRef.current;
@@ -1147,6 +1191,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       terminal.reset();
       resetWriteState();
       lastReportedSizeRef.current = null;
+      sentValueRef.current = '';
+      if (hiddenInputRef.current) {
+        hiddenInputRef.current.value = '';
+      }
       fitTerminal('session-reset');
       if (autoFocus) {
         terminal.focus();
@@ -1353,38 +1401,37 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
                   if (nativeEvent.inputType === 'insertLineBreak') {
                     event.preventDefault();
-                    inputHandlerRef.current('\r');
-                    event.currentTarget.value = '';
+                    flushAndSendEnter(event.currentTarget);
                     return;
                   }
 
-                  if (nativeEvent.inputType === 'deleteContentBackward') {
-                    event.preventDefault();
+                  if (
+                    nativeEvent.inputType === 'deleteContentBackward' ||
+                    nativeEvent.inputType === 'deleteContentForward' ||
+                    nativeEvent.inputType === 'deleteByCut'
+                  ) {
                     if (!event.currentTarget.value) {
+                      // Textarea is empty — user is deleting from the terminal.
+                      // Prevent browser default and send \x7f directly.
+                      event.preventDefault();
                       inputHandlerRef.current('\x7f');
                     }
+                    // Non-empty: let the browser handle the textarea deletion.
+                    // onInput → syncTextareaToPty will send \x7f for the diff.
+                    return;
                   }
                 }}
                 onInput={(event) => {
                   if (isComposingRef.current) {
                     return;
                   }
-
-                  const raw = String(event.currentTarget.value || '');
-                  if (!raw) {
-                    return;
-                  }
-
-                  const value = sanitizeTerminalInput(raw);
-                  inputHandlerRef.current(value);
-                  event.currentTarget.value = '';
+                  syncTextareaToPty(event.currentTarget);
                 }}
                 onKeyDown={(event) => {
                   // Handle Enter key (including mobile keyboard confirm button)
                   if (event.key === 'Enter' || event.key === 'Go' || event.key === 'done' || event.key === 'send') {
                     event.preventDefault();
-                    inputHandlerRef.current('\r');
-                    event.currentTarget.value = '';
+                    flushAndSendEnter(event.currentTarget);
                     return;
                   }
 
@@ -1394,8 +1441,13 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                     }
 
                     if (!event.currentTarget.value) {
+                      // Textarea empty — user is deleting from the terminal.
+                      event.preventDefault();
                       inputHandlerRef.current('\x7f');
                     }
+                    // Non-empty: let the browser handle deletion.
+                    // onBeforeInput won't preventDefault, browser deletes from
+                    // textarea, then syncTextareaToPty sends \x7f for the diff.
                   }
                 }}
                 onCompositionStart={() => {
@@ -1406,13 +1458,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                 }}
                 onCompositionEnd={(event) => {
                   isComposingRef.current = false;
-
-                  const raw = String(event.currentTarget.value || '');
-                  if (raw) {
-                    const value = sanitizeTerminalInput(raw);
-                    inputHandlerRef.current(value);
-                    event.currentTarget.value = '';
-                  }
+                  syncTextareaToPty(event.currentTarget);
                 }}
               />
             ) : null}
