@@ -152,7 +152,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     return [];
   }, [migrateLegacyLocalState, normalizeSessionList]);
 
-  // 保存新会话
+  // 保存新会话（带去重：同 sessionId 或同 tmuxSessionName 更新已有条目）
   const saveSession = useCallback((session: Omit<PersistedSession, 'createdAt' | 'lastActivity' | 'backendSessionId'>, backendSessionId: string | null) => {
     const now = Date.now();
     const keepAliveMs = session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs;
@@ -168,6 +168,28 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     };
 
     setSessions(prev => {
+      // 去重：相同 sessionId 直接更新
+      const exactIdx = prev.findIndex(s => s.sessionId === session.sessionId);
+      if (exactIdx >= 0) {
+        const updated = [...prev];
+        updated[exactIdx] = newSession;
+        queuePersist(updated, session.sessionId);
+        return updated;
+      }
+
+      // 去重：tmux 模式同名 session 视为同一个，替换已有条目
+      if (newSession.mode === 'tmux' && newSession.tmuxSessionName) {
+        const tmuxIdx = prev.findIndex(
+          s => s.mode === 'tmux' && s.tmuxSessionName === newSession.tmuxSessionName
+        );
+        if (tmuxIdx >= 0) {
+          const updated = [...prev];
+          updated[tmuxIdx] = newSession;
+          queuePersist(updated, session.sessionId);
+          return updated;
+        }
+      }
+
       const updated = [...prev, newSession];
       queuePersist(updated, session.sessionId);
       return updated;

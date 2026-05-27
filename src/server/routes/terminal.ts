@@ -138,13 +138,53 @@ function loadClientStatesFromDisk(): void {
       const raw = fs.readFileSync(CLIENT_STATES_FILE, 'utf-8');
       const data = JSON.parse(raw) as Record<string, ClientTerminalState>;
       for (const [key, value] of Object.entries(data)) {
-        clientTerminalStates.set(key, value);
+        // 去重：同 client 下 tmux 同名 session 只保留最后一条
+        const deduped = deduplicateClientState(value);
+        clientTerminalStates.set(key, deduped);
       }
       console.log(`[session-persist] Loaded ${clientTerminalStates.size} client states from disk`);
     }
   } catch (error) {
     console.warn('[session-persist] Failed to load client states:', getErrorMessage(error));
   }
+}
+
+function deduplicateClientState(state: ClientTerminalState): ClientTerminalState {
+  const seen = new Map<string, number>(); // sessionId → index, tmuxSessionName → index
+  const sessions = state.sessions;
+  let hasDuplicates = false;
+
+  const keep = new Array<boolean>(sessions.length).fill(true);
+
+  for (let i = sessions.length - 1; i >= 0; i--) {
+    const s = sessions[i];
+
+    // 同 sessionId 的只保留最新的
+    if (seen.has(s.sessionId)) {
+      keep[i] = false;
+      hasDuplicates = true;
+      continue;
+    }
+    seen.set(s.sessionId, i);
+
+    // tmux 同名 session 只保留最新的
+    if (s.mode === 'tmux' && s.tmuxSessionName) {
+      const dupKey = `tmux:${s.tmuxSessionName}`;
+      if (seen.has(dupKey)) {
+        keep[i] = false;
+        hasDuplicates = true;
+        continue;
+      }
+      seen.set(dupKey, i);
+    }
+  }
+
+  if (!hasDuplicates) return state;
+
+  return {
+    ...state,
+    sessions: sessions.filter((_, i) => keep[i]),
+  };
 }
 
 function schedulePersistClientStates(): void {
@@ -161,11 +201,57 @@ function schedulePersistClientStates(): void {
     } catch (error) {
       console.warn('[session-persist] Failed to persist client states:', getErrorMessage(error));
     }
-  }, 2000); // 2 秒防抖
+  }, 200); // 200ms debounce — short enough to survive most tsx watch restart windows
 }
 
-// 服务启动时从磁盘加载
+// 进程退出前立即刷盘，避免 tsx watch 重启导致状态丢失
+function flushPersistAndExit(): void {
+  if (persistClientStatesTimer) {
+    clearTimeout(persistClientStatesTimer);
+    persistClientStatesTimer = null;
+  }
+  try {
+    const dir = `${os.homedir()}/.termdock`;
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const obj: Record<string, ClientTerminalState> = {};
+    for (const [key, value] of clientTerminalStates.entries()) {
+      obj[key] = value;
+    }
+    fs.writeFileSync(CLIENT_STATES_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+  } catch { /* best effort */ }
+}
+process.on('SIGTERM', () => { flushPersistAndExit(); process.exit(0); });
+process.on('SIGINT', () => { flushPersistAndExit(); process.exit(0); });
+
+// 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
 loadClientStatesFromDisk();
+
+// 清理磁盘恢复后后端已不存在的 session 引用。
+// 服务重启时 terminalSessions 是空的，持久化的 client states
+// 全部指向已销毁的 session，必须清掉，否则客户端重连时会不断
+// 创建新 session 直到打满 MAX_TERMINAL_SESSIONS。
+(function pruneOrphanClientSessions(): void {
+  let changed = false;
+  for (const [clientId, state] of clientTerminalStates.entries()) {
+    const valid = state.sessions.filter(
+      (s) => s.backendSessionId != null && terminalSessions.has(s.backendSessionId),
+    );
+    if (valid.length === state.sessions.length) continue;
+    changed = true;
+    if (valid.length === 0) {
+      clientTerminalStates.delete(clientId);
+    } else {
+      const activeOk = state.activeSessionId != null &&
+        valid.some((s) => s.sessionId === state.activeSessionId);
+      clientTerminalStates.set(clientId, {
+        sessions: valid,
+        activeSessionId: activeOk ? state.activeSessionId : valid[0]?.sessionId ?? null,
+        updatedAt: Date.now(),
+      });
+    }
+  }
+  if (changed) schedulePersistClientStates();
+})();
 
 // ── end persistence ──
 
@@ -537,51 +623,16 @@ async function configureTmuxWheelBindings(): Promise<void> {
   // screen is active (less, man without mouse), send arrow keys instead.
   // Otherwise fall back to tmux copy-mode for scrollback history.
   //
-  // Each tmux command token is a separate array element (execFile bypasses
-  // the shell, so #{format} strings and {} grouping tokens are safe).
-  const upArgs = [
-    'bind-key', '-n', 'WheelUpPane',
-    'if', '-F', '#{||:#{pane_in_mode},#{mouse_any_flag}}',
-    '{', 'send', '-M', '}',
-    '{', 'if', '-F', '#{alternate_on}',
-    '{', 'send-keys', '-N', '5', 'Up', '}',
-    '{', 'copy-mode', '-e', '}',
-    '}',
-  ];
+  // The command is passed as a single string argument because tmux's
+  // argument parser cannot parse nested { } groups from separate argv
+  // tokens — execFile bypasses the shell, so tmux receives each token
+  // individually and rejects the command with "too many arguments".
+  const upCmd = "if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { if -F '#{alternate_on}' { send-keys -N 5 Up } { copy-mode -He } }";
 
-  const downArgs = [
-    'bind-key', '-n', 'WheelDownPane',
-    'if', '-F', '#{||:#{pane_in_mode},#{mouse_any_flag}}',
-    '{', 'send', '-M', '}',
-    '{', 'if', '-F', '#{alternate_on}',
-    '{', 'send-keys', '-N', '5', 'Down', '}',
-    '{', 'copy-mode', '-e', '}',
-    '}',
-  ];
+  const downCmd = "if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { if -F '#{alternate_on}' { send-keys -N 5 Down } { copy-mode -He } }";
 
-  let lastError: unknown;
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      await runTmux(upArgs);
-      break;
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      await runTmux(downArgs);
-      return;
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  await runTmux(['bind-key', '-n', 'WheelUpPane', upCmd]);
+  await runTmux(['bind-key', '-n', 'WheelDownPane', downCmd]);
 }
 
 async function disableTmuxStatus(sessionName: string): Promise<void> {
@@ -1569,12 +1620,35 @@ router.delete('/client-state', (req, res) => {
 
 router.post('/create', async (req, res) => {
   try {
+    const { cwd: inputCwd, cols, rows, mode, tmuxSessionName, shouldPersist, keepAliveMs } = req.body;
+    const normalizedMode = normalizeMode(mode);
+    const normalizedTmuxName = normalizedMode === 'tmux' ? normalizeTmuxSessionName(tmuxSessionName) : null;
+
+    // Deduplicate: if a TerminalSession for this tmux session already exists,
+    // return it instead of creating a duplicate wrapper.  tmux's own
+    // new-session -A already prevents duplicate tmux sessions.
+    if (normalizedMode === 'tmux' && normalizedTmuxName) {
+      for (const [id, s] of terminalSessions.entries()) {
+        if (s.mode === 'tmux' && s.tmuxSessionName === normalizedTmuxName) {
+          console.log(`Reusing existing terminal session ${id} for tmux:${normalizedTmuxName}`);
+          return res.json({
+            sessionId: id,
+            mode: s.mode,
+            tmuxSessionName: s.tmuxSessionName,
+            shouldPersist: s.shouldPersist,
+            keepAliveMs: s.keepAliveMs,
+            activeProgram: s.activeProgram?.command ?? null,
+            activeProgramSource: s.activeProgram?.source ?? null,
+          });
+        }
+      }
+    }
+
     if (terminalSessions.size >= MAX_TERMINAL_SESSIONS) {
       return res.status(429).json({ error: 'Maximum terminal sessions reached' });
     }
 
-    const { cwd: inputCwd, cols, rows, mode, tmuxSessionName, shouldPersist, keepAliveMs } = req.body;
-    const { sessionId, session } = await spawnTerminalSession(req, {
+    const spawned = await spawnTerminalSession(req, {
       cwd: inputCwd,
       cols,
       rows,
@@ -1584,17 +1658,17 @@ router.post('/create', async (req, res) => {
       keepAliveMs,
     });
 
-    console.log(`Created terminal session: ${sessionId} in ${session.cwd}, shouldPersist=${session.shouldPersist}, keepAliveMs=${session.keepAliveMs ?? 'never'}`);
+    console.log(`Created terminal session: ${spawned.sessionId} in ${spawned.session.cwd}, shouldPersist=${spawned.session.shouldPersist}, keepAliveMs=${spawned.session.keepAliveMs ?? 'never'}`);
     res.json({
-      sessionId,
+      sessionId: spawned.sessionId,
       cols: cols || 80,
       rows: rows || 24,
-      mode: session.mode,
-      tmuxSessionName: session.tmuxSessionName,
-      shouldPersist: session.shouldPersist,
-      keepAliveMs: session.keepAliveMs,
-      activeProgram: session.activeProgram?.command ?? null,
-      activeProgramSource: session.activeProgram?.source ?? null,
+      mode: spawned.session.mode,
+      tmuxSessionName: spawned.session.tmuxSessionName,
+      shouldPersist: spawned.session.shouldPersist,
+      keepAliveMs: spawned.session.keepAliveMs,
+      activeProgram: spawned.session.activeProgram?.command ?? null,
+      activeProgramSource: spawned.session.activeProgram?.source ?? null,
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2087,7 +2161,7 @@ async function executeTmuxAction(
       const enabled = body.enabled !== false;
       if (enabled) {
         try {
-          await sendTmuxCommand(tmuxTarget, control, ['copy-mode', '-e', '-t', tmuxTarget]);
+          await sendTmuxCommand(tmuxTarget, control, ['copy-mode', '-He', '-t', tmuxTarget]);
         } catch (error) {
           if (!isAlreadyInCopyModeError(getErrorMessage(error))) throw error;
         }
@@ -2115,7 +2189,7 @@ async function executeTmuxAction(
       let inCopyMode = await isTmuxPaneInMode(tmuxTarget, control);
       if (!inCopyMode) {
         try {
-          await sendTmuxCommand(tmuxTarget, control, ['copy-mode', '-e', '-t', tmuxTarget]);
+          await sendTmuxCommand(tmuxTarget, control, ['copy-mode', '-He', '-t', tmuxTarget]);
         } catch (error) {
           if (!isAlreadyInCopyModeError(getErrorMessage(error))) throw error;
         }
@@ -2368,5 +2442,9 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
     // close handler will clean up
   });
 }
+
+// Refresh global WheelUpPane/WheelDownPane bindings on every server start
+// so existing tmux sessions pick up the latest copy-mode flags.
+configureTmuxWheelBindings().catch(() => {});
 
 export default router;
