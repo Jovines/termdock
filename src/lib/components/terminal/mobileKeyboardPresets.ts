@@ -85,6 +85,18 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
       { id: 'opencode-share', label: '/share', sequence: '/share' },
     ],
   },
+  {
+    id: 'claude',
+    label: 'Claude',
+    programs: ['claude', 'claude-code'],
+    includeAlt: false,
+    rowLayout: [3, 3],
+    actions: [
+      { id: 'claude-undo', label: '/undo', sequence: '/undo' },
+      { id: 'claude-clear', label: '/clear', sequence: '/clear' },
+      { id: 'claude-compact', label: '/compact', sequence: '/compact' },
+    ],
+  },
 ];
 
 export function createDefaultToolbarPresets(): ToolbarPresetDefinition[] {

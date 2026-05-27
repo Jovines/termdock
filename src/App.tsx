@@ -83,7 +83,16 @@ function App() {
       if (!raw) {
         return createDefaultToolbarPresets();
       }
-      return sanitizeToolbarPresets(JSON.parse(raw) as ToolbarPresetDefinition[]);
+      const stored = sanitizeToolbarPresets(JSON.parse(raw) as ToolbarPresetDefinition[]);
+      // Merge in any new default presets that don't exist in stored
+      const defaults = createDefaultToolbarPresets();
+      const storedIds = new Set(stored.map((p) => p.id));
+      for (const preset of defaults) {
+        if (!storedIds.has(preset.id)) {
+          stored.push(preset);
+        }
+      }
+      return stored;
     } catch {
       return createDefaultToolbarPresets();
     }
