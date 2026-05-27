@@ -605,32 +605,36 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       // Speed-adjusted effective line height: at rest (speed=0) use the
       // full eff for controlled slow-scroll feel.  At high speed, reduce
       // eff so the terminal content keeps up with the finger instead of
-      // falling behind.  The scaling factor saturates at ~4x.
+      // falling behind.  The scaling factor saturates at ~6x.
       const dynamicEff = () => {
-        const factor = 1 + instantSpeed * 0.05;
-        return eff / Math.min(4, factor);
+        const factor = 1 + instantSpeed * 0.10;
+        return eff / Math.min(6, factor);
       };
 
       // rAF loop: consume accumulated remainder at a steady 60 fps so
       // scroll commands are spaced evenly in time regardless of how
-      // irregularly touch events fire.
+      // irregularly touch events fire.  Lines are batched per frame and
+      // sent as a single call per direction to minimise round-trips.
       const tick = () => {
         rafId = null;
 
         const deff = dynamicEff();
-        // Consume up to 3 lines per frame to keep up with fast swipes.
-        let consumed = 0;
-        while (consumed < 3 && remainder >= deff) {
+        let linesUp = 0;
+        let linesDown = 0;
+
+        while ((linesUp + linesDown) < 8 && remainder >= deff) {
           remainder -= deff;
-          onTmuxScroll('down', 1);
-          consumed++;
+          linesDown++;
         }
-        while (consumed < 3 && remainder <= -deff) {
+        while ((linesUp + linesDown) < 8 && remainder <= -deff) {
           remainder += deff;
-          onTmuxScroll('up', 1);
-          consumed++;
+          linesUp++;
         }
 
+        if (linesDown > 0) onTmuxScroll('down', linesDown);
+        if (linesUp > 0) onTmuxScroll('up', linesUp);
+
+        const consumed = linesUp + linesDown;
         if (consumed > 0) {
           rafId = requestAnimationFrame(tick);
         } else if (pointerId !== null && Math.abs(remainder) >= deff / 3) {
@@ -685,8 +689,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       const onUp = (e: PointerEvent) => {
         if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
+        stopRaf();
         pointerId = null;
         lastY = null;
+        instantSpeed = 0;
 
         // Light inertia: decay velocity and feed into remainder over
         // several frames after finger lift for a subtle glide feel.
@@ -695,9 +701,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             velocity *= 0.96;
             remainder += velocity;
             // Use velocity-based dynamic eff so fast swipes produce more
-            // lines per frame during inertia.
-            const factor = 1 + Math.abs(velocity) * 0.05;
-            const deff = eff / Math.min(4, factor);
+            // lines per frame during inertia.  Lines are batched and sent
+            // as a single call per direction.
+            const factor = 1 + Math.abs(velocity) * 0.10;
+            const deff = eff / Math.min(6, factor);
             if (Math.abs(velocity) < eff * 0.08) {
               if (Math.abs(remainder) >= deff / 3) {
                 const dir = remainder > 0 ? 'down' : 'up';
@@ -708,18 +715,19 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
               rafId = null;
               return;
             }
-            // Consume up to 3 lines per frame.
-            let consumed = 0;
-            while (consumed < 3 && remainder >= deff) {
+            // Consume up to 8 lines per frame.
+            let linesUp = 0;
+            let linesDown = 0;
+            while ((linesUp + linesDown) < 8 && remainder >= deff) {
               remainder -= deff;
-              onTmuxScroll('down', 1);
-              consumed++;
+              linesDown++;
             }
-            while (consumed < 3 && remainder <= -deff) {
+            while ((linesUp + linesDown) < 8 && remainder <= -deff) {
               remainder += deff;
-              onTmuxScroll('up', 1);
-              consumed++;
+              linesUp++;
             }
+            if (linesDown > 0) onTmuxScroll('down', linesDown);
+            if (linesUp > 0) onTmuxScroll('up', linesUp);
             rafId = requestAnimationFrame(decay);
           };
           rafId = requestAnimationFrame(decay);

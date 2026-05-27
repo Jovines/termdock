@@ -860,16 +860,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const normalizedLines = Math.max(1, Math.min(Math.floor(lines) || 1, 40));
     shouldExitTmuxCopyModeOnInputRef.current = true;
 
-    // Batch consecutive same-direction scrolls into one request to reduce
-    // tmux command overhead, but cap the batch low so content moves in
-    // small, smooth increments instead of large visible jumps.
+    // The tick loop already batches lines per rAF frame, so most calls
+    // arrive with a meaningful line count.  We still merge consecutive
+    // same-direction calls that happen synchronously (rare edge case),
+    // but send immediately — no artificial timer delay.
     const pending = tmuxScrollPendingRef.current;
-    if (pending && pending.direction === direction && pending.lines < 2) {
+    if (pending && pending.direction === direction) {
       pending.lines += normalizedLines;
       return;
     }
 
-    // Flush any pending batch first, then send the new one.
     if (pending) {
       void sendTmuxAction({ action: 'scroll', direction: pending.direction, lines: pending.lines }).finally(() => {
         focusTerminalIfActive();
@@ -877,8 +877,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
     tmuxScrollPendingRef.current = { direction, lines: normalizedLines };
 
-    // Flush after a short idle window so the last scroll in a gesture
-    // doesn't get stuck in the pending buffer.
+    // Microtask drain: flush on the next microtask so synchronous batches
+    // (rare with tick-level batching) are merged, but we don't block on
+    // an arbitrary timer.
     if (tmuxScrollFlushTimerRef.current) clearTimeout(tmuxScrollFlushTimerRef.current);
     tmuxScrollFlushTimerRef.current = setTimeout(() => {
       const p = tmuxScrollPendingRef.current;
@@ -888,7 +889,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           focusTerminalIfActive();
         });
       }
-    }, 16);
+    }, 0);
   }, [focusTerminalIfActive, sendTmuxAction]);
 
   const handleModifierToggle = React.useCallback(
