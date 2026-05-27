@@ -190,6 +190,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           if (attempts < 8) setTimeout(tryFit, attempts < 4 ? 100 : 250);
         };
         setTimeout(tryFit, 150);
+        terminalControllerRef.current?.recoverRenderer();
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
@@ -1152,6 +1153,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onResize={handleViewportResize}
               onTmuxScroll={isTmuxMode ? handleViewportTmuxScroll : undefined}
               tmuxScrollSensitivity={0.38}
+              onDoubleTap={isMobile ? () => {
+                handleViewportInput('\t', { skipModifierTransform: true });
+              } : undefined}
               onInputFocusChange={handleInputFocusChange}
               rendererMode={rendererMode}
               theme={xtermTheme}

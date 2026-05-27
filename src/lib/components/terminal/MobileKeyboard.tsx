@@ -1,6 +1,7 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { RiArrowDownLine, RiArrowGoBackLine, RiArrowLeftLine, RiArrowRightLine, RiArrowUpLine } from '@remixicon/react';
+import { light as hapticLight } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
 
 type Modifier = 'ctrl' | 'alt';
@@ -137,6 +138,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       }
       if (target.closest('button')) {
         event.preventDefault();
+        hapticLight();
         onPressStart();
       }
     },

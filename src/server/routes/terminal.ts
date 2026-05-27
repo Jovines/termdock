@@ -629,7 +629,9 @@ async function configureTmuxWheelBindings(): Promise<void> {
   // individually and rejects the command with "too many arguments".
   const upCmd = "if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { if -F '#{alternate_on}' { send-keys -N 5 Up } { copy-mode -He } }";
 
-  const downCmd = "if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { if -F '#{alternate_on}' { send-keys -N 5 Down } { copy-mode -He } }";
+  // WheelDownPane: don't enter copy mode — scrolling down at the live
+  // prompt has nowhere to go and just flash-enters/exits copy mode.
+  const downCmd = "if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { if -F '#{alternate_on}' { send-keys -N 5 Down } }";
 
   await runTmux(['bind-key', '-n', 'WheelUpPane', upCmd]);
   await runTmux(['bind-key', '-n', 'WheelDownPane', downCmd]);
@@ -2178,26 +2180,41 @@ async function executeTmuxAction(
       const direction = body.direction === 'down' ? 'down' : 'up';
       const lines = Math.max(1, Math.min(50, Math.floor(Number(body.lines) || 1)));
 
-      if (direction === 'down' && exitedAtBottom.has(tmuxTarget)) {
+      let inCopyMode = await isTmuxPaneInMode(tmuxTarget, control);
+
+      // Down-scroll outside copy mode: already at the live prompt, nothing to do.
+      if (direction === 'down' && !inCopyMode) {
         shouldBroadcastLayout = false;
         break;
       }
-      if (direction === 'up') {
-        exitedAtBottom.delete(tmuxTarget);
-      }
 
-      let inCopyMode = await isTmuxPaneInMode(tmuxTarget, control);
+      // Up-scroll outside copy mode: only enter if the pane has scrollback
+      // history.  Without history, copy-mode -He would flash-enter then
+      // `-e` auto-exit instantly.
       if (!inCopyMode) {
+        // Re-check history_size on every entry — the pane may have
+        // accumulated scrollback since last check.
+        const histRaw = (await sendTmuxCommand(tmuxTarget, control, [
+          'display-message', '-t', tmuxTarget, '-p', '#{history_size}',
+        ])).trim();
+        const historySize = parseInt(histRaw, 10) || 0;
+        if (historySize === 0) {
+          exitedAtBottom.add(tmuxTarget);
+          shouldBroadcastLayout = false;
+          break;
+        }
+        exitedAtBottom.delete(tmuxTarget);
+
         try {
           await sendTmuxCommand(tmuxTarget, control, ['copy-mode', '-He', '-t', tmuxTarget]);
         } catch (error) {
           if (!isAlreadyInCopyModeError(getErrorMessage(error))) throw error;
         }
         inCopyMode = await isTmuxPaneInMode(tmuxTarget, control);
-      }
-      if (!inCopyMode) {
-        shouldBroadcastLayout = false;
-        break;
+        if (!inCopyMode) {
+          shouldBroadcastLayout = false;
+          break;
+        }
       }
 
       // Scroll commands are fire-and-forget — don't wait for %exit.
@@ -2446,9 +2463,5 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
 // Refresh global WheelUpPane/WheelDownPane bindings on every server start
 // so existing tmux sessions pick up the latest copy-mode flags.
 configureTmuxWheelBindings().catch(() => {});
-
-// Give copy mode a distinct visual cue so users can tell when they're in
-// scrollback mode even without the default [N/M] position indicator.
-runTmux(['set-option', '-gw', 'mode-style', 'bg=blue,fg=white,bold']).catch(() => {});
 
 export default router;

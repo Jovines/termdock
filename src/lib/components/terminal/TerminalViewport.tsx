@@ -7,6 +7,7 @@ import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
 import type { TerminalRendererMode } from '../../terminal/renderer';
 import { useTouchScroll, type TouchScrollConfig } from '../../hooks/useTouchScroll';
+import { light as hapticLight } from 'browser-haptic';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
 import { createDebugLogger } from '../../utils/debug';
@@ -127,6 +128,7 @@ export type TerminalController = {
   clear: () => void;
   fit: () => void;
   refreshTextureAtlas: () => void;
+  recoverRenderer: () => void;
 };
 
 interface TerminalViewportProps {
@@ -136,6 +138,7 @@ interface TerminalViewportProps {
   onResize: (cols: number, rows: number) => void;
   onTmuxScroll?: (direction: 'up' | 'down', lines: number) => void;
   tmuxScrollSensitivity?: number;
+  onDoubleTap?: () => void;
   onInputFocusChange?: (isFocused: boolean) => void;
   rendererMode?: TerminalRendererMode;
   theme: TerminalTheme;
@@ -196,6 +199,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       onResize,
       onTmuxScroll,
       tmuxScrollSensitivity = 0.55,
+      onDoubleTap,
       onInputFocusChange,
       rendererMode = 'auto',
       theme,
@@ -242,6 +246,15 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
     // Early initialization loading indicator
     const [isInitializing, setIsInitializing] = React.useState(true);
+
+    // Gesture feedback indicators
+    const [tabIndicator, setTabIndicator] = React.useState(false);
+    const [arrowIndicator, setArrowIndicator] = React.useState<{
+      visible: boolean;
+      activeDir: string; // 'up' | 'down' | 'left' | 'right' | ''
+    }>({ visible: false, activeDir: '' });
+    const arrowIndicatorRef = React.useRef<HTMLDivElement>(null);
+    const tabIndicatorTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     inputHandlerRef.current = onInput;
     resizeHandlerRef.current = onResize;
@@ -534,6 +547,10 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     const stableOnTap = React.useCallback((x: number, y: number) => {
       onTapRef.current(x, y);
     }, []);
+
+    // Stable ref for double-tap callback, consumed by the gesture capture effect
+    const onDoubleTapRef = React.useRef(onDoubleTap);
+    onDoubleTapRef.current = onDoubleTap;
 
     const { setupTouchScroll } = useTouchScroll(containerRef, {
       ...touchScrollConfig,
@@ -873,6 +890,217 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         container.removeEventListener('pointercancel', onUp, true);
       };
     }, [enableTouchScroll, onTmuxScroll != null, fontSize, tmuxScrollSensitivity]);
+
+    // ---- Mobile gesture capture (long-press arrows + double-tap Tab) ----
+    // Attached to `document` in capture phase so they fire BEFORE Swiper,
+    // useTouchScroll, and the hidden textarea — guaranteeing first access
+    // to every touch event.  Events are filtered to only those whose target
+    // lies within this terminal's container and outside the mobile keyboard.
+    React.useEffect(() => {
+      if (!enableTouchScroll) return;
+
+      const container = containerRef.current;
+      if (!container) return;
+
+      const LONG_PRESS_DURATION_MS = 500;
+      const LONG_PRESS_MOVE_THRESHOLD_PX = 12;
+      const ARROW_GRID_STEP_PX = 15;
+      const TAP_MOVE_THRESHOLD_PX = 10;
+      const DOUBLE_TAP_WINDOW_MS = 150;
+      const DOUBLE_TAP_DISTANCE_PX = 25;
+
+      const ARROW_SEQUENCES: Record<string, string> = {
+        up: '\x1b[A',
+        down: '\x1b[B',
+        left: '\x1b[D',
+        right: '\x1b[C',
+      };
+
+      // Long-press state
+      let pointerId: number | null = null;
+      let originX = 0;
+      let originY = 0;
+      let holdTimer: ReturnType<typeof setTimeout> | null = null;
+      let mode: 'idle' | 'holding' | 'arrow' = 'idle';
+      let lastGridX = 0;
+      let lastGridY = 0;
+
+      // Double-tap state (independent from long-press)
+      let lastTapTime = 0;
+      let lastTapX = 0;
+      let lastTapY = 0;
+      let tapStartX = 0;
+      let tapStartY = 0;
+      let tapDidMove = false;
+
+      const clearHoldTimer = () => {
+        if (holdTimer !== null) {
+          clearTimeout(holdTimer);
+          holdTimer = null;
+        }
+      };
+
+      const resetGestureState = () => {
+        clearHoldTimer();
+        pointerId = null;
+        mode = 'idle';
+      };
+
+      // Only process touches inside this terminal, not on the keyboard toolbar
+      const isTargetInside = (target: EventTarget | null): boolean => {
+        if (!(target instanceof HTMLElement)) return false;
+        if (!container.contains(target)) return false;
+        // Exclude the mobile keyboard toolbar
+        if (target.closest('[data-mobile-keyboard="true"]')) return false;
+        return true;
+      };
+
+      const onDown = (e: PointerEvent) => {
+        if (e.pointerType !== 'touch') return;
+        if (!isTargetInside(e.target)) return;
+
+        // Double-tap detection fires in pointerdown so we can block the
+        // event BEFORE the textarea / useTouchScroll / Swiper see it.
+        if (onDoubleTapRef.current) {
+          const now = performance.now();
+          const x = e.clientX;
+          const y = e.clientY;
+
+          if (
+            lastTapTime !== 0 &&
+            now - lastTapTime <= DOUBLE_TAP_WINDOW_MS &&
+            Math.hypot(x - lastTapX, y - lastTapY) <= DOUBLE_TAP_DISTANCE_PX
+          ) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            hapticLight();
+            onDoubleTapRef.current?.();
+            lastTapTime = 0;
+            return;
+          }
+        }
+
+        resetGestureState();
+        pointerId = e.pointerId;
+        originX = e.clientX;
+        originY = e.clientY;
+        tapStartX = e.clientX;
+        tapStartY = e.clientY;
+        tapDidMove = false;
+        mode = 'holding';
+        lastGridX = 0;
+        lastGridY = 0;
+
+        holdTimer = setTimeout(() => {
+          holdTimer = null;
+          if (mode === 'holding') {
+            mode = 'arrow';
+            hapticLight();
+          }
+        }, LONG_PRESS_DURATION_MS);
+      };
+
+      const onMove = (e: PointerEvent) => {
+        if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
+
+        // Track whether this touch moved enough to disqualify a tap
+        const totalDx = e.clientX - tapStartX;
+        const totalDy = e.clientY - tapStartY;
+        if (Math.hypot(totalDx, totalDy) > TAP_MOVE_THRESHOLD_PX) {
+          tapDidMove = true;
+        }
+
+        if (mode === 'holding') {
+          const dx = e.clientX - originX;
+          const dy = e.clientY - originY;
+          if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_THRESHOLD_PX) {
+            clearHoldTimer();
+            mode = 'idle';
+          }
+          return;
+        }
+
+        if (mode === 'arrow') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+
+          const dx = e.clientX - originX;
+          const dy = e.clientY - originY;
+
+          const gridX = Math.round(dx / ARROW_GRID_STEP_PX);
+          const gridY = Math.round(dy / ARROW_GRID_STEP_PX);
+
+          let keysSent = 0;
+
+          if (gridX > lastGridX) {
+            for (let i = lastGridX + 1; i <= gridX; i++) {
+              inputHandlerRef.current(ARROW_SEQUENCES.right);
+              keysSent++;
+            }
+          } else if (gridX < lastGridX) {
+            for (let i = gridX; i < lastGridX; i++) {
+              inputHandlerRef.current(ARROW_SEQUENCES.left);
+              keysSent++;
+            }
+          }
+
+          if (gridY > lastGridY) {
+            for (let i = lastGridY + 1; i <= gridY; i++) {
+              inputHandlerRef.current(ARROW_SEQUENCES.down);
+              keysSent++;
+            }
+          } else if (gridY < lastGridY) {
+            for (let i = gridY; i < lastGridY; i++) {
+              inputHandlerRef.current(ARROW_SEQUENCES.up);
+              keysSent++;
+            }
+          }
+
+          if (keysSent > 0) {
+            hapticLight();
+          }
+
+          lastGridX = gridX;
+          lastGridY = gridY;
+        }
+      };
+
+      const onUp = (e: PointerEvent) => {
+        if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
+
+        if (mode === 'arrow') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          resetGestureState();
+          return;
+        }
+
+        // Record clean tap for the next onDown to potentially detect as double-tap
+        if (!tapDidMove && isTargetInside(e.target)) {
+          lastTapTime = performance.now();
+          lastTapX = e.clientX;
+          lastTapY = e.clientY;
+        } else if (tapDidMove) {
+          lastTapTime = 0;
+        }
+
+        resetGestureState();
+      };
+
+      // Attach to document (capture) so we beat Swiper and all other handlers
+      document.addEventListener('pointerdown', onDown, { capture: true, passive: false });
+      document.addEventListener('pointermove', onMove, { capture: true, passive: false });
+      document.addEventListener('pointerup', onUp, { capture: true, passive: false });
+      document.addEventListener('pointercancel', onUp, { capture: true, passive: false });
+
+      return () => {
+        resetGestureState();
+        document.removeEventListener('pointerdown', onDown, true);
+        document.removeEventListener('pointermove', onMove, true);
+        document.removeEventListener('pointerup', onUp, true);
+        document.removeEventListener('pointercancel', onUp, true);
+      };
+    }, [enableTouchScroll]);
 
     const resetWriteState = React.useCallback(() => {
       pendingWriteRef.current = '';
@@ -1403,8 +1631,24 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         refreshTextureAtlas: () => {
           scheduleTextureAtlasRefresh('imperative-refresh');
         },
+        recoverRenderer: () => {
+          const terminal = terminalRef.current;
+          if (!terminal) return;
+          if (!webglAddonRef.current && shouldUseWebgl) {
+            enableWebglRenderer(terminal, 'recover');
+          }
+          scheduleTextureAtlasRefresh('recover');
+        },
       }),
-      [enableTouchScroll, focusHiddenInput, fitTerminal, resetWriteState, scheduleTextureAtlasRefresh]
+      [
+        enableTouchScroll,
+        focusHiddenInput,
+        fitTerminal,
+        resetWriteState,
+        scheduleTextureAtlasRefresh,
+        enableWebglRenderer,
+        shouldUseWebgl,
+      ]
     );
 
     return (

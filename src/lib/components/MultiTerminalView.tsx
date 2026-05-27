@@ -758,36 +758,29 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           resistanceRatio={0.82}
           threshold={8}
           longSwipesRatio={0.2}
-          touchAngle={15}
+          touchAngle={45}
           touchStartPreventDefault={false}
           noSwiping
           noSwipingSelector="[data-mobile-keyboard='true']"
           allowTouchMove={sessions.length > 1}
           className="h-full"
         >
-          {sessions.map((session, index) => {
-            const isNearActive = Math.abs(index - activeSessionIndex) <= 1;
-            return (
-              <SwiperSlide key={session.id} className="h-full">
-                {isNearActive ? (
-                  <TerminalView
-                    sessionId={session.id}
-                    fontFamily={fontFamily}
-                    fontSize={fontSize}
-                    rendererMode={rendererMode}
-                    toolbarPresets={toolbarPresets}
-                    isActive={index === activeSessionIndex}
-                    focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
-                    onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
-                    showDebug={showDebug}
-                    onStatusChange={index === activeSessionIndex ? onStatusChange : undefined}
-                  />
-                ) : (
-                  <div className="h-full bg-background" />
-                )}
-              </SwiperSlide>
-            );
-          })}
+          {sessions.map((session, index) => (
+            <SwiperSlide key={session.id} className="h-full">
+              <TerminalView
+                sessionId={session.id}
+                fontFamily={fontFamily}
+                fontSize={fontSize}
+                rendererMode={rendererMode}
+                toolbarPresets={toolbarPresets}
+                isActive={index === activeSessionIndex}
+                focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
+                onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
+                showDebug={showDebug}
+                onStatusChange={index === activeSessionIndex ? onStatusChange : undefined}
+              />
+            </SwiperSlide>
+          ))}
         </Swiper>
       </div>
     </div>

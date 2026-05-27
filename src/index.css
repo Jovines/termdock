@@ -36,23 +36,38 @@ body {
 }
 
 html {
-  height: var(--app-vh, 100dvh);
+  height: var(--app-vh, 100vh);
   width: 100vw;
   overscroll-behavior: none;
 }
 
 body {
-  height: var(--app-vh, 100dvh);
+  height: var(--app-vh, 100vh);
   width: 100vw;
   overflow: hidden;
   overscroll-behavior: none;
 }
 
 #root {
-  height: var(--app-vh, 100dvh);
+  height: var(--app-vh, 100vh);
   width: 100vw;
   overscroll-behavior: none;
   padding-top: max(0px, env(safe-area-inset-top, 0px) - 24px);
+}
+
+/* Use native dvh where supported — compositor-synchronized, no JS lag during keyboard animation */
+@supports (height: 100dvh) {
+  html, body, #root {
+    height: 100dvh;
+  }
+}
+
+@media (max-width: 768px) {
+  @supports (height: 100dvh) {
+    html, body {
+      height: 100dvh;
+    }
+  }
 }
 
 .terminal-viewport-container {
@@ -231,13 +246,13 @@ body {
   }
 
   html {
-    height: var(--app-vh, 100dvh);
+    height: var(--app-vh, 100vh);
     width: 100vw;
   }
 
   body {
     overflow: hidden;
-    height: var(--app-vh, 100dvh);
+    height: var(--app-vh, 100vh);
     width: 100vw;
     touch-action: pan-y;
     background-color: #1C1B1A !important;
@@ -322,6 +337,8 @@ body {
 .xterm *,
 .xterm canvas {
   transition: none !important;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
 }
 
 /* Gradient text utility */

@@ -79,7 +79,7 @@ function App() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
-  const clickTimerRef = React.useRef<{ sessionId: string; timer: ReturnType<typeof setTimeout> } | null>(null);
+
   const renameSession = useCallback((sessionId: string, newName: string) => {
     const trimmed = newName.trim();
     if (!trimmed) return;
@@ -239,30 +239,9 @@ function App() {
     }
   }, [editingSessionId]);
 
-  const switchSession = useCallback((sessionId: string) => {
+  const handleTabClick = useCallback((sessionId: string) => {
     window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
   }, []);
-
-  const handleTabClick = useCallback((sessionId: string) => {
-    if (clickTimerRef.current?.sessionId === sessionId) {
-      clearTimeout(clickTimerRef.current.timer);
-      clickTimerRef.current = null;
-      setEditingSessionId(sessionId);
-      return;
-    }
-
-    if (clickTimerRef.current) {
-      clearTimeout(clickTimerRef.current.timer);
-    }
-
-    clickTimerRef.current = {
-      sessionId,
-      timer: setTimeout(() => {
-        clickTimerRef.current = null;
-        switchSession(sessionId);
-      }, 350),
-    };
-  }, [switchSession]);
 
   const applyActiveSessionKeepAlive = useCallback((keepAliveMs: number | null) => {
     if (!activeSessionId) return;
@@ -328,7 +307,7 @@ function App() {
   return (
     <div
       className="w-screen flex flex-col bg-background text-foreground"
-      style={{ height: 'var(--app-vh, 100dvh)' }}
+      style={{ height: 'var(--app-vh, 100vh)' }}
     >
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="mx-auto flex h-full w-full max-w-[1440px] min-h-0 flex-col overflow-visible bg-background">
@@ -379,6 +358,7 @@ function App() {
                     ref={isActive ? activeSessionTabRef : null}
                     type="button"
                     onClick={() => handleTabClick(session.id)}
+                    onDoubleClick={() => setEditingSessionId(session.id)}
                     className={`inline-flex items-center shrink-0 truncate rounded-full px-2 py-0.5 text-[11px] transition max-w-[14rem] ${
                       isActive
                         ? 'bg-surface-elevated text-foreground'
