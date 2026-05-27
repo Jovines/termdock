@@ -15,10 +15,6 @@ const wsClients = new Map<string, Map<string, WebSocket>>();
 // Prevents immediate re-entry on subsequent scroll-down commands.
 const exitedAtBottom = new Set<string>();
 
-// Cache "currently in copy-mode" to skip expensive isTmuxPaneInMode
-// display-message round-trips on every scroll frame.  Mutated synchronously
-// alongside copy-mode entry/exit so it stays in sync with tmux state.
-const copyModeCache = new Set<string>();
 
 type TerminalMode = 'shell' | 'tmux';
 
@@ -541,9 +537,6 @@ async function captureTmuxPane(sessionName: string): Promise<string> {
 }
 
 async function isTmuxPaneInMode(target: string, control?: TmuxControl): Promise<boolean> {
-  // Fast path: cache hit avoids a tmux display-message round-trip.
-  if (copyModeCache.has(target)) return true;
-
   const paneInModeRaw = (await sendTmuxCommand(target, control, [
     'display-message',
     '-t',
@@ -552,18 +545,19 @@ async function isTmuxPaneInMode(target: string, control?: TmuxControl): Promise<
     '#{pane_in_mode}',
   ])).trim();
 
-  const inMode = paneInModeRaw === '1';
-  // Keep cache in sync with ground truth (handles external state changes).
-  if (inMode) {
-    copyModeCache.add(target);
-  } else {
-    copyModeCache.delete(target);
-  }
-  return inMode;
+  return paneInModeRaw === '1';
 }
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isAlreadyInCopyModeError(message: string): boolean {
+  return /already in.*mode/i.test(message);
+}
+
+function isNotInCopyModeError(message: string): boolean {
+  return /not in (a )?mode/i.test(message);
 }
 
 function parseDelimitedRow(line: string, expected: number): string[] | null {
@@ -980,7 +974,6 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   session.tmuxControl = undefined;
 
   if (session.tmuxSessionName) {
-    copyModeCache.delete(session.tmuxSessionName);
     exitedAtBottom.delete(session.tmuxSessionName);
   }
 
@@ -1859,22 +1852,15 @@ async function executeTmuxAction(
       if (enabled) {
         try {
           await sendTmuxCommand(tmuxTarget, control, ['copy-mode', '-e', '-t', tmuxTarget]);
-        } catch (err) {
-          // Control-mode %exit only carries an exit code, not the
-          // stderr text — so we can't pattern-match the error reason.
-          // Fall back to ground truth.
-          if (!(await isTmuxPaneInMode(tmuxTarget, control))) throw err;
+        } catch (error) {
+          if (!isAlreadyInCopyModeError(getErrorMessage(error))) throw error;
         }
-        copyModeCache.add(tmuxTarget);
-        exitedAtBottom.delete(tmuxTarget);
       } else {
         try {
           await sendTmuxCommand(tmuxTarget, control, ['send-keys', '-t', tmuxTarget, '-X', 'cancel']);
-        } catch (err) {
-          // If we're still in copy mode, the cancel genuinely failed.
-          if (await isTmuxPaneInMode(tmuxTarget, control)) throw err;
+        } catch (error) {
+          if (!isNotInCopyModeError(getErrorMessage(error))) throw error;
         }
-        copyModeCache.delete(tmuxTarget);
       }
       break;
     }
@@ -1883,7 +1869,6 @@ async function executeTmuxAction(
       const lines = Math.max(1, Math.min(50, Math.floor(Number(body.lines) || 1)));
 
       if (direction === 'down' && exitedAtBottom.has(tmuxTarget)) {
-        copyModeCache.delete(tmuxTarget);
         shouldBroadcastLayout = false;
         break;
       }
@@ -1891,20 +1876,18 @@ async function executeTmuxAction(
         exitedAtBottom.delete(tmuxTarget);
       }
 
-      if (!copyModeCache.has(tmuxTarget)) {
+      let inCopyMode = await isTmuxPaneInMode(tmuxTarget, control);
+      if (!inCopyMode) {
         try {
           await sendTmuxCommand(tmuxTarget, control, ['copy-mode', '-e', '-t', tmuxTarget]);
-        } catch {
-          // copy-mode may fail with "already in copy mode" via the control
-          // process (which only reports exit codes, not stderr text).
-          // Fall back to ground truth: if we truly aren't in copy mode, bail.
-          if (!(await isTmuxPaneInMode(tmuxTarget, control))) {
-            shouldBroadcastLayout = false;
-            break;
-          }
+        } catch (error) {
+          if (!isAlreadyInCopyModeError(getErrorMessage(error))) throw error;
         }
-        copyModeCache.add(tmuxTarget);
-        exitedAtBottom.delete(tmuxTarget);
+        inCopyMode = await isTmuxPaneInMode(tmuxTarget, control);
+      }
+      if (!inCopyMode) {
+        shouldBroadcastLayout = false;
+        break;
       }
 
       // Scroll commands are fire-and-forget — don't wait for %exit.
@@ -1937,7 +1920,6 @@ async function executeTmuxAction(
       if (direction === 'down') {
         const stillInCopyMode = await isTmuxPaneInMode(tmuxTarget, control);
         if (!stillInCopyMode) {
-          copyModeCache.delete(tmuxTarget);
           exitedAtBottom.add(tmuxTarget);
         }
       }
