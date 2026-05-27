@@ -46,7 +46,7 @@ interface TerminalViewProps {
 
 export const TerminalView: React.FC<TerminalViewProps> = ({
   sessionId: initialSessionId,
-  fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
+  fontFamily = '"JetBrains Mono NL", "Symbols Nerd Font Mono"',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
   rendererMode = 'auto',
   toolbarPresets: configuredToolbarPresets = [],

@@ -169,7 +169,7 @@ function SessionTabStrip({
 }
 
 export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
-  fontFamily = '"JetBrainsMonoNL Nerd Font", "JetBrains Mono"',
+  fontFamily = '"JetBrains Mono NL", "Symbols Nerd Font Mono"',
   fontSize = 13,
   rendererMode = 'auto',
   toolbarPresets = [],
@@ -398,10 +398,26 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           persistedSessions.map(async (session) => restoreOrCreateSession(session, availableProcessIds))
         );
 
+        // 收集已恢复的 tmux 会话名，防止 adopted 阶段重复创建
+        const restoredTmuxNames = new Set(
+          restoredPersisted
+            .filter((s) => s.mode === 'tmux' && s.tmuxSessionName)
+            .map((s) => s.tmuxSessionName!)
+        );
+
         const adoptedSessions = await Promise.all(
           orphanBackendIds.map(async (backendSessionId) => {
             try {
               const attached = await attachTerminalSession(backendSessionId);
+
+              // 如果已恢复的会话已覆盖此 tmux 会话则跳过，避免 UI 出现重复 tab
+              if (
+                attached.tmuxSessionName &&
+                restoredTmuxNames.has(attached.tmuxSessionName)
+              ) {
+                return null;
+              }
+
               const frontendSessionId = uuidv4();
               const name = attached.tmuxSessionName
                 ? `tmux:${attached.tmuxSessionName}`
@@ -430,7 +446,17 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           })
         );
 
-        const restored = [...restoredPersisted, ...adoptedSessions.filter((s): s is TerminalSession => s !== null)];
+        const adopted = adoptedSessions.filter((s): s is TerminalSession => s !== null);
+        const adoptedTmuxNames = new Set(
+          adopted.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName!)
+        );
+
+        // 如果 adopted 中有 tmux 会话，从 restoredPersisted 中剔除同名的旧条目
+        const restored = adoptedTmuxNames.size > 0
+          ? [...restoredPersisted.filter(
+              (s) => !(s.mode === 'tmux' && s.tmuxSessionName && adoptedTmuxNames.has(s.tmuxSessionName))
+            ), ...adopted]
+          : [...restoredPersisted, ...adopted];
 
         debugSession('[Session] Restored sessions:', restored.length);
         setSessions(restored);

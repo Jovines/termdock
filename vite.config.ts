@@ -16,6 +16,7 @@ export default defineConfig({
         'pwa-512x512.png',
         'maskable-icon-512x512.png',
         'robots.txt',
+        'fonts/*.woff2',
       ],
       manifest: {
         name: 'Termdock',
@@ -50,17 +51,6 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         globIgnores: ['**/apple-splash-*.png'],
         runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/cdn\.jsdelivr\.net\/.*/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'cdn-cache',
-              expiration: {
-                maxEntries: 10,
-                maxAgeSeconds: 60 * 60 * 24 * 30, // 30 days
-              },
-            },
-          },
           {
             urlPattern: /\/api\/.*/i,
             handler: 'NetworkFirst',
