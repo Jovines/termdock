@@ -6,6 +6,7 @@ import { createRequire } from 'module';
 import { execFile, spawn, type ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import type { WebSocket } from 'ws';
+import { caffeinateManager } from '../utils/caffeinate.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -242,11 +243,12 @@ function flushPersistAndExit(): void {
     fs.writeFileSync(CLIENT_STATES_FILE, JSON.stringify(obj, null, 2), 'utf-8');
   } catch { /* best effort */ }
 }
-process.on('SIGTERM', () => { flushPersistAndExit(); persistToolbarPresetsNow(); process.exit(0); });
-process.on('SIGINT', () => { flushPersistAndExit(); persistToolbarPresetsNow(); process.exit(0); });
+process.on('SIGTERM', () => { flushPersistAndExit(); persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
+process.on('SIGINT', () => { flushPersistAndExit(); persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
 
 // 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
 loadClientStatesFromDisk();
+caffeinateManager.startNetworkMonitor();
 
 // 清理磁盘恢复后后端已不存在的 session 引用。
 // 服务重启时 terminalSessions 是空的，持久化的 client states
@@ -2039,6 +2041,27 @@ router.put('/toolbar-presets', (req, res) => {
   toolbarPresetsDoc = { version, presets, updatedAt: Date.now() };
   schedulePersistToolbarPresets();
   res.json(toolbarPresetsDoc);
+});
+
+// ── Settings (prevent sleep) ──────────────────────────────────────────
+router.get('/settings', (_req, res) => {
+  res.json({
+    preventSleep: caffeinateManager.getPreventSleep(),
+    caffeinateActive: caffeinateManager.isActive(),
+    networkAvailable: caffeinateManager.isNetworkAvailable(),
+  });
+});
+
+router.put('/settings', (req, res) => {
+  const body = req.body ?? {};
+  if (typeof body.preventSleep === 'boolean') {
+    caffeinateManager.setPreventSleep(body.preventSleep);
+  }
+  res.json({
+    preventSleep: caffeinateManager.getPreventSleep(),
+    caffeinateActive: caffeinateManager.isActive(),
+    networkAvailable: caffeinateManager.isNetworkAvailable(),
+  });
 });
 
 router.post('/create', async (req, res) => {

@@ -1,20 +1,37 @@
 import React, { useEffect, useCallback, useState } from 'react';
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
 import {
-  RiTerminalBoxLine,
-  RiSettings4Line,
-  RiAddLine,
-  RiCloseLine,
-  RiLayoutGridLine,
-  RiRefreshLine,
-  RiCheckLine,
-  RiTerminalLine,
-  RiKeyboardLine,
-  RiEqualizerLine,
-  RiStackLine,
-  RiDeleteBinLine,
-  RiLogoutBoxRLine,
-} from '@remixicon/react';
+  SquareTerminal as RiTerminalBoxLine,
+  Settings as RiSettings4Line,
+  Plus as RiAddLine,
+  X as RiCloseLine,
+  LayoutGrid as RiLayoutGridLine,
+  RefreshCw as RiRefreshLine,
+  Check as RiCheckLine,
+  Terminal as RiTerminalLine,
+  Keyboard as RiKeyboardLine,
+  SlidersHorizontal as RiEqualizerLine,
+  Layers as RiStackLine,
+  Trash2 as RiDeleteBinLine,
+  Unplug as RiLogoutBoxRLine,
+  GripVertical,
+} from 'lucide-react';
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  verticalListSortingStrategy,
+  horizontalListSortingStrategy,
+  useSortable,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
@@ -22,7 +39,7 @@ import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { CleanupDurationPreset, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings } from './lib/terminal/api';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
@@ -82,6 +99,66 @@ function getTabDisplayLines(
   return { primary: session.name, secondary: null };
 }
 
+// --- Sortable Session Card (Drawer) ---
+function SortableSessionCard({ id, children }: { id: string; children: React.ReactNode }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    zIndex: isDragging ? 50 : undefined,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} {...attributes}>
+      <div className="flex items-center">
+        <button
+          type="button"
+          className="shrink-0 cursor-grab touch-none p-1 text-muted-foreground/40 active:cursor-grabbing"
+          aria-label="Drag to reorder"
+          {...listeners}
+        >
+          <GripVertical size={16} />
+        </button>
+        <div className="min-w-0 flex-1">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// --- Sortable Tab (Top Tab Bar) ---
+function SortableTab({ id, children }: { id: string; children: React.ReactNode }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.7 : 1,
+    zIndex: isDragging ? 50 : undefined,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners} className="touch-none">
+      {children}
+    </div>
+  );
+}
+
 function App() {
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
   const safeBottomInset = 'env(safe-area-inset-bottom, 0px)';
@@ -89,6 +166,8 @@ function App() {
   useViewportHeight();
 
   const [showDebug, setShowDebug] = React.useState(false);
+  const [preventSleep, setPreventSleep] = React.useState(false);
+  const [networkAvailable, setNetworkAvailable] = React.useState(true);
   const [debugInfo, setDebugInfo] = React.useState<Record<string, any>>({});
   const { fontSize, setFontSize } = useFontSize();
   const { rendererMode, setRendererMode } = useTerminalRenderer();
@@ -103,9 +182,34 @@ function App() {
   const [tmuxConfirmKillName, setTmuxConfirmKillName] = useState<string | null>(null);
   const [tmuxKillingName, setTmuxKillingName] = useState<string | null>(null);
   const [tmuxKillError, setTmuxKillError] = useState<string | null>(null);
+  // Per-session "destroy tmux on close" confirmation state for the Sessions tab.
+  const [sessionConfirmDestroyId, setSessionConfirmDestroyId] = useState<string | null>(null);
+  const [sessionDestroyingId, setSessionDestroyingId] = useState<string | null>(null);
+  const [sessionDestroyError, setSessionDestroyError] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
+  const [isTabDragging, setIsTabDragging] = useState(false);
+
+  // DnD sensors
+  const drawerSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+  );
+  const tabSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
+  );
+
+  const handleSessionDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIndex = sessions.findIndex(s => s.id === active.id);
+    const newIndex = sessions.findIndex(s => s.id === over.id);
+    if (oldIndex === -1 || newIndex === -1) return;
+    const newOrder = arrayMove(sessions, oldIndex, newIndex);
+    window.dispatchEvent(new CustomEvent('reorder-terminal-session', {
+      detail: { sessionIds: newOrder.map(s => s.id) },
+    }));
+  }, [sessions]);
 
   const renameSession = useCallback((sessionId: string, newName: string) => {
     const trimmed = newName.trim();
@@ -162,10 +266,18 @@ function App() {
         if (stored.length === 0) {
           next = defaults;
         } else if (versionMismatch) {
-          // Replace all built-in presets with the latest definitions, keep
-          // user-authored custom presets intact.
+          // Replace built-in presets with the latest definitions, but
+          // preserve user-customized rowLayout from stored presets.
+          const storedMap = new Map(stored.map((p) => [p.id, p]));
           const customPresets = stored.filter((preset) => !builtinIds.has(preset.id));
-          next = [...defaults, ...customPresets];
+          const updatedDefaults = defaults.map((preset) => {
+            const existing = storedMap.get(preset.id);
+            if (existing) {
+              return { ...preset, rowLayout: existing.rowLayout };
+            }
+            return preset;
+          });
+          next = [...updatedDefaults, ...customPresets];
         } else {
           const storedIds = new Set(stored.map((p) => p.id));
           next = [...stored];
@@ -197,6 +309,16 @@ function App() {
       console.warn('[toolbar-presets] Failed to save to server:', error);
     });
   }, [toolbarPresets, toolbarPresetsLoaded]);
+
+  // Load settings (prevent sleep) from server on mount
+  useEffect(() => {
+    getSettings()
+      .then((s) => {
+        setPreventSleep(s.preventSleep);
+        setNetworkAvailable(s.networkAvailable);
+      })
+      .catch(() => { /* ignore — settings not available */ });
+  }, []);
 
   useEffect(() => {
     if (!toolbarPresets.some((preset) => preset.id === selectedToolbarPresetId)) {
@@ -378,6 +500,33 @@ function App() {
     }
   }, [refreshTmuxSessions]);
 
+  // Close a session AND destroy its underlying tmux session in one shot.
+  // Only meaningful for `mode === 'tmux'` sessions. The backend
+  // `tmux/sessions DELETE` route already cleans up local pty sessions wired
+  // to that tmux session, so we just need to mirror frontend tab removal via
+  // the existing `close-terminal-session-by-backend` event.
+  const handleDestroyTmuxForSession = useCallback(async (session: TerminalSessionInfo) => {
+    if (session.mode !== 'tmux' || !session.tmuxSessionName) return;
+    setSessionDestroyingId(session.id);
+    setSessionDestroyError(null);
+    try {
+      const { cleanedSessions } = await killTmuxSession(session.tmuxSessionName);
+      for (const backendId of cleanedSessions) {
+        window.dispatchEvent(new CustomEvent('close-terminal-session-by-backend', { detail: backendId }));
+      }
+      // Fallback: if the backend reported no cleaned sessions (e.g. tmux
+      // session was already gone), still drop the local tab.
+      if (cleanedSessions.length === 0) {
+        window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: session.id }));
+      }
+      setSessionConfirmDestroyId(null);
+    } catch (error) {
+      setSessionDestroyError(error instanceof Error ? error.message : 'Failed to destroy tmux session');
+    } finally {
+      setSessionDestroyingId(null);
+    }
+  }, []);
+
   // Auto-refresh tmux sessions when drawer is open and on tmux/new tabs
   useEffect(() => {
     if (!isDrawerOpen) return;
@@ -496,7 +645,24 @@ function App() {
           <div
             className="flex min-h-6 shrink-0 items-center justify-between gap-1.5 bg-background px-1.5 sm:min-h-7 sm:px-2"
           >
-            <div className="scrollbar-thin flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
+            <DndContext
+              sensors={tabSensors}
+              collisionDetection={closestCenter}
+              onDragStart={() => setIsTabDragging(true)}
+              onDragEnd={(event) => {
+                setIsTabDragging(false);
+                handleSessionDragEnd(event);
+              }}
+              onDragCancel={() => setIsTabDragging(false)}
+            >
+            <SortableContext
+              items={sessions.map(s => s.id)}
+              strategy={horizontalListSortingStrategy}
+            >
+            <div
+              className="scrollbar-thin flex min-w-0 flex-1 items-center gap-1 overflow-y-hidden whitespace-nowrap"
+              style={{ overflowX: isTabDragging ? 'hidden' : 'auto' }}
+            >
               {sessions.map((session) => {
                 const isActive = session.id === activeSessionId;
                 const isEditing = session.id === editingSessionId;
@@ -539,8 +705,8 @@ function App() {
                 }
 
                 return (
+                  <SortableTab key={session.id} id={session.id}>
                   <button
-                    key={session.id}
                     ref={isActive ? activeSessionTabRef : null}
                     type="button"
                     onClick={() => handleTabClick(session.id)}
@@ -571,6 +737,7 @@ function App() {
                       )}
                     </span>
                   </button>
+                  </SortableTab>
                 );
               })}
               <div className="hidden items-center gap-1.5 pl-2 lg:flex">
@@ -589,6 +756,8 @@ function App() {
                 </span>
               </div>
             </div>
+            </SortableContext>
+            </DndContext>
             <div className="flex shrink-0 items-center gap-2">
               {sessions.length > 0 && (
               <span
@@ -721,8 +890,17 @@ function App() {
                     </div>
                   ) : (
                     <>
-                      <div className="space-y-2">
-                        {sessions.map((session) => {
+                      <DndContext
+                        sensors={drawerSensors}
+                        collisionDetection={closestCenter}
+                        onDragEnd={handleSessionDragEnd}
+                      >
+                        <SortableContext
+                          items={sessions.map(s => s.id)}
+                          strategy={verticalListSortingStrategy}
+                        >
+                          <div className="space-y-2">
+                            {sessions.map((session) => {
                           const ts = terminalSessions.get(session.id);
                           const { primary: display } = getTabDisplayLines(
                             session,
@@ -730,51 +908,130 @@ function App() {
                             ts?.cwd ?? null,
                           );
                           const isActive = session.id === activeSessionId;
+                          const isTmux = session.mode === 'tmux' && !!session.tmuxSessionName;
+                          const confirmingDestroy = sessionConfirmDestroyId === session.id;
+                          const destroying = sessionDestroyingId === session.id;
                           return (
+                            <SortableSessionCard key={session.id} id={session.id}>
                             <div
-                              key={session.id}
-                              className={`flex w-full items-center gap-2 rounded-2xl px-3 py-3 text-sm transition ${
+                              className={`w-full rounded-2xl text-sm transition ${
                                 isActive
                                   ? 'bg-surface-elevated text-foreground ring-1 ring-primary/30'
                                   : 'bg-surface-2 text-foreground hover:bg-surface-elevated'
                               }`}
                             >
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
-                                  setIsDrawerOpen(false);
-                                }}
-                                className="min-w-0 flex flex-1 items-center gap-3 text-left"
-                              >
-                                <span className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
-                                  isActive ? 'bg-primary/20 text-primary' : 'bg-surface text-muted-foreground'
-                                }`}>
-                                  {session.mode === 'tmux' ? <RiLayoutGridLine size={16} /> : <RiTerminalBoxLine size={16} />}
-                                </span>
-                                <span className="min-w-0 flex-1">
-                                  <span className="block truncate text-sm text-foreground">{display}</span>
-                                  <span className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                                    <span>{getSessionModeLabel(session.mode)}</span>
-                                    {session.tmuxSessionName && <span>· {session.tmuxSessionName}</span>}
-                                    <span>· {formatKeepAliveLabel(session.keepAliveMs)}</span>
+                              <div className="flex w-full items-center gap-2 px-3 py-3">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
+                                    setIsDrawerOpen(false);
+                                  }}
+                                  className="min-w-0 flex flex-1 items-center gap-3 text-left"
+                                >
+                                  <span className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
+                                    isActive ? 'bg-primary/20 text-primary' : 'bg-surface text-muted-foreground'
+                                  }`}>
+                                    {session.mode === 'tmux' ? <RiLayoutGridLine size={16} /> : <RiTerminalBoxLine size={16} />}
                                   </span>
-                                </span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: session.id }));
-                                }}
-                                className="shrink-0 rounded-full p-2 text-muted-foreground transition hover:bg-destructive/15 hover:text-destructive"
-                                aria-label={`Close ${display}`}
-                              >
-                                <RiCloseLine size={16} />
-                              </button>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block truncate text-sm text-foreground">{display}</span>
+                                    <span className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                                      <span>{getSessionModeLabel(session.mode)}</span>
+                                      {session.tmuxSessionName && <span>· {session.tmuxSessionName}</span>}
+                                      <span>· {formatKeepAliveLabel(session.keepAliveMs)}</span>
+                                    </span>
+                                  </span>
+                                </button>
+                                {isTmux ? (
+                                  // tmux session: two distinct icon buttons —
+                                  // disconnect (logout arrow) + destroy (trash, with confirm).
+                                  <div className="shrink-0 inline-flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      disabled={destroying}
+                                      onClick={() => {
+                                        window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: session.id }));
+                                      }}
+                                      title="Disconnect (keep tmux session)"
+                                      aria-label={`Disconnect ${display}`}
+                                      className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+                                    >
+                                      <RiLogoutBoxRLine size={15} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={destroying}
+                                      onClick={() => {
+                                        setSessionDestroyError(null);
+                                        setSessionConfirmDestroyId(confirmingDestroy ? null : session.id);
+                                      }}
+                                      title="Destroy tmux session (kill-session)"
+                                      aria-label={`Destroy tmux session ${session.tmuxSessionName}`}
+                                      className={`inline-flex h-9 w-9 items-center justify-center rounded-full transition disabled:opacity-50 ${
+                                        confirmingDestroy
+                                          ? 'bg-destructive/20 text-destructive'
+                                          : 'bg-surface text-muted-foreground hover:bg-destructive/15 hover:text-destructive'
+                                      }`}
+                                    >
+                                      <RiDeleteBinLine size={15} />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: session.id }));
+                                    }}
+                                    className="shrink-0 rounded-full p-2 text-muted-foreground transition hover:bg-destructive/15 hover:text-destructive"
+                                    aria-label={`Close ${display}`}
+                                  >
+                                    <RiCloseLine size={16} />
+                                  </button>
+                                )}
+                              </div>
+
+                              {isTmux && confirmingDestroy && (
+                                <div className="mx-3 mb-3 space-y-2 rounded-xl bg-surface/80 p-3">
+                                  <p className="text-[12px] leading-snug text-foreground">
+                                    Close session and permanently destroy tmux session <span className="font-mono font-semibold">{session.tmuxSessionName}</span>?
+                                  </p>
+                                  <p className="text-[11px] text-muted-foreground">
+                                    Runs <span className="font-mono">tmux kill-session</span>. All windows and panes inside will be terminated. Cannot be undone.
+                                  </p>
+                                  {sessionDestroyError && (
+                                    <p className="text-[11px] text-destructive">{sessionDestroyError}</p>
+                                  )}
+                                  <div className="flex items-center gap-2 pt-1">
+                                    <button
+                                      type="button"
+                                      disabled={destroying}
+                                      onClick={() => void handleDestroyTmuxForSession(session)}
+                                      className="flex-1 rounded-full bg-destructive/90 px-3 py-2 text-xs font-medium text-destructive-foreground transition hover:bg-destructive disabled:opacity-50"
+                                    >
+                                      {destroying ? 'Destroying…' : 'Destroy'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={destroying}
+                                      onClick={() => {
+                                        setSessionConfirmDestroyId(null);
+                                        setSessionDestroyError(null);
+                                      }}
+                                      className="flex-1 rounded-full bg-surface-2 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-surface-elevated disabled:opacity-50"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
                             </div>
+                            </SortableSessionCard>
                           );
                         })}
-                      </div>
+                          </div>
+                        </SortableContext>
+                      </DndContext>
 
                       <button
                         type="button"
@@ -1279,6 +1536,45 @@ function App() {
                         }`}
                       />
                     </button>
+                  </div>
+
+                  {/* Prevent sleep toggle */}
+                  <div>
+                    <div className="flex items-center justify-between rounded-2xl bg-surface-2 px-4 py-3">
+                      <span className="flex items-center gap-2">
+                        <span className="ui-label">Prevent sleep</span>
+                        {!networkAvailable && preventSleep && (
+                          <span className="text-[11px] text-yellow-500">No network</span>
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const newValue = !preventSleep;
+                          setPreventSleep(newValue);
+                          try {
+                            const result = await updateSettings({ preventSleep: newValue });
+                            setPreventSleep(result.preventSleep);
+                            setNetworkAvailable(result.networkAvailable);
+                          } catch {
+                            setPreventSleep(!newValue);
+                          }
+                        }}
+                        className={`inline-flex h-6 w-10 items-center rounded-full transition ${
+                          preventSleep ? 'bg-green-500' : 'bg-surface-elevated'
+                        }`}
+                        aria-label="Toggle prevent sleep"
+                      >
+                        <span
+                          className={`mx-0.5 inline-block h-5 w-5 rounded-full transition ${
+                            preventSleep ? 'translate-x-4 bg-white' : 'bg-foreground/90'
+                          }`}
+                        />
+                      </button>
+                    </div>
+                    <p className="mt-1 px-1 text-[11px] text-muted-foreground">
+                      Keeps Mac awake while network is available. Turns off if WiFi is lost.
+                    </p>
                   </div>
 
                   {/* Sign out — only visible when password protection is enabled. */}

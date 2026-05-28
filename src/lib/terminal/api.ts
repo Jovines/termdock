@@ -625,6 +625,37 @@ export async function replaceToolbarPresetsDoc(doc: ToolbarPresetsDoc): Promise<
   return response.json();
 }
 
+// ---- Settings (prevent sleep) ----
+
+export interface SettingsState {
+  preventSleep: boolean;
+  caffeinateActive: boolean;
+  networkAvailable: boolean;
+}
+
+export async function getSettings(): Promise<SettingsState> {
+  const response = await fetch('/api/terminal/settings', { method: 'GET' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to load settings' }));
+    throw new Error(error.error || 'Failed to load settings');
+  }
+  return response.json();
+}
+
+export async function updateSettings(settings: { preventSleep: boolean }): Promise<SettingsState> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(settings),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update settings' }));
+    throw new Error(error.error || 'Failed to update settings');
+  }
+  return response.json();
+}
+
 // ---- Auth ----
 
 export interface AuthStatus {
