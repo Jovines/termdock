@@ -1797,8 +1797,11 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         recoverRenderer: () => {
           const terminal = terminalRef.current;
           if (!terminal) return;
-          if (!webglAddonRef.current && shouldUseWebgl) {
-            // enableWebglRenderer 内部已会同步 refreshTextureAtlasNow
+          if (shouldUseWebgl) {
+            // iOS Safari 可能在后台静默丢失 WebGL 上下文而不触发 onContextLoss，
+            // 导致 webglAddonRef 仍存在但底层 GL 上下文已死（僵尸状态）。
+            // 仅在死上下文上刷新纹理图集是无效操作，必须销毁重建。
+            disposeWebglRenderer('recover');
             enableWebglRenderer(terminal, 'recover');
           } else {
             refreshTextureAtlasNow('recover');

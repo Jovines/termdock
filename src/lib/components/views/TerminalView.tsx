@@ -433,21 +433,27 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   });
                 }
 
-                if (event.mode !== 'tmux') {
-                  setTmuxLayout(null);
-                  setSessionCopyMode(storeSessionId, false);
-                } else {
-                  // 进入/重连 tmux 后强制 resize：单次 rAF，复用 recoverActive 思路
-                  resizeStateRef.current.lastSent = null;
-                  tmuxSessionResizedRef.current = null;
-                  skipLayoutResizeRef.current = true;
+                // 连接建立后强制刷新：数据写入与 WebGL 纹理图集构建存在时序差，
+                // 不刷新会导致部分单元格未绘制（花屏/空白），必须等数据写入后
+                // 再清纹理图集 + 全量重绘。延迟两帧确保 history 数据已落盘。
+                requestAnimationFrame(() => {
                   requestAnimationFrame(() => {
                     const c = terminalControllerRef.current;
                     if (!c) return;
+                    c.recoverRenderer();
                     c.fit();
                     c.refreshNow();
                     c.scrollToBottom();
                   });
+                });
+
+                if (event.mode !== 'tmux') {
+                  setTmuxLayout(null);
+                  setSessionCopyMode(storeSessionId, false);
+                } else {
+                  resizeStateRef.current.lastSent = null;
+                  tmuxSessionResizedRef.current = null;
+                  skipLayoutResizeRef.current = true;
                 }
 
                 debugSession('[Terminal] Connected event received:', {
