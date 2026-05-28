@@ -1,26 +1,42 @@
 import React, { useEffect, useCallback, useState } from 'react';
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
-import { RiTerminalBoxLine, RiSettings4Line, RiAddLine, RiCloseLine, RiArrowDownSLine, RiArrowRightSLine, RiLayoutGridLine } from '@remixicon/react';
+import {
+  RiTerminalBoxLine,
+  RiSettings4Line,
+  RiAddLine,
+  RiCloseLine,
+  RiLayoutGridLine,
+  RiRefreshLine,
+  RiCheckLine,
+  RiTerminalLine,
+  RiKeyboardLine,
+  RiEqualizerLine,
+  RiStackLine,
+  RiDeleteBinLine,
+} from '@remixicon/react';
 import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
+import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { CleanupDurationPreset, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, listTmuxSessions } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions } from './lib/terminal/api';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import { createDefaultToolbarPresets, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 
 const TOOLBAR_PRESETS_STORAGE_KEY = 'termdock:toolbar-presets';
 
-const SESSION_KEEPALIVE_PRESETS: Array<{ value: CleanupDurationPreset | 'custom'; label: string; ms: number | null }> = [
+type DrawerTab = 'sessions' | 'new' | 'tmux' | 'settings';
+
+const KEEPALIVE_PRESETS: Array<{ value: CleanupDurationPreset | 'custom'; label: string; ms: number | null }> = [
   { value: 'never', label: 'Never', ms: null },
-  { value: '30min', label: '30 minutes', ms: 30 * 60 * 1000 },
-  { value: '1hour', label: '1 hour', ms: 60 * 60 * 1000 },
-  { value: '2hours', label: '2 hours', ms: 2 * 60 * 60 * 1000 },
-  { value: '3hours', label: '3 hours', ms: 3 * 60 * 60 * 1000 },
-  { value: '1day', label: '1 day', ms: 24 * 60 * 60 * 1000 },
+  { value: '30min', label: '30m', ms: 30 * 60 * 1000 },
+  { value: '1hour', label: '1h', ms: 60 * 60 * 1000 },
+  { value: '2hours', label: '2h', ms: 2 * 60 * 60 * 1000 },
+  { value: '3hours', label: '3h', ms: 3 * 60 * 60 * 1000 },
+  { value: '1day', label: '1d', ms: 24 * 60 * 60 * 1000 },
   { value: 'custom', label: 'Custom', ms: null },
 ];
 
@@ -34,7 +50,7 @@ function formatKeepAliveLabel(ms: number | null): string {
 
 function getPresetByDuration(ms: number | null): CleanupDurationPreset | 'custom' {
   if (ms === null) return 'never';
-  const matched = SESSION_KEEPALIVE_PRESETS.find((preset) => preset.ms === ms);
+  const matched = KEEPALIVE_PRESETS.find((preset) => preset.ms === ms);
   return (matched?.value ?? 'custom') as CleanupDurationPreset | 'custom';
 }
 
@@ -70,12 +86,16 @@ function App() {
   const { fontSize, setFontSize } = useFontSize();
   const { rendererMode, setRendererMode } = useTerminalRenderer();
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
+  const [drawerTab, setDrawerTab] = React.useState<DrawerTab>('sessions');
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
   const terminalSessions = useTerminalStore((s) => s.sessions);
   const [tmuxSessions, setTmuxSessions] = useState<TmuxSessionSummary[]>([]);
   const [tmuxStatus, setTmuxStatus] = useState<TmuxStatus>({ available: true, version: null, reason: null });
-  const [tmuxSectionCollapsed, setTmuxSectionCollapsed] = useState(true);
+  const [tmuxRefreshing, setTmuxRefreshing] = useState(false);
+  const [tmuxConfirmKillName, setTmuxConfirmKillName] = useState<string | null>(null);
+  const [tmuxKillingName, setTmuxKillingName] = useState<string | null>(null);
+  const [tmuxKillError, setTmuxKillError] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
@@ -95,10 +115,16 @@ function App() {
   } = useCleanupDuration();
 
   const [customDurationInput, setCustomDurationInput] = React.useState<string>('');
-  const [newSessionMode, setNewSessionMode] = React.useState<'shell' | 'tmux'>('shell');
-  const [newSessionTmuxName, setNewSessionTmuxName] = React.useState('');
+  const {
+    newSessionMode,
+    newSessionTmuxName,
+    setNewSessionMode,
+    setNewSessionTmuxName,
+  } = useNewSessionDefaults();
+
   const [activeKeepAlivePreset, setActiveKeepAlivePreset] = React.useState<CleanupDurationPreset | 'custom'>('3hours');
   const [activeKeepAliveCustomInput, setActiveKeepAliveCustomInput] = React.useState<string>('180');
+  const [activeKeepAliveSavedAt, setActiveKeepAliveSavedAt] = React.useState<number>(0);
   const [isToolbarPresetsOpen, setIsToolbarPresetsOpen] = React.useState(false);
   const [toolbarPresets, setToolbarPresets] = React.useState<ToolbarPresetDefinition[]>(() => {
     if (typeof window === 'undefined') {
@@ -111,7 +137,6 @@ function App() {
         return createDefaultToolbarPresets();
       }
       const stored = sanitizeToolbarPresets(JSON.parse(raw) as ToolbarPresetDefinition[]);
-      // Merge in any new default presets that don't exist in stored
       const defaults = createDefaultToolbarPresets();
       const storedIds = new Set(stored.map((p) => p.id));
       for (const preset of defaults) {
@@ -125,9 +150,6 @@ function App() {
     }
   });
   const [selectedToolbarPresetId, setSelectedToolbarPresetId] = React.useState<string>('default');
-  const keepAliveSummary = cleanupDurationMs === Infinity
-    ? 'without expiry'
-    : `for ${formatKeepAliveLabel(cleanupDurationMs)}`;
 
   useEffect(() => {
     window.localStorage.setItem(TOOLBAR_PRESETS_STORAGE_KEY, JSON.stringify(toolbarPresets));
@@ -151,7 +173,7 @@ function App() {
     if (!tmuxStatus.available && newSessionMode === 'tmux') {
       setNewSessionMode('shell');
     }
-  }, [newSessionMode, tmuxStatus.available]);
+  }, [newSessionMode, tmuxStatus.available, setNewSessionMode]);
 
   useEffect(() => {
     const info: Record<string, any> = {};
@@ -207,10 +229,6 @@ function App() {
     () => new Set(sessions.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName)),
     [sessions],
   );
-  const availableTmuxSessions = React.useMemo(
-    () => tmuxSessions.filter((t) => !connectedTmuxNames.has(t.name)),
-    [connectedTmuxNames, tmuxSessions],
-  );
 
   useEffect(() => {
     if (!activeSession) return;
@@ -243,6 +261,13 @@ function App() {
     window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
   }, []);
 
+  const flashKeepAliveSaved = useCallback(() => {
+    setActiveKeepAliveSavedAt(Date.now());
+    window.setTimeout(() => {
+      setActiveKeepAliveSavedAt((current) => (Date.now() - current >= 1500 ? 0 : current));
+    }, 1600);
+  }, []);
+
   const applyActiveSessionKeepAlive = useCallback((keepAliveMs: number | null) => {
     if (!activeSessionId) return;
     window.dispatchEvent(new CustomEvent('update-terminal-session-policy', {
@@ -251,42 +276,83 @@ function App() {
         keepAliveMs,
       },
     }));
-  }, [activeSessionId]);
+    flashKeepAliveSaved();
+  }, [activeSessionId, flashKeepAliveSaved]);
 
-  // Listen for session updates from MultiTerminalView
   const handleSessionDataUpdate = useCallback((data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => {
     setSessions(data.sessions);
     setActiveSessionId(data.activeSessionId);
   }, []);
 
-  // Auto-refresh tmux sessions when drawer is open
+  const dispatchNewSession = useCallback((overrides?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => {
+    const mode = overrides?.mode ?? newSessionMode;
+    const tmuxSessionName = mode === 'tmux'
+      ? (overrides?.tmuxSessionName?.trim() || newSessionTmuxName.trim() || undefined)
+      : undefined;
+    window.dispatchEvent(new CustomEvent('new-terminal-session', {
+      detail: {
+        keepAliveMs: cleanupDurationMs === Infinity ? null : cleanupDurationMs,
+        mode,
+        tmuxSessionName,
+      },
+    }));
+  }, [cleanupDurationMs, newSessionMode, newSessionTmuxName]);
+
+  const refreshTmuxSessions = useCallback(async () => {
+    setTmuxRefreshing(true);
+    try {
+      const status = await getTmuxStatus();
+      setTmuxStatus(status);
+      if (!status.available) {
+        setTmuxSessions([]);
+        return;
+      }
+      const list = await listTmuxSessions();
+      setTmuxSessions(list);
+    } catch {
+      setTmuxStatus({ available: false, version: null, reason: 'tmux integration is unavailable with the current server build.' });
+      setTmuxSessions([]);
+    } finally {
+      setTmuxRefreshing(false);
+    }
+  }, []);
+
+  const handleKillTmuxSession = useCallback(async (name: string) => {
+    setTmuxKillingName(name);
+    setTmuxKillError(null);
+    try {
+      const { cleanedSessions } = await killTmuxSession(name);
+      // Drop any frontend tabs that were attached to this tmux session.
+      for (const backendId of cleanedSessions) {
+        window.dispatchEvent(new CustomEvent('close-terminal-session-by-backend', { detail: backendId }));
+      }
+      setTmuxConfirmKillName(null);
+      await refreshTmuxSessions();
+    } catch (error) {
+      setTmuxKillError(error instanceof Error ? error.message : 'Failed to kill tmux session');
+    } finally {
+      setTmuxKillingName(null);
+    }
+  }, [refreshTmuxSessions]);
+
+  // Auto-refresh tmux sessions when drawer is open and on tmux/new tabs
   useEffect(() => {
     if (!isDrawerOpen) return;
+    if (drawerTab !== 'tmux' && drawerTab !== 'new') return;
 
     let cancelled = false;
     let pollingDisabled = false;
     const fetchSessions = async () => {
-      if (pollingDisabled) {
-        return;
-      }
-
+      if (pollingDisabled) return;
       try {
         const status = await getTmuxStatus();
-        if (!cancelled) {
-          setTmuxStatus(status);
-        }
-
+        if (!cancelled) setTmuxStatus(status);
         if (!status.available) {
-          if (!cancelled) {
-            setTmuxSessions([]);
-          }
+          if (!cancelled) setTmuxSessions([]);
           return;
         }
-
-        const sessions = await listTmuxSessions();
-        if (!cancelled) {
-          setTmuxSessions(sessions);
-        }
+        const list = await listTmuxSessions();
+        if (!cancelled) setTmuxSessions(list);
       } catch {
         pollingDisabled = true;
         if (!cancelled) {
@@ -297,12 +363,85 @@ function App() {
     };
 
     void fetchSessions();
-    const interval = setInterval(() => { void fetchSessions(); }, 3000);
+    const interval = setInterval(() => { void fetchSessions(); }, 4000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [isDrawerOpen]);
+  }, [isDrawerOpen, drawerTab]);
+
+  const tabDefs: Array<{ id: DrawerTab; label: string; icon: React.ReactNode; badge?: number | null }> = [
+    { id: 'sessions', label: 'Sessions', icon: <RiStackLine size={16} />, badge: sessions.length },
+    { id: 'new', label: 'New', icon: <RiAddLine size={16} /> },
+    {
+      id: 'tmux',
+      label: 'Tmux',
+      icon: <RiLayoutGridLine size={16} />,
+      badge: tmuxStatus.available ? tmuxSessions.length : null,
+    },
+    { id: 'settings', label: 'Settings', icon: <RiEqualizerLine size={16} /> },
+  ];
+
+  // Swipe-to-switch tab support for the settings drawer.
+  const swipeStateRef = React.useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    decided: 'h' | 'v' | null;
+    pointerType: string;
+  } | null>(null);
+
+  const goToTabByDelta = useCallback((delta: number) => {
+    const idx = tabDefs.findIndex((t) => t.id === drawerTab);
+    if (idx === -1) return;
+    const next = idx + delta;
+    if (next < 0 || next >= tabDefs.length) return;
+    setDrawerTab(tabDefs[next].id);
+  }, [drawerTab, tabDefs]);
+
+  const onSwipePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    // Only enable swipe for touch / pen, not mouse.
+    if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
+    // Skip if interaction starts on a horizontally scrollable element (chips, scrollers, etc.)
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('input, textarea, button, [role="slider"], [data-no-swipe]')) {
+      return;
+    }
+    swipeStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      decided: null,
+      pointerType: event.pointerType,
+    };
+  }, []);
+
+  const onSwipePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const state = swipeStateRef.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    const dx = event.clientX - state.startX;
+    const dy = event.clientY - state.startY;
+    if (state.decided === null) {
+      const ax = Math.abs(dx);
+      const ay = Math.abs(dy);
+      if (ax < 8 && ay < 8) return;
+      // Vertical first → release ownership so scroll can happen.
+      state.decided = ay > ax ? 'v' : 'h';
+    }
+  }, []);
+
+  const onSwipePointerEnd = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const state = swipeStateRef.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    swipeStateRef.current = null;
+    if (state.decided !== 'h') return;
+    const dx = event.clientX - state.startX;
+    const ax = Math.abs(dx);
+    const ay = Math.abs(event.clientY - state.startY);
+    // Require a clearly horizontal swipe of meaningful distance.
+    if (ax < 60 || ax < ay * 1.5) return;
+    goToTabByDelta(dx < 0 ? 1 : -1);
+  }, [goToTabByDelta]);
 
   return (
     <div
@@ -405,7 +544,10 @@ function App() {
               )}
               <button
                 type="button"
-                onClick={() => setIsDrawerOpen(true)}
+                onClick={() => {
+                  setDrawerTab('sessions');
+                  setIsDrawerOpen(true);
+                }}
                 className="inline-flex h-5 shrink-0 items-center justify-center gap-1 rounded-full bg-surface-2 px-2.5 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground sm:h-6"
                 aria-label="Open sessions and settings"
               >
@@ -430,7 +572,7 @@ function App() {
         </div>
       </main>
 
-      {/* Combined Drawer - Sessions + Settings */}
+      {/* Drawer with tabs */}
       {isDrawerOpen && (
         <>
           <button
@@ -439,348 +581,647 @@ function App() {
             onClick={() => setIsDrawerOpen(false)}
           />
           <div
-            className="fixed inset-y-0 right-0 z-50 w-full max-w-[30rem] overflow-y-auto border-l border-border/15 bg-surface animate-fade-in"
+            className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[30rem] flex-col border-l border-border/15 bg-surface animate-fade-in"
             style={{ paddingTop: safeTopInset, paddingBottom: safeBottomInset }}
           >
-            <div className="space-y-6 p-4 sm:p-6">
-              <div className="flex items-start justify-between gap-4 border-b border-border/15 pb-4">
-                <div>
-                  <div className="ui-kicker">Workspace controls</div>
-                  <h2 className="section-title mt-2">Sessions and settings</h2>
-                  <p className="mt-2 max-w-md text-sm text-muted-foreground">
-                    Switch sessions, shape persistence, and tune the terminal surface without leaving the active pane.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsDrawerOpen(false)}
-                  className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive"
-                  aria-label="Close sessions and settings"
-                >
-                  <RiCloseLine size={18} />
-                </button>
+            {/* Header */}
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/15 px-4 py-3 sm:px-6">
+              <div className="min-w-0">
+                <div className="ui-kicker">Workspace</div>
+                <h2 className="section-title mt-0.5">
+                  {drawerTab === 'sessions' && 'Sessions'}
+                  {drawerTab === 'new' && 'New session'}
+                  {drawerTab === 'tmux' && 'Tmux server'}
+                  {drawerTab === 'settings' && 'Settings'}
+                </h2>
               </div>
+              <button
+                type="button"
+                onClick={() => setIsDrawerOpen(false)}
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive"
+                aria-label="Close"
+              >
+                <RiCloseLine size={18} />
+              </button>
+            </div>
 
-              {/* Sessions Section */}
-              {sessions.length > 0 && (
-                <>
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="ui-kicker">Open sessions</span>
-                      <span className="text-xs text-muted-foreground">Swipe in the workspace or jump directly here.</span>
-                    </div>
-                    {sessions.map((session) => (
-                      <div
-                        key={session.id}
-                        className={`flex w-full items-center gap-2 rounded-2xl px-3 py-3 text-sm transition ${
-                          session.id === activeSessionId
-                            ? 'bg-surface-elevated text-foreground shadow-sm'
-                            : 'bg-surface text-foreground hover:bg-surface-2'
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const event = new CustomEvent('switch-terminal-session', { detail: session.id });
-                            window.dispatchEvent(event);
-                            setIsDrawerOpen(false);
-                          }}
-                          className="min-w-0 flex flex-1 items-center gap-3 text-left"
-                        >
-                          <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-elevated text-muted-foreground">
-                            <RiTerminalBoxLine size={16} />
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm text-foreground">{getTabDisplayName(session, terminalSessions.get(session.id)?.activeProgram ?? null, terminalSessions.get(session.id)?.cwd ?? null)}</span>
-                            <span className="mt-1 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
-                              <span>{getSessionModeLabel(session.mode)}</span>
-                              <span>keepalive {formatKeepAliveLabel(session.keepAliveMs)}</span>
-                            </span>
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const event = new CustomEvent('close-terminal-session', { detail: session.id });
-                            window.dispatchEvent(event);
-                          }}
-                          className="shrink-0 rounded-full p-2 text-muted-foreground transition hover:bg-destructive/15 hover:text-destructive"
-                          aria-label={`Close ${getTabDisplayName(session, terminalSessions.get(session.id)?.activeProgram ?? null, terminalSessions.get(session.id)?.cwd ?? null)}`}
-                        >
-                          <RiCloseLine size={14} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Add Session Button */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      window.dispatchEvent(new CustomEvent('new-terminal-session', {
-                        detail: {
-                          keepAliveMs: cleanupDurationMs === Infinity ? null : cleanupDurationMs,
-                          mode: newSessionMode,
-                          tmuxSessionName: newSessionMode === 'tmux' ? (newSessionTmuxName.trim() || undefined) : undefined,
-                        },
-                      }));
-                      setIsDrawerOpen(false);
-                    }}
-                    className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-primary/10 px-4 py-3 text-sm font-medium text-primary transition hover:bg-primary/20 active:scale-[0.98]"
-                  >
-                    <RiAddLine size={14} />
-                    <span>New Session</span>
-                  </button>
-
-                  {/* Divider */}
-                  <div className="border-t border-border/15" />
-                </>
-              )}
-
-                {/* Tmux Server Sessions - Collapsible */}
-                {(() => {
-                  if (availableTmuxSessions.length === 0) return null;
+            {/* Tab bar */}
+            <div className="shrink-0 border-b border-border/15 px-2 py-2 sm:px-4">
+              <div className="grid grid-cols-4 gap-1">
+                {tabDefs.map((tab) => {
+                  const isActive = drawerTab === tab.id;
                   return (
-                    <div className="space-y-2">
-                     <button
-                        type="button"
-                        onClick={() => setTmuxSectionCollapsed((c) => !c)}
-                       className="flex w-full items-center gap-2 px-1 py-1 text-left text-xs text-muted-foreground transition hover:text-foreground"
-                     >
-                       {tmuxSectionCollapsed ? <RiArrowRightSLine size={14} /> : <RiArrowDownSLine size={14} />}
-                       <span className="uppercase tracking-wider">tmux sessions</span>
-                      <span className="text-[10px]">({availableTmuxSessions.length})</span>
-                    </button>
-                    {!tmuxSectionCollapsed && (
-                       <div className="space-y-2 pl-1">
-                         {availableTmuxSessions.map((tmux) => (
-                           <button
-                             key={tmux.name}
-                            type="button"
-                            onClick={() => {
-                              window.dispatchEvent(new CustomEvent('new-terminal-session', {
-                                detail: {
-                                  keepAliveMs: cleanupDurationMs === Infinity ? null : cleanupDurationMs,
-                                  mode: 'tmux',
-                                  tmuxSessionName: tmux.name,
-                                },
-                              }));
-                              setIsDrawerOpen(false);
-                            }}
-                             className="flex w-full items-center gap-3 rounded-2xl bg-surface px-3 py-3 text-sm transition hover:bg-surface-2"
-                           >
-                             <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-elevated text-muted-foreground">
-                               <RiTerminalBoxLine size={16} />
-                             </span>
-                             <span className="flex-1 truncate text-left">{tmux.name}</span>
-                             <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{tmux.windows}w</span>
-                           </button>
-                         ))}
-                       </div>
-                    )}
-                    </div>
-                  );
-                })()}
-
-              {/* Settings Section */}
-              <div className="space-y-4">
-                <span className="ui-kicker">Settings</span>
-
-                {/* Font Size */}
-                <div className="space-y-2">
-                  <span className="ui-label">Font Size: {fontSize}px</span>
-                  <input
-                    type="range"
-                    min="8"
-                    max="32"
-                    value={fontSize}
-                    onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
-                    className="w-full"
-                    aria-label="Font size"
-                  />
-                </div>
-
-                {/* Terminal Renderer */}
-                <div className="space-y-2">
-                  <span className="ui-label">Terminal Renderer</span>
-                  <select
-                    value={rendererMode}
-                    onChange={(e) => setRendererMode(e.target.value as TerminalRendererMode)}
-                    className="ui-input w-full appearance-none"
-                  >
-                    <option value="auto">Auto</option>
-                    <option value="webgl">WebGL (Sharper)</option>
-                    <option value="canvas">Canvas (Stable)</option>
-                  </select>
-                </div>
-
-                {/* New Session Keepalive */}
-                <div className="space-y-2">
-                  <span className="ui-label">New Session Keepalive</span>
-                  <select
-                    value={cleanupDurationPreset}
-                    onChange={(e) => setCleanupDurationPreset(e.target.value as CleanupDurationPreset | 'custom')}
-                    className="ui-input w-full appearance-none"
-                  >
-                    <option value="never">Never</option>
-                    <option value="default">Default (3h)</option>
-                    <option value="5min">5 minutes</option>
-                    <option value="10min">10 minutes</option>
-                    <option value="30min">30 minutes</option>
-                    <option value="1hour">1 hour</option>
-                    <option value="3hours">3 hours</option>
-                    <option value="2hours">2 hours</option>
-                    <option value="1day">1 day</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                  {cleanupDurationPreset === 'custom' && (
-                    <input
-                      type="number"
-                      min="1"
-                      max="10080"
-                      value={customDurationInput}
-                      onChange={(e) => setCustomDurationInput(e.target.value)}
-                      onBlur={handleCustomDurationBlur}
-                      placeholder="Minutes"
-                      className="ui-input mt-2 w-full"
-                    />
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <span className="ui-label">New Session Mode</span>
-                  <div className="space-y-2">
                     <button
+                      key={tab.id}
                       type="button"
-                      onClick={() => setNewSessionMode('shell')}
-                      className={`w-full rounded-2xl px-4 py-4 text-left transition ${
-                        newSessionMode === 'shell'
-                          ? 'bg-surface-elevated ring-1 ring-accent/30'
-                          : 'bg-surface hover:bg-surface-2'
+                      onClick={() => setDrawerTab(tab.id)}
+                      className={`group flex flex-col items-center justify-center gap-1 rounded-2xl px-2 py-2 text-[11px] font-medium transition ${
+                        isActive
+                          ? 'bg-surface-elevated text-foreground'
+                          : 'text-muted-foreground hover:bg-surface-2'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-medium text-foreground">Shell</span>
-                        <span className="text-[10px] uppercase tracking-[0.16em] text-accent">Recommended</span>
-                      </div>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        Best for most people. With keepalive set {keepAliveSummary}, you can usually close the page and come back later without needing tmux.
-                      </p>
+                      <span className={`relative flex h-6 w-6 items-center justify-center rounded-full ${
+                        isActive ? 'bg-primary/20 text-primary' : 'bg-surface-2 text-muted-foreground group-hover:bg-surface-elevated'
+                      }`}>
+                        {tab.icon}
+                        {typeof tab.badge === 'number' && tab.badge > 0 && (
+                          <span className="absolute -top-1 -right-1 inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-accent px-1 text-[9px] text-accent-foreground">
+                            {tab.badge}
+                          </span>
+                        )}
+                      </span>
+                      <span>{tab.label}</span>
                     </button>
+                  );
+                })}
+              </div>
+            </div>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (tmuxStatus.available) {
-                          setNewSessionMode('tmux');
-                        }
-                      }}
-                      className={`w-full rounded-2xl px-4 py-4 text-left transition ${
-                        newSessionMode === 'tmux'
-                          ? 'bg-surface-elevated ring-1 ring-accent/30'
-                          : 'bg-surface hover:bg-surface-2'
-                      } ${tmuxStatus.available ? '' : 'opacity-80'}`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-medium text-foreground">tmux</span>
-                        <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
-                          {tmuxStatus.available ? 'Available' : 'Optional'}
-                        </span>
+            {/* Tab content */}
+            <div
+              className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6"
+              onPointerDown={onSwipePointerDown}
+              onPointerMove={onSwipePointerMove}
+              onPointerUp={onSwipePointerEnd}
+              onPointerCancel={onSwipePointerEnd}
+              style={{ touchAction: 'pan-y' }}
+            >
+              <div key={drawerTab} className="animate-fade-in">
+              {drawerTab === 'sessions' && (
+                <div className="space-y-3">
+                  {sessions.length === 0 ? (
+                    <div className="rounded-2xl bg-surface-2/60 px-4 py-8 text-center">
+                      <RiTerminalBoxLine size={28} className="mx-auto mb-2 text-muted-foreground" />
+                      <p className="text-sm text-muted-foreground">No open sessions yet.</p>
+                      <button
+                        type="button"
+                        onClick={() => setDrawerTab('new')}
+                        className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-primary/15 px-4 py-2 text-sm font-medium text-primary"
+                      >
+                        <RiAddLine size={14} />
+                        Create one
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="space-y-2">
+                        {sessions.map((session) => {
+                          const ts = terminalSessions.get(session.id);
+                          const display = getTabDisplayName(session, ts?.activeProgram ?? null, ts?.cwd ?? null);
+                          const isActive = session.id === activeSessionId;
+                          return (
+                            <div
+                              key={session.id}
+                              className={`flex w-full items-center gap-2 rounded-2xl px-3 py-3 text-sm transition ${
+                                isActive
+                                  ? 'bg-surface-elevated text-foreground ring-1 ring-primary/30'
+                                  : 'bg-surface-2 text-foreground hover:bg-surface-elevated'
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
+                                  setIsDrawerOpen(false);
+                                }}
+                                className="min-w-0 flex flex-1 items-center gap-3 text-left"
+                              >
+                                <span className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
+                                  isActive ? 'bg-primary/20 text-primary' : 'bg-surface text-muted-foreground'
+                                }`}>
+                                  {session.mode === 'tmux' ? <RiLayoutGridLine size={16} /> : <RiTerminalBoxLine size={16} />}
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                  <span className="block truncate text-sm text-foreground">{display}</span>
+                                  <span className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                                    <span>{getSessionModeLabel(session.mode)}</span>
+                                    {session.tmuxSessionName && <span>· {session.tmuxSessionName}</span>}
+                                    <span>· {formatKeepAliveLabel(session.keepAliveMs)}</span>
+                                  </span>
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: session.id }));
+                                }}
+                                className="shrink-0 rounded-full p-2 text-muted-foreground transition hover:bg-destructive/15 hover:text-destructive"
+                                aria-label={`Close ${display}`}
+                              >
+                                <RiCloseLine size={16} />
+                              </button>
+                            </div>
+                          );
+                        })}
                       </div>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        Better for named sessions, multi-pane layouts, and longer-running workflows that you want to reattach across browser sessions.
-                      </p>
-                      {!tmuxStatus.available ? (
-                        <p className="mt-2 text-xs text-muted-foreground">
-                          Not installed right now. Shell mode already covers the common "come back later" workflow. If you install `tmux`, Termdock will detect it automatically while this panel stays open.
-                        </p>
-                      ) : tmuxStatus.version ? (
-                        <p className="mt-2 text-xs text-muted-foreground">Detected: {tmuxStatus.version}</p>
-                      ) : null}
-                    </button>
-                  </div>
-                  {newSessionMode === 'tmux' && (
-                    <input
-                      type="text"
-                      value={newSessionTmuxName}
-                      onChange={(e) => setNewSessionTmuxName(e.target.value)}
-                      onBlur={() => setNewSessionTmuxName((prev) => prev.trim())}
-                      placeholder="Tmux session name (empty = auto)"
-                      className="ui-input w-full"
-                    />
+
+                      <button
+                        type="button"
+                        onClick={() => setDrawerTab('new')}
+                        className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-primary/10 px-4 py-3 text-sm font-medium text-primary transition hover:bg-primary/20 active:scale-[0.98]"
+                      >
+                        <RiAddLine size={16} />
+                        New session
+                      </button>
+
+                      {activeSession && (
+                        <div className="mt-2 space-y-2 rounded-2xl bg-surface-2/60 p-3">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <span className="ui-kicker">Active keepalive</span>
+                              <p className="text-[11px] text-muted-foreground">Auto-cleanup for the focused session.</p>
+                            </div>
+                            {activeKeepAliveSavedAt > 0 && Date.now() - activeKeepAliveSavedAt < 1500 && (
+                              <span className="inline-flex items-center gap-1 text-[11px] text-primary">
+                                <RiCheckLine size={12} /> Saved
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {KEEPALIVE_PRESETS.map((preset) => {
+                              const selected = activeKeepAlivePreset === preset.value;
+                              return (
+                                <button
+                                  key={preset.value}
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveKeepAlivePreset(preset.value);
+                                    if (preset.value === 'custom') {
+                                      if (!activeKeepAliveCustomInput) {
+                                        setActiveKeepAliveCustomInput('180');
+                                      }
+                                      return;
+                                    }
+                                    applyActiveSessionKeepAlive(preset.ms);
+                                  }}
+                                  className={`rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                                    selected
+                                      ? 'bg-primary/20 text-primary ring-1 ring-primary/30'
+                                      : 'bg-surface text-muted-foreground hover:bg-surface-elevated'
+                                  }`}
+                                >
+                                  {preset.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {activeKeepAlivePreset === 'custom' && (
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="number"
+                                min="1"
+                                max="10080"
+                                value={activeKeepAliveCustomInput}
+                                onChange={(e) => setActiveKeepAliveCustomInput(e.target.value)}
+                                placeholder="Minutes"
+                                className="ui-input flex-1"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const minutes = parseInt(activeKeepAliveCustomInput, 10);
+                                  const normalized = Number.isFinite(minutes) ? Math.min(10080, Math.max(1, minutes)) : 180;
+                                  setActiveKeepAliveCustomInput(String(normalized));
+                                  applyActiveSessionKeepAlive(normalized * 60000);
+                                }}
+                                className="shrink-0 rounded-full bg-primary/15 px-4 py-2.5 text-sm font-medium text-primary hover:bg-primary/25"
+                              >
+                                Apply
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
+              )}
 
-                {activeSession && (
+              {drawerTab === 'new' && (
+                <div className="space-y-4">
                   <div className="space-y-2">
-                    <span className="ui-label">Active Session Keepalive</span>
-                    <select
-                      value={activeKeepAlivePreset}
-                      onChange={(e) => {
-                        const preset = e.target.value as CleanupDurationPreset | 'custom';
-                        setActiveKeepAlivePreset(preset);
-                        if (preset === 'custom') {
-                          if (!activeKeepAliveCustomInput) {
-                            setActiveKeepAliveCustomInput('180');
+                    <span className="ui-kicker">Mode</span>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setNewSessionMode('shell')}
+                        className={`rounded-2xl px-4 py-4 text-left transition ${
+                          newSessionMode === 'shell'
+                            ? 'bg-surface-elevated ring-1 ring-primary/30'
+                            : 'bg-surface-2 hover:bg-surface-elevated'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="inline-flex items-center gap-2 text-sm font-medium text-foreground">
+                            <RiTerminalLine size={14} /> Shell
+                          </span>
+                          {newSessionMode === 'shell' && <RiCheckLine size={16} className="text-primary" />}
+                        </div>
+                        <p className="mt-1.5 text-[11px] text-muted-foreground">
+                          Persistent PTY with keepalive. Best default.
+                        </p>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (tmuxStatus.available) {
+                            setNewSessionMode('tmux');
                           }
-                          return;
-                        }
-                        const selected = SESSION_KEEPALIVE_PRESETS.find((item) => item.value === preset);
-                        applyActiveSessionKeepAlive(selected?.ms ?? 3 * 60 * 60 * 1000);
-                      }}
-                      className="ui-input w-full appearance-none"
-                    >
-                      <option value="never">Never</option>
-                      <option value="30min">30 minutes</option>
-                      <option value="1hour">1 hour</option>
-                      <option value="2hours">2 hours</option>
-                      <option value="3hours">3 hours</option>
-                      <option value="1day">1 day</option>
-                      <option value="custom">Custom</option>
-                    </select>
-                    {activeKeepAlivePreset === 'custom' && (
+                        }}
+                        disabled={!tmuxStatus.available}
+                        className={`rounded-2xl px-4 py-4 text-left transition ${
+                          newSessionMode === 'tmux'
+                            ? 'bg-surface-elevated ring-1 ring-primary/30'
+                            : 'bg-surface-2 hover:bg-surface-elevated'
+                        } ${!tmuxStatus.available ? 'opacity-60 cursor-not-allowed' : ''}`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="inline-flex items-center gap-2 text-sm font-medium text-foreground">
+                            <RiLayoutGridLine size={14} /> Tmux
+                          </span>
+                          {newSessionMode === 'tmux' && <RiCheckLine size={16} className="text-primary" />}
+                        </div>
+                        <p className="mt-1.5 text-[11px] text-muted-foreground">
+                          {tmuxStatus.available
+                            ? 'Named, multi-pane, reattachable.'
+                            : 'tmux not detected on server.'}
+                        </p>
+                      </button>
+                    </div>
+                  </div>
+
+                  {newSessionMode === 'tmux' && (
+                    <div className="space-y-2">
+                      <span className="ui-kicker">Tmux name (optional)</span>
+                      <input
+                        type="text"
+                        value={newSessionTmuxName}
+                        onChange={(e) => setNewSessionTmuxName(e.target.value)}
+                        onBlur={() => setNewSessionTmuxName(newSessionTmuxName.trim())}
+                        placeholder="auto-generated when empty"
+                        className="ui-input w-full"
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        autoComplete="off"
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        Leave blank for an auto name. Reuse an existing name to attach to it.
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <span className="ui-kicker">Keepalive</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {KEEPALIVE_PRESETS.map((preset) => {
+                        const selected = cleanupDurationPreset === preset.value;
+                        return (
+                          <button
+                            key={preset.value}
+                            type="button"
+                            onClick={() => setCleanupDurationPreset(preset.value)}
+                            className={`rounded-full px-3 py-2 text-xs font-medium transition ${
+                              selected
+                                ? 'bg-primary/20 text-primary ring-1 ring-primary/30'
+                                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated'
+                            }`}
+                          >
+                            {preset.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {cleanupDurationPreset === 'custom' && (
                       <input
                         type="number"
                         min="1"
                         max="10080"
-                        value={activeKeepAliveCustomInput}
-                        onChange={(e) => setActiveKeepAliveCustomInput(e.target.value)}
-                        onBlur={() => {
-                          const minutes = parseInt(activeKeepAliveCustomInput, 10);
-                          const normalized = Number.isFinite(minutes) ? Math.min(10080, Math.max(1, minutes)) : 180;
-                          setActiveKeepAliveCustomInput(String(normalized));
-                          applyActiveSessionKeepAlive(normalized * 60000);
-                        }}
+                        value={customDurationInput}
+                        onChange={(e) => setCustomDurationInput(e.target.value)}
+                        onBlur={handleCustomDurationBlur}
                         placeholder="Minutes"
-                        className="ui-input mt-2 w-full"
+                        className="ui-input mt-1 w-full"
                       />
                     )}
                   </div>
-                )}
 
-                {/* Debug Toggle */}
-                <div className="flex items-center justify-between pt-2">
-                  <span className="ui-label">Debug Mode</span>
                   <button
                     type="button"
-                    onClick={() => setShowDebug(!showDebug)}
-                    className={`rounded-full px-4 py-2 text-xs font-medium transition ${
-                      showDebug ? 'bg-accent text-accent-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated'
-                    }`}
+                    onClick={() => {
+                      dispatchNewSession();
+                      setIsDrawerOpen(false);
+                    }}
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-primary px-4 py-3.5 text-sm font-semibold text-primary-foreground transition hover:opacity-90 active:scale-[0.98]"
                   >
-                    {showDebug ? 'On' : 'Off'}
+                    <RiAddLine size={16} />
+                    Create {newSessionMode === 'tmux' ? 'tmux' : 'shell'} session
                   </button>
-                </div>
 
-                <div className="border-t border-border/15 pt-4">
+                  {newSessionMode === 'tmux' && tmuxStatus.available && (
+                    <div className="rounded-2xl bg-surface-2/60 px-3 py-3">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="ui-kicker">Quick attach</span>
+                        <button
+                          type="button"
+                          onClick={() => setDrawerTab('tmux')}
+                          className="text-[11px] text-primary hover:underline"
+                        >
+                          See all →
+                        </button>
+                      </div>
+                      {tmuxSessions.length === 0 ? (
+                        <p className="text-[11px] text-muted-foreground">No tmux sessions on the server yet.</p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {tmuxSessions.slice(0, 4).map((tmux) => {
+                            const connected = connectedTmuxNames.has(tmux.name);
+                            return (
+                              <button
+                                key={tmux.name}
+                                type="button"
+                                disabled={connected}
+                                onClick={() => {
+                                  dispatchNewSession({ mode: 'tmux', tmuxSessionName: tmux.name });
+                                  setIsDrawerOpen(false);
+                                }}
+                                className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-left transition ${
+                                  connected
+                                    ? 'bg-surface text-muted-foreground opacity-70 cursor-not-allowed'
+                                    : 'bg-surface text-foreground hover:bg-surface-elevated'
+                                }`}
+                              >
+                                <RiLayoutGridLine size={14} className="shrink-0 text-muted-foreground" />
+                                <span className="flex-1 truncate">{tmux.name}</span>
+                                <span className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                                  {connected ? 'attached' : `${tmux.windows}w`}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {drawerTab === 'tmux' && (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 rounded-2xl bg-surface-2/60 px-3 py-3">
+                    <span className={`inline-flex h-2 w-2 rounded-full ${tmuxStatus.available ? 'bg-primary' : 'bg-destructive'}`} />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-foreground">
+                        {tmuxStatus.available ? 'tmux available' : 'tmux unavailable'}
+                      </div>
+                      <div className="truncate text-[11px] text-muted-foreground">
+                        {tmuxStatus.available
+                          ? (tmuxStatus.version || 'Detected on server')
+                          : (tmuxStatus.reason || 'Install tmux on the server to enable.')}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void refreshTmuxSessions()}
+                      disabled={tmuxRefreshing}
+                      className="shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface text-muted-foreground transition hover:bg-surface-elevated disabled:opacity-50"
+                      aria-label="Refresh tmux sessions"
+                    >
+                      <RiRefreshLine size={14} className={tmuxRefreshing ? 'animate-spin' : ''} />
+                    </button>
+                  </div>
+
+                  {tmuxStatus.available && (
+                    <>
+                      {tmuxSessions.length === 0 ? (
+                        <div className="rounded-2xl bg-surface-2/60 px-4 py-8 text-center">
+                          <RiLayoutGridLine size={28} className="mx-auto mb-2 text-muted-foreground" />
+                          <p className="text-sm text-muted-foreground">No tmux sessions on the server.</p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNewSessionMode('tmux');
+                              setDrawerTab('new');
+                            }}
+                            className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-primary/15 px-4 py-2 text-sm font-medium text-primary"
+                          >
+                            <RiAddLine size={14} />
+                            Create one
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {tmuxSessions.map((tmux) => {
+                            const connected = connectedTmuxNames.has(tmux.name);
+                            const confirming = tmuxConfirmKillName === tmux.name;
+                            const killing = tmuxKillingName === tmux.name;
+                            return (
+                              <div
+                                key={tmux.name}
+                                className={`rounded-2xl px-3 py-3 transition ${
+                                  confirming
+                                    ? 'bg-destructive/10 ring-1 ring-destructive/40'
+                                    : connected
+                                      ? 'bg-surface-2/40'
+                                      : 'bg-surface-2 hover:bg-surface-elevated'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <span className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
+                                    connected ? 'bg-primary/20 text-primary' : 'bg-surface text-muted-foreground'
+                                  }`}>
+                                    <RiLayoutGridLine size={16} />
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate text-sm font-medium text-foreground">{tmux.name}</div>
+                                    <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                                      {tmux.windows} window{tmux.windows === 1 ? '' : 's'}
+                                      {connected && ' · attached'}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={connected || confirming || killing}
+                                    onClick={() => {
+                                      dispatchNewSession({ mode: 'tmux', tmuxSessionName: tmux.name });
+                                    }}
+                                    className={`shrink-0 rounded-full px-4 py-2 text-xs font-medium transition ${
+                                      connected || confirming || killing
+                                        ? 'bg-surface text-muted-foreground cursor-not-allowed'
+                                        : 'bg-primary/15 text-primary hover:bg-primary/25'
+                                    }`}
+                                  >
+                                    {connected ? 'Attached' : 'Attach'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={killing}
+                                    onClick={() => {
+                                      setTmuxKillError(null);
+                                      setTmuxConfirmKillName(confirming ? null : tmux.name);
+                                    }}
+                                    className={`shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-full transition ${
+                                      confirming
+                                        ? 'bg-destructive/20 text-destructive'
+                                        : 'bg-surface text-muted-foreground hover:bg-destructive/15 hover:text-destructive'
+                                    } disabled:opacity-50`}
+                                    aria-label={`Kill tmux session ${tmux.name}`}
+                                  >
+                                    <RiDeleteBinLine size={14} />
+                                  </button>
+                                </div>
+
+                                {confirming && (
+                                  <div className="mt-3 space-y-2 rounded-xl bg-surface/80 p-3">
+                                    <p className="text-[12px] leading-snug text-foreground">
+                                      Permanently destroy tmux session <span className="font-mono font-semibold">{tmux.name}</span>?
+                                    </p>
+                                    <p className="text-[11px] text-muted-foreground">
+                                      Runs <span className="font-mono">tmux kill-session</span>. All windows and panes inside will be terminated. Cannot be undone.
+                                    </p>
+                                    {tmuxKillError && (
+                                      <p className="text-[11px] text-destructive">{tmuxKillError}</p>
+                                    )}
+                                    <div className="flex items-center gap-2 pt-1">
+                                      <button
+                                        type="button"
+                                        disabled={killing}
+                                        onClick={() => void handleKillTmuxSession(tmux.name)}
+                                        className="flex-1 rounded-full bg-destructive/90 px-3 py-2 text-xs font-medium text-destructive-foreground transition hover:bg-destructive disabled:opacity-50"
+                                      >
+                                        {killing ? 'Destroying…' : 'Destroy'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={killing}
+                                        onClick={() => {
+                                          setTmuxConfirmKillName(null);
+                                          setTmuxKillError(null);
+                                        }}
+                                        className="flex-1 rounded-full bg-surface-2 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-surface-elevated disabled:opacity-50"
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      <p className="text-center text-[11px] text-muted-foreground">
+                        Attach opens a new tab without closing this panel.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {drawerTab === 'settings' && (
+                <div className="space-y-5">
+                  {/* Font Size */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="ui-label">Font size</span>
+                      <span className="text-xs text-muted-foreground tabular-nums">{fontSize}px</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setFontSize(Math.max(8, fontSize - 1))}
+                        className="h-10 w-10 shrink-0 rounded-full bg-surface-2 text-muted-foreground hover:bg-surface-elevated"
+                      >
+                        −
+                      </button>
+                      <input
+                        type="range"
+                        min="8"
+                        max="32"
+                        value={fontSize}
+                        onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
+                        className="flex-1"
+                        aria-label="Font size"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setFontSize(Math.min(32, fontSize + 1))}
+                        className="h-10 w-10 shrink-0 rounded-full bg-surface-2 text-muted-foreground hover:bg-surface-elevated"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Renderer */}
+                  <div className="space-y-2">
+                    <span className="ui-label">Renderer</span>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {(['auto', 'webgl', 'canvas'] as TerminalRendererMode[]).map((mode) => {
+                        const selected = rendererMode === mode;
+                        return (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() => setRendererMode(mode)}
+                            className={`rounded-full px-3 py-2 text-xs font-medium transition ${
+                              selected
+                                ? 'bg-primary/20 text-primary ring-1 ring-primary/30'
+                                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated'
+                            }`}
+                          >
+                            {mode === 'auto' ? 'Auto' : mode === 'webgl' ? 'WebGL' : 'Canvas'}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      WebGL is sharper. Canvas is more compatible.
+                    </p>
+                  </div>
+
+                  {/* Toolbar Presets */}
                   <button
                     type="button"
                     onClick={() => setIsToolbarPresetsOpen(true)}
-                    className="w-full rounded-full bg-surface-2 px-4 py-3 text-left text-sm text-foreground transition hover:bg-surface-elevated"
+                    className="flex w-full items-center justify-between rounded-2xl bg-surface-2 px-4 py-3.5 text-left text-sm transition hover:bg-surface-elevated"
                   >
-                    Edit Toolbar Presets
+                    <span className="flex items-center gap-3">
+                      <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface text-muted-foreground">
+                        <RiKeyboardLine size={16} />
+                      </span>
+                      <span>
+                        <span className="block font-medium text-foreground">Mobile keyboard toolbar</span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          {toolbarPresets.length} preset{toolbarPresets.length === 1 ? '' : 's'}
+                        </span>
+                      </span>
+                    </span>
+                    <span className="text-muted-foreground">›</span>
                   </button>
+
+                  {/* Debug toggle */}
+                  <div className="flex items-center justify-between rounded-2xl bg-surface-2 px-4 py-3">
+                    <span className="ui-label">Debug overlay</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowDebug(!showDebug)}
+                      className={`inline-flex h-6 w-10 items-center rounded-full transition ${
+                        showDebug ? 'bg-primary/70' : 'bg-surface-elevated'
+                      }`}
+                      aria-label="Toggle debug overlay"
+                    >
+                      <span
+                        className={`mx-0.5 inline-block h-5 w-5 rounded-full bg-foreground/90 transition ${
+                          showDebug ? 'translate-x-4' : ''
+                        }`}
+                      />
+                    </button>
+                  </div>
                 </div>
+              )}
               </div>
             </div>
           </div>
@@ -794,23 +1235,22 @@ function App() {
             className="fixed inset-0 z-[60] bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
             onClick={() => setIsToolbarPresetsOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto max-w-4xl overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
-            <div className="flex items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
-              <div>
+          <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
+            <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
+              <div className="min-w-0">
                 <div className="ui-kicker">Mobile keyboard</div>
-                <h2 className="section-title mt-2">Toolbar presets</h2>
-                <p className="mt-2 text-sm text-muted-foreground">Configure program-specific mobile toolbar buttons with live preview.</p>
+                <h2 className="section-title mt-1">Toolbar presets</h2>
               </div>
               <button
                 type="button"
                 onClick={() => setIsToolbarPresetsOpen(false)}
-                className="rounded-full bg-surface-2 p-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                className="shrink-0 rounded-full bg-surface-2 p-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
                 aria-label="Close toolbar presets"
               >
                 <RiCloseLine size={18} />
               </button>
             </div>
-            <div className="h-[calc(100%-89px)] overflow-y-auto p-4 sm:p-6">
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
               <ToolbarPresetSettings
                 presets={toolbarPresets}
                 selectedPresetId={selectedToolbarPresetId}

@@ -499,6 +499,23 @@ export async function getTmuxStatus(): Promise<TmuxStatus> {
   return response.json() as Promise<TmuxStatus>;
 }
 
+export async function killTmuxSession(name: string): Promise<{ cleanedSessions: string[]; alreadyGone?: boolean }> {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    throw new Error('tmux session name is required');
+  }
+  const response = await fetch(`/api/terminal/tmux/sessions/${encodeURIComponent(trimmed)}`, { method: 'DELETE' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to kill tmux session' }));
+    throw new Error(error.error || 'Failed to kill tmux session');
+  }
+  const payload = await response.json() as { cleanedSessions?: string[]; alreadyGone?: boolean };
+  return {
+    cleanedSessions: Array.isArray(payload.cleanedSessions) ? payload.cleanedSessions : [],
+    alreadyGone: Boolean(payload.alreadyGone),
+  };
+}
+
 export interface PersistedTerminalClientSession {
   sessionId: string; name: string; backendSessionId: string | null;
   mode: 'shell' | 'tmux'; tmuxSessionName: string | null; keepAliveMs: number | null;

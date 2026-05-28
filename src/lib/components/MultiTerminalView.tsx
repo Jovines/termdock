@@ -681,6 +681,31 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     debugSession('[Session] Closed session:', sessionId);
   }, [sessions, removePersistedSession, debugSession]);
 
+  // Drop a frontend session whose backend pty was already cleaned up server-side
+  // (e.g. after `tmux kill-session`). Skip the DELETE call to avoid 404s.
+  const handleCloseSessionByBackendId = useCallback((backendSessionId: string) => {
+    if (!backendSessionId) return;
+    const matched = sessions.filter((s) => s.sessionId === backendSessionId);
+    if (matched.length === 0) return;
+
+    setSessions((prev) => {
+      const remaining = prev.filter((s) => s.sessionId !== backendSessionId);
+      if (remaining.length !== prev.length) {
+        const wasActiveRemoved = !remaining.some((s) => s.id === activeSessionId);
+        if (wasActiveRemoved) {
+          setActiveSessionId(remaining.length > 0 ? remaining[0].id : null);
+        }
+      }
+      return remaining;
+    });
+
+    for (const s of matched) {
+      removePersistedSession(s.id);
+      delete keyboardOpenBySessionRef.current[s.id];
+    }
+    debugSession('[Session] Backend gone, dropped local session(s):', matched.map((s) => s.id));
+  }, [sessions, activeSessionId, removePersistedSession, debugSession]);
+
   // Set up event listeners for session management
   useEffect(() => {
     const handleNewSessionEvent = (event: Event) => {
@@ -696,6 +721,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const handleCloseSessionEvent = (event: Event) => {
       const customEvent = event as CustomEvent<string>;
       handleCloseSession(customEvent.detail);
+    };
+
+    const handleCloseSessionByBackendIdEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<string>;
+      handleCloseSessionByBackendId(customEvent.detail);
     };
 
     const handleUpdateSessionPolicyEvent = (event: Event) => {
@@ -717,6 +747,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     window.addEventListener('new-terminal-session', handleNewSessionEvent);
     window.addEventListener('switch-terminal-session', handleSwitchSessionEvent);
     window.addEventListener('close-terminal-session', handleCloseSessionEvent);
+    window.addEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
     window.addEventListener('update-terminal-session-policy', handleUpdateSessionPolicyEvent);
     window.addEventListener('rename-terminal-session', handleRenameSessionEvent);
 
@@ -724,10 +755,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('new-terminal-session', handleNewSessionEvent);
       window.removeEventListener('switch-terminal-session', handleSwitchSessionEvent);
       window.removeEventListener('close-terminal-session', handleCloseSessionEvent);
+      window.removeEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
       window.removeEventListener('update-terminal-session-policy', handleUpdateSessionPolicyEvent);
       window.removeEventListener('rename-terminal-session', handleRenameSessionEvent);
     };
-  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleUpdateSessionPolicy, handleRenameSession]);
+  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleCloseSessionByBackendId, handleUpdateSessionPolicy, handleRenameSession]);
 
   // 没有会话时创建新的
   useEffect(() => {

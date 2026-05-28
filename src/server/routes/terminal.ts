@@ -1560,6 +1560,52 @@ router.get('/tmux/status', async (_req, res) => {
   res.json(status);
 });
 
+router.delete('/tmux/sessions/:name', async (req, res) => {
+  const rawName = typeof req.params.name === 'string' ? req.params.name.trim() : '';
+  if (!rawName) {
+    return res.status(400).json({ error: 'tmux session name is required' });
+  }
+  // tmux session names cannot contain ':' or '.'; reject anything that doesn't look right.
+  if (/[:.\s]/.test(rawName)) {
+    return res.status(400).json({ error: 'invalid tmux session name' });
+  }
+
+  // Detach any local terminal sessions still wired to this tmux session so that
+  // their pty (the tmux client) is cleaned up alongside the kill-session call.
+  const affectedSessionIds: string[] = [];
+  for (const [sessionId, session] of terminalSessions.entries()) {
+    if (session.mode === 'tmux' && session.tmuxSessionName === rawName) {
+      affectedSessionIds.push(sessionId);
+    }
+  }
+
+  try {
+    await runTmux(['kill-session', '-t', rawName]);
+  } catch (error) {
+    const errorMessage = getErrorMessage(error);
+    if (/can't find session|no server running|session not found/i.test(errorMessage)) {
+      // Already gone; treat as success and still clean up any orphan ptys.
+      for (const id of affectedSessionIds) {
+        try { cleanupSession(id, { killProcess: true }); } catch {}
+      }
+      return res.json({ success: true, alreadyGone: true, cleanedSessions: affectedSessionIds });
+    }
+    if (isTmuxUnavailableMessage(errorMessage)) {
+      return res.status(503).json({ error: 'tmux is not installed or not available in PATH.' });
+    }
+    return res.status(500).json({ error: errorMessage || 'Failed to kill tmux session' });
+  }
+
+  for (const id of affectedSessionIds) {
+    try { cleanupSession(id, { killProcess: true }); } catch (error) {
+      console.error(`[tmux] cleanup attached session ${id} failed:`, getErrorMessage(error));
+    }
+  }
+
+  console.log(`[tmux] killed session: ${rawName} (cleaned ${affectedSessionIds.length} attached pty)`);
+  res.json({ success: true, cleanedSessions: affectedSessionIds });
+});
+
 router.post('/serialize-state', async (req, res) => {
   const ids = Array.isArray(req.body?.ids)
     ? new Set((req.body.ids as unknown[]).filter((item): item is string => typeof item === 'string'))
