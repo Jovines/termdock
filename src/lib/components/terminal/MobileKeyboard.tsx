@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { RiArrowDownLine, RiArrowGoBackLine, RiArrowLeftLine, RiArrowRightLine, RiArrowUpLine } from '@remixicon/react';
+import { ArrowDown as RiArrowDownLine, CornerDownLeft as RiArrowGoBackLine, ArrowLeft as RiArrowLeftLine, ArrowRight as RiArrowRightLine, ArrowUp as RiArrowUpLine } from 'lucide-react';
 import { light as hapticLight } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from './PresetModeButton';

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { RiArrowRightLine, RiLoader4Line } from '@remixicon/react';
+import { ArrowRight as RiArrowRightLine, Loader2 as RiLoader4Line } from 'lucide-react';
 import { loginWithPassword } from '../../terminal/api';
 
 interface LoginScreenProps {

@@ -1,5 +1,5 @@
 import React from 'react';
-import { RiMagicLine } from '@remixicon/react';
+import { Wand2 as RiMagicLine } from 'lucide-react';
 import type { ToolbarPresetMode } from './mobileKeyboardPresets';
 
 export const PRESET_MODE_BUTTON_SIZE_PX = 28;
