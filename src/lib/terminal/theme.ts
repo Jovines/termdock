@@ -29,7 +29,7 @@ export interface TerminalTheme {
 export const FLEXOKI_DARK: TerminalTheme = {
   background: '#1C1B1A',
   foreground: '#CECDC3',
-  cursor: '#4385BE',
+  cursor: '#CECDC3',
   cursorAccent: '#1C1B1A',
   selectionBackground: '#403E3C',
   selectionForeground: '#CECDC3',

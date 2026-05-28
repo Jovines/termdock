@@ -1460,7 +1460,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             theme: convertTheme(theme),
             cursorBlink: true,
             cursorStyle: 'block',
-            cursorInactiveStyle: 'block',
+            cursorInactiveStyle: 'bar',
             scrollback: 1000,
             allowTransparency: false,
             convertEol: true,
@@ -1482,6 +1482,22 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           lastDevicePixelRatioRef.current = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
 
           terminal.open(container);
+
+          // 强制让 xterm 把光标视为"已初始化"——否则 WebglRenderer 在
+          // _updateModel 阶段会把 model.cursor 置为 undefined，导致光标
+          // 完全不绘制。xterm 默认要等 textarea 获焦 / 敲键 / 切 alt buffer
+          // 才会触发 _showCursor()，但移动端我们用上层 textarea 覆盖了
+          // xterm 自己的 textarea，xterm 内部 textarea 永远不获焦，
+          // 因此 isCursorInitialized 一直是 false，inactive 光标也画不出来。
+          // 通过私有 _core 把这个标志直接置位，并请求刷新一帧。
+          try {
+            const core = (terminal as unknown as { _core?: { coreService?: { isCursorInitialized: boolean } } })._core;
+            if (core?.coreService) {
+              core.coreService.isCursorInitialized = true;
+            }
+            terminal.refresh(0, terminal.rows - 1);
+          } catch { /* ignored */ }
+
           if (shouldUseWebgl) {
             enableWebglRenderer(terminal, 'init');
           } else {
