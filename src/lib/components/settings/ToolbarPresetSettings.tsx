@@ -1,17 +1,20 @@
 import React from 'react';
 import {
-  RiAddLine,
-  RiRefreshLine,
-  RiDeleteBinLine,
-  RiArrowUpLine,
-  RiArrowDownLine,
-  RiCloseLine,
-  RiSubtractLine,
-} from '@remixicon/react';
+  Plus as RiAddLine,
+  RefreshCw as RiRefreshLine,
+  Trash2 as RiDeleteBinLine,
+  ArrowUp as RiArrowUpLine,
+  ArrowDown as RiArrowDownLine,
+  X as RiCloseLine,
+  Minus as RiSubtractLine,
+} from 'lucide-react';
 import {
   getToolbarActionLabel,
+  isRegexProgramPattern,
+  normalizeProgramMatchEntry,
   sanitizeRowLayout,
   splitButtonsIntoRows,
+  tryCompileProgramRegex,
   type ToolbarPresetDefinition,
 } from '../terminal/mobileKeyboardPresets';
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from '../terminal/PresetModeButton';
@@ -74,14 +77,50 @@ function ChipInput({
   const [draft, setDraft] = React.useState('');
 
   const addChip = (raw: string) => {
-    const tokens = raw
-      .split(/[,\s]+/)
-      .map((t) => t.trim().toLowerCase())
-      .filter(Boolean);
+    // Split on commas and whitespace, but keep `/regex/flags` segments intact
+    // (regex bodies may contain spaces/commas that must NOT be tokenized).
+    const tokens: string[] = [];
+    let buffer = '';
+    let inRegex = false;
+    const flush = () => {
+      const trimmed = buffer.trim();
+      if (trimmed) tokens.push(trimmed);
+      buffer = '';
+    };
+    for (let i = 0; i < raw.length; i += 1) {
+      const ch = raw[i];
+      if (!inRegex && ch === '/' && buffer.trim().length === 0) {
+        inRegex = true;
+        buffer += ch;
+        continue;
+      }
+      if (inRegex) {
+        buffer += ch;
+        if (ch === '/' && raw[i - 1] !== '\\' && buffer.length > 1) {
+          // Consume trailing flag chars [gimsuy]*
+          while (i + 1 < raw.length && /[gimsuy]/.test(raw[i + 1] ?? '')) {
+            i += 1;
+            buffer += raw[i];
+          }
+          flush();
+          inRegex = false;
+        }
+        continue;
+      }
+      if (ch === ',' || /\s/.test(ch)) {
+        flush();
+        continue;
+      }
+      buffer += ch;
+    }
+    flush();
+
     if (tokens.length === 0) return;
     const next = [...value];
     for (const token of tokens) {
-      if (!next.includes(token)) next.push(token);
+      const normalized = normalizeProgramMatchEntry(token);
+      if (!normalized) continue;
+      if (!next.includes(normalized)) next.push(normalized);
     }
     onChange(next);
     setDraft('');
@@ -91,31 +130,47 @@ function ChipInput({
     onChange(value.filter((t) => t !== token));
   };
 
+  const draftTrimmed = draft.trim();
+  const draftIsRegex = draftTrimmed.length > 0 && isRegexProgramPattern(draftTrimmed);
+  const draftRegexInvalid = draftIsRegex && !tryCompileProgramRegex(draftTrimmed);
+
   return (
     <div className="rounded-2xl bg-surface px-3 py-2 ring-1 ring-border/15 focus-within:ring-accent/40">
       <div className="flex flex-wrap items-center gap-1.5">
-        {value.map((token) => (
-          <span
-            key={token}
-            className="inline-flex items-center gap-1 rounded-full bg-surface-elevated px-2.5 py-1 text-[11px] text-foreground"
-          >
-            {token}
-            <button
-              type="button"
-              onClick={() => removeChip(token)}
-              className="rounded-full p-0.5 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
-              aria-label={`Remove ${token}`}
+        {value.map((token) => {
+          const isRegex = isRegexProgramPattern(token);
+          const invalid = isRegex && !tryCompileProgramRegex(token);
+          return (
+            <span
+              key={token}
+              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] ${
+                invalid
+                  ? 'bg-destructive/15 text-destructive'
+                  : isRegex
+                    ? 'bg-accent/15 font-mono text-accent'
+                    : 'bg-surface-elevated text-foreground'
+              }`}
+              title={isRegex ? (invalid ? 'Invalid regex' : 'Regex match') : 'Exact match (case-insensitive)'}
             >
-              <RiCloseLine size={12} />
-            </button>
-          </span>
-        ))}
+              {isRegex && <span className="text-[10px] opacity-70">re</span>}
+              {token}
+              <button
+                type="button"
+                onClick={() => removeChip(token)}
+                className="rounded-full p-0.5 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
+                aria-label={`Remove ${token}`}
+              >
+                <RiCloseLine size={12} />
+              </button>
+            </span>
+          );
+        })}
         <input
           type="text"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ',') {
+            if (e.key === 'Enter' || (e.key === ',' && !draftIsRegex)) {
               e.preventDefault();
               addChip(draft);
             } else if (e.key === 'Backspace' && draft.length === 0 && value.length > 0) {
@@ -124,7 +179,9 @@ function ChipInput({
           }}
           onBlur={() => addChip(draft)}
           placeholder={value.length === 0 ? placeholder : ''}
-          className="min-w-[8ch] flex-1 bg-transparent py-1 text-sm outline-none placeholder:text-muted/60"
+          className={`min-w-[8ch] flex-1 bg-transparent py-1 text-sm outline-none placeholder:text-muted/60 ${
+            draftIsRegex ? 'font-mono' : ''
+          } ${draftRegexInvalid ? 'text-destructive' : ''}`}
           autoCapitalize="off"
           autoCorrect="off"
           autoComplete="off"
@@ -214,7 +271,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
   return (
     <div className="space-y-4">
       {/* Sticky Preview at the top */}
-      <div className="sticky top-0 z-10 -mx-4 -mt-4 sm:-mx-6 sm:-mt-6 border-b border-border/15 bg-surface/95 backdrop-blur px-4 py-3 sm:px-6">
+      <div className="sticky top-[-1rem] sm:top-[-1.5rem] z-10 -mx-4 -mt-4 sm:-mx-6 sm:-mt-6 border-b border-border/15 bg-surface/95 backdrop-blur px-4 py-3 sm:px-6">
         <div className="mb-2 flex items-center justify-between">
           <span className="ui-kicker">Preview</span>
           <span className="text-[10px] text-muted-foreground">
@@ -343,8 +400,11 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
             onChange={(next) =>
               onUpdatePreset(selectedPreset.id, (preset) => ({ ...preset, programs: next }))
             }
-            placeholder="vim, nvim, opencode…"
+            placeholder="vim, nvim, /^claude(-code)?$/i …"
           />
+          <p className="text-[10px] text-muted-foreground">
+            Plain names match case-insensitively. Wrap in <code className="font-mono">/…/flags</code> for regex (tested against the lowercase program name).
+          </p>
         </div>
 
         {/* Include Alt */}

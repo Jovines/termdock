@@ -29,7 +29,7 @@ export function getToolbarActionLabel(action: MobileToolbarAction, index: number
 // actions/programs changed). The App reads this on startup and, when the
 // stored version differs, overwrites all built-in preset ids with the latest
 // definitions while keeping any user-authored custom presets intact.
-export const BUILTIN_TOOLBAR_PRESETS_VERSION = 3;
+export const BUILTIN_TOOLBAR_PRESETS_VERSION = 4;
 
 export function getBuiltinToolbarPresetIds(): string[] {
   return DEFAULT_PRESETS.map((preset) => preset.id);
@@ -78,7 +78,7 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     actions: [
       { id: 'coco-undo', label: '/undo', sequence: '/||undo ' },
       { id: 'coco-clear', label: '/clear', sequence: '/||clear ' },
-      { id: 'coco-compact', label: '/compact', sequence: '/||compact ' },
+      { id: 'coco-model', label: '/model', sequence: '/||model ' },
       { id: 'coco-resume', label: '/resume', sequence: '/||resume ' },
     ],
   },
@@ -111,6 +111,43 @@ export function normalizeActiveProgram(program: string | null | undefined): stri
 
   const normalized = program.trim().toLowerCase();
   return normalized.length > 0 ? normalized : null;
+}
+
+// A program-match entry may be either a plain (case-insensitive) program name
+// like `claude` or a JS-style regex literal like `/^claude(-code)?$/i`.
+const PROGRAM_REGEX_PATTERN = /^\/(.+)\/([gimsuy]*)$/;
+
+export function isRegexProgramPattern(input: string): boolean {
+  return PROGRAM_REGEX_PATTERN.test(input.trim());
+}
+
+export function tryCompileProgramRegex(input: string): RegExp | null {
+  const match = input.trim().match(PROGRAM_REGEX_PATTERN);
+  if (!match) {
+    return null;
+  }
+  try {
+    return new RegExp(match[1] ?? '', match[2] ?? '');
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeProgramMatchEntry(input: unknown): string | null {
+  if (typeof input !== 'string') {
+    return null;
+  }
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (PROGRAM_REGEX_PATTERN.test(trimmed)) {
+    // Preserve the regex literal verbatim (case + flags matter), but drop
+    // entries that fail to compile so we never throw at match time.
+    return tryCompileProgramRegex(trimmed) ? trimmed : null;
+  }
+  // Plain program name: case-insensitive comparison via lowercase.
+  return trimmed.toLowerCase();
 }
 
 export function decodeToolbarSequence(input: string): string {
@@ -149,7 +186,7 @@ export function sanitizeToolbarPresets(input: ToolbarPresetDefinition[]): Toolba
         id,
         label: typeof preset.label === 'string' && preset.label.trim().length > 0 ? preset.label.trim() : 'Preset',
         programs: Array.isArray(preset.programs)
-          ? preset.programs.map((program) => normalizeActiveProgram(program)).filter((program): program is string => !!program)
+          ? preset.programs.map((program) => normalizeProgramMatchEntry(program)).filter((program): program is string => !!program)
           : [],
         includeAlt: typeof (preset as Partial<ToolbarPresetDefinition>).includeAlt === 'boolean'
           ? Boolean((preset as Partial<ToolbarPresetDefinition>).includeAlt)
@@ -184,8 +221,15 @@ export function detectToolbarPreset(program: string | null | undefined, presets:
     if (preset.id === 'default') {
       continue;
     }
-    if (preset.programs.includes(normalized)) {
-      return preset.id;
+    for (const entry of preset.programs) {
+      const regex = tryCompileProgramRegex(entry);
+      if (regex) {
+        if (regex.test(normalized)) {
+          return preset.id;
+        }
+      } else if (entry === normalized) {
+        return preset.id;
+      }
     }
   }
 
