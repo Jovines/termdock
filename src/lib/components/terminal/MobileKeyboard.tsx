@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { RiArrowDownLine, RiArrowGoBackLine, RiArrowLeftLine, RiArrowRightLine, RiArrowUpLine } from '@remixicon/react';
 import { light as hapticLight } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
+import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from './PresetModeButton';
 
 type Modifier = 'ctrl' | 'alt';
 type MobileKey =
@@ -526,27 +527,30 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
 
       {showExtended && (
         <div className="mt-1 space-y-1">
-          {expandedRows.map((row: { columns: number; items: ExpandedItem[] }, rowIndex: number) => (
+          {expandedRows.map((row: { columns: number; items: ExpandedItem[] }, rowIndex: number) => {
+            const hasPresetSlot = row.items[0]?.kind === 'preset';
+            const baseCols = Math.max(2, row.columns);
+            const gridTemplateColumns = hasPresetSlot
+              ? `${PRESET_MODE_BUTTON_SIZE_PX}px repeat(${Math.max(1, baseCols - 1)}, minmax(0, 1fr))`
+              : `repeat(${baseCols}, minmax(0, 1fr))`;
+            return (
             <div
               key={`row-${rowIndex}`}
               className="relative grid gap-1"
-              style={{ gridTemplateColumns: `repeat(${Math.max(2, row.columns)}, minmax(0, 1fr))` }}
+              style={{ gridTemplateColumns }}
             >
               {row.items.map((item: ExpandedItem) => {
                 if (item.kind === 'preset') {
                   return (
-                    <button
+                    <PresetModeButton
                       key={item.id}
-                      ref={item.id === 'preset' ? presetButtonRef : undefined}
-                      type="button"
-                      onPointerDown={handlePresetCyclePointerDown}
-                      tabIndex={-1}
-                      disabled={toolbarDisabled}
-                      className="h-7 w-full rounded-full bg-surface-2 shadow-sm px-1 text-[10px] active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
+                      buttonRef={item.id === 'preset' ? presetButtonRef : undefined}
+                      mode={presetMode}
+                      presetLabel={presetLabel}
                       title={presetModeLabel}
-                    >
-                      {presetLabel}
-                    </button>
+                      disabled={toolbarDisabled}
+                      onPointerDown={handlePresetCyclePointerDown}
+                    />
                   );
                 }
 
@@ -598,7 +602,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
                 );
               })}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
       </div>

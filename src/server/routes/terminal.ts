@@ -1,12 +1,34 @@
 import express from 'express';
 import fs from 'fs';
 import os from 'os';
+import path from 'path';
+import { createRequire } from 'module';
 import { execFile, spawn, type ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import type { WebSocket } from 'ws';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
+
+// Termdock metadata constants used to populate tmux user options
+// (`@termdock-*`) so external tools (e.g. `termdock --tls`) can identify
+// and describe termdock-managed tmux sessions without contacting the server.
+const TERMDOCK_VERSION: string = (() => {
+  try {
+    const require_ = createRequire(import.meta.url);
+    // dist/server/routes/terminal.js → ../../../package.json
+    const pkg = require_(path.join(__dirname || '', '..', '..', '..', 'package.json'));
+    if (typeof pkg?.version === 'string') return pkg.version;
+  } catch { /* fall through */ }
+  try {
+    const require_ = createRequire(import.meta.url);
+    const pkg = require_('../../../package.json');
+    if (typeof pkg?.version === 'string') return pkg.version;
+  } catch { /* ignore */ }
+  return '0.0.0';
+})();
+const TERMDOCK_HOST = os.hostname();
+const TERMDOCK_PID = String(process.pid);
 
 // WebSocket clients per session (separate from SSE clients).
 const wsClients = new Map<string, Map<string, WebSocket>>();
@@ -28,6 +50,7 @@ interface TmuxPane {
   left: number;
   command: string;
   title: string;
+  currentPath: string;
 }
 
 interface TmuxWindow {
@@ -110,6 +133,7 @@ interface TerminalSession {
 interface PersistedClientSession {
   sessionId: string;
   name: string;
+  customName?: boolean;
   backendSessionId: string | null;
   mode: TerminalMode;
   tmuxSessionName: string | null;
@@ -257,6 +281,44 @@ loadClientStatesFromDisk();
   if (changed) schedulePersistClientStates();
 })();
 
+// On boot, backfill termdock metadata onto every tmux session referenced by
+// the persisted client states. Lets `termdock --tls` work the first time
+// after upgrading from a version that didn't write `@termdock-*`.
+// Dynamic fields (label/program/cwd/last-active-at) are intentionally left
+// for the per-session polling to fill in lazily.
+void (async () => {
+  const seen = new Set<string>();
+  for (const state of clientTerminalStates.values()) {
+    for (const s of state.sessions) {
+      if (s.mode !== 'tmux' || !s.tmuxSessionName) continue;
+      if (seen.has(s.tmuxSessionName)) continue;
+      seen.add(s.tmuxSessionName);
+      try {
+        if (!(await tmuxSessionExists(s.tmuxSessionName))) continue;
+
+        const baseOptions: Record<string, string> = {
+          '@termdock-version': TERMDOCK_VERSION,
+          '@termdock-host': TERMDOCK_HOST,
+          '@termdock-pid': TERMDOCK_PID,
+        };
+        const existingCreatedAt = await getTmuxOption(s.tmuxSessionName, '@termdock-created-at');
+        if (!existingCreatedAt) {
+          baseOptions['@termdock-created-at'] = String(Date.now());
+        }
+        await setTmuxOptions(s.tmuxSessionName, baseOptions);
+
+        if (s.customName === true && typeof s.name === 'string' && s.name.trim().length > 0) {
+          await setTmuxOption(s.tmuxSessionName, '@termdock-friendly-name', s.name);
+        }
+      } catch (error) {
+        console.warn(
+          `[tmux] failed to backfill metadata on ${s.tmuxSessionName}: ${getErrorMessage(error)}`,
+        );
+      }
+    }
+  }
+})();
+
 // ── end persistence ──
 
 // ── Toolbar presets persistence (shared across all clients) ──
@@ -391,6 +453,7 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
   return {
     sessionId: candidate.sessionId,
     name: candidate.name,
+    customName: candidate.customName === true ? true : undefined,
     backendSessionId: typeof candidate.backendSessionId === 'string' && candidate.backendSessionId.trim().length > 0
       ? candidate.backendSessionId
       : null,
@@ -708,6 +771,71 @@ async function disableTmuxStatus(sessionName: string): Promise<void> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+// ── tmux user-option helpers (`@termdock-*`) ──
+//
+// We use tmux user options to attach termdock metadata (program/cwd/label/
+// friendly-name/client-count/etc.) to each managed session. They live with the
+// session, propagate across attaches, and never affect session-name addressing.
+// Failures are non-fatal — we only warn once per call site so a transient tmux
+// hiccup never blocks layout broadcast or session creation.
+
+async function setTmuxOption(sessionName: string, key: string, value: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await runTmux(['set-option', '-t', sessionName, key, value]);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+  }
+  console.warn(
+    `[tmux] failed to set option ${key} on ${sessionName}: ${getErrorMessage(lastError)}`,
+  );
+}
+
+async function setTmuxOptions(
+  sessionName: string,
+  options: Record<string, string>,
+): Promise<void> {
+  await Promise.all(
+    Object.entries(options).map(([key, value]) => setTmuxOption(sessionName, key, value)),
+  );
+}
+
+async function unsetTmuxOption(sessionName: string, key: string): Promise<void> {
+  try {
+    await runTmux(['set-option', '-t', sessionName, '-u', key]);
+  } catch (error) {
+    console.warn(
+      `[tmux] failed to unset option ${key} on ${sessionName}: ${getErrorMessage(error)}`,
+    );
+  }
+}
+
+async function getTmuxOption(sessionName: string, key: string): Promise<string | null> {
+  try {
+    const value = (await runTmux(['show-option', '-vqt', sessionName, key])).trim();
+    return value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function tmuxSessionExists(sessionName: string): Promise<boolean> {
+  try {
+    await runTmux(['has-session', '-t', sessionName]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ── end tmux user-option helpers ──
+
 async function captureTmuxPane(sessionName: string): Promise<string> {
   let lastError: unknown;
 
@@ -872,6 +1000,125 @@ function getActiveProgramFromTmuxLayout(layout: TmuxLayout): { command: string |
   };
 }
 
+function getCwdFromTmuxLayout(layout: TmuxLayout): string | null {
+  const activeWindow = layout.windows.find((window) => window.id === layout.activeWindowId);
+  const activePane = activeWindow?.panes.find((pane) => pane.id === layout.activePaneId);
+  return activePane?.currentPath || null;
+}
+
+// ── label builder (mirrors the frontend `getTabDisplayLines` semantics) ──
+//
+// Used to populate the `@termdock-label` tmux user option so external tools
+// (e.g. `termdock --tls`) can show a meaningful one-line summary that matches
+// what the user sees on the tab in the browser.
+
+const SHELL_NAMES_BACKEND = new Set([
+  'bash',
+  'zsh',
+  'fish',
+  'sh',
+  'dash',
+  'ksh',
+  'tcsh',
+  'csh',
+  'nu',
+]);
+
+function getCwdLeafBackend(cwd: string | null | undefined): string | null {
+  if (!cwd) return null;
+  const trimmed = cwd.trim();
+  if (!trimmed) return null;
+  if (trimmed === '/') return '/';
+  const normalized = trimmed.replace(/[\\/]+$/, '');
+  if (!normalized) return '/';
+  const segments = normalized.split(/[\\/]/).filter(Boolean);
+  const leaf = segments[segments.length - 1];
+  return leaf && leaf.length > 0 ? leaf : trimmed;
+}
+
+function buildTermdockLabel(input: {
+  friendlyName: string | null;
+  program: string | null;
+  cwd: string | null;
+  sessionName: string;
+}): string {
+  const friendly = input.friendlyName?.trim();
+  if (friendly) return friendly;
+
+  const program = input.program?.trim();
+  const dir = getCwdLeafBackend(input.cwd);
+
+  if (program && !SHELL_NAMES_BACKEND.has(program)) {
+    return dir ? `${program} · ${dir}` : program;
+  }
+
+  if (dir) return dir;
+  return input.sessionName;
+}
+
+// Walk all client states to find a friendly (custom) name for a given
+// tmux session. The first hit wins — `customName` is per-client but in
+// practice everybody renaming the same tmux session converges on the
+// same name, and any name is better than falling back to the raw id.
+function findFriendlyNameForTmuxSession(tmuxSessionName: string): string | null {
+  for (const state of clientTerminalStates.values()) {
+    for (const s of state.sessions) {
+      if (
+        s.mode === 'tmux' &&
+        s.tmuxSessionName === tmuxSessionName &&
+        s.customName === true &&
+        typeof s.name === 'string' &&
+        s.name.trim().length > 0
+      ) {
+        return s.name;
+      }
+    }
+  }
+  return null;
+}
+
+// Push the latest dynamic metadata (program / cwd / label / last-active-at)
+// onto the tmux session as user options. Caller passes the previous label
+// and last-active-write timestamp so repeated polls with no change skip the
+// tmux write entirely. Returns the new (label, last-active-write) pair.
+const TERMDOCK_LAST_ACTIVE_REFRESH_MS = 30_000;
+
+function syncDynamicTmuxMetadata(input: {
+  tmuxSessionName: string;
+  program: string | null;
+  cwd: string | null;
+  previousLabel: string | null;
+  lastActiveWriteAt: number;
+}): { label: string; lastActiveWriteAt: number } {
+  const { tmuxSessionName, program, cwd, previousLabel, lastActiveWriteAt } = input;
+  const friendlyName = findFriendlyNameForTmuxSession(tmuxSessionName);
+  const label = buildTermdockLabel({
+    friendlyName,
+    program,
+    cwd,
+    sessionName: tmuxSessionName,
+  });
+  const now = Date.now();
+
+  if (label === previousLabel) {
+    // Cheap path: refresh last-active-at at most every 30 s so external
+    // tools see the session as alive without flooding tmux every 500 ms.
+    if (now - lastActiveWriteAt >= TERMDOCK_LAST_ACTIVE_REFRESH_MS) {
+      void setTmuxOption(tmuxSessionName, '@termdock-last-active-at', String(now));
+      return { label, lastActiveWriteAt: now };
+    }
+    return { label, lastActiveWriteAt };
+  }
+
+  void setTmuxOptions(tmuxSessionName, {
+    '@termdock-label': label,
+    '@termdock-program': program ?? '',
+    '@termdock-cwd': cwd ?? '',
+    '@termdock-last-active-at': String(now),
+  });
+  return { label, lastActiveWriteAt: now };
+}
+
 async function detectShellActiveProgram(session: TerminalSession): Promise<{
   command: string | null;
   source: 'shell-tty' | 'shell-pid' | 'unknown';
@@ -1033,16 +1280,16 @@ async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
       '-t',
       windowId,
       '-F',
-      `#{pane_id}${TMUX_DELIMITER}#{pane_index}${TMUX_DELIMITER}#{pane_active}${TMUX_DELIMITER}#{pane_width}${TMUX_DELIMITER}#{pane_height}${TMUX_DELIMITER}#{pane_top}${TMUX_DELIMITER}#{pane_left}${TMUX_DELIMITER}#{pane_current_command}${TMUX_DELIMITER}#{pane_title}`,
+      `#{pane_id}${TMUX_DELIMITER}#{pane_index}${TMUX_DELIMITER}#{pane_active}${TMUX_DELIMITER}#{pane_width}${TMUX_DELIMITER}#{pane_height}${TMUX_DELIMITER}#{pane_top}${TMUX_DELIMITER}#{pane_left}${TMUX_DELIMITER}#{pane_current_command}${TMUX_DELIMITER}#{pane_title}${TMUX_DELIMITER}#{pane_current_path}`,
     ]);
 
     const panes: TmuxPane[] = panesRaw.trim().split('\n').filter(Boolean).map((paneLine) => {
-      const paneRow = parseDelimitedRow(paneLine, 9);
+      const paneRow = parseDelimitedRow(paneLine, 10);
       if (!paneRow) {
         return null;
       }
 
-      const [paneId, paneIndexRaw, paneActiveRaw, widthRaw, heightRaw, topRaw, leftRaw, command, title] = paneRow;
+      const [paneId, paneIndexRaw, paneActiveRaw, widthRaw, heightRaw, topRaw, leftRaw, command, title, currentPath] = paneRow;
       return {
         id: paneId,
         index: parseInt(paneIndexRaw || '0', 10),
@@ -1053,6 +1300,7 @@ async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
         left: parseInt(leftRaw || '0', 10),
         command: command || '',
         title: title || '',
+        currentPath: currentPath || '',
       } as TmuxPane;
     }).filter((pane): pane is TmuxPane => pane !== null);
 
@@ -1173,6 +1421,18 @@ function getTotalClients(sessionId: string): number {
   return count;
 }
 
+// Mirror the current SSE+WS client count onto the session's tmux user
+// option `@termdock-client-count`. No-op for shell sessions.
+function syncClientCountToTmux(sessionId: string): void {
+  const session = terminalSessions.get(sessionId);
+  if (!session || session.mode !== 'tmux' || !session.tmuxSessionName) return;
+  void setTmuxOption(
+    session.tmuxSessionName,
+    '@termdock-client-count',
+    String(getTotalClients(sessionId)),
+  );
+}
+
 function sessionIsOrphaned(sessionId: string): boolean {
   const session = terminalSessions.get(sessionId);
   if (!session) return true;
@@ -1191,6 +1451,7 @@ function closeClient(session: TerminalSession, sessionId: string, clientId: stri
   if (sessionIsOrphaned(sessionId)) {
     session.lastDetachedAt = Date.now();
   }
+  syncClientCountToTmux(sessionId);
 
   try {
     client.end();
@@ -1420,6 +1681,23 @@ async function spawnTerminalSession(req: express.Request, input: {
     } catch (error) {
       console.warn(`Failed to configure tmux wheel bindings: ${getErrorMessage(error)}`);
     }
+
+    // Stamp termdock metadata as tmux user options so external tools (e.g.
+    // `termdock --tls`) can identify and describe this session.
+    void (async () => {
+      const baseOptions: Record<string, string> = {
+        '@termdock-version': TERMDOCK_VERSION,
+        '@termdock-host': TERMDOCK_HOST,
+        '@termdock-pid': TERMDOCK_PID,
+      };
+      // Preserve `@termdock-created-at` if a previous termdock instance
+      // already stamped it on this tmux session.
+      const existingCreatedAt = await getTmuxOption(tmuxSessionName, '@termdock-created-at');
+      if (!existingCreatedAt) {
+        baseOptions['@termdock-created-at'] = String(Date.now());
+      }
+      await setTmuxOptions(tmuxSessionName, baseOptions);
+    })();
 
     // Spawn a persistent control-mode connection so scroll commands
     // don't pay execFile process-spawn overhead on every frame.
@@ -1703,9 +1981,39 @@ router.put('/client-state', (req, res) => {
     return res.status(500).json({ error: 'Client identity is not available' });
   }
 
+  const previousState = clientTerminalStates.get(clientId);
   const state = normalizeClientTerminalState(req.body);
   clientTerminalStates.set(clientId, state);
   schedulePersistClientStates();
+
+  // Sync friendly-name to tmux user options for any tmux session whose
+  // customName flag flipped, or whose name changed while customName=true.
+  // Only fires for tmux-mode sessions; shell sessions have no tmux to write to.
+  void (async () => {
+    const previousByTmux = new Map<string, PersistedClientSession>();
+    if (previousState) {
+      for (const s of previousState.sessions) {
+        if (s.mode === 'tmux' && s.tmuxSessionName) {
+          previousByTmux.set(s.tmuxSessionName, s);
+        }
+      }
+    }
+
+    for (const session of state.sessions) {
+      if (session.mode !== 'tmux' || !session.tmuxSessionName) continue;
+      const prev = previousByTmux.get(session.tmuxSessionName);
+      const wasCustom = prev?.customName === true;
+      const isCustom = session.customName === true;
+      const nameChanged = prev?.name !== session.name;
+
+      if (isCustom && (!wasCustom || nameChanged)) {
+        await setTmuxOption(session.tmuxSessionName, '@termdock-friendly-name', session.name);
+      } else if (!isCustom && wasCustom) {
+        await unsetTmuxOption(session.tmuxSessionName, '@termdock-friendly-name');
+      }
+    }
+  })();
+
   res.json(state);
 });
 
@@ -1746,6 +2054,13 @@ router.post('/create', async (req, res) => {
       for (const [id, s] of terminalSessions.entries()) {
         if (s.mode === 'tmux' && s.tmuxSessionName === normalizedTmuxName) {
           console.log(`Reusing existing terminal session ${id} for tmux:${normalizedTmuxName}`);
+          // Refresh host/pid/version on reuse so a restarted server claims the
+          // session in tmux user options; created-at is left untouched.
+          void setTmuxOptions(normalizedTmuxName, {
+            '@termdock-version': TERMDOCK_VERSION,
+            '@termdock-host': TERMDOCK_HOST,
+            '@termdock-pid': TERMDOCK_PID,
+          });
           return res.json({
             sessionId: id,
             mode: s.mode,
@@ -1817,6 +2132,7 @@ router.get('/:sessionId/stream', async (req, res) => {
   session.clients.set(clientId, res);
   session.lastActivity = Date.now();
   session.lastDetachedAt = null;
+  syncClientCountToTmux(sessionId);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const runtime = (globalThis as any).Bun ? 'bun' : 'node';
@@ -1836,6 +2152,8 @@ router.get('/:sessionId/stream', async (req, res) => {
   let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
   let lastTmuxLayoutSnapshot = '';
   let lastActiveProgramSnapshot = JSON.stringify(session.activeProgram ?? null);
+  let lastTmuxMetaLabel: string | null = null;
+  let lastTmuxMetaWriteAt = 0;
 
   const maybeWriteActiveProgram = (activeProgram: TerminalSession['activeProgram']) => {
     const snapshot = JSON.stringify(activeProgram ?? null);
@@ -1845,6 +2163,9 @@ router.get('/:sessionId/stream', async (req, res) => {
 
     lastActiveProgramSnapshot = snapshot;
     session.activeProgram = activeProgram;
+    console.log(
+      `[active-program][shell-sse] session=${sessionId} client=${clientId} cmd=${activeProgram?.command ?? null} source=${activeProgram?.source ?? null}`,
+    );
     writeSse(res, {
       type: 'active-program',
       activeProgram: activeProgram?.command ?? null,
@@ -1860,6 +2181,24 @@ router.get('/:sessionId/stream', async (req, res) => {
     try {
       const layout = await getTmuxLayout(session.tmuxSessionName);
       maybeWriteActiveProgram(getActiveProgramFromTmuxLayout(layout));
+      const newCwd = getCwdFromTmuxLayout(layout);
+      if (newCwd && newCwd !== session.cwd) {
+        session.cwd = newCwd;
+        console.log(`[tmux-cwd][sse] session=${sessionId} cwd=${newCwd}`);
+        writeSse(res, { type: 'cwd', cwd: newCwd });
+      }
+      // Mirror dynamic metadata onto tmux user options (cheap when nothing
+      // changed thanks to the label cache).
+      const meta = syncDynamicTmuxMetadata({
+        tmuxSessionName: session.tmuxSessionName,
+        program: session.activeProgram?.command ?? null,
+        cwd: session.cwd ?? null,
+        previousLabel: lastTmuxMetaLabel,
+        lastActiveWriteAt: lastTmuxMetaWriteAt,
+      });
+      lastTmuxMetaLabel = meta.label;
+      lastTmuxMetaWriteAt = meta.lastActiveWriteAt;
+
       const snapshot = JSON.stringify(layout);
       if (snapshot === lastTmuxLayoutSnapshot) {
         return;
@@ -2400,6 +2739,7 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
   clients.set(clientId, ws);
   session.lastActivity = Date.now();
   session.lastDetachedAt = null;
+  syncClientCountToTmux(sessionId);
 
   void (async () => {
     // 连接时立即检测一次 activeProgram，避免前端首次显示闪烁
@@ -2435,6 +2775,8 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
   if (session.mode === 'tmux' && session.tmuxSessionName) {
     let lastTmuxLayoutSnapshot = '';
     let lastActiveProgramSnapshot = JSON.stringify(session.activeProgram ?? null);
+    let lastTmuxMetaLabel: string | null = null;
+    let lastTmuxMetaWriteAt = 0;
 
     const sendTmuxLayout = async () => {
       if (ws.readyState !== ws.OPEN) return;
@@ -2452,6 +2794,24 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
             activeProgramSource: ap?.source ?? null,
           }));
         }
+        // Update cwd from active pane
+        const newCwd = getCwdFromTmuxLayout(layout);
+        if (newCwd && newCwd !== session.cwd) {
+          session.cwd = newCwd;
+          console.log(`[tmux-cwd][ws] session=${sessionId} cwd=${newCwd}`);
+          ws.send(JSON.stringify({ type: 'cwd', cwd: newCwd }));
+        }
+        // Mirror dynamic metadata onto tmux user options.
+        const meta = syncDynamicTmuxMetadata({
+          tmuxSessionName: session.tmuxSessionName!,
+          program: session.activeProgram?.command ?? null,
+          cwd: session.cwd ?? null,
+          previousLabel: lastTmuxMetaLabel,
+          lastActiveWriteAt: lastTmuxMetaWriteAt,
+        });
+        lastTmuxMetaLabel = meta.label;
+        lastTmuxMetaWriteAt = meta.lastActiveWriteAt;
+
         const snapshot = JSON.stringify(layout);
         if (snapshot !== lastTmuxLayoutSnapshot) {
           lastTmuxLayoutSnapshot = snapshot;
@@ -2562,6 +2922,7 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
         }
       }
     }
+    syncClientCountToTmux(sessionId);
   });
 
   ws.on('error', () => {

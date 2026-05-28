@@ -14,6 +14,7 @@ import {
   splitButtonsIntoRows,
   type ToolbarPresetDefinition,
 } from '../terminal/mobileKeyboardPresets';
+import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from '../terminal/PresetModeButton';
 
 interface ToolbarPresetSettingsProps {
   presets: ToolbarPresetDefinition[];
@@ -186,8 +187,8 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
   }
 
   const hasCustomActions = selectedPreset.actions.length > 0;
-  const previewItems = [
-    { id: 'preview-auto', label: 'Auto' },
+  const previewItems: Array<{ id: string; label: string; kind?: 'preset' }> = [
+    { id: 'preview-auto', label: selectedPreset.label, kind: 'preset' },
     ...(selectedPreset.includeAlt ? [{ id: 'preview-alt', label: 'Alt' }] : []),
     ...(hasCustomActions
       ? selectedPreset.actions.map((action, index) => ({ id: action.id, label: getToolbarActionLabel(action, index) }))
@@ -221,17 +222,34 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
           </span>
         </div>
         <div className="space-y-1 rounded-2xl bg-surface-2/60 p-2">
-          {previewRows.map((row, rowIndex) => (
-            <div
-              key={`preview-row-${rowIndex}`}
-              className="grid gap-1"
-              style={{ gridTemplateColumns: `repeat(${Math.max(2, row.columns)}, minmax(0, 1fr))` }}
-            >
-              {row.items.map((item) => (
-                <PreviewButton key={item.id} label={item.label} />
-              ))}
-            </div>
-          ))}
+          {previewRows.map((row, rowIndex) => {
+            const hasPresetSlot = row.items[0]?.kind === 'preset';
+            const baseCols = Math.max(2, row.columns);
+            const gridTemplateColumns = hasPresetSlot
+              ? `${PRESET_MODE_BUTTON_SIZE_PX}px repeat(${Math.max(1, baseCols - 1)}, minmax(0, 1fr))`
+              : `repeat(${baseCols}, minmax(0, 1fr))`;
+            return (
+              <div
+                key={`preview-row-${rowIndex}`}
+                className="grid gap-1"
+                style={{ gridTemplateColumns }}
+              >
+                {row.items.map((item) =>
+                  item.kind === 'preset' ? (
+                    <PresetModeButton
+                      key={item.id}
+                      mode="auto"
+                      presetLabel={item.label}
+                      title={`Auto preset · ${item.label}`}
+                      disabled
+                    />
+                  ) : (
+                    <PreviewButton key={item.id} label={item.label} />
+                  ),
+                )}
+              </div>
+            );
+          })}
         </div>
         {selectedPreset.actions.length > totalCapacity - reservedSlots && (
           <p className="mt-1.5 text-[10px] text-muted-foreground">

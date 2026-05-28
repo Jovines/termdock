@@ -59,19 +59,27 @@ function getSessionModeLabel(mode: 'shell' | 'tmux'): string {
 
 const SHELL_NAMES = new Set(['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu']);
 
-function getTabDisplayName(
+function getCwdLeafName(cwd: string | null): string | null {
+  if (!cwd) return null;
+  if (cwd === '/') return '/';
+  const segments = cwd.replace(/\/+$/, '').split('/');
+  return segments[segments.length - 1] || cwd;
+}
+
+function getTabDisplayLines(
   session: { name: string; customName?: boolean },
   activeProgram: string | null,
   cwd: string | null,
-): string {
-  if (session.customName) return session.name;
-  if (activeProgram && !SHELL_NAMES.has(activeProgram)) return activeProgram;
-  if (cwd) {
-    if (cwd === '/') return '/';
-    const segments = cwd.replace(/\/+$/, '').split('/');
-    return segments[segments.length - 1] || cwd;
+): { primary: string; secondary: string | null } {
+  if (session.customName) return { primary: session.name, secondary: null };
+  // 打开了非 shell 程序时：第一行程序名，第二行当前目录名
+  if (activeProgram && !SHELL_NAMES.has(activeProgram)) {
+    return { primary: activeProgram, secondary: getCwdLeafName(cwd) };
   }
-  return session.name;
+  // 否则回落到目录名 / session.name
+  const dir = getCwdLeafName(cwd);
+  if (dir) return { primary: dir, secondary: null };
+  return { primary: session.name, secondary: null };
 }
 
 function App() {
@@ -486,14 +494,18 @@ function App() {
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="mx-auto flex h-full w-full max-w-[1440px] min-h-0 flex-col overflow-visible bg-background">
           <div
-            className="flex h-6 shrink-0 items-center justify-between gap-1.5 bg-background px-1.5 sm:h-7 sm:px-2"
+            className="flex min-h-6 shrink-0 items-center justify-between gap-1.5 bg-background px-1.5 sm:min-h-7 sm:px-2"
           >
             <div className="scrollbar-thin flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
               {sessions.map((session) => {
                 const isActive = session.id === activeSessionId;
                 const isEditing = session.id === editingSessionId;
                 const ts = terminalSessions.get(session.id);
-                const displayName = getTabDisplayName(session, ts?.activeProgram ?? null, ts?.cwd ?? null);
+                const { primary: displayName, secondary: displaySubName } = getTabDisplayLines(
+                  session,
+                  ts?.activeProgram ?? null,
+                  ts?.cwd ?? null,
+                );
                 const tooltip = ts?.cwd || session.name;
 
                 if (isEditing) {
@@ -533,7 +545,7 @@ function App() {
                     type="button"
                     onClick={() => handleTabClick(session.id)}
                     onDoubleClick={() => setEditingSessionId(session.id)}
-                    className={`inline-flex items-center shrink-0 truncate rounded-full px-2 py-0.5 text-[11px] transition max-w-[14rem] ${
+                    className={`inline-flex items-center shrink-0 truncate rounded-full px-2 py-0.5 text-[11px] leading-tight transition max-w-[14rem] ${
                       isActive
                         ? 'bg-surface-elevated text-foreground'
                         : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
@@ -547,7 +559,16 @@ function App() {
                           className={`shrink-0 ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}
                         />
                       )}
-                      <span className="truncate">{displayName}</span>
+                      {displaySubName ? (
+                        <span className="flex min-w-0 flex-col leading-tight">
+                          <span className="truncate">{displayName}</span>
+                          <span className="truncate text-[9px] text-muted-foreground">
+                            {displaySubName}
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="truncate">{displayName}</span>
+                      )}
                     </span>
                   </button>
                 );
@@ -703,7 +724,11 @@ function App() {
                       <div className="space-y-2">
                         {sessions.map((session) => {
                           const ts = terminalSessions.get(session.id);
-                          const display = getTabDisplayName(session, ts?.activeProgram ?? null, ts?.cwd ?? null);
+                          const { primary: display } = getTabDisplayLines(
+                            session,
+                            ts?.activeProgram ?? null,
+                            ts?.cwd ?? null,
+                          );
                           const isActive = session.id === activeSessionId;
                           return (
                             <div

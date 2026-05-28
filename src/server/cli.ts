@@ -4,9 +4,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import readline from 'readline';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
+import { promisify } from 'util';
 import { Writable } from 'stream';
-import { startServer } from './entry.js';
 import { PORT, DEFAULT_HOST } from './config.js';
 import {
   clearAuthFile,
@@ -15,6 +15,8 @@ import {
   isAuthEnabled,
   writeAuthFile,
 } from './utils/authProtection.js';
+
+const execFileAsync = promisify(execFile);
 
 const stateDir = path.join(os.homedir(), '.termdock');
 const stateFilePath = path.join(stateDir, 'server.json');
@@ -57,6 +59,11 @@ interface CliOptions {
   stop: boolean;
   setPassword: boolean;
   clearPassword: boolean;
+  tls: boolean;
+  tlsAll: boolean;
+  tlsJson: boolean;
+  attachTmux: boolean;
+  attachTmuxName?: string;
 }
 
 interface ServerState {
@@ -78,6 +85,13 @@ Options:
   --stop             Stop the background server
   --set-password     Set or update the access password (interactive prompt)
   --clear-password   Remove the access password and disable authentication
+  --tls              List termdock-managed tmux sessions (reads tmux directly,
+                     no server connection required)
+  -a, --all          With --tls: include tmux sessions not stamped by termdock
+  --json             With --tls: emit JSON instead of a table
+  --attach-tmux [n]  Attach to a termdock-managed tmux session.
+                     With no name: interactive picker.
+                     With name: attach directly (e.g. --attach-tmux wt-foo).
   -h, --help         Show this help message
 
 Password examples:
@@ -161,6 +175,19 @@ function parseArgs(argv: string[]): CliOptions {
   let stop = false;
   let setPassword = false;
   let clearPassword = false;
+  let tls = false;
+  let tlsAll = false;
+  let tlsJson = false;
+  let attachTmux = false;
+  let attachTmuxName: string | undefined;
+
+  // Allow `termdock tls` as shorthand for `termdock --tls`. Only honour the
+  // bare token when it's the first argument so we don't accidentally swallow
+  // a literal value somewhere down the line.
+  if (argv[0] === 'tls') {
+    tls = true;
+    argv = argv.slice(1);
+  }
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -213,12 +240,37 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === '--tls') {
+      tls = true;
+      continue;
+    }
+
+    if (arg === '-a' || arg === '--all') {
+      tlsAll = true;
+      continue;
+    }
+
+    if (arg === '--json') {
+      tlsJson = true;
+      continue;
+    }
+
+    if (arg === '--attach-tmux') {
+      attachTmux = true;
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        attachTmuxName = next;
+        index += 1;
+      }
+      continue;
+    }
+
     console.error(`${ICON.err} ${c.red(`Unknown argument: ${arg}`)}`);
     printHelp();
     process.exit(1);
   }
 
-  return { host, port, foreground, status, stop, setPassword, clearPassword };
+  return { host, port, foreground, status, stop, setPassword, clearPassword, tls, tlsAll, tlsJson, attachTmux, attachTmuxName };
 }
 
 // Reads a single line from stdin without echoing keystrokes. Used for password
@@ -372,7 +424,298 @@ function warnIfAuthDisabled(host: string): void {
   console.log('');
 }
 
+// ── `termdock --tls` (a.k.a `termdock tls`) ──
+// Reads termdock metadata directly out of tmux user options. Does not contact
+// the termdock server, so it works over plain ssh on any machine that has
+// termdock-managed tmux sessions on it (even if the termdock daemon is down).
+
+interface TlsRow {
+  name: string;
+  friendlyName: string;
+  program: string;
+  cwd: string;
+  label: string;
+  clientCount: string;
+  host: string;
+  pid: string;
+  version: string;
+  createdAt: string;
+  lastActiveAt: string;
+}
+
+const TLS_FIELDS: Array<keyof TlsRow | 'name'> = [
+  'name',
+  'friendlyName',
+  'program',
+  'cwd',
+  'label',
+  'clientCount',
+  'host',
+  'pid',
+  'version',
+  'createdAt',
+  'lastActiveAt',
+];
+
+const TLS_FORMAT = [
+  '#{session_name}',
+  '#{@termdock-friendly-name}',
+  '#{@termdock-program}',
+  '#{@termdock-cwd}',
+  '#{@termdock-label}',
+  '#{@termdock-client-count}',
+  '#{@termdock-host}',
+  '#{@termdock-pid}',
+  '#{@termdock-version}',
+  '#{@termdock-created-at}',
+  '#{@termdock-last-active-at}',
+].join('\t');
+
+function formatIdle(lastActiveAtRaw: string): string {
+  const ts = Number(lastActiveAtRaw);
+  if (!Number.isFinite(ts) || ts <= 0) return '-';
+  const diffMs = Date.now() - ts;
+  if (diffMs < 0) return '0s';
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const days = Math.floor(hr / 24);
+  return `${days}d`;
+}
+
+function renderBlocks(rows: TlsRow[]): string {
+  const blocks: string[] = [];
+  for (const row of rows) {
+    const heading = row.label || row.friendlyName || row.name || '(unnamed)';
+    const lines: string[] = [];
+    lines.push(`${c.bold(c.cyan('●'))} ${c.bold(heading)}  ${c.dim(`(${row.name})`)}`);
+
+    const kv: Array<[string, string]> = [];
+    if (row.program) kv.push(['Program', row.program]);
+    if (row.cwd) kv.push(['CWD', row.cwd]);
+    const meta: string[] = [];
+    meta.push(`clients=${row.clientCount || '0'}`);
+    meta.push(`idle=${formatIdle(row.lastActiveAt)}`);
+    if (row.host) meta.push(`host=${row.host}`);
+    if (row.version) meta.push(`v${row.version}`);
+    kv.push(['Status', meta.join('  ')]);
+
+    const keyWidth = Math.max(...kv.map(([k]) => k.length));
+    for (const [k, v] of kv) {
+      lines.push(`  ${c.dim(k.padEnd(keyWidth))}  ${v}`);
+    }
+    blocks.push(lines.join('\n'));
+  }
+  return blocks.join('\n\n');
+}
+
+// Fetch tmux sessions with termdock metadata. Returns null if tmux is not
+// running (so callers can decide to print a friendly message and exit).
+// Hard errors (tmux missing, query failure) `process.exit(1)` directly.
+async function fetchTlsRows(): Promise<TlsRow[] | null> {
+  let stdout: string;
+  try {
+    const result = await execFileAsync('tmux', ['list-sessions', '-F', TLS_FORMAT], {
+      timeout: 5000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    stdout = result.stdout;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & { stderr?: string };
+    if (err?.code === 'ENOENT') {
+      console.error(`${ICON.err} ${c.red('tmux is not installed or not on PATH.')}`);
+      process.exit(1);
+    }
+    const stderr = (err?.stderr || '').toString().trim();
+    if (stderr.includes('no server running') || stderr.includes('no current session')) {
+      return null;
+    }
+    console.error(`${ICON.err} ${c.red('Failed to query tmux:')} ${stderr || (err?.message ?? String(err))}`);
+    process.exit(1);
+  }
+
+  return stdout
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const cols = line.split('\t');
+      const row = {} as TlsRow;
+      TLS_FIELDS.forEach((field, idx) => {
+        (row as unknown as Record<string, string>)[field] = cols[idx] ?? '';
+      });
+      return row;
+    });
+}
+
+async function runTls(opts: { all: boolean; json: boolean }): Promise<void> {
+  const allRows = await fetchTlsRows();
+  if (allRows === null) {
+    if (opts.json) {
+      process.stdout.write('[]\n');
+      return;
+    }
+    console.log(`${ICON.info} ${c.dim('No tmux server running on this host.')}`);
+    return;
+  }
+
+  const rows = opts.all ? allRows : allRows.filter((row) => row.version.length > 0);
+
+  if (opts.json) {
+    const json = rows.map((row) => ({
+      sessionName: row.name,
+      friendlyName: row.friendlyName || null,
+      program: row.program || null,
+      cwd: row.cwd || null,
+      label: row.label || null,
+      clientCount: row.clientCount ? Number(row.clientCount) : null,
+      host: row.host || null,
+      pid: row.pid ? Number(row.pid) : null,
+      version: row.version || null,
+      createdAt: row.createdAt ? Number(row.createdAt) : null,
+      lastActiveAt: row.lastActiveAt ? Number(row.lastActiveAt) : null,
+    }));
+    process.stdout.write(`${JSON.stringify(json, null, 2)}\n`);
+    return;
+  }
+
+  if (rows.length === 0) {
+    if (opts.all) {
+      console.log(`${ICON.info} ${c.dim('No tmux sessions on this host.')}`);
+    } else {
+      console.log(`${ICON.info} ${c.dim('No termdock-managed tmux sessions on this host.')}`);
+      console.log(`  ${c.dim('Use')} ${c.cyan('termdock --tls -a')} ${c.dim('to include all tmux sessions.')}`);
+    }
+    return;
+  }
+
+  console.log(renderBlocks(rows));
+}
+
+// ── end --tls ──
+
+// ── `termdock --attach-tmux [name]` ──
+//
+// Attach to a termdock-managed tmux session. If `name` is provided, attach
+// directly. Otherwise show an interactive picker that lists termdock sessions
+// (with -a, all tmux sessions). Replaces the current process with `tmux
+// attach -t <name>` so the user gets a normal tmux experience.
+
+function execTmuxAttach(sessionName: string): never {
+  // Use spawn with `stdio: 'inherit'` (not exec) so tmux owns the tty.
+  // Don't `process.exit(0)` — wait for tmux to detach, then propagate code.
+  const child = spawn('tmux', ['attach', '-t', sessionName], { stdio: 'inherit' });
+  child.on('exit', (code, signal) => {
+    if (signal) {
+      // Re-raise the signal so the parent shell sees it.
+      process.kill(process.pid, signal);
+      return;
+    }
+    process.exit(code ?? 0);
+  });
+  child.on('error', (error) => {
+    console.error(`${ICON.err} ${c.red('Failed to spawn tmux:')} ${getMessage(error)}`);
+    process.exit(1);
+  });
+  // Make TypeScript happy — we never actually return.
+  return undefined as never;
+}
+
+function getMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+async function pickTmuxSession(rows: TlsRow[]): Promise<string | null> {
+  if (rows.length === 0) return null;
+  if (rows.length === 1) {
+    const only = rows[0];
+    console.log(`${ICON.info} ${c.dim('Only one session — attaching:')} ${c.cyan(only.name)}`);
+    return only.name;
+  }
+
+  if (!process.stdin.isTTY) {
+    console.error(`${ICON.err} ${c.red('No TTY — pass a session name explicitly: termdock --attach-tmux <name>')}`);
+    return null;
+  }
+
+  console.log(c.bold('Select a tmux session to attach:'));
+  const indexWidth = String(rows.length).length;
+  rows.forEach((row, idx) => {
+    const num = c.cyan(String(idx + 1).padStart(indexWidth));
+    const heading = row.label || row.friendlyName || row.name;
+    const meta: string[] = [];
+    if (row.cwd) meta.push(row.cwd);
+    if (row.clientCount && row.clientCount !== '0') meta.push(`${row.clientCount} client(s)`);
+    const tail = meta.length > 0 ? c.dim(`  ${meta.join(' · ')}`) : '';
+    console.log(`  ${num}. ${heading} ${c.dim(`(${row.name})`)}${tail}`);
+  });
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>((resolve) => {
+    rl.question(`Choice [1-${rows.length}, q to quit]: `, (input) => {
+      rl.close();
+      resolve(input.trim());
+    });
+  });
+
+  if (!answer || answer.toLowerCase() === 'q') return null;
+  const choice = Number(answer);
+  if (!Number.isInteger(choice) || choice < 1 || choice > rows.length) {
+    console.error(`${ICON.err} ${c.red(`Invalid choice: ${answer}`)}`);
+    return null;
+  }
+  return rows[choice - 1].name;
+}
+
+async function runAttachTmux(opts: { name?: string }): Promise<void> {
+  // Direct attach when caller already knows the name.
+  if (opts.name) {
+    execTmuxAttach(opts.name);
+    return;
+  }
+
+  const allRows = await fetchTlsRows();
+  if (allRows === null) {
+    console.log(`${ICON.info} ${c.dim('No tmux server running on this host.')}`);
+    process.exit(0);
+  }
+
+  // Prefer termdock-managed sessions; fall back to all tmux sessions if
+  // none are stamped (better than refusing to attach).
+  const managed = allRows.filter((row) => row.version.length > 0);
+  const candidates = managed.length > 0 ? managed : allRows;
+
+  if (candidates.length === 0) {
+    console.log(`${ICON.info} ${c.dim('No tmux sessions on this host.')}`);
+    process.exit(0);
+  }
+
+  const picked = await pickTmuxSession(candidates);
+  if (!picked) {
+    console.log(`${ICON.info} ${c.dim('Cancelled.')}`);
+    process.exit(0);
+  }
+
+  execTmuxAttach(picked);
+}
+
+// ── end --attach-tmux ──
+
 async function main(): Promise<void> {
+  if (options.tls) {
+    await runTls({ all: options.tlsAll, json: options.tlsJson });
+    process.exit(0);
+  }
+
+  if (options.attachTmux) {
+    await runAttachTmux({ name: options.attachTmuxName });
+    return; // execTmuxAttach handles process exit
+  }
+
   if (options.setPassword) {
     await runSetPassword();
     process.exit(0);
@@ -409,6 +752,9 @@ async function main(): Promise<void> {
 
   if (options.foreground) {
     warnIfAuthDisabled(options.host ?? DEFAULT_HOST);
+    // Dynamic import keeps terminal.ts side-effects (loadClientStatesFromDisk
+    // etc.) out of fast paths like `termdock --tls` / `--status`.
+    const { startServer } = await import('./entry.js');
     const server = startServer({ host: options.host, port: options.port });
     server.on('close', () => {
       const runningState = readState();

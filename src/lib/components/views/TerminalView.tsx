@@ -1090,20 +1090,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     [toolbarPreset.actions]
   );
   const activeProgramLabel = React.useMemo(() => normalizeActiveProgram(detectedActiveProgram), [detectedActiveProgram]);
-  const presetLabel = React.useMemo(() => {
-    if (toolbarPresetMode !== 'auto') {
-      return toolbarPreset.label;
-    }
-
-    return activeProgramLabel ? `Auto:${toolbarPreset.label}` : 'Auto';
-  }, [activeProgramLabel, toolbarPreset.label, toolbarPresetMode]);
+  const presetLabel = toolbarPreset.label;
   const presetModeLabel = React.useMemo(() => {
     if (toolbarPresetMode !== 'auto') {
       return `Manual preset: ${toolbarPreset.label}`;
     }
 
     return activeProgramLabel
-      ? `Auto preset from ${activeProgramLabel}`
+      ? `Auto preset · ${toolbarPreset.label} (${activeProgramLabel})`
       : 'Auto preset';
   }, [activeProgramLabel, toolbarPreset.label, toolbarPresetMode]);
   const handlePresetSelect = React.useCallback((mode: ToolbarPresetMode) => {
