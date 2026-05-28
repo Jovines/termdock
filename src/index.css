@@ -48,6 +48,17 @@ body {
   overscroll-behavior: none;
 }
 
+/* Prevent iOS Safari from auto-zooming the page when focusing form fields
+   whose effective font-size is below 16px. We force a 16px floor on touch
+   devices only, so desktop layouts keep their compact sizes. */
+@media (hover: none) and (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
 #root {
   height: var(--app-vh, 100vh);
   width: 100vw;
