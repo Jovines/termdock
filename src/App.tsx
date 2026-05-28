@@ -17,12 +17,11 @@ import {
   GripVertical,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
-import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
-import type { CleanupDurationPreset, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
+import type { TmuxSessionSummary, TmuxStatus, AgentStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings } from './lib/terminal/api';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
@@ -30,30 +29,6 @@ import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSe
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 
 type DrawerTab = 'sessions' | 'new' | 'tmux' | 'settings';
-
-const KEEPALIVE_PRESETS: Array<{ value: CleanupDurationPreset | 'custom'; label: string; ms: number | null }> = [
-  { value: 'never', label: 'Never', ms: null },
-  { value: '30min', label: '30m', ms: 30 * 60 * 1000 },
-  { value: '1hour', label: '1h', ms: 60 * 60 * 1000 },
-  { value: '2hours', label: '2h', ms: 2 * 60 * 60 * 1000 },
-  { value: '3hours', label: '3h', ms: 3 * 60 * 60 * 1000 },
-  { value: '1day', label: '1d', ms: 24 * 60 * 60 * 1000 },
-  { value: 'custom', label: 'Custom', ms: null },
-];
-
-function formatKeepAliveLabel(ms: number | null): string {
-  if (ms === null) return 'Never';
-  const minutes = Math.round(ms / 60000);
-  if (minutes >= 60 * 24) return `${Math.round(minutes / 60 / 24)}d`;
-  if (minutes >= 60) return `${Math.round(minutes / 60)}h`;
-  return `${minutes}m`;
-}
-
-function getPresetByDuration(ms: number | null): CleanupDurationPreset | 'custom' {
-  if (ms === null) return 'never';
-  const matched = KEEPALIVE_PRESETS.find((preset) => preset.ms === ms);
-  return (matched?.value ?? 'custom') as CleanupDurationPreset | 'custom';
-}
 
 function getSessionModeLabel(mode: 'shell' | 'tmux'): string {
   return mode === 'tmux' ? 'tmux' : 'shell';
@@ -82,6 +57,21 @@ function getTabDisplayLines(
   const dir = getCwdLeafName(cwd);
   if (dir) return { primary: dir, secondary: null };
   return { primary: session.name, secondary: null };
+}
+
+function AgentStatusDot({ status }: { status: AgentStatus | null }) {
+  if (!status) return null;
+  const color = status === 'thinking'
+    ? 'bg-green-400'
+    : status === 'waiting-input'
+    ? 'bg-yellow-400'
+    : 'bg-muted-foreground/50';
+  return (
+    <span
+      className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${color}`}
+      title={status === 'thinking' ? 'AI thinking...' : status === 'waiting-input' ? 'AI waiting for input' : 'AI idle'}
+    />
+  );
 }
 
 function App() {
@@ -132,24 +122,12 @@ function App() {
   }, []);
 
   const {
-    cleanupDurationMs,
-    cleanupDurationPreset,
-    customDurationMs,
-    setCleanupDurationPreset,
-    setCustomDuration,
-  } = useCleanupDuration();
-
-  const [customDurationInput, setCustomDurationInput] = React.useState<string>('');
-  const {
     newSessionMode,
     newSessionTmuxName,
     setNewSessionMode,
     setNewSessionTmuxName,
   } = useNewSessionDefaults();
 
-  const [activeKeepAlivePreset, setActiveKeepAlivePreset] = React.useState<CleanupDurationPreset | 'custom'>('3hours');
-  const [activeKeepAliveCustomInput, setActiveKeepAliveCustomInput] = React.useState<string>('180');
-  const [activeKeepAliveSavedAt, setActiveKeepAliveSavedAt] = React.useState<number>(0);
   const [isToolbarPresetsOpen, setIsToolbarPresetsOpen] = React.useState(false);
   // Toolbar presets are owned by the server (~/.termdock/toolbar-presets.json)
   // and shared across every browser pointing at this server. We start with the
@@ -241,14 +219,6 @@ function App() {
   }, [selectedToolbarPresetId, toolbarPresets]);
 
   useEffect(() => {
-    if (cleanupDurationPreset === 'custom' && customDurationMs !== null) {
-      setCustomDurationInput(String(Math.round(customDurationMs / 60000)));
-    } else if (cleanupDurationPreset !== 'custom') {
-      setCustomDurationInput('');
-    }
-  }, [cleanupDurationPreset, customDurationMs]);
-
-  useEffect(() => {
     if (!tmuxStatus.available && newSessionMode === 'tmux') {
       setNewSessionMode('shell');
     }
@@ -284,23 +254,11 @@ function App() {
     setDebugInfo(info);
   }, []);
 
-  const handleCustomDurationBlur = () => {
-    const minutes = parseInt(customDurationInput, 10);
-    if (isNaN(minutes) || minutes < 1) {
-      setCustomDurationInput('5');
-      setCustomDuration(5 * 60 * 1000);
-    } else if (minutes > 10080) {
-      setCustomDurationInput('10080');
-      setCustomDuration(7 * 24 * 60 * 60 * 1000);
-    }
-  };
-
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
   const activeSessionIndex = activeSessionId
     ? sessions.findIndex((session) => session.id === activeSessionId)
     : -1;
   const activeSessionModeLabel = activeSession ? getSessionModeLabel(activeSession.mode) : null;
-  const activeSessionKeepAliveLabel = activeSession ? formatKeepAliveLabel(activeSession.keepAliveMs) : null;
   const activeSessionPositionLabel = sessions.length > 0 && activeSessionIndex >= 0
     ? `${activeSessionIndex + 1}/${sessions.length}`
     : `${sessions.length}`;
@@ -308,19 +266,6 @@ function App() {
     () => new Set(sessions.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName)),
     [sessions],
   );
-
-  useEffect(() => {
-    if (!activeSession) return;
-    const preset = getPresetByDuration(activeSession.keepAliveMs);
-    setActiveKeepAlivePreset(preset);
-    if (preset === 'custom') {
-      if (activeSession.keepAliveMs === null) {
-        setActiveKeepAliveCustomInput('180');
-      } else {
-        setActiveKeepAliveCustomInput(String(Math.max(1, Math.round(activeSession.keepAliveMs / 60000))));
-      }
-    }
-  }, [activeSession?.id, activeSession?.keepAliveMs]);
 
   useEffect(() => {
     activeSessionTabRef.current?.scrollIntoView({
@@ -340,24 +285,6 @@ function App() {
     window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
   }, []);
 
-  const flashKeepAliveSaved = useCallback(() => {
-    setActiveKeepAliveSavedAt(Date.now());
-    window.setTimeout(() => {
-      setActiveKeepAliveSavedAt((current) => (Date.now() - current >= 1500 ? 0 : current));
-    }, 1600);
-  }, []);
-
-  const applyActiveSessionKeepAlive = useCallback((keepAliveMs: number | null) => {
-    if (!activeSessionId) return;
-    window.dispatchEvent(new CustomEvent('update-terminal-session-policy', {
-      detail: {
-        sessionId: activeSessionId,
-        keepAliveMs,
-      },
-    }));
-    flashKeepAliveSaved();
-  }, [activeSessionId, flashKeepAliveSaved]);
-
   const handleSessionDataUpdate = useCallback((data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => {
     setSessions(data.sessions);
     setActiveSessionId(data.activeSessionId);
@@ -370,12 +297,11 @@ function App() {
       : undefined;
     window.dispatchEvent(new CustomEvent('new-terminal-session', {
       detail: {
-        keepAliveMs: cleanupDurationMs === Infinity ? null : cleanupDurationMs,
         mode,
         tmuxSessionName,
       },
     }));
-  }, [cleanupDurationMs, newSessionMode, newSessionTmuxName]);
+  }, [newSessionMode, newSessionTmuxName]);
 
   const refreshTmuxSessions = useCallback(async () => {
     setTmuxRefreshing(true);
@@ -588,7 +514,14 @@ function App() {
                   };
 
                   return (
-                    <Draggable key={session.id} draggableId={session.id} index={index}>
+                    <React.Fragment key={session.id}>
+                      {index > 0 && (
+                        <span
+                          aria-hidden="true"
+                          className="mx-px h-3 w-px shrink-0 self-center rounded-full bg-muted-foreground/30"
+                        />
+                      )}
+                    <Draggable draggableId={session.id} index={index}>
                       {(provided) => (
                     <div
                       ref={provided.innerRef}
@@ -616,11 +549,19 @@ function App() {
                     </div>
                       )}
                     </Draggable>
+                    </React.Fragment>
                   );
                 }
 
                 return (
-                  <Draggable key={session.id} draggableId={session.id} index={index}>
+                  <React.Fragment key={session.id}>
+                    {index > 0 && (
+                      <span
+                        aria-hidden="true"
+                        className="mx-px h-3 w-px shrink-0 self-center rounded-full bg-muted-foreground/30"
+                      />
+                    )}
+                  <Draggable draggableId={session.id} index={index}>
                     {(provided, snapshot) => (
                     <div
                       ref={provided.innerRef}
@@ -641,6 +582,7 @@ function App() {
                     title={tooltip}
                   >
                     <span className="inline-flex min-w-0 items-center gap-1">
+                      <AgentStatusDot status={ts?.agentStatus ?? null} />
                       {session.mode === 'tmux' && (
                         <RiLayoutGridLine
                           size={12}
@@ -662,17 +604,13 @@ function App() {
                     </div>
                     )}
                   </Draggable>
+                  </React.Fragment>
                 );
               })}
               <div className="hidden items-center gap-1.5 pl-2 lg:flex">
                 {activeSessionModeLabel && (
                   <span className="rounded-full bg-surface-2 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
                     {activeSessionModeLabel}
-                  </span>
-                )}
-                {activeSessionKeepAliveLabel && (
-                  <span className="rounded-full bg-surface-2 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
-                    keepalive {activeSessionKeepAliveLabel}
                   </span>
                 )}
                 <span className="rounded-full bg-surface-2 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
@@ -875,7 +813,6 @@ function App() {
                                     <span className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
                                       <span>{getSessionModeLabel(session.mode)}</span>
                                       {session.tmuxSessionName && <span>· {session.tmuxSessionName}</span>}
-                                      <span>· {formatKeepAliveLabel(session.keepAliveMs)}</span>
                                     </span>
                                   </span>
                                 </button>
@@ -981,75 +918,6 @@ function App() {
                         <RiAddLine size={16} />
                         New session
                       </button>
-
-                      {activeSession && (
-                        <div className="mt-2 space-y-2 rounded-2xl bg-surface-2/60 p-3">
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <span className="ui-kicker">Active keepalive</span>
-                              <p className="text-[11px] text-muted-foreground">Auto-cleanup for the focused session.</p>
-                            </div>
-                            {activeKeepAliveSavedAt > 0 && Date.now() - activeKeepAliveSavedAt < 1500 && (
-                              <span className="inline-flex items-center gap-1 text-[11px] text-primary">
-                                <RiCheckLine size={12} /> Saved
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {KEEPALIVE_PRESETS.map((preset) => {
-                              const selected = activeKeepAlivePreset === preset.value;
-                              return (
-                                <button
-                                  key={preset.value}
-                                  type="button"
-                                  onClick={() => {
-                                    setActiveKeepAlivePreset(preset.value);
-                                    if (preset.value === 'custom') {
-                                      if (!activeKeepAliveCustomInput) {
-                                        setActiveKeepAliveCustomInput('180');
-                                      }
-                                      return;
-                                    }
-                                    applyActiveSessionKeepAlive(preset.ms);
-                                  }}
-                                  className={`rounded-full px-3 py-1.5 text-xs font-medium transition ${
-                                    selected
-                                      ? 'bg-primary/20 text-primary ring-1 ring-primary/30'
-                                      : 'bg-surface text-muted-foreground hover:bg-surface-elevated'
-                                  }`}
-                                >
-                                  {preset.label}
-                                </button>
-                              );
-                            })}
-                          </div>
-                          {activeKeepAlivePreset === 'custom' && (
-                            <div className="flex items-center gap-2">
-                              <input
-                                type="number"
-                                min="1"
-                                max="10080"
-                                value={activeKeepAliveCustomInput}
-                                onChange={(e) => setActiveKeepAliveCustomInput(e.target.value)}
-                                placeholder="Minutes"
-                                className="ui-input flex-1"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const minutes = parseInt(activeKeepAliveCustomInput, 10);
-                                  const normalized = Number.isFinite(minutes) ? Math.min(10080, Math.max(1, minutes)) : 180;
-                                  setActiveKeepAliveCustomInput(String(normalized));
-                                  applyActiveSessionKeepAlive(normalized * 60000);
-                                }}
-                                className="shrink-0 rounded-full bg-primary/15 px-4 py-2.5 text-sm font-medium text-primary hover:bg-primary/25"
-                              >
-                                Apply
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </>
                   )}
                 </div>
@@ -1076,7 +944,7 @@ function App() {
                           {newSessionMode === 'shell' && <RiCheckLine size={16} className="text-primary" />}
                         </div>
                         <p className="mt-1.5 text-[11px] text-muted-foreground">
-                          Persistent PTY with keepalive. Best default.
+                          Persistent PTY. Best default.
                         </p>
                       </button>
 
@@ -1128,41 +996,6 @@ function App() {
                       </p>
                     </div>
                   )}
-
-                  <div className="space-y-2">
-                    <span className="ui-kicker">Keepalive</span>
-                    <div className="flex flex-wrap gap-1.5">
-                      {KEEPALIVE_PRESETS.map((preset) => {
-                        const selected = cleanupDurationPreset === preset.value;
-                        return (
-                          <button
-                            key={preset.value}
-                            type="button"
-                            onClick={() => setCleanupDurationPreset(preset.value)}
-                            className={`rounded-full px-3 py-2 text-xs font-medium transition ${
-                              selected
-                                ? 'bg-primary/20 text-primary ring-1 ring-primary/30'
-                                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated'
-                            }`}
-                          >
-                            {preset.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    {cleanupDurationPreset === 'custom' && (
-                      <input
-                        type="number"
-                        min="1"
-                        max="10080"
-                        value={customDurationInput}
-                        onChange={(e) => setCustomDurationInput(e.target.value)}
-                        onBlur={handleCustomDurationBlur}
-                        placeholder="Minutes"
-                        className="ui-input mt-1 w-full"
-                      />
-                    )}
-                  </div>
 
                   <button
                     type="button"

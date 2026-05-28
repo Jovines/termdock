@@ -1,5 +1,7 @@
 export type TerminalMode = 'shell' | 'tmux';
 
+export type AgentStatus = 'thinking' | 'waiting-input' | 'idle';
+
 export interface TmuxPane {
   id: string;
   index: number;
@@ -48,8 +50,6 @@ export interface TerminalSession {
   rows: number;
   mode?: TerminalMode;
   tmuxSessionName?: string | null;
-  shouldPersist?: boolean;
-  keepAliveMs?: number | null;
   activeProgram?: string | null;
   activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   cwd?: string | null;
@@ -57,7 +57,7 @@ export interface TerminalSession {
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -71,6 +71,7 @@ export interface TerminalStreamEvent {
   tmuxSessionName?: string | null;
   activeProgram?: string | null;
   activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+  agentStatus?: AgentStatus | null;
 }
 
 // Create Session Options
@@ -79,8 +80,6 @@ export interface CreateTerminalOptions {
   rows?: number;
   mode?: TerminalMode;
   tmuxSessionName?: string;
-  shouldPersist?: boolean;
-  keepAliveMs?: number | null;
 }
 
 export interface TmuxActionPayload {
@@ -180,6 +179,7 @@ export interface TerminalSessionState {
   cwd: string | null;
   inCopyMode: boolean;
   isConnecting: boolean;
+  agentStatus: AgentStatus | null;
   buffer: string;
   bufferChunks: TerminalChunk[];
   bufferLength: number;
@@ -187,27 +187,7 @@ export interface TerminalSessionState {
   history?: string[];  // 从后端恢复的历史输出，仅 shell 模式使用
 }
 
-// 断联清理时长配置类型
-export type DisconnectCleanupDuration = number;  // 清理时长（毫秒），Infinity 表示永不清理
-
-// 预设的清理时长选项（毫秒）
-export const CLEANUP_DURATION_PRESETS = {
-  'never': Infinity,  // 永远不清理
-  'default': 3 * 60 * 60 * 1000,  // 默认3小时
-  '5min': 5 * 60 * 1000,      // 5分钟
-  '10min': 10 * 60 * 1000,    // 10分钟
-  '30min': 30 * 60 * 1000,    // 30分钟
-  '1hour': 60 * 60 * 1000,    // 1小时
-  '3hours': 3 * 60 * 60 * 1000, // 3小时
-  '2hours': 2 * 60 * 60 * 1000, // 2小时
-  '1day': 24 * 60 * 60 * 1000,  // 1天
-} as const;
-
-export type CleanupDurationPreset = keyof typeof CLEANUP_DURATION_PRESETS;
-
 // 前端设置配置
 export interface TerminalSettings {
-  cleanupDuration: DisconnectCleanupDuration;
-  cleanupDurationPreset: CleanupDurationPreset | 'custom';
   fontSize: number;  // 终端字体大小（像素）
 }

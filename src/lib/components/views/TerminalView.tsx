@@ -106,6 +106,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const setSessionActiveProgram = terminalStore.setSessionActiveProgram;
   const setSessionCwd = terminalStore.setSessionCwd;
   const setSessionCopyMode = terminalStore.setSessionCopyMode;
+  const setSessionAgentStatus = terminalStore.setSessionAgentStatus;
 
   const terminalState = React.useMemo(() => {
     if (!sessionId) return undefined;
@@ -421,6 +422,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setConnectionError(null);
                 setIsFatalError(false);
 
+                // Sync agent status from server on connect
+                if (event.agentStatus !== undefined) {
+                  setSessionAgentStatus(storeSessionId, event.agentStatus ?? null);
+                }
+
                 const sessionState = useTerminalStore.getState().getTerminalSession(storeSessionId);
                 if (sessionState?.terminalSessionId && event.mode) {
                   useTerminalStore.getState().setTerminalSession(storeSessionId, {
@@ -512,6 +518,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setSessionCwd(storeSessionId, event.cwd ?? null);
                 break;
               }
+              case 'agent-status': {
+                setSessionAgentStatus(storeSessionId, event.agentStatus ?? null);
+                break;
+              }
               case 'exit': {
                 const exitCode =
                   typeof event.exitCode === 'number' ? event.exitCode : null;
@@ -552,6 +562,23 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             if (fatal) {
               setConnecting(storeSessionId, false);
               disconnectStream();
+
+              // Session lost on server (e.g. server restart) — automatically
+              // recreate instead of making the user manually refresh.
+              if (error.message === 'Session not found on server') {
+                debugSession(`[onError] Session lost, auto-recreating`);
+                clearTerminalSession(storeSessionId);
+                clearBuffer(storeSessionId);
+                terminalIdRef.current = null;
+                // Allow ensureSession to run again
+                hasInitializedRef.current = false;
+                // Small delay to let cleanup settle, then re-init
+                setTimeout(() => {
+                  hasInitializedRef.current = false;
+                  setConnectionError(null);
+                  setIsFatalError(false);
+                }, 200);
+              }
             }
           },
         },
@@ -1089,7 +1116,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const runtimeToolbarActions = React.useMemo(
     () => toolbarPreset.actions
       .filter((action: { sequence: string }) => action.sequence.trim().length > 0)
-      .map((action: { id: string; label: string; sequence: string }, index: number) => ({
+      .map((action: { id: string; label: string; sequence: string; doubleTapSequence?: string }, index: number) => ({
         ...action,
         label: getToolbarActionLabel(action, index),
       })),

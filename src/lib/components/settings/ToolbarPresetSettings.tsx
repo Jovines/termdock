@@ -15,6 +15,7 @@ import {
   sanitizeRowLayout,
   splitButtonsIntoRows,
   tryCompileProgramRegex,
+  type MobileToolbarAction,
   type ToolbarPresetDefinition,
 } from '../terminal/mobileKeyboardPresets';
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from '../terminal/PresetModeButton';
@@ -568,6 +569,9 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                     </div>
                     <div className="truncate text-[11px] text-muted-foreground">
                       {action.sequence ? action.sequence : 'No sequence'}
+                      {action.doubleTapSequence && (
+                        <span className="ml-1 text-accent/70">· 2× {action.doubleTapSequence}</span>
+                      )}
                     </div>
                   </button>
                   <button
@@ -645,6 +649,86 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                           </button>
                         ))}
                       </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">Double-tap sequence</span>
+                        {!action.doubleTapSequence && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onUpdatePreset(selectedPreset.id, (preset) => ({
+                                ...preset,
+                                actions: preset.actions.map((item) =>
+                                  item.id === action.id ? { ...item, doubleTapSequence: '' } : item,
+                                ),
+                              }))
+                            }
+                            className="text-[10px] text-accent hover:text-accent/80"
+                          >
+                            + Add
+                          </button>
+                        )}
+                      </div>
+                      {action.doubleTapSequence !== undefined && (
+                        <>
+                          <input
+                            type="text"
+                            value={action.doubleTapSequence}
+                            onChange={(event) =>
+                              onUpdatePreset(selectedPreset.id, (preset) => ({
+                                ...preset,
+                                actions: preset.actions.map((item) =>
+                                  item.id === action.id ? { ...item, doubleTapSequence: event.target.value } : item,
+                                ),
+                              }))
+                            }
+                            className="w-full rounded-full bg-surface px-4 py-2.5 font-mono text-sm outline-none ring-1 ring-transparent focus:ring-accent/40"
+                            placeholder="e.g. /undo\r or /||undo ||\r"
+                            autoCapitalize="off"
+                            autoCorrect="off"
+                            spellCheck={false}
+                          />
+                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                            {SEQUENCE_TEMPLATES.map((template) => (
+                              <button
+                                key={template.label}
+                                type="button"
+                                onClick={() =>
+                                  onUpdatePreset(selectedPreset.id, (preset) => ({
+                                    ...preset,
+                                    actions: preset.actions.map((item) =>
+                                      item.id === action.id
+                                        ? { ...item, doubleTapSequence: (item.doubleTapSequence ?? '') + template.sequence }
+                                        : item,
+                                    ),
+                                  }))
+                                }
+                                className="rounded-full bg-surface px-2.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
+                              >
+                                {template.label}
+                              </button>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onUpdatePreset(selectedPreset.id, (preset) => ({
+                                  ...preset,
+                                  actions: preset.actions.map((item) => {
+                                    if (item.id !== action.id) return item;
+                                    const { doubleTapSequence, ...rest } = item;
+                                    return rest as MobileToolbarAction;
+                                  }),
+                                }))
+                              }
+                              className="rounded-full bg-destructive/10 px-2.5 py-1 text-[11px] font-medium text-destructive/70 hover:bg-destructive/20 hover:text-destructive"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </>
+                      )}
                     </div>
                   </div>
                 )}

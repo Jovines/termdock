@@ -115,9 +115,6 @@ interface TerminalSession {
   lastActivity: number;
   clients: Map<string, express.Response>;
   createdAt: number;
-  shouldPersist: boolean;
-  keepAliveMs: number | null;
-  lastDetachedAt: number | null;
   hasWrittenData: boolean;
   activeProgram: {
     command: string | null;
@@ -129,6 +126,10 @@ interface TerminalSession {
   tmuxControl?: TmuxControl;
   oscSniffBuf: string;
   lastOscCwd: string | null;
+  agentStatus: 'thinking' | 'waiting-input' | 'idle' | null;
+  agentLastDataAt: number;
+  agentStatusTimer: ReturnType<typeof setTimeout> | null;
+  agentLastResizeAt: number;
 }
 
 interface PersistedClientSession {
@@ -138,7 +139,6 @@ interface PersistedClientSession {
   backendSessionId: string | null;
   mode: TerminalMode;
   tmuxSessionName: string | null;
-  keepAliveMs: number | null;
   createdAt: number;
   lastActivity: number;
 }
@@ -375,9 +375,8 @@ loadToolbarPresetsFromDisk();
 
 // 开发模式下使用更激进的清理策略
 const isDevelopment = process.env.NODE_ENV === 'development';
-const TERMINAL_IDLE_TIMEOUT = parseInt(process.env.TERMINAL_IDLE_TIMEOUT || (isDevelopment ? '300000' : '1800000'), 10);
+const TERMINAL_IDLE_TIMEOUT = parseInt(process.env.TERMINAL_IDLE_TIMEOUT || (isDevelopment ? '300000' : '21600000'), 10);
 const CLEANUP_INTERVAL = isDevelopment ? 60 * 1000 : 5 * 60 * 1000;
-const DEFAULT_KEEP_ALIVE_MS = parseInt(process.env.TERMINAL_DEFAULT_KEEPALIVE_MS || String(3 * 60 * 60 * 1000), 10);
 const RECONNECT_SCROLLBACK = parseInt(process.env.TERMINAL_RECONNECT_SCROLLBACK || '200', 10);
 const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10);
 const ACTIVE_PROGRAM_POLL_INTERVAL = parseInt(process.env.TERMINAL_ACTIVE_PROGRAM_POLL_INTERVAL || '1200', 10);
@@ -422,22 +421,6 @@ function getReconnectionHistory(sessionId: string): string[] {
   return history.slice(-RECONNECT_SCROLLBACK);
 }
 
-function normalizeKeepAliveMs(input: unknown): number | null {
-  if (input === null) {
-    return null;
-  }
-
-  if (typeof input !== 'number' || !Number.isFinite(input)) {
-    return DEFAULT_KEEP_ALIVE_MS;
-  }
-
-  if (input < 1000) {
-    return 1000;
-  }
-
-  return Math.floor(input);
-}
-
 function normalizeMode(input: unknown): TerminalMode {
   return input === 'tmux' ? 'tmux' : 'shell';
 }
@@ -463,7 +446,6 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
     tmuxSessionName: typeof candidate.tmuxSessionName === 'string' && candidate.tmuxSessionName.trim().length > 0
       ? candidate.tmuxSessionName
       : null,
-    keepAliveMs: normalizeKeepAliveMs(candidate.keepAliveMs),
     createdAt: typeof candidate.createdAt === 'number' && Number.isFinite(candidate.createdAt)
       ? Math.floor(candidate.createdAt)
       : Date.now(),
@@ -986,6 +968,51 @@ function sniffCwdFromOsc(buf: string, home: string): { cwd: string | null; remai
 
 // ── end OSC sniffing ──
 
+// ── Agent status detection for AI coding tools ──
+
+const AI_TOOL_PROGRAMS = new Set(['claude', 'claude-code', 'opencode', 'coco', 'aider']);
+const AGENT_THINKING_TIMEOUT_MS = 1500;
+const AGENT_STATUS_DEBOUNCE_MS = 300;
+const AGENT_IDLE_DISPLAY_MS = 3000;
+const AGENT_RESIZE_SUPPRESS_MS = 1500;
+
+function isAiToolProgram(command: string | null | undefined): boolean {
+  if (!command) return false;
+  return AI_TOOL_PROGRAMS.has(command.toLowerCase());
+}
+
+function evaluateAgentStatus(sessionId: string, session: TerminalSession): void {
+  const previousStatus = session.agentStatus;
+
+  if (!isAiToolProgram(session.activeProgram?.command)) {
+    if (previousStatus !== null && previousStatus !== undefined) {
+      session.agentStatus = 'idle';
+      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: 'idle' });
+
+      if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
+      session.agentStatusTimer = setTimeout(() => {
+        if (session.agentStatus === 'idle') {
+          session.agentStatus = null;
+          broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null });
+        }
+      }, AGENT_IDLE_DISPLAY_MS);
+    }
+    return;
+  }
+
+  const timeSinceLastData = Date.now() - session.agentLastDataAt;
+  const newStatus: 'thinking' | 'waiting-input' = timeSinceLastData < AGENT_THINKING_TIMEOUT_MS
+    ? 'thinking'
+    : 'waiting-input';
+
+  if (newStatus !== previousStatus) {
+    session.agentStatus = newStatus;
+    broadcastEvent(sessionId, { type: 'agent-status', agentStatus: newStatus });
+  }
+}
+
+// ── end Agent status detection ──
+
 function getActiveProgramFromTmuxLayout(layout: TmuxLayout): { command: string | null; source: 'tmux-pane'; updatedAt: number } | null {
   const activeWindow = layout.windows.find((window) => window.id === layout.activeWindowId);
   const activePane = activeWindow?.panes.find((pane) => pane.id === layout.activePaneId);
@@ -1435,14 +1462,6 @@ function syncClientCountToTmux(sessionId: string): void {
   );
 }
 
-function sessionIsOrphaned(sessionId: string): boolean {
-  const session = terminalSessions.get(sessionId);
-  if (!session) return true;
-  if (session.clients.size > 0) return false;
-  const ws = wsClients.get(sessionId);
-  return !ws || ws.size === 0;
-}
-
 function closeClient(session: TerminalSession, sessionId: string, clientId: string): void {
   const client = session.clients.get(clientId);
   if (!client) {
@@ -1450,9 +1469,6 @@ function closeClient(session: TerminalSession, sessionId: string, clientId: stri
   }
 
   session.clients.delete(clientId);
-  if (sessionIsOrphaned(sessionId)) {
-    session.lastDetachedAt = Date.now();
-  }
   syncClientCountToTmux(sessionId);
 
   try {
@@ -1487,6 +1503,7 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
 
   session.dataDisposable?.dispose();
   session.exitDisposable?.dispose();
+  if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
   destroyTmuxControl(session.tmuxControl);
   session.tmuxControl = undefined;
 
@@ -1562,6 +1579,29 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
       }
     } catch { /* sniff failure should never block data */ }
 
+    // Agent status detection for AI coding tools
+    try {
+      if (isAiToolProgram(session.activeProgram?.command)) {
+        session.agentLastDataAt = Date.now();
+
+        // Suppress immediate thinking switch after resize (soft keyboard / layout change
+        // causes redraw which produces PTY output but isn't real AI activity)
+        const timeSinceResize = Date.now() - session.agentLastResizeAt;
+        const suppressImmediate = timeSinceResize < AGENT_RESIZE_SUPPRESS_MS;
+
+        if (session.agentStatus !== 'thinking' && !suppressImmediate) {
+          session.agentStatus = 'thinking';
+          broadcastEvent(sessionId, { type: 'agent-status', agentStatus: 'thinking' });
+        }
+
+        // Debounce: reset timer, will evaluate thinking → waiting-input after timeout
+        if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
+        session.agentStatusTimer = setTimeout(() => {
+          evaluateAgentStatus(sessionId, session);
+        }, AGENT_STATUS_DEBOUNCE_MS);
+      }
+    } catch { /* agent status detection failure should never block data */ }
+
     broadcastEvent(sessionId, { type: 'data', data });
   });
 
@@ -1578,8 +1618,6 @@ async function spawnTerminalSession(req: express.Request, input: {
   rows?: number;
   mode?: TerminalMode;
   tmuxSessionName?: string;
-  shouldPersist?: boolean;
-  keepAliveMs?: number | null;
 }): Promise<{ sessionId: string; session: TerminalSession; cols: number; rows: number }> {
   const cwd = resolveWorkingDirectory(req, input.cwd);
   const cols = input.cols || 80;
@@ -1653,13 +1691,14 @@ async function spawnTerminalSession(req: express.Request, input: {
     lastActivity: Date.now(),
     clients: new Map(),
     createdAt: Date.now(),
-    shouldPersist: input.shouldPersist !== false,
-    keepAliveMs: normalizeKeepAliveMs(input.keepAliveMs),
-    lastDetachedAt: null,
     hasWrittenData: false,
     activeProgram: null,
     oscSniffBuf: '',
     lastOscCwd: null,
+    agentStatus: null,
+    agentLastDataAt: 0,
+    agentStatusTimer: null,
+    agentLastResizeAt: 0,
   };
 
   terminalSessions.set(sessionId, session);
@@ -1809,47 +1848,13 @@ setInterval(() => {
   const now = Date.now();
   for (const [sessionId, session] of terminalSessions.entries()) {
     const idleTooLong = now - session.lastActivity > TERMINAL_IDLE_TIMEOUT;
-    const orphaned = sessionIsOrphaned(sessionId);
-    const graceWindow = session.keepAliveMs;
-    const graceExpired = orphaned
-      && session.lastDetachedAt !== null
-      && graceWindow !== null
-      && now - session.lastDetachedAt > graceWindow;
 
-    if (idleTooLong || (!session.shouldPersist && orphaned) || graceExpired) {
-      console.log(`Cleaning up terminal session: ${sessionId}, idleTooLong=${idleTooLong}, orphaned=${orphaned}, graceExpired=${graceExpired}`);
+    if (idleTooLong) {
+      console.log(`Cleaning up terminal session: ${sessionId}, idleTooLong=${idleTooLong}`);
       cleanupSession(sessionId, { killProcess: true });
     }
   }
 }, CLEANUP_INTERVAL);
-
-router.get('/processes', (_req, res) => {
-  const processes = Array.from(terminalSessions.entries()).map(([sessionId, session]) => ({
-    sessionId,
-    cwd: session.cwd,
-    createdAt: session.createdAt,
-    lastActivity: session.lastActivity,
-    backend: session.ptyBackend,
-    clients: getTotalClients(sessionId),
-    mode: session.mode,
-    tmuxSessionName: session.tmuxSessionName,
-    shouldPersist: session.shouldPersist,
-    keepAliveMs: session.keepAliveMs,
-    isOrphan: sessionIsOrphaned(sessionId),
-    hasWrittenData: session.hasWrittenData,
-    activeProgram: session.activeProgram?.command ?? null,
-    activeProgramSource: session.activeProgram?.source ?? null,
-  }));
-
-  res.json({
-    reconnect: {
-      graceTime: DEFAULT_KEEP_ALIVE_MS,
-      scrollback: RECONNECT_SCROLLBACK,
-      idleTimeout: TERMINAL_IDLE_TIMEOUT,
-    },
-    processes,
-  });
-});
 
 router.get('/tmux/sessions', async (_req, res) => {
   try {
@@ -1943,7 +1948,7 @@ router.post('/serialize-state', async (req, res) => {
 
   const states = await Promise.all(
     Array.from(terminalSessions.entries())
-      .filter(([sessionId, session]) => (ids ? ids.has(sessionId) : true) && session.shouldPersist)
+      .filter(([sessionId]) => (ids ? ids.has(sessionId) : true))
       .map(async ([sessionId, session]) => ({
         sessionId,
         cwd: session.cwd,
@@ -1952,7 +1957,6 @@ router.post('/serialize-state', async (req, res) => {
         backend: session.ptyBackend,
         mode: session.mode,
         tmuxSessionName: session.tmuxSessionName,
-        keepAliveMs: session.keepAliveMs,
         history: await getRestoreHistory(sessionId, session),
       }))
   );
@@ -2066,7 +2070,7 @@ router.put('/settings', (req, res) => {
 
 router.post('/create', async (req, res) => {
   try {
-    const { cwd: inputCwd, cols, rows, mode, tmuxSessionName, shouldPersist, keepAliveMs } = req.body;
+    const { cwd: inputCwd, cols, rows, mode, tmuxSessionName } = req.body;
     const normalizedMode = normalizeMode(mode);
     const normalizedTmuxName = normalizedMode === 'tmux' ? normalizeTmuxSessionName(tmuxSessionName) : null;
 
@@ -2088,8 +2092,6 @@ router.post('/create', async (req, res) => {
             sessionId: id,
             mode: s.mode,
             tmuxSessionName: s.tmuxSessionName,
-            shouldPersist: s.shouldPersist,
-            keepAliveMs: s.keepAliveMs,
             activeProgram: s.activeProgram?.command ?? null,
             activeProgramSource: s.activeProgram?.source ?? null,
           });
@@ -2103,19 +2105,15 @@ router.post('/create', async (req, res) => {
       rows,
       mode,
       tmuxSessionName,
-      shouldPersist,
-      keepAliveMs,
     });
 
-    console.log(`Created terminal session: ${spawned.sessionId} in ${spawned.session.cwd}, shouldPersist=${spawned.session.shouldPersist}, keepAliveMs=${spawned.session.keepAliveMs ?? 'never'}`);
+    console.log(`Created terminal session: ${spawned.sessionId} in ${spawned.session.cwd}`);
     res.json({
       sessionId: spawned.sessionId,
       cols: cols || 80,
       rows: rows || 24,
       mode: spawned.session.mode,
       tmuxSessionName: spawned.session.tmuxSessionName,
-      shouldPersist: spawned.session.shouldPersist,
-      keepAliveMs: spawned.session.keepAliveMs,
       activeProgram: spawned.session.activeProgram?.command ?? null,
       activeProgramSource: spawned.session.activeProgram?.source ?? null,
     });
@@ -2154,7 +2152,6 @@ router.get('/:sessionId/stream', async (req, res) => {
   const clientId = Math.random().toString(36).substring(7);
   session.clients.set(clientId, res);
   session.lastActivity = Date.now();
-  session.lastDetachedAt = null;
   syncClientCountToTmux(sessionId);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2169,6 +2166,7 @@ router.get('/:sessionId/stream', async (req, res) => {
     cwd: session.cwd ?? null,
     activeProgram: session.activeProgram?.command ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
+    agentStatus: session.agentStatus,
   });
 
   let tmuxInterval: ReturnType<typeof setInterval> | null = null;
@@ -2186,6 +2184,11 @@ router.get('/:sessionId/stream', async (req, res) => {
 
     lastActiveProgramSnapshot = snapshot;
     session.activeProgram = activeProgram;
+
+    // Agent status: react to AI tool start/exit
+    if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
+    evaluateAgentStatus(sessionId, session);
+
     console.log(
       `[active-program][shell-sse] session=${sessionId} client=${clientId} cmd=${activeProgram?.command ?? null} source=${activeProgram?.source ?? null}`,
     );
@@ -2327,7 +2330,6 @@ router.get('/:sessionId/attach', async (req, res) => {
     return res.status(404).json({ error: 'Session not found' });
   }
 
-  session.lastDetachedAt = null;
   session.lastActivity = Date.now();
 
   const history = await getRestoreHistory(sessionId, session);
@@ -2340,58 +2342,8 @@ router.get('/:sessionId/attach', async (req, res) => {
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
     history,
-    shouldPersist: session.shouldPersist,
-    keepAliveMs: session.keepAliveMs,
     activeProgram: session.activeProgram?.command ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
-  });
-});
-
-router.patch('/:sessionId/policy', (req, res) => {
-  const { sessionId } = req.params;
-  const session = terminalSessions.get(sessionId);
-
-  if (!session) {
-    return res.status(404).json({ error: 'Session not found' });
-  }
-
-  if (Object.prototype.hasOwnProperty.call(req.body, 'shouldPersist')) {
-    session.shouldPersist = req.body.shouldPersist !== false;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(req.body, 'keepAliveMs')) {
-    session.keepAliveMs = normalizeKeepAliveMs(req.body.keepAliveMs);
-  }
-
-  if (sessionIsOrphaned(sessionId)) {
-    session.lastDetachedAt = Date.now();
-  }
-
-  return res.json({
-    sessionId,
-    shouldPersist: session.shouldPersist,
-    keepAliveMs: session.keepAliveMs,
-    clients: getTotalClients(sessionId),
-  });
-});
-
-router.post('/:sessionId/detach', (req, res) => {
-  const { sessionId } = req.params;
-  const session = terminalSessions.get(sessionId);
-
-  if (!session) {
-    return res.status(404).json({ error: 'Session not found' });
-  }
-
-  if (sessionIsOrphaned(sessionId)) {
-    session.lastDetachedAt = Date.now();
-  }
-
-  res.json({
-    sessionId,
-    detachedAt: session.lastDetachedAt,
-    clients: getTotalClients(sessionId),
-    shouldPersist: session.shouldPersist,
   });
 });
 
@@ -2431,6 +2383,7 @@ router.post('/:sessionId/resize', (req, res) => {
 
   try {
     session.ptyProcess.resize(cols, rows);
+    session.agentLastResizeAt = Date.now();
     session.lastActivity = Date.now();
     res.json({ success: true, cols, rows });
   } catch (error) {
@@ -2533,7 +2486,7 @@ router.delete('/:sessionId', (req, res) => {
 
 router.post('/:sessionId/restart', async (req, res) => {
   const { sessionId } = req.params;
-  const { cwd: inputCwd, cols, rows, mode, tmuxSessionName, shouldPersist, keepAliveMs } = req.body;
+  const { cwd: inputCwd, cols, rows, mode, tmuxSessionName } = req.body;
 
   const existingSession = terminalSessions.get(sessionId);
   if (existingSession) {
@@ -2547,8 +2500,6 @@ router.post('/:sessionId/restart', async (req, res) => {
       rows,
       mode,
       tmuxSessionName,
-      shouldPersist,
-      keepAliveMs,
     });
 
     console.log(`Restarted terminal session: ${sessionId} -> ${newSessionId} in ${session.cwd}`);
@@ -2558,8 +2509,6 @@ router.post('/:sessionId/restart', async (req, res) => {
       rows: rows || 24,
       mode: session.mode,
       tmuxSessionName: session.tmuxSessionName,
-      shouldPersist: session.shouldPersist,
-      keepAliveMs: session.keepAliveMs,
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2761,7 +2710,6 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
   }
   clients.set(clientId, ws);
   session.lastActivity = Date.now();
-  session.lastDetachedAt = null;
   syncClientCountToTmux(sessionId);
 
   void (async () => {
@@ -2788,6 +2736,7 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
       cwd: session.cwd ?? null,
       activeProgram: session.activeProgram?.command ?? null,
       activeProgramSource: session.activeProgram?.source ?? null,
+      agentStatus: session.agentStatus,
     }));
   })();
 
@@ -2811,6 +2760,11 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
         if (apSnapshot !== lastActiveProgramSnapshot) {
           lastActiveProgramSnapshot = apSnapshot;
           session.activeProgram = ap;
+
+          // Agent status: react to AI tool start/exit
+          if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
+          evaluateAgentStatus(sessionId, session);
+
           ws.send(JSON.stringify({
             type: 'active-program',
             activeProgram: ap?.command ?? null,
@@ -2859,6 +2813,11 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
         if (snapshot !== lastApSnapshot) {
           lastApSnapshot = snapshot;
           session.activeProgram = ap;
+
+          // Agent status: react to AI tool start/exit
+          if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
+          evaluateAgentStatus(sessionId, session);
+
           ws.send(JSON.stringify({
             type: 'active-program',
             activeProgram: ap?.command ?? null,
@@ -2894,6 +2853,7 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
           const rows = Number(msg.rows);
           if (cols > 0 && rows > 0) {
             session.ptyProcess.resize(cols, rows);
+            session.agentLastResizeAt = Date.now();
           }
           break;
         }
@@ -2940,9 +2900,6 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
       clients.delete(clientId);
       if (clients.size === 0) {
         wsClients.delete(sessionId);
-        if (sessionIsOrphaned(sessionId)) {
-          session.lastDetachedAt = Date.now();
-        }
       }
     }
     syncClientCountToTmux(sessionId);

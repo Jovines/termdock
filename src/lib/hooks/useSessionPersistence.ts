@@ -18,7 +18,6 @@ export interface PersistedSession {
   backendSessionId: string | null;  // 后端 sessionId，用于复用
   mode: 'shell' | 'tmux';
   tmuxSessionName: string | null;
-  keepAliveMs: number | null;
   createdAt: number;
   lastActivity: number;
 }
@@ -32,14 +31,11 @@ interface UseSessionPersistenceReturn {
   updateSessionActivity: (sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
   updateSessionBackendId: (sessionId: string, backendSessionId: string) => void;
-  updateSessionKeepAliveMs: (sessionId: string, keepAliveMs: number | null) => void;
   renameSession: (sessionId: string, newName: string) => void;
   reorderSessions: (orderedIds: string[]) => void;
   clearAllSessions: () => void;
   restoreSessions: () => Promise<PersistedSession[]>;
 }
-
-const DEFAULT_KEEP_ALIVE_MS = 3 * 60 * 60 * 1000;
 
 export function useSessionPersistence(): UseSessionPersistenceReturn {
   const [sessions, setSessions] = useState<PersistedSession[]>([]);
@@ -59,9 +55,6 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
       mode: session.mode === 'tmux' ? 'tmux' : 'shell',
       tmuxSessionName: session.tmuxSessionName ?? null,
       customName: (session as any).customName === true,
-      keepAliveMs: Object.prototype.hasOwnProperty.call(session, 'keepAliveMs')
-        ? (session.keepAliveMs ?? null)
-        : DEFAULT_KEEP_ALIVE_MS,
     }));
   }, []);
 
@@ -156,13 +149,11 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   // 保存新会话（带去重：同 sessionId 或同 tmuxSessionName 更新已有条目）
   const saveSession = useCallback((session: Omit<PersistedSession, 'createdAt' | 'lastActivity' | 'backendSessionId'>, backendSessionId: string | null) => {
     const now = Date.now();
-    const keepAliveMs = session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs;
     const newSession: PersistedSession = {
       ...session,
       backendSessionId,
       mode: session.mode === 'tmux' ? 'tmux' : 'shell',
       tmuxSessionName: session.tmuxSessionName ?? null,
-      keepAliveMs,
       customName: session.customName ?? false,
       createdAt: now,
       lastActivity: now,
@@ -280,16 +271,6 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     });
   }, [queuePersist]);
 
-  const updateSessionKeepAliveMs = useCallback((sessionId: string, keepAliveMs: number | null) => {
-    setSessions(prev => {
-      const updated = prev.map(s =>
-        s.sessionId === sessionId ? { ...s, keepAliveMs } : s
-      );
-      queuePersist(updated);
-      return updated;
-    });
-  }, [queuePersist]);
-
   // 初始化时恢复会话
   useEffect(() => {
     if (!initialized.current) {
@@ -307,7 +288,6 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     updateSessionActivity,
     setActiveSession,
     updateSessionBackendId,
-    updateSessionKeepAliveMs,
     renameSession,
     reorderSessions,
     clearAllSessions,

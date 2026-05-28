@@ -127,6 +127,10 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     delayTimer: null,
     intervalTimer: null,
   });
+  const pendingTapRef = React.useRef<{
+    actionId: string;
+    timer: number;
+  } | null>(null);
 
   const preventToolbarButtonFocus = React.useCallback(
     (event: React.MouseEvent<HTMLDivElement> | React.PointerEvent<HTMLDivElement>) => {
@@ -323,16 +327,51 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     [onPressStart, toolbarDisabled]
   );
 
+  const DOUBLE_TAP_WINDOW_MS = 250;
+
+  const clearPendingTap = React.useCallback(() => {
+    if (pendingTapRef.current !== null) {
+      window.clearTimeout(pendingTapRef.current.timer);
+      pendingTapRef.current = null;
+    }
+  }, []);
+
+  React.useEffect(() => () => {
+    clearPendingTap();
+  }, [clearPendingTap]);
+
   const handleTextPointerDown = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>, sequence: string) => {
+    (event: React.PointerEvent<HTMLButtonElement>, action: MobileToolbarAction) => {
       if (toolbarDisabled) {
         return;
       }
       event.preventDefault();
       onPressStart();
-      onTextPress(sequence);
+
+      if (!action.doubleTapSequence) {
+        // No double-tap sequence: fire immediately (zero delay)
+        onTextPress(action.sequence);
+        return;
+      }
+
+      const pending = pendingTapRef.current;
+      if (pending !== null && pending.actionId === action.id) {
+        // Double tap detected: cancel pending single-tap, fire double-tap sequence
+        window.clearTimeout(pending.timer);
+        pendingTapRef.current = null;
+        onTextPress(action.doubleTapSequence);
+        return;
+      }
+
+      // First tap: start timer for single-tap, wait to see if double-tap follows
+      clearPendingTap();
+      const timer = window.setTimeout(() => {
+        pendingTapRef.current = null;
+        onTextPress(action.sequence);
+      }, DOUBLE_TAP_WINDOW_MS);
+      pendingTapRef.current = { actionId: action.id, timer };
     },
-    [onPressStart, onTextPress, toolbarDisabled]
+    [clearPendingTap, onPressStart, onTextPress, toolbarDisabled],
   );
 
   const handlePresetCyclePointerDown = React.useCallback(
@@ -576,12 +615,15 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
                     <button
                       key={item.id}
                       type="button"
-                      onPointerDown={(event) => handleTextPointerDown(event, item.action.sequence)}
+                      onPointerDown={(event) => handleTextPointerDown(event, item.action)}
                       tabIndex={-1}
                       disabled={toolbarDisabled}
-                      className="h-7 w-full rounded-full bg-surface-2 shadow-sm px-1 text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
+                      className="h-7 w-full rounded-full bg-surface-2 shadow-sm px-1 text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 relative"
                     >
                       {item.action.label}
+                      {item.action.doubleTapSequence && (
+                        <span className="absolute top-0.5 right-1.5 h-1 w-1 rounded-full bg-accent/60" />
+                      )}
                     </button>
                   );
                 }

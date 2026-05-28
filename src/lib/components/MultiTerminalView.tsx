@@ -5,7 +5,7 @@ import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
-import { attachTerminalSession, listTerminalProcesses, createTerminalSession, closeTerminal, updateTerminalSessionPolicy } from '../terminal/api';
+import { attachTerminalSession, createTerminalSession, closeTerminal } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
@@ -19,7 +19,6 @@ interface TerminalSession {
   sessionId: string | null;
   mode: TerminalMode;
   tmuxSessionName: string | null;
-  keepAliveMs: number | null;
   history?: string[];
 }
 
@@ -29,21 +28,13 @@ export interface TerminalSessionInfo {
   customName: boolean;
   mode: TerminalMode;
   tmuxSessionName: string | null;
-  keepAliveMs: number | null;
 }
 
 interface NewSessionEventDetail {
-  keepAliveMs?: number | null;
   mode?: TerminalMode;
   tmuxSessionName?: string;
 }
 
-interface UpdateSessionPolicyEventDetail {
-  sessionId: string;
-  keepAliveMs?: number | null;
-}
-
-const DEFAULT_KEEP_ALIVE_MS = 3 * 60 * 60 * 1000;
 const SWIPE_ANIMATION_SPEED_MS = 320;
 
 interface MultiTerminalViewProps {
@@ -212,7 +203,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     saveSession,
     setActiveSession,
     updateSessionBackendId,
-    updateSessionKeepAliveMs,
     removeSession: removePersistedSession,
     renameSession,
     reorderSessions,
@@ -306,7 +296,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         customName: s.customName,
         mode: s.mode,
         tmuxSessionName: s.tmuxSessionName,
-        keepAliveMs: s.keepAliveMs,
       })),
       activeSessionId,
     });
@@ -315,7 +304,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // 尝试为单个 session 恢复或创建 session
   const restoreOrCreateSession = useCallback(async (
     session: typeof persistedSessions[0],
-    availableProcessIds: Set<string> | null
   ): Promise<TerminalSession> => {
     const { sessionId, name, backendSessionId } = session;
     const mode: TerminalMode = session.mode === 'tmux' || session.mode === 'shell'
@@ -326,10 +314,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const tmuxSessionName = mode === 'tmux'
       ? (persistedTmuxName || configuredDefaultTmuxName || generateTmuxSessionName(sessionId))
       : null;
-    const keepAliveMs = session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs;
 
     // 如果有 backendSessionId，优先附着到现有持久进程
-    if (backendSessionId && (!availableProcessIds || availableProcessIds.has(backendSessionId))) {
+    if (backendSessionId) {
       try {
         const attached = await attachTerminalSession(backendSessionId);
         debugSession('[Session] Attached to existing session:', {
@@ -348,7 +335,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           sessionId: attached.sessionId,
           mode: attached.mode ?? mode,
           tmuxSessionName: attached.tmuxSessionName ?? tmuxSessionName,
-          keepAliveMs: attached.keepAliveMs,
           history: attached.history,
         };
       } catch {
@@ -358,7 +344,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     // 创建新 session（服务端会自动使用 home 目录）
     const newSession = await createTerminalSession({
-      keepAliveMs,
       mode,
       tmuxSessionName: tmuxSessionName ?? undefined,
     });
@@ -371,7 +356,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       sessionId: newSession.sessionId,
       mode: newSession.mode ?? mode,
       tmuxSessionName: newSession.tmuxSessionName ?? tmuxSessionName,
-      keepAliveMs,
     };
   }, [defaultSessionMode, defaultTmuxSessionName]);
 
@@ -386,94 +370,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const restore = async () => {
       let sessionCount = 0;
       try {
-        let availableProcessIds: Set<string> | null = null;
-        let orphanBackendIds: string[] = [];
-
-        try {
-          const processInfo = await listTerminalProcesses();
-          availableProcessIds = new Set(processInfo.processes.map((process) => process.sessionId));
-
-          const knownBackendIds = new Set(
-            persistedSessions
-              .map((session) => session.backendSessionId)
-              .filter((id): id is string => !!id)
-          );
-
-          orphanBackendIds = processInfo.processes
-            .filter((process) => process.isOrphan && !knownBackendIds.has(process.sessionId))
-            .map((process) => process.sessionId);
-
-          debugSession('[Session] Process snapshot:', {
-            total: processInfo.processes.length,
-            orphanCandidates: orphanBackendIds.length,
-          });
-        } catch (error) {
-          debugSession('[Session] Failed to list terminal processes, fallback to persisted session mapping only:', error);
-        }
-
-        const restoredPersisted = await Promise.all(
-          persistedSessions.map(async (session) => restoreOrCreateSession(session, availableProcessIds))
+        const restored = await Promise.all(
+          persistedSessions.map(async (session) => restoreOrCreateSession(session))
         );
-
-        // 收集已恢复的 tmux 会话名，防止 adopted 阶段重复创建
-        const restoredTmuxNames = new Set(
-          restoredPersisted
-            .filter((s) => s.mode === 'tmux' && s.tmuxSessionName)
-            .map((s) => s.tmuxSessionName!)
-        );
-
-        const adoptedSessions = await Promise.all(
-          orphanBackendIds.map(async (backendSessionId) => {
-            try {
-              const attached = await attachTerminalSession(backendSessionId);
-
-              // 如果已恢复的会话已覆盖此 tmux 会话则跳过，避免 UI 出现重复 tab
-              if (
-                attached.tmuxSessionName &&
-                restoredTmuxNames.has(attached.tmuxSessionName)
-              ) {
-                return null;
-              }
-
-              const frontendSessionId = uuidv4();
-              const name = attached.tmuxSessionName
-                ? `tmux:${attached.tmuxSessionName}`
-                : generateSessionName();
-              saveSession({
-                sessionId: frontendSessionId,
-                name,
-                customName: false,
-                mode: attached.mode ?? 'shell',
-                tmuxSessionName: attached.tmuxSessionName ?? null,
-                keepAliveMs: attached.keepAliveMs,
-              }, attached.sessionId);
-              return {
-                id: frontendSessionId,
-                name,
-                customName: false,
-                sessionId: attached.sessionId,
-                mode: attached.mode ?? 'shell',
-                tmuxSessionName: attached.tmuxSessionName ?? null,
-                keepAliveMs: attached.keepAliveMs,
-                history: attached.history,
-              } as TerminalSession;
-            } catch {
-              return null;
-            }
-          })
-        );
-
-        const adopted = adoptedSessions.filter((s): s is TerminalSession => s !== null);
-        const adoptedTmuxNames = new Set(
-          adopted.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName!)
-        );
-
-        // 如果 adopted 中有 tmux 会话，从 restoredPersisted 中剔除同名的旧条目
-        const restored = adoptedTmuxNames.size > 0
-          ? [...restoredPersisted.filter(
-              (s) => !(s.mode === 'tmux' && s.tmuxSessionName && adoptedTmuxNames.has(s.tmuxSessionName))
-            ), ...adopted]
-          : [...restoredPersisted, ...adopted];
 
         sessionCount = restored.length;
         debugSession('[Session] Restored sessions:', restored.length);
@@ -484,7 +383,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         restored.forEach((session) => {
           if (session.sessionId) {
             updateSessionBackendId(session.id, session.sessionId);
-            updateSessionKeepAliveMs(session.id, session.keepAliveMs);
             store.setTerminalSession(session.id, {
               sessionId: session.sessionId,
               cols: 80,
@@ -510,7 +408,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           sessionId: null as string | null,
           mode: session.mode === 'tmux' || session.mode === 'shell' ? session.mode : defaultSessionMode,
           tmuxSessionName: session.tmuxSessionName ?? null,
-          keepAliveMs: session.keepAliveMs === undefined ? DEFAULT_KEEP_ALIVE_MS : session.keepAliveMs,
         }));
         setSessions(fallbackSessions);
         sessionCount = fallbackSessions.length;
@@ -532,7 +429,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     persistedActiveId,
     restoreOrCreateSession,
     updateSessionBackendId,
-    updateSessionKeepAliveMs,
     defaultSessionMode,
     debugSession,
   ]);
@@ -540,9 +436,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // Handle new session creation from custom event
   const handleNewSession = useCallback(async (options?: NewSessionEventDetail) => {
     try {
-      const keepAliveMs = options && Object.prototype.hasOwnProperty.call(options, 'keepAliveMs')
-        ? (options.keepAliveMs ?? null)
-        : DEFAULT_KEEP_ALIVE_MS;
       const mode: TerminalMode = options?.mode === 'tmux' || options?.mode === 'shell'
         ? options.mode
         : defaultSessionMode;
@@ -553,7 +446,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         : null;
       // 服务端会自动使用 home 目录，不需要客户端传递
       const newTerminalSession = await createTerminalSession({
-        keepAliveMs,
         mode,
         tmuxSessionName: tmuxSessionName ?? undefined,
       });
@@ -570,7 +462,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         sessionId: newTerminalSession.sessionId,
         mode: newTerminalSession.mode ?? mode,
         tmuxSessionName: effectiveTmuxSessionName,
-        keepAliveMs: newTerminalSession.keepAliveMs ?? keepAliveMs,
       };
 
       setSessions((prev) => {
@@ -587,7 +478,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         customName: false,
         mode: newSession.mode,
         tmuxSessionName: newSession.tmuxSessionName,
-        keepAliveMs: newSession.keepAliveMs,
       }, newTerminalSession.sessionId);
 
       // Update useTerminalStore with the new backend session
@@ -602,36 +492,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         });
       }
 
-      debugSession('[Session] Created new session:', sessionId, newTerminalSession.sessionId, 'keepAliveMs=', newSession.keepAliveMs);
+      debugSession('[Session] Created new session:', sessionId, newTerminalSession.sessionId);
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);
     }
   }, [defaultSessionMode, defaultTmuxSessionName, saveSession, debugSession]);
   handleNewSessionRef.current = handleNewSession;
-
-  const handleUpdateSessionPolicy = useCallback(async (detail: UpdateSessionPolicyEventDetail) => {
-    const target = sessions.find((session) => session.id === detail.sessionId);
-    if (!target?.sessionId) {
-      return;
-    }
-
-    const keepAliveMs = Object.prototype.hasOwnProperty.call(detail, 'keepAliveMs')
-      ? (detail.keepAliveMs ?? null)
-      : target.keepAliveMs;
-
-    try {
-      const updated = await updateTerminalSessionPolicy(target.sessionId, { keepAliveMs });
-      setSessions((prev) => prev.map((session) => (
-        session.id === detail.sessionId
-          ? { ...session, keepAliveMs: updated.keepAliveMs }
-          : session
-      )));
-      updateSessionKeepAliveMs(detail.sessionId, updated.keepAliveMs);
-      debugSession('[Session] Updated policy:', detail.sessionId, updated.keepAliveMs);
-    } catch (error) {
-      console.error('[Session] Failed to update session policy:', error);
-    }
-  }, [sessions, updateSessionKeepAliveMs, debugSession]);
 
   // Handle session switching from custom event
   const handleSwitchSession = useCallback((sessionId: string) => {
@@ -747,14 +613,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       handleCloseSessionByBackendId(customEvent.detail);
     };
 
-    const handleUpdateSessionPolicyEvent = (event: Event) => {
-      const customEvent = event as CustomEvent<UpdateSessionPolicyEventDetail>;
-      if (!customEvent.detail?.sessionId) {
-        return;
-      }
-      void handleUpdateSessionPolicy(customEvent.detail);
-    };
-
     const handleRenameSessionEvent = (event: Event) => {
       const customEvent = event as CustomEvent<{ sessionId: string; name: string }>;
       if (!customEvent.detail?.sessionId || !customEvent.detail?.name) {
@@ -775,7 +633,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     window.addEventListener('switch-terminal-session', handleSwitchSessionEvent);
     window.addEventListener('close-terminal-session', handleCloseSessionEvent);
     window.addEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
-    window.addEventListener('update-terminal-session-policy', handleUpdateSessionPolicyEvent);
     window.addEventListener('rename-terminal-session', handleRenameSessionEvent);
     window.addEventListener('reorder-terminal-session', handleReorderSessionEvent);
 
@@ -784,11 +641,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('switch-terminal-session', handleSwitchSessionEvent);
       window.removeEventListener('close-terminal-session', handleCloseSessionEvent);
       window.removeEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
-      window.removeEventListener('update-terminal-session-policy', handleUpdateSessionPolicyEvent);
       window.removeEventListener('rename-terminal-session', handleRenameSessionEvent);
       window.removeEventListener('reorder-terminal-session', handleReorderSessionEvent);
     };
-  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleCloseSessionByBackendId, handleUpdateSessionPolicy, handleRenameSession, handleReorderSessions]);
+  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleReorderSessions]);
 
   // 没有会话时创建新的
   useEffect(() => {

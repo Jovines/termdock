@@ -102,9 +102,6 @@ function getWebSocketUrl(sessionId: string): string {
 export async function createTerminalSession(
   options: CreateTerminalOptions
 ): Promise<TerminalSession> {
-  const keepAliveMs = Object.prototype.hasOwnProperty.call(options, 'keepAliveMs')
-    ? (options.keepAliveMs ?? null)
-    : 3 * 60 * 60 * 1000;
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/create', {
     method: 'POST',
@@ -117,8 +114,6 @@ export async function createTerminalSession(
       rows: options.rows || 24,
       mode: options.mode || 'shell',
       tmuxSessionName: options.tmuxSessionName,
-      shouldPersist: options.shouldPersist ?? true,
-      keepAliveMs,
     }),
   });
 
@@ -157,6 +152,9 @@ export function connectTerminalStream(
   };
 
   let conn: WsConnection | null = null;
+  // Guard against onerror + onclose double-fire: only the first one
+  // should trigger handleError for a given disconnection.
+  let handlingError = false;
 
   const clearTimeouts = () => {
     if (retryState.retryTimeout) { clearTimeout(retryState.retryTimeout); retryState.retryTimeout = null; }
@@ -178,6 +176,7 @@ export function connectTerminalStream(
 
     const url = getWebSocketUrl(sessionId);
     const ws = new WebSocket(url);
+    handlingError = false; // reset for new connection attempt
 
     retryState.connectionTimeoutId = setTimeout(() => {
       if (ws.readyState !== WebSocket.OPEN) {
@@ -223,6 +222,12 @@ export function connectTerminalStream(
           return;
         }
 
+        // Handle agent-status broadcast
+        if (msg.type === 'agent-status') {
+          onEvent({ type: 'agent-status', agentStatus: msg.agentStatus ?? null });
+          return;
+        }
+
         // Standard stream events
         const event_ = msg as TerminalStreamEvent;
 
@@ -245,14 +250,34 @@ export function connectTerminalStream(
 
     ws.onerror = () => {
       clearTimeouts();
-      handleError(new Error('WebSocket connection error'), false);
+      if (!handlingError) {
+        handlingError = true;
+        handleError(new Error('WebSocket connection error'), false);
+      }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev: CloseEvent) => {
       clearTimeouts();
-      if (!retryState.isClosed) {
-        handleError(new Error('WebSocket connection closed'), false);
+      if (retryState.isClosed) return;
+      if (handlingError) return; // already handled by onerror
+      handlingError = true;
+
+      // Server closed with 4001 = session not found — fatal, no point retrying
+      if (ev.code === 4001) {
+        handleError(new Error('Session not found on server'), true);
+        return;
       }
+
+      // Server closed with 4003 / 4401 = auth failure — trigger re-login
+      if (ev.code === 4003 || ev.code === 4401) {
+        try {
+          window.dispatchEvent(new CustomEvent(AUTH_UNAUTHORIZED_EVENT));
+        } catch { /* ignore */ }
+        handleError(new Error('Authentication required'), true);
+        return;
+      }
+
+      handleError(new Error('WebSocket connection closed'), false);
     };
 
     conn = { ws, onEvent, onError, retryState };
@@ -279,7 +304,8 @@ export function connectTerminalStream(
         if (!retryState.isClosed) connect();
       }, delay);
     } else {
-      onError?.(error, isFatal);
+      // Retries exhausted → treat as fatal so UI shows Retry button
+      onError?.(error, isFatal || retryState.retryCount >= maxRetries);
       cleanup();
     }
   };
@@ -397,7 +423,7 @@ export async function closeTerminal(sessionId: string): Promise<void> {
 
 export async function restartTerminalSession(
   currentSessionId: string,
-  options: { cwd?: string; cols?: number; rows?: number; keepAliveMs?: number | null; mode?: 'shell' | 'tmux'; tmuxSessionName?: string }
+  options: { cwd?: string; cols?: number; rows?: number; mode?: 'shell' | 'tmux'; tmuxSessionName?: string }
 ): Promise<TerminalSession> {
   // Clean up old WebSocket
   const conn = wsConnections.get(currentSessionId);
@@ -413,7 +439,6 @@ export async function restartTerminalSession(
       rows: options.rows ?? 24,
       mode: options.mode,
       tmuxSessionName: options.tmuxSessionName,
-      keepAliveMs: options.keepAliveMs,
     }),
   });
   if (!response.ok) {
@@ -437,27 +462,9 @@ export async function checkTerminalHealth(sessionId: string): Promise<{
   return response.json();
 }
 
-export interface PersistentTerminalProcess {
-  sessionId: string; cwd: string; createdAt: number; lastActivity: number; backend: string;
-  clients: number; mode: 'shell' | 'tmux'; tmuxSessionName: string | null;
-  shouldPersist: boolean; keepAliveMs: number | null; isOrphan: boolean; hasWrittenData: boolean;
-  activeProgram: string | null; activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
-}
-
-export async function listTerminalProcesses(): Promise<{
-  reconnect: { graceTime: number; scrollback: number; idleTimeout: number }; processes: PersistentTerminalProcess[];
-}> {
-  const response = await fetch('/api/terminal/processes', { method: 'GET' });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to list terminal processes' }));
-    throw new Error(error.error || 'Failed to list terminal processes');
-  }
-  return response.json();
-}
-
 export async function attachTerminalSession(sessionId: string): Promise<{
   sessionId: string; cwd: string; backend: string; clients: number; mode: 'shell' | 'tmux';
-  tmuxSessionName: string | null; history: string[]; shouldPersist: boolean; keepAliveMs: number | null;
+  tmuxSessionName: string | null; history: string[];
   activeProgram: string | null; activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }> {
   const response = await fetch(`/api/terminal/${sessionId}/attach`, { method: 'GET' });
@@ -467,35 +474,6 @@ export async function attachTerminalSession(sessionId: string): Promise<{
     throw new Error(error.error || 'Failed to attach terminal session');
   }
   return response.json();
-}
-
-export async function updateTerminalSessionPolicy(sessionId: string, policy: {
-  keepAliveMs?: number | null; shouldPersist?: boolean;
-}): Promise<{ sessionId: string; keepAliveMs: number | null; shouldPersist: boolean; clients: number }> {
-  const csrfTokenHeader = await getCsrfToken();
-  const response = await fetch(`/api/terminal/${sessionId}/policy`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
-    body: JSON.stringify(policy),
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to update terminal session policy' }));
-    throw new Error(error.error || 'Failed to update terminal session policy');
-  }
-  return response.json();
-}
-
-export async function detachTerminalSession(sessionId: string): Promise<void> {
-  const csrfTokenHeader = await getCsrfToken();
-  const response = await fetch(`/api/terminal/${sessionId}/detach`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
-    body: JSON.stringify({}),
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to detach terminal session' }));
-    throw new Error(error.error || 'Failed to detach terminal session');
-  }
 }
 
 export async function forceKillTerminal(options: {
@@ -551,7 +529,7 @@ export async function killTmuxSession(name: string): Promise<{ cleanedSessions: 
 
 export interface PersistedTerminalClientSession {
   sessionId: string; name: string; backendSessionId: string | null;
-  mode: 'shell' | 'tmux'; tmuxSessionName: string | null; keepAliveMs: number | null;
+  mode: 'shell' | 'tmux'; tmuxSessionName: string | null;
   createdAt: number; lastActivity: number;
 }
 

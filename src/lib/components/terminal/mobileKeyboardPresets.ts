@@ -4,6 +4,7 @@ export interface MobileToolbarAction {
   id: string;
   label: string;
   sequence: string;
+  doubleTapSequence?: string;
 }
 
 export interface ToolbarPresetDefinition {
@@ -29,7 +30,7 @@ export function getToolbarActionLabel(action: MobileToolbarAction, index: number
 // actions/programs changed). The App reads this on startup and, when the
 // stored version differs, overwrites all built-in preset ids with the latest
 // definitions while keeping any user-authored custom presets intact.
-export const BUILTIN_TOOLBAR_PRESETS_VERSION = 4;
+export const BUILTIN_TOOLBAR_PRESETS_VERSION = 5;
 
 export function getBuiltinToolbarPresetIds(): string[] {
   return DEFAULT_PRESETS.map((preset) => preset.id);
@@ -64,9 +65,9 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     includeAlt: false,
     rowLayout: [3, 3],
     actions: [
-      { id: 'claude-undo', label: '/undo', sequence: '/undo' },
-      { id: 'claude-clear', label: '/clear', sequence: '/clear' },
-      { id: 'claude-compact', label: '/compact', sequence: '/compact' },
+      { id: 'claude-undo', label: '/undo', sequence: '/undo', doubleTapSequence: '/undo\r' },
+      { id: 'claude-clear', label: '/clear', sequence: '/clear', doubleTapSequence: '/clear\r' },
+      { id: 'claude-compact', label: '/compact', sequence: '/compact', doubleTapSequence: '/compact\r' },
     ],
   },
   {
@@ -76,10 +77,10 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     includeAlt: false,
     rowLayout: [3, 3],
     actions: [
-      { id: 'coco-undo', label: '/undo', sequence: '/||undo ' },
-      { id: 'coco-clear', label: '/clear', sequence: '/||clear ' },
-      { id: 'coco-model', label: '/model', sequence: '/||model ' },
-      { id: 'coco-resume', label: '/resume', sequence: '/||resume ' },
+      { id: 'coco-undo', label: '/undo', sequence: '/||undo ', doubleTapSequence: '/||undo ||\r' },
+      { id: 'coco-clear', label: '/clear', sequence: '/||clear ', doubleTapSequence: '/||clear ||\r' },
+      { id: 'coco-model', label: '/model', sequence: '/||model ', doubleTapSequence: '/||model ||\r' },
+      { id: 'coco-resume', label: '/resume', sequence: '/||resume ', doubleTapSequence: '/||resume ||\r' },
     ],
   },
 ];
@@ -90,7 +91,10 @@ export function createDefaultToolbarPresets(): ToolbarPresetDefinition[] {
     programs: [...preset.programs],
     includeAlt: preset.includeAlt,
     rowLayout: [...preset.rowLayout],
-    actions: preset.actions.map((action) => ({ ...action })),
+    actions: preset.actions.map((action) => {
+      const copy: MobileToolbarAction = { ...action };
+      return copy;
+    }),
   }));
 }
 
@@ -194,11 +198,17 @@ export function sanitizeToolbarPresets(input: ToolbarPresetDefinition[]): Toolba
         rowLayout: sanitizeRowLayout((preset as Partial<ToolbarPresetDefinition>).rowLayout),
         actions: Array.isArray(preset.actions)
           ? preset.actions
-            .map((action, actionIndex) => ({
-              id: typeof action.id === 'string' && action.id.trim().length > 0 ? action.id : `${id}-action-${actionIndex + 1}`,
-              label: typeof action.label === 'string' ? action.label : `Key ${actionIndex + 1}`,
-              sequence: typeof action.sequence === 'string' ? action.sequence : '',
-            }))
+            .map((action, actionIndex) => {
+              const sanitized: MobileToolbarAction = {
+                id: typeof action.id === 'string' && action.id.trim().length > 0 ? action.id : `${id}-action-${actionIndex + 1}`,
+                label: typeof action.label === 'string' ? action.label : `Key ${actionIndex + 1}`,
+                sequence: typeof action.sequence === 'string' ? action.sequence : '',
+              };
+              if (typeof (action as Partial<MobileToolbarAction>).doubleTapSequence === 'string') {
+                sanitized.doubleTapSequence = (action as Partial<MobileToolbarAction>).doubleTapSequence;
+              }
+              return sanitized;
+            })
           : [],
       };
     })
