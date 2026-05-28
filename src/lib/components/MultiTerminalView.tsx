@@ -215,6 +215,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     updateSessionKeepAliveMs,
     removeSession: removePersistedSession,
     renameSession,
+    reorderSessions,
   } = useSessionPersistence();
 
   useEffect(() => {
@@ -650,6 +651,24 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     renameSession(sessionId, newName.trim());
   }, [renameSession]);
 
+  // Handle session reorder
+  const handleReorderSessions = useCallback((orderedIds: string[]) => {
+    setSessions((prev) => {
+      const idToSession = new Map(prev.map(s => [s.id, s]));
+      const reordered = orderedIds
+        .map(id => idToSession.get(id))
+        .filter((s): s is TerminalSession => s !== undefined);
+      const covered = new Set(orderedIds);
+      const remaining = prev.filter(s => !covered.has(s.id));
+      return [...reordered, ...remaining];
+    });
+    reorderSessions(orderedIds);
+    debugSession('[Session] Reordered sessions:', orderedIds);
+    requestAnimationFrame(() => {
+      swiperRef.current?.update();
+    });
+  }, [reorderSessions, debugSession]);
+
   // Handle session closing from custom event
   const handleCloseSession = useCallback(async (sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
@@ -744,12 +763,21 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       handleRenameSession(customEvent.detail.sessionId, customEvent.detail.name);
     };
 
+    const handleReorderSessionEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<{ sessionIds: string[] }>;
+      if (!customEvent.detail?.sessionIds) {
+        return;
+      }
+      handleReorderSessions(customEvent.detail.sessionIds);
+    };
+
     window.addEventListener('new-terminal-session', handleNewSessionEvent);
     window.addEventListener('switch-terminal-session', handleSwitchSessionEvent);
     window.addEventListener('close-terminal-session', handleCloseSessionEvent);
     window.addEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
     window.addEventListener('update-terminal-session-policy', handleUpdateSessionPolicyEvent);
     window.addEventListener('rename-terminal-session', handleRenameSessionEvent);
+    window.addEventListener('reorder-terminal-session', handleReorderSessionEvent);
 
     return () => {
       window.removeEventListener('new-terminal-session', handleNewSessionEvent);
@@ -758,8 +786,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
       window.removeEventListener('update-terminal-session-policy', handleUpdateSessionPolicyEvent);
       window.removeEventListener('rename-terminal-session', handleRenameSessionEvent);
+      window.removeEventListener('reorder-terminal-session', handleReorderSessionEvent);
     };
-  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleCloseSessionByBackendId, handleUpdateSessionPolicy, handleRenameSession]);
+  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleCloseSessionByBackendId, handleUpdateSessionPolicy, handleRenameSession, handleReorderSessions]);
 
   // 没有会话时创建新的
   useEffect(() => {

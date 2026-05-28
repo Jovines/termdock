@@ -16,22 +16,7 @@ import {
   Unplug as RiLogoutBoxRLine,
   GripVertical,
 } from 'lucide-react';
-import {
-  DndContext,
-  closestCenter,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core';
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-  horizontalListSortingStrategy,
-  useSortable,
-  arrayMove,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
+import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
 import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
@@ -99,66 +84,6 @@ function getTabDisplayLines(
   return { primary: session.name, secondary: null };
 }
 
-// --- Sortable Session Card (Drawer) ---
-function SortableSessionCard({ id, children }: { id: string; children: React.ReactNode }) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id });
-
-  const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-    zIndex: isDragging ? 50 : undefined,
-  };
-
-  return (
-    <div ref={setNodeRef} style={style} {...attributes}>
-      <div className="flex items-center">
-        <button
-          type="button"
-          className="shrink-0 cursor-grab touch-none p-1 text-muted-foreground/40 active:cursor-grabbing"
-          aria-label="Drag to reorder"
-          {...listeners}
-        >
-          <GripVertical size={16} />
-        </button>
-        <div className="min-w-0 flex-1">{children}</div>
-      </div>
-    </div>
-  );
-}
-
-// --- Sortable Tab (Top Tab Bar) ---
-function SortableTab({ id, children }: { id: string; children: React.ReactNode }) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id });
-
-  const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.7 : 1,
-    zIndex: isDragging ? 50 : undefined,
-  };
-
-  return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners} className="touch-none">
-      {children}
-    </div>
-  );
-}
-
 function App() {
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
   const safeBottomInset = 'env(safe-area-inset-bottom, 0px)';
@@ -189,23 +114,12 @@ function App() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
-  const [isTabDragging, setIsTabDragging] = useState(false);
 
-  // DnD sensors
-  const drawerSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-  );
-  const tabSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
-  );
-
-  const handleSessionDragEnd = useCallback((event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    const oldIndex = sessions.findIndex(s => s.id === active.id);
-    const newIndex = sessions.findIndex(s => s.id === over.id);
-    if (oldIndex === -1 || newIndex === -1) return;
-    const newOrder = arrayMove(sessions, oldIndex, newIndex);
+  const handleDragEnd = useCallback((result: DropResult) => {
+    if (!result.destination || result.source.index === result.destination.index) return;
+    const newOrder = [...sessions];
+    const [moved] = newOrder.splice(result.source.index, 1);
+    newOrder.splice(result.destination.index, 0, moved);
     window.dispatchEvent(new CustomEvent('reorder-terminal-session', {
       detail: { sessionIds: newOrder.map(s => s.id) },
     }));
@@ -643,27 +557,17 @@ function App() {
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="mx-auto flex h-full w-full max-w-[1440px] min-h-0 flex-col overflow-visible bg-background">
           <div
-            className="flex min-h-6 shrink-0 items-center justify-between gap-1.5 bg-background px-1.5 sm:min-h-7 sm:px-2"
+            className="flex min-h-6 shrink-0 items-center justify-between gap-1 bg-background px-1 sm:min-h-7 sm:px-1.5"
           >
-            <DndContext
-              sensors={tabSensors}
-              collisionDetection={closestCenter}
-              onDragStart={() => setIsTabDragging(true)}
-              onDragEnd={(event) => {
-                setIsTabDragging(false);
-                handleSessionDragEnd(event);
-              }}
-              onDragCancel={() => setIsTabDragging(false)}
-            >
-            <SortableContext
-              items={sessions.map(s => s.id)}
-              strategy={horizontalListSortingStrategy}
-            >
+            <DragDropContext onDragEnd={handleDragEnd}>
+            <Droppable droppableId="tabs" direction="horizontal">
+              {(provided) => (
             <div
-              className="scrollbar-thin flex min-w-0 flex-1 items-center gap-1 overflow-y-hidden whitespace-nowrap"
-              style={{ overflowX: isTabDragging ? 'hidden' : 'auto' }}
+              ref={provided.innerRef}
+              {...provided.droppableProps}
+              className="scrollbar-thin flex min-w-0 flex-1 items-center gap-px overflow-x-auto overflow-y-hidden whitespace-nowrap"
             >
-              {sessions.map((session) => {
+              {sessions.map((session, index) => {
                 const isActive = session.id === activeSessionId;
                 const isEditing = session.id === editingSessionId;
                 const ts = terminalSessions.get(session.id);
@@ -684,13 +588,21 @@ function App() {
                   };
 
                   return (
+                    <Draggable key={session.id} draggableId={session.id} index={index}>
+                      {(provided) => (
+                    <div
+                      ref={provided.innerRef}
+                      {...provided.draggableProps}
+                      {...provided.dragHandleProps}
+                    >
                     <input
-                      key={session.id}
-                      ref={renameInputRef}
+                      ref={(el) => {
+                        renameInputRef.current = el;
+                      }}
                       type="text"
                       defaultValue={session.name}
                       maxLength={48}
-                      className="shrink-0 rounded-full px-2 py-0.5 text-[11px] outline-none bg-surface-elevated text-foreground ring-1 ring-primary/50 min-w-[6rem]"
+                      className="shrink-0 rounded-md px-1 py-0.5 text-[11px] outline-none bg-surface-elevated text-foreground ring-1 ring-primary/50 min-w-[6rem]"
                       style={{ width: `${Math.min(Math.max(session.name.length, 6), 24)}ch` }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
@@ -701,17 +613,27 @@ function App() {
                       }}
                       onBlur={(e) => commitRename(session.id, e.target.value)}
                     />
+                    </div>
+                      )}
+                    </Draggable>
                   );
                 }
 
                 return (
-                  <SortableTab key={session.id} id={session.id}>
+                  <Draggable key={session.id} draggableId={session.id} index={index}>
+                    {(provided, snapshot) => (
+                    <div
+                      ref={provided.innerRef}
+                      {...provided.draggableProps}
+                      {...provided.dragHandleProps}
+                      className={`shrink-0 ${snapshot.isDragging ? 'opacity-70' : ''}`}
+                    >
                   <button
                     ref={isActive ? activeSessionTabRef : null}
                     type="button"
                     onClick={() => handleTabClick(session.id)}
                     onDoubleClick={() => setEditingSessionId(session.id)}
-                    className={`inline-flex items-center shrink-0 truncate rounded-full px-2 py-0.5 text-[11px] leading-tight transition max-w-[14rem] ${
+                    className={`inline-flex items-center shrink-0 truncate rounded-md px-1 py-0.5 text-[11px] leading-tight transition max-w-[14rem] ${
                       isActive
                         ? 'bg-surface-elevated text-foreground'
                         : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
@@ -737,7 +659,9 @@ function App() {
                       )}
                     </span>
                   </button>
-                  </SortableTab>
+                    </div>
+                    )}
+                  </Draggable>
                 );
               })}
               <div className="hidden items-center gap-1.5 pl-2 lg:flex">
@@ -755,9 +679,11 @@ function App() {
                   {fontSize}px
                 </span>
               </div>
+              {provided.placeholder}
             </div>
-            </SortableContext>
-            </DndContext>
+              )}
+            </Droppable>
+            </DragDropContext>
             <div className="flex shrink-0 items-center gap-2">
               {sessions.length > 0 && (
               <span
@@ -773,11 +699,11 @@ function App() {
                   setDrawerTab('sessions');
                   setIsDrawerOpen(true);
                 }}
-                className="inline-flex h-5 shrink-0 items-center justify-center gap-1 rounded-full bg-surface-2 px-2.5 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground sm:h-6"
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center gap-1 rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground sm:h-7 sm:w-auto sm:px-3"
                 aria-label="Open sessions and settings"
               >
-                <RiSettings4Line size={16} />
-                <span className="ml-2 hidden text-xs sm:inline">Settings</span>
+                <RiSettings4Line size={14} />
+                <span className="ml-1.5 hidden text-xs sm:inline">Settings</span>
               </button>
             </div>
           </div>
@@ -890,17 +816,15 @@ function App() {
                     </div>
                   ) : (
                     <>
-                      <DndContext
-                        sensors={drawerSensors}
-                        collisionDetection={closestCenter}
-                        onDragEnd={handleSessionDragEnd}
-                      >
-                        <SortableContext
-                          items={sessions.map(s => s.id)}
-                          strategy={verticalListSortingStrategy}
-                        >
-                          <div className="space-y-2">
-                            {sessions.map((session) => {
+                      <DragDropContext onDragEnd={handleDragEnd}>
+                        <Droppable droppableId="sessions">
+                          {(provided) => (
+                          <div
+                            ref={provided.innerRef}
+                            {...provided.droppableProps}
+                            className="space-y-2"
+                          >
+                            {sessions.map((session, index) => {
                           const ts = terminalSessions.get(session.id);
                           const { primary: display } = getTabDisplayLines(
                             session,
@@ -912,9 +836,21 @@ function App() {
                           const confirmingDestroy = sessionConfirmDestroyId === session.id;
                           const destroying = sessionDestroyingId === session.id;
                           return (
-                            <SortableSessionCard key={session.id} id={session.id}>
+                            <Draggable key={session.id} draggableId={`session-${session.id}`} index={index}>
+                              {(provided, snapshot) => (
                             <div
-                              className={`w-full rounded-2xl text-sm transition ${
+                              ref={provided.innerRef}
+                              {...provided.draggableProps}
+                              className={`flex items-center ${snapshot.isDragging ? 'opacity-70' : ''}`}
+                            >
+                              <div
+                                {...provided.dragHandleProps}
+                                className="shrink-0 cursor-grab touch-none p-1 text-muted-foreground/40 active:cursor-grabbing"
+                              >
+                                <GripVertical size={16} />
+                              </div>
+                            <div
+                              className={`w-full min-w-0 rounded-2xl text-sm transition ${
                                 isActive
                                   ? 'bg-surface-elevated text-foreground ring-1 ring-primary/30'
                                   : 'bg-surface-2 text-foreground hover:bg-surface-elevated'
@@ -1026,12 +962,16 @@ function App() {
                                 </div>
                               )}
                             </div>
-                            </SortableSessionCard>
+                            </div>
+                              )}
+                            </Draggable>
                           );
                         })}
+                          {provided.placeholder}
                           </div>
-                        </SortableContext>
-                      </DndContext>
+                          )}
+                        </Droppable>
+                      </DragDropContext>
 
                       <button
                         type="button"

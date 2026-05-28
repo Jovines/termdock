@@ -34,6 +34,7 @@ interface UseSessionPersistenceReturn {
   updateSessionBackendId: (sessionId: string, backendSessionId: string) => void;
   updateSessionKeepAliveMs: (sessionId: string, keepAliveMs: number | null) => void;
   renameSession: (sessionId: string, newName: string) => void;
+  reorderSessions: (orderedIds: string[]) => void;
   clearAllSessions: () => void;
   restoreSessions: () => Promise<PersistedSession[]>;
 }
@@ -243,6 +244,21 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     });
   }, [queuePersist]);
 
+  // 重排会话顺序
+  const reorderSessions = useCallback((orderedIds: string[]) => {
+    setSessions(prev => {
+      const idToSession = new Map(prev.map(s => [s.sessionId, s]));
+      const reordered = orderedIds
+        .map(id => idToSession.get(id))
+        .filter((s): s is PersistedSession => s !== undefined);
+      const covered = new Set(orderedIds);
+      const remaining = prev.filter(s => !covered.has(s.sessionId));
+      const updated = [...reordered, ...remaining];
+      queuePersist(updated);
+      return updated;
+    });
+  }, [queuePersist]);
+
   // 清除所有会话
   const clearAllSessions = useCallback(() => {
     setSessions([]);
@@ -293,6 +309,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     updateSessionBackendId,
     updateSessionKeepAliveMs,
     renameSession,
+    reorderSessions,
     clearAllSessions,
     restoreSessions,
   };
