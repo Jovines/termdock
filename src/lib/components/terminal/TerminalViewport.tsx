@@ -922,9 +922,12 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       const container = containerRef.current;
       if (!container) return;
 
-      const LONG_PRESS_DURATION_MS = 500;
-      const LONG_PRESS_MOVE_THRESHOLD_PX = 12;
-      const ARROW_GRID_STEP_PX = 25;
+      const LONG_PRESS_DURATION_MS = 350;
+      const LONG_PRESS_MOVE_THRESHOLD_PX = 20;
+      const JOYSTICK_DEAD_ZONE_PX = 12;
+      const JOYSTICK_SLOW_INTERVAL_MS = 260;
+      const JOYSTICK_FAST_INTERVAL_MS = 80;
+      const JOYSTICK_MAX_DISTANCE_PX = 80;
       const TAP_MOVE_THRESHOLD_PX = 10;
       const DOUBLE_TAP_WINDOW_MS = 150;
       const DOUBLE_TAP_DISTANCE_PX = 25;
@@ -942,8 +945,39 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       let originY = 0;
       let holdTimer: ReturnType<typeof setTimeout> | null = null;
       let mode: 'idle' | 'holding' | 'arrow' = 'idle';
-      let lastGridX = 0;
-      let lastGridY = 0;
+
+      // Joystick repeat state
+      let joystickDir: '' | 'up' | 'down' | 'left' | 'right' = '';
+      let joystickRepeatTimer: ReturnType<typeof setInterval> | null = null;
+      let lastHapticTime = 0;
+
+      const clearJoystickRepeat = () => {
+        if (joystickRepeatTimer !== null) {
+          clearInterval(joystickRepeatTimer);
+          joystickRepeatTimer = null;
+        }
+        joystickDir = '';
+      };
+
+      const startJoystickRepeat = (dir: 'up' | 'down' | 'left' | 'right', intervalMs: number) => {
+        clearJoystickRepeat();
+        joystickDir = dir;
+        // Fire first key immediately
+        inputHandlerRef.current(ARROW_SEQUENCES[dir]);
+        const now = performance.now();
+        if (now - lastHapticTime > 120) {
+          hapticLight();
+          lastHapticTime = now;
+        }
+        joystickRepeatTimer = setInterval(() => {
+          inputHandlerRef.current(ARROW_SEQUENCES[dir]);
+          const t = performance.now();
+          if (t - lastHapticTime > 120) {
+            hapticLight();
+            lastHapticTime = t;
+          }
+        }, intervalMs);
+      };
 
       // Double-tap state (independent from long-press)
       let lastTapTime = 0;
@@ -962,6 +996,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       const resetGestureState = () => {
         clearHoldTimer();
+        clearJoystickRepeat();
         pointerId = null;
         mode = 'idle';
       };
@@ -1025,8 +1060,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         tapStartY = e.clientY;
         tapDidMove = false;
         mode = 'holding';
-        lastGridX = 0;
-        lastGridY = 0;
 
         holdTimer = setTimeout(() => {
           holdTimer = null;
@@ -1034,13 +1067,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             mode = 'arrow';
             hapticLight();
             notifyGestureLock(true);
-            // Show arrow indicator at the touch origin
+            // Show arrow indicator (fixed at top-center of screen)
             setArrowIndicator({ visible: true, activeDir: '' });
-            const el = arrowIndicatorRef.current;
-            if (el) {
-              el.style.left = originX + 'px';
-              el.style.top = (originY - 100) + 'px';
-            }
           }
         }, LONG_PRESS_DURATION_MS);
       };
@@ -1083,74 +1111,68 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         }
 
         if (mode === 'arrow') {
-          // (preventDefault + stopImmediatePropagation already called above)
-
+          // Joystick mode: displacement from origin determines direction & speed.
+          // The further the finger moves, the faster keys repeat.
+          // When direction changes, origin resets so switching feels instant.
           const dx = e.clientX - originX;
           const dy = e.clientY - originY;
+          const dist = Math.hypot(dx, dy);
 
-          const gridX = Math.round(dx / ARROW_GRID_STEP_PX);
-          const gridY = Math.round(dy / ARROW_GRID_STEP_PX);
+          // Determine primary axis (soft lock, not rigid)
+          const absDx = Math.abs(dx);
+          const absDy = Math.abs(dy);
+          const isX = absDx >= absDy;
 
-          // Axis lock: once committed, ignore the other axis unless it
-          // clearly dominates (1.6x displacement ratio).  Within the same
-          // axis, no threshold — continuous movement fires immediately.
-          const prevDir = arrowIndicator.activeDir;
-          const lockedX = prevDir === 'left' || prevDir === 'right';
-          const lockedY = prevDir === 'up' || prevDir === 'down';
-          const xDominant = !lockedY && (lockedX || Math.abs(dx) > Math.abs(dy) * 1.6);
-          const yDominant = !lockedX && (lockedY || Math.abs(dy) > Math.abs(dx) * 1.6);
-
-          let keysSent = 0;
-
-          if (xDominant) {
-            if (gridX > lastGridX) {
-              for (let i = lastGridX + 1; i <= gridX; i++) {
-                inputHandlerRef.current(ARROW_SEQUENCES.right);
-                keysSent++;
-              }
-            } else if (gridX < lastGridX) {
-              for (let i = gridX; i < lastGridX; i++) {
-                inputHandlerRef.current(ARROW_SEQUENCES.left);
-                keysSent++;
-              }
-            }
-          } else if (yDominant) {
-            if (gridY > lastGridY) {
-              for (let i = lastGridY + 1; i <= gridY; i++) {
-                inputHandlerRef.current(ARROW_SEQUENCES.down);
-                keysSent++;
-              }
-            } else if (gridY < lastGridY) {
-              for (let i = gridY; i < lastGridY; i++) {
-                inputHandlerRef.current(ARROW_SEQUENCES.up);
-                keysSent++;
-              }
+          let newDir: '' | 'up' | 'down' | 'left' | 'right' = '';
+          if (dist > JOYSTICK_DEAD_ZONE_PX) {
+            if (isX) {
+              newDir = dx > 0 ? 'right' : 'left';
+            } else {
+              newDir = dy > 0 ? 'down' : 'up';
             }
           }
 
-          if (keysSent > 0) {
-            hapticLight();
+          if (newDir && newDir !== joystickDir) {
+            // Direction changed — reset origin to current position so
+            // the new direction's displacement starts from zero
+            originX = e.clientX;
+            originY = e.clientY;
           }
 
-          let activeDir = prevDir;
-          if (!lockedX && !lockedY) {
-            // First move — lock to whichever axis crosses a grid step
-            if (gridX > lastGridX) activeDir = 'right';
-            else if (gridX < lastGridX) activeDir = 'left';
-            else if (gridY > lastGridY) activeDir = 'down';
-            else if (gridY < lastGridY) activeDir = 'up';
-          } else if (xDominant && gridX !== lastGridX) {
-            activeDir = dx > 0 ? 'right' : 'left';
-          } else if (yDominant && gridY !== lastGridY) {
-            activeDir = dy > 0 ? 'down' : 'up';
-          }
+          if (newDir) {
+            // Recalculate after potential origin reset
+            const newDx = e.clientX - originX;
+            const newDy = e.clientY - originY;
+            const newDist = Math.hypot(newDx, newDy);
 
-          if (activeDir) {
-            setArrowIndicator({ visible: true, activeDir });
-          }
+            // Map distance to repeat interval: closer = slower, further = faster
+            const excess = Math.min(newDist - JOYSTICK_DEAD_ZONE_PX, JOYSTICK_MAX_DISTANCE_PX - JOYSTICK_DEAD_ZONE_PX);
+            const ratio = excess / (JOYSTICK_MAX_DISTANCE_PX - JOYSTICK_DEAD_ZONE_PX);
+            const intervalMs = JOYSTICK_SLOW_INTERVAL_MS - ratio * (JOYSTICK_SLOW_INTERVAL_MS - JOYSTICK_FAST_INTERVAL_MS);
 
-          lastGridX = gridX;
-          lastGridY = gridY;
+            if (newDir !== joystickDir) {
+              // Direction changed — restart timer with new direction & speed
+              startJoystickRepeat(newDir, intervalMs);
+            } else {
+              // Same direction — adjust repeat speed if interval changed significantly
+              if (joystickRepeatTimer !== null) {
+                clearInterval(joystickRepeatTimer);
+                joystickRepeatTimer = setInterval(() => {
+                  inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
+                  const t = performance.now();
+                  if (t - lastHapticTime > 120) {
+                    hapticLight();
+                    lastHapticTime = t;
+                  }
+                }, intervalMs);
+              }
+            }
+            setArrowIndicator({ visible: true, activeDir: newDir });
+          } else {
+            // Inside dead zone — stop repeating but stay in arrow mode
+            clearJoystickRepeat();
+            setArrowIndicator({ visible: true, activeDir: '' });
+          }
         }
       };
 
@@ -2017,14 +2039,16 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
               Tab
             </div>
 
-            {/* Long-press arrow drag indicator */}
+            {/* Long-press arrow drag indicator — fixed top-center */}
             <div
               ref={arrowIndicatorRef}
               aria-hidden
-              className="fixed z-30 pointer-events-none transition-opacity duration-150 ease-out"
+              className="fixed left-1/2 top-6 z-30 pointer-events-none transition-opacity duration-150 ease-out"
               style={{
                 opacity: arrowIndicator.visible ? 1 : 0,
-                transform: 'translate(-50%, -50%)',
+                transform: arrowIndicator.visible
+                  ? 'translate(-50%, 0) scale(1)'
+                  : 'translate(-50%, -8px) scale(0.9)',
               }}
             >
               {arrowIndicator.visible && (() => {
@@ -2032,26 +2056,26 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                 const A = (d: string) => activeDir === d;
 
                 return (
-                  <div className="flex flex-col items-center gap-1 rounded-2xl bg-black/75 backdrop-blur-sm shadow-xl px-2.5 py-2">
+                  <div className="flex flex-col items-center gap-0.5 rounded-xl bg-black/70 backdrop-blur-sm shadow-lg px-1.5 py-1.5">
                     {/* Up */}
-                    <div className={`w-10 h-10 flex items-center justify-center rounded-xl transition-colors ${A('up') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M7 11l5-5 5 5"/></svg>
+                    <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('up') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M7 11l5-5 5 5"/></svg>
                     </div>
                     {/* Left / Right */}
-                    <div className="flex items-center gap-1">
-                      <div className={`w-10 h-10 flex items-center justify-center rounded-xl transition-colors ${A('left') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
-                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                    <div className="flex items-center gap-0.5">
+                      <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('left') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
                       </div>
-                      <div className="w-10 h-10 flex items-center justify-center rounded-xl text-white/15">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4"/></svg>
+                      <div className="w-7 h-7 flex items-center justify-center rounded-lg text-white/15">
+                        <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4"/></svg>
                       </div>
-                      <div className={`w-10 h-10 flex items-center justify-center rounded-xl transition-colors ${A('right') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
-                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                      <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('right') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
                       </div>
                     </div>
                     {/* Down */}
-                    <div className={`w-10 h-10 flex items-center justify-center rounded-xl transition-colors ${A('down') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+                    <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('down') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
                     </div>
                   </div>
                 );
