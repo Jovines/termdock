@@ -174,48 +174,67 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => document.removeEventListener('termfontchange', handleFontChange);
   }, []);
 
-  // 页面从后台恢复可见时，强制发送 resize 修正 tmux 窗口大小
+  // 统一恢复入口：从后台返回 / BFCache 恢复 / 网络恢复 / 切回当前 session 时调用。
+  // 单一职责：清 resize 去重 → fit → 同步刷新纹理图集 → 滚动到底（非 alternate buffer）。
+  // 不使用 setTimeout 重试链：rAF 内一次性同步完成，避免与 ResizeObserver / 防抖刷新互相覆盖。
+  const recoverActive = React.useCallback((reason: string) => {
+    if (!isActive) return;
+    debugSession(`[recoverActive] ${reason}`);
+
+    // 清掉 resize 去重，强制下一帧把本地尺寸推给后端 / tmux
+    resizeStateRef.current.lastSent = null;
+    tmuxSessionResizedRef.current = null;
+    skipLayoutResizeRef.current = true;
+
+    const controller = terminalControllerRef.current;
+    if (!controller) return;
+
+    // 在浏览器下一帧（容器尺寸已经稳定后）：fit → 立即同步刷新 → 滚到底
+    const raf = requestAnimationFrame(() => {
+      const c = terminalControllerRef.current;
+      if (!c) return;
+      c.recoverRenderer();   // WebGL addon 丢失时重建 + 同步刷新
+      c.fit();               // 重新 fit 容器
+      c.refreshNow();        // 同步立即清纹理 + 重绘所有行
+      c.scrollToBottom();    // 滚到底（alternate buffer 内部会自动跳过）
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [isActive, debugSession]);
+
+  // 1) 页面可见性变化（前后台切换）
   React.useEffect(() => {
     const handleVisibility = () => {
-      if (!document.hidden && isActive) {
-        // 重置所有状态，强制用本地尺寸覆盖 tmux 的其他客户端窗口大小
-        resizeStateRef.current.lastSent = null;
-        tmuxSessionResizedRef.current = null;
-        skipLayoutResizeRef.current = true;
-        let attempts = 0;
-        const tryFit = () => {
-          attempts++;
-          if (attempts > 15) return;
-          terminalControllerRef.current?.fit();
-          if (attempts < 8) setTimeout(tryFit, attempts < 4 ? 100 : 250);
-        };
-        setTimeout(tryFit, 150);
-        terminalControllerRef.current?.recoverRenderer();
+      if (!document.hidden) {
+        recoverActive('visibilitychange');
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
     return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [isActive]);
+  }, [recoverActive]);
 
-  // 切换回当前 session 时：
-  //  - 重置 resize 状态以覆盖其他设备的窗口尺寸（多设备复用同一 session 场景）
-  //  - 刷新 WebGL 纹理图集修复静态内容乱码
+  // 2) BFCache 恢复（iOS Safari PWA 从后台回来不会触发 visibilitychange）
+  //    online：网络恢复时也强制刷一遍，与 WS 重连联动
+  React.useEffect(() => {
+    const handlePageShow = (event: PageTransitionEvent) => {
+      recoverActive(event.persisted ? 'pageshow:bfcache' : 'pageshow');
+    };
+    const handleOnline = () => recoverActive('online');
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [recoverActive]);
+
+  // 3) 切换回当前 session（左右翻页 inactive → active）
   const prevIsActiveRef = React.useRef(isActive);
   React.useEffect(() => {
     const wasInactive = !prevIsActiveRef.current;
     prevIsActiveRef.current = isActive;
-
     if (!isActive || !wasInactive) return;
-
-    resizeStateRef.current.lastSent = null;
-    tmuxSessionResizedRef.current = null;
-    skipLayoutResizeRef.current = true;
-    const raf = requestAnimationFrame(() => {
-      terminalControllerRef.current?.fit();
-      terminalControllerRef.current?.refreshTextureAtlas();
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [isActive]);
+    return recoverActive('session-active');
+  }, [isActive, recoverActive]);
 
   // iOS detection
   React.useEffect(() => {
@@ -418,20 +437,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   setTmuxLayout(null);
                   setSessionCopyMode(storeSessionId, false);
                 } else {
-                  // 进入/重连 tmux 后强制 resize，绕过所有去重逻辑
+                  // 进入/重连 tmux 后强制 resize：单次 rAF，复用 recoverActive 思路
                   resizeStateRef.current.lastSent = null;
                   tmuxSessionResizedRef.current = null;
                   skipLayoutResizeRef.current = true;
-                  let attempts = 0;
-                  const tryFit = () => {
-                    attempts++;
-                    if (attempts > 20) return;
-                    terminalControllerRef.current?.fit();
-                    if (attempts < 10) {
-                      setTimeout(tryFit, attempts < 5 ? 80 : 200);
-                    }
-                  };
-                  setTimeout(tryFit, 100);
+                  requestAnimationFrame(() => {
+                    const c = terminalControllerRef.current;
+                    if (!c) return;
+                    c.fit();
+                    c.refreshNow();
+                    c.scrollToBottom();
+                  });
                 }
 
                 debugSession('[Terminal] Connected event received:', {

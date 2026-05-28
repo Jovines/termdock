@@ -127,8 +127,14 @@ export type TerminalController = {
   focus: () => void;
   clear: () => void;
   fit: () => void;
+  /** 同步立即清纹理图集 + 重绘所有行（恢复 / 切换 session 关键路径用） */
+  refreshNow: () => void;
+  /** 防抖延迟刷新（高频场景，如 ResizeObserver 回调） */
   refreshTextureAtlas: () => void;
+  /** 恢复 WebGL renderer：addon 丢失时重建 + 立即刷新 */
   recoverRenderer: () => void;
+  /** 滚动到底部（除非用户在 alternate buffer 或 tmux copy-mode） */
+  scrollToBottom: () => void;
 };
 
 interface TerminalViewportProps {
@@ -1249,6 +1255,34 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       textureAtlasRefreshTimerRef.current = null;
     }, []);
 
+    /**
+     * 立即同步清纹理图集 + 重绘所有行。
+     * 用于"必须刷"的关键时刻：从后台返回、切换 session、重建 renderer 后。
+     * 不走 setTimeout 防抖，避免被后续高频事件无限推迟。
+     */
+    const refreshTextureAtlasNow = React.useCallback((reason: string) => {
+      clearTextureAtlasRefreshTimer();
+      const addon = webglAddonRef.current;
+      const terminal = terminalRef.current;
+      if (!terminal) {
+        return;
+      }
+      try {
+        if (addon) {
+          addon.clearTextureAtlas();
+        }
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        debugTerminal('texture atlas refreshed (sync)', {
+          reason,
+          cols: terminal.cols,
+          rows: terminal.rows,
+          hasWebgl: !!addon,
+        });
+      } catch (error) {
+        debugTerminal('texture atlas refresh (sync) failed', { reason, error });
+      }
+    }, [clearTextureAtlasRefreshTimer, debugTerminal]);
+
     const scheduleTextureAtlasRefresh = React.useCallback((reason: string) => {
       if (typeof window === 'undefined') {
         return;
@@ -1258,26 +1292,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       textureAtlasRefreshTimerRef.current = window.setTimeout(() => {
         textureAtlasRefreshTimerRef.current = null;
-
-        const addon = webglAddonRef.current;
-        const terminal = terminalRef.current;
-        if (!addon || !terminal) {
-          return;
-        }
-
-        try {
-          addon.clearTextureAtlas();
-          terminal.refresh(0, Math.max(0, terminal.rows - 1));
-          debugTerminal('texture atlas refreshed', {
-            reason,
-            cols: terminal.cols,
-            rows: terminal.rows,
-          });
-        } catch (error) {
-          debugTerminal('texture atlas refresh failed', { reason, error });
-        }
+        refreshTextureAtlasNow(reason);
       }, TEXTURE_ATLAS_REFRESH_DELAY_MS);
-    }, [clearTextureAtlasRefreshTimer, debugTerminal]);
+    }, [clearTextureAtlasRefreshTimer, refreshTextureAtlasNow]);
 
     const disposeWebglRenderer = React.useCallback((reason: string): boolean => {
       clearTextureAtlasRefreshTimer();
@@ -1316,6 +1333,15 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           debugTerminal('webgl context loss', { reason: 'onContextLoss' });
           disposeWebglRenderer('context-loss');
           fitTerminal('webgl-context-loss');
+          // 异步重建 WebGL renderer（避免在 onContextLoss 回调内同步重建死循环）
+          if (typeof window !== 'undefined' && shouldUseWebgl) {
+            window.setTimeout(() => {
+              const term = terminalRef.current;
+              if (term && !webglAddonRef.current) {
+                enableWebglRenderer(term, 'auto-recover-after-context-loss');
+              }
+            }, 0);
+          }
         });
 
         terminal.loadAddon(webglAddon);
@@ -1327,7 +1353,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           mobile: enableTouchScroll,
           mode: rendererMode,
         });
-        scheduleTextureAtlasRefresh(`webgl-enabled:${reason}`);
+        // 新建 renderer 后立即同步刷新一次，确保字符立刻正确
+        refreshTextureAtlasNow(`webgl-enabled:${reason}`);
         return true;
       } catch (error) {
         debugTerminal('webgl load failed, fallback to canvas', {
@@ -1343,8 +1370,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       disposeWebglRenderer,
       enableTouchScroll,
       fitTerminal,
+      refreshTextureAtlasNow,
       rendererMode,
-      scheduleTextureAtlasRefresh,
+      shouldUseWebgl,
     ]);
 
     const flushWrites = React.useCallback(() => {
@@ -1552,14 +1580,19 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             }
 
             const nextDevicePixelRatio = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
-            if (Math.abs(nextDevicePixelRatio - lastDevicePixelRatioRef.current) > 0.001) {
+            const dprChanged = Math.abs(nextDevicePixelRatio - lastDevicePixelRatioRef.current) > 0.001;
+            if (dprChanged) {
               lastDevicePixelRatioRef.current = nextDevicePixelRatio;
               debugTerminal('device pixel ratio changed', { value: nextDevicePixelRatio });
-              scheduleTextureAtlasRefresh('device-pixel-ratio-change');
             }
 
             fitTerminal('resize-observer');
-            scheduleTextureAtlasRefresh('resize-observer');
+            // DPR 变化必须立即刷（屏幕在缩放/移动），其他场景走防抖即可
+            if (dprChanged) {
+              refreshTextureAtlasNow('device-pixel-ratio-change');
+            } else {
+              scheduleTextureAtlasRefresh('resize-observer');
+            }
           });
           localResizeObserver.observe(container);
 
@@ -1636,11 +1669,13 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         hiddenInputRef.current.value = '';
       }
       fitTerminal('session-reset');
+      // reset 后立即同步刷新，避免同尺寸切换 session 时纹理图集残留旧字形
+      refreshTextureAtlasNow('session-reset');
       if (autoFocus) {
         terminal.focus();
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [sessionKey, terminalReadyVersion, fitTerminal, resetWriteState]);
+    }, [sessionKey, terminalReadyVersion, fitTerminal, refreshTextureAtlasNow, resetWriteState]);
 
     React.useEffect(() => {
       if (!enableTouchScroll) return;
@@ -1663,6 +1698,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           terminal.reset();
           resetWriteState();
           fitTerminal('buffer-reset');
+          refreshTextureAtlasNow('buffer-reset');
         }
         return;
       }
@@ -1689,7 +1725,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
 
       lastProcessedChunkIdRef.current = chunks[chunks.length - 1].id;
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [chunks, terminalReadyVersion, enqueueWrite, fitTerminal, resetWriteState]);
+    }, [chunks, terminalReadyVersion, enqueueWrite, fitTerminal, refreshTextureAtlasNow, resetWriteState]);
 
     React.useImperativeHandle(
       ref,
@@ -1709,9 +1745,13 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           terminal.reset();
           resetWriteState();
           fitTerminal('imperative-clear');
+          refreshTextureAtlasNow('imperative-clear');
         },
         fit: () => {
           fitTerminal('imperative-fit');
+        },
+        refreshNow: () => {
+          refreshTextureAtlasNow('imperative-refresh-now');
         },
         refreshTextureAtlas: () => {
           scheduleTextureAtlasRefresh('imperative-refresh');
@@ -1720,9 +1760,20 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           const terminal = terminalRef.current;
           if (!terminal) return;
           if (!webglAddonRef.current && shouldUseWebgl) {
+            // enableWebglRenderer 内部已会同步 refreshTextureAtlasNow
             enableWebglRenderer(terminal, 'recover');
+          } else {
+            refreshTextureAtlasNow('recover');
           }
-          scheduleTextureAtlasRefresh('recover');
+        },
+        scrollToBottom: () => {
+          const terminal = terminalRef.current;
+          if (!terminal) return;
+          // alternate buffer（vim/less/tmux 等）下不能强制滚到底，会破坏内容定位
+          if (terminal.buffer.active.type === 'alternate') return;
+          try {
+            terminal.scrollToBottom();
+          } catch { /* ignored */ }
         },
       }),
       [
@@ -1730,6 +1781,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         focusHiddenInput,
         fitTerminal,
         resetWriteState,
+        refreshTextureAtlasNow,
         scheduleTextureAtlasRefresh,
         enableWebglRenderer,
         shouldUseWebgl,
