@@ -8,8 +8,10 @@ import cookieParser from 'cookie-parser';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import terminalRoutes, { handleTerminalWebSocket } from './routes/terminal.js';
+import authRoutes from './routes/auth.js';
 import { csrfProtection } from './utils/csrfProtection.js';
 import { pathValidator } from './utils/pathValidator.js';
+import { isUpgradeRequestAuthenticated, requireAuth } from './utils/authProtection.js';
 
 import { PORT, DEFAULT_HOST } from './config.js';
 
@@ -55,7 +57,7 @@ export function createApp(): express.Express {
   // 安全中间件：CSRF令牌生成（在所有路由之前）
   app.use(csrfProtection.tokenMiddleware());
 
-  // 健康检查端点（不需要CSRF保护）
+  // 健康检查端点（不需要CSRF保护，也不需要登录）
   app.get('/health', (_req, res) => {
     res.json({ 
       status: 'ok', 
@@ -67,8 +69,11 @@ export function createApp(): express.Express {
     });
   });
 
-  // CSRF令牌获取端点
-  app.get('/api/csrf-token', csrfProtection.getTokenHandler());
+  // 鉴权路由（公开：登录 / 登出 / 状态查询）
+  app.use('/api/auth', authRoutes);
+
+  // CSRF令牌获取端点（必须先登录后才能拿，避免未授权探测）
+  app.get('/api/csrf-token', requireAuth(), csrfProtection.getTokenHandler());
 
   // 安全中间件：将路径验证器注入到请求对象中
   app.use((req, _res, next) => {
@@ -76,11 +81,12 @@ export function createApp(): express.Express {
     next();
   });
 
-  app.get('/api/home', (_req, res) => {
+  app.get('/api/home', requireAuth(), (_req, res) => {
     res.json({ home: homedir() });
   });
 
-  // 应用CSRF保护（在终端路由之前）
+  // 应用鉴权 + CSRF保护（在终端路由之前）
+  app.use('/api/terminal', requireAuth());
   app.use('/api/terminal', csrfProtection.verifyMiddleware());
 
   // 终端路由
@@ -114,6 +120,16 @@ export function startServer(options: ServerOptions = {}) {
     const match = url.pathname.match(WS_PATH_RE);
 
     if (!match) {
+      socket.destroy();
+      return;
+    }
+
+    // Reject the upgrade before the WebSocket handshake completes if auth
+    // is enabled and the client cookie is missing/expired. We respond with
+    // a real HTTP 401 so the browser surfaces a useful error.
+    const cookieHeader = request.headers.cookie;
+    if (!isUpgradeRequestAuthenticated(typeof cookieHeader === 'string' ? cookieHeader : undefined)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
     }

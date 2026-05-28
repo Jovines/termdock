@@ -543,7 +543,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                           }))
                         }
                         className="w-full rounded-full bg-surface px-4 py-2.5 font-mono text-sm outline-none ring-1 ring-transparent focus:ring-accent/40"
-                        placeholder="e.g. /undo or \t or \u001b[A"
+                        placeholder="e.g. /undo or \t or /||undo"
                         autoCapitalize="off"
                         autoCorrect="off"
                         spellCheck={false}

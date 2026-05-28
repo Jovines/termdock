@@ -154,6 +154,62 @@ body {
   opacity: 0.5;
 }
 
+/* 全局聚焦样式：去掉浏览器默认的蓝色 outline / native focus ring，
+   让所有元素的聚焦效果由 Tailwind 的 ring/border 工具类控制（默认走主题色）。
+   - outline: none 去掉桌面浏览器默认蓝色实线
+   - -webkit-tap-highlight-color: transparent 去掉移动端点击灰阴影
+   - 不强制覆盖 ring 色，组件可按需用 focus:ring-primary 等定制 */
+:where(input, textarea, select, button, a, [tabindex]):focus,
+:where(input, textarea, select, button, a, [tabindex]):focus-visible {
+  outline: none;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* iOS Safari 会给 input/textarea/select 加原生外观（包括失焦后的蓝色描边、
+   内阴影、圆角等），用 -webkit-appearance: none 才能彻底去掉。
+   不影响 type=range / type=checkbox / type=radio / button 等按钮原生外观，
+   因此这里只覆盖文本类输入。 */
+input:not([type='range']):not([type='checkbox']):not([type='radio']),
+textarea,
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-clip: padding-box;
+  /* 把光标颜色和系统强调色都拉到主题色，避免 iOS 显示蓝色 caret / accent */
+  caret-color: var(--primary);
+  accent-color: var(--primary);
+}
+
+/* iOS 在密码自动填充 / Strong Password 提示后，会给 input 残留一层
+   淡蓝色背景 + 蓝色 outline。下面这组 -webkit-autofill 规则把它换成
+   我们的主题底色，并强制清掉 outline / box-shadow 残影。 */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px var(--surface-2) inset !important;
+  -webkit-text-fill-color: var(--foreground) !important;
+  caret-color: var(--primary) !important;
+  border-color: var(--border) !important;
+  transition: background-color 9999s ease-out 0s;
+}
+
+/* 兜底：所有 input/textarea 在任何 focus 相关伪类下都不允许有 outline。
+   用 !important 是因为 Safari 的 user-agent stylesheet 优先级不低，
+   也防止 PWA 的旧缓存 CSS 残留。 */
+input:focus,
+input:focus-visible,
+input:focus-within,
+textarea:focus,
+textarea:focus-visible,
+textarea:focus-within {
+  outline: none !important;
+  outline-offset: 0 !important;
+}
+
 /* Custom UI utility classes */
 .ui-kicker {
   font-size: 0.6875rem;
@@ -183,6 +239,74 @@ body {
 .ui-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(67, 133, 190, 0.3);
+}
+
+/*
+ * Global focus / autofill ring suppression.
+ * iOS Safari adds a blue "tap highlight" + a persistent autofill / saved-password
+ * outline that lingers after the keyboard closes. We strip it everywhere — components
+ * that need a focus ring should opt-in via :focus-visible (e.g. the .ui-input rule above).
+ */
+* {
+  -webkit-tap-highlight-color: transparent;
+  /* Tailwind's `ring-*` utility falls back to a hard-coded blue (#3b82f6) when no
+     ring color is set. Re-point the default to our theme border so utilities like
+     `ring-1` don't suddenly bleed bright blue around inputs/cards. */
+  --tw-ring-color: var(--border);
+}
+
+input,
+textarea,
+select,
+button,
+a,
+[tabindex] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+select:focus,
+select:focus-visible,
+button:focus,
+button:focus-visible {
+  outline: none !important;
+  outline-offset: 0 !important;
+}
+
+/* Strip the iOS native input chrome so Safari doesn't redraw a blue inset border
+   after the soft keyboard dismisses. */
+input[type='text'],
+input[type='password'],
+input[type='email'],
+input[type='search'],
+input[type='number'],
+input[type='url'],
+input[type='tel'],
+textarea {
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-user-select: text;
+  user-select: text;
+  caret-color: var(--foreground);
+  accent-color: var(--accent);
+}
+
+/* Saved-password / autofill: kill the yellow background and any residual
+   blue ring Safari paints once the keyboard closes. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active,
+input:autofill {
+  -webkit-box-shadow: 0 0 0 1000px var(--surface-2) inset !important;
+  box-shadow: 0 0 0 1000px var(--surface-2) inset !important;
+  -webkit-text-fill-color: var(--foreground) !important;
+  caret-color: var(--foreground) !important;
+  border-color: var(--border) !important;
+  transition: background-color 9999s ease-out, color 9999s ease-out;
 }
 
 .section-title {

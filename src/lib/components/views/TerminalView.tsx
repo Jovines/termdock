@@ -7,7 +7,7 @@ import { FLEXOKI_DARK } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
-import { buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
+import { buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, splitToolbarSequenceSegments, TOOLBAR_SEGMENT_DELAY_MS, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
 import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
@@ -1053,10 +1053,27 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   );
 
   const handleToolbarTextPress = React.useCallback((sequence: string) => {
-    handleViewportInput(decodeToolbarSequence(sequence), {
+    const segments = splitToolbarSequenceSegments(sequence);
+    if (segments.length === 0) {
+      return;
+    }
+    const consumeModifier = activeModifier !== null;
+    // First segment is sent immediately and consumes any active modifier;
+    // subsequent segments are sent after a small delay so TUIs that react
+    // to the first keystroke (e.g. coco's slash-command palette) have time
+    // to enter the right input mode before receiving the rest.
+    handleViewportInput(decodeToolbarSequence(segments[0]), {
       skipModifierTransform: true,
-      consumeModifier: activeModifier !== null,
+      consumeModifier,
     });
+    for (let i = 1; i < segments.length; i += 1) {
+      const segment = segments[i];
+      window.setTimeout(() => {
+        handleViewportInput(decodeToolbarSequence(segment), {
+          skipModifierTransform: true,
+        });
+      }, TOOLBAR_SEGMENT_DELAY_MS * i);
+    }
     focusTerminalIfActive();
   }, [activeModifier, focusTerminalIfActive, handleViewportInput]);
 

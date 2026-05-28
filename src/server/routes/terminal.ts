@@ -218,8 +218,8 @@ function flushPersistAndExit(): void {
     fs.writeFileSync(CLIENT_STATES_FILE, JSON.stringify(obj, null, 2), 'utf-8');
   } catch { /* best effort */ }
 }
-process.on('SIGTERM', () => { flushPersistAndExit(); process.exit(0); });
-process.on('SIGINT', () => { flushPersistAndExit(); process.exit(0); });
+process.on('SIGTERM', () => { flushPersistAndExit(); persistToolbarPresetsNow(); process.exit(0); });
+process.on('SIGINT', () => { flushPersistAndExit(); persistToolbarPresetsNow(); process.exit(0); });
 
 // 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
 loadClientStatesFromDisk();
@@ -258,6 +258,56 @@ loadClientStatesFromDisk();
 })();
 
 // ── end persistence ──
+
+// ── Toolbar presets persistence (shared across all clients) ──
+// Stored as a single JSON document at ~/.termdock/toolbar-presets.json.
+// The schema is intentionally opaque to the server: it just round-trips
+// `presets` (array) and `version` (number) so the client owns all merge /
+// upgrade logic. The whole document is global (not keyed by clientId) so
+// every browser pointing at this server sees the same toolbar config.
+const TOOLBAR_PRESETS_FILE = `${os.homedir()}/.termdock/toolbar-presets.json`;
+interface ToolbarPresetsDoc {
+  version: number;
+  presets: unknown[];
+  updatedAt: number;
+}
+let toolbarPresetsDoc: ToolbarPresetsDoc | null = null;
+let persistToolbarPresetsTimer: ReturnType<typeof setTimeout> | null = null;
+
+function loadToolbarPresetsFromDisk(): void {
+  try {
+    if (fs.existsSync(TOOLBAR_PRESETS_FILE)) {
+      const raw = fs.readFileSync(TOOLBAR_PRESETS_FILE, 'utf-8');
+      const parsed = JSON.parse(raw) as Partial<ToolbarPresetsDoc>;
+      toolbarPresetsDoc = {
+        version: typeof parsed.version === 'number' ? parsed.version : 0,
+        presets: Array.isArray(parsed.presets) ? parsed.presets : [],
+        updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now(),
+      };
+    }
+  } catch (error) {
+    console.warn('[toolbar-presets] Failed to load from disk:', getErrorMessage(error));
+  }
+}
+
+function persistToolbarPresetsNow(): void {
+  if (!toolbarPresetsDoc) return;
+  try {
+    const dir = `${os.homedir()}/.termdock`;
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(TOOLBAR_PRESETS_FILE, JSON.stringify(toolbarPresetsDoc, null, 2), 'utf-8');
+  } catch (error) {
+    console.warn('[toolbar-presets] Failed to persist:', getErrorMessage(error));
+  }
+}
+
+function schedulePersistToolbarPresets(): void {
+  if (persistToolbarPresetsTimer) clearTimeout(persistToolbarPresetsTimer);
+  persistToolbarPresetsTimer = setTimeout(persistToolbarPresetsNow, 200);
+}
+
+loadToolbarPresetsFromDisk();
+// ── end toolbar presets persistence ──
 
 // 开发模式下使用更激进的清理策略
 const isDevelopment = process.env.NODE_ENV === 'development';
@@ -1668,6 +1718,19 @@ router.delete('/client-state', (req, res) => {
   clientTerminalStates.delete(clientId);
   schedulePersistClientStates();
   res.status(204).send();
+});
+
+router.get('/toolbar-presets', (_req, res) => {
+  res.json(toolbarPresetsDoc ?? { version: 0, presets: [], updatedAt: 0 });
+});
+
+router.put('/toolbar-presets', (req, res) => {
+  const body = (req.body ?? {}) as Partial<ToolbarPresetsDoc>;
+  const version = typeof body.version === 'number' ? body.version : 0;
+  const presets = Array.isArray(body.presets) ? body.presets : [];
+  toolbarPresetsDoc = { version, presets, updatedAt: Date.now() };
+  schedulePersistToolbarPresets();
+  res.json(toolbarPresetsDoc);
 });
 
 router.post('/create', async (req, res) => {

@@ -9,9 +9,37 @@ import type {
   TmuxStatus,
 } from './types';
 
+// ---- Global 401 interceptor ----
+//
+// We wrap window.fetch once on module load so every request to our backend
+// participates in auth handling. On a 401 we clear the cached CSRF token and
+// emit an `auth:unauthorized` window event; App.tsx listens for this and
+// re-renders the LoginScreen.
+//
+// This must happen before any other module-level code below issues a fetch.
+export const AUTH_UNAUTHORIZED_EVENT = 'auth:unauthorized';
+
 // ---- CSRF token (still needed for HTTP endpoints) ----
 
 let csrfToken: string | null = null;
+
+if (typeof window !== 'undefined' && !(window as any).__termdockFetchPatched) {
+  (window as any).__termdockFetchPatched = true;
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = async (...args: Parameters<typeof fetch>) => {
+    const response = await originalFetch(...args);
+    if (response.status === 401) {
+      // Drop CSRF cache so the next login re-fetches a fresh token.
+      csrfToken = null;
+      try {
+        window.dispatchEvent(new CustomEvent(AUTH_UNAUTHORIZED_EVENT));
+      } catch {
+        // ignore — environments without CustomEvent support are not relevant here
+      }
+    }
+    return response;
+  };
+}
 
 async function getCsrfToken(): Promise<string> {
   if (csrfToken) return csrfToken;
@@ -20,6 +48,11 @@ async function getCsrfToken(): Promise<string> {
   const data = await response.json();
   csrfToken = data.csrfToken;
   return csrfToken as string;
+}
+
+// Exported so the auth flow can force a fresh token after login.
+export function resetCsrfTokenCache(): void {
+  csrfToken = null;
 }
 
 // ---- WebSocket connections (replaces SSE + HTTP POST for terminal I/O) ----
@@ -561,4 +594,85 @@ export async function clearTerminalClientState(): Promise<void> {
     const error = await response.json().catch(() => ({ error: 'Failed to clear terminal client state' }));
     throw new Error(error.error || 'Failed to clear terminal client state');
   }
+}
+
+export interface ToolbarPresetsDoc {
+  version: number;
+  presets: unknown[];
+  updatedAt?: number;
+}
+
+export async function getToolbarPresetsDoc(): Promise<ToolbarPresetsDoc> {
+  const response = await fetch('/api/terminal/toolbar-presets', { method: 'GET' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to load toolbar presets' }));
+    throw new Error(error.error || 'Failed to load toolbar presets');
+  }
+  return response.json();
+}
+
+export async function replaceToolbarPresetsDoc(doc: ToolbarPresetsDoc): Promise<ToolbarPresetsDoc> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/toolbar-presets', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(doc),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to save toolbar presets' }));
+    throw new Error(error.error || 'Failed to save toolbar presets');
+  }
+  return response.json();
+}
+
+// ---- Auth ----
+
+export interface AuthStatus {
+  enabled: boolean;
+  authenticated: boolean;
+}
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+  // /api/auth/status is public — it must not 401, but we go through the
+  // patched fetch anyway to keep behaviour uniform.
+  const response = await fetch('/api/auth/status');
+  if (!response.ok) {
+    throw new Error('Failed to query auth status');
+  }
+  return response.json();
+}
+
+export interface LoginResult {
+  ok: boolean;
+  error?: string;
+  retryAfterMs?: number;
+  rateLimited?: boolean;
+}
+
+export async function loginWithPassword(password: string): Promise<LoginResult> {
+  const response = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  if (response.ok) {
+    // Force a fresh CSRF token tied to the new session.
+    resetCsrfTokenCache();
+    return { ok: true };
+  }
+  const data = await response.json().catch(() => null);
+  if (response.status === 429) {
+    return {
+      ok: false,
+      rateLimited: true,
+      retryAfterMs: typeof data?.retryAfterMs === 'number' ? data.retryAfterMs : undefined,
+      error: data?.error || 'Too many failed attempts. Please wait and try again.',
+    };
+  }
+  return { ok: false, error: data?.error || 'Login failed' };
+}
+
+export async function logout(): Promise<void> {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  resetCsrfTokenCache();
 }

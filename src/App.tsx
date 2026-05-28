@@ -13,6 +13,7 @@ import {
   RiEqualizerLine,
   RiStackLine,
   RiDeleteBinLine,
+  RiLogoutBoxRLine,
 } from '@remixicon/react';
 import { useCleanupDuration } from './lib/hooks/useCleanupDuration';
 import { useFontSize } from './lib/hooks/useFontSize';
@@ -21,12 +22,10 @@ import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { CleanupDurationPreset, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, killTmuxSession, listTmuxSessions } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout } from './lib/terminal/api';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
-import { createDefaultToolbarPresets, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
-
-const TOOLBAR_PRESETS_STORAGE_KEY = 'termdock:toolbar-presets';
+import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 
 type DrawerTab = 'sessions' | 'new' | 'tmux' | 'settings';
 
@@ -126,34 +125,70 @@ function App() {
   const [activeKeepAliveCustomInput, setActiveKeepAliveCustomInput] = React.useState<string>('180');
   const [activeKeepAliveSavedAt, setActiveKeepAliveSavedAt] = React.useState<number>(0);
   const [isToolbarPresetsOpen, setIsToolbarPresetsOpen] = React.useState(false);
-  const [toolbarPresets, setToolbarPresets] = React.useState<ToolbarPresetDefinition[]>(() => {
-    if (typeof window === 'undefined') {
-      return createDefaultToolbarPresets();
-    }
-
-    try {
-      const raw = window.localStorage.getItem(TOOLBAR_PRESETS_STORAGE_KEY);
-      if (!raw) {
-        return createDefaultToolbarPresets();
-      }
-      const stored = sanitizeToolbarPresets(JSON.parse(raw) as ToolbarPresetDefinition[]);
-      const defaults = createDefaultToolbarPresets();
-      const storedIds = new Set(stored.map((p) => p.id));
-      for (const preset of defaults) {
-        if (!storedIds.has(preset.id)) {
-          stored.push(preset);
-        }
-      }
-      return stored;
-    } catch {
-      return createDefaultToolbarPresets();
-    }
-  });
+  // Toolbar presets are owned by the server (~/.termdock/toolbar-presets.json)
+  // and shared across every browser pointing at this server. We start with the
+  // built-in defaults so the UI is usable on first paint, then load + reconcile
+  // with the server state on mount.
+  const [toolbarPresets, setToolbarPresets] = React.useState<ToolbarPresetDefinition[]>(() => createDefaultToolbarPresets());
+  const [toolbarPresetsLoaded, setToolbarPresetsLoaded] = React.useState(false);
   const [selectedToolbarPresetId, setSelectedToolbarPresetId] = React.useState<string>('default');
 
+  // Initial load from server: merge any stored custom presets with the latest
+  // built-ins, force-overwriting built-in ids when the server's stored version
+  // is older than BUILTIN_TOOLBAR_PRESETS_VERSION.
   useEffect(() => {
-    window.localStorage.setItem(TOOLBAR_PRESETS_STORAGE_KEY, JSON.stringify(toolbarPresets));
-  }, [toolbarPresets]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const doc = await getToolbarPresetsDoc();
+        if (cancelled) return;
+        const defaults = createDefaultToolbarPresets();
+        const builtinIds = new Set(getBuiltinToolbarPresetIds());
+        const stored = sanitizeToolbarPresets(
+          Array.isArray(doc.presets) ? (doc.presets as ToolbarPresetDefinition[]) : [],
+        );
+        const storedVersion = typeof doc.version === 'number' ? doc.version : 0;
+        const versionMismatch = storedVersion < BUILTIN_TOOLBAR_PRESETS_VERSION;
+
+        let next: ToolbarPresetDefinition[];
+        if (stored.length === 0) {
+          next = defaults;
+        } else if (versionMismatch) {
+          // Replace all built-in presets with the latest definitions, keep
+          // user-authored custom presets intact.
+          const customPresets = stored.filter((preset) => !builtinIds.has(preset.id));
+          next = [...defaults, ...customPresets];
+        } else {
+          const storedIds = new Set(stored.map((p) => p.id));
+          next = [...stored];
+          for (const preset of defaults) {
+            if (!storedIds.has(preset.id)) next.push(preset);
+          }
+        }
+        setToolbarPresets(next);
+      } catch (error) {
+        console.warn('[toolbar-presets] Failed to load from server:', error);
+      } finally {
+        if (!cancelled) setToolbarPresetsLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Persist to the server whenever the in-memory presets change. Skip the
+  // initial render before the server load has resolved to avoid clobbering
+  // the server doc with the temporary defaults seed.
+  useEffect(() => {
+    if (!toolbarPresetsLoaded) return;
+    void replaceToolbarPresetsDoc({
+      version: BUILTIN_TOOLBAR_PRESETS_VERSION,
+      presets: toolbarPresets,
+    }).catch((error) => {
+      console.warn('[toolbar-presets] Failed to save to server:', error);
+    });
+  }, [toolbarPresets, toolbarPresetsLoaded]);
 
   useEffect(() => {
     if (!toolbarPresets.some((preset) => preset.id === selectedToolbarPresetId)) {
@@ -1220,6 +1255,35 @@ function App() {
                       />
                     </button>
                   </div>
+
+                  {/* Sign out — only visible when password protection is enabled. */}
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await logout();
+                      } catch {
+                        // Even if the request fails, the global 401 interceptor or
+                        // the next status check will eventually flip us back to login.
+                      }
+                      // Force the AuthGate to re-render the LoginScreen immediately.
+                      window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+                    }}
+                    className="flex w-full items-center justify-between rounded-2xl bg-surface-2 px-4 py-3.5 text-left text-sm transition hover:bg-surface-elevated"
+                  >
+                    <span className="flex items-center gap-3">
+                      <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface text-muted-foreground">
+                        <RiLogoutBoxRLine size={16} />
+                      </span>
+                      <span>
+                        <span className="block font-medium text-foreground">Sign out</span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          End this session and return to the password screen.
+                        </span>
+                      </span>
+                    </span>
+                    <span className="text-muted-foreground">›</span>
+                  </button>
                 </div>
               )}
               </div>

@@ -24,6 +24,17 @@ export function getToolbarActionLabel(action: MobileToolbarAction, index: number
   return action.label.trim().length > 0 ? action.label : `Key ${index + 1}`;
 }
 
+// Bump this whenever the built-in DEFAULT_PRESETS change in a way that should
+// be force-pushed to existing clients (new preset added, removed, or default
+// actions/programs changed). The App reads this on startup and, when the
+// stored version differs, overwrites all built-in preset ids with the latest
+// definitions while keeping any user-authored custom presets intact.
+export const BUILTIN_TOOLBAR_PRESETS_VERSION = 2;
+
+export function getBuiltinToolbarPresetIds(): string[] {
+  return DEFAULT_PRESETS.map((preset) => preset.id);
+}
+
 const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
   {
     id: 'default',
@@ -32,45 +43,6 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     includeAlt: true,
     rowLayout: [3, 3, 3],
     actions: [],
-  },
-  {
-    id: 'vim',
-    label: 'Vim',
-    programs: ['vim', 'nvim', 'vi'],
-    includeAlt: false,
-    rowLayout: [3, 3],
-    actions: [
-      { id: 'vim-colon', label: ':', sequence: ':' },
-      { id: 'vim-slash', label: '/', sequence: '/' },
-      { id: 'vim-qmark', label: '?', sequence: '?' },
-      { id: 'vim-u', label: 'u', sequence: 'u' },
-    ],
-  },
-  {
-    id: 'navigation',
-    label: 'Nav',
-    programs: ['less', 'more', 'most', 'man'],
-    includeAlt: false,
-    rowLayout: [3, 3],
-    actions: [
-      { id: 'nav-q', label: 'q', sequence: 'q' },
-      { id: 'nav-slash', label: '/', sequence: '/' },
-      { id: 'nav-n', label: 'n', sequence: 'n' },
-      { id: 'nav-big-n', label: 'N', sequence: 'N' },
-    ],
-  },
-  {
-    id: 'fzf',
-    label: 'FZF',
-    programs: ['fzf', 'sk', 'atuin'],
-    includeAlt: false,
-    rowLayout: [3, 3],
-    actions: [
-      { id: 'fzf-tab', label: 'Tab', sequence: '\\t' },
-      { id: 'fzf-shift-tab', label: 'S-Tab', sequence: '\\u001b[Z' },
-      { id: 'fzf-ctrl-j', label: 'C-j', sequence: '\\n' },
-      { id: 'fzf-ctrl-k', label: 'C-k', sequence: '\\u000b' },
-    ],
   },
   {
     id: 'opencode',
@@ -95,6 +67,19 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
       { id: 'claude-undo', label: '/undo', sequence: '/undo' },
       { id: 'claude-clear', label: '/clear', sequence: '/clear' },
       { id: 'claude-compact', label: '/compact', sequence: '/compact' },
+    ],
+  },
+  {
+    id: 'coco',
+    label: 'Coco',
+    programs: ['coco'],
+    includeAlt: false,
+    rowLayout: [3, 3],
+    actions: [
+      { id: 'coco-undo', label: '/undo', sequence: '/||undo' },
+      { id: 'coco-clear', label: '/clear', sequence: '/||clear' },
+      { id: 'coco-compact', label: '/compact', sequence: '/||compact' },
+      { id: 'coco-resume', label: '/resume', sequence: '/||resume' },
     ],
   },
 ];
@@ -134,6 +119,20 @@ export function decodeToolbarSequence(input: string): string {
     .replace(/\\r/g, '\r')
     .replace(/\\n/g, '\n')
     .replace(/\\t/g, '\t');
+}
+
+// Multi-segment delimiter for toolbar sequences. Buttons whose `sequence`
+// contains `||` are sent segment-by-segment with a small delay between
+// segments. Useful for TUIs that open a slash-command menu after the first
+// `/` keystroke (e.g. coco) and only then accept the command name.
+export const TOOLBAR_SEGMENT_DELIMITER = '||';
+export const TOOLBAR_SEGMENT_DELAY_MS = 120;
+
+export function splitToolbarSequenceSegments(sequence: string): string[] {
+  if (!sequence.includes(TOOLBAR_SEGMENT_DELIMITER)) {
+    return [sequence];
+  }
+  return sequence.split(TOOLBAR_SEGMENT_DELIMITER).filter((segment) => segment.length > 0);
 }
 
 export function sanitizeToolbarPresets(input: ToolbarPresetDefinition[]): ToolbarPresetDefinition[] {
