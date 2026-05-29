@@ -1491,11 +1491,23 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
             letterSpacing: 0,
             lineHeight: 1,
             overviewRuler: {
-              width: 2,
+              width: 0,
             },
           });
 
           const fitAddon = new FitAddon();
+          // Patch proposeDimensions to never subtract scrollbar width.
+          // FitAddon subtracts `overviewRuler?.width || 14` from available width,
+          // but we hide the native scrollbar and use a custom overlay scrollbar.
+          // Temporarily set scrollback=0 so FitAddon skips the offset entirely.
+          const originalPropose = fitAddon.proposeDimensions.bind(fitAddon);
+          fitAddon.proposeDimensions = () => {
+            const saved = terminal.options.scrollback;
+            terminal.options.scrollback = 0;
+            const dims = originalPropose();
+            terminal.options.scrollback = saved;
+            return dims;
+          };
           terminal.loadAddon(fitAddon);
 
           localTerminal = terminal;

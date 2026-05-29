@@ -477,10 +477,19 @@ body {
   display: none !important;
 }
 
-/* Force xterm-screen to fill the full width — xterm.js reserves
-   scrollbar space in its inline style, but we hide the scrollbar
-   via the rules above so the space is wasted. */
+/* Hide xterm.js internal scrollbar */
+.xterm .xterm-scrollable-element > .scrollbar {
+  display: none !important;
+}
+
+/* Force xterm-screen and its canvases to fill the full width.
+   xterm.js reserves scrollbar space in inline styles, but we
+   hide the scrollbar so the space is wasted. */
 .xterm .xterm-screen {
+  width: 100% !important;
+}
+
+.xterm .xterm-screen canvas {
   width: 100% !important;
 }
 
