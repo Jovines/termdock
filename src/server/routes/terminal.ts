@@ -126,10 +126,8 @@ interface TerminalSession {
   tmuxControl?: TmuxControl;
   oscSniffBuf: string;
   lastOscCwd: string | null;
-  agentStatus: 'thinking' | 'waiting-input' | 'idle' | null;
-  agentLastDataAt: number;
-  agentStatusTimer: ReturnType<typeof setTimeout> | null;
-  agentLastResizeAt: number;
+  agentStatus: 'running' | 'waiting' | 'idle' | null;
+  agentStatusBuf: string;      // 去除 ANSI 后的纯文本滚动缓冲区
 }
 
 interface PersistedClientSession {
@@ -143,46 +141,25 @@ interface PersistedClientSession {
   lastActivity: number;
 }
 
-interface ClientTerminalState {
+interface GlobalSessionState {
   sessions: PersistedClientSession[];
-  activeSessionId: string | null;
   updatedAt: number;
 }
 
 const terminalSessions = new Map<string, TerminalSession>();
-const clientTerminalStates = new Map<string, ClientTerminalState>();
-// ── 持久化 clientTerminalStates 到磁盘，防止服务重启后丢失 ──
-const CLIENT_STATES_FILE = `${os.homedir()}/.termdock/client-states.json`;
-let persistClientStatesTimer: ReturnType<typeof setTimeout> | null = null;
+let globalSessionState: GlobalSessionState = { sessions: [], updatedAt: Date.now() };
+// ── 持久化 globalSessionState 到磁盘，防止服务重启后丢失 ──
+const GLOBAL_SESSION_STATE_FILE = `${os.homedir()}/.termdock/global-session-state.json`;
+const CLIENT_STATES_FILE = `${os.homedir()}/.termdock/client-states.json`; // 保留用于迁移
+let persistGlobalStateTimer: ReturnType<typeof setTimeout> | null = null;
 
-function loadClientStatesFromDisk(): void {
-  try {
-    if (fs.existsSync(CLIENT_STATES_FILE)) {
-      const raw = fs.readFileSync(CLIENT_STATES_FILE, 'utf-8');
-      const data = JSON.parse(raw) as Record<string, ClientTerminalState>;
-      for (const [key, value] of Object.entries(data)) {
-        // 去重：同 client 下 tmux 同名 session 只保留最后一条
-        const deduped = deduplicateClientState(value);
-        clientTerminalStates.set(key, deduped);
-      }
-      console.log(`[session-persist] Loaded ${clientTerminalStates.size} client states from disk`);
-    }
-  } catch (error) {
-    console.warn('[session-persist] Failed to load client states:', getErrorMessage(error));
-  }
-}
-
-function deduplicateClientState(state: ClientTerminalState): ClientTerminalState {
-  const seen = new Map<string, number>(); // sessionId → index, tmuxSessionName → index
-  const sessions = state.sessions;
+function deduplicateGlobalSessions(sessions: PersistedClientSession[]): PersistedClientSession[] {
+  const seen = new Map<string, number>();
   let hasDuplicates = false;
-
   const keep = new Array<boolean>(sessions.length).fill(true);
 
   for (let i = sessions.length - 1; i >= 0; i--) {
     const s = sessions[i];
-
-    // 同 sessionId 的只保留最新的
     if (seen.has(s.sessionId)) {
       keep[i] = false;
       hasDuplicates = true;
@@ -190,7 +167,6 @@ function deduplicateClientState(state: ClientTerminalState): ClientTerminalState
     }
     seen.set(s.sessionId, i);
 
-    // tmux 同名 session 只保留最新的
     if (s.mode === 'tmux' && s.tmuxSessionName) {
       const dupKey = `tmux:${s.tmuxSessionName}`;
       if (seen.has(dupKey)) {
@@ -202,85 +178,127 @@ function deduplicateClientState(state: ClientTerminalState): ClientTerminalState
     }
   }
 
-  if (!hasDuplicates) return state;
-
-  return {
-    ...state,
-    sessions: sessions.filter((_, i) => keep[i]),
-  };
+  if (!hasDuplicates) return sessions;
+  return sessions.filter((_, i) => keep[i]);
 }
 
-function schedulePersistClientStates(): void {
-  if (persistClientStatesTimer) clearTimeout(persistClientStatesTimer);
-  persistClientStatesTimer = setTimeout(() => {
+function migrateFromClientStatesFile(): GlobalSessionState | null {
+  try {
+    if (!fs.existsSync(CLIENT_STATES_FILE)) return null;
+    const raw = fs.readFileSync(CLIENT_STATES_FILE, 'utf-8');
+    const data = JSON.parse(raw) as Record<string, { sessions: unknown[] }>;
+    const allSessions: PersistedClientSession[] = [];
+    for (const state of Object.values(data)) {
+      for (const s of (state.sessions || [])) {
+        const normalized = normalizePersistedClientSession(s);
+        if (normalized) allSessions.push(normalized);
+      }
+    }
+    return {
+      sessions: deduplicateGlobalSessions(allSessions),
+      updatedAt: Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function loadGlobalSessionStateFromDisk(): void {
+  try {
+    if (fs.existsSync(GLOBAL_SESSION_STATE_FILE)) {
+      const raw = fs.readFileSync(GLOBAL_SESSION_STATE_FILE, 'utf-8');
+      const data = JSON.parse(raw) as GlobalSessionState;
+      globalSessionState = {
+        sessions: deduplicateGlobalSessions(
+          (data.sessions || []).map(s => normalizePersistedClientSession(s)).filter((s): s is PersistedClientSession => s !== null)
+        ),
+        updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : Date.now(),
+      };
+      console.log(`[session-persist] Loaded ${globalSessionState.sessions.length} sessions from global state`);
+      return;
+    }
+    const migrated = migrateFromClientStatesFile();
+    if (migrated) {
+      globalSessionState = migrated;
+      schedulePersistGlobalState();
+      console.log(`[session-persist] Migrated ${globalSessionState.sessions.length} sessions from legacy client-states`);
+      return;
+    }
+  } catch (error) {
+    console.warn('[session-persist] Failed to load global state:', getErrorMessage(error));
+  }
+}
+
+function schedulePersistGlobalState(): void {
+  if (persistGlobalStateTimer) clearTimeout(persistGlobalStateTimer);
+  persistGlobalStateTimer = setTimeout(() => {
     try {
       const dir = `${os.homedir()}/.termdock`;
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const obj: Record<string, ClientTerminalState> = {};
-      for (const [key, value] of clientTerminalStates.entries()) {
-        obj[key] = value;
-      }
-      fs.writeFileSync(CLIENT_STATES_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+      fs.writeFileSync(GLOBAL_SESSION_STATE_FILE, JSON.stringify(globalSessionState, null, 2), 'utf-8');
     } catch (error) {
-      console.warn('[session-persist] Failed to persist client states:', getErrorMessage(error));
+      console.warn('[session-persist] Failed to persist global state:', getErrorMessage(error));
     }
-  }, 200); // 200ms debounce — short enough to survive most tsx watch restart windows
+  }, 200);
 }
 
 // 进程退出前立即刷盘，避免 tsx watch 重启导致状态丢失
 function flushPersistAndExit(): void {
-  if (persistClientStatesTimer) {
-    clearTimeout(persistClientStatesTimer);
-    persistClientStatesTimer = null;
+  if (persistGlobalStateTimer) {
+    clearTimeout(persistGlobalStateTimer);
+    persistGlobalStateTimer = null;
   }
   try {
     const dir = `${os.homedir()}/.termdock`;
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const obj: Record<string, ClientTerminalState> = {};
-    for (const [key, value] of clientTerminalStates.entries()) {
-      obj[key] = value;
-    }
-    fs.writeFileSync(CLIENT_STATES_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+    fs.writeFileSync(GLOBAL_SESSION_STATE_FILE, JSON.stringify(globalSessionState, null, 2), 'utf-8');
   } catch { /* best effort */ }
 }
 process.on('SIGTERM', () => { flushPersistAndExit(); persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
 process.on('SIGINT', () => { flushPersistAndExit(); persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
 
 // 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
-loadClientStatesFromDisk();
+loadGlobalSessionStateFromDisk();
 caffeinateManager.startNetworkMonitor();
 
 // 清理磁盘恢复后后端已不存在的 session 引用。
-// 服务重启时 terminalSessions 是空的，持久化的 client states
-// 全部指向已销毁的 session，必须清掉，否则客户端重连时会不断创建新 session。
-(function pruneOrphanClientSessions(): void {
+// 服务重启时 terminalSessions 是空的，持久化的 global state
+// 全部指向已销毁的 session。shell session 的 PTY 已死无法复用，直接删除；
+// tmux session 的 tmux 进程独立于 termdock，保留条目但清空 backendSessionId。
+(function pruneOrphanSessions(): void {
   let changed = false;
-  for (const [clientId, state] of clientTerminalStates.entries()) {
-    let sessionChanged = false;
-    const cleaned = state.sessions.map((s) => {
+  const cleaned = globalSessionState.sessions.filter((s) => {
+    // Shell sessions with no live backend: PTY is dead, can't be reattached — remove entirely
+    if (s.mode !== 'tmux') {
       if (s.backendSessionId != null && !terminalSessions.has(s.backendSessionId)) {
-        sessionChanged = true;
-        return { ...s, backendSessionId: null };
+        changed = true;
+        return false;
       }
-      return s;
-    });
-
-    if (!sessionChanged) continue;
-    changed = true;
-
-    if (cleaned.length === 0) {
-      clientTerminalStates.delete(clientId);
-    } else {
-      const activeOk = state.activeSessionId != null &&
-        cleaned.some((s) => s.sessionId === state.activeSessionId);
-      clientTerminalStates.set(clientId, {
-        sessions: cleaned,
-        activeSessionId: activeOk ? state.activeSessionId : cleaned[0]?.sessionId ?? null,
-        updatedAt: Date.now(),
-      });
+      // backendSessionId already null but no live backend either — also dead
+      if (s.backendSessionId == null) {
+        changed = true;
+        return false;
+      }
+      return true;
     }
-  }
-  if (changed) schedulePersistClientStates();
+    // Tmux sessions: tmux process may still be alive, keep but clear backend ref
+    if (s.backendSessionId != null && !terminalSessions.has(s.backendSessionId)) {
+      changed = true;
+    }
+    return true;
+  }).map((s) => {
+    if (s.mode === 'tmux' && s.backendSessionId != null && !terminalSessions.has(s.backendSessionId)) {
+      return { ...s, backendSessionId: null };
+    }
+    return s;
+  });
+
+  if (!changed) return;
+  globalSessionState = {
+    sessions: cleaned,
+    updatedAt: Date.now(),
+  };
+  schedulePersistGlobalState();
 })();
 
 // On boot, backfill termdock metadata onto every tmux session referenced by
@@ -290,33 +308,31 @@ caffeinateManager.startNetworkMonitor();
 // for the per-session polling to fill in lazily.
 void (async () => {
   const seen = new Set<string>();
-  for (const state of clientTerminalStates.values()) {
-    for (const s of state.sessions) {
-      if (s.mode !== 'tmux' || !s.tmuxSessionName) continue;
-      if (seen.has(s.tmuxSessionName)) continue;
-      seen.add(s.tmuxSessionName);
-      try {
-        if (!(await tmuxSessionExists(s.tmuxSessionName))) continue;
+  for (const s of globalSessionState.sessions) {
+    if (s.mode !== 'tmux' || !s.tmuxSessionName) continue;
+    if (seen.has(s.tmuxSessionName)) continue;
+    seen.add(s.tmuxSessionName);
+    try {
+      if (!(await tmuxSessionExists(s.tmuxSessionName))) continue;
 
-        const baseOptions: Record<string, string> = {
-          '@termdock-version': TERMDOCK_VERSION,
-          '@termdock-host': TERMDOCK_HOST,
-          '@termdock-pid': TERMDOCK_PID,
-        };
-        const existingCreatedAt = await getTmuxOption(s.tmuxSessionName, '@termdock-created-at');
-        if (!existingCreatedAt) {
-          baseOptions['@termdock-created-at'] = String(Date.now());
-        }
-        await setTmuxOptions(s.tmuxSessionName, baseOptions);
-
-        if (s.customName === true && typeof s.name === 'string' && s.name.trim().length > 0) {
-          await setTmuxOption(s.tmuxSessionName, '@termdock-friendly-name', s.name);
-        }
-      } catch (error) {
-        console.warn(
-          `[tmux] failed to backfill metadata on ${s.tmuxSessionName}: ${getErrorMessage(error)}`,
-        );
+      const baseOptions: Record<string, string> = {
+        '@termdock-version': TERMDOCK_VERSION,
+        '@termdock-host': TERMDOCK_HOST,
+        '@termdock-pid': TERMDOCK_PID,
+      };
+      const existingCreatedAt = await getTmuxOption(s.tmuxSessionName, '@termdock-created-at');
+      if (!existingCreatedAt) {
+        baseOptions['@termdock-created-at'] = String(Date.now());
       }
+      await setTmuxOptions(s.tmuxSessionName, baseOptions);
+
+      if (s.customName === true && typeof s.name === 'string' && s.name.trim().length > 0) {
+        await setTmuxOption(s.tmuxSessionName, '@termdock-friendly-name', s.name);
+      }
+    } catch (error) {
+      console.warn(
+        `[tmux] failed to backfill metadata on ${s.tmuxSessionName}: ${getErrorMessage(error)}`,
+      );
     }
   }
 })();
@@ -455,24 +471,20 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
   };
 }
 
-function normalizeClientTerminalState(input: unknown): ClientTerminalState {
+function normalizeGlobalSessionState(input: unknown): GlobalSessionState {
   if (!input || typeof input !== 'object') {
-    return { sessions: [], activeSessionId: null, updatedAt: Date.now() };
+    return { sessions: [], updatedAt: Date.now() };
   }
 
-  const candidate = input as Partial<ClientTerminalState> & { sessions?: unknown[] };
+  const candidate = input as Partial<GlobalSessionState> & { sessions?: unknown[] };
   const sessions = Array.isArray(candidate.sessions)
     ? candidate.sessions
       .map((session) => normalizePersistedClientSession(session))
       .filter((session): session is PersistedClientSession => session !== null)
     : [];
-  const activeSessionId = typeof candidate.activeSessionId === 'string' && candidate.activeSessionId.trim().length > 0
-    ? candidate.activeSessionId
-    : null;
 
   return {
     sessions,
-    activeSessionId,
     updatedAt: Date.now(),
   };
 }
@@ -970,40 +982,151 @@ function sniffCwdFromOsc(buf: string, home: string): { cwd: string | null; remai
 
 // ── Agent status detection for AI coding tools ──
 
-const AI_TOOL_PROGRAMS = new Set(['claude', 'claude-code', 'opencode', 'coco', 'aider']);
-const AGENT_THINKING_TIMEOUT_MS = 1500;
-const AGENT_STATUS_DEBOUNCE_MS = 300;
-const AGENT_IDLE_DISPLAY_MS = 3000;
-const AGENT_RESIZE_SUPPRESS_MS = 1500;
+const AGENT_BUF_CAP = 4096;  // 滚动缓冲区容量
+
+// ── Agent detection rules (user-configurable) ──
+
+interface AgentRule {
+  pattern: string;   // regex pattern string
+  status: string;    // status label, e.g. "running"
+}
+
+interface AgentProgramConfig {
+  program: string;   // program name to match (case-insensitive)
+  rules: AgentRule[];
+}
+
+// Built-in default rules
+const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
+  {
+    program: 'claude',
+    rules: [
+      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊·✢✳✶✻✽]|Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing', status: 'running' },
+    ],
+  },
+  {
+    program: 'claude-code',
+    rules: [
+      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊·✢✳✶✻✽]|Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing', status: 'running' },
+    ],
+  },
+  {
+    program: 'opencode',
+    rules: [
+      { pattern: 'thinking|working|generating', status: 'running' },
+    ],
+  },
+  {
+    program: 'coco',
+    rules: [
+      { pattern: '[·✢❋❇✽]|thinking|working|generating', status: 'running' },
+    ],
+  },
+  {
+    program: 'aider',
+    rules: [
+      { pattern: 'Thinking|Generating|Working', status: 'running' },
+    ],
+  },
+];
+
+// Runtime cache: program → compiled rules
+let agentRulesCache: Map<string, { status: string; regex: RegExp }[]> = new Map();
+let agentRulesVersion = 0;
+
+function loadAgentRules(): Map<string, { status: string; regex: RegExp }[]> {
+  const rules = loadAgentRulesFromDisk();
+  const map = new Map<string, { status: string; regex: RegExp }[]>();
+  for (const config of rules) {
+    const compiled = config.rules.map(r => ({
+      status: r.status,
+      regex: new RegExp(r.pattern, 'i'),
+    }));
+    map.set(config.program.toLowerCase(), compiled);
+  }
+  agentRulesCache = map;
+  agentRulesVersion++;
+  return map;
+}
+
+const AGENT_RULES_FILE = `${os.homedir()}/.termdock/agent-rules.json`;
+
+function loadAgentRulesFromDisk(): AgentProgramConfig[] {
+  try {
+    const data = fs.readFileSync(AGENT_RULES_FILE, 'utf-8');
+    const parsed = JSON.parse(data);
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+  } catch { /* file doesn't exist or invalid, use builtins */ }
+  return BUILTIN_AGENT_RULES;
+}
+
+function saveAgentRulesToDisk(rules: AgentProgramConfig[]): void {
+  const dir = path.dirname(AGENT_RULES_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(AGENT_RULES_FILE, JSON.stringify(rules, null, 2));
+  loadAgentRules();
+}
+
+// Initialize on startup
+loadAgentRules();
 
 function isAiToolProgram(command: string | null | undefined): boolean {
   if (!command) return false;
-  return AI_TOOL_PROGRAMS.has(command.toLowerCase());
+  return agentRulesCache.has(command.toLowerCase());
+}
+
+/**
+ * 去除 ANSI 转义序列，保留纯文本内容
+ */
+function stripAnsi(data: string): string {
+  return data
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')           // CSI sequences
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')  // OSC sequences
+    .replace(/\x1b[()][AB0-2]/g, '')                   // Charset
+    .replace(/\x1b[^[\]()0-9]/g, '')                   // Other escapes
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');    // Control chars
+}
+
+/**
+ * 基于可配置规则匹配检测 AI 工具状态
+ * 只看实际输出文本，不受 resize/布局变化影响
+ */
+function detectAgentStatus(command: string, buf: string): string | null {
+  if (!buf || buf.length < 2) return null;
+
+  const rules = agentRulesCache.get(command.toLowerCase());
+  if (!rules) return null;
+
+  // 只看最后 1KB，这是最新的输出
+  const tail = buf.slice(-1024);
+
+  for (const rule of rules) {
+    if (rule.regex.test(tail)) {
+      return rule.status;
+    }
+  }
+
+  return null;
 }
 
 function evaluateAgentStatus(sessionId: string, session: TerminalSession): void {
   const previousStatus = session.agentStatus;
+  const command = session.activeProgram?.command;
 
-  if (!isAiToolProgram(session.activeProgram?.command)) {
-    if (previousStatus !== null && previousStatus !== undefined) {
-      session.agentStatus = 'idle';
-      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: 'idle' });
-
-      if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
-      session.agentStatusTimer = setTimeout(() => {
-        if (session.agentStatus === 'idle') {
-          session.agentStatus = null;
-          broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null });
-        }
-      }, AGENT_IDLE_DISPLAY_MS);
+  if (!command || !isAiToolProgram(command)) {
+    // Program is not an AI tool → clear status
+    if (previousStatus !== null) {
+      session.agentStatus = null;
+      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null });
     }
     return;
   }
 
-  const timeSinceLastData = Date.now() - session.agentLastDataAt;
-  const newStatus: 'thinking' | 'waiting-input' = timeSinceLastData < AGENT_THINKING_TIMEOUT_MS
-    ? 'thinking'
-    : 'waiting-input';
+  const detected = detectAgentStatus(command, session.agentStatusBuf);
+
+  // Use the detected status directly; null means no rule matched → clear
+  const validStatuses = new Set(['running', 'waiting', 'idle']);
+  const newStatus: 'running' | 'waiting' | 'idle' | null = detected && validStatuses.has(detected) ? detected as 'running' | 'waiting' | 'idle' : null;
 
   if (newStatus !== previousStatus) {
     session.agentStatus = newStatus;
@@ -1085,22 +1208,17 @@ function buildTermdockLabel(input: {
   return input.sessionName;
 }
 
-// Walk all client states to find a friendly (custom) name for a given
-// tmux session. The first hit wins — `customName` is per-client but in
-// practice everybody renaming the same tmux session converges on the
-// same name, and any name is better than falling back to the raw id.
+// Find a friendly (custom) name for a given tmux session from the global state.
 function findFriendlyNameForTmuxSession(tmuxSessionName: string): string | null {
-  for (const state of clientTerminalStates.values()) {
-    for (const s of state.sessions) {
-      if (
-        s.mode === 'tmux' &&
-        s.tmuxSessionName === tmuxSessionName &&
-        s.customName === true &&
-        typeof s.name === 'string' &&
-        s.name.trim().length > 0
-      ) {
-        return s.name;
-      }
+  for (const s of globalSessionState.sessions) {
+    if (
+      s.mode === 'tmux' &&
+      s.tmuxSessionName === tmuxSessionName &&
+      s.customName === true &&
+      typeof s.name === 'string' &&
+      s.name.trim().length > 0
+    ) {
+      return s.name;
     }
   }
   return null;
@@ -1503,7 +1621,6 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
 
   session.dataDisposable?.dispose();
   session.exitDisposable?.dispose();
-  if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
   destroyTmuxControl(session.tmuxControl);
   session.tmuxControl = undefined;
 
@@ -1582,23 +1699,27 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
     // Agent status detection for AI coding tools
     try {
       if (isAiToolProgram(session.activeProgram?.command)) {
-        session.agentLastDataAt = Date.now();
-
-        // Suppress immediate thinking switch after resize (soft keyboard / layout change
-        // causes redraw which produces PTY output but isn't real AI activity)
-        const timeSinceResize = Date.now() - session.agentLastResizeAt;
-        const suppressImmediate = timeSinceResize < AGENT_RESIZE_SUPPRESS_MS;
-
-        if (session.agentStatus !== 'thinking' && !suppressImmediate) {
-          session.agentStatus = 'thinking';
-          broadcastEvent(sessionId, { type: 'agent-status', agentStatus: 'thinking' });
+        // Append stripped text to rolling buffer for pattern matching
+        const stripped = stripAnsi(data);
+        if (stripped) {
+          const buf = session.agentStatusBuf + stripped;
+          session.agentStatusBuf = buf.length > AGENT_BUF_CAP ? buf.slice(-AGENT_BUF_CAP / 2) : buf;
+          // Log spinner patterns for debugging (capped at 512KB)
+          const tail = session.agentStatusBuf.slice(-200);
+          if (/[·✢✳✶✻✽❋❇⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊]/.test(tail)) {
+            try {
+              const logPath = `${os.homedir()}/.termdock/agent-debug.log`;
+              const { statSync, appendFileSync } = fs;
+              let size = 0;
+              try { size = statSync(logPath).size; } catch { /* not exists yet */ }
+              if (size > 512 * 1024) fs.writeFileSync(logPath, ''); // truncate if too large
+              appendFileSync(logPath, `[${new Date().toISOString()}] program=${session.activeProgram?.command} tail=${JSON.stringify(tail)}\n`);
+            } catch { /* logging failure should never block */ }
+          }
         }
 
-        // Debounce: reset timer, will evaluate thinking → waiting-input after timeout
-        if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
-        session.agentStatusTimer = setTimeout(() => {
-          evaluateAgentStatus(sessionId, session);
-        }, AGENT_STATUS_DEBOUNCE_MS);
+        // Content-based detection on every data chunk
+        evaluateAgentStatus(sessionId, session);
       }
     } catch { /* agent status detection failure should never block data */ }
 
@@ -1696,9 +1817,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     oscSniffBuf: '',
     lastOscCwd: null,
     agentStatus: null,
-    agentLastDataAt: 0,
-    agentStatusTimer: null,
-    agentLastResizeAt: 0,
+    agentStatusBuf: '',
   };
 
   terminalSessions.set(sessionId, session);
@@ -1967,41 +2086,24 @@ router.post('/serialize-state', async (req, res) => {
   });
 });
 
-router.get('/client-state', (req, res) => {
-  const clientId = req.clientId;
-  if (!clientId) {
-    return res.status(500).json({ error: 'Client identity is not available' });
-  }
-
-  const state = clientTerminalStates.get(clientId) ?? {
-    sessions: [],
-    updatedAt: Date.now(),
-  };
-
-  res.json(state);
+router.get('/client-state', (_req, res) => {
+  res.json(globalSessionState);
 });
 
 router.put('/client-state', (req, res) => {
-  const clientId = req.clientId;
-  if (!clientId) {
-    return res.status(500).json({ error: 'Client identity is not available' });
-  }
-
-  const previousState = clientTerminalStates.get(clientId);
-  const state = normalizeClientTerminalState(req.body);
-  clientTerminalStates.set(clientId, state);
-  schedulePersistClientStates();
+  const previousState = { ...globalSessionState };
+  const state = normalizeGlobalSessionState(req.body);
+  globalSessionState = state;
+  schedulePersistGlobalState();
 
   // Sync friendly-name to tmux user options for any tmux session whose
   // customName flag flipped, or whose name changed while customName=true.
   // Only fires for tmux-mode sessions; shell sessions have no tmux to write to.
   void (async () => {
     const previousByTmux = new Map<string, PersistedClientSession>();
-    if (previousState) {
-      for (const s of previousState.sessions) {
-        if (s.mode === 'tmux' && s.tmuxSessionName) {
-          previousByTmux.set(s.tmuxSessionName, s);
-        }
+    for (const s of previousState.sessions) {
+      if (s.mode === 'tmux' && s.tmuxSessionName) {
+        previousByTmux.set(s.tmuxSessionName, s);
       }
     }
 
@@ -2023,14 +2125,9 @@ router.put('/client-state', (req, res) => {
   res.json(state);
 });
 
-router.delete('/client-state', (req, res) => {
-  const clientId = req.clientId;
-  if (!clientId) {
-    return res.status(500).json({ error: 'Client identity is not available' });
-  }
-
-  clientTerminalStates.delete(clientId);
-  schedulePersistClientStates();
+router.delete('/client-state', (_req, res) => {
+  globalSessionState = { sessions: [], updatedAt: Date.now() };
+  schedulePersistGlobalState();
   res.status(204).send();
 });
 
@@ -2066,6 +2163,47 @@ router.put('/settings', (req, res) => {
     caffeinateActive: caffeinateManager.isActive(),
     networkAvailable: caffeinateManager.isNetworkAvailable(),
   });
+});
+
+// ── Agent detection rules API ──
+
+router.get('/agent-rules', (_req, res) => {
+  res.json(loadAgentRulesFromDisk());
+});
+
+router.put('/agent-rules', (req, res) => {
+  const rules = req.body;
+  if (!Array.isArray(rules)) {
+    res.status(400).json({ error: 'Expected array of program configs' });
+    return;
+  }
+  // Basic validation
+  for (const config of rules) {
+    if (!config.program || !Array.isArray(config.rules)) {
+      res.status(400).json({ error: 'Each config must have program and rules' });
+      return;
+    }
+    for (const rule of config.rules) {
+      if (!rule.pattern || !rule.status) {
+        res.status(400).json({ error: 'Each rule must have pattern and status' });
+        return;
+      }
+      // Validate regex
+      try { new RegExp(rule.pattern, 'i'); } catch {
+        res.status(400).json({ error: `Invalid regex: ${rule.pattern}` });
+        return;
+      }
+    }
+  }
+  saveAgentRulesToDisk(rules);
+  res.json(rules);
+});
+
+router.delete('/agent-rules', (_req, res) => {
+  // Remove custom rules file so builtins take effect again
+  try { fs.unlinkSync(AGENT_RULES_FILE); } catch { /* already gone */ }
+  loadAgentRules();
+  res.json(BUILTIN_AGENT_RULES);
 });
 
 router.post('/create', async (req, res) => {
@@ -2186,7 +2324,6 @@ router.get('/:sessionId/stream', async (req, res) => {
     session.activeProgram = activeProgram;
 
     // Agent status: react to AI tool start/exit
-    if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
     evaluateAgentStatus(sessionId, session);
 
     console.log(
@@ -2383,7 +2520,6 @@ router.post('/:sessionId/resize', (req, res) => {
 
   try {
     session.ptyProcess.resize(cols, rows);
-    session.agentLastResizeAt = Date.now();
     session.lastActivity = Date.now();
     res.json({ success: true, cols, rows });
   } catch (error) {
@@ -2762,7 +2898,6 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
           session.activeProgram = ap;
 
           // Agent status: react to AI tool start/exit
-          if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
           evaluateAgentStatus(sessionId, session);
 
           ws.send(JSON.stringify({
@@ -2815,7 +2950,6 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
           session.activeProgram = ap;
 
           // Agent status: react to AI tool start/exit
-          if (session.agentStatusTimer) clearTimeout(session.agentStatusTimer);
           evaluateAgentStatus(sessionId, session);
 
           ws.send(JSON.stringify({
@@ -2853,7 +2987,6 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
           const rows = Number(msg.rows);
           if (cols > 0 && rows > 0) {
             session.ptyProcess.resize(cols, rows);
-            session.agentLastResizeAt = Date.now();
           }
           break;
         }

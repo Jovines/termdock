@@ -4,7 +4,7 @@ import { Swiper, SwiperSlide } from 'swiper/react';
 import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
-import { useSessionPersistence } from '../hooks/useSessionPersistence';
+import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
 import { attachTerminalSession, createTerminalSession, closeTerminal } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
@@ -205,6 +205,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     updateSessionBackendId,
     removeSession: removePersistedSession,
     renameSession,
+    resetSessionCustomName,
     reorderSessions,
   } = useSessionPersistence();
 
@@ -433,6 +434,95 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     debugSession,
   ]);
 
+  // 增量同步：轮询检测到 persistedSessions 变化时，处理新增/移除/重命名的 session
+  const prevPersistedRef = useRef<PersistedSession[]>([]);
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (isRestoring) return;
+
+    const prev = prevPersistedRef.current;
+    const curr = persistedSessions;
+
+    // Seed the ref on first non-restoring render (before any diff logic)
+    if (!seededRef.current) {
+      prevPersistedRef.current = curr;
+      seededRef.current = true;
+      return;
+    }
+
+    const prevIds = new Set(prev.map(s => s.sessionId));
+    const currIds = new Set(curr.map(s => s.sessionId));
+    // Local sessions already have backend connections — skip these
+    const localIds = new Set(sessions.map(s => s.id));
+
+    // New sessions (appeared in persisted but not in prev, and not already local)
+    const newPersisted = curr.filter(ps => !prevIds.has(ps.sessionId) && !localIds.has(ps.sessionId));
+    // Removed sessions (disappeared from persisted)
+    const removedSessionIds = [...prevIds].filter(id => !currIds.has(id));
+    // Renamed sessions
+    const prevNameMap = new Map(prev.map(s => [s.sessionId, s.name]));
+    const renamedSessions = curr.filter(ps =>
+      prevIds.has(ps.sessionId) && prevNameMap.get(ps.sessionId) !== ps.name
+    );
+
+    prevPersistedRef.current = curr;
+
+    // Handle new sessions: attach to existing terminals
+    if (newPersisted.length > 0) {
+      (async () => {
+        const attached = await Promise.all(
+          newPersisted.map(async (ps) => {
+            try {
+              return await restoreOrCreateSession(ps);
+            } catch {
+              return null;
+            }
+          })
+        );
+        const validAttached = attached.filter((s): s is TerminalSession => s !== null);
+        if (validAttached.length > 0) {
+          setSessions(prev => [...prev, ...validAttached]);
+          validAttached.forEach(session => {
+            if (session.sessionId) {
+              updateSessionBackendId(session.id, session.sessionId);
+              const store = useTerminalStore.getState();
+              store.setTerminalSession(session.id, {
+                sessionId: session.sessionId,
+                cols: 80, rows: 24,
+                mode: session.mode,
+                tmuxSessionName: session.tmuxSessionName,
+              });
+            }
+          });
+        }
+      })();
+    }
+
+    // Handle removed sessions: remove from local state (don't kill backend)
+    if (removedSessionIds.length > 0) {
+      setSessions(prev => {
+        const remaining = prev.filter(s => !removedSessionIds.includes(s.id));
+        if (remaining.length !== prev.length) {
+          const wasActiveRemoved = !remaining.some(s => s.id === activeSessionId);
+          if (wasActiveRemoved && remaining.length > 0) {
+            setActiveSessionId(remaining[0].id);
+          } else if (remaining.length === 0) {
+            setActiveSessionId(null);
+          }
+        }
+        return remaining;
+      });
+    }
+
+    // Handle renamed sessions
+    if (renamedSessions.length > 0) {
+      const renameMap = new Map(renamedSessions.map(ps => [ps.sessionId, ps.name]));
+      setSessions(prev => prev.map(s =>
+        renameMap.has(s.id) ? { ...s, name: renameMap.get(s.id)!, customName: true } : s
+      ));
+    }
+  }, [persistedSessions, isRestoring, restoreOrCreateSession, updateSessionBackendId, activeSessionId, sessions]);
+
   // Handle new session creation from custom event
   const handleNewSession = useCallback(async (options?: NewSessionEventDetail) => {
     try {
@@ -516,6 +606,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     );
     renameSession(sessionId, newName.trim());
   }, [renameSession]);
+
+  // Reset session name → 清掉 customName,后续渲染回退到「程序名/目录名」默认显示
+  const handleResetSessionName = useCallback((sessionId: string) => {
+    setSessions((prev) =>
+      prev.map((s) => (s.id === sessionId ? { ...s, customName: false } : s))
+    );
+    resetSessionCustomName(sessionId);
+  }, [resetSessionCustomName]);
 
   // Handle session reorder
   const handleReorderSessions = useCallback((orderedIds: string[]) => {
@@ -621,6 +719,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       handleRenameSession(customEvent.detail.sessionId, customEvent.detail.name);
     };
 
+    const handleResetSessionNameEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<{ sessionId: string }>;
+      if (!customEvent.detail?.sessionId) {
+        return;
+      }
+      handleResetSessionName(customEvent.detail.sessionId);
+    };
+
     const handleReorderSessionEvent = (event: Event) => {
       const customEvent = event as CustomEvent<{ sessionIds: string[] }>;
       if (!customEvent.detail?.sessionIds) {
@@ -634,6 +740,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     window.addEventListener('close-terminal-session', handleCloseSessionEvent);
     window.addEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
     window.addEventListener('rename-terminal-session', handleRenameSessionEvent);
+    window.addEventListener('reset-terminal-session-name', handleResetSessionNameEvent);
     window.addEventListener('reorder-terminal-session', handleReorderSessionEvent);
 
     return () => {
@@ -642,9 +749,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('close-terminal-session', handleCloseSessionEvent);
       window.removeEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
       window.removeEventListener('rename-terminal-session', handleRenameSessionEvent);
+      window.removeEventListener('reset-terminal-session-name', handleResetSessionNameEvent);
       window.removeEventListener('reorder-terminal-session', handleReorderSessionEvent);
     };
-  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleReorderSessions]);
+  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleResetSessionName, handleReorderSessions]);
 
   // 没有会话时创建新的
   useEffect(() => {

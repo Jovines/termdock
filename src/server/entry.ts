@@ -36,6 +36,8 @@ export function createApp(): express.Express {
   app.use(express.json());
   app.use(cookieParser());
 
+  // Note: clientId cookie is no longer used for session persistence (sessions are global).
+  // Kept for potential future use and backward compatibility.
   app.use((req, res, next) => {
     const existingClientId = req.cookies?.[CLIENT_STATE_COOKIE];
     const clientId = typeof existingClientId === 'string' && existingClientId.trim().length > 0

@@ -528,14 +528,14 @@ export async function killTmuxSession(name: string): Promise<{ cleanedSessions: 
 }
 
 export interface PersistedTerminalClientSession {
-  sessionId: string; name: string; backendSessionId: string | null;
+  sessionId: string; name: string; customName?: boolean; backendSessionId: string | null;
   mode: 'shell' | 'tmux'; tmuxSessionName: string | null;
   createdAt: number; lastActivity: number;
 }
 
 export interface TerminalClientState {
   sessions: PersistedTerminalClientSession[];
-  activeSessionId?: string | null;
+  activeSessionId?: string | null; // Deprecated: no longer returned by server, kept for backward compat
   updatedAt?: number;
 }
 
