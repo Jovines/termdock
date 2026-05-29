@@ -224,7 +224,7 @@ export function connectTerminalStream(
 
         // Handle agent-status broadcast
         if (msg.type === 'agent-status') {
-          onEvent({ type: 'agent-status', agentStatus: msg.agentStatus ?? null });
+          onEvent({ type: 'agent-status', agentStatus: msg.agentStatus ?? null, agentColor: msg.agentColor ?? null });
           return;
         }
 
@@ -691,6 +691,7 @@ export async function logout(): Promise<void> {
 export interface AgentRule {
   pattern: string;
   status: string;
+  color?: string;
 }
 
 export interface AgentProgramConfig {

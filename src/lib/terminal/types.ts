@@ -1,6 +1,6 @@
 export type TerminalMode = 'shell' | 'tmux';
 
-export type AgentStatus = 'thinking' | 'waiting-input' | 'idle';
+export type AgentStatus = string;
 
 export interface TmuxPane {
   id: string;
@@ -72,6 +72,7 @@ export interface TerminalStreamEvent {
   activeProgram?: string | null;
   activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   agentStatus?: AgentStatus | null;
+  agentColor?: string | null;
 }
 
 // Create Session Options
@@ -180,6 +181,8 @@ export interface TerminalSessionState {
   inCopyMode: boolean;
   isConnecting: boolean;
   agentStatus: AgentStatus | null;
+  agentColor: string | null;
+  agentNeedsReview: boolean;  // 前端状态：AI 从运行变为停止时，用户未查看 → 黄点提醒
   buffer: string;
   bufferChunks: TerminalChunk[];
   bufferLength: number;

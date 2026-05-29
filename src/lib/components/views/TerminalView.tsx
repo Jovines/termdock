@@ -519,7 +519,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 break;
               }
               case 'agent-status': {
-                setSessionAgentStatus(storeSessionId, event.agentStatus ?? null);
+                setSessionAgentStatus(storeSessionId, event.agentStatus ?? null, event.agentColor ?? null);
                 break;
               }
               case 'exit': {

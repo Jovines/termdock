@@ -1,16 +1,20 @@
 import { create } from 'zustand';
-import type { TerminalSession, TerminalChunk, TerminalSessionState } from '../terminal';
+import type { TerminalSession, TerminalChunk, TerminalSessionState, AgentStatus } from '../terminal';
 
 export interface TerminalStore {
   sessions: Map<string, TerminalSessionState>;
   nextChunkId: number;
+  activeSessionId: string | null;
 
   getTerminalSession: (sessionId: string) => TerminalSessionState | undefined;
+  setActiveSessionId: (id: string | null) => void;
   setTerminalSession: (sessionId: string, terminalSession: TerminalSession & { history?: string[] }) => void;
   setSessionHistory: (sessionId: string, history: string[]) => void;
   setSessionActiveProgram: (sessionId: string, activeProgram: string | null, activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null) => void;
   setSessionCwd: (sessionId: string, cwd: string | null) => void;
   setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => void;
+  setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null) => void;
+  clearAgentNeedsReview: (sessionId: string) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string) => void;
   clearTerminalSession: (sessionId: string) => void;
@@ -33,6 +37,9 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     cwd: null,
     inCopyMode: false,
     isConnecting: false,
+    agentStatus: null,
+    agentColor: null,
+    agentNeedsReview: false,
     buffer: '',
     bufferChunks: [],
     bufferLength: 0,
@@ -43,9 +50,23 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
 export const useTerminalStore = create<TerminalStore>((set, get) => ({
   sessions: new Map(),
   nextChunkId: 1,
+  activeSessionId: null,
 
   getTerminalSession: (sessionId: string) => {
     return get().sessions.get(sessionId);
+  },
+
+  setActiveSessionId: (id: string | null) => {
+    set({ activeSessionId: id });
+    // When user switches to a session, clear its needs-review flag
+    if (id) {
+      const session = get().sessions.get(id);
+      if (session?.agentNeedsReview) {
+        const newSessions = new Map(get().sessions);
+        newSessions.set(id, { ...session, agentNeedsReview: false, updatedAt: Date.now() });
+        set({ sessions: newSessions });
+      }
+    }
   },
 
   setTerminalSession: (sessionId: string, terminalSession: TerminalSession & { history?: string[] }) => {
@@ -131,6 +152,40 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     });
   },
 
+  setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null) => {
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      const existing = newSessions.get(sessionId);
+      if (!existing) return state;
+      if (existing.agentStatus === agentStatus && existing.agentColor === (agentColor ?? existing.agentColor)) return state;
+
+      // any status → null: AI stopped. If user is NOT on this session, mark needs-review.
+      const wasActive = existing.agentStatus !== null;
+      const nowStopped = agentStatus === null;
+      const userNotViewing = state.activeSessionId !== sessionId;
+      const agentNeedsReview = wasActive && nowStopped && userNotViewing;
+
+      newSessions.set(sessionId, {
+        ...existing,
+        agentStatus,
+        agentColor: agentColor ?? existing.agentColor,
+        agentNeedsReview: agentNeedsReview || (existing.agentNeedsReview && !agentStatus),
+        updatedAt: Date.now(),
+      });
+      return { sessions: newSessions };
+    });
+  },
+
+  clearAgentNeedsReview: (sessionId: string) => {
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      const existing = newSessions.get(sessionId);
+      if (!existing || !existing.agentNeedsReview) return state;
+      newSessions.set(sessionId, { ...existing, agentNeedsReview: false, updatedAt: Date.now() });
+      return { sessions: newSessions };
+    });
+  },
+
   setConnecting: (sessionId: string, isConnecting: boolean) => {
     set((state) => {
       const newSessions = new Map(state.sessions);
@@ -192,6 +247,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           activeProgram: null,
           activeProgramSource: null,
           isConnecting: false,
+          agentStatus: null,
+          agentColor: null,
+          agentNeedsReview: false,
           updatedAt: Date.now(),
         });
       }

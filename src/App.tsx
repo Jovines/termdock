@@ -66,31 +66,14 @@ function getTabDisplayLines(
   return { primary: session.name, secondary: null };
 }
 
-function AgentStatusDot({ status, needsReview }: { status: AgentStatus | null; needsReview?: boolean }) {
-  if (!status && !needsReview) return null;
-  // running=green, waiting=yellow, idle=gray, needsReview=yellow
-  let color: string;
-  let title: string;
-  if (status === 'running') {
-    color = 'bg-green-400';
-    title = 'AI running';
-  } else if (status === 'waiting') {
-    color = 'bg-yellow-400';
-    title = 'AI waiting for input';
-  } else if (status === 'idle') {
-    color = 'bg-muted-foreground/50';
-    title = 'AI idle';
-  } else {
-    // needsReview (status is null but needsReview is true)
-    color = 'bg-yellow-400';
-    title = 'AI finished — needs review';
-  }
-  return (
-    <span
-      className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${color}`}
-      title={title}
-    />
-  );
+function getAgentColor(status: AgentStatus | null, color?: string | null, needsReview?: boolean): string | undefined {
+  if (!status && !needsReview) return undefined;
+  if (color) return color;
+  if (status === 'running') return '#4ade80';
+  if (status === 'waiting') return '#facc15';
+  if (status === 'idle') return '#888';
+  if (status) return '#4ade80';
+  return '#facc15'; // needsReview
 }
 
 function App() {
@@ -694,22 +677,28 @@ function App() {
                     title={tooltip}
                   >
                     <span className="inline-flex min-w-0 items-center gap-1">
-                      <AgentStatusDot status={ts?.agentStatus ?? null} needsReview={ts?.agentNeedsReview} />
-                      {session.mode === 'tmux' && (
+                      {session.mode === 'tmux' ? (
                         <RiLayoutGridLine
                           size={12}
-                          className={`shrink-0 ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}
+                          className="shrink-0"
+                          style={{ color: getAgentColor(ts?.agentStatus ?? null, ts?.agentColor, ts?.agentNeedsReview) }}
+                        />
+                      ) : (
+                        <RiTerminalLine
+                          size={12}
+                          className="shrink-0"
+                          style={{ color: getAgentColor(ts?.agentStatus ?? null, ts?.agentColor, ts?.agentNeedsReview) }}
                         />
                       )}
                       {displaySubName ? (
                         <span className="flex min-w-0 flex-col leading-tight">
-                          <span className="truncate">{displayName}</span>
+                          <span className={`truncate ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
                           <span className="truncate text-[9px] text-muted-foreground">
                             {displaySubName}
                           </span>
                         </span>
                       ) : (
-                        <span className="truncate">{displayName}</span>
+                        <span className={`truncate ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
                       )}
                     </span>
                   </button>

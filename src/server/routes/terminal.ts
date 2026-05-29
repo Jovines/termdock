@@ -126,7 +126,8 @@ interface TerminalSession {
   tmuxControl?: TmuxControl;
   oscSniffBuf: string;
   lastOscCwd: string | null;
-  agentStatus: 'running' | 'waiting' | 'idle' | null;
+  agentStatus: string | null;
+  agentColor: string | null;
   agentStatusBuf: string;      // 去除 ANSI 后的纯文本滚动缓冲区
 }
 
@@ -989,6 +990,7 @@ const AGENT_BUF_CAP = 4096;  // 滚动缓冲区容量
 interface AgentRule {
   pattern: string;   // regex pattern string
   status: string;    // status label, e.g. "running"
+  color?: string;    // CSS color for the tab dot, e.g. "#4ade80" or "green"
 }
 
 interface AgentProgramConfig {
@@ -1001,45 +1003,50 @@ const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
   {
     program: 'claude',
     rules: [
-      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊·✢✳✶✻✽]|Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing', status: 'running' },
+      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80' },
+      { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80' },
+      { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80' },
     ],
   },
   {
     program: 'claude-code',
     rules: [
-      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊·✢✳✶✻✽]|Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing', status: 'running' },
+      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80' },
+      { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80' },
+      { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80' },
     ],
   },
   {
     program: 'opencode',
     rules: [
-      { pattern: 'thinking|working|generating', status: 'running' },
+      { pattern: 'thinking|working|generating', status: 'running', color: '#4ade80' },
     ],
   },
   {
     program: 'coco',
     rules: [
-      { pattern: '[·✢❋❇✽]|thinking|working|generating', status: 'running' },
+      { pattern: '[·✢❋❇✽] (thinking|working|generating)', status: 'running', color: '#4ade80' },
     ],
   },
   {
     program: 'aider',
     rules: [
-      { pattern: 'Thinking|Generating|Working', status: 'running' },
+      { pattern: 'Thinking|Generating|Working', status: 'running', color: '#4ade80' },
     ],
   },
 ];
 
 // Runtime cache: program → compiled rules
-let agentRulesCache: Map<string, { status: string; regex: RegExp }[]> = new Map();
+let agentRulesCache: Map<string, { status: string; color: string | undefined; regex: RegExp }[]> = new Map();
 let agentRulesVersion = 0;
 
-function loadAgentRules(): Map<string, { status: string; regex: RegExp }[]> {
+function loadAgentRules(): Map<string, { status: string; color: string | undefined; regex: RegExp }[]> {
   const rules = loadAgentRulesFromDisk();
-  const map = new Map<string, { status: string; regex: RegExp }[]>();
+  const map = new Map<string, { status: string; color: string | undefined; regex: RegExp }[]>();
   for (const config of rules) {
     const compiled = config.rules.map(r => ({
       status: r.status,
+      color: r.color,
       regex: new RegExp(r.pattern, 'i'),
     }));
     map.set(config.program.toLowerCase(), compiled);
@@ -1091,7 +1098,7 @@ function stripAnsi(data: string): string {
  * 基于可配置规则匹配检测 AI 工具状态
  * 只看实际输出文本，不受 resize/布局变化影响
  */
-function detectAgentStatus(command: string, buf: string): string | null {
+function detectAgentStatus(command: string, buf: string): { status: string; color: string | undefined } | null {
   if (!buf || buf.length < 2) return null;
 
   const rules = agentRulesCache.get(command.toLowerCase());
@@ -1102,7 +1109,7 @@ function detectAgentStatus(command: string, buf: string): string | null {
 
   for (const rule of rules) {
     if (rule.regex.test(tail)) {
-      return rule.status;
+      return { status: rule.status, color: rule.color };
     }
   }
 
@@ -1117,7 +1124,8 @@ function evaluateAgentStatus(sessionId: string, session: TerminalSession): void 
     // Program is not an AI tool → clear status
     if (previousStatus !== null) {
       session.agentStatus = null;
-      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null });
+      session.agentColor = null;
+      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null, agentColor: null });
     }
     return;
   }
@@ -1125,12 +1133,13 @@ function evaluateAgentStatus(sessionId: string, session: TerminalSession): void 
   const detected = detectAgentStatus(command, session.agentStatusBuf);
 
   // Use the detected status directly; null means no rule matched → clear
-  const validStatuses = new Set(['running', 'waiting', 'idle']);
-  const newStatus: 'running' | 'waiting' | 'idle' | null = detected && validStatuses.has(detected) ? detected as 'running' | 'waiting' | 'idle' : null;
+  const newStatus: string | null = detected ? detected.status : null;
+  const newColor: string | null = detected?.color ?? null;
 
-  if (newStatus !== previousStatus) {
+  if (newStatus !== previousStatus || newColor !== session.agentColor) {
     session.agentStatus = newStatus;
-    broadcastEvent(sessionId, { type: 'agent-status', agentStatus: newStatus });
+    session.agentColor = newColor;
+    broadcastEvent(sessionId, { type: 'agent-status', agentStatus: newStatus, agentColor: newColor });
   }
 }
 
@@ -1817,6 +1826,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     oscSniffBuf: '',
     lastOscCwd: null,
     agentStatus: null,
+    agentColor: null,
     agentStatusBuf: '',
   };
 
