@@ -16,8 +16,8 @@ AI 状态通过 tab 左侧的图标颜色表示：
 
 - 所有正则使用 **大小写不敏感** 匹配（`'i'` flag）
 - 按规则顺序匹配，**第一个命中的规则决定当前状态**
-- 没有规则命中则状态清空
-- 代码不做任何额外判断，完全由正则控制匹配逻辑
+- 没有规则命中则启动 200ms debounce 定时器，到后清除状态
+- 状态由最新到达的 PTY 数据块触发匹配（非全量缓冲区），确保即时退出
 
 ## 添加新 AI 工具的步骤
 
@@ -112,12 +112,104 @@ Settings → AI agent detection → Add program，填入程序名、正则、状
 |------|-------------|-------------|------|
 | claude / claude-code | `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊` (braille) + `·✢✳✶✻✽` (flower) | `⠋ Thinking...` 或 `✢ Generating...` | Claude Code 源码 |
 | coco | `·✢❋❇✽` (flower variant) | `✢ Thinking... (4s)` | 实测抓取 |
-| opencode | 无 spinner | `thinking...` | 纯关键词匹配 |
+| opencode | `⬝■` + braille `⠦⠧⠇⠏⠋⠙⠹⠸⠼⠴`（进度条动画） | `⬝⬝⬝■■⬝⬝■⠦...` 进度条 + `Thought: 1.3s` | 实测抓取 |
 | aider | 无 spinner | `Thinking...` | 纯关键词匹配 |
+
+## 分析 Debug 日志与制定规则
+
+### 从 debug 日志中提取时序和字符特征
+
+```bash
+cat ~/.termdock/agent-debug.log | python3 -c "
+import sys, json, re
+lines = sys.stdin.readlines()
+prev_ts = None
+for line in lines:
+    m = re.match(r'\[([^\]]+)\] program=(\S+) tail=(.+)', line)
+    if not m: continue
+    ts, prog, tail = m.groups()
+    tail = json.loads(tail)
+    if prev_ts:
+        from datetime import datetime
+        dt1 = datetime.fromisoformat(prev_ts)
+        dt2 = datetime.fromisoformat(ts)
+        diff_ms = (dt2.timestamp() - dt1.timestamp()) * 1000
+        has_pattern = bool(re.search(r'YOUR_REGEX', tail))
+        print(f'{diff_ms:6.0f}ms | match={has_pattern} | tail[-120:]: {tail[-120:]}')
+    prev_ts = ts
+"
+```
+
+这段脚本输出每条日志的**帧间隔**、**是否命中正则**、**末尾 120 字符**。三条核心信息：
+- **帧间隔**：动画每多少毫秒刷新一次，决定 debounce 超时该设多大
+- **匹配状态**：跟踪正则何时命中、何时失配，找到状态转换点
+- **尾部内容**：观察动画消失后被什么内容替换
+
+### 时序分析 → 确定 debounce 安全值
+
+以 opencode 进度条为例，分析结果：
+
+| 指标 | 数值 |
+|------|------|
+| 帧间隔 | 15-64ms，中位数 ~25ms |
+| 每帧字符数 | ~40-50 个 |
+| 输出方式 | ANSI 光标回到行首重绘 |
+
+**通用规则**：debounce 超时取帧间隔中位数的 **8-10 倍**。进度条 25ms × 8 = 200ms，足够覆盖任何网络/IO 抖动，又不会让用户感知到延迟。
+
+### 为什么缓冲区匹配会有"退出延迟"
+
+检测机制将 stripAnsi 后的文本追加到滚动缓冲区，取末尾 N 字节匹配正则。ANSI 光标重绘（回到行首覆盖）会被 stripAnsi 移除，旧帧的字符堆积在缓冲区。动画跑 3 秒后缓冲区中可能有 5000+ 个过期字符，动画结束后新输出只有几十字节，无法快速推出 1024 字节的检测窗口，导致状态清除滞后数秒。
+
+**解决方法**：用最新到达的数据块（而非累积缓冲区）做匹配。动画活跃时每 25ms 就有新数据块命中正则；动画停止后，下一个不含动画字符的数据块立刻失配，触发 debounce 清除。
+
+### 确定匹配策略
+
+两种基础策略，根据输出特征选择：
+
+| 策略 | 适用场景 | 优缺点 |
+|------|---------|--------|
+| **最新数据块匹配** | 高频动画（每帧 < 100ms），如 spinner、进度条 | 瞬时响应，无缓冲污染；需 debounce 防抖 |
+| **缓冲区匹配** | 低频或跨行输出，如 `Thinking...` 这类状态文本 | 不漏检跨 chunk 的模式；可能有退出延迟 |
+
+混合使用：优先用最新数据块匹配，检测到后立即置状态；失配时启动 debounce 定时器（200ms），定时器到后复查缓冲区尾部确认是否可以清除。
+
+## 状态检测 debounce 机制
+
+Termdock 内置 200ms debounce：当最新数据块不再匹配正则后，等待 200ms 再清除状态。在这 200ms 内如果再次命中，定时器取消，状态保持。这避免了：
+
+- 进度条帧跨数据块边界导致的短暂失配（闪烁）
+- 网络抖动导致的数据块间隔不均匀
+- 动画结束后的延迟清除
+
+200ms 对于帧间隔 ≤ 50ms 的动画足够安全；如果帧间隔更大（如某些工具的 spinner 每秒只刷新 2-3 次），可适当增大 debounce 值。当前 debounce 值硬编码在 `AGENT_STATUS_DEBOUNCE_MS` 常量中。
 
 ## Debug 日志
 
 - 路径：`~/.termdock/agent-debug.log`
 - 大小上限：512KB（超出自动清空）
 - 仅当 PTY 输出包含已知 spinner 字符时才记录
-- 用于排查新工具的 spinner 模式
+- 用于排查新工具的 spinner 模式和动画时序分析
+
+查看日志的帧间隔分布（快速评估 debounce 安全性）：
+```bash
+cat ~/.termdock/agent-debug.log | python3 -c "
+import sys, re, json
+lines = sys.stdin.readlines()
+timestamps = []
+for line in lines:
+    m = re.match(r'\[([^\]]+)\]', line)
+    if m: timestamps.append(m.group(1))
+diffs = []
+for i in range(1, len(timestamps)):
+    from datetime import datetime
+    d1 = datetime.fromisoformat(timestamps[i-1])
+    d2 = datetime.fromisoformat(timestamps[i])
+    diffs.append((d2.timestamp() - d1.timestamp()) * 1000)
+if diffs:
+    diffs.sort()
+    n = len(diffs)
+    print(f'帧数: {n}  |  最小: {diffs[0]:.0f}ms  |  中位: {diffs[n//2]:.0f}ms  |  最大: {diffs[-1]:.0f}ms')
+    print(f'推荐 debounce: {diffs[n//2]*8:.0f}ms (中位数 × 8)')
+"
+```
