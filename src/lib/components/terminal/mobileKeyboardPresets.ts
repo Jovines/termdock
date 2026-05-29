@@ -30,7 +30,7 @@ export function getToolbarActionLabel(action: MobileToolbarAction, index: number
 // actions/programs changed). The App reads this on startup and, when the
 // stored version differs, overwrites all built-in preset ids with the latest
 // definitions while keeping any user-authored custom presets intact.
-export const BUILTIN_TOOLBAR_PRESETS_VERSION = 5;
+export const BUILTIN_TOOLBAR_PRESETS_VERSION = 8;
 
 export function getBuiltinToolbarPresetIds(): string[] {
   return DEFAULT_PRESETS.map((preset) => preset.id);
@@ -50,12 +50,12 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     label: 'Code',
     programs: ['opencode'],
     includeAlt: false,
-    rowLayout: [3, 3],
+    rowLayout: [4],
     actions: [
-      { id: 'opencode-undo', label: '/undo', sequence: '/undo' },
-      { id: 'opencode-help', label: '/help', sequence: '/help' },
-      { id: 'opencode-init', label: '/init', sequence: '/init' },
-      { id: 'opencode-share', label: '/share', sequence: '/share' },
+      { id: 'opencode-undo', label: '/undo', sequence: '/undo', doubleTapSequence: '/undo||\r' },
+      { id: 'opencode-new', label: '/new', sequence: '/new', doubleTapSequence: '/new||\r' },
+      { id: 'opencode-models', label: '/models', sequence: '/models', doubleTapSequence: '/models||\r' },
+      { id: 'opencode-compact', label: '/compact', sequence: '/compact', doubleTapSequence: '/compact||\r' },
     ],
   },
   {
