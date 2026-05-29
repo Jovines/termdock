@@ -15,6 +15,7 @@ import {
   Trash2 as RiDeleteBinLine,
   Unplug as RiLogoutBoxRLine,
   GripVertical,
+  Bot as RiBotLine,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
 import { useFontSize } from './lib/hooks/useFontSize';
@@ -23,9 +24,15 @@ import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { TmuxSessionSummary, TmuxStatus, AgentStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules } from './lib/terminal/api';
+import type { AgentProgramConfig } from './lib/terminal/api';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
+import { useSidebarStore } from './lib/stores/useSidebarStore';
+import { useEdgeSwipe } from './lib/hooks/useEdgeSwipe';
+import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
+import { RightSidebar } from './lib/components/sidebar/RightSidebar';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
+import { AgentRulesSettings } from './lib/components/settings/AgentRulesSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 
 type DrawerTab = 'sessions' | 'new' | 'tmux' | 'settings';
@@ -48,7 +55,7 @@ function getTabDisplayLines(
   activeProgram: string | null,
   cwd: string | null,
 ): { primary: string; secondary: string | null } {
-  if (session.customName) return { primary: session.name, secondary: null };
+  if (session.customName) return { primary: session.name, secondary: getCwdLeafName(cwd) };
   // 打开了非 shell 程序时：第一行程序名，第二行当前目录名
   if (activeProgram && !SHELL_NAMES.has(activeProgram)) {
     return { primary: activeProgram, secondary: getCwdLeafName(cwd) };
@@ -59,17 +66,29 @@ function getTabDisplayLines(
   return { primary: session.name, secondary: null };
 }
 
-function AgentStatusDot({ status }: { status: AgentStatus | null }) {
-  if (!status) return null;
-  const color = status === 'thinking'
-    ? 'bg-green-400'
-    : status === 'waiting-input'
-    ? 'bg-yellow-400'
-    : 'bg-muted-foreground/50';
+function AgentStatusDot({ status, needsReview }: { status: AgentStatus | null; needsReview?: boolean }) {
+  if (!status && !needsReview) return null;
+  // running=green, waiting=yellow, idle=gray, needsReview=yellow
+  let color: string;
+  let title: string;
+  if (status === 'running') {
+    color = 'bg-green-400';
+    title = 'AI running';
+  } else if (status === 'waiting') {
+    color = 'bg-yellow-400';
+    title = 'AI waiting for input';
+  } else if (status === 'idle') {
+    color = 'bg-muted-foreground/50';
+    title = 'AI idle';
+  } else {
+    // needsReview (status is null but needsReview is true)
+    color = 'bg-yellow-400';
+    title = 'AI finished — needs review';
+  }
   return (
     <span
       className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${color}`}
-      title={status === 'thinking' ? 'AI thinking...' : status === 'waiting-input' ? 'AI waiting for input' : 'AI idle'}
+      title={title}
     />
   );
 }
@@ -105,11 +124,50 @@ function App() {
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
 
+  // Sidebar state
+  const sidebarStore = useSidebarStore();
+
+  // Sync active session's cwd to sidebar store
+  useEffect(() => {
+    const ts = activeSessionId ? terminalSessions.get(activeSessionId) : null;
+    sidebarStore.setRootPath(ts?.cwd ?? null);
+  }, [activeSessionId, terminalSessions]);
+
+  // Edge swipe detection
+  const edgeSwipe = useEdgeSwipe({
+    onOpen: (side) => {
+      if (side === 'left') sidebarStore.openLeft();
+      else sidebarStore.openRight();
+    },
+    onClose: () => {
+      // Edge swipe didn't complete — no action needed
+    },
+  });
+
+  // Desktop keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key === 'b' && !e.shiftKey) {
+        e.preventDefault();
+        sidebarStore.toggleLeft();
+      }
+      if (mod && e.shiftKey && e.key === 'E') {
+        e.preventDefault();
+        sidebarStore.toggleRight();
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [sidebarStore]);
+
   const handleDragEnd = useCallback((result: DropResult) => {
     if (!result.destination || result.source.index === result.destination.index) return;
     const newOrder = [...sessions];
     const [moved] = newOrder.splice(result.source.index, 1);
     newOrder.splice(result.destination.index, 0, moved);
+    // 乐观更新本地顺序,避免 MultiTerminalView 异步回传期间发生一帧布局回弹
+    setSessions(newOrder);
     window.dispatchEvent(new CustomEvent('reorder-terminal-session', {
       detail: { sessionIds: newOrder.map(s => s.id) },
     }));
@@ -119,6 +177,11 @@ function App() {
     const trimmed = newName.trim();
     if (!trimmed) return;
     window.dispatchEvent(new CustomEvent('rename-terminal-session', { detail: { sessionId, name: trimmed } }));
+  }, []);
+
+  // 把自定义名称清空回退为「程序名/目录名」默认显示
+  const resetSessionName = useCallback((sessionId: string) => {
+    window.dispatchEvent(new CustomEvent('reset-terminal-session-name', { detail: { sessionId } }));
   }, []);
 
   const {
@@ -136,6 +199,18 @@ function App() {
   const [toolbarPresets, setToolbarPresets] = React.useState<ToolbarPresetDefinition[]>(() => createDefaultToolbarPresets());
   const [toolbarPresetsLoaded, setToolbarPresetsLoaded] = React.useState(false);
   const [selectedToolbarPresetId, setSelectedToolbarPresetId] = React.useState<string>('default');
+
+  // Agent detection rules — owned by server (~/.termdock/agent-rules.json)
+  const [isAgentRulesOpen, setIsAgentRulesOpen] = React.useState(false);
+  const [agentRules, setAgentRules] = React.useState<AgentProgramConfig[]>([]);
+  const [agentRulesLoaded, setAgentRulesLoaded] = React.useState(false);
+  const [agentRulesSaving, setAgentRulesSaving] = React.useState(false);
+
+  useEffect(() => {
+    getAgentRules()
+      .then((rules) => { setAgentRules(rules); setAgentRulesLoaded(true); })
+      .catch(() => { /* use empty state */ });
+  }, []);
 
   // Initial load from server: merge any stored custom presets with the latest
   // built-ins, force-overwriting built-in ids when the server's stored version
@@ -281,13 +356,47 @@ function App() {
     }
   }, [editingSessionId]);
 
+  const editingSessionIdRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    editingSessionIdRef.current = editingSessionId;
+  }, [editingSessionId]);
+  const lastTabTapRef = React.useRef<{ id: string; time: number } | null>(null);
+  const tabSingleClickTimerRef = React.useRef<number | null>(null);
+
   const handleTabClick = useCallback((sessionId: string) => {
     window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
+  }, []);
+
+  const handleTabPress = useCallback((sessionId: string) => {
+    const DOUBLE_TAP_MS = 320;
+    const now = performance.now();
+    const last = lastTabTapRef.current;
+    if (last && last.id === sessionId && now - last.time <= DOUBLE_TAP_MS) {
+      // 双击 → 进入编辑态;取消挂起的单击切换
+      if (tabSingleClickTimerRef.current !== null) {
+        window.clearTimeout(tabSingleClickTimerRef.current);
+        tabSingleClickTimerRef.current = null;
+      }
+      lastTabTapRef.current = null;
+      setEditingSessionId(sessionId);
+      return;
+    }
+    lastTabTapRef.current = { id: sessionId, time: now };
+    if (tabSingleClickTimerRef.current !== null) {
+      window.clearTimeout(tabSingleClickTimerRef.current);
+    }
+    tabSingleClickTimerRef.current = window.setTimeout(() => {
+      tabSingleClickTimerRef.current = null;
+      // 编辑态下不再发起切换
+      if (editingSessionIdRef.current === sessionId) return;
+      handleTabClick(sessionId);
+    }, DOUBLE_TAP_MS);
   }, []);
 
   const handleSessionDataUpdate = useCallback((data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => {
     setSessions(data.sessions);
     setActiveSessionId(data.activeSessionId);
+    useTerminalStore.getState().setActiveSessionId(data.activeSessionId);
   }, []);
 
   const dispatchNewSession = useCallback((overrides?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => {
@@ -507,7 +616,11 @@ function App() {
                 if (isEditing) {
                   const commitRename = (sessionId: string, value: string) => {
                     const trimmed = value.trim();
-                    if (trimmed) {
+                    if (!trimmed) {
+                      // 清空 → 重置为默认(程序名/目录名)显示
+                      resetSessionName(sessionId);
+                    } else if (trimmed !== session.name) {
+                      // 只在值实际改变时才写入,避免双击直接退出就把 session 标成 customName
                       renameSession(sessionId, trimmed);
                     }
                     setEditingSessionId(null);
@@ -572,8 +685,7 @@ function App() {
                   <button
                     ref={isActive ? activeSessionTabRef : null}
                     type="button"
-                    onClick={() => handleTabClick(session.id)}
-                    onDoubleClick={() => setEditingSessionId(session.id)}
+                    onClick={() => handleTabPress(session.id)}
                     className={`inline-flex items-center shrink-0 truncate rounded-md px-1 py-0.5 text-[11px] leading-tight transition max-w-[14rem] ${
                       isActive
                         ? 'bg-surface-elevated text-foreground'
@@ -582,7 +694,7 @@ function App() {
                     title={tooltip}
                   >
                     <span className="inline-flex min-w-0 items-center gap-1">
-                      <AgentStatusDot status={ts?.agentStatus ?? null} />
+                      <AgentStatusDot status={ts?.agentStatus ?? null} needsReview={ts?.agentNeedsReview} />
                       {session.mode === 'tmux' && (
                         <RiLayoutGridLine
                           size={12}
@@ -1292,6 +1404,26 @@ function App() {
                     <span className="text-muted-foreground">›</span>
                   </button>
 
+                  {/* Agent Detection Rules */}
+                  <button
+                    type="button"
+                    onClick={() => setIsAgentRulesOpen(true)}
+                    className="flex w-full items-center justify-between rounded-2xl bg-surface-2 px-4 py-3.5 text-left text-sm transition hover:bg-surface-elevated"
+                  >
+                    <span className="flex items-center gap-3">
+                      <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface text-muted-foreground">
+                        <RiBotLine size={16} />
+                      </span>
+                      <span>
+                        <span className="block font-medium text-foreground">AI agent detection</span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          {agentRulesLoaded ? `${agentRules.length} program${agentRules.length === 1 ? '' : 's'}` : 'Loading…'}
+                        </span>
+                      </span>
+                    </span>
+                    <span className="text-muted-foreground">›</span>
+                  </button>
+
                   {/* Debug toggle */}
                   <div className="flex items-center justify-between rounded-2xl bg-surface-2 px-4 py-3">
                     <span className="ui-label">Debug overlay</span>
@@ -1445,6 +1577,83 @@ function App() {
           </div>
         </>
       )}
+
+      {isAgentRulesOpen && (
+        <>
+          <button
+            type="button"
+            className="fixed inset-0 z-[60] bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+            onClick={() => setIsAgentRulesOpen(false)}
+          />
+          <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
+            <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
+              <div className="min-w-0">
+                <div className="ui-kicker">AI agent detection</div>
+                <h2 className="section-title mt-1">Detection rules</h2>
+              </div>
+              <div className="flex items-center gap-2">
+                {agentRulesSaving && (
+                  <span className="text-[11px] text-muted-foreground">Saving…</span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setIsAgentRulesOpen(false)}
+                  className="shrink-0 rounded-full bg-surface-2 p-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                  aria-label="Close agent rules"
+                >
+                  <RiCloseLine size={18} />
+                </button>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+              <p className="mb-4 text-[11px] text-muted-foreground">
+                Configure regex patterns to detect when an AI tool is running in a terminal tab.
+                When a pattern matches the terminal output, the tab shows a green dot. When it stops
+                and you haven't viewed the tab yet, it shows a yellow dot.
+              </p>
+              <AgentRulesSettings
+                rules={agentRules}
+                onChange={(rules) => {
+                  setAgentRules(rules);
+                  setAgentRulesSaving(true);
+                  replaceAgentRules(rules)
+                    .then((saved) => setAgentRules(saved))
+                    .catch(() => { /* keep local state */ })
+                    .finally(() => setAgentRulesSaving(false));
+                }}
+                onResetDefaults={() => {
+                  setAgentRulesSaving(true);
+                  resetAgentRules()
+                    .then((rules) => setAgentRules(rules))
+                    .catch(() => { /* keep local state */ })
+                    .finally(() => setAgentRulesSaving(false));
+                }}
+              />
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Left Sidebar */}
+      <LeftSidebar
+        isOpen={sidebarStore.leftOpen}
+        isDragging={edgeSwipe.isEdgeSwiping && edgeSwipe.edgeSide === 'left'}
+        dragProgress={edgeSwipe.edgeSide === 'left' ? edgeSwipe.dragProgress : 0}
+        onClose={sidebarStore.closeLeft}
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        sessionStates={terminalSessions}
+        onNewSession={() => dispatchNewSession()}
+        onOpenDrawer={() => { setDrawerTab('sessions'); setIsDrawerOpen(true); }}
+      />
+
+      {/* Right Sidebar */}
+      <RightSidebar
+        isOpen={sidebarStore.rightOpen}
+        isDragging={edgeSwipe.isEdgeSwiping && edgeSwipe.edgeSide === 'right'}
+        dragProgress={edgeSwipe.edgeSide === 'right' ? edgeSwipe.dragProgress : 0}
+        onClose={sidebarStore.closeRight}
+      />
 
       {/* Debug Info Panel */}
       {showDebug && (

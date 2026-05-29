@@ -34,7 +34,7 @@ export class PathValidator {
   }
   
   /**
-   * 验证和规范化路径
+   * 验证和规范化路径（仅允许目录）
    * @param requestedPath 请求的路径
    * @returns 安全、规范化的路径
    * @throws Error 如果路径不安全
@@ -43,7 +43,7 @@ export class PathValidator {
     if (!requestedPath || typeof requestedPath !== 'string') {
       throw new Error('Path must be a non-empty string');
     }
-    
+
     // 解析路径，去除相对路径
     let resolvedPath: string;
     try {
@@ -51,12 +51,12 @@ export class PathValidator {
     } catch (error) {
       throw new Error(`Invalid path format: ${requestedPath}`);
     }
-    
+
     // 检查路径是否存在
     if (!fs.existsSync(resolvedPath)) {
       throw new Error(`Directory does not exist: ${resolvedPath}`);
     }
-    
+
     // 检查是否为目录
     try {
       const stat = fs.statSync(resolvedPath);
@@ -69,36 +69,83 @@ export class PathValidator {
       }
       throw new Error(`Cannot access directory: ${resolvedPath}`);
     }
-    
+
     // 检查路径是否在允许的范围内
-    let isAllowed = false;
-    for (const allowedPath of this.allowedPaths) {
-      if (resolvedPath.startsWith(allowedPath)) {
-        isAllowed = true;
-        break;
-      }
-    }
-    
-    if (!isAllowed) {
+    if (!this.isInAllowedPaths(resolvedPath)) {
       console.warn(`Access denied: ${resolvedPath} is not in allowed paths`);
       throw new Error('Access denied: directory not allowed');
     }
-    
+
     // 额外的安全检查：避免系统关键目录
+    this.checkDangerousPatterns(resolvedPath);
+
+    return resolvedPath;
+  }
+
+  /**
+   * 验证和规范化路径（允许文件和目录）
+   * @param requestedPath 请求的路径
+   * @returns 安全、规范化的路径
+   * @throws Error 如果路径不安全
+   */
+  validatePath(requestedPath: string): string {
+    if (!requestedPath || typeof requestedPath !== 'string') {
+      throw new Error('Path must be a non-empty string');
+    }
+
+    let resolvedPath: string;
+    try {
+      resolvedPath = path.resolve(requestedPath);
+    } catch (error) {
+      throw new Error(`Invalid path format: ${requestedPath}`);
+    }
+
+    if (!fs.existsSync(resolvedPath)) {
+      throw new Error(`Path does not exist: ${resolvedPath}`);
+    }
+
+    // 对文件，验证其父目录在允许范围内
+    try {
+      const stat = fs.statSync(resolvedPath);
+      const pathToCheck = stat.isDirectory() ? resolvedPath : path.dirname(resolvedPath);
+      if (!this.isInAllowedPaths(pathToCheck)) {
+        console.warn(`Access denied: ${resolvedPath} is not in allowed paths`);
+        throw new Error('Access denied: path not allowed');
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('not allowed')) {
+        throw error;
+      }
+      throw new Error(`Cannot access path: ${resolvedPath}`);
+    }
+
+    this.checkDangerousPatterns(resolvedPath);
+
+    return resolvedPath;
+  }
+
+  private isInAllowedPaths(resolvedPath: string): boolean {
+    for (const allowedPath of this.allowedPaths) {
+      if (resolvedPath.startsWith(allowedPath)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private checkDangerousPatterns(resolvedPath: string): void {
     const dangerousPatterns = [
       '/bin', '/sbin', '/usr/bin', '/usr/sbin',
       '/etc', '/var', '/lib', '/proc', '/sys',
       '/boot', '/root', '/dev'
     ];
-    
+
     for (const pattern of dangerousPatterns) {
       if (resolvedPath.startsWith(pattern)) {
         console.warn(`Access denied: ${resolvedPath} is a system directory`);
         throw new Error('Access denied: system directories are restricted');
       }
     }
-    
-    return resolvedPath;
   }
   
   /**

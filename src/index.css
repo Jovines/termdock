@@ -468,6 +468,22 @@ body {
   transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease, opacity 0.2s ease, box-shadow 0.2s ease;
 }
 
+.xterm .xterm-viewport {
+  overflow-y: auto !important;
+  scrollbar-width: none !important;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar {
+  display: none !important;
+}
+
+/* Force xterm-screen to fill the full width — xterm.js reserves
+   scrollbar space in its inline style, but we hide the scrollbar
+   via the rules above so the space is wasted. */
+.xterm .xterm-screen {
+  width: 100% !important;
+}
+
 .xterm,
 .xterm *,
 .xterm canvas {

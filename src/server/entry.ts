@@ -8,6 +8,7 @@ import cookieParser from 'cookie-parser';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import terminalRoutes, { handleTerminalWebSocket } from './routes/terminal.js';
+import filesystemRoutes from './routes/filesystem.js';
 import authRoutes from './routes/auth.js';
 import { csrfProtection } from './utils/csrfProtection.js';
 import { pathValidator } from './utils/pathValidator.js';
@@ -91,6 +92,9 @@ export function createApp(): express.Express {
 
   // 终端路由
   app.use('/api/terminal', terminalRoutes);
+
+  // 文件系统路由（继承 /api/terminal 上的 auth + CSRF 保护）
+  app.use('/api/terminal/fs', filesystemRoutes);
 
   if (fs.existsSync(clientIndexPath)) {
     app.use(express.static(clientDistPath));

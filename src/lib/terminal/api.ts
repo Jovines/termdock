@@ -685,3 +685,101 @@ export async function logout(): Promise<void> {
   await fetch('/api/auth/logout', { method: 'POST' });
   resetCsrfTokenCache();
 }
+
+// ---- Agent detection rules API ----
+
+export interface AgentRule {
+  pattern: string;
+  status: string;
+}
+
+export interface AgentProgramConfig {
+  program: string;
+  rules: AgentRule[];
+}
+
+export async function getAgentRules(): Promise<AgentProgramConfig[]> {
+  const response = await fetch('/api/terminal/agent-rules');
+  if (!response.ok) throw new Error('Failed to get agent rules');
+  return response.json();
+}
+
+export async function replaceAgentRules(rules: AgentProgramConfig[]): Promise<AgentProgramConfig[]> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/agent-rules', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(rules),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update agent rules' }));
+    throw new Error(error.error || 'Failed to update agent rules');
+  }
+  return response.json();
+}
+
+export async function resetAgentRules(): Promise<AgentProgramConfig[]> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/agent-rules', {
+    method: 'DELETE',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) throw new Error('Failed to reset agent rules');
+  return response.json();
+}
+
+// ---- Filesystem API ----
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  type: 'file' | 'directory' | 'symlink';
+  size?: number;
+  modified?: string;
+}
+
+export async function listDirectory(dirPath: string): Promise<{ path: string; entries: FileEntry[] }> {
+  const response = await fetch(`/api/terminal/fs/list?path=${encodeURIComponent(dirPath)}`);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to list directory' }));
+    throw new Error(error.error || 'Failed to list directory');
+  }
+  return response.json();
+}
+
+export async function readFileContent(filePath: string): Promise<{
+  path: string; content: string; size: number; modified: string; truncated?: boolean;
+}> {
+  const response = await fetch(`/api/terminal/fs/read?path=${encodeURIComponent(filePath)}`);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to read file' }));
+    throw new Error(error.error || 'Failed to read file');
+  }
+  return response.json();
+}
+
+export async function getFileDiff(filePath?: string, cached?: boolean): Promise<{
+  path: string | null; diff: string; error?: string;
+}> {
+  const params = new URLSearchParams();
+  if (filePath) params.set('path', filePath);
+  if (cached) params.set('cached', 'true');
+  const response = await fetch(`/api/terminal/fs/diff?${params}`);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get diff' }));
+    throw new Error(error.error || 'Failed to get diff');
+  }
+  return response.json();
+}
+
+export async function getDiffFileList(): Promise<{
+  files: Array<{ path: string; status: string; oldPath?: string }>;
+  error?: string;
+}> {
+  const response = await fetch('/api/terminal/fs/diff-files');
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get diff file list' }));
+    throw new Error(error.error || 'Failed to get diff file list');
+  }
+  return response.json();
+}
