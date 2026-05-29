@@ -2034,9 +2034,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
                 }}
               />
             ) : null}
-            {viewportRef.current && !enableTouchScroll ? (
-              <div className="overlay-scrollbar overlay-scrollbar--flush overlay-scrollbar--dense overlay-scrollbar--zero" />
-            ) : null}
 
             {/* Double-tap Tab indicator */}
             <div
