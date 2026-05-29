@@ -129,6 +129,7 @@ interface TerminalSession {
   agentStatus: string | null;
   agentColor: string | null;
   agentStatusBuf: string;      // 去除 ANSI 后的纯文本滚动缓冲区
+  agentStatusTimer: ReturnType<typeof setTimeout> | null;
 }
 
 interface PersistedClientSession {
@@ -1116,13 +1117,22 @@ function detectAgentStatus(command: string, buf: string): { status: string; colo
   return null;
 }
 
-function evaluateAgentStatus(sessionId: string, session: TerminalSession): void {
+const AGENT_STATUS_DEBOUNCE_MS = 200;
+
+function clearAgentStatusTimer(session: TerminalSession): void {
+  if (session.agentStatusTimer) {
+    clearTimeout(session.agentStatusTimer);
+    session.agentStatusTimer = null;
+  }
+}
+
+function evaluateAgentStatus(sessionId: string, session: TerminalSession, latestChunk?: string): void {
   const previousStatus = session.agentStatus;
   const command = session.activeProgram?.command;
 
   if (!command || !isAiToolProgram(command)) {
-    // Program is not an AI tool → clear status
     if (previousStatus !== null) {
+      clearAgentStatusTimer(session);
       session.agentStatus = null;
       session.agentColor = null;
       broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null, agentColor: null });
@@ -1130,16 +1140,30 @@ function evaluateAgentStatus(sessionId: string, session: TerminalSession): void 
     return;
   }
 
-  const detected = detectAgentStatus(command, session.agentStatusBuf);
+  const detected = detectAgentStatus(command, latestChunk || session.agentStatusBuf);
 
-  // Use the detected status directly; null means no rule matched → clear
-  const newStatus: string | null = detected ? detected.status : null;
-  const newColor: string | null = detected?.color ?? null;
+  if (detected) {
+    clearAgentStatusTimer(session);
+    const newStatus = detected.status;
+    const newColor = detected.color ?? null;
+    if (newStatus !== previousStatus || newColor !== session.agentColor) {
+      session.agentStatus = newStatus;
+      session.agentColor = newColor;
+      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: newStatus, agentColor: newColor });
+    }
+    return;
+  }
 
-  if (newStatus !== previousStatus || newColor !== session.agentColor) {
-    session.agentStatus = newStatus;
-    session.agentColor = newColor;
-    broadcastEvent(sessionId, { type: 'agent-status', agentStatus: newStatus, agentColor: newColor });
+  if (previousStatus !== null && !session.agentStatusTimer) {
+    session.agentStatusTimer = setTimeout(() => {
+      session.agentStatusTimer = null;
+      const recheck = detectAgentStatus(command, session.agentStatusBuf.slice(-256));
+      if (!recheck) {
+        session.agentStatus = null;
+        session.agentColor = null;
+        broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null, agentColor: null });
+      }
+    }, AGENT_STATUS_DEBOUNCE_MS);
   }
 }
 
@@ -1628,6 +1652,10 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
     return;
   }
 
+  if (session.agentStatusTimer) {
+    clearTimeout(session.agentStatusTimer);
+    session.agentStatusTimer = null;
+  }
   session.dataDisposable?.dispose();
   session.exitDisposable?.dispose();
   destroyTmuxControl(session.tmuxControl);
@@ -1728,7 +1756,7 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
         }
 
         // Content-based detection on every data chunk
-        evaluateAgentStatus(sessionId, session);
+        evaluateAgentStatus(sessionId, session, stripped);
       }
     } catch { /* agent status detection failure should never block data */ }
 
@@ -1828,6 +1856,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     agentStatus: null,
     agentColor: null,
     agentStatusBuf: '',
+    agentStatusTimer: null,
   };
 
   terminalSessions.set(sessionId, session);
