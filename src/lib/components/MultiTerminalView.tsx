@@ -181,6 +181,63 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [focusTransferRequest, setFocusTransferRequest] = useState<{ sessionId: string; token: number } | null>(null);
   const isTouchSwipeRef = useRef(false);
   const handleNewSessionRef = useRef<((options?: NewSessionEventDetail) => Promise<void>) | null>(null);
+  // Trackpad horizontal swipe → switch session tabs.
+  // Accumulates deltaX across a single gesture and only triggers one slide
+  // per gesture, with a cooldown to prevent rapid multi-page flips.
+  const wheelAccumRef = useRef<{ delta: number; side: 1 | -1; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const wheelSlideCooldownRef = useRef(false);
+  useEffect(() => {
+    const handleWheel = (e: WheelEvent) => {
+      const absX = Math.abs(e.deltaX);
+      const absY = Math.abs(e.deltaY);
+      // Only react to clearly horizontal trackpad gestures
+      if (absX < 10 || absX < absY * 1.5) return;
+      // Ignore if Ctrl/Meta is held (font zoom)
+      if (e.ctrlKey || e.metaKey) return;
+
+      const swiper = swiperRef.current;
+      if (!swiper || sessions.length <= 1) return;
+
+      const side: 1 | -1 = e.deltaX > 0 ? 1 : -1;
+
+      // Reset accumulator if direction changed or this is a new gesture
+      let accum = wheelAccumRef.current;
+      if (!accum || accum.side !== side) {
+        if (accum?.timer) clearTimeout(accum.timer);
+        accum = { delta: 0, side, timer: 0 as any };
+        wheelAccumRef.current = accum;
+      }
+
+      accum.delta += absX;
+
+      // Reset accumulator after a brief pause (end of gesture)
+      if (accum.timer) clearTimeout(accum.timer);
+      accum.timer = setTimeout(() => {
+        wheelAccumRef.current = null;
+      }, 200);
+
+      // Only trigger slide once per gesture, with cooldown
+      if (accum.delta >= 60 && !wheelSlideCooldownRef.current) {
+        wheelSlideCooldownRef.current = true;
+        if (side === 1) {
+          if (!swiper.isEnd) swiper.slideNext(SWIPE_ANIMATION_SPEED_MS);
+        } else {
+          if (!swiper.isBeginning) swiper.slidePrev(SWIPE_ANIMATION_SPEED_MS);
+        }
+        // Cooldown: prevent another slide until this one finishes + a small gap
+        setTimeout(() => {
+          wheelSlideCooldownRef.current = false;
+        }, SWIPE_ANIMATION_SPEED_MS + 100);
+        wheelAccumRef.current = null;
+      }
+    };
+    document.addEventListener('wheel', handleWheel, { passive: true });
+    return () => {
+      document.removeEventListener('wheel', handleWheel);
+      if (wheelAccumRef.current?.timer) clearTimeout(wheelAccumRef.current.timer);
+    };
+  }, [sessions.length]);
+
   // Listen for gesture-lock events from TerminalViewport to disable Swiper.
   // Directly mutates the Swiper instance so allowTouchMove takes effect
   // synchronously — React state (via prop) is too slow for touch sequences
