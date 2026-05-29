@@ -1,6 +1,6 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 
-set -eu
+set -euo pipefail
 
 # 端口配置 (与 src/shared/config.ts 保持一致)
 FRONTEND_PORT=9833
@@ -53,16 +53,11 @@ ensure_port_available() {
     return
   fi
 
-  echo "Port $port is in use by:"
+  echo "Port $port is in use, killing..."
   for pid in $pids; do
-    echo "  pid=$pid  $(ps -p "$pid" -o args= 2>/dev/null || true)"
+    kill_pid_and_children "$pid"
   done
-  echo ""
-  echo "Run the following to free it:"
-  for pid in $pids; do
-    echo "  kill $pid"
-  done
-  exit 1
+  sleep 1
 }
 
 stop_by_pid_file() {
@@ -104,8 +99,8 @@ do_stop() {
   echo "Stopping termdock dev services..."
   stop_by_pid_file "$SERVER_PID_FILE" "server"
   stop_by_pid_file "$CLIENT_PID_FILE" "client"
-  kill_matching_processes "$ROOT_DIR/node_modules/.bin/tsx watch src/server/entry.ts" "server"
-  kill_matching_processes "$ROOT_DIR/node_modules/.bin/vite" "client"
+  kill_matching_processes "tsx.*watch.*src/server/entry" "server"
+  kill_matching_processes "node.*vite" "client"
   echo "Done."
 }
 
