@@ -1,3 +1,4 @@
+import React from 'react';
 import {
   X as RiCloseLine,
   Plus as RiAddLine,
@@ -10,8 +11,7 @@ import type { AgentStatus } from '../../terminal/types';
 
 interface LeftSidebarProps {
   isOpen: boolean;
-  isDragging?: boolean;
-  dragProgress?: number;
+  drawerWidthPx: number;
   onClose: () => void;
   sessions: Array<{
     id: string;
@@ -49,23 +49,16 @@ function getCwdLeafName(cwd: string | null): string | null {
   return segments[segments.length - 1] || cwd;
 }
 
-export function LeftSidebar({
-  isOpen,
-  isDragging,
-  dragProgress,
-  onClose,
-  sessions,
-  activeSessionId,
-  sessionStates,
-  onNewSession,
-  onOpenDrawer,
-}: LeftSidebarProps) {
+export const LeftSidebar = React.forwardRef<HTMLElement, LeftSidebarProps>(function LeftSidebar(
+  { isOpen, drawerWidthPx, onClose, sessions, activeSessionId, sessionStates, onNewSession, onOpenDrawer },
+  ref,
+) {
   return (
     <Sidebar
+      ref={ref}
       side="left"
       isOpen={isOpen}
-      isDragging={isDragging}
-      dragProgress={dragProgress}
+      drawerWidthPx={drawerWidthPx}
       onClose={onClose}
     >
       {/* Header */}
@@ -156,4 +149,4 @@ export function LeftSidebar({
       </div>
     </Sidebar>
   );
-}
+});

@@ -44,6 +44,7 @@
     "cookie-parser": "^1.4.7",
     "express": "^5.2.1",
     "lucide-react": "^1.17.0",
+    "motion": "^12.40.0",
     "node-pty": "^1.1.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

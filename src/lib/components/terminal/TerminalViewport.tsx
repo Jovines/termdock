@@ -7,6 +7,9 @@ import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
 import type { TerminalRendererMode } from '../../terminal/renderer';
 import { useTouchScroll, type TouchScrollConfig } from '../../hooks/useTouchScroll';
+import { useGesture } from '../../hooks/useGesture';
+import { PRIORITY_LONG_PRESS, PRIORITY_TMUX_SCROLL } from '../../gesture/types';
+import type { GestureAction } from '../../gesture/types';
 import { light as hapticLight } from 'browser-haptic';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
@@ -196,7 +199,7 @@ function convertTheme(theme: TerminalTheme): Record<string, string> {
   };
 }
 
-export const TerminalViewport = React.forwardRef<TerminalController, TerminalViewportProps>(
+const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewportProps>(
   (
     {
       sessionKey,
@@ -265,6 +268,8 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
     inputHandlerRef.current = onInput;
     resizeHandlerRef.current = onResize;
     inputFocusHandlerRef.current = onInputFocusChange;
+    const autoFocusRef = React.useRef(autoFocus);
+    autoFocusRef.current = autoFocus;
 
     const shouldUseWebgl = rendererMode !== 'canvas';
 
@@ -576,6 +581,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       onClickWithCoords: handleClick,
       onTap: stableOnTap,
       tapThreshold: 12,
+      gestureName: `normal-scroll:${sessionKey}`,
     });
 
     React.useEffect(() => {
@@ -653,567 +659,557 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       };
     }, [enableTouchScroll, nowMs]);
 
-    // ---- Tmux-mode touch scroll (fully independent) ----
-    // Capture-phase pointer listeners that fire before useTouchScroll's
-    // bubble-phase handlers.  stopImmediatePropagation() prevents the
-    // normal-mode system from ever seeing touch events intended for tmux.
-    //
-    // Sends SGR (1006) mouse wheel escape sequences directly through the
-    // PTY instead of server-side tmux copy-mode commands.  tmux's own
-    // WheelUpPane / WheelDownPane bindings then conditionally pass the
-    // events through to the TUI program (send -M when the program has
-    // mouse reporting enabled) or fall back to copy-mode scrollback.
-    React.useEffect(() => {
-      if (!enableTouchScroll || !onTmuxScroll) return;
+    // ---- Tmux-mode touch scroll (registered via GestureManager) ----
+    // Priority PRIORITY_TMUX_SCROLL (80) fires AFTER long-press (90) but
+    // BEFORE normal-scroll (70).  Sends SGR (1006) mouse wheel escape
+    // sequences directly through the PTY instead of server-side tmux
+    // copy-mode commands.
 
-      const container = containerRef.current;
-      if (!container) return;
+    const tmuxScrollStateRef = React.useRef<{
+      pointerId: number | null;
+      lastX: number | null;
+      lastY: number | null;
+      startX: number | null;
+      startY: number | null;
+      gestureAxis: 'x' | 'y' | null;
+      remainder: number;
+      didScroll: boolean;
+      rafId: number | null;
+      velocity: number;
+      instantSpeed: number;
+    }>({
+      pointerId: null,
+      lastX: null,
+      lastY: null,
+      startX: null,
+      startY: null,
+      gestureAxis: null,
+      remainder: 0,
+      didScroll: false,
+      rafId: null,
+      velocity: 0,
+      instantSpeed: 0,
+    });
 
-      let pointerId: number | null = null;
-      let lastX: number | null = null;
-      let lastY: number | null = null;
-      let startX: number | null = null;
-      let startY: number | null = null;
-      let gestureAxis: 'x' | 'y' | null = null;
-      let remainder = 0;
-      let didScroll = false;
-      let rafId: number | null = null;
-      let velocity = 0;
-      let instantSpeed = 0;
+    const tmuxStopRaf = React.useCallback(() => {
+      const st = tmuxScrollStateRef.current;
+      if (st.rafId !== null) {
+        cancelAnimationFrame(st.rafId);
+        st.rafId = null;
+      }
+    }, []);
+
+    const tmuxBuildSgrScroll = React.useCallback((direction: 'up' | 'down'): string | null => {
+      const term = terminalRef.current;
+      if (!term || !term.element || !term.cols || !term.rows) return null;
+      const st = tmuxScrollStateRef.current;
+      const rect = term.element.getBoundingClientRect();
+      const rx = (st.lastX ?? rect.left + rect.width / 2) - rect.left;
+      const ry = (st.lastY ?? rect.top + rect.height / 2) - rect.top;
+      const charW = term.element.offsetWidth / term.cols || 8;
+      const charH = term.element.offsetHeight / term.rows || 16;
+      const col = Math.max(1, Math.min(term.cols, Math.floor(rx / charW) + 1));
+      const row = Math.max(1, Math.min(term.rows, Math.floor(ry / charH) + 1));
+      const button = direction === 'up' ? 64 : 65;
+      return `\x1b[<${button};${col};${row}M`;
+    }, []);
+
+    const tmuxSendSgrScroll = React.useCallback((direction: 'up' | 'down', count: number) => {
+      const seq = tmuxBuildSgrScroll(direction);
+      if (!seq) return;
+      for (let i = 0; i < count; i++) {
+        inputHandlerRef.current(seq);
+      }
+    }, [tmuxBuildSgrScroll]);
+
+    const tmuxDynamicEff = React.useCallback((): number => {
+      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+      const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
+      const factor = 1 + tmuxScrollStateRef.current.instantSpeed * 0.10;
+      return eff / Math.min(6, factor);
+    }, [fontSize, tmuxScrollSensitivity]);
+
+    const tmuxTick = React.useCallback(() => {
+      const st = tmuxScrollStateRef.current;
+      st.rafId = null;
+
+      const deff = tmuxDynamicEff();
+      let linesUp = 0;
+      let linesDown = 0;
+
+      while ((linesUp + linesDown) < 8 && st.remainder >= deff) {
+        st.remainder -= deff;
+        linesDown++;
+      }
+      while ((linesUp + linesDown) < 8 && st.remainder <= -deff) {
+        st.remainder += deff;
+        linesUp++;
+      }
+
+      if (linesDown > 0) tmuxSendSgrScroll('down', linesDown);
+      if (linesUp > 0) tmuxSendSgrScroll('up', linesUp);
+
+      const consumed = linesUp + linesDown;
+      if (consumed > 0) {
+        st.rafId = requestAnimationFrame(tmuxTick);
+      } else if (st.pointerId !== null && Math.abs(st.remainder) >= deff / 3) {
+        const dir = st.remainder > 0 ? 'down' : 'up';
+        st.remainder = 0;
+        tmuxSendSgrScroll(dir, 1);
+        st.rafId = requestAnimationFrame(tmuxTick);
+      }
+    }, [tmuxDynamicEff, tmuxSendSgrScroll]);
+
+    const tmuxScheduleTick = React.useCallback(() => {
+      const st = tmuxScrollStateRef.current;
+      if (st.rafId === null && typeof requestAnimationFrame !== 'undefined') {
+        st.rafId = requestAnimationFrame(tmuxTick);
+      }
+    }, [tmuxTick]);
+
+    const tmux_onPointerDown = React.useCallback((e: PointerEvent): boolean => {
+      if (e.pointerType !== 'touch') return false;
+      tmuxStopRaf();
+      const st = tmuxScrollStateRef.current;
+      st.pointerId = e.pointerId;
+      st.lastX = e.clientX;
+      st.lastY = e.clientY;
+      st.startX = e.clientX;
+      st.startY = e.clientY;
+      st.gestureAxis = null;
+      st.remainder = 0;
+      st.velocity = 0;
+      st.instantSpeed = 0;
+      st.didScroll = false;
+      return false;
+    }, [tmuxStopRaf]);
+
+    const tmux_onPointerMove = React.useCallback((e: PointerEvent, isClaimed: boolean): GestureAction => {
+      const st = tmuxScrollStateRef.current;
+      if (e.pointerType !== 'touch' || e.pointerId !== st.pointerId) return 'neutral';
+      if (st.lastY == null) return 'neutral';
+
+      if (st.gestureAxis === null && st.startX !== null && st.startY !== null) {
+        const absDx = Math.abs(e.clientX - st.startX);
+        const absDy = Math.abs(e.clientY - st.startY);
+        const axisThreshold = 8;
+        if (absDx > axisThreshold || absDy > axisThreshold) {
+          if (absDx > absDy * 1.06) {
+            st.gestureAxis = 'x';
+            return 'release';
+          } else if (absDy > absDx * 1.06) {
+            st.gestureAxis = 'y';
+          }
+        }
+      }
+
+      if (st.gestureAxis === 'x') {
+        st.lastX = e.clientX;
+        st.lastY = e.clientY;
+        return 'release';
+      }
+
+      if (st.gestureAxis === null) {
+        st.lastX = e.clientX;
+        st.lastY = e.clientY;
+        return 'neutral';
+      }
+
+      const deltaY = e.clientY - st.lastY;
+      st.lastX = e.clientX;
+      st.lastY = e.clientY;
+
+      const deltaPixels = -deltaY;
+      st.remainder += deltaPixels;
+      st.instantSpeed = Math.abs(deltaPixels);
+      st.velocity = st.velocity * 0.45 + deltaPixels * 0.55;
+
+      if (isClaimed) {
+        const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+        const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
+        if (Math.abs(st.remainder) >= eff / 3) {
+          st.didScroll = true;
+          tmuxScheduleTick();
+        }
+      }
+
+      return 'claim';
+    }, [fontSize, tmuxScrollSensitivity, tmuxScheduleTick]);
+
+    const tmux_onPointerUp = React.useCallback((e: PointerEvent): void => {
+      const st = tmuxScrollStateRef.current;
+      if (e.pointerType !== 'touch' || e.pointerId !== st.pointerId) return;
+      tmuxStopRaf();
+      st.pointerId = null;
+      st.lastX = null;
+      st.lastY = null;
+      st.startX = null;
+      st.startY = null;
+      st.instantSpeed = 0;
+
+      if (st.gestureAxis === 'x') {
+        st.gestureAxis = null;
+        return;
+      }
+      st.gestureAxis = null;
 
       const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
       const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
 
-      const stopRaf = () => {
-        if (rafId !== null) {
-          cancelAnimationFrame(rafId);
-          rafId = null;
-        }
-      };
-
-      // Build an SGR (1006) mouse wheel escape sequence relative to the
-      // terminal element.  Button 64 = scroll up, 65 = scroll down.
-      const buildSgrScroll = (direction: 'up' | 'down'): string | null => {
-        const term = terminalRef.current;
-        if (!term || !term.element || !term.cols || !term.rows) return null;
-        const rect = term.element.getBoundingClientRect();
-        const rx = (lastX ?? rect.left + rect.width / 2) - rect.left;
-        const ry = (lastY ?? rect.top + rect.height / 2) - rect.top;
-        const charW = term.element.offsetWidth / term.cols || 8;
-        const charH = term.element.offsetHeight / term.rows || 16;
-        const col = Math.max(1, Math.min(term.cols, Math.floor(rx / charW) + 1));
-        const row = Math.max(1, Math.min(term.rows, Math.floor(ry / charH) + 1));
-        const button = direction === 'up' ? 64 : 65;
-        return `\x1b[<${button};${col};${row}M`;
-      };
-
-      const sendSgrScroll = (direction: 'up' | 'down', count: number) => {
-        const seq = buildSgrScroll(direction);
-        if (!seq) return;
-        for (let i = 0; i < count; i++) {
-          inputHandlerRef.current(seq);
-        }
-      };
-
-      // Speed-adjusted effective line height: at rest (speed=0) use the
-      // full eff for controlled slow-scroll feel.  At high speed, reduce
-      // eff so the terminal content keeps up with the finger instead of
-      // falling behind.  The scaling factor saturates at ~6x.
-      const dynamicEff = () => {
-        const factor = 1 + instantSpeed * 0.10;
-        return eff / Math.min(6, factor);
-      };
-
-      // rAF loop: consume accumulated remainder at a steady 60 fps so
-      // scroll events are spaced evenly in time regardless of how
-      // irregularly touch events fire.  Each SGR event translates to one
-      // wheel "click" forwarded through tmux's WheelUpPane binding.
-      const tick = () => {
-        rafId = null;
-
-        const deff = dynamicEff();
-        let linesUp = 0;
-        let linesDown = 0;
-
-        while ((linesUp + linesDown) < 8 && remainder >= deff) {
-          remainder -= deff;
-          linesDown++;
-        }
-        while ((linesUp + linesDown) < 8 && remainder <= -deff) {
-          remainder += deff;
-          linesUp++;
-        }
-
-        if (linesDown > 0) sendSgrScroll('down', linesDown);
-        if (linesUp > 0) sendSgrScroll('up', linesUp);
-
-        const consumed = linesUp + linesDown;
-        if (consumed > 0) {
-          rafId = requestAnimationFrame(tick);
-        } else if (pointerId !== null && Math.abs(remainder) >= deff / 3) {
-          // Finger still down with a meaningful fraction — flush it.
-          const dir = remainder > 0 ? 'down' : 'up';
-          remainder = 0;
-          sendSgrScroll(dir, 1);
-          rafId = requestAnimationFrame(tick);
-        }
-        // else: stop ticking until more delta arrives
-      };
-
-      const scheduleTick = () => {
-        if (rafId === null && typeof requestAnimationFrame !== 'undefined') {
-          rafId = requestAnimationFrame(tick);
-        }
-      };
-
-      const onDown = (e: PointerEvent) => {
-        if (e.pointerType !== 'touch') return;
-        stopRaf();
-        pointerId = e.pointerId;
-        lastX = e.clientX;
-        lastY = e.clientY;
-        startX = e.clientX;
-        startY = e.clientY;
-        gestureAxis = null;
-        remainder = 0;
-        velocity = 0;
-        instantSpeed = 0;
-        didScroll = false;
-      };
-
-      const onMove = (e: PointerEvent) => {
-        if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
-        if (lastY == null) return;
-
-        // Axis lock: detect horizontal swipes and let them pass through
-        // to Swiper for page-flipping between terminal sessions.
-        if (gestureAxis === null && startX !== null && startY !== null) {
-          const absDx = Math.abs(e.clientX - startX);
-          const absDy = Math.abs(e.clientY - startY);
-          const axisThreshold = 8;
-          if (absDx > axisThreshold || absDy > axisThreshold) {
-            if (absDx > absDy * 1.06) {
-              gestureAxis = 'x';
-            } else if (absDy > absDx * 1.06) {
-              gestureAxis = 'y';
+      if (st.didScroll && Math.abs(st.velocity) > eff * 0.05) {
+        const decay = () => {
+          st.velocity *= 0.96;
+          st.remainder += st.velocity;
+          const factor = 1 + Math.abs(st.velocity) * 0.10;
+          const deff = eff / Math.min(6, factor);
+          if (Math.abs(st.velocity) < eff * 0.08) {
+            if (Math.abs(st.remainder) >= deff / 3) {
+              const dir = st.remainder > 0 ? 'down' : 'up';
+              tmuxSendSgrScroll(dir, 1);
+              st.remainder = 0;
             }
-          }
-        }
-
-        if (gestureAxis === 'x') {
-          // Let horizontal swipes reach Swiper for page flipping
-          lastX = e.clientX;
-          lastY = e.clientY;
-          return;
-        }
-
-        if (gestureAxis === null) {
-          // Direction still ambiguous — don't consume yet
-          lastX = e.clientX;
-          lastY = e.clientY;
-          return;
-        }
-
-        e.preventDefault();
-        e.stopImmediatePropagation();
-
-        const deltaY = e.clientY - lastY;
-        lastX = e.clientX;
-        lastY = e.clientY;
-
-        // Negate to match useTouchScroll direction convention.
-        const deltaPixels = -deltaY;
-        remainder += deltaPixels;
-        instantSpeed = Math.abs(deltaPixels);
-        // EMA-smoothed velocity for light inertia on finger lift.
-        velocity = velocity * 0.45 + deltaPixels * 0.55;
-
-        if (Math.abs(remainder) >= eff / 3) {
-          didScroll = true;
-          scheduleTick();
-        }
-      };
-
-      const onUp = (e: PointerEvent) => {
-        if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
-        stopRaf();
-        pointerId = null;
-        lastX = null;
-        lastY = null;
-        startX = null;
-        startY = null;
-        instantSpeed = 0;
-
-        // Horizontal gestures are handled by Swiper — skip inertia
-        if (gestureAxis === 'x') {
-          gestureAxis = null;
-          return;
-        }
-        gestureAxis = null;
-
-        // Light inertia: decay velocity and feed into remainder over
-        // several frames after finger lift for a subtle glide feel.
-        if (didScroll && Math.abs(velocity) > eff * 0.05) {
-          const decay = () => {
-            velocity *= 0.96;
-            remainder += velocity;
-            // Use velocity-based dynamic eff so fast swipes produce more
-            // wheel events per frame during inertia.
-            const factor = 1 + Math.abs(velocity) * 0.10;
-            const deff = eff / Math.min(6, factor);
-            if (Math.abs(velocity) < eff * 0.08) {
-              if (Math.abs(remainder) >= deff / 3) {
-                const dir = remainder > 0 ? 'down' : 'up';
-                sendSgrScroll(dir, 1);
-                remainder = 0;
-              }
-              velocity = 0;
-              rafId = null;
-              return;
-            }
-            // Consume up to 8 events per frame.
-            let linesUp = 0;
-            let linesDown = 0;
-            while ((linesUp + linesDown) < 8 && remainder >= deff) {
-              remainder -= deff;
-              linesDown++;
-            }
-            while ((linesUp + linesDown) < 8 && remainder <= -deff) {
-              remainder += deff;
-              linesUp++;
-            }
-            if (linesDown > 0) sendSgrScroll('down', linesDown);
-            if (linesUp > 0) sendSgrScroll('up', linesUp);
-            rafId = requestAnimationFrame(decay);
-          };
-          rafId = requestAnimationFrame(decay);
-        } else if (Math.abs(remainder) >= eff / 3) {
-          // No meaningful velocity, just drain the remainder.
-          scheduleTick();
-        }
-
-        if (didScroll) {
-          e.stopImmediatePropagation();
-        }
-      };
-
-      container.addEventListener('pointerdown', onDown, { capture: true, passive: false });
-      container.addEventListener('pointermove', onMove, { capture: true, passive: false });
-      container.addEventListener('pointerup', onUp, { capture: true, passive: false });
-      container.addEventListener('pointercancel', onUp, { capture: true, passive: false });
-
-      return () => {
-        stopRaf();
-        container.removeEventListener('pointerdown', onDown, true);
-        container.removeEventListener('pointermove', onMove, true);
-        container.removeEventListener('pointerup', onUp, true);
-        container.removeEventListener('pointercancel', onUp, true);
-      };
-    }, [enableTouchScroll, onTmuxScroll != null, fontSize, tmuxScrollSensitivity]);
-
-    // ---- Mobile gesture capture (long-press arrows + double-tap Tab) ----
-    // Attached to `document` in capture phase so they fire BEFORE Swiper,
-    // useTouchScroll, and the hidden textarea — guaranteeing first access
-    // to every touch event.  Events are filtered to only those whose target
-    // lies within this terminal's container and outside the mobile keyboard.
-    React.useEffect(() => {
-      if (!enableTouchScroll) return;
-
-      const container = containerRef.current;
-      if (!container) return;
-
-      const LONG_PRESS_DURATION_MS = 350;
-      const LONG_PRESS_MOVE_THRESHOLD_PX = 20;
-      const JOYSTICK_DEAD_ZONE_PX = 12;
-      const JOYSTICK_SLOW_INTERVAL_MS = 260;
-      const JOYSTICK_FAST_INTERVAL_MS = 80;
-      const JOYSTICK_MAX_DISTANCE_PX = 80;
-      const TAP_MOVE_THRESHOLD_PX = 10;
-      const DOUBLE_TAP_WINDOW_MS = 150;
-      const DOUBLE_TAP_DISTANCE_PX = 25;
-
-      const ARROW_SEQUENCES: Record<string, string> = {
-        up: '\x1b[A',
-        down: '\x1b[B',
-        left: '\x1b[D',
-        right: '\x1b[C',
-      };
-
-      // Long-press state
-      let pointerId: number | null = null;
-      let originX = 0;
-      let originY = 0;
-      let holdTimer: ReturnType<typeof setTimeout> | null = null;
-      let mode: 'idle' | 'holding' | 'arrow' = 'idle';
-
-      // Joystick repeat state
-      let joystickDir: '' | 'up' | 'down' | 'left' | 'right' = '';
-      let joystickRepeatTimer: ReturnType<typeof setInterval> | null = null;
-      let lastHapticTime = 0;
-
-      const clearJoystickRepeat = () => {
-        if (joystickRepeatTimer !== null) {
-          clearInterval(joystickRepeatTimer);
-          joystickRepeatTimer = null;
-        }
-        joystickDir = '';
-      };
-
-      const startJoystickRepeat = (dir: 'up' | 'down' | 'left' | 'right', intervalMs: number) => {
-        clearJoystickRepeat();
-        joystickDir = dir;
-        // Fire first key immediately
-        inputHandlerRef.current(ARROW_SEQUENCES[dir]);
-        const now = performance.now();
-        if (now - lastHapticTime > 120) {
-          hapticLight();
-          lastHapticTime = now;
-        }
-        joystickRepeatTimer = setInterval(() => {
-          inputHandlerRef.current(ARROW_SEQUENCES[dir]);
-          const t = performance.now();
-          if (t - lastHapticTime > 120) {
-            hapticLight();
-            lastHapticTime = t;
-          }
-        }, intervalMs);
-      };
-
-      // Double-tap state (independent from long-press)
-      let lastTapTime = 0;
-      let lastTapX = 0;
-      let lastTapY = 0;
-      let tapStartX = 0;
-      let tapStartY = 0;
-      let tapDidMove = false;
-
-      const clearHoldTimer = () => {
-        if (holdTimer !== null) {
-          clearTimeout(holdTimer);
-          holdTimer = null;
-        }
-      };
-
-      const resetGestureState = () => {
-        clearHoldTimer();
-        clearJoystickRepeat();
-        pointerId = null;
-        mode = 'idle';
-      };
-
-      // Only process touches inside this terminal, not on the keyboard toolbar
-      const isTargetInside = (target: EventTarget | null): boolean => {
-        if (!(target instanceof HTMLElement)) return false;
-        if (!container.contains(target)) return false;
-        // Exclude the mobile keyboard toolbar
-        if (target.closest('[data-mobile-keyboard="true"]')) return false;
-        return true;
-      };
-
-      const onDown = (e: PointerEvent) => {
-        if (e.pointerType !== 'touch') return;
-        if (!isTargetInside(e.target)) return;
-
-        // While in arrow mode, block all new touches to prevent Swiper
-        // page-flipping or other handlers from hijacking the gesture.
-        if (mode === 'arrow') {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          return;
-        }
-
-        // Suppress iOS magnifying glass / text selection loupe on long-press.
-        // Without this, iOS fires its native loupe when the user holds on the
-        // hidden textarea, which conflicts with our long-press gesture.
-        e.preventDefault();
-
-        // Double-tap detection fires in pointerdown so we can block the
-        // event BEFORE the textarea / useTouchScroll / Swiper see it.
-        if (onDoubleTapRef.current) {
-          const now = performance.now();
-          const x = e.clientX;
-          const y = e.clientY;
-
-          if (
-            lastTapTime !== 0 &&
-            now - lastTapTime <= DOUBLE_TAP_WINDOW_MS &&
-            Math.hypot(x - lastTapX, y - lastTapY) <= DOUBLE_TAP_DISTANCE_PX
-          ) {
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            hapticLight();
-            onDoubleTapRef.current?.();
-            // Flash Tab indicator
-            setTabIndicator(true);
-            if (tabIndicatorTimerRef.current) clearTimeout(tabIndicatorTimerRef.current);
-            tabIndicatorTimerRef.current = setTimeout(() => setTabIndicator(false), 400);
-            lastTapTime = 0;
+            st.velocity = 0;
+            st.rafId = null;
             return;
           }
+          let linesUp = 0;
+          let linesDown = 0;
+          while ((linesUp + linesDown) < 8 && st.remainder >= deff) {
+            st.remainder -= deff;
+            linesDown++;
+          }
+          while ((linesUp + linesDown) < 8 && st.remainder <= -deff) {
+            st.remainder += deff;
+            linesUp++;
+          }
+          if (linesDown > 0) tmuxSendSgrScroll('down', linesDown);
+          if (linesUp > 0) tmuxSendSgrScroll('up', linesUp);
+          st.rafId = requestAnimationFrame(decay);
+        };
+        st.rafId = requestAnimationFrame(decay);
+      } else if (Math.abs(st.remainder) >= eff / 3) {
+        tmuxScheduleTick();
+      }
+
+      if (st.didScroll) {
+        e.stopImmediatePropagation();
+      }
+    }, [tmuxStopRaf, tmuxSendSgrScroll, tmuxScheduleTick, tmuxScrollSensitivity, fontSize]);
+
+    const tmux_onPointerCancel = React.useCallback((e: PointerEvent): void => {
+      const st = tmuxScrollStateRef.current;
+      if (e.pointerType !== 'touch' || e.pointerId !== st.pointerId) return;
+      tmuxStopRaf();
+      st.pointerId = null;
+      st.lastX = null;
+      st.lastY = null;
+      st.startX = null;
+      st.startY = null;
+      st.gestureAxis = null;
+      st.remainder = 0;
+      st.velocity = 0;
+      st.didScroll = false;
+    }, [tmuxStopRaf]);
+
+    useGesture({
+      name: `tmux-scroll:${sessionKey}`,
+      priority: PRIORITY_TMUX_SCROLL,
+      container: () => containerRef.current,
+      onPointerDown: (enableTouchScroll && onTmuxScroll) ? tmux_onPointerDown : undefined,
+      onPointerMove: (enableTouchScroll && onTmuxScroll) ? tmux_onPointerMove : undefined,
+      onPointerUp: (enableTouchScroll && onTmuxScroll) ? tmux_onPointerUp : undefined,
+      onPointerCancel: (enableTouchScroll && onTmuxScroll) ? tmux_onPointerCancel : undefined,
+    });
+
+    // ---- Mobile gesture capture (long-press arrows + double-tap Tab) ----
+    // Registered via GestureManager at priority PRIORITY_LONG_PRESS (90).
+    // UseGesture callbacks use stable refs so they never rebuild.
+    const lpStateRef = React.useRef<{
+      pointerId: number | null;
+      originX: number;
+      originY: number;
+      holdTimer: ReturnType<typeof setTimeout> | null;
+      mode: 'idle' | 'holding' | 'arrow';
+      joystickDir: '' | 'up' | 'down' | 'left' | 'right';
+      joystickRepeatTimer: ReturnType<typeof setInterval> | null;
+      lastHapticTime: number;
+      lastTapTime: number;
+      lastTapX: number;
+      lastTapY: number;
+      tapStartX: number;
+      tapStartY: number;
+      tapDidMove: boolean;
+    }>({
+      pointerId: null,
+      originX: 0,
+      originY: 0,
+      holdTimer: null,
+      mode: 'idle',
+      joystickDir: '',
+      joystickRepeatTimer: null,
+      lastHapticTime: 0,
+      lastTapTime: 0,
+      lastTapX: 0,
+      lastTapY: 0,
+      tapStartX: 0,
+      tapStartY: 0,
+      tapDidMove: false,
+    });
+
+    const containerForGestureRef = React.useRef<HTMLElement | null>(null);
+    containerForGestureRef.current = containerRef.current;
+
+    const lpContainerRef = containerForGestureRef;
+    const lp_inputHandlerRef = inputHandlerRef;
+
+    const lp_onPointerDown = React.useCallback((e: PointerEvent): boolean => {
+      if (e.pointerType !== 'touch') return false;
+
+      const container = lpContainerRef.current;
+      if (!container) return false;
+
+      const target = e.target;
+      if (!(target instanceof HTMLElement)) return false;
+      if (!container.contains(target)) return false;
+      if (target.closest('[data-mobile-keyboard="true"]')) return false;
+
+      const s = lpStateRef.current;
+
+      if (s.mode === 'arrow') return true;
+
+      if (onDoubleTapRef.current) {
+        const now = performance.now();
+        const x = e.clientX;
+        const y = e.clientY;
+
+        if (
+          s.lastTapTime !== 0 &&
+          now - s.lastTapTime <= 150 &&
+          Math.hypot(x - s.lastTapX, y - s.lastTapY) <= 25
+        ) {
+          hapticLight();
+          onDoubleTapRef.current?.();
+          setTabIndicator(true);
+          if (tabIndicatorTimerRef.current) clearTimeout(tabIndicatorTimerRef.current);
+          tabIndicatorTimerRef.current = setTimeout(() => setTabIndicator(false), 400);
+          s.lastTapTime = 0;
+          return true;
         }
+      }
 
-        resetGestureState();
-        pointerId = e.pointerId;
-        originX = e.clientX;
-        originY = e.clientY;
-        tapStartX = e.clientX;
-        tapStartY = e.clientY;
-        tapDidMove = false;
-        mode = 'holding';
+      if (s.holdTimer !== null) {
+        clearTimeout(s.holdTimer);
+        s.holdTimer = null;
+      }
+      if (s.joystickRepeatTimer !== null) {
+        clearInterval(s.joystickRepeatTimer);
+        s.joystickRepeatTimer = null;
+      }
+      s.joystickDir = '';
+      s.pointerId = e.pointerId;
+      s.originX = e.clientX;
+      s.originY = e.clientY;
+      s.tapStartX = e.clientX;
+      s.tapStartY = e.clientY;
+      s.tapDidMove = false;
+      s.mode = 'holding';
 
-        holdTimer = setTimeout(() => {
-          holdTimer = null;
-          if (mode === 'holding') {
-            mode = 'arrow';
-            hapticLight();
-            notifyGestureLock(true);
-            // Show arrow indicator (fixed at top-center of screen)
+      s.holdTimer = setTimeout(() => {
+        s.holdTimer = null;
+        if (s.mode === 'holding') {
+          s.mode = 'arrow';
+          hapticLight();
+          notifyGestureLock(true);
+          requestAnimationFrame(() => {
             setArrowIndicator({ visible: true, activeDir: '' });
-          }
-        }, LONG_PRESS_DURATION_MS);
-      };
-
-      const onMove = (e: PointerEvent) => {
-        if (e.pointerType !== 'touch') return;
-
-        // Arrow mode: block ALL touches from reaching Swiper/useTouchScroll.
-        // We consume every touchmove at document capture regardless of pointerId.
-        if (mode === 'arrow') {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          if (e.pointerId !== pointerId) return;
-          // Fall through to arrow handling below (matching pointerId only)
-        } else {
-          if (e.pointerId !== pointerId) return;
+          });
         }
+      }, 350);
 
-        // Track whether this touch moved enough to disqualify a tap
-        const totalDx = e.clientX - tapStartX;
-        const totalDy = e.clientY - tapStartY;
-        if (Math.hypot(totalDx, totalDy) > TAP_MOVE_THRESHOLD_PX) {
-          tapDidMove = true;
+      return true;
+    }, []);
+
+    const lp_onPointerMove = React.useCallback((e: PointerEvent, isClaimed: boolean): GestureAction => {
+      if (e.pointerType !== 'touch') return 'neutral';
+
+      const s = lpStateRef.current;
+
+      if (s.mode === 'arrow' && e.pointerId !== s.pointerId) return 'neutral';
+
+      if (s.mode !== 'arrow' && e.pointerId !== s.pointerId) return 'neutral';
+
+      const totalDx = e.clientX - s.tapStartX;
+      const totalDy = e.clientY - s.tapStartY;
+      if (Math.hypot(totalDx, totalDy) > 10) {
+        s.tapDidMove = true;
+      }
+
+      if (s.mode === 'holding') {
+        if (!isClaimed) {
+          if (s.holdTimer !== null) {
+            clearTimeout(s.holdTimer);
+            s.holdTimer = null;
+          }
+          s.mode = 'idle';
+          return 'neutral';
         }
-
-        if (mode === 'holding') {
-          // Block ALL touch movement from reaching Swiper during the hold.
-          // Even the very first pointermove must not reach Swiper, otherwise
-          // it starts tracking and a horizontal swipe will flip pages.
-          e.preventDefault();
-          e.stopImmediatePropagation();
-
-          const dx = e.clientX - originX;
-          const dy = e.clientY - originY;
-          if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_THRESHOLD_PX) {
-            clearHoldTimer();
-            mode = 'idle';
+        const dx = e.clientX - s.originX;
+        const dy = e.clientY - s.originY;
+        if (Math.hypot(dx, dy) > 20) {
+          if (s.holdTimer !== null) {
+            clearTimeout(s.holdTimer);
+            s.holdTimer = null;
           }
-          return;
+          s.mode = 'idle';
+          return 'release';
         }
+        return 'claim';
+      }
 
-        if (mode === 'arrow') {
-          // Joystick mode: displacement from origin determines direction & speed.
-          // The further the finger moves, the faster keys repeat.
-          // When direction changes, origin resets so switching feels instant.
-          const dx = e.clientX - originX;
-          const dy = e.clientY - originY;
-          const dist = Math.hypot(dx, dy);
+      if (s.mode === 'arrow') {
+        if (!isClaimed) return 'claim';
+        const ARROW_SEQUENCES: Record<string, string> = {
+          up: '\x1b[A',
+          down: '\x1b[B',
+          left: '\x1b[D',
+          right: '\x1b[C',
+        };
 
-          // Determine primary axis (soft lock, not rigid)
-          const absDx = Math.abs(dx);
-          const absDy = Math.abs(dy);
-          const isX = absDx >= absDy;
+        const dx = e.clientX - s.originX;
+        const dy = e.clientY - s.originY;
+        const dist = Math.hypot(dx, dy);
 
-          let newDir: '' | 'up' | 'down' | 'left' | 'right' = '';
-          if (dist > JOYSTICK_DEAD_ZONE_PX) {
-            if (isX) {
-              newDir = dx > 0 ? 'right' : 'left';
-            } else {
-              newDir = dy > 0 ? 'down' : 'up';
-            }
-          }
+        const absDx = Math.abs(dx);
+        const absDy = Math.abs(dy);
+        const isX = absDx >= absDy;
 
-          if (newDir && newDir !== joystickDir) {
-            // Direction changed — reset origin to current position so
-            // the new direction's displacement starts from zero
-            originX = e.clientX;
-            originY = e.clientY;
-          }
-
-          if (newDir) {
-            // Recalculate after potential origin reset
-            const newDx = e.clientX - originX;
-            const newDy = e.clientY - originY;
-            const newDist = Math.hypot(newDx, newDy);
-
-            // Map distance to repeat interval: closer = slower, further = faster
-            const excess = Math.min(newDist - JOYSTICK_DEAD_ZONE_PX, JOYSTICK_MAX_DISTANCE_PX - JOYSTICK_DEAD_ZONE_PX);
-            const ratio = excess / (JOYSTICK_MAX_DISTANCE_PX - JOYSTICK_DEAD_ZONE_PX);
-            const intervalMs = JOYSTICK_SLOW_INTERVAL_MS - ratio * (JOYSTICK_SLOW_INTERVAL_MS - JOYSTICK_FAST_INTERVAL_MS);
-
-            if (newDir !== joystickDir) {
-              // Direction changed — restart timer with new direction & speed
-              startJoystickRepeat(newDir, intervalMs);
-            } else {
-              // Same direction — adjust repeat speed if interval changed significantly
-              if (joystickRepeatTimer !== null) {
-                clearInterval(joystickRepeatTimer);
-                joystickRepeatTimer = setInterval(() => {
-                  inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
-                  const t = performance.now();
-                  if (t - lastHapticTime > 120) {
-                    hapticLight();
-                    lastHapticTime = t;
-                  }
-                }, intervalMs);
-              }
-            }
-            setArrowIndicator({ visible: true, activeDir: newDir });
+        let newDir: '' | 'up' | 'down' | 'left' | 'right' = '';
+        if (dist > 12) {
+          if (isX) {
+            newDir = dx > 0 ? 'right' : 'left';
           } else {
-            // Inside dead zone — stop repeating but stay in arrow mode
-            clearJoystickRepeat();
-            setArrowIndicator({ visible: true, activeDir: '' });
+            newDir = dy > 0 ? 'down' : 'up';
           }
         }
-      };
 
-      const onUp = (e: PointerEvent) => {
-        if (e.pointerType !== 'touch' || e.pointerId !== pointerId) return;
-
-        if (mode === 'arrow') {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          notifyGestureLock(false);
-          setArrowIndicator({ visible: false, activeDir: '' });
-          resetGestureState();
-          return;
+        if (newDir && newDir !== s.joystickDir) {
+          s.originX = e.clientX;
+          s.originY = e.clientY;
         }
 
-        // Record clean tap for the next onDown to potentially detect as double-tap
-        if (!tapDidMove && isTargetInside(e.target)) {
-          lastTapTime = performance.now();
-          lastTapX = e.clientX;
-          lastTapY = e.clientY;
-        } else if (tapDidMove) {
-          lastTapTime = 0;
+        if (newDir) {
+          const newDx = e.clientX - s.originX;
+          const newDy = e.clientY - s.originY;
+          const newDist = Math.hypot(newDx, newDy);
+
+          const excess = Math.min(newDist - 12, 80 - 12);
+          const ratio = excess / (80 - 12);
+          const intervalMs = 260 - ratio * (260 - 80);
+
+          if (newDir !== s.joystickDir) {
+            if (s.joystickRepeatTimer !== null) {
+              clearInterval(s.joystickRepeatTimer);
+            }
+            s.joystickDir = newDir;
+            lp_inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
+            const now = performance.now();
+            if (now - s.lastHapticTime > 120) {
+              hapticLight();
+              s.lastHapticTime = now;
+            }
+            s.joystickRepeatTimer = setInterval(() => {
+              lp_inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
+              const t = performance.now();
+              if (t - s.lastHapticTime > 120) {
+                hapticLight();
+                s.lastHapticTime = t;
+              }
+            }, intervalMs);
+          } else {
+            if (s.joystickRepeatTimer !== null) {
+              clearInterval(s.joystickRepeatTimer);
+              s.joystickRepeatTimer = setInterval(() => {
+                lp_inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
+                const t = performance.now();
+                if (t - s.lastHapticTime > 120) {
+                  hapticLight();
+                  s.lastHapticTime = t;
+                }
+              }, intervalMs);
+            }
+          }
+          setArrowIndicator({ visible: true, activeDir: newDir });
+        } else {
+          if (s.joystickRepeatTimer !== null) {
+            clearInterval(s.joystickRepeatTimer);
+            s.joystickRepeatTimer = null;
+          }
+          s.joystickDir = '';
+          setArrowIndicator({ visible: true, activeDir: '' });
         }
+        return 'claim';
+      }
+      return 'neutral';
+    }, []);
 
-        resetGestureState();
-      };
+    const lp_onPointerUp = React.useCallback((e: PointerEvent) => {
+      if (e.pointerType !== 'touch' || e.pointerId !== lpStateRef.current.pointerId) return;
 
-      // Attach to document (capture) so we beat Swiper and all other handlers
-      document.addEventListener('pointerdown', onDown, { capture: true, passive: false });
-      document.addEventListener('pointermove', onMove, { capture: true, passive: false });
-      document.addEventListener('pointerup', onUp, { capture: true, passive: false });
-      document.addEventListener('pointercancel', onUp, { capture: true, passive: false });
+      const s = lpStateRef.current;
 
-      return () => {
-        resetGestureState();
-        document.removeEventListener('pointerdown', onDown, true);
-        document.removeEventListener('pointermove', onMove, true);
-        document.removeEventListener('pointerup', onUp, true);
-        document.removeEventListener('pointercancel', onUp, true);
-      };
-    }, [enableTouchScroll]);
+      if (s.mode === 'arrow') {
+        notifyGestureLock(false);
+        setArrowIndicator({ visible: false, activeDir: '' });
+        if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
+        if (s.joystickRepeatTimer !== null) { clearInterval(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
+        s.joystickDir = '';
+        s.pointerId = null;
+        s.mode = 'idle';
+        return;
+      }
+
+      const container = lpContainerRef.current;
+      if (container && !s.tapDidMove) {
+        const target = e.target;
+        if (target instanceof HTMLElement && container.contains(target) && !target.closest('[data-mobile-keyboard="true"]')) {
+          s.lastTapTime = performance.now();
+          s.lastTapX = e.clientX;
+          s.lastTapY = e.clientY;
+        }
+      } else if (s.tapDidMove) {
+        s.lastTapTime = 0;
+      }
+
+      if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
+      if (s.joystickRepeatTimer !== null) { clearInterval(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
+      s.joystickDir = '';
+      s.pointerId = null;
+      s.mode = 'idle';
+    }, []);
+
+    const lp_onPointerCancel = React.useCallback(() => {
+      const s = lpStateRef.current;
+      if (s.mode === 'arrow') {
+        notifyGestureLock(false);
+        setArrowIndicator({ visible: false, activeDir: '' });
+      }
+      if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
+      if (s.joystickRepeatTimer !== null) { clearInterval(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
+      s.joystickDir = '';
+      s.pointerId = null;
+      s.tapDidMove = false;
+      s.mode = 'idle';
+    }, []);
+
+    useGesture({
+      name: `long-press:${sessionKey}`,
+      priority: PRIORITY_LONG_PRESS,
+      container: () => containerRef.current,
+      onPointerDown: enableTouchScroll ? lp_onPointerDown : undefined,
+      onPointerMove: enableTouchScroll ? lp_onPointerMove : undefined,
+      onPointerUp: enableTouchScroll ? lp_onPointerUp : undefined,
+      onPointerCancel: enableTouchScroll ? lp_onPointerCancel : undefined,
+    });
 
     const resetWriteState = React.useCallback(() => {
       pendingWriteRef.current = '';
@@ -1303,7 +1299,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       } catch (error) {
         debugTerminal('texture atlas refresh (sync) failed', { reason, error });
       }
-    }, [clearTextureAtlasRefreshTimer, debugTerminal]);
+    }, [clearTextureAtlasRefreshTimer, debugTerminal, sessionKey]);
 
     const scheduleTextureAtlasRefresh = React.useCallback((reason: string) => {
       if (typeof window === 'undefined') {
@@ -1316,7 +1312,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
         textureAtlasRefreshTimerRef.current = null;
         refreshTextureAtlasNow(reason);
       }, TEXTURE_ATLAS_REFRESH_DELAY_MS);
-    }, [clearTextureAtlasRefreshTimer, refreshTextureAtlasNow]);
+    }, [clearTextureAtlasRefreshTimer, refreshTextureAtlasNow, sessionKey]);
 
     const disposeWebglRenderer = React.useCallback((reason: string): boolean => {
       clearTextureAtlasRefreshTimer();
@@ -1571,7 +1567,7 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
           }
 
           fitTerminal('init');
-          if (autoFocus) {
+          if (autoFocusRef.current) {
             terminal.focus();
           }
 
@@ -1698,7 +1694,6 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       enableTouchScroll,
       shouldUseWebgl,
       rendererMode,
-      autoFocus,
       enableWebglRenderer,
       scheduleTextureAtlasRefresh,
       disposeWebglRenderer,
@@ -1721,9 +1716,9 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
       fitTerminal('session-reset');
       // reset 后立即同步刷新，避免同尺寸切换 session 时纹理图集残留旧字形
       refreshTextureAtlasNow('session-reset');
-      if (autoFocus) {
-        terminal.focus();
-      }
+            if (autoFocusRef.current) {
+              terminal.focus();
+            }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionKey, terminalReadyVersion, fitTerminal, refreshTextureAtlasNow, resetWriteState]);
 
@@ -2100,4 +2095,5 @@ export const TerminalViewport = React.forwardRef<TerminalController, TerminalVie
   }
 );
 
-TerminalViewport.displayName = 'TerminalViewport';
+TerminalViewportInner.displayName = 'TerminalViewport';
+export const TerminalViewport = TerminalViewportInner;

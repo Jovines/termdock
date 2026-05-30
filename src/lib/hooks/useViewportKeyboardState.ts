@@ -4,15 +4,18 @@ interface UseViewportKeyboardStateOptions {
   enabled: boolean;
   openThresholdPx?: number;
   closeThresholdPx?: number;
+  settleDelayMs?: number;
 }
 
 interface ViewportKeyboardState {
   isOpen: boolean;
+  isSettled: boolean;
   keyboardHeight: number;
 }
 
 const DEFAULT_OPEN_THRESHOLD_PX = 120;
 const DEFAULT_CLOSE_THRESHOLD_PX = 80;
+const DEFAULT_SETTLE_DELAY_MS = 400;
 
 function getKeyboardHeightPx(): number {
   if (typeof window === 'undefined' || !window.visualViewport) {
@@ -32,22 +35,28 @@ export function useViewportKeyboardState(
     enabled,
     openThresholdPx = DEFAULT_OPEN_THRESHOLD_PX,
     closeThresholdPx = DEFAULT_CLOSE_THRESHOLD_PX,
+    settleDelayMs = DEFAULT_SETTLE_DELAY_MS,
   } = options;
 
   const isOpenRef = React.useRef(false);
+  const settleTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastKeyboardHeightRef = React.useRef(0);
   const [state, setState] = React.useState<ViewportKeyboardState>({
     isOpen: false,
+    isSettled: false,
     keyboardHeight: 0,
   });
 
   React.useEffect(() => {
     if (typeof window === 'undefined' || !enabled) {
       isOpenRef.current = false;
+      if (settleTimerRef.current !== null) {
+        clearTimeout(settleTimerRef.current);
+        settleTimerRef.current = null;
+      }
       setState((current) => {
-        if (!current.isOpen && current.keyboardHeight === 0) {
-          return current;
-        }
-        return { isOpen: false, keyboardHeight: 0 };
+        if (!current.isOpen && !current.isSettled && current.keyboardHeight === 0) return current;
+        return { isOpen: false, isSettled: false, keyboardHeight: 0 };
       });
       return;
     }
@@ -68,14 +77,29 @@ export function useViewportKeyboardState(
 
       isOpenRef.current = nextOpen;
 
+      if (nextOpen) {
+        const heightDelta = Math.abs(keyboardHeight - lastKeyboardHeightRef.current);
+        lastKeyboardHeightRef.current = keyboardHeight;
+        if (heightDelta > 10) {
+          if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
+          settleTimerRef.current = setTimeout(() => {
+            settleTimerRef.current = null;
+            setState((c) => (c.isSettled ? c : { ...c, isSettled: true }));
+          }, settleDelayMs);
+        }
+      } else {
+        if (settleTimerRef.current !== null) {
+          clearTimeout(settleTimerRef.current);
+          settleTimerRef.current = null;
+        }
+      }
+
       setState((current) => {
-        if (current.isOpen === nextOpen && current.keyboardHeight === keyboardHeight) {
+        const nextSettled = nextOpen ? current.isSettled : false;
+        if (current.isOpen === nextOpen && current.keyboardHeight === keyboardHeight && current.isSettled === nextSettled) {
           return current;
         }
-        return {
-          isOpen: nextOpen,
-          keyboardHeight,
-        };
+        return { isOpen: nextOpen, isSettled: nextSettled, keyboardHeight };
       });
     };
 
@@ -99,11 +123,13 @@ export function useViewportKeyboardState(
       window.visualViewport?.removeEventListener('resize', schedule);
       window.visualViewport?.removeEventListener('scroll', schedule);
 
-      if (rafId !== null) {
-        window.cancelAnimationFrame(rafId);
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+      if (settleTimerRef.current !== null) {
+        clearTimeout(settleTimerRef.current);
+        settleTimerRef.current = null;
       }
     };
-  }, [enabled, openThresholdPx, closeThresholdPx]);
+  }, [enabled, openThresholdPx, closeThresholdPx, settleDelayMs]);
 
   return state;
 }

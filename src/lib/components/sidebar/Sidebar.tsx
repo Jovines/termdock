@@ -1,44 +1,19 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect } from 'react';
 
 interface SidebarProps {
   side: 'left' | 'right';
   isOpen: boolean;
-  isDragging?: boolean;
-  dragProgress?: number;
+  drawerWidthPx: number;
   onClose: () => void;
-  width?: string;
   children: React.ReactNode;
 }
 
-export function Sidebar({
-  side,
-  isOpen,
-  isDragging = false,
-  dragProgress = 0,
-  onClose,
-  width,
-  children,
-}: SidebarProps) {
-  const panelRef = useRef<HTMLDivElement>(null);
-  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
-  const panelWidth = width ?? (isMobile ? '85vw' : '360px');
+export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Sidebar(
+  { side, isOpen, drawerWidthPx, onClose, children },
+  ref,
+) {
+  const handleBackdropClick = () => onClose();
 
-  // Compute transform
-  const getTransform = () => {
-    if (isDragging && dragProgress > 0) {
-      const offset = (1 - dragProgress) * 100;
-      return side === 'left' ? `translateX(-${offset}%)` : `translateX(${offset}%)`;
-    }
-    if (isOpen) return 'translateX(0)';
-    return side === 'left' ? 'translateX(-100%)' : 'translateX(100%)';
-  };
-
-  // Close on backdrop click
-  const handleBackdropClick = () => {
-    onClose();
-  };
-
-  // Close on Escape
   useEffect(() => {
     if (!isOpen) return;
     const handler = (e: KeyboardEvent) => {
@@ -48,43 +23,42 @@ export function Sidebar({
     return () => document.removeEventListener('keydown', handler);
   }, [isOpen, onClose]);
 
-  const showBackdrop = isOpen || (isDragging && dragProgress > 0.1);
+  const isLeft = side === 'left';
 
   return (
     <>
-      {/* Backdrop */}
-      {showBackdrop && (
-        <button
-          type="button"
-          className="fixed inset-0 z-40 bg-[rgba(0,0,0,0.5)] backdrop-blur-sm animate-fade-in cursor-default"
-          onClick={handleBackdropClick}
-          aria-label="Close sidebar"
-        />
-      )}
-
-      {/* Panel */}
+      {/* Backdrop — plain div, opacity toggled via CSS class */}
       <div
-        ref={panelRef}
+        data-sidebar-backdrop={side}
+        className={`fixed inset-0 z-40 bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default transition-opacity duration-250 ease-out ${
+          isOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+        }`}
+        onClick={handleBackdropClick}
+        aria-label="Close sidebar"
+      />
+
+      {/* Panel — plain aside, position controlled by direct DOM transform */}
+      <aside
+        ref={ref}
         data-sidebar={side}
-        className={`fixed inset-y-0 z-50 flex flex-col bg-surface ${
-          side === 'left'
+        className={`fixed inset-y-0 z-50 flex flex-col bg-surface will-change-transform ${
+          isLeft
             ? 'left-0 border-r border-border/15'
             : 'right-0 border-l border-border/15'
         }`}
         style={{
-          width: panelWidth,
+          width: drawerWidthPx,
           maxWidth: '90vw',
-          transform: getTransform(),
-          transition: isDragging ? 'none' : 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+          transform: isLeft ? `translateX(-${drawerWidthPx}px)` : `translateX(${drawerWidthPx}px)`,
           paddingTop: 'max(0px, env(safe-area-inset-top, 0px) - 24px)',
           paddingBottom: 'env(safe-area-inset-bottom, 0px)',
-          ...(side === 'left'
+          ...(isLeft
             ? { paddingLeft: 'env(safe-area-inset-left, 0px)' }
             : { paddingRight: 'env(safe-area-inset-right, 0px)' }),
         }}
       >
         {children}
-      </div>
+      </aside>
     </>
   );
-}
+});

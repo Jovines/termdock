@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+import React, { useEffect, useCallback } from 'react';
 import {
   X as RiCloseLine,
   Folder as RiFolder,
@@ -12,17 +12,14 @@ import { getDiffFileList } from '../../terminal/api';
 
 interface RightSidebarProps {
   isOpen: boolean;
-  isDragging?: boolean;
-  dragProgress?: number;
+  drawerWidthPx: number;
   onClose: () => void;
 }
 
-export function RightSidebar({
-  isOpen,
-  isDragging,
-  dragProgress,
-  onClose,
-}: RightSidebarProps) {
+export const RightSidebar = React.forwardRef<HTMLElement, RightSidebarProps>(function RightSidebar(
+  { isOpen, drawerWidthPx, onClose },
+  ref,
+) {
   const {
     rightTab,
     setRightTab,
@@ -59,10 +56,10 @@ export function RightSidebar({
 
   return (
     <Sidebar
+      ref={ref}
       side="right"
       isOpen={isOpen}
-      isDragging={isDragging}
-      dragProgress={dragProgress}
+      drawerWidthPx={drawerWidthPx}
       onClose={onClose}
     >
       {/* Header */}
@@ -132,4 +129,4 @@ export function RightSidebar({
       </div>
     </Sidebar>
   );
-}
+});

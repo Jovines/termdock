@@ -1,4 +1,5 @@
 import React, { useEffect, useCallback, useState } from 'react';
+import { animate } from 'motion/react';
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
 import {
   SquareTerminal as RiTerminalBoxLine,
@@ -92,14 +93,20 @@ function App() {
   const [drawerTab, setDrawerTab] = React.useState<DrawerTab>('sessions');
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
-  const terminalSessions = useTerminalStore((s) => s.sessions);
+  // Only re-render when session list changes (add/remove), not on every terminal output.
+  const sessionCount = useTerminalStore((s) => s.sessions.size);
+  const terminalSessions = useTerminalStore.getState().sessions;
+
+  // Sidebar state — only subscribe to the booleans we render, not the whole store.
+  const sidebarLeftOpen = useSidebarStore((s) => s.leftOpen);
+  const sidebarRightOpen = useSidebarStore((s) => s.rightOpen);
+
   const [tmuxSessions, setTmuxSessions] = useState<TmuxSessionSummary[]>([]);
   const [tmuxStatus, setTmuxStatus] = useState<TmuxStatus>({ available: true, version: null, reason: null });
   const [tmuxRefreshing, setTmuxRefreshing] = useState(false);
   const [tmuxConfirmKillName, setTmuxConfirmKillName] = useState<string | null>(null);
   const [tmuxKillingName, setTmuxKillingName] = useState<string | null>(null);
   const [tmuxKillError, setTmuxKillError] = useState<string | null>(null);
-  // Per-session "destroy tmux on close" confirmation state for the Sessions tab.
   const [sessionConfirmDestroyId, setSessionConfirmDestroyId] = useState<string | null>(null);
   const [sessionDestroyingId, setSessionDestroyingId] = useState<string | null>(null);
   const [sessionDestroyError, setSessionDestroyError] = useState<string | null>(null);
@@ -107,20 +114,87 @@ function App() {
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
 
-  // Sidebar state
-  const sidebarStore = useSidebarStore();
-
   // Sync active session's cwd to sidebar store
   useEffect(() => {
-    const ts = activeSessionId ? terminalSessions.get(activeSessionId) : null;
-    sidebarStore.setRootPath(ts?.cwd ?? null);
-  }, [activeSessionId, terminalSessions]);
+    const ts = activeSessionId ? useTerminalStore.getState().sessions.get(activeSessionId) : null;
+    useSidebarStore.getState().setRootPath(ts?.cwd ?? null);
+  }, [activeSessionId, sessionCount]);
 
-  // Edge swipe detection
-  const edgeSwipe = useEdgeSwipe({
+  // Edge swipe detection — uses overlay strips that naturally isolate
+  // edge touches from Swiper (the strips sit above Swiper in z-order).
+  const edgeWrapperRef = React.useRef<HTMLDivElement>(null);
+  const leftSidebarRef = React.useRef<HTMLElement>(null);
+  const rightSidebarRef = React.useRef<HTMLElement>(null);
+
+  // Sidebar drawer dimensions
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+  const drawerWidthPxRef = React.useRef(isMobile ? window.innerWidth * 0.85 : 360);
+
+  // Update drawer width on resize
+  useEffect(() => {
+    const onResize = () => {
+      const mobile = window.innerWidth < 768;
+      const newWidth = mobile ? window.innerWidth * 0.85 : 360;
+      const oldWidth = drawerWidthPxRef.current;
+      drawerWidthPxRef.current = newWidth;
+
+      const scaleFactor = oldWidth > 0 ? newWidth / oldWidth : 1;
+      for (const ref of [leftSidebarRef, rightSidebarRef]) {
+        const el = ref.current;
+        if (el && el.style.transform) {
+          const m = el.style.transform.match(/-?[\d.]+/);
+          if (m) el.style.transform = `translateX(${parseFloat(m[0]) * scaleFactor}px)`;
+        }
+      }
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // Spring-animate left sidebar open/close
+  useEffect(() => {
+    const el = leftSidebarRef.current;
+    if (!el) return;
+    const targetX = sidebarLeftOpen ? 0 : -drawerWidthPxRef.current;
+    const currentX = parseFloat(el.style.transform?.replace(/[^-\d.]/g, '')) || targetX;
+    el.style.transform = `translateX(${currentX}px)`;
+    const ctrl = animate(el, { x: targetX }, {
+      type: 'spring',
+      stiffness: 400,
+      damping: 35,
+      mass: 0.8,
+    });
+    return () => {
+      ctrl?.stop?.();
+    };
+  }, [sidebarLeftOpen]);
+
+  // Spring-animate right sidebar open/close
+  useEffect(() => {
+    const el = rightSidebarRef.current;
+    if (!el) return;
+    const targetX = sidebarRightOpen ? 0 : drawerWidthPxRef.current;
+    const currentX = parseFloat(el.style.transform?.replace(/[^-\d.]/g, '')) || targetX;
+    el.style.transform = `translateX(${currentX}px)`;
+    const ctrl = animate(el, { x: targetX }, {
+      type: 'spring',
+      stiffness: 400,
+      damping: 35,
+      mass: 0.8,
+    });
+    return () => {
+      ctrl?.stop?.();
+    };
+  }, [sidebarRightOpen]);
+
+  useEdgeSwipe({
+    container: edgeWrapperRef,
+    leftSidebarRef,
+    rightSidebarRef,
+    drawerWidthPx: drawerWidthPxRef.current,
     onOpen: (side) => {
-      if (side === 'left') sidebarStore.openLeft();
-      else sidebarStore.openRight();
+      if (side === 'left') useSidebarStore.getState().openLeft();
+      else useSidebarStore.getState().openRight();
     },
     onClose: () => {
       // Edge swipe didn't complete — no action needed
@@ -133,16 +207,16 @@ function App() {
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key === 'b' && !e.shiftKey) {
         e.preventDefault();
-        sidebarStore.toggleLeft();
+        useSidebarStore.getState().toggleLeft();
       }
       if (mod && e.shiftKey && e.key === 'E') {
         e.preventDefault();
-        sidebarStore.toggleRight();
+        useSidebarStore.getState().toggleRight();
       }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [sidebarStore]);
+  }, []);
 
   const handleDragEnd = useCallback((result: DropResult) => {
     if (!result.destination || result.source.index === result.destination.index) return;
@@ -569,9 +643,37 @@ function App() {
 
   return (
     <div
-      className="w-screen flex flex-col bg-background text-foreground"
-      style={{ height: 'var(--app-vh, 100vh)' }}
+      className="w-screen h-full flex flex-col bg-background text-foreground"
     >
+      {/* Edge overlay strips — absorb edge touches so Swiper never sees them.
+          When sidebar is open, pointerEvents: none lets touches pass through
+          to the sidebar panel. */}
+      <div ref={edgeWrapperRef} style={{ pointerEvents: 'none' }}>
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            width: 25,
+            height: 'var(--app-vh, 100vh)',
+            zIndex: 30,
+            touchAction: 'none',
+            pointerEvents: sidebarLeftOpen ? 'none' : 'auto',
+          }}
+        />
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            right: 0,
+            width: 25,
+            height: 'var(--app-vh, 100vh)',
+            zIndex: 30,
+            touchAction: 'none',
+            pointerEvents: sidebarRightOpen ? 'none' : 'auto',
+          }}
+        />
+      </div>
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="mx-auto flex h-full w-full max-w-[1440px] min-h-0 flex-col overflow-visible bg-background">
           <div
@@ -1625,10 +1727,10 @@ function App() {
 
       {/* Left Sidebar */}
       <LeftSidebar
-        isOpen={sidebarStore.leftOpen}
-        isDragging={edgeSwipe.isEdgeSwiping && edgeSwipe.edgeSide === 'left'}
-        dragProgress={edgeSwipe.edgeSide === 'left' ? edgeSwipe.dragProgress : 0}
-        onClose={sidebarStore.closeLeft}
+        ref={leftSidebarRef}
+        isOpen={sidebarLeftOpen}
+        drawerWidthPx={drawerWidthPxRef.current}
+        onClose={useSidebarStore.getState().closeLeft}
         sessions={sessions}
         activeSessionId={activeSessionId}
         sessionStates={terminalSessions}
@@ -1638,10 +1740,10 @@ function App() {
 
       {/* Right Sidebar */}
       <RightSidebar
-        isOpen={sidebarStore.rightOpen}
-        isDragging={edgeSwipe.isEdgeSwiping && edgeSwipe.edgeSide === 'right'}
-        dragProgress={edgeSwipe.edgeSide === 'right' ? edgeSwipe.dragProgress : 0}
-        onClose={sidebarStore.closeRight}
+        ref={rightSidebarRef}
+        isOpen={sidebarRightOpen}
+        drawerWidthPx={drawerWidthPxRef.current}
+        onClose={useSidebarStore.getState().closeRight}
       />
 
       {/* Debug Info Panel */}
