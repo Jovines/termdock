@@ -1,4 +1,3 @@
-import React from 'react';
 import {
   X as RiCloseLine,
   Plus as RiAddLine,
@@ -13,6 +12,7 @@ interface LeftSidebarProps {
   isOpen: boolean;
   drawerWidthPx: number;
   onClose: () => void;
+  onOpen?: () => void;
   sessions: Array<{
     id: string;
     name: string;
@@ -32,8 +32,16 @@ interface LeftSidebarProps {
 
 function AgentStatusDot({ status, needsReview }: { status: AgentStatus | null; needsReview?: boolean }) {
   if (!status && !needsReview) return null;
-  const color = status === 'running' ? 'bg-green-400' : 'bg-yellow-400';
-  const title = status === 'running' ? 'AI running' : 'AI finished — needs review';
+  if (status === 'running') {
+    return (
+      <span
+        className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-green-400 animate-pulse"
+        title="AI running"
+      />
+    );
+  }
+  const color = needsReview ? 'bg-yellow-400' : 'bg-yellow-400';
+  const title = 'AI finished — needs review';
   return (
     <span
       className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${color}`}
@@ -49,17 +57,16 @@ function getCwdLeafName(cwd: string | null): string | null {
   return segments[segments.length - 1] || cwd;
 }
 
-export const LeftSidebar = React.forwardRef<HTMLElement, LeftSidebarProps>(function LeftSidebar(
-  { isOpen, drawerWidthPx, onClose, sessions, activeSessionId, sessionStates, onNewSession, onOpenDrawer },
-  ref,
+export function LeftSidebar(
+  { isOpen, drawerWidthPx, onClose, onOpen, sessions, activeSessionId, sessionStates, onNewSession, onOpenDrawer }: LeftSidebarProps,
 ) {
   return (
     <Sidebar
-      ref={ref}
       side="left"
       isOpen={isOpen}
       drawerWidthPx={drawerWidthPx}
       onClose={onClose}
+      onOpen={onOpen}
     >
       {/* Header */}
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/15 px-4 py-3">
@@ -149,4 +156,4 @@ export const LeftSidebar = React.forwardRef<HTMLElement, LeftSidebarProps>(funct
       </div>
     </Sidebar>
   );
-});
+}

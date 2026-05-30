@@ -238,8 +238,6 @@ export class ErrorReporter {
       });
     }
 
-    // TODO: 在生产环境中发送到错误监控服务
-    // this.sendToMonitoringService(appError, context);
   }
 
   /**

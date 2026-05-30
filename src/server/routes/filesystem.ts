@@ -27,6 +27,16 @@ function execGit(args: string[], cwd: string): Promise<string> {
   });
 }
 
+/** Find the top-level directory of the git repo containing `cwd`, or null. */
+async function findGitRoot(cwd: string): Promise<string | null> {
+  try {
+    const root = await execGit(['rev-parse', '--show-toplevel'], cwd);
+    return root.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 // Directory listing
 router.get('/list', async (req: Request, res: Response) => {
   try {
@@ -126,16 +136,24 @@ router.get('/diff', async (req: Request, res: Response) => {
   try {
     const requestedPath = req.query.path as string | undefined;
     const cached = req.query.cached === 'true';
+    const cwd = req.query.cwd as string | undefined;
 
     // Determine the git working directory
-    let gitCwd: string;
+    let gitCwd: string | null;
     if (requestedPath) {
       const resolvedPath = pathValidator.validatePath(requestedPath);
       const stat = fs.statSync(resolvedPath);
-      gitCwd = stat.isDirectory() ? resolvedPath : path.dirname(resolvedPath);
+      gitCwd = await findGitRoot(stat.isDirectory() ? resolvedPath : path.dirname(resolvedPath));
+    } else if (cwd) {
+      const resolvedCwd = pathValidator.validatePath(cwd);
+      gitCwd = await findGitRoot(resolvedCwd);
     } else {
-      // Use home directory as fallback
-      gitCwd = process.env.HOME || process.cwd();
+      gitCwd = null;
+    }
+
+    if (!gitCwd) {
+      res.json({ path: requestedPath ?? null, diff: '', error: 'Not a git repository' });
+      return;
     }
 
     const args = ['diff'];
@@ -151,9 +169,21 @@ router.get('/diff', async (req: Request, res: Response) => {
 });
 
 // List changed files (git diff --name-status)
-router.get('/diff-files', async (_req: Request, res: Response) => {
+router.get('/diff-files', async (req: Request, res: Response) => {
   try {
-    const gitCwd = process.env.HOME || process.cwd();
+    const cwd = req.query.cwd as string | undefined;
+    if (!cwd) {
+      res.json({ files: [], error: 'No cwd provided' });
+      return;
+    }
+
+    const resolvedCwd = pathValidator.validatePath(cwd);
+    const gitCwd = await findGitRoot(resolvedCwd);
+    if (!gitCwd) {
+      res.json({ files: [], error: 'Not a git repository' });
+      return;
+    }
+
     const output = await execGit(['diff', '--name-status'], gitCwd);
 
     const files = output

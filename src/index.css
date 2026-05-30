@@ -510,6 +510,68 @@ body {
   -webkit-text-fill-color: transparent;
 }
 
+/* react-diff-view — theme-consistent palette */
+:root {
+  --diff-background-color: var(--surface);
+  --diff-text-color: var(--muted-foreground);
+  --diff-font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  --diff-selection-background-color: rgba(67, 133, 190, 0.12);
+  --diff-selection-text-color: var(--foreground);
+  --diff-gutter-insert-background-color: rgba(102, 128, 11, 0.04);
+  --diff-gutter-insert-text-color: rgba(102, 128, 11, 0.35);
+  --diff-gutter-delete-background-color: rgba(175, 48, 41, 0.04);
+  --diff-gutter-delete-text-color: rgba(175, 48, 41, 0.35);
+  --diff-gutter-selected-background-color: rgba(67, 133, 190, 0.05);
+  --diff-gutter-selected-text-color: var(--foreground);
+  --diff-code-insert-background-color: rgba(102, 128, 11, 0.08);
+  --diff-code-insert-text-color: #9aab6d;
+  --diff-code-delete-background-color: rgba(175, 48, 41, 0.08);
+  --diff-code-delete-text-color: #c49393;
+  --diff-code-insert-edit-background-color: rgba(102, 128, 11, 0.16);
+  --diff-code-insert-edit-text-color: #9aab6d;
+  --diff-code-delete-edit-background-color: rgba(175, 48, 41, 0.16);
+  --diff-code-delete-edit-text-color: #c49393;
+  --diff-code-selected-background-color: rgba(67, 133, 190, 0.05);
+  --diff-code-selected-text-color: var(--foreground);
+}
+
+.diff {
+  border-collapse: collapse;
+  font-size: 11px;
+  line-height: 1.625;
+  table-layout: auto;
+  width: 100%;
+}
+
+.diff-gutter {
+  padding: 0 6px;
+  min-width: 32px;
+  text-align: right;
+  user-select: none;
+  opacity: 0.45;
+  font-size: 10px;
+}
+
+.diff-code {
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-decoration {
+  font-size: 11px;
+}
+
+.diff-decoration-content {
+  padding: 2px 8px;
+  color: var(--accent);
+  background: rgba(67, 133, 190, 0.04);
+}
+
+.diff-hunk-header {
+  color: var(--accent);
+}
+
 /* Keyboard button active state delay - keeps active color longer for better feedback */
 .keyboard-button-active {
   transition: background-color 0.15s ease-out;

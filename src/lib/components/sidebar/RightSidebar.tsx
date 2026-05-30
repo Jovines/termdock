@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback } from 'react';
+import { useEffect, useCallback } from 'react';
 import {
   X as RiCloseLine,
   Folder as RiFolder,
@@ -14,11 +14,11 @@ interface RightSidebarProps {
   isOpen: boolean;
   drawerWidthPx: number;
   onClose: () => void;
+  onOpen?: () => void;
 }
 
-export const RightSidebar = React.forwardRef<HTMLElement, RightSidebarProps>(function RightSidebar(
-  { isOpen, drawerWidthPx, onClose },
-  ref,
+export function RightSidebar(
+  { isOpen, drawerWidthPx, onClose, onOpen }: RightSidebarProps,
 ) {
   const {
     rightTab,
@@ -34,7 +34,7 @@ export const RightSidebar = React.forwardRef<HTMLElement, RightSidebarProps>(fun
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
-    getDiffFileList()
+    getDiffFileList(rootPath ?? undefined)
       .then((result) => {
         if (cancelled) return;
         const map = new Map<string, string>();
@@ -47,7 +47,7 @@ export const RightSidebar = React.forwardRef<HTMLElement, RightSidebarProps>(fun
         // Not a git repo or git not available — that's fine
       });
     return () => { cancelled = true; };
-  }, [isOpen, setChangedFiles]);
+  }, [isOpen, rootPath, setChangedFiles]);
 
   const handleFileSelect = useCallback((path: string) => {
     selectFile(path);
@@ -56,11 +56,11 @@ export const RightSidebar = React.forwardRef<HTMLElement, RightSidebarProps>(fun
 
   return (
     <Sidebar
-      ref={ref}
       side="right"
       isOpen={isOpen}
       drawerWidthPx={drawerWidthPx}
       onClose={onClose}
+      onOpen={onOpen}
     >
       {/* Header */}
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/15 px-4 py-3">
@@ -129,4 +129,4 @@ export const RightSidebar = React.forwardRef<HTMLElement, RightSidebarProps>(fun
       </div>
     </Sidebar>
   );
-});
+}

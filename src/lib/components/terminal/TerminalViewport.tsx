@@ -931,7 +931,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       holdTimer: ReturnType<typeof setTimeout> | null;
       mode: 'idle' | 'holding' | 'arrow';
       joystickDir: '' | 'up' | 'down' | 'left' | 'right';
-      joystickRepeatTimer: ReturnType<typeof setInterval> | null;
+      joystickRepeatTimer: ReturnType<typeof setTimeout> | null;
+      repeatIntervalMs: number;
       lastHapticTime: number;
       lastTapTime: number;
       lastTapX: number;
@@ -947,6 +948,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       mode: 'idle',
       joystickDir: '',
       joystickRepeatTimer: null,
+      repeatIntervalMs: 260,
       lastHapticTime: 0,
       lastTapTime: 0,
       lastTapX: 0,
@@ -1002,7 +1004,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         s.holdTimer = null;
       }
       if (s.joystickRepeatTimer !== null) {
-        clearInterval(s.joystickRepeatTimer);
+        clearTimeout(s.joystickRepeatTimer);
         s.joystickRepeatTimer = null;
       }
       s.joystickDir = '';
@@ -1084,15 +1086,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
         const absDx = Math.abs(dx);
         const absDy = Math.abs(dy);
-        const isX = absDx >= absDy;
 
         let newDir: '' | 'up' | 'down' | 'left' | 'right' = '';
         if (dist > 12) {
-          if (isX) {
+          // Require a clear directional intent: the dominant axis must be at
+          // least 1.5× the other.  This prevents accidental direction switches
+          // when the finger drifts diagonally (e.g. 13px right, 12px down).
+          const AXIS_RATIO = 1.5;
+          if (absDx >= absDy * AXIS_RATIO) {
             newDir = dx > 0 ? 'right' : 'left';
-          } else {
+          } else if (absDy >= absDx * AXIS_RATIO) {
             newDir = dy > 0 ? 'down' : 'up';
           }
+          // else: ambiguous diagonal — keep previous direction (or none)
         }
 
         // Track incremental movement for repeat-rate control
@@ -1109,11 +1115,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           const excess = Math.min(newDist - 12, 80 - 12);
           const ratio = excess / (80 - 12);
           const intervalMs = 260 - ratio * (260 - 80);
+          // Store for the running timer to pick up on its next iteration
+          s.repeatIntervalMs = intervalMs;
 
           if (newDir !== s.joystickDir) {
+            // Direction changed — fire immediately, start repeat with initial delay
             if (s.joystickRepeatTimer !== null) {
-              clearInterval(s.joystickRepeatTimer);
+              clearTimeout(s.joystickRepeatTimer);
             }
+            const isInitialActivation = s.joystickDir === '';
             s.joystickDir = newDir;
             lp_inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
             const now = performance.now();
@@ -1121,31 +1131,26 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               hapticLight();
               s.lastHapticTime = now;
             }
-            s.joystickRepeatTimer = setInterval(() => {
+            // First activation: longer delay (user likely wants single step)
+            // Direction switch: shorter delay (already in motion, wants responsive change)
+            const initialDelay = isInitialActivation ? 400 : 300;
+            s.joystickRepeatTimer = setTimeout(function repeat() {
+              if (s.joystickDir !== newDir) return;
               lp_inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
               const t = performance.now();
               if (t - s.lastHapticTime > 120) {
                 hapticLight();
                 s.lastHapticTime = t;
               }
-            }, intervalMs);
-          } else {
-            if (s.joystickRepeatTimer !== null) {
-              clearInterval(s.joystickRepeatTimer);
-              s.joystickRepeatTimer = setInterval(() => {
-                lp_inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
-                const t = performance.now();
-                if (t - s.lastHapticTime > 120) {
-                  hapticLight();
-                  s.lastHapticTime = t;
-                }
-              }, intervalMs);
-            }
+              s.joystickRepeatTimer = setTimeout(repeat, s.repeatIntervalMs);
+            }, initialDelay);
           }
+          // Same direction — don't restart timer; it picks up repeatIntervalMs
+          // on its next iteration, so speed adapts smoothly to finger distance.
           setArrowIndicator({ visible: true, activeDir: newDir });
         } else {
           if (s.joystickRepeatTimer !== null) {
-            clearInterval(s.joystickRepeatTimer);
+            clearTimeout(s.joystickRepeatTimer);
             s.joystickRepeatTimer = null;
           }
           s.joystickDir = '';
@@ -1165,7 +1170,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         notifyGestureLock(false);
         setArrowIndicator({ visible: false, activeDir: '' });
         if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
-        if (s.joystickRepeatTimer !== null) { clearInterval(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
+        if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
         s.joystickDir = '';
         s.pointerId = null;
         s.mode = 'idle';
@@ -1185,7 +1190,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
 
       if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
-      if (s.joystickRepeatTimer !== null) { clearInterval(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
+      if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
       s.joystickDir = '';
       s.pointerId = null;
       s.mode = 'idle';
@@ -1198,7 +1203,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         setArrowIndicator({ visible: false, activeDir: '' });
       }
       if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
-      if (s.joystickRepeatTimer !== null) { clearInterval(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
+      if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
       s.joystickDir = '';
       s.pointerId = null;
       s.tapDidMove = false;

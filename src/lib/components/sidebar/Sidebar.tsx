@@ -1,55 +1,191 @@
-import React, { useEffect } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
+import { useDrag } from '@use-gesture/react';
 
 interface SidebarProps {
   side: 'left' | 'right';
   isOpen: boolean;
   drawerWidthPx: number;
   onClose: () => void;
+  onOpen?: () => void;
   children: React.ReactNode;
 }
 
+const EDGE_ZONE_WIDTH = 30;
+const SNAP_PROGRESS_THRESHOLD = 0.3;
+// @use-gesture reports velocity in px/ms.
+const SNAP_VELOCITY_THRESHOLD = 0.5;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
 export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Sidebar(
-  { side, isOpen, drawerWidthPx, onClose, children },
-  ref,
+  { side, isOpen, drawerWidthPx, onClose, onOpen, children },
+  forwardedRef,
 ) {
-  const handleBackdropClick = () => onClose();
+  const isLeft = side === 'left';
+  const closedX = isLeft ? -drawerWidthPx : drawerWidthPx;
+
+  const panelRef = useRef<HTMLElement | null>(null);
+  const backdropRef = useRef<HTMLDivElement | null>(null);
+  const currentXRef = useRef(isOpen ? 0 : closedX);
+  const dragStartXRef = useRef(0);
+  const isOpenRef = useRef(isOpen);
+  isOpenRef.current = isOpen;
+
+  const setPanelRef = useCallback((node: HTMLElement | null) => {
+    panelRef.current = node;
+    if (typeof forwardedRef === 'function') {
+      forwardedRef(node);
+    } else if (forwardedRef) {
+      forwardedRef.current = node;
+    }
+  }, [forwardedRef]);
+
+  const setBackdropOpacity = useCallback((x: number) => {
+    const backdrop = backdropRef.current;
+    if (!backdrop) return;
+    const progress = isLeft
+      ? (x + drawerWidthPx) / drawerWidthPx
+      : (drawerWidthPx - x) / drawerWidthPx;
+    backdrop.getAnimations().forEach((animation) => animation.cancel());
+    backdrop.style.transition = 'none';
+    backdrop.style.opacity = String(clamp(progress, 0, 1));
+  }, [drawerWidthPx, isLeft]);
+
+  const setPosition = useCallback((nextX: number) => {
+    const panel = panelRef.current;
+    currentXRef.current = nextX;
+    if (!panel) return;
+    panel.getAnimations().forEach((animation) => animation.cancel());
+    panel.style.transition = 'none';
+    panel.style.transform = `translateX(${nextX}px)`;
+    setBackdropOpacity(nextX);
+  }, [setBackdropOpacity]);
+
+  const snapToState = useCallback((open: boolean) => {
+    setPosition(open ? 0 : closedX);
+  }, [closedX, setPosition]);
+
+  useEffect(() => {
+    snapToState(isOpen);
+  }, [isOpen, snapToState]);
+
+  // Keep the drawer aligned when viewport-derived width changes.
+  useEffect(() => {
+    setPosition(isOpenRef.current ? 0 : closedX);
+  }, [closedX, setPosition]);
 
   useEffect(() => {
     if (!isOpen) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
   }, [isOpen, onClose]);
 
-  const isLeft = side === 'left';
+  const decideSnap = useCallback((velocity: number, direction: number) => {
+    const currentX = currentXRef.current;
+    const progress = isLeft
+      ? (currentX + drawerWidthPx) / drawerWidthPx
+      : (drawerWidthPx - currentX) / drawerWidthPx;
+    const flingOpen = Math.abs(velocity) > SNAP_VELOCITY_THRESHOLD && (isLeft ? direction > 0 : direction < 0);
+    const shouldOpen = progress > SNAP_PROGRESS_THRESHOLD || flingOpen;
+
+    if (shouldOpen) {
+      if (!isOpenRef.current) onOpen?.();
+      else snapToState(true);
+    } else if (isOpenRef.current) {
+      onClose();
+    } else {
+      snapToState(false);
+    }
+  }, [drawerWidthPx, isLeft, onClose, onOpen, snapToState]);
+
+  const bindPanel = useDrag(
+    ({ active, first, movement: [mx], velocity: [vx], direction: [dx] }) => {
+      if (first) {
+        dragStartXRef.current = currentXRef.current;
+      }
+      if (!active) {
+        decideSnap(vx, dx);
+        return;
+      }
+      const min = isLeft ? closedX : 0;
+      const max = isLeft ? 0 : drawerWidthPx;
+      setPosition(clamp(dragStartXRef.current + mx, min, max));
+    },
+    {
+      axis: 'x',
+      filterTaps: true,
+    },
+  );
+
+  const bindEdge = useDrag(
+    ({ active, cancel, movement: [mx], velocity: [vx], direction: [dx] }) => {
+      if (isOpenRef.current) {
+        cancel();
+        return;
+      }
+      if (!active) {
+        decideSnap(vx, dx);
+        return;
+      }
+      const min = isLeft ? closedX : 0;
+      const max = isLeft ? 0 : drawerWidthPx;
+      setPosition(clamp(closedX + mx, min, max));
+    },
+    {
+      axis: 'x',
+      filterTaps: true,
+    },
+  );
 
   return (
     <>
-      {/* Backdrop — plain div, opacity toggled via CSS class */}
       <div
+        {...bindEdge()}
+        style={{
+          position: 'fixed',
+          top: 0,
+          ...(isLeft ? { left: 0 } : { right: 0 }),
+          width: EDGE_ZONE_WIDTH,
+          height: 'var(--app-vh, 100vh)',
+          zIndex: 30,
+          touchAction: 'none',
+          pointerEvents: isOpen ? 'none' : 'auto',
+        }}
+      />
+
+      <div
+        ref={backdropRef}
         data-sidebar-backdrop={side}
-        className={`fixed inset-0 z-40 bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default transition-opacity duration-250 ease-out ${
-          isOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-        }`}
-        onClick={handleBackdropClick}
+        className="fixed inset-0 z-40 bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+        style={{
+          opacity: isOpen ? 1 : 0,
+          pointerEvents: isOpen ? 'auto' : 'none',
+          transition: 'none',
+        }}
+        onClick={onClose}
         aria-label="Close sidebar"
       />
 
-      {/* Panel — plain aside, position controlled by direct DOM transform */}
       <aside
-        ref={ref}
+        {...bindPanel()}
+        ref={setPanelRef}
         data-sidebar={side}
         className={`fixed inset-y-0 z-50 flex flex-col bg-surface will-change-transform ${
-          isLeft
-            ? 'left-0 border-r border-border/15'
-            : 'right-0 border-l border-border/15'
+          isLeft ? 'border-r border-border/15' : 'border-l border-border/15'
         }`}
         style={{
+          ...(isLeft ? { left: 0 } : { right: 0 }),
           width: drawerWidthPx,
           maxWidth: '90vw',
-          transform: isLeft ? `translateX(-${drawerWidthPx}px)` : `translateX(${drawerWidthPx}px)`,
+          transform: `translateX(${isOpen ? 0 : closedX}px)`,
+          transition: 'none',
+          touchAction: 'none',
+          pointerEvents: isOpen ? 'auto' : 'none',
           paddingTop: 'max(0px, env(safe-area-inset-top, 0px) - 24px)',
           paddingBottom: 'env(safe-area-inset-bottom, 0px)',
           ...(isLeft

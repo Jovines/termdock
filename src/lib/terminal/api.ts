@@ -759,12 +759,13 @@ export async function readFileContent(filePath: string): Promise<{
   return response.json();
 }
 
-export async function getFileDiff(filePath?: string, cached?: boolean): Promise<{
+export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: string): Promise<{
   path: string | null; diff: string; error?: string;
 }> {
   const params = new URLSearchParams();
   if (filePath) params.set('path', filePath);
   if (cached) params.set('cached', 'true');
+  if (cwd) params.set('cwd', cwd);
   const response = await fetch(`/api/terminal/fs/diff?${params}`);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get diff' }));
@@ -773,11 +774,14 @@ export async function getFileDiff(filePath?: string, cached?: boolean): Promise<
   return response.json();
 }
 
-export async function getDiffFileList(): Promise<{
+export async function getDiffFileList(cwd?: string): Promise<{
   files: Array<{ path: string; status: string; oldPath?: string }>;
   error?: string;
 }> {
-  const response = await fetch('/api/terminal/fs/diff-files');
+  const params = new URLSearchParams();
+  if (cwd) params.set('cwd', cwd);
+  const qs = params.toString();
+  const response = await fetch(`/api/terminal/fs/diff-files${qs ? `?${qs}` : ''}`);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get diff file list' }));
     throw new Error(error.error || 'Failed to get diff file list');

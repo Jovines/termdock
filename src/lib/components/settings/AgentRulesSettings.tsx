@@ -92,59 +92,57 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
           {prog.rules.map((rule, ri) => {
             const regexError = validateRegex(rule.pattern);
             return (
-              <div key={ri} className="flex items-start gap-2 pl-2">
-                <div className="flex-1 space-y-1">
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="text"
-                      value={rule.pattern}
-                      onChange={(e) => updateRule(pi, ri, 'pattern', e.target.value)}
-                      placeholder="Regex pattern (e.g. Thinking|Generating)"
-                      className={`flex-1 rounded-lg bg-surface px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 ${
-                        regexError ? 'ring-1 ring-red-400' : 'focus:ring-primary/30'
-                      }`}
-                    />
-                    <input
-                      type="text"
-                      value={rule.status}
-                      onChange={(e) => updateRule(pi, ri, 'status', e.target.value)}
-                      placeholder="Status"
-                      className="w-20 shrink-0 rounded-lg bg-surface px-2 py-1.5 text-[11px] text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 focus:ring-primary/30"
-                    />
-                    <div className="flex shrink-0 items-center gap-1">
-                      {PRESET_COLORS.map((c) => (
-                        <button
-                          key={c.value}
-                          type="button"
-                          onClick={() => updateRule(pi, ri, 'color', c.value)}
-                          className={`h-4 w-4 rounded-full border transition ${
-                            rule.color === c.value ? 'border-foreground ring-1 ring-foreground/30 scale-110' : 'border-transparent hover:scale-110'
-                          }`}
-                          style={{ backgroundColor: c.value }}
-                          title={c.label}
-                        />
-                      ))}
-                      <input
-                        type="color"
-                        value={rule.color || '#4ade80'}
-                        onChange={(e) => updateRule(pi, ri, 'color', e.target.value)}
-                        className="h-4 w-4 shrink-0 cursor-pointer rounded-full border-0 bg-transparent p-0"
-                        title="Custom color"
-                      />
-                    </div>
-                  </div>
-                  {regexError && (
-                    <p className="px-1 text-[10px] text-red-400">{regexError}</p>
-                  )}
+              <div key={ri} className="space-y-1.5 rounded-lg bg-surface/50 p-2 pl-3">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={rule.pattern}
+                    onChange={(e) => updateRule(pi, ri, 'pattern', e.target.value)}
+                    placeholder="Regex pattern (e.g. Thinking|Generating)"
+                    className={`flex-1 rounded-lg bg-surface px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 ${
+                      regexError ? 'ring-1 ring-red-400' : 'focus:ring-primary/30'
+                    }`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeRule(pi, ri)}
+                    className="shrink-0 rounded p-1 text-muted-foreground/60 hover:text-red-400 transition"
+                    aria-label="Remove rule"
+                  >
+                    <RiCloseLine size={12} />
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => removeRule(pi, ri)}
-                  className="mt-1 shrink-0 rounded p-1 text-muted-foreground/60 hover:text-red-400 transition"
-                  aria-label="Remove rule"
-                >
-                  <RiCloseLine size={12} />
-                </button>
+                {regexError && (
+                  <p className="px-1 text-[10px] text-red-400">{regexError}</p>
+                )}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={rule.status}
+                    onChange={(e) => updateRule(pi, ri, 'status', e.target.value)}
+                    placeholder="Status"
+                    className="w-20 shrink-0 rounded-lg bg-surface px-2 py-1.5 text-[11px] text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 focus:ring-primary/30"
+                  />
+                  {PRESET_COLORS.map((c) => (
+                    <button
+                      key={c.value}
+                      type="button"
+                      onClick={() => updateRule(pi, ri, 'color', c.value)}
+                      className={`h-5 w-5 rounded-full border transition ${
+                        rule.color === c.value ? 'border-foreground ring-1 ring-foreground/30 scale-110' : 'border-transparent hover:scale-110'
+                      }`}
+                      style={{ backgroundColor: c.value }}
+                      title={c.label}
+                    />
+                  ))}
+                  <input
+                    type="color"
+                    value={rule.color || '#4ade80'}
+                    onChange={(e) => updateRule(pi, ri, 'color', e.target.value)}
+                    className="h-5 w-5 shrink-0 cursor-pointer rounded-full border-0 bg-transparent p-0"
+                    title="Custom color"
+                  />
+                </div>
               </div>
             );
           })}

@@ -1,5 +1,4 @@
 import React, { useEffect, useCallback, useState } from 'react';
-import { animate } from 'motion/react';
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
 import {
   SquareTerminal as RiTerminalBoxLine,
@@ -17,19 +16,19 @@ import {
   Unplug as RiLogoutBoxRLine,
   GripVertical,
   Bot as RiBotLine,
+  LoaderCircle as RiLoaderCircle,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
 import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
-import type { TmuxSessionSummary, TmuxStatus, AgentStatus } from './lib/terminal/types';
+import type { TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules } from './lib/terminal/api';
 import type { AgentProgramConfig } from './lib/terminal/api';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
-import { useEdgeSwipe } from './lib/hooks/useEdgeSwipe';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
@@ -67,15 +66,6 @@ function getTabDisplayLines(
   return { primary: session.name, secondary: null };
 }
 
-function getAgentColor(status: AgentStatus | null, color?: string | null, needsReview?: boolean): string | undefined {
-  if (!status && !needsReview) return undefined;
-  if (color) return color;
-  if (status === 'running') return '#4ade80';
-  if (status === 'waiting') return '#facc15';
-  if (status === 'idle') return '#888';
-  if (status) return '#4ade80';
-  return '#facc15'; // needsReview
-}
 
 function App() {
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
@@ -120,86 +110,9 @@ function App() {
     useSidebarStore.getState().setRootPath(ts?.cwd ?? null);
   }, [activeSessionId, sessionCount]);
 
-  // Edge swipe detection — uses overlay strips that naturally isolate
-  // edge touches from Swiper (the strips sit above Swiper in z-order).
-  const edgeWrapperRef = React.useRef<HTMLDivElement>(null);
-  const leftSidebarRef = React.useRef<HTMLElement>(null);
-  const rightSidebarRef = React.useRef<HTMLElement>(null);
-
   // Sidebar drawer dimensions
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
-  const drawerWidthPxRef = React.useRef(isMobile ? window.innerWidth * 0.85 : 360);
-
-  // Update drawer width on resize
-  useEffect(() => {
-    const onResize = () => {
-      const mobile = window.innerWidth < 768;
-      const newWidth = mobile ? window.innerWidth * 0.85 : 360;
-      const oldWidth = drawerWidthPxRef.current;
-      drawerWidthPxRef.current = newWidth;
-
-      const scaleFactor = oldWidth > 0 ? newWidth / oldWidth : 1;
-      for (const ref of [leftSidebarRef, rightSidebarRef]) {
-        const el = ref.current;
-        if (el && el.style.transform) {
-          const m = el.style.transform.match(/-?[\d.]+/);
-          if (m) el.style.transform = `translateX(${parseFloat(m[0]) * scaleFactor}px)`;
-        }
-      }
-    };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-
-  // Spring-animate left sidebar open/close
-  useEffect(() => {
-    const el = leftSidebarRef.current;
-    if (!el) return;
-    const targetX = sidebarLeftOpen ? 0 : -drawerWidthPxRef.current;
-    const currentX = parseFloat(el.style.transform?.replace(/[^-\d.]/g, '')) || targetX;
-    el.style.transform = `translateX(${currentX}px)`;
-    const ctrl = animate(el, { x: targetX }, {
-      type: 'spring',
-      stiffness: 400,
-      damping: 35,
-      mass: 0.8,
-    });
-    return () => {
-      ctrl?.stop?.();
-    };
-  }, [sidebarLeftOpen]);
-
-  // Spring-animate right sidebar open/close
-  useEffect(() => {
-    const el = rightSidebarRef.current;
-    if (!el) return;
-    const targetX = sidebarRightOpen ? 0 : drawerWidthPxRef.current;
-    const currentX = parseFloat(el.style.transform?.replace(/[^-\d.]/g, '')) || targetX;
-    el.style.transform = `translateX(${currentX}px)`;
-    const ctrl = animate(el, { x: targetX }, {
-      type: 'spring',
-      stiffness: 400,
-      damping: 35,
-      mass: 0.8,
-    });
-    return () => {
-      ctrl?.stop?.();
-    };
-  }, [sidebarRightOpen]);
-
-  useEdgeSwipe({
-    container: edgeWrapperRef,
-    leftSidebarRef,
-    rightSidebarRef,
-    drawerWidthPx: drawerWidthPxRef.current,
-    onOpen: (side) => {
-      if (side === 'left') useSidebarStore.getState().openLeft();
-      else useSidebarStore.getState().openRight();
-    },
-    onClose: () => {
-      // Edge swipe didn't complete — no action needed
-    },
-  });
+  const drawerWidthPx = isMobile ? window.innerWidth * 0.85 : 360;
 
   // Desktop keyboard shortcuts
   useEffect(() => {
@@ -645,35 +558,6 @@ function App() {
     <div
       className="w-screen h-full flex flex-col bg-background text-foreground"
     >
-      {/* Edge overlay strips — absorb edge touches so Swiper never sees them.
-          When sidebar is open, pointerEvents: none lets touches pass through
-          to the sidebar panel. */}
-      <div ref={edgeWrapperRef} style={{ pointerEvents: 'none' }}>
-        <div
-          style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            width: 25,
-            height: 'var(--app-vh, 100vh)',
-            zIndex: 30,
-            touchAction: 'none',
-            pointerEvents: sidebarLeftOpen ? 'none' : 'auto',
-          }}
-        />
-        <div
-          style={{
-            position: 'fixed',
-            top: 0,
-            right: 0,
-            width: 25,
-            height: 'var(--app-vh, 100vh)',
-            zIndex: 30,
-            touchAction: 'none',
-            pointerEvents: sidebarRightOpen ? 'none' : 'auto',
-          }}
-        />
-      </div>
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="mx-auto flex h-full w-full max-w-[1440px] min-h-0 flex-col overflow-visible bg-background">
           <div
@@ -779,18 +663,39 @@ function App() {
                     title={tooltip}
                   >
                     <span className="inline-flex min-w-0 items-center gap-1">
-                      {session.mode === 'tmux' ? (
-                        <RiLayoutGridLine
+                      {ts?.agentStatus === 'running' ? (
+                        <RiLoaderCircle
                           size={12}
-                          className="shrink-0"
-                          style={{ color: getAgentColor(ts?.agentStatus ?? null, ts?.agentColor, ts?.agentNeedsReview) }}
+                          className="shrink-0 animate-spin text-green-400"
                         />
+                      ) : ts?.agentStatus === 'waiting' ? (
+                        session.mode === 'tmux' ? (
+                          <RiLayoutGridLine size={12} className="shrink-0 animate-pulse text-yellow-400" />
+                        ) : (
+                          <RiTerminalLine size={12} className="shrink-0 animate-pulse text-yellow-400" />
+                        )
+                      ) : ts?.agentNeedsReview ? (
+                        session.mode === 'tmux' ? (
+                          <RiLayoutGridLine size={12} className="shrink-0 animate-pulse text-yellow-400" />
+                        ) : (
+                          <RiTerminalLine size={12} className="shrink-0 animate-pulse text-yellow-400" />
+                        )
+                      ) : ts?.agentStatus === 'idle' ? (
+                        session.mode === 'tmux' ? (
+                          <RiLayoutGridLine size={12} className="shrink-0 text-gray-500" />
+                        ) : (
+                          <RiTerminalLine size={12} className="shrink-0 text-gray-500" />
+                        )
+                      ) : ts?.agentColor ? (
+                        session.mode === 'tmux' ? (
+                          <RiLayoutGridLine size={12} className="shrink-0" style={{ color: ts.agentColor }} />
+                        ) : (
+                          <RiTerminalLine size={12} className="shrink-0" style={{ color: ts.agentColor }} />
+                        )
+                      ) : session.mode === 'tmux' ? (
+                        <RiLayoutGridLine size={12} className="shrink-0" />
                       ) : (
-                        <RiTerminalLine
-                          size={12}
-                          className="shrink-0"
-                          style={{ color: getAgentColor(ts?.agentStatus ?? null, ts?.agentColor, ts?.agentNeedsReview) }}
-                        />
+                        <RiTerminalLine size={12} className="shrink-0" />
                       )}
                       {displaySubName ? (
                         <span className="flex min-w-0 flex-col leading-tight">
@@ -1727,10 +1632,10 @@ function App() {
 
       {/* Left Sidebar */}
       <LeftSidebar
-        ref={leftSidebarRef}
         isOpen={sidebarLeftOpen}
-        drawerWidthPx={drawerWidthPxRef.current}
+        drawerWidthPx={drawerWidthPx}
         onClose={useSidebarStore.getState().closeLeft}
+        onOpen={useSidebarStore.getState().openLeft}
         sessions={sessions}
         activeSessionId={activeSessionId}
         sessionStates={terminalSessions}
@@ -1740,10 +1645,10 @@ function App() {
 
       {/* Right Sidebar */}
       <RightSidebar
-        ref={rightSidebarRef}
         isOpen={sidebarRightOpen}
-        drawerWidthPx={drawerWidthPxRef.current}
+        drawerWidthPx={drawerWidthPx}
         onClose={useSidebarStore.getState().closeRight}
+        onOpen={useSidebarStore.getState().openRight}
       />
 
       {/* Debug Info Panel */}
