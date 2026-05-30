@@ -73,14 +73,6 @@ body {
   }
 }
 
-@media (max-width: 768px) {
-  @supports (height: 100dvh) {
-    html, body {
-      height: 100dvh;
-    }
-  }
-}
-
 .terminal-viewport-container {
   cursor: text;
   /* 触摸滚动优化 */
@@ -372,26 +364,36 @@ body {
   -webkit-touch-callout: none;
 }
 
-/* Mobile-specific styles - Ensure visibility */
+/* Mobile-specific styles — use fixed base height so keyboard never resizes the terminal.
+   --app-base-vh is set by JS to window.innerHeight at startup / orientation change,
+   and does NOT shrink when the soft-keyboard opens.  The terminal area stays the same
+   pixel height; instead we translate it up via TerminalView.tsx. */
 @media (max-width: 768px) {
-  body,
-  #root {
-    position: fixed;
-    inset: 0;
-  }
-
   html {
-    height: var(--app-vh, 100vh);
+    height: var(--app-base-vh, 100lvh);
     width: 100vw;
   }
 
   body {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
     overflow: hidden;
-    height: var(--app-vh, 100vh);
+    height: var(--app-base-vh, 100lvh);
     width: 100vw;
     touch-action: pan-y;
     background-color: #1C1B1A !important;
     color: var(--foreground) !important;
+  }
+
+  #root {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--app-base-vh, 100lvh);
+    padding-bottom: max(0px, env(safe-area-inset-bottom, 0px) - 16px);
   }
 
   .terminal-viewport-container {

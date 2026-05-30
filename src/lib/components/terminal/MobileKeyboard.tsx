@@ -462,17 +462,17 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       {presetMenu}
       <div
         data-mobile-keyboard="true"
-        className={`z-20 select-none overflow-hidden bg-background transition-all duration-150 ease-out ${
+        className={`z-20 select-none overflow-hidden bg-background transition-all duration-150 ease-out max-h-40 px-1 py-0 ${
           visible
-            ? 'max-h-40 px-3 py-2 opacity-100 translate-y-0 pointer-events-auto'
-            : 'max-h-0 border-t-0 px-3 py-0 opacity-0 translate-y-1 pointer-events-none'
+            ? 'opacity-100 pointer-events-auto'
+            : 'opacity-0 pointer-events-none'
         }`}
         onMouseDownCapture={preventToolbarButtonFocus}
         onPointerDownCapture={preventToolbarButtonFocus}
         onContextMenuCapture={preventContextMenu}
         onFocusCapture={handleToolbarButtonFocus}
       >
-      <div className="rounded-2xl bg-surface-elevated p-1.5 space-y-1">
+      <div className="rounded-2xl bg-surface-elevated p-0.5 space-y-0.5">
       <div className="grid grid-cols-8 gap-1">
         <button
           type="button"

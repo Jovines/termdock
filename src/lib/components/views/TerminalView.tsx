@@ -144,6 +144,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const modifierTapRef = React.useRef<{ modifier: Modifier; timestamp: number } | null>(null);
   const lastFocusRequestTokenRef = React.useRef(0);
   const streamVersionRef = React.useRef(0);
+  const isActiveRef = React.useRef(isActive);
+  const isMobileRef = React.useRef(isMobile);
   const resizeStateRef = React.useRef<{
     timerId: number | null;
     pending: { cols: number; rows: number } | null;
@@ -154,12 +156,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     lastSent: null,
   });
 
+  React.useEffect(() => {
+    isActiveRef.current = isActive;
+  }, [isActive]);
+
+  React.useEffect(() => {
+    isMobileRef.current = isMobile;
+  }, [isMobile]);
+
   const focusTerminalIfActive = React.useCallback(() => {
-    if (!isActive) {
+    if (!isActiveRef.current) {
       return;
     }
     terminalControllerRef.current?.focus();
-  }, [isActive]);
+  }, []);
 
   // Listen for font size changes from TerminalViewport (pinch-to-zoom)
   React.useEffect(() => {
@@ -175,7 +185,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => document.removeEventListener('termfontchange', handleFontChange);
   }, []);
 
-  // 统一恢复入口：从后台返回 / BFCache 恢复 / 网络恢复 / 切回当前 session 时调用。
+  // 统一恢复入口：从后台返回 / BFCache 恢复 / 网络恢复时调用。
   // 单一职责：清 resize 去重 → fit → 同步刷新纹理图集 → 滚动到底（非 alternate buffer）。
   // 不使用 setTimeout 重试链：rAF 内一次性同步完成，避免与 ResizeObserver / 防抖刷新互相覆盖。
   const recoverActive = React.useCallback((reason: string) => {
@@ -227,15 +237,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       window.removeEventListener('online', handleOnline);
     };
   }, [recoverActive]);
-
-  // 3) 切换回当前 session（左右翻页 inactive → active）
-  const prevIsActiveRef = React.useRef(isActive);
-  React.useEffect(() => {
-    const wasInactive = !prevIsActiveRef.current;
-    prevIsActiveRef.current = isActive;
-    if (!isActive || !wasInactive) return;
-    return recoverActive('session-active');
-  }, [isActive, recoverActive]);
 
   // iOS detection
   React.useEffect(() => {
@@ -802,7 +803,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const handleViewportInput = React.useCallback(
     (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean }) => {
-      if (!isActive) {
+      if (!isActiveRef.current) {
         return;
       }
 
@@ -867,7 +868,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         focusTerminalIfActive();
       }
     },
-    [activeModifier, focusTerminalIfActive, isActive, isTmuxMode, lockedModifier, terminal]
+    [activeModifier, focusTerminalIfActive, isTmuxMode, lockedModifier, terminal]
   );
 
   const flushPendingResize = React.useCallback(() => {
@@ -933,6 +934,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const handleViewportResize = React.useCallback(
     (cols: number, rows: number) => {
+      debugKeyboard('xterm resize detected', { cols, rows });
       queueViewportResize(cols, rows);
     },
     [queueViewportResize]
@@ -1059,15 +1061,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const handleInputFocusChange = React.useCallback((focused: boolean) => {
     debugKeyboard('input focus changed', {
       focused,
-      isActive,
-      isMobile,
+      isActive: isActiveRef.current,
+      isMobile: isMobileRef.current,
     });
-    if (!isMobile || !isActive) {
+    if (!isMobileRef.current || !isActiveRef.current) {
       setIsInputFocused(false);
       return;
     }
     setIsInputFocused((current) => (current === focused ? current : focused));
-  }, [isActive, isMobile, debugKeyboard]);
+  }, [debugKeyboard]);
+
+  const handleTerminalControllerRef = React.useCallback((controller: TerminalController | null) => {
+    terminalControllerRef.current = controller;
+  }, []);
 
   const handleMobileKeyPress = React.useCallback(
     (key: 'esc' | 'tab' | 'enter' | 'home' | 'end' | 'ctrl-c' | 'ctrl-d' | 'arrow-up' | 'arrow-down' | 'arrow-left' | 'arrow-right') => {
@@ -1166,10 +1172,28 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const normalizedLines = Math.max(1, Math.min(Math.floor(lines) || 1, 40));
     handleTmuxScroll(direction, normalizedLines);
   }, [handleTmuxScroll, quickKeysDisabled]);
-  const isKeyboardVisible = isActive && isMobile && isViewportKeyboardOpen;
+  const isKeyboardVisible = isActive && isMobile;
+
+  // The translateY / margin-top formulas are always applied on mobile.
+  // They naturally evaluate to 0 when the keyboard is closed (appVh ===
+  // appBaseVh), so we don't gate them on isViewportKeyboardOpen.  This
+  // avoids a 1-frame race between the CSS-variable rAF (useViewportHeight)
+  // and the React-state rAF (useViewportKeyboardState).  Layout depends
+  // ONLY on CSS custom properties, not React state.
+  const wrapperStyle = isMobile
+    ? {
+        transform: 'translateY(min(0px, calc(var(--app-vh, 0px) - var(--app-base-vh, 0px) + max(0px, env(safe-area-inset-bottom, 0px) - 16px))))',
+      } as React.CSSProperties
+    : undefined;
+
+  const keyboardShrinkStyle = isMobile
+    ? {
+        marginTop: 'max(0px, calc(var(--app-base-vh, 0px) - var(--app-vh, 0px) - max(0px, env(safe-area-inset-bottom, 0px) - 16px)))',
+      } as React.CSSProperties
+    : undefined;
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col overflow-hidden">
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden" style={wrapperStyle}>
       {showDebug && (
         <DebugPanel
           isMobile={isMobile}
@@ -1185,6 +1209,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         className="relative min-h-0 flex-1 overflow-hidden"
         style={{
           backgroundColor: xtermTheme.background,
+          ...keyboardShrinkStyle,
         }}
       >
         <div className="h-full w-full box-border">
@@ -1204,9 +1229,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           >
             <TerminalViewport
               key={terminalSessionKey}
-              ref={(controller) => {
-                terminalControllerRef.current = controller;
-              }}
+              ref={handleTerminalControllerRef}
               sessionKey={terminalSessionKey}
               chunks={bufferChunks}
               onInput={handleViewportInput}
@@ -1222,7 +1245,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               fontFamily={fontFamily}
               fontSize={fontSize}
               enableTouchScroll={isMobile}
-              autoFocus={!isMobile && isActive}
+              autoFocus={!isMobile}
             />
           </ErrorBoundary>
         </div>

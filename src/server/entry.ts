@@ -72,6 +72,16 @@ export function createApp(): express.Express {
     });
   });
 
+  // Client-side log relay — enables collecting browser/device logs
+  // on the server, critical for debugging mobile Safari / PWA issues.
+  app.post('/api/client-log', (req, res) => {
+    const { level, message, data } = req.body ?? {};
+    const ts = new Date().toISOString();
+    const line = `[client-log ${ts}] [${level ?? 'info'}] ${message ?? ''} ${data ? JSON.stringify(data) : ''}`;
+    console.log(line);
+    res.json({ ok: true });
+  });
+
   // 鉴权路由（公开：登录 / 登出 / 状态查询）
   app.use('/api/auth', authRoutes);
 
