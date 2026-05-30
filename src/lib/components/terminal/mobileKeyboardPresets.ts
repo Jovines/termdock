@@ -63,7 +63,7 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     label: 'Claude',
     programs: ['claude', 'claude-code'],
     includeAlt: false,
-    rowLayout: [3, 3],
+    rowLayout: [4],
     actions: [
       { id: 'claude-undo', label: '/undo', sequence: '/undo', doubleTapSequence: '/undo\r' },
       { id: 'claude-clear', label: '/clear', sequence: '/clear', doubleTapSequence: '/clear\r' },
