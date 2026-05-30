@@ -1182,13 +1182,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // ONLY on CSS custom properties, not React state.
   const wrapperStyle = isMobile
     ? {
-        transform: 'translateY(min(0px, calc(var(--app-vh, 0px) - var(--app-base-vh, 0px) + max(0px, env(safe-area-inset-bottom, 0px) - 16px))))',
+        transform: 'translateY(var(--kb-translate-y, 0px))',
+        transition: 'none',
       } as React.CSSProperties
     : undefined;
 
   const keyboardShrinkStyle = isMobile
     ? {
-        marginTop: 'max(0px, calc(var(--app-base-vh, 0px) - var(--app-vh, 0px) - max(0px, env(safe-area-inset-bottom, 0px) - 16px)))',
+        marginTop: 'var(--kb-margin-top, 0px)',
+        transition: 'none',
       } as React.CSSProperties
     : undefined;
 

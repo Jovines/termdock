@@ -100,6 +100,20 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       document.documentElement.style.setProperty(cssVarName, `${filteredHeight}px`);
       document.documentElement.style.setProperty('--app-vv-offset-top', `${nextOffsetTop}px`);
 
+      // Pre-compute keyboard translateY and marginTop so CSS can reference
+      // plain px values (avoids Safari bugs with min()/calc()/env() nested
+      // inside transform).
+      const baseVh = baseHeightRef.current;
+      let safeBottom = 0;
+      try {
+        const root = document.getElementById('root');
+        if (root) safeBottom = parseFloat(getComputedStyle(root).paddingBottom) || 0;
+      } catch { /* ignore */ }
+      const ty = Math.min(0, filteredHeight - baseVh + safeBottom);
+      const mt = Math.max(0, baseVh - filteredHeight - safeBottom);
+      document.documentElement.style.setProperty('--kb-translate-y', `${ty}px`);
+      document.documentElement.style.setProperty('--kb-margin-top', `${mt}px`);
+
       const previousHeight = prevApplied;
       if (previousHeight !== filteredHeight || nextOffsetTop > 0) {
         debugViewport('sync', {
