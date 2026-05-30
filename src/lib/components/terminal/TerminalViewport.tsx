@@ -1075,8 +1075,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           right: '\x1b[C',
         };
 
-        const dx = e.clientX - s.originX;
-        const dy = e.clientY - s.originY;
+        // Direction is always relative to the long-press origin so the
+        // indicator stays perfectly in sync with the finger's actual
+        // movement direction — no drift from origin resets.
+        const dx = e.clientX - s.tapStartX;
+        const dy = e.clientY - s.tapStartY;
         const dist = Math.hypot(dx, dy);
 
         const absDx = Math.abs(dx);
@@ -1092,6 +1095,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
         }
 
+        // Track incremental movement for repeat-rate control
         if (newDir && newDir !== s.joystickDir) {
           s.originX = e.clientX;
           s.originY = e.clientY;
