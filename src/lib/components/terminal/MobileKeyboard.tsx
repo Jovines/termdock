@@ -57,7 +57,6 @@ interface MobileKeyboardProps {
   onModifierToggle: (modifier: Modifier) => void;
   onPresetSelect: (mode: ToolbarPresetMode) => void;
   onExpandedChange?: (expanded: boolean) => void;
-  onPressStart: () => void;
 }
 
 export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
@@ -78,7 +77,6 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   onModifierToggle,
   onPresetSelect,
   onExpandedChange,
-  onPressStart,
 }) => {
   const [showExtended, setShowExtended] = React.useState(defaultShowExtended);
   const [showPresetMenu, setShowPresetMenu] = React.useState(false);
@@ -102,10 +100,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       if (target.closest('button')) {
         event.preventDefault();
         hapticLight();
-        onPressStart();
       }
     },
-    [onPressStart, toolbarDisabled]
+    [toolbarDisabled]
   );
 
   const preventContextMenu = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
@@ -125,9 +122,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       target.blur();
-      onPressStart();
     },
-    [onPressStart, toolbarDisabled]
+    [toolbarDisabled]
   );
 
   React.useEffect(() => {
@@ -184,10 +180,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       event.preventDefault();
-      onPressStart();
       onKeyPress(key);
     },
-    [onKeyPress, onPressStart, toolbarDisabled]
+    [onKeyPress, toolbarDisabled]
   );
 
   const handleModifierPointerDown = React.useCallback(
@@ -196,10 +191,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       event.preventDefault();
-      onPressStart();
       onModifierToggle(modifier);
     },
-    [onModifierToggle, onPressStart, toolbarDisabled]
+    [onModifierToggle, toolbarDisabled]
   );
 
   const handleToggleExtendedPointerDown = React.useCallback(
@@ -208,10 +202,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       event.preventDefault();
-      onPressStart();
       setShowExtended((current) => !current);
     },
-    [onPressStart, toolbarDisabled]
+    [toolbarDisabled]
   );
 
   const DOUBLE_TAP_WINDOW_MS = 250;
@@ -233,24 +226,20 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       event.preventDefault();
-      onPressStart();
 
       if (!action.doubleTapSequence) {
-        // No double-tap sequence: fire immediately (zero delay)
         onTextPress(action.sequence);
         return;
       }
 
       const pending = pendingTapRef.current;
       if (pending !== null && pending.actionId === action.id) {
-        // Double tap detected: cancel pending single-tap, fire double-tap sequence
         window.clearTimeout(pending.timer);
         pendingTapRef.current = null;
         onTextPress(action.doubleTapSequence);
         return;
       }
 
-      // First tap: start timer for single-tap, wait to see if double-tap follows
       clearPendingTap();
       const timer = window.setTimeout(() => {
         pendingTapRef.current = null;
@@ -258,7 +247,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       }, DOUBLE_TAP_WINDOW_MS);
       pendingTapRef.current = { actionId: action.id, timer };
     },
-    [clearPendingTap, onPressStart, onTextPress, toolbarDisabled],
+    [clearPendingTap, onTextPress, toolbarDisabled],
   );
 
   const handlePresetCyclePointerDown = React.useCallback(
@@ -267,7 +256,6 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       event.preventDefault();
-      onPressStart();
       const rect = event.currentTarget.getBoundingClientRect();
       setPresetMenuPosition({
         left: Math.max(8, rect.left),
@@ -275,7 +263,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       });
       setShowPresetMenu((current) => !current);
     },
-    [onPressStart, toolbarDisabled]
+    [toolbarDisabled]
   );
 
   const handlePresetOptionPointerDown = React.useCallback(
@@ -284,12 +272,11 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       event.preventDefault();
-      onPressStart();
       setShowPresetMenu(false);
       setPresetMenuPosition(null);
       onPresetSelect(mode);
     },
-    [onPressStart, onPresetSelect, toolbarDisabled]
+    [onPresetSelect, toolbarDisabled]
   );
 
   const hasPresetActions = extraActions.length > 0;

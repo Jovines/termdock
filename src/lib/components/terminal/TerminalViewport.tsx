@@ -247,6 +247,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
     const keepInputFocusUntilRef = React.useRef(0);
     const lastTouchInteractionAtRef = React.useRef(0);
+    const lastFocusHiddenInputAtRef = React.useRef(0);
     const [, forceRender] = React.useReducer((x) => x + 1, 0);
     const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
     const [loadingState, setLoadingState] = React.useState<LoadingState>('loading');
@@ -504,22 +505,24 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
 
       try {
-        // Synchronously remove readonly so iOS shows the keyboard.
-        // React state is async — can't use setTextareaReadOnly here.
         input.removeAttribute('readonly');
 
-        // When iOS dismissed the keyboard via its own dismiss button, the
-        // textarea stays focused but the keyboard is gone — plain focus() is
-        // a no-op.  Only in that specific case do we blur first.
         const alreadyFocused = typeof document !== 'undefined' && document.activeElement === input;
         const keyboardGone = alreadyFocused && !isViewportKeyboardLikelyOpen();
+        const now = nowMs();
+        const cooldownMs = now - lastFocusHiddenInputAtRef.current;
+        lastFocusHiddenInputAtRef.current = now;
 
-        if (keyboardGone) {
+        if (keyboardGone && cooldownMs > 600) {
           input.blur();
+          input.removeAttribute('readonly');
+          input.focus();
+          lastFocusHiddenInputAtRef.current = nowMs();
+        } else {
+          input.focus();
         }
-        input.focus();
       } catch { /* ignored */ }
-    }, [isViewportKeyboardLikelyOpen]);
+    }, [isViewportKeyboardLikelyOpen, nowMs]);
 
     const markInputBlurGuard = React.useCallback((durationMs: number) => {
       keepInputFocusUntilRef.current = nowMs() + durationMs;

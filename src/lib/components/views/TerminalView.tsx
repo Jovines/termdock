@@ -1033,14 +1033,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (lockedModifier === modifier) {
         setLockedModifier(null);
         setActiveModifier(null);
-        focusTerminalIfActive();
         return;
       }
 
       if (isDoubleTap) {
         setLockedModifier(modifier);
         setActiveModifier(modifier);
-        focusTerminalIfActive();
         return;
       }
 
@@ -1049,14 +1047,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
 
       setActiveModifier((current) => (current === modifier ? null : modifier));
-      focusTerminalIfActive();
     },
-    [focusTerminalIfActive, lockedModifier]
+    [lockedModifier]
   );
-
-  const handleMobileToolbarPressStart = React.useCallback(() => {
-    focusTerminalIfActive();
-  }, [focusTerminalIfActive]);
 
   const handleInputFocusChange = React.useCallback((focused: boolean) => {
     debugKeyboard('input focus changed', {
@@ -1086,9 +1079,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         skipModifierTransform: true,
         consumeModifier: shouldConsumeModifier,
       });
-      focusTerminalIfActive();
     },
-    [activeModifier, focusTerminalIfActive, handleViewportInput]
+    [activeModifier, handleViewportInput]
   );
 
   const handleToolbarTextPress = React.useCallback((sequence: string) => {
@@ -1097,10 +1089,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
     const consumeModifier = activeModifier !== null;
-    // First segment is sent immediately and consumes any active modifier;
-    // subsequent segments are sent after a small delay so TUIs that react
-    // to the first keystroke (e.g. coco's slash-command palette) have time
-    // to enter the right input mode before receiving the rest.
     handleViewportInput(decodeToolbarSequence(segments[0]), {
       skipModifierTransform: true,
       consumeModifier,
@@ -1113,8 +1101,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         });
       }, TOOLBAR_SEGMENT_DELAY_MS * i);
     }
-    focusTerminalIfActive();
-  }, [activeModifier, focusTerminalIfActive, handleViewportInput]);
+  }, [activeModifier, handleViewportInput]);
 
   const detectedPreset = React.useMemo(() => detectToolbarPreset(detectedActiveProgram, toolbarPresets), [detectedActiveProgram, toolbarPresets]);
   const effectivePresetId = toolbarPresetMode === 'auto' ? detectedPreset : toolbarPresetMode;
@@ -1280,7 +1267,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         onModifierToggle={handleModifierToggle}
         onPresetSelect={handlePresetSelect}
         onExpandedChange={handleExpandedChange}
-        onPressStart={handleMobileToolbarPressStart}
       />
     </div>
   );
