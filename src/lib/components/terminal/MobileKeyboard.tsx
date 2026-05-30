@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowDown as RiArrowDownLine, CornerDownLeft as RiArrowGoBackLine, ArrowLeft as RiArrowLeftLine, ArrowRight as RiArrowRightLine, ArrowUp as RiArrowUpLine } from 'lucide-react';
+import { ChevronDown, ChevronUp, CornerDownLeft as RiArrowGoBackLine } from 'lucide-react';
 import { light as hapticLight } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from './PresetModeButton';
@@ -8,65 +8,34 @@ import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from './PresetModeButton
 type Modifier = 'ctrl' | 'alt';
 type MobileKey =
   | 'esc'
-  | 'tab'
   | 'enter'
   | 'home'
   | 'end'
   | 'ctrl-c'
   | 'ctrl-d'
-  | 'arrow-up'
-  | 'arrow-down'
-  | 'arrow-left'
-  | 'arrow-right';
+  | 'ctrl-w'
+  | 'ctrl-u';
 
-type RepeatableMobileKey = 'arrow-up' | 'arrow-down' | 'arrow-left' | 'arrow-right';
 type ExpandedItem =
   | { id: 'preset'; kind: 'preset' }
   | { id: 'alt'; kind: 'alt' }
-  | { id: 'enter'; kind: 'key'; keyName: 'enter' }
   | { id: 'home'; kind: 'key'; keyName: 'home' }
   | { id: 'end'; kind: 'key'; keyName: 'end' }
-  | { id: 'ctrl-c'; kind: 'key'; keyName: 'ctrl-c' }
   | { id: 'ctrl-d'; kind: 'key'; keyName: 'ctrl-d' }
   | { id: string; kind: 'text'; action: MobileToolbarAction };
 
-const REPEAT_START_DELAY_MS = 280;
-const REPEAT_INTERVAL_MS = 70;
 const BASE_KEY_SEQUENCES: Record<MobileKey, string> = {
   esc: '\u001b',
-  tab: '\t',
   enter: '\r',
   home: '\u001b[H',
   end: '\u001b[F',
   'ctrl-c': '\u0003',
   'ctrl-d': '\u0004',
-  'arrow-up': '\u001b[A',
-  'arrow-down': '\u001b[B',
-  'arrow-left': '\u001b[D',
-  'arrow-right': '\u001b[C',
+  'ctrl-w': '\u0017',
+  'ctrl-u': '\u0015',
 };
 
-const MODIFIER_ARROW_SUFFIX: Record<Modifier, string> = {
-  ctrl: '5',
-  alt: '3',
-};
-
-export function getSequenceForKey(key: MobileKey, modifier: Modifier | null): string | null {
-  if (modifier) {
-    switch (key) {
-      case 'arrow-up':
-        return `\u001b[1;${MODIFIER_ARROW_SUFFIX[modifier]}A`;
-      case 'arrow-down':
-        return `\u001b[1;${MODIFIER_ARROW_SUFFIX[modifier]}B`;
-      case 'arrow-right':
-        return `\u001b[1;${MODIFIER_ARROW_SUFFIX[modifier]}C`;
-      case 'arrow-left':
-        return `\u001b[1;${MODIFIER_ARROW_SUFFIX[modifier]}D`;
-      default:
-        break;
-    }
-  }
-
+export function getSequenceForKey(key: MobileKey, _modifier: Modifier | null): string | null {
   return BASE_KEY_SEQUENCES[key] ?? null;
 }
 
@@ -116,17 +85,6 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   const [presetMenuPosition, setPresetMenuPosition] = React.useState<{ top: number; left: number } | null>(null);
   const toolbarDisabled = disabled || !visible;
   const presetButtonRef = React.useRef<HTMLButtonElement | null>(null);
-  const repeatStateRef = React.useRef<{
-    key: RepeatableMobileKey | null;
-    pointerId: number | null;
-    delayTimer: number | null;
-    intervalTimer: number | null;
-  }>({
-    key: null,
-    pointerId: null,
-    delayTimer: null,
-    intervalTimer: null,
-  });
   const pendingTapRef = React.useRef<{
     actionId: string;
     timer: number;
@@ -172,24 +130,6 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     [onPressStart, toolbarDisabled]
   );
 
-  const stopKeyRepeat = React.useCallback(() => {
-    const state = repeatStateRef.current;
-    if (state.delayTimer !== null) {
-      window.clearTimeout(state.delayTimer);
-      state.delayTimer = null;
-    }
-    if (state.intervalTimer !== null) {
-      window.clearInterval(state.intervalTimer);
-      state.intervalTimer = null;
-    }
-    state.key = null;
-    state.pointerId = null;
-  }, []);
-
-  React.useEffect(() => () => {
-    stopKeyRepeat();
-  }, [stopKeyRepeat]);
-
   React.useEffect(() => {
     setShowExtended(defaultShowExtended);
   }, [defaultShowExtended]);
@@ -200,11 +140,10 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
 
   React.useEffect(() => {
     if (toolbarDisabled) {
-      stopKeyRepeat();
       setShowPresetMenu(false);
       setPresetMenuPosition(null);
     }
-  }, [stopKeyRepeat, toolbarDisabled]);
+  }, [toolbarDisabled]);
 
   React.useEffect(() => {
     if (visible) {
@@ -239,60 +178,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     };
   }, [showPresetMenu]);
 
-  const handleRepeatPointerDown = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>, key: RepeatableMobileKey) => {
-      if (toolbarDisabled) {
-        return;
-      }
-      event.preventDefault();
-      onPressStart();
-
-      stopKeyRepeat();
-
-      const state = repeatStateRef.current;
-      state.key = key;
-      state.pointerId = event.pointerId;
-
-      onKeyPress(key);
-
-      try {
-        event.currentTarget.setPointerCapture(event.pointerId);
-      } catch { /* ignored */ }
-
-      state.delayTimer = window.setTimeout(() => {
-        const nextKey = repeatStateRef.current.key;
-        if (!nextKey) {
-          return;
-        }
-        repeatStateRef.current.intervalTimer = window.setInterval(() => {
-          const currentKey = repeatStateRef.current.key;
-          if (!currentKey || toolbarDisabled) {
-            return;
-          }
-          onKeyPress(currentKey);
-        }, REPEAT_INTERVAL_MS);
-      }, REPEAT_START_DELAY_MS);
-    },
-    [onKeyPress, onPressStart, stopKeyRepeat, toolbarDisabled]
-  );
-
-  const handleRepeatPointerEnd = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      const state = repeatStateRef.current;
-      if (state.pointerId !== null && state.pointerId !== event.pointerId) {
-        return;
-      }
-      const hasCapture = event.currentTarget.hasPointerCapture?.(event.pointerId) ?? false;
-      if (hasCapture) {
-        event.currentTarget.releasePointerCapture?.(event.pointerId);
-      }
-      stopKeyRepeat();
-    },
-    [stopKeyRepeat]
-  );
-
   const handleSinglePointerDown = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>, key: Exclude<MobileKey, RepeatableMobileKey>) => {
+    (event: React.PointerEvent<HTMLButtonElement>, key: MobileKey) => {
       if (toolbarDisabled) {
         return;
       }
@@ -420,10 +307,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     }
 
     return defaultItems.concat([
-      { id: 'enter', kind: 'key', keyName: 'enter' as const },
       { id: 'home', kind: 'key', keyName: 'home' as const },
       { id: 'end', kind: 'key', keyName: 'end' as const },
-      { id: 'ctrl-c', kind: 'key', keyName: 'ctrl-c' as const },
       { id: 'ctrl-d', kind: 'key', keyName: 'ctrl-d' as const },
     ]);
   }, [extraActions, hasPresetActions, includeAlt]);
@@ -485,20 +370,22 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         </button>
         <button
           type="button"
-          onPointerDown={(event) => handleSinglePointerDown(event, 'tab')}
+          onPointerDown={(event) => handleSinglePointerDown(event, 'enter')}
           tabIndex={-1}
           disabled={toolbarDisabled}
-          className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
+          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
-          Tab
+          <RiArrowGoBackLine size={16} />
         </button>
         <button
           type="button"
           onPointerDown={(event) => handleModifierPointerDown(event, 'ctrl')}
           tabIndex={-1}
           disabled={toolbarDisabled}
-          className={`h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs disabled:opacity-50 flex items-center justify-center ${
-            activeModifier === 'ctrl' ? 'bg-primary text-primary-foreground' : ''
+          className={`h-7 w-full rounded-full shadow-sm text-xs disabled:opacity-50 flex items-center justify-center transition-all ${
+            activeModifier === 'ctrl'
+              ? 'bg-primary text-primary-foreground scale-105 shadow-md shadow-primary/40'
+              : 'bg-surface-2'
           } ${
             lockedModifier === 'ctrl' ? 'ring-2 ring-accent' : ''
           }`}
@@ -507,60 +394,48 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         </button>
         <button
           type="button"
-          onPointerDown={(event) => handleRepeatPointerDown(event, 'arrow-left')}
-          onPointerUp={handleRepeatPointerEnd}
-          onPointerCancel={handleRepeatPointerEnd}
-          onPointerLeave={handleRepeatPointerEnd}
+          onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-c')}
           tabIndex={-1}
           disabled={toolbarDisabled}
-          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
+          className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
-          <RiArrowLeftLine size={16} />
+          C-C
         </button>
         <button
           type="button"
-          onPointerDown={(event) => handleRepeatPointerDown(event, 'arrow-up')}
-          onPointerUp={handleRepeatPointerEnd}
-          onPointerCancel={handleRepeatPointerEnd}
-          onPointerLeave={handleRepeatPointerEnd}
+          onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-w')}
           tabIndex={-1}
           disabled={toolbarDisabled}
-          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
+          className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
-          <RiArrowUpLine size={16} />
+          C-W
         </button>
         <button
           type="button"
-          onPointerDown={(event) => handleRepeatPointerDown(event, 'arrow-down')}
-          onPointerUp={handleRepeatPointerEnd}
-          onPointerCancel={handleRepeatPointerEnd}
-          onPointerLeave={handleRepeatPointerEnd}
+          onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-u')}
           tabIndex={-1}
           disabled={toolbarDisabled}
-          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
+          className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
-          <RiArrowDownLine size={16} />
+          C-U
         </button>
         <button
           type="button"
-          onPointerDown={(event) => handleRepeatPointerDown(event, 'arrow-right')}
-          onPointerUp={handleRepeatPointerEnd}
-          onPointerCancel={handleRepeatPointerEnd}
-          onPointerLeave={handleRepeatPointerEnd}
+          onPointerDown={() => onTextPress('/')}
           tabIndex={-1}
           disabled={toolbarDisabled}
-          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
+          className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
-          <RiArrowRightLine size={16} />
+          /
         </button>
         <button
           type="button"
           onPointerDown={handleToggleExtendedPointerDown}
           tabIndex={-1}
           disabled={toolbarDisabled}
-          className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
+          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
-          {showExtended ? 'Less' : 'More'}
+          {showExtended ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
         </button>
       </div>
 
@@ -601,8 +476,10 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
                       onPointerDown={(event) => handleModifierPointerDown(event, 'alt')}
                       tabIndex={-1}
                       disabled={toolbarDisabled}
-                      className={`h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs disabled:opacity-50 flex items-center justify-center ${
-                        activeModifier === 'alt' ? 'bg-primary text-primary-foreground' : ''
+                      className={`h-7 w-full rounded-full shadow-sm text-xs disabled:opacity-50 flex items-center justify-center transition-all ${
+                        activeModifier === 'alt'
+                          ? 'bg-primary text-primary-foreground scale-105 shadow-md shadow-primary/40'
+                          : 'bg-surface-2'
                       } ${lockedModifier === 'alt' ? 'ring-2 ring-accent' : ''}`}
                     >
                       <span className="font-medium">{lockedModifier === 'alt' ? 'Alt*' : 'Alt'}</span>
@@ -635,11 +512,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
                     onPointerDown={(event) => handleSinglePointerDown(event, item.keyName)}
                     tabIndex={-1}
                     disabled={toolbarDisabled}
-                    className={`h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 ${
-                      item.keyName === 'enter' ? 'flex items-center justify-center' : ''
-                    }`}
+                    className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
                   >
-                    {item.keyName === 'enter' ? <RiArrowGoBackLine size={16} /> : item.keyName === 'ctrl-c' ? 'Ctrl-C' : item.keyName === 'ctrl-d' ? 'Ctrl-D' : item.keyName === 'home' ? 'Home' : 'End'}
+                    {item.keyName === 'ctrl-d' ? 'Ctrl-D' : item.keyName === 'home' ? 'Home' : 'End'}
                   </button>
                 );
               })}

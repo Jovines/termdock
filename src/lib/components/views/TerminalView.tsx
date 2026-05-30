@@ -1076,7 +1076,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, []);
 
   const handleMobileKeyPress = React.useCallback(
-    (key: 'esc' | 'tab' | 'enter' | 'home' | 'end' | 'ctrl-c' | 'ctrl-d' | 'arrow-up' | 'arrow-down' | 'arrow-left' | 'arrow-right') => {
+    (key: 'esc' | 'enter' | 'home' | 'end' | 'ctrl-c' | 'ctrl-d' | 'ctrl-w' | 'ctrl-u') => {
       const sequence = getSequenceForKey(key, activeModifier);
       if (!sequence) {
         return;
