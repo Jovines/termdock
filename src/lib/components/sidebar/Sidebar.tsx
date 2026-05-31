@@ -8,10 +8,12 @@ interface SidebarProps {
   onClose: () => void;
   onOpen?: () => void;
   children: React.ReactNode;
+  /** Push mode: sidebar takes horizontal space instead of overlaying (desktop) */
+  push?: boolean;
 }
 
 const EDGE_ZONE_WIDTH = 30;
-const SNAP_PROGRESS_THRESHOLD = 0.3;
+const SNAP_PROGRESS_THRESHOLD = 0.5;
 // @use-gesture reports velocity in px/ms.
 const SNAP_VELOCITY_THRESHOLD = 0.5;
 
@@ -20,7 +22,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Sidebar(
-  { side, isOpen, drawerWidthPx, onClose, onOpen, children },
+  { side, isOpen, drawerWidthPx, onClose, onOpen, children, push },
   forwardedRef,
 ) {
   const isLeft = side === 'left';
@@ -86,20 +88,29 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   }, [isOpen, onClose]);
 
   const decideSnap = useCallback((velocity: number, direction: number) => {
-    const currentX = currentXRef.current;
-    const progress = isLeft
-      ? (currentX + drawerWidthPx) / drawerWidthPx
-      : (drawerWidthPx - currentX) / drawerWidthPx;
-    const flingOpen = Math.abs(velocity) > SNAP_VELOCITY_THRESHOLD && (isLeft ? direction > 0 : direction < 0);
-    const shouldOpen = progress > SNAP_PROGRESS_THRESHOLD || flingOpen;
+    const hasFling = Math.abs(velocity) > SNAP_VELOCITY_THRESHOLD;
+    const flingClose = hasFling && (isLeft ? direction < 0 : direction > 0);
+    const flingOpen = hasFling && (isLeft ? direction > 0 : direction < 0);
 
-    if (shouldOpen) {
+    if (flingClose) {
+      if (isOpenRef.current) onClose();
+      else snapToState(false);
+    } else if (flingOpen) {
       if (!isOpenRef.current) onOpen?.();
       else snapToState(true);
-    } else if (isOpenRef.current) {
-      onClose();
     } else {
-      snapToState(false);
+      const currentX = currentXRef.current;
+      const progress = isLeft
+        ? (currentX + drawerWidthPx) / drawerWidthPx
+        : (drawerWidthPx - currentX) / drawerWidthPx;
+      if (progress > SNAP_PROGRESS_THRESHOLD) {
+        if (!isOpenRef.current) onOpen?.();
+        else snapToState(true);
+      } else if (isOpenRef.current) {
+        onClose();
+      } else {
+        snapToState(false);
+      }
     }
   }, [drawerWidthPx, isLeft, onClose, onOpen, snapToState]);
 
@@ -142,6 +153,32 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     },
   );
 
+  // ── Push mode (desktop): flex child, no overlay ──
+  if (push) {
+    return (
+      <aside
+        ref={setPanelRef}
+        data-sidebar={side}
+        className={`shrink-0 flex flex-col bg-surface overflow-hidden transition-[width] duration-200 ease-out ${
+          isLeft ? 'border-r border-border/15' : 'border-l border-border/15'
+        }`}
+        style={{
+          width: isOpen ? drawerWidthPx : 0,
+          paddingTop: 'max(0px, env(safe-area-inset-top, 0px) - 24px)',
+          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+          ...(isLeft
+            ? { paddingLeft: 'env(safe-area-inset-left, 0px)' }
+            : { paddingRight: 'env(safe-area-inset-right, 0px)' }),
+        }}
+      >
+        <div style={{ width: drawerWidthPx, minWidth: drawerWidthPx }}>
+          {children}
+        </div>
+      </aside>
+    );
+  }
+
+  // ── Overlay mode (mobile): fixed, draggable ──
   return (
     <>
       <div

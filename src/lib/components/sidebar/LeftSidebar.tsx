@@ -28,6 +28,7 @@ interface LeftSidebarProps {
   }>;
   onNewSession: () => void;
   onOpenDrawer: () => void;
+  push?: boolean;
 }
 
 function AgentStatusDot({ status, needsReview }: { status: AgentStatus | null; needsReview?: boolean }) {
@@ -58,7 +59,7 @@ function getCwdLeafName(cwd: string | null): string | null {
 }
 
 export function LeftSidebar(
-  { isOpen, drawerWidthPx, onClose, onOpen, sessions, activeSessionId, sessionStates, onNewSession, onOpenDrawer }: LeftSidebarProps,
+  { isOpen, drawerWidthPx, onClose, onOpen, sessions, activeSessionId, sessionStates, onNewSession, onOpenDrawer, push }: LeftSidebarProps,
 ) {
   return (
     <Sidebar
@@ -67,6 +68,7 @@ export function LeftSidebar(
       drawerWidthPx={drawerWidthPx}
       onClose={onClose}
       onOpen={onOpen}
+      push={push}
     >
       {/* Header */}
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/15 px-4 py-3">

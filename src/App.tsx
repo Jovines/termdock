@@ -5,6 +5,8 @@ import {
   Settings as RiSettings4Line,
   Plus as RiAddLine,
   X as RiCloseLine,
+  PanelLeft as RiPanelLeftLine,
+  PanelRight as RiPanelRightLine,
   LayoutGrid as RiLayoutGridLine,
   RefreshCw as RiRefreshLine,
   Check as RiCheckLine,
@@ -568,6 +570,14 @@ function App() {
           <div
             className="flex min-h-6 shrink-0 items-center justify-between gap-1 bg-background px-1 sm:min-h-7 sm:px-1.5"
           >
+            <button
+              type="button"
+              onClick={() => useSidebarStore.getState().toggleLeft()}
+              className="hidden lg:inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground"
+              aria-label="Toggle sessions sidebar"
+            >
+              <RiPanelLeftLine size={14} />
+            </button>
             <DragDropContext onDragEnd={handleDragEnd}>
             <Droppable droppableId="tabs" direction="horizontal">
               {(provided) => (
@@ -685,18 +695,6 @@ function App() {
                         ) : (
                           <RiTerminalLine size={12} className="shrink-0 animate-pulse text-yellow-400" />
                         )
-                      ) : ts?.agentStatus === 'idle' ? (
-                        session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={12} className="shrink-0 text-gray-500" />
-                        ) : (
-                          <RiTerminalLine size={12} className="shrink-0 text-gray-500" />
-                        )
-                      ) : ts?.agentColor ? (
-                        session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={12} className="shrink-0" style={{ color: ts.agentColor }} />
-                        ) : (
-                          <RiTerminalLine size={12} className="shrink-0" style={{ color: ts.agentColor }} />
-                        )
                       ) : session.mode === 'tmux' ? (
                         <RiLayoutGridLine size={12} className="shrink-0" />
                       ) : (
@@ -746,6 +744,14 @@ function App() {
               )}
               <button
                 type="button"
+                onClick={() => useSidebarStore.getState().toggleRight()}
+                className="hidden lg:inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground"
+                aria-label="Toggle explorer sidebar"
+              >
+                <RiPanelRightLine size={14} />
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setDrawerTab('settings');
                   setIsDrawerOpen(true);
@@ -759,17 +765,46 @@ function App() {
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-hidden bg-background">
-            <MultiTerminalView
-              fontSize={fontSize}
-              rendererMode={rendererMode}
-              toolbarPresets={toolbarPresets}
-              showDebug={showDebug}
-              defaultSessionMode={newSessionMode}
-              defaultTmuxSessionName={newSessionTmuxName}
-              showSessionStrip={false}
-              onSessionDataUpdate={handleSessionDataUpdate}
-            />
+          <div className="min-h-0 flex-1 flex overflow-hidden bg-background">
+            {/* Left Sidebar — push mode on desktop */}
+            <div className="hidden lg:block">
+              <LeftSidebar
+                isOpen={sidebarLeftOpen}
+                drawerWidthPx={drawerWidthPx}
+                onClose={useSidebarStore.getState().closeLeft}
+                onOpen={useSidebarStore.getState().openLeft}
+                sessions={sessions}
+                activeSessionId={activeSessionId}
+                sessionStates={terminalSessions}
+                onNewSession={() => dispatchNewSession()}
+                onOpenDrawer={() => { setDrawerTab('sessions'); setIsDrawerOpen(true); }}
+                push
+              />
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <MultiTerminalView
+                fontSize={fontSize}
+                rendererMode={rendererMode}
+                toolbarPresets={toolbarPresets}
+                showDebug={showDebug}
+                defaultSessionMode={newSessionMode}
+                defaultTmuxSessionName={newSessionTmuxName}
+                showSessionStrip={false}
+                onSessionDataUpdate={handleSessionDataUpdate}
+              />
+            </div>
+
+            {/* Right Sidebar — push mode on desktop */}
+            <div className="hidden lg:block">
+              <RightSidebar
+                isOpen={sidebarRightOpen}
+                drawerWidthPx={drawerWidthPx}
+                onClose={useSidebarStore.getState().closeRight}
+                onOpen={useSidebarStore.getState().openRight}
+                push
+              />
+            </div>
           </div>
         </div>
       </main>
@@ -1635,26 +1670,30 @@ function App() {
         </>
       )}
 
-      {/* Left Sidebar */}
-      <LeftSidebar
-        isOpen={sidebarLeftOpen}
-        drawerWidthPx={drawerWidthPx}
-        onClose={useSidebarStore.getState().closeLeft}
-        onOpen={useSidebarStore.getState().openLeft}
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        sessionStates={terminalSessions}
-        onNewSession={() => dispatchNewSession()}
-        onOpenDrawer={() => { setDrawerTab('sessions'); setIsDrawerOpen(true); }}
-      />
+      {/* Left Sidebar — overlay mode on mobile */}
+      <div className="lg:hidden">
+        <LeftSidebar
+          isOpen={sidebarLeftOpen}
+          drawerWidthPx={drawerWidthPx}
+          onClose={useSidebarStore.getState().closeLeft}
+          onOpen={useSidebarStore.getState().openLeft}
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          sessionStates={terminalSessions}
+          onNewSession={() => dispatchNewSession()}
+          onOpenDrawer={() => { setDrawerTab('sessions'); setIsDrawerOpen(true); }}
+        />
+      </div>
 
-      {/* Right Sidebar */}
-      <RightSidebar
-        isOpen={sidebarRightOpen}
-        drawerWidthPx={drawerWidthPx}
-        onClose={useSidebarStore.getState().closeRight}
-        onOpen={useSidebarStore.getState().openRight}
-      />
+      {/* Right Sidebar — overlay mode on mobile */}
+      <div className="lg:hidden">
+        <RightSidebar
+          isOpen={sidebarRightOpen}
+          drawerWidthPx={drawerWidthPx}
+          onClose={useSidebarStore.getState().closeRight}
+          onOpen={useSidebarStore.getState().openRight}
+        />
+      </div>
 
       {/* Debug Info Panel */}
       {showDebug && (

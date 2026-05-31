@@ -15,10 +15,11 @@ interface RightSidebarProps {
   drawerWidthPx: number;
   onClose: () => void;
   onOpen?: () => void;
+  push?: boolean;
 }
 
 export function RightSidebar(
-  { isOpen, drawerWidthPx, onClose, onOpen }: RightSidebarProps,
+  { isOpen, drawerWidthPx, onClose, onOpen, push }: RightSidebarProps,
 ) {
   const {
     rightTab,
@@ -61,6 +62,7 @@ export function RightSidebar(
       drawerWidthPx={drawerWidthPx}
       onClose={onClose}
       onOpen={onOpen}
+      push={push}
     >
       {/* Header */}
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/15 px-4 py-3">
