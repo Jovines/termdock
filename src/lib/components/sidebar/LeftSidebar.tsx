@@ -112,6 +112,10 @@ export function LeftSidebar(
     activeItemRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [activeSessionId, isOpen, visibleSessions.length]);
 
+  useEffect(() => {
+    if (!isOpen) setQuery('');
+  }, [isOpen]);
+
   const closeIfOverlay = () => {
     if (!push) onClose();
   };
@@ -162,15 +166,24 @@ export function LeftSidebar(
           </div>
         </div>
 
+        {!push && (
+          <div className="mt-2 text-[11px] leading-none text-muted-foreground/70">
+            Tap a session to switch · swipe left or tap outside to close
+          </div>
+        )}
+
         <div className="mt-3 flex items-center gap-2 rounded-full bg-surface-2 px-3 py-2 text-muted-foreground focus-within:bg-surface-elevated">
           <RiSearchLine size={14} className="shrink-0" />
           <input
+            type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search sessions"
             className="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground"
             autoCapitalize="off"
             autoCorrect="off"
+            autoComplete="off"
+            enterKeyHint="search"
           />
           {query && (
             <button
@@ -201,7 +214,7 @@ export function LeftSidebar(
       </div>
 
       {/* Session list */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
         {sessions.length === 0 ? (
           <div className="rounded-2xl bg-surface-2/60 px-4 py-8 text-center">
             <RiTerminalLine size={28} className="mx-auto mb-2 text-muted-foreground" />
@@ -288,22 +301,22 @@ export function LeftSidebar(
       </div>
 
       {/* Footer actions */}
-      <div className="shrink-0 border-t border-border/15 p-3 space-y-2">
+      <div className={`shrink-0 border-t border-border/15 p-3 ${push ? 'space-y-2' : 'grid grid-cols-2 gap-2'}`}>
         <button
           type="button"
           onClick={() => { onNewSession(); closeIfOverlay(); }}
-          className="w-full flex items-center justify-center gap-2 rounded-full bg-primary/15 px-4 py-2.5 text-sm font-medium text-primary transition hover:bg-primary/25"
+          className="w-full flex items-center justify-center gap-2 rounded-full bg-primary/15 px-4 py-2.5 text-sm font-medium text-primary transition hover:bg-primary/25 active:scale-[0.98]"
         >
           <RiAddLine size={16} />
-          New session
+          <span className="truncate">{push ? 'New session' : 'New'}</span>
         </button>
         <button
           type="button"
           onClick={() => { onOpenDrawer(); closeIfOverlay(); }}
-          className="w-full flex items-center justify-center gap-2 rounded-full bg-surface-2 px-4 py-2.5 text-sm font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+          className="w-full flex items-center justify-center gap-2 rounded-full bg-surface-2 px-4 py-2.5 text-sm font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-[0.98]"
         >
           <RiSettings4Line size={16} />
-          Settings
+          <span className="truncate">{push ? 'Settings' : 'Manage'}</span>
         </button>
       </div>
     </Sidebar>

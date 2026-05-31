@@ -81,6 +81,10 @@ export function RightSidebar(
     return () => { cancelled = true; };
   }, [isOpen, rootPath, selectedFilePath, setChangedFiles, setRightTab]);
 
+  useEffect(() => {
+    if (!isOpen) setFileQuery('');
+  }, [isOpen]);
+
   const handleFileSelect = useCallback((path: string) => {
     selectFile(path);
     setRightTab('diff');
@@ -139,22 +143,31 @@ export function RightSidebar(
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive active:scale-95"
             aria-label="Close"
           >
             <RiCloseLine size={18} />
           </button>
         </div>
 
-        <div className="mt-3 flex items-center gap-2 rounded-md border border-border/20 bg-background-subtle px-2.5 py-1.5 focus-within:border-primary/35">
+        {!push && (
+          <div className="mt-2 text-[11px] leading-none text-muted-foreground/70">
+            Browse files and changes · swipe right or tap outside to close
+          </div>
+        )}
+
+        <div className="mt-3 flex items-center gap-2 rounded-full border border-border/20 bg-background-subtle px-3 py-2 focus-within:border-primary/35">
           <RiSearch size={14} className="shrink-0 text-muted-foreground" />
           <input
+            type="search"
             value={fileQuery}
             onChange={(event) => setFileQuery(event.target.value)}
             placeholder="Search changes or files"
             className="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground"
             autoCapitalize="off"
             autoCorrect="off"
+            autoComplete="off"
+            enterKeyHint="search"
             spellCheck={false}
           />
           {fileQuery && (
@@ -181,11 +194,11 @@ export function RightSidebar(
 
       {/* Tab bar */}
       <div className="shrink-0 border-b border-border/15 px-3 py-2">
-        <div className="grid grid-cols-2 gap-1 rounded-md bg-background-subtle p-0.5">
+        <div className="grid grid-cols-2 gap-1 rounded-full bg-background-subtle p-0.5">
           <button
             type="button"
             onClick={() => setRightTab('diff')}
-            className={`flex items-center justify-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium ${
+            className={`flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-xs font-medium transition active:scale-[0.98] ${
               rightTab === 'diff'
                 ? 'bg-surface-elevated text-foreground'
                 : 'text-muted-foreground hover:bg-surface-2'
@@ -202,7 +215,7 @@ export function RightSidebar(
           <button
             type="button"
             onClick={() => setRightTab('files')}
-            className={`flex items-center justify-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium ${
+            className={`flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-xs font-medium transition active:scale-[0.98] ${
               rightTab === 'files'
                 ? 'bg-surface-elevated text-foreground'
                 : 'text-muted-foreground hover:bg-surface-2'
@@ -215,7 +228,7 @@ export function RightSidebar(
       </div>
 
       {/* Content */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         {rightTab === 'files' ? (
           <FileTree
             rootPath={rootPath ?? ''}
@@ -231,7 +244,7 @@ export function RightSidebar(
                   <button
                     type="button"
                     onClick={() => selectDiffFile(null)}
-                    className={`rounded px-2 py-1 text-[11px] font-medium ${
+                    className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
                       selectedFilePath === null
                         ? 'bg-surface-elevated text-foreground'
                         : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
@@ -254,7 +267,7 @@ export function RightSidebar(
                         key={path}
                         type="button"
                         onClick={() => selectDiffFile(path)}
-                        className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left ${
+                        className={`flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition active:scale-[0.99] ${
                           isSelected
                             ? 'bg-surface-elevated text-foreground'
                             : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'

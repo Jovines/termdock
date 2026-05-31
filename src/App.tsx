@@ -222,7 +222,7 @@ function App() {
 
   // Sidebar drawer dimensions
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
-  const drawerWidthPx = isMobile ? window.innerWidth * 0.85 : 360;
+  const drawerWidthPx = isMobile ? Math.min(window.innerWidth * 0.92, 420) : 360;
 
   // Desktop keyboard shortcuts
   useEffect(() => {
@@ -681,8 +681,9 @@ function App() {
             <button
               type="button"
               onClick={() => useSidebarStore.getState().toggleLeft()}
-              className="hidden lg:inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground lg:bg-transparent lg:hover:bg-surface-2"
               aria-label="Toggle sessions sidebar"
+              title="Sessions"
             >
               <RiPanelLeftLine size={14} />
             </button>
@@ -825,8 +826,9 @@ function App() {
               <button
                 type="button"
                 onClick={() => useSidebarStore.getState().toggleRight()}
-                className="hidden lg:inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground"
+                className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground lg:bg-transparent lg:hover:bg-surface-2"
                 aria-label="Toggle explorer sidebar"
+                title="Explorer"
               >
                 <RiPanelRightLine size={14} />
               </button>

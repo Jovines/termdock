@@ -241,10 +241,10 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
         style={{
           ...(isLeft ? { left: 0 } : { right: 0 }),
           width: drawerWidthPx,
-          maxWidth: '90vw',
+          maxWidth: '94vw',
           transform: `translateX(${isOpen ? 0 : closedX}px)`,
           transition: 'none',
-          touchAction: 'none',
+          touchAction: 'pan-y',
           pointerEvents: isOpen ? 'auto' : 'none',
           paddingTop: 'max(0px, env(safe-area-inset-top, 0px) - 24px)',
           paddingBottom: 'env(safe-area-inset-bottom, 0px)',
