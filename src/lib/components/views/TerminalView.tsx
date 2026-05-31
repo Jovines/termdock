@@ -137,6 +137,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const terminalIdRef = React.useRef<string | null>(null);
   const sessionIdRef = React.useRef<string | null>(null);
   const terminalControllerRef = React.useRef<TerminalController | null>(null);
+  const flowPausedRef = React.useRef(false);
+  const flowPausedBufferRef = React.useRef<string[]>([]);
   const suppressInputUntilRef = React.useRef(0);
   const shouldExitTmuxCopyModeOnInputRef = React.useRef(false);
   const tmuxScrollPendingRef = React.useRef<{ direction: 'up' | 'down'; lines: number } | null>(null);
@@ -496,7 +498,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               }
               case 'data': {
                 if (event.data) {
-                  appendToBuffer(storeSessionId, event.data);
+                  if (flowPausedRef.current) {
+                    flowPausedBufferRef.current.push(event.data);
+                  } else {
+                    appendToBuffer(storeSessionId, event.data);
+                  }
                 }
                 break;
               }
@@ -1064,6 +1070,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     setIsInputFocused((current) => (current === focused ? current : focused));
   }, [debugKeyboard]);
 
+  const handleFlowControl = React.useCallback((paused: boolean) => {
+    flowPausedRef.current = paused;
+    if (!paused && flowPausedBufferRef.current.length > 0) {
+      const storeSessionId = sessionId;
+      if (storeSessionId) {
+        const buffered = flowPausedBufferRef.current;
+        flowPausedBufferRef.current = [];
+        for (const chunk of buffered) {
+          appendToBuffer(storeSessionId, chunk);
+        }
+      }
+    }
+  }, [appendToBuffer, sessionId]);
+
   const handleTerminalControllerRef = React.useCallback((controller: TerminalController | null) => {
     terminalControllerRef.current = controller;
   }, []);
@@ -1223,6 +1243,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               chunks={bufferChunks}
               onInput={handleViewportInput}
               onResize={handleViewportResize}
+              onFlowControl={handleFlowControl}
               onTmuxScroll={isTmuxMode ? handleViewportTmuxScroll : undefined}
               tmuxScrollSensitivity={0.38}
               onDoubleTap={isMobile ? () => {

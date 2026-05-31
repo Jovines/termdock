@@ -2,6 +2,9 @@ import React from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { SearchAddon } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
@@ -145,6 +148,7 @@ interface TerminalViewportProps {
   chunks: TerminalChunk[];
   onInput: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
+  onFlowControl?: (paused: boolean) => void;
   onTmuxScroll?: (direction: 'up' | 'down', lines: number) => void;
   tmuxScrollSensitivity?: number;
   onDoubleTap?: () => void;
@@ -160,6 +164,8 @@ interface TerminalViewportProps {
 
 type LoadingState = 'loading' | 'ready' | 'error';
 const TEXTURE_ATLAS_REFRESH_DELAY_MS = 120;
+const FLOW_CONTROL_HIGH_WATERMARK = 500_000; // bytes — pause PTY above this
+const FLOW_CONTROL_LOW_WATERMARK = 100_000;  // bytes — resume PTY below this
 const INPUT_BLUR_GUARD_ACTIVE_MS = 260;
 const INPUT_BLUR_GUARD_RELEASE_MS = 140;
 const KEYBOARD_OPEN_THRESHOLD_PX = 80;
@@ -206,6 +212,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       chunks,
       onInput,
       onResize,
+      onFlowControl,
       onTmuxScroll,
       tmuxScrollSensitivity = 0.55,
       onDoubleTap,
@@ -227,8 +234,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const inputHandlerRef = React.useRef<(data: string) => void>(onInput);
     const resizeHandlerRef = React.useRef<(cols: number, rows: number) => void>(onResize);
     const inputFocusHandlerRef = React.useRef<typeof onInputFocusChange>(onInputFocusChange);
+    const flowControlHandlerRef = React.useRef<typeof onFlowControl>(onFlowControl);
     const lastReportedSizeRef = React.useRef<{ cols: number; rows: number } | null>(null);
     const pendingWriteRef = React.useRef('');
+    const pendingBytesRef = React.useRef(0);
+    const flowPausedRef = React.useRef(false);
     const writeScheduledRef = React.useRef<number | null>(null);
     const isWritingRef = React.useRef(false);
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
@@ -269,6 +279,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     inputHandlerRef.current = onInput;
     resizeHandlerRef.current = onResize;
     inputFocusHandlerRef.current = onInputFocusChange;
+    flowControlHandlerRef.current = onFlowControl;
     const autoFocusRef = React.useRef(autoFocus);
     autoFocusRef.current = autoFocus;
 
@@ -1225,6 +1236,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     const resetWriteState = React.useCallback(() => {
       pendingWriteRef.current = '';
+      pendingBytesRef.current = 0;
+      flowPausedRef.current = false;
       if (writeScheduledRef.current !== null && typeof window !== 'undefined') {
         window.cancelAnimationFrame(writeScheduledRef.current);
       }
@@ -1421,11 +1434,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
 
       const chunk = pendingWriteRef.current;
+      const chunkBytes = chunk.length;
       pendingWriteRef.current = '';
 
       isWritingRef.current = true;
       term.write(chunk, () => {
         isWritingRef.current = false;
+        pendingBytesRef.current -= chunkBytes;
+        if (pendingBytesRef.current < 0) pendingBytesRef.current = 0;
+
+        // Flow control: resume PTY if paused and below low watermark
+        if (flowPausedRef.current && pendingBytesRef.current < FLOW_CONTROL_LOW_WATERMARK) {
+          flowPausedRef.current = false;
+          flowControlHandlerRef.current?.(false);
+        }
+
         if (pendingWriteRef.current) {
           if (typeof window !== 'undefined') {
             writeScheduledRef.current = window.requestAnimationFrame(() => {
@@ -1459,6 +1482,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           return;
         }
         pendingWriteRef.current += data;
+        pendingBytesRef.current += data.length;
+
+        // Flow control: pause PTY if above high watermark
+        if (!flowPausedRef.current && pendingBytesRef.current >= FLOW_CONTROL_HIGH_WATERMARK) {
+          flowPausedRef.current = true;
+          flowControlHandlerRef.current?.(true);
+        }
+
         scheduleFlushWrites();
       },
       [scheduleFlushWrites]
@@ -1493,6 +1524,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             cursorInactiveStyle: 'bar',
             scrollback: 1000,
             allowTransparency: false,
+            allowProposedApi: true,
             convertEol: true,
             customGlyphs: true,
             rescaleOverlappingGlyphs: true,
@@ -1517,6 +1549,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             return dims;
           };
           terminal.loadAddon(fitAddon);
+          terminal.loadAddon(new Unicode11Addon());
+          terminal.loadAddon(new SearchAddon());
+          terminal.loadAddon(new WebLinksAddon());
 
           localTerminal = terminal;
           terminalRef.current = terminal;
@@ -1544,7 +1579,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             enableWebglRenderer(terminal, 'init');
           } else {
             debugTerminal('renderer', {
-              type: 'canvas',
+              type: 'dom',
               reason: 'renderer-mode-canvas',
               mobile: enableTouchScroll,
               mode: rendererMode,
