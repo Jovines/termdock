@@ -31,6 +31,7 @@ import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc,
 import type { AgentProgramConfig } from './lib/terminal/api';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
+import { clientLog } from './lib/utils/clientLog';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
@@ -111,6 +112,15 @@ function App() {
     const ts = activeSessionId ? useTerminalStore.getState().sessions.get(activeSessionId) : null;
     useSidebarStore.getState().setRootPath(ts?.cwd ?? null);
   }, [activeSessionId, sessionCount]);
+
+  // Log tab bar state changes for debugging disappearance
+  useEffect(() => {
+    clientLog('info', '[tab-bar] state changed', {
+      sessionCount: sessions.length,
+      sessionIds: sessions.map(s => s.id),
+      activeSessionId,
+    });
+  }, [sessions, activeSessionId]);
 
   // Sidebar drawer dimensions
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -366,6 +376,11 @@ function App() {
   }, []);
 
   const handleSessionDataUpdate = useCallback((data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => {
+    clientLog('info', '[tab-bar] handleSessionDataUpdate', {
+      sessionCount: data.sessions.length,
+      sessionIds: data.sessions.map(s => s.id),
+      activeSessionId: data.activeSessionId,
+    });
     setSessions(data.sessions);
     setActiveSessionId(data.activeSessionId);
     useTerminalStore.getState().setActiveSessionId(data.activeSessionId);

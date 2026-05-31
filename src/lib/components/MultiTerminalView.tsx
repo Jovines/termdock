@@ -10,6 +10,7 @@ import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { createDebugLogger } from '../utils/debug';
+import { clientLog } from '../utils/clientLog';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
 
 interface TerminalSession {
@@ -307,6 +308,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   // Notify parent of session data changes
   useEffect(() => {
+    clientLog('info', '[tab-bar] MultiTerminalView sessions changed', {
+      sessionCount: sessions.length,
+      sessionIds: sessions.map(s => s.id),
+      activeSessionId,
+    });
     onSessionDataUpdate?.({
       sessions: sessions.map((s) => ({
         id: s.id,
@@ -454,6 +460,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // 增量同步：轮询检测到 persistedSessions 变化时，处理新增/移除/重命名的 session
   const prevPersistedRef = useRef<PersistedSession[]>([]);
   const seededRef = useRef(false);
+  const sessionsRef = useRef<TerminalSession[]>(sessions);
+  sessionsRef.current = sessions;
+  const activeSessionIdRef2 = useRef<string | null>(activeSessionId);
+  activeSessionIdRef2.current = activeSessionId;
   useEffect(() => {
     if (isRestoring) return;
 
@@ -470,7 +480,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const prevIds = new Set(prev.map(s => s.sessionId));
     const currIds = new Set(curr.map(s => s.sessionId));
     // Local sessions already have backend connections — skip these
-    const localIds = new Set(sessions.map(s => s.id));
+    const localIds = new Set(sessionsRef.current.map(s => s.id));
 
     // New sessions (appeared in persisted but not in prev, and not already local)
     const newPersisted = curr.filter(ps => !prevIds.has(ps.sessionId) && !localIds.has(ps.sessionId));
@@ -517,10 +527,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     // Handle removed sessions: remove from local state (don't kill backend)
     if (removedSessionIds.length > 0) {
+      const currentActiveId = activeSessionIdRef2.current;
       setSessions(prev => {
         const remaining = prev.filter(s => !removedSessionIds.includes(s.id));
         if (remaining.length !== prev.length) {
-          const wasActiveRemoved = !remaining.some(s => s.id === activeSessionId);
+          const wasActiveRemoved = !remaining.some(s => s.id === currentActiveId);
           if (wasActiveRemoved && remaining.length > 0) {
             setActiveSessionId(remaining[0].id);
           } else if (remaining.length === 0) {
@@ -538,7 +549,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         renameMap.has(s.id) ? { ...s, name: renameMap.get(s.id)!, customName: true } : s
       ));
     }
-  }, [persistedSessions, isRestoring, restoreOrCreateSession, updateSessionBackendId, activeSessionId, sessions]);
+  }, [persistedSessions, isRestoring, restoreOrCreateSession, updateSessionBackendId]);
 
   // Handle new session creation from custom event
   const handleNewSession = useCallback(async (options?: NewSessionEventDetail) => {

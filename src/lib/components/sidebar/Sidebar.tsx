@@ -92,10 +92,6 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     setTimeout(cleanup, SNAP_DURATION_MS + 50);
   }, [closedX, drawerWidthPx, isLeft]);
 
-  const snapToState = useCallback((open: boolean) => {
-    setPosition(open ? 0 : closedX);
-  }, [closedX, setPosition]);
-
   useEffect(() => {
     animateToState(isOpen);
   }, [isOpen, animateToState]);
