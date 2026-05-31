@@ -46,14 +46,19 @@ async function checkNetworkConnectivity(): Promise<boolean> {
   if (!hasNonLoopback) return false;
 
   // Deeper check: can we resolve DNS?
+  let timeout: ReturnType<typeof setTimeout> | null = null;
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    await dns.promises.resolve('cloudflare.com');
-    clearTimeout(timeout);
+    await Promise.race([
+      dns.promises.resolve('cloudflare.com'),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('DNS resolve timed out')), 5000);
+      }),
+    ]);
     return true;
   } catch {
     return false;
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 

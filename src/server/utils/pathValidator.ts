@@ -18,7 +18,7 @@ export class PathValidator {
       '/tmp',
       // 当前工作目录
       process.cwd(),
-    ].filter(Boolean).map(p => path.resolve(p));
+    ].filter(Boolean).map(p => this.normalizeAllowedPath(p));
     
     this.allowedPaths = new Set(this.defaultAllowedPaths);
     
@@ -26,7 +26,7 @@ export class PathValidator {
     const extraPaths = process.env.ALLOWED_PATHS?.split(':').filter(Boolean) || [];
     extraPaths.forEach(p => {
       try {
-        this.allowedPaths.add(path.resolve(p));
+        this.allowedPaths.add(this.normalizeAllowedPath(p));
       } catch (error) {
         console.warn(`Invalid allowed path: ${p}`, error);
       }
@@ -57,29 +57,31 @@ export class PathValidator {
       throw new Error(`Directory does not exist: ${resolvedPath}`);
     }
 
+    const realPath = fs.realpathSync(resolvedPath);
+
     // 检查是否为目录
     try {
-      const stat = fs.statSync(resolvedPath);
+      const stat = fs.statSync(realPath);
       if (!stat.isDirectory()) {
-        throw new Error(`Path is not a directory: ${resolvedPath}`);
+        throw new Error(`Path is not a directory: ${realPath}`);
       }
     } catch (error) {
       if (error instanceof Error && error.message.includes('not a directory')) {
         throw error;
       }
-      throw new Error(`Cannot access directory: ${resolvedPath}`);
+      throw new Error(`Cannot access directory: ${realPath}`);
     }
 
     // 检查路径是否在允许的范围内
-    if (!this.isInAllowedPaths(resolvedPath)) {
-      console.warn(`Access denied: ${resolvedPath} is not in allowed paths`);
+    if (!this.isInAllowedPaths(realPath)) {
+      console.warn(`Access denied: ${realPath} is not in allowed paths`);
       throw new Error('Access denied: directory not allowed');
     }
 
     // 额外的安全检查：避免系统关键目录
-    this.checkDangerousPatterns(resolvedPath);
+    this.checkDangerousPatterns(realPath);
 
-    return resolvedPath;
+    return realPath;
   }
 
   /**
@@ -104,33 +106,50 @@ export class PathValidator {
       throw new Error(`Path does not exist: ${resolvedPath}`);
     }
 
-    // 对文件，验证其父目录在允许范围内
+    const realPath = fs.realpathSync(resolvedPath);
+
+    // 对最终真实路径做白名单校验，避免允许目录内的 symlink 指向敏感位置。
     try {
-      const stat = fs.statSync(resolvedPath);
-      const pathToCheck = stat.isDirectory() ? resolvedPath : path.dirname(resolvedPath);
-      if (!this.isInAllowedPaths(pathToCheck)) {
-        console.warn(`Access denied: ${resolvedPath} is not in allowed paths`);
+      if (!this.isInAllowedPaths(realPath)) {
+        console.warn(`Access denied: ${realPath} is not in allowed paths`);
         throw new Error('Access denied: path not allowed');
       }
     } catch (error) {
       if (error instanceof Error && error.message.includes('not allowed')) {
         throw error;
       }
-      throw new Error(`Cannot access path: ${resolvedPath}`);
+      throw new Error(`Cannot access path: ${realPath}`);
     }
 
-    this.checkDangerousPatterns(resolvedPath);
+    this.checkDangerousPatterns(realPath);
 
-    return resolvedPath;
+    return realPath;
   }
 
   private isInAllowedPaths(resolvedPath: string): boolean {
     for (const allowedPath of this.allowedPaths) {
-      if (resolvedPath.startsWith(allowedPath)) {
+      if (this.isSameOrChildPath(allowedPath, resolvedPath)) {
         return true;
       }
     }
     return false;
+  }
+
+  private isSameOrChildPath(parentPath: string, childPath: string): boolean {
+    const relativePath = path.relative(parentPath, childPath);
+    return relativePath === '' || (
+      !relativePath.startsWith('..') &&
+      !path.isAbsolute(relativePath)
+    );
+  }
+
+  private normalizeAllowedPath(inputPath: string): string {
+    const resolved = path.resolve(inputPath);
+    try {
+      return fs.realpathSync(resolved);
+    } catch {
+      return resolved;
+    }
   }
 
   private checkDangerousPatterns(resolvedPath: string): void {
@@ -141,7 +160,7 @@ export class PathValidator {
     ];
 
     for (const pattern of dangerousPatterns) {
-      if (resolvedPath.startsWith(pattern)) {
+      if (this.isSameOrChildPath(pattern, resolvedPath)) {
         console.warn(`Access denied: ${resolvedPath} is a system directory`);
         throw new Error('Access denied: system directories are restricted');
       }
@@ -152,7 +171,7 @@ export class PathValidator {
    * 添加允许的路径
    */
   addAllowedPath(pathToAdd: string): void {
-    const resolved = path.resolve(pathToAdd);
+    const resolved = this.normalizeAllowedPath(pathToAdd);
     this.allowedPaths.add(resolved);
   }
   

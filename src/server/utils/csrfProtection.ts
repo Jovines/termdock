@@ -47,16 +47,20 @@ export class CsrfProtection {
   /**
    * 验证CSRF令牌
    */
-  verifyToken(cookieToken: string | undefined, headerToken: string | undefined): boolean {
-    if (!cookieToken || !headerToken) {
+  verifyToken(cookieToken: unknown, headerToken: unknown): boolean {
+    if (typeof cookieToken !== 'string' || typeof headerToken !== 'string') {
+      return false;
+    }
+
+    const cookieBuffer = Buffer.from(cookieToken);
+    const headerBuffer = Buffer.from(headerToken);
+
+    if (cookieBuffer.length !== headerBuffer.length) {
       return false;
     }
     
     // 使用定时安全比较防止时序攻击
-    return crypto.timingSafeEqual(
-      Buffer.from(cookieToken),
-      Buffer.from(headerToken)
-    );
+    return crypto.timingSafeEqual(cookieBuffer, headerBuffer);
   }
   
   /**

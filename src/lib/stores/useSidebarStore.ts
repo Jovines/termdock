@@ -72,7 +72,20 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   closeAll: () => set({ leftOpen: false, rightOpen: false }),
 
   setRightTab: (tab) => set({ rightTab: tab }),
-  setRootPath: (path) => set({ rootPath: path }),
+  setRootPath: (path) => set((s) => {
+    if (s.rootPath === path) return { rootPath: path };
+    return {
+      rootPath: path,
+      expandedPaths: new Set(),
+      selectedFilePath: null,
+      directoryCache: new Map(),
+      diffFilePath: null,
+      diffContent: null,
+      diffLoading: false,
+      diffError: null,
+      changedFiles: new Map(),
+    };
+  }),
 
   toggleExpanded: (path) =>
     set((s) => {

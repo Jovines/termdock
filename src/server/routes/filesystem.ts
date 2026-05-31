@@ -9,6 +9,19 @@ const router = Router();
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
 const GIT_TIMEOUT_MS = 5000;
 
+function readFilePrefix(filePath: string, bytesToRead: number): string {
+  if (bytesToRead <= 0) return '';
+
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(bytesToRead);
+    const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, 0);
+    return buffer.subarray(0, bytesRead).toString('utf-8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function execGit(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -112,15 +125,13 @@ router.get('/read', async (req: Request, res: Response) => {
       return;
     }
 
-    const truncated = stat.size > MAX_FILE_SIZE;
-    const content = fs.readFileSync(resolvedPath, {
-      encoding: 'utf-8',
-      flag: 'r',
-    });
+    const bytesToRead = Math.min(stat.size, MAX_FILE_SIZE);
+    const truncated = stat.size > bytesToRead;
+    const content = readFilePrefix(resolvedPath, bytesToRead);
 
     res.json({
       path: resolvedPath,
-      content: truncated ? content.slice(0, MAX_FILE_SIZE) : content,
+      content,
       size: stat.size,
       modified: stat.mtime.toISOString(),
       truncated,
@@ -184,25 +195,31 @@ router.get('/diff-files', async (req: Request, res: Response) => {
       return;
     }
 
-    const output = await execGit(['diff', '--name-status'], gitCwd);
+    const output = await execGit(['diff', '--name-status', '-z'], gitCwd);
 
-    const files = output
-      .trim()
-      .split('\n')
-      .filter(line => line.trim())
-      .map(line => {
-        const parts = line.trim().split(/\s+/);
-        const status = parts[0];
-        const filePath = parts[1];
-        const oldPath = parts[2]; // for renames
-        return {
-          path: filePath,
-          status: status.startsWith('R') ? 'renamed' :
-                  status.startsWith('A') ? 'added' :
-                  status.startsWith('D') ? 'deleted' : 'modified',
-          ...(oldPath ? { oldPath } : {}),
-        };
+    const tokens = output.split('\0').filter(Boolean);
+    const files: Array<{ path: string; status: string; oldPath?: string }> = [];
+    for (let i = 0; i < tokens.length;) {
+      const status = tokens[i++];
+      if (!status) break;
+
+      if (status.startsWith('R')) {
+        const oldPath = tokens[i++];
+        const newPath = tokens[i++];
+        if (newPath) {
+          files.push({ path: newPath, status: 'renamed', ...(oldPath ? { oldPath } : {}) });
+        }
+        continue;
+      }
+
+      const filePath = tokens[i++];
+      if (!filePath) continue;
+      files.push({
+        path: filePath,
+        status: status.startsWith('A') ? 'added' :
+                status.startsWith('D') ? 'deleted' : 'modified',
       });
+    }
 
     res.json({ files });
   } catch (error) {

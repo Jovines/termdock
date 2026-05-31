@@ -17,11 +17,12 @@ interface FileTreeProps {
   selectedFilePath: string | null;
 }
 
+const CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.rb', '.php', '.swift', '.kt', '.sh', '.css', '.scss', '.html', '.json', '.yaml', '.yml', '.toml', '.md']);
+
 function getFileIcon(name: string, type: 'file' | 'directory' | 'symlink') {
   if (type === 'directory') return null; // handled separately
-  const codeExts = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.rb', '.php', '.swift', '.kt', '.sh', '.css', '.scss', '.html', '.json', '.yaml', '.yml', '.toml', '.md']);
   const ext = name.lastIndexOf('.') >= 0 ? name.slice(name.lastIndexOf('.')) : '';
-  return codeExts.has(ext) ? <RiFileCode size={14} /> : <RiFile size={14} />;
+  return CODE_EXTS.has(ext) ? <RiFileCode size={14} /> : <RiFile size={14} />;
 }
 
 function getChangeStatusBadge(path: string, changedFiles: Map<string, string>) {
