@@ -57,6 +57,14 @@ export function resetCsrfTokenCache(): void {
 
 // ---- WebSocket connections (replaces SSE + HTTP POST for terminal I/O) ----
 
+// 心跳间隔：定时给后端发 ping，让后端知道连接还活着；
+// 同时如果在 PONG_TIMEOUT_MS 内未收到任何消息（含 pong/data/事件），就主动断开重连。
+// iOS PWA 后台返回时这个机制比 TCP keepalive 更快发现"半开连接"。
+const HEARTBEAT_INTERVAL_MS = 20_000;
+const PONG_TIMEOUT_MS = 8_000;
+// visibilitychange / online 唤醒后做一次健康探测：发 ping 等 500ms，超时直接重连。
+const WAKEUP_PROBE_TIMEOUT_MS = 500;
+
 interface WsConnection {
   ws: WebSocket;
   onEvent: (event: TerminalStreamEvent) => void;
@@ -71,6 +79,15 @@ interface WsConnection {
     connectionTimeoutId: ReturnType<typeof setTimeout> | null;
     isClosed: boolean;
   };
+  // 重连补帧基线：每次收到 data 时不递增（服务端补帧靠 replayLastSeq 同步），
+  // 仅在 connected.replayLastSeq 到来时刷新；下一次重连用它作为 since 参数。
+  lastSeq: number;
+  // 输入端缓冲：WS 没开时把用户输入暂存，连上后批量 flush，避免短线期间丢字。
+  pendingInputs: string[];
+  heartbeatTimer: ReturnType<typeof setInterval> | null;
+  pongTimer: ReturnType<typeof setTimeout> | null;
+  // 上次收到任意服务端消息的时间戳，用于判断半开连接。
+  lastInboundAt: number;
 }
 
 const wsConnections = new Map<string, WsConnection>();
@@ -92,9 +109,20 @@ function resolveTmuxRequest(reqId: string, success: boolean, layout?: TmuxLayout
   }
 }
 
-function getWebSocketUrl(sessionId: string): string {
+function getWebSocketUrl(sessionId: string, sinceSeq: number): string {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${proto}://${window.location.host}/api/terminal/${sessionId}/ws`;
+  const base = `${proto}://${window.location.host}/api/terminal/${sessionId}/ws`;
+  // sinceSeq > 0 时让服务端只补发增量（短线重连补帧）；首次连接为 0，服务端不会重复发送。
+  return sinceSeq > 0 ? `${base}?since=${sinceSeq}` : base;
+}
+
+// 给定一个已知的初始 seq（来自 attach 接口），让 connectTerminalStream 后续重连
+// 自动带上正确的 since。如果尚未建立连接，则记录在外层 map 等待 connect() 时使用。
+const pendingInitialSeq = new Map<string, number>();
+export function setTerminalInitialSeq(sessionId: string, seq: number): void {
+  if (seq > 0) {
+    pendingInitialSeq.set(sessionId, seq);
+  }
 }
 
 // ---- Session management (HTTP, unchanged) ----
@@ -135,9 +163,11 @@ export function connectTerminalStream(
   options: ConnectStreamOptions = {}
 ): () => void {
   const {
-    maxRetries = 5,
+    // 调长重连窗口：覆盖电梯/地铁/锁屏 1-2 分钟的常见弱网场景。
+    // 10 次指数退避 + 20s 上限 ≈ 总等待 3 分钟。
+    maxRetries = 10,
     initialRetryDelay = 1000,
-    maxRetryDelay = 15000,
+    maxRetryDelay = 20000,
     connectionTimeout = 15000,
   } = options;
 
@@ -153,6 +183,11 @@ export function connectTerminalStream(
   };
 
   let conn: WsConnection | null = null;
+  // 初始 seq 来自 /attach（如果有），后续每次重连用 conn.lastSeq。
+  let lastSeq = pendingInitialSeq.get(sessionId) ?? 0;
+  pendingInitialSeq.delete(sessionId);
+  // WS 没建立时积累的输入缓冲；每次创建新 conn 时挂到上面。
+  const pendingInputs: string[] = [];
   // Guard against onerror + onclose double-fire: only the first one
   // should trigger handleError for a given disconnection.
   let handlingError = false;
@@ -162,20 +197,51 @@ export function connectTerminalStream(
     if (retryState.connectionTimeoutId) { clearTimeout(retryState.connectionTimeoutId); retryState.connectionTimeoutId = null; }
   };
 
+  const stopHeartbeat = (c: WsConnection) => {
+    if (c.heartbeatTimer) { clearInterval(c.heartbeatTimer); c.heartbeatTimer = null; }
+    if (c.pongTimer) { clearTimeout(c.pongTimer); c.pongTimer = null; }
+  };
+
+  const startHeartbeat = (c: WsConnection) => {
+    stopHeartbeat(c);
+    c.heartbeatTimer = setInterval(() => {
+      if (c.ws.readyState !== WebSocket.OPEN) return;
+      try { c.ws.send(JSON.stringify({ type: 'ping' })); } catch { /* ignore */ }
+      // 启动一次 pong 超时检测：在 PONG_TIMEOUT_MS 内未收到任何消息则视为半开连接。
+      if (c.pongTimer) clearTimeout(c.pongTimer);
+      c.pongTimer = setTimeout(() => {
+        const sinceLast = Date.now() - c.lastInboundAt;
+        if (sinceLast >= PONG_TIMEOUT_MS) {
+          // 主动关掉，让 onclose 走重连路径。
+          try { c.ws.close(); } catch { /* ignore */ }
+        }
+      }, PONG_TIMEOUT_MS);
+    }, HEARTBEAT_INTERVAL_MS);
+  };
+
   const cleanup = () => {
     retryState.isClosed = true;
     clearTimeouts();
     if (conn) {
+      stopHeartbeat(conn);
       wsConnections.delete(sessionId);
       try { conn.ws.close(); } catch { /* ignore */ }
       conn = null;
     }
   };
 
+  const flushPendingInputs = (c: WsConnection) => {
+    if (c.pendingInputs.length === 0) return;
+    const queued = c.pendingInputs.splice(0);
+    for (const data of queued) {
+      try { c.ws.send(JSON.stringify({ type: 'input', data })); } catch { /* ignore */ }
+    }
+  };
+
   const connect = () => {
     if (retryState.isClosed) return;
 
-    const url = getWebSocketUrl(sessionId);
+    const url = getWebSocketUrl(sessionId, lastSeq);
     const ws = new WebSocket(url);
     handlingError = false; // reset for new connection attempt
 
@@ -186,14 +252,37 @@ export function connectTerminalStream(
       }
     }, connectionTimeout);
 
+    const newConn: WsConnection = {
+      ws,
+      onEvent,
+      onError,
+      retryState,
+      lastSeq,
+      pendingInputs,
+      heartbeatTimer: null,
+      pongTimer: null,
+      lastInboundAt: Date.now(),
+    };
+
     ws.onopen = () => {
       clearTimeouts();
       retryState.retryCount = 0;
+      newConn.lastInboundAt = Date.now();
+      startHeartbeat(newConn);
+      // WS 重新打开后立刻把断线期间的输入 flush 到后端。
+      flushPendingInputs(newConn);
     };
 
     ws.onmessage = (event) => {
+      newConn.lastInboundAt = Date.now();
       try {
         const msg = JSON.parse(event.data as string);
+
+        // 服务端 pong 不需要透传给上层。
+        if (msg.type === 'pong') {
+          if (newConn.pongTimer) { clearTimeout(newConn.pongTimer); newConn.pongTimer = null; }
+          return;
+        }
 
         // Handle tmux-result (correlated response for sendTmuxAction)
         if (msg.type === 'tmux-result' && msg.reqId) {
@@ -233,6 +322,11 @@ export function connectTerminalStream(
         const event_ = msg as TerminalStreamEvent;
 
         if (event_.type === 'connected') {
+          // 收到服务端基线，下一次重连就用这个 seq 做 since。
+          if (typeof event_.replayLastSeq === 'number' && event_.replayLastSeq > 0) {
+            lastSeq = event_.replayLastSeq;
+            newConn.lastSeq = lastSeq;
+          }
           onEvent(event_);
           return;
         }
@@ -251,6 +345,7 @@ export function connectTerminalStream(
 
     ws.onerror = () => {
       clearTimeouts();
+      stopHeartbeat(newConn);
       if (!handlingError) {
         handlingError = true;
         handleError(new Error('WebSocket connection error'), false);
@@ -259,6 +354,7 @@ export function connectTerminalStream(
 
     ws.onclose = (ev: CloseEvent) => {
       clearTimeouts();
+      stopHeartbeat(newConn);
       if (retryState.isClosed) return;
       if (handlingError) return; // already handled by onerror
       handlingError = true;
@@ -281,7 +377,7 @@ export function connectTerminalStream(
       handleError(new Error('WebSocket connection closed'), false);
     };
 
-    conn = { ws, onEvent, onError, retryState };
+    conn = newConn;
     wsConnections.set(sessionId, conn);
   };
 
@@ -316,17 +412,27 @@ export function connectTerminalStream(
 }
 
 // ---- Terminal input (WebSocket replaces HTTP POST) ----
-
+//
+// 短线重连期间不再 fallback 到 HTTP（HTTP 大概率也失败），而是把 input 暂存到
+// 当前 conn.pendingInputs；WS 重新连上后 onopen 里会自动 flush。
+// 这样 iOS PWA 后台返回的瞬间用户敲的命令不会丢。
 export async function sendTerminalInput(
   sessionId: string,
   data: string
 ): Promise<void> {
   const conn = wsConnections.get(sessionId);
-  if (conn && conn.ws.readyState === WebSocket.OPEN) {
-    conn.ws.send(JSON.stringify({ type: 'input', data }));
-    return;
+  if (conn) {
+    if (conn.ws.readyState === WebSocket.OPEN) {
+      conn.ws.send(JSON.stringify({ type: 'input', data }));
+      return;
+    }
+    if (conn.ws.readyState === WebSocket.CONNECTING) {
+      // 正在握手，先排队等 onopen 一起 flush。
+      conn.pendingInputs.push(data);
+      return;
+    }
   }
-  // Fallback to HTTP for backward compatibility
+  // 完全没有 conn（极少数边缘情况：cleanup 后又触发 input），fallback HTTP。
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/${sessionId}/input`, {
     method: 'POST',
@@ -337,6 +443,27 @@ export async function sendTerminalInput(
     const error = await response.json().catch(() => ({ error: 'Failed to send input' }));
     throw new Error(error.error || 'Failed to send terminal input');
   }
+}
+
+// 主动探测：visibilitychange/online/pageshow 唤醒后调用，确认 WS 是否还活着。
+// - 没有 conn 或 WS 不在 OPEN 态：直接当成已断，调用方应触发重连。
+// - WS OPEN：发一个 ping，等 WAKEUP_PROBE_TIMEOUT_MS 内有任何消息就算活着；
+//   超时则主动 close 触发 onclose 走重连补帧路径。
+export function probeTerminalConnection(sessionId: string): void {
+  const conn = wsConnections.get(sessionId);
+  if (!conn) return;
+  if (conn.ws.readyState !== WebSocket.OPEN) {
+    // 不是 OPEN 就由现有重连机制处理，不在这里干预。
+    return;
+  }
+  const baseline = conn.lastInboundAt;
+  try { conn.ws.send(JSON.stringify({ type: 'ping' })); } catch { /* ignore */ }
+  setTimeout(() => {
+    // 如果在窗口期内 lastInboundAt 没有更新，就视为半开连接，强行 close。
+    if (conn.lastInboundAt <= baseline) {
+      try { conn.ws.close(); } catch { /* ignore */ }
+    }
+  }, WAKEUP_PROBE_TIMEOUT_MS);
 }
 
 // ---- Resize (WebSocket replaces HTTP POST) ----

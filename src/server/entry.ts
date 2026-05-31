@@ -152,9 +152,12 @@ export function startServer(options: ServerOptions = {}) {
 
     const sessionId = match[1];
     const clientId = crypto.randomUUID();
+    // 短线重连时客户端会带上 ?since=<lastSeq>，让服务端只补发增量。
+    const sinceParam = url.searchParams.get('since');
+    const sinceSeq = sinceParam ? Math.max(0, Number.parseInt(sinceParam, 10) || 0) : 0;
 
     wss.handleUpgrade(request, socket, head, (ws) => {
-      handleTerminalWebSocket(ws, sessionId, clientId);
+      handleTerminalWebSocket(ws, sessionId, clientId, { sinceSeq });
     });
   });
 

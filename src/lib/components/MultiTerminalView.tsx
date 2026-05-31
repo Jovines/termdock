@@ -5,7 +5,7 @@ import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
-import { attachTerminalSession, createTerminalSession, closeTerminal } from '../terminal/api';
+import { attachTerminalSession, createTerminalSession, closeTerminal, setTerminalInitialSeq } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
@@ -351,7 +351,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           backend: attached.backend,
           clients: attached.clients,
           historyLength: attached.history?.length ?? 0,
+          lastSeq: (attached as { lastSeq?: number }).lastSeq,
         });
+        // 把 attach 返回的 lastSeq 记下，作为后续 WS 重连补帧的基线。
+        // 这样网络抖动后只补增量，不会重复回放整段 history。
+        const seq = (attached as { lastSeq?: number }).lastSeq;
+        if (typeof seq === 'number' && seq > 0) {
+          setTerminalInitialSeq(attached.sessionId, seq);
+        }
         return {
           id: sessionId,
           name,

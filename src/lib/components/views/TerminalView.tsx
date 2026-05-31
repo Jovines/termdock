@@ -5,6 +5,7 @@ import type { TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../t
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
 import { FLEXOKI_DARK } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
+import { probeTerminalConnection } from '../../terminal/api';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
 import { buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, splitToolbarSequenceSegments, TOOLBAR_SEGMENT_DELAY_MS, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
@@ -220,6 +221,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const handleVisibility = () => {
       if (!document.hidden) {
         recoverActive('visibilitychange');
+        // 唤醒后立刻探测 WS 是否还活着（iOS PWA 后台返回常出现"半开连接"）。
+        // probe 内部会发 ping，500ms 没回应就主动 close 触发重连补帧。
+        const tid = terminalIdRef.current;
+        if (tid) probeTerminalConnection(tid);
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
@@ -231,8 +236,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   React.useEffect(() => {
     const handlePageShow = (event: PageTransitionEvent) => {
       recoverActive(event.persisted ? 'pageshow:bfcache' : 'pageshow');
+      const tid = terminalIdRef.current;
+      if (tid) probeTerminalConnection(tid);
     };
-    const handleOnline = () => recoverActive('online');
+    const handleOnline = () => {
+      recoverActive('online');
+      const tid = terminalIdRef.current;
+      if (tid) probeTerminalConnection(tid);
+    };
     window.addEventListener('pageshow', handlePageShow);
     window.addEventListener('online', handleOnline);
     return () => {
@@ -487,6 +498,28 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   debugSession(`[Terminal] History restoration complete for ${storeSessionId}`);
                 } else {
                   debugSession(`[Terminal] No history to restore for ${storeSessionId}`);
+                }
+
+                // 短线重连补帧：服务端按 sinceSeq 返回断线期间产生的输出。
+                // - replayOutOfWindow 表示客户端基线已被服务端淘汰（环形 buffer
+                //   覆盖），此时清屏 + 全量重放，避免错位拼接。
+                // - 否则直接 append，与现有 buffer 衔接。
+                const replayChunks = event.replayChunks;
+                if (replayChunks && replayChunks.length > 0) {
+                  if (event.replayOutOfWindow) {
+                    debugSession(`[Terminal] Replay out-of-window, clearing buffer before replay (${replayChunks.length} chunks)`);
+                    clearBuffer(storeSessionId);
+                    terminalControllerRef.current?.clear();
+                  } else {
+                    debugSession(`[Terminal] Replay incremental: ${replayChunks.length} chunks`);
+                  }
+                  // 抑制 replay 期间的用户输入，避免 echo 顺序错乱。
+                  const replayBytes = replayChunks.reduce((total, chunk) => total + chunk.length, 0);
+                  const suppressionMs = Math.max(200, Math.min(1500, Math.ceil(replayBytes / 200)));
+                  suppressInputUntilRef.current = Math.max(suppressInputUntilRef.current, Date.now() + suppressionMs);
+                  for (const chunk of replayChunks) {
+                    appendToBuffer(storeSessionId, chunk);
+                  }
                 }
                 break;
               }

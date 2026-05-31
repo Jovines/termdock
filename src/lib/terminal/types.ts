@@ -73,6 +73,13 @@ export interface TerminalStreamEvent {
   activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   agentStatus?: AgentStatus | null;
   agentColor?: string | null;
+  // 短线重连补帧（仅 connected 事件携带）：
+  // replayChunks 是断线期间产生的输出，前端要追加到 buffer。
+  // replayLastSeq 是新的客户端基线（保存为下一次重连的 since）。
+  // replayOutOfWindow 表示客户端基线已被服务端淘汰，回放前最好清屏。
+  replayChunks?: string[];
+  replayLastSeq?: number;
+  replayOutOfWindow?: boolean;
 }
 
 // Create Session Options

@@ -8,6 +8,11 @@ interface ConnectionStatusProps {
   onHardRestart: () => void;
 }
 
+// "Reconnecting (x/y)..." 由 reconnecting 事件回填到 connectionError，
+// 但它是过渡态（短线重连），不应该用 destructive 红字吓用户。
+// 这里把它识别成软提示，跟首次连接的 "Reconnecting..." 同款样式。
+const RECONNECTING_RE = /^Reconnecting/i;
+
 export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
   connectionError,
   isFatalError,
@@ -15,11 +20,13 @@ export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
   isConnecting,
   onHardRestart,
 }) => {
-  if (isConnecting && !connectionError) {
+  const isTransientReconnect = !!connectionError && !isFatalError && RECONNECTING_RE.test(connectionError);
+
+  if ((isConnecting && !connectionError) || isTransientReconnect) {
     return (
       <div className="absolute inset-x-0 bottom-0 flex items-end justify-center pb-2 pointer-events-none">
         <span className="text-[11px] text-muted-foreground/60 animate-pulse tracking-wide">
-          Reconnecting...
+          {connectionError || 'Reconnecting...'}
         </span>
       </div>
     );

@@ -401,30 +401,33 @@ const ACTIVE_PROGRAM_POLL_INTERVAL = parseInt(process.env.TERMINAL_ACTIVE_PROGRA
 const TMUX_DELIMITER = '\x1f';
 // 输出历史缓冲区（限制大小）
 const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
-const sessionHistory = new Map<string, { chunks: string[]; size: number }>();
+// 给每个 chunk 加单调递增 seq，用于短线重连时按需补发增量。
+interface HistoryChunk { seq: number; data: string }
+const sessionHistory = new Map<string, { chunks: HistoryChunk[]; size: number; nextSeq: number }>();
 
-function addToHistory(sessionId: string, data: string): void {
-  const history = sessionHistory.get(sessionId);
+function addToHistory(sessionId: string, data: string): number {
+  let history = sessionHistory.get(sessionId);
   if (!history) {
-    sessionHistory.set(sessionId, { chunks: [data], size: data.length });
-    return;
+    history = { chunks: [], size: 0, nextSeq: 1 };
+    sessionHistory.set(sessionId, history);
   }
-
-  history.chunks.push(data);
+  const seq = history.nextSeq++;
+  history.chunks.push({ seq, data });
   history.size += data.length;
 
   // 超出限制时移除最旧的 chunk
   while (history.size > MAX_HISTORY_SIZE && history.chunks.length > 0) {
     const removed = history.chunks.shift();
     if (removed) {
-      history.size -= removed.length;
+      history.size -= removed.data.length;
     }
   }
+  return seq;
 }
 
 function getHistory(sessionId: string): string[] {
   const history = sessionHistory.get(sessionId);
-  return history ? [...history.chunks] : [];
+  return history ? history.chunks.map((c) => c.data) : [];
 }
 
 function clearHistory(sessionId: string): void {
@@ -437,6 +440,48 @@ function getReconnectionHistory(sessionId: string): string[] {
     return history;
   }
   return history.slice(-RECONNECT_SCROLLBACK);
+}
+
+// 取当前 history 的最大 seq；用于客户端首次 attach 后记录基线。
+function getHistoryLastSeq(sessionId: string): number {
+  const history = sessionHistory.get(sessionId);
+  return history ? history.nextSeq - 1 : 0;
+}
+
+// 短线重连：返回 sinceSeq 之后的所有 chunks（含 seq）。
+// 若 sinceSeq 落在已淘汰窗口之外，则需要发"超出窗口"标志，让前端走全量恢复。
+function getHistorySince(sessionId: string, sinceSeq: number): {
+  chunks: HistoryChunk[];
+  lastSeq: number;
+  outOfWindow: boolean;
+} {
+  const history = sessionHistory.get(sessionId);
+  if (!history) {
+    return { chunks: [], lastSeq: 0, outOfWindow: false };
+  }
+  const lastSeq = history.nextSeq - 1;
+  if (sinceSeq <= 0) {
+    // 客户端没有基线，按 RECONNECT_SCROLLBACK 截断。
+    const chunks = RECONNECT_SCROLLBACK > 0 && history.chunks.length > RECONNECT_SCROLLBACK
+      ? history.chunks.slice(-RECONNECT_SCROLLBACK)
+      : history.chunks.slice();
+    return { chunks, lastSeq, outOfWindow: false };
+  }
+  if (sinceSeq >= lastSeq) {
+    return { chunks: [], lastSeq, outOfWindow: false };
+  }
+  const oldestSeq = history.chunks.length > 0 ? history.chunks[0].seq : history.nextSeq;
+  if (sinceSeq < oldestSeq - 1) {
+    // 客户端基线已被淘汰，需要全量重放可见窗口。
+    const chunks = RECONNECT_SCROLLBACK > 0 && history.chunks.length > RECONNECT_SCROLLBACK
+      ? history.chunks.slice(-RECONNECT_SCROLLBACK)
+      : history.chunks.slice();
+    return { chunks, lastSeq, outOfWindow: true };
+  }
+  // 正常增量：返回 seq > sinceSeq 的部分。
+  // 由于 chunks 按 seq 递增，可以二分；这里数据量有限直接 filter。
+  const chunks = history.chunks.filter((c) => c.seq > sinceSeq);
+  return { chunks, lastSeq, outOfWindow: false };
 }
 
 function normalizeMode(input: unknown): TerminalMode {
@@ -2509,6 +2554,9 @@ router.get('/:sessionId/attach', async (req, res) => {
   session.lastActivity = Date.now();
 
   const history = await getRestoreHistory(sessionId, session);
+  // 把当前 history 的最后 seq 一并返回，前端用它作为 WS 重连补帧的基线。
+  // tmux 模式下 sessionHistory 里没东西（capture pane 走不同通道），lastSeq 仍取 0。
+  const lastSeq = session.mode === 'shell' ? getHistoryLastSeq(sessionId) : 0;
 
   res.json({
     sessionId,
@@ -2518,6 +2566,7 @@ router.get('/:sessionId/attach', async (req, res) => {
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
     history,
+    lastSeq,
     activeProgram: session.activeProgram?.command ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
   });
@@ -2870,12 +2919,18 @@ async function executeTmuxAction(
   return { shouldBroadcastLayout };
 }
 
-export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, clientId: string): void {
+export function handleTerminalWebSocket(
+  ws: WebSocket,
+  sessionId: string,
+  clientId: string,
+  options: { sinceSeq?: number } = {},
+): void {
   const session = terminalSessions.get(sessionId);
   if (!session) {
     ws.close(4001, 'Session not found');
     return;
   }
+  const sinceSeq = options.sinceSeq ?? 0;
 
   // Register client
   let clients = wsClients.get(sessionId);
@@ -2900,6 +2955,21 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
       }
     } catch { /* ignore */ }
 
+    // 计算重连补帧：仅 shell 模式有 history。
+    // - sinceSeq > 0：客户端带了基线，只补增量；若已被淘汰则发 outOfWindow + 全量窗口。
+    // - sinceSeq == 0：客户端是首次连或刷新，不在 connected 里发 history（走 /attach 一次性回放，避免重复）。
+    let replayChunks: string[] = [];
+    let replayLastSeq = 0;
+    let replayOutOfWindow = false;
+    if (session.mode === 'shell' && sinceSeq > 0) {
+      const since = getHistorySince(sessionId, sinceSeq);
+      replayChunks = since.chunks.map((c) => c.data);
+      replayLastSeq = since.lastSeq;
+      replayOutOfWindow = since.outOfWindow;
+    } else if (session.mode === 'shell') {
+      replayLastSeq = getHistoryLastSeq(sessionId);
+    }
+
     // Send connected event (after initial detection)
     const runtime = (globalThis as Record<string, unknown>).Bun ? 'bun' : 'node';
     ws.send(JSON.stringify({
@@ -2912,6 +2982,12 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
       activeProgram: session.activeProgram?.command ?? null,
       activeProgramSource: session.activeProgram?.source ?? null,
       agentStatus: session.agentStatus,
+      // 短线重连补帧：
+      // replayChunks 为补发数据；replayLastSeq 是客户端应记录的新基线；
+      // replayOutOfWindow 表示客户端基线已被服务端淘汰，前端可以选择清屏后再回放。
+      replayChunks,
+      replayLastSeq,
+      replayOutOfWindow,
     }));
   })();
 
