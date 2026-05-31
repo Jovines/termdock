@@ -33,6 +33,7 @@ export interface TerminalSessionInfo {
 interface NewSessionEventDetail {
   mode?: TerminalMode;
   tmuxSessionName?: string;
+  cwd?: string;
 }
 
 const SWIPE_ANIMATION_SPEED_MS = 320;
@@ -180,7 +181,20 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
   const [focusTransferRequest, setFocusTransferRequest] = useState<{ sessionId: string; token: number } | null>(null);
   const isTouchSwipeRef = useRef(false);
+  const isMobileRef = useRef(false);
   const handleNewSessionRef = useRef<((options?: NewSessionEventDetail) => Promise<void>) | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const check = () => {
+      const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+      const isNarrow = window.innerWidth < 768;
+      isMobileRef.current = hasTouch && isNarrow;
+    };
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
   // Listen for gesture-lock events from TerminalViewport to disable Swiper.
   // Directly mutates the Swiper instance so allowTouchMove takes effect
   // synchronously — React state (via prop) is too slow for touch sequences
@@ -260,10 +274,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       return;
     }
 
-    const shouldTransferFocus =
-      isTouchSwipeRef.current &&
-      !!activeSessionId &&
+    // Desktop: always transfer focus so typing reaches the new terminal.
+    // Mobile: only transfer focus if the soft keyboard was already open,
+    // otherwise focusHiddenInput() would pop the keyboard unexpectedly.
+    const isKeyboardOpen = !!activeSessionId &&
       keyboardOpenBySessionRef.current[activeSessionId] === true;
+    const shouldTransferFocus =
+      !isMobileRef.current || isKeyboardOpen;
 
     setActiveSessionId(nextSessionId);
     if (shouldTransferFocus) {
@@ -538,6 +555,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       const newTerminalSession = await createTerminalSession({
         mode,
         tmuxSessionName: tmuxSessionName ?? undefined,
+        cwd: options?.cwd,
       });
       const sessionId = uuidv4();
       const effectiveTmuxSessionName = newTerminalSession.tmuxSessionName ?? tmuxSessionName;

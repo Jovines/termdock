@@ -114,6 +114,7 @@ export async function createTerminalSession(
       rows: options.rows || 24,
       mode: options.mode || 'shell',
       tmuxSessionName: options.tmuxSessionName,
+      cwd: options.cwd,
     }),
   });
 

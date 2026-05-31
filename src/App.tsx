@@ -374,13 +374,18 @@ function App() {
     const tmuxSessionName = mode === 'tmux'
       ? (overrides?.tmuxSessionName?.trim() || newSessionTmuxName.trim() || undefined)
       : undefined;
+    // Inherit cwd from the currently active session
+    const activeCwd = activeSessionId
+      ? useTerminalStore.getState().sessions.get(activeSessionId)?.cwd
+      : undefined;
     window.dispatchEvent(new CustomEvent('new-terminal-session', {
       detail: {
         mode,
         tmuxSessionName,
+        cwd: activeCwd,
       },
     }));
-  }, [newSessionMode, newSessionTmuxName]);
+  }, [newSessionMode, newSessionTmuxName, activeSessionId]);
 
   const refreshTmuxSessions = useCallback(async () => {
     setTmuxRefreshing(true);
