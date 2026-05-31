@@ -439,7 +439,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
                 // Sync agent status from server on connect
                 if (event.agentStatus !== undefined) {
-                  setSessionAgentStatus(storeSessionId, event.agentStatus ?? null);
+                  setSessionAgentStatus(
+                    storeSessionId,
+                    event.agentStatus ?? null,
+                    event.agentColor ?? null,
+                    event.agentIndicator ?? null,
+                  );
                 }
 
                 const sessionState = useTerminalStore.getState().getTerminalSession(storeSessionId);
@@ -560,7 +565,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 break;
               }
               case 'agent-status': {
-                setSessionAgentStatus(storeSessionId, event.agentStatus ?? null, event.agentColor ?? null);
+                setSessionAgentStatus(
+                  storeSessionId,
+                  event.agentStatus ?? null,
+                  event.agentColor ?? null,
+                  event.agentIndicator ?? null,
+                );
                 break;
               }
               case 'exit': {

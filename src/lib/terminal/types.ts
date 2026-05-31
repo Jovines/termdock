@@ -1,6 +1,7 @@
 export type TerminalMode = 'shell' | 'tmux';
 
 export type AgentStatus = string;
+export type AgentIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal';
 
 export interface TmuxPane {
   id: string;
@@ -73,6 +74,7 @@ export interface TerminalStreamEvent {
   activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   agentStatus?: AgentStatus | null;
   agentColor?: string | null;
+  agentIndicator?: AgentIndicator | null;
   // 短线重连补帧（仅 connected 事件携带）：
   // replayChunks 是断线期间产生的输出，前端要追加到 buffer。
   // replayLastSeq 是新的客户端基线（保存为下一次重连的 since）。
@@ -190,6 +192,7 @@ export interface TerminalSessionState {
   isConnecting: boolean;
   agentStatus: AgentStatus | null;
   agentColor: string | null;
+  agentIndicator: AgentIndicator | null;
   agentNeedsReview: boolean;  // 前端状态：AI 从运行变为停止时，用户未查看 → 黄点提醒
   buffer: string;
   bufferChunks: TerminalChunk[];

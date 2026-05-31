@@ -16,6 +16,15 @@ const PRESET_COLORS = [
   { value: '#888888', label: 'Gray' },
 ];
 
+const INDICATOR_OPTIONS: Array<{ value: NonNullable<AgentRule['indicator']>; label: string }> = [
+  { value: 'spinner', label: 'Spinner' },
+  { value: 'pulse', label: 'Pulse' },
+  { value: 'dot', label: 'Dot' },
+  { value: 'ring', label: 'Ring' },
+  { value: 'badge', label: 'Badge' },
+  { value: 'terminal', label: 'Icon' },
+];
+
 interface AgentRulesSettingsProps {
   rules: AgentProgramConfig[];
   onChange: (rules: AgentProgramConfig[]) => void;
@@ -24,7 +33,7 @@ interface AgentRulesSettingsProps {
 
 function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSettingsProps) {
   const addProgram = () => {
-    onChange([...rules, { program: '', rules: [{ pattern: '', status: 'running' }] }]);
+    onChange([...rules, { program: '', rules: [{ pattern: '', status: 'running', indicator: 'pulse', clearDelayMs: 700 }] }]);
   };
 
   const removeProgram = (index: number) => {
@@ -37,7 +46,7 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
 
   const addRule = (progIndex: number) => {
     onChange(rules.map((r, i) =>
-      i === progIndex ? { ...r, rules: [...r.rules, { pattern: '', status: 'running' }] } : r
+      i === progIndex ? { ...r, rules: [...r.rules, { pattern: '', status: 'running', indicator: 'pulse', clearDelayMs: 700 }] } : r
     ));
   };
 
@@ -47,7 +56,7 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
     ));
   };
 
-  const updateRule = (progIndex: number, ruleIndex: number, field: keyof AgentRule, value: string) => {
+  const updateRule = (progIndex: number, ruleIndex: number, field: keyof AgentRule, value: string | number) => {
     onChange(rules.map((r, i) =>
       i === progIndex
         ? { ...r, rules: r.rules.map((rule, ri) => (ri === ruleIndex ? { ...rule, [field]: value } : rule)) }
@@ -142,6 +151,29 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
                     className="h-5 w-5 shrink-0 cursor-pointer rounded-full border-0 bg-transparent p-0"
                     title="Custom color"
                   />
+                  <select
+                    value={rule.indicator || 'pulse'}
+                    onChange={(e) => updateRule(pi, ri, 'indicator', e.target.value)}
+                    className="rounded-lg bg-surface px-2 py-1.5 text-[11px] text-foreground outline-none focus:ring-1 focus:ring-primary/30"
+                    title="Tab indicator style"
+                  >
+                    {INDICATOR_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                  <label className="inline-flex items-center gap-1 rounded-lg bg-surface px-2 py-1.5 text-[11px] text-muted-foreground">
+                    keep
+                    <input
+                      type="number"
+                      min={80}
+                      max={10000}
+                      step={100}
+                      value={rule.clearDelayMs ?? 450}
+                      onChange={(e) => updateRule(pi, ri, 'clearDelayMs', Number(e.target.value))}
+                      className="w-14 bg-transparent text-foreground outline-none"
+                    />
+                    ms
+                  </label>
                 </div>
               </div>
             );

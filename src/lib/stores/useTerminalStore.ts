@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { TerminalSession, TerminalChunk, TerminalSessionState, AgentStatus } from '../terminal';
+import type { TerminalSession, TerminalChunk, TerminalSessionState, AgentStatus, AgentIndicator } from '../terminal';
 
 export interface TerminalStore {
   sessions: Map<string, TerminalSessionState>;
@@ -13,7 +13,7 @@ export interface TerminalStore {
   setSessionActiveProgram: (sessionId: string, activeProgram: string | null, activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null) => void;
   setSessionCwd: (sessionId: string, cwd: string | null) => void;
   setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => void;
-  setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null) => void;
+  setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null, agentIndicator?: AgentIndicator | null) => void;
   clearAgentNeedsReview: (sessionId: string) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string) => void;
@@ -39,6 +39,7 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     isConnecting: false,
     agentStatus: null,
     agentColor: null,
+    agentIndicator: null,
     agentNeedsReview: false,
     buffer: '',
     bufferChunks: [],
@@ -152,13 +153,18 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     });
   },
 
-  setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null) => {
+  setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null, agentIndicator?: AgentIndicator | null) => {
     set((state) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
       if (!existing) return state;
       const nextAgentColor = agentStatus ? (agentColor ?? existing.agentColor) : null;
-      if (existing.agentStatus === agentStatus && existing.agentColor === nextAgentColor) return state;
+      const nextAgentIndicator = agentStatus ? (agentIndicator ?? existing.agentIndicator ?? null) : null;
+      if (
+        existing.agentStatus === agentStatus &&
+        existing.agentColor === nextAgentColor &&
+        existing.agentIndicator === nextAgentIndicator
+      ) return state;
 
       // any status → null: AI stopped. If user is NOT on this session, mark needs-review.
       const wasActive = existing.agentStatus !== null;
@@ -170,6 +176,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         ...existing,
         agentStatus,
         agentColor: nextAgentColor,
+        agentIndicator: nextAgentIndicator,
         agentNeedsReview: agentNeedsReview || (existing.agentNeedsReview && !agentStatus),
         updatedAt: Date.now(),
       });
@@ -250,6 +257,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           isConnecting: false,
           agentStatus: null,
           agentColor: null,
+          agentIndicator: null,
           agentNeedsReview: false,
           updatedAt: Date.now(),
         });

@@ -25,7 +25,7 @@ import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
-import type { TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
+import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules } from './lib/terminal/api';
 import type { AgentProgramConfig } from './lib/terminal/api';
@@ -68,6 +68,104 @@ function getTabDisplayLines(
   return { primary: session.name, secondary: null };
 }
 
+type TabTerminalSessionState = Pick<
+  TerminalSessionState,
+  | 'cwd'
+  | 'activeProgram'
+  | 'inCopyMode'
+  | 'isConnecting'
+  | 'agentStatus'
+  | 'agentColor'
+  | 'agentIndicator'
+  | 'agentNeedsReview'
+>;
+
+function pickTabTerminalSessions(
+  source: Map<string, TerminalSessionState>,
+): Map<string, TabTerminalSessionState> {
+  const picked = new Map<string, TabTerminalSessionState>();
+  for (const [id, state] of source) {
+    picked.set(id, {
+      cwd: state.cwd,
+      activeProgram: state.activeProgram,
+      inCopyMode: state.inCopyMode,
+      isConnecting: state.isConnecting,
+      agentStatus: state.agentStatus,
+      agentColor: state.agentColor,
+      agentIndicator: state.agentIndicator,
+      agentNeedsReview: state.agentNeedsReview,
+    });
+  }
+  return picked;
+}
+
+function areTabTerminalSessionsEqual(
+  current: Map<string, TabTerminalSessionState>,
+  next: Map<string, TabTerminalSessionState>,
+): boolean {
+  if (current.size !== next.size) return false;
+
+  for (const [id, nextState] of next) {
+    const currentState = current.get(id);
+    if (!currentState) return false;
+    if (
+      currentState.cwd !== nextState.cwd ||
+      currentState.activeProgram !== nextState.activeProgram ||
+      currentState.inCopyMode !== nextState.inCopyMode ||
+      currentState.isConnecting !== nextState.isConnecting ||
+      currentState.agentStatus !== nextState.agentStatus ||
+      currentState.agentColor !== nextState.agentColor ||
+      currentState.agentIndicator !== nextState.agentIndicator ||
+      currentState.agentNeedsReview !== nextState.agentNeedsReview
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function renderTabIcon(
+  sessionMode: 'shell' | 'tmux',
+  state?: TabTerminalSessionState,
+): React.ReactNode {
+  const baseIcon = sessionMode === 'tmux'
+    ? <RiLayoutGridLine size={11} className="shrink-0" />
+    : <RiTerminalLine size={11} className="shrink-0" />;
+  const color = state?.agentColor || (state?.agentStatus === 'waiting' || state?.agentNeedsReview || state?.inCopyMode ? '#facc15' : undefined);
+
+  if (state?.agentStatus) {
+    const indicator = state.agentIndicator || (state.agentStatus === 'running' ? 'spinner' : 'pulse');
+    const style = color ? { color } : undefined;
+    if (indicator === 'spinner') {
+      return <RiLoaderCircle size={11} className="shrink-0 animate-spin" style={style} />;
+    }
+    if (indicator === 'dot') {
+      return <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color || '#4ade80' }} />;
+    }
+    if (indicator === 'ring') {
+      return <span className="h-2.5 w-2.5 shrink-0 rounded-full border-2 animate-pulse" style={{ borderColor: color || '#facc15' }} />;
+    }
+    if (indicator === 'badge') {
+      return <span className="shrink-0 rounded bg-surface px-1 text-[8px] font-semibold uppercase leading-3" style={style}>{state.agentStatus.slice(0, 2)}</span>;
+    }
+    if (indicator === 'terminal') {
+      return sessionMode === 'tmux'
+        ? <RiLayoutGridLine size={11} className="shrink-0" style={style} />
+        : <RiTerminalLine size={11} className="shrink-0" style={style} />;
+    }
+    return <span className="h-2 w-2 shrink-0 animate-pulse rounded-full" style={{ backgroundColor: color || '#4ade80' }} />;
+  }
+
+  if (state?.agentNeedsReview || state?.inCopyMode) {
+    return sessionMode === 'tmux'
+      ? <RiLayoutGridLine size={11} className="shrink-0 text-yellow-400" />
+      : <RiTerminalLine size={11} className="shrink-0 text-yellow-400" />;
+  }
+
+  return baseIcon;
+}
+
 
 function App() {
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
@@ -85,9 +183,19 @@ function App() {
   const [drawerTab, setDrawerTab] = React.useState<DrawerTab>('sessions');
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
-  // Only re-render when session list changes (add/remove), not on every terminal output.
-  const sessionCount = useTerminalStore((s) => s.sessions.size);
-  const terminalSessions = useTerminalStore.getState().sessions;
+  // Only re-render the chrome when tab metadata changes, not on every terminal output chunk.
+  const [terminalSessions, setTerminalSessions] = useState(() =>
+    pickTabTerminalSessions(useTerminalStore.getState().sessions),
+  );
+
+  useEffect(() => {
+    return useTerminalStore.subscribe((state) => {
+      const next = pickTabTerminalSessions(state.sessions);
+      setTerminalSessions((current) => (
+        areTabTerminalSessionsEqual(current, next) ? current : next
+      ));
+    });
+  }, []);
 
   // Sidebar state — only subscribe to the booleans we render, not the whole store.
   const sidebarLeftOpen = useSidebarStore((s) => s.leftOpen);
@@ -108,9 +216,9 @@ function App() {
 
   // Sync active session's cwd to sidebar store
   useEffect(() => {
-    const ts = activeSessionId ? useTerminalStore.getState().sessions.get(activeSessionId) : null;
+    const ts = activeSessionId ? terminalSessions.get(activeSessionId) : null;
     useSidebarStore.getState().setRootPath(ts?.cwd ?? null);
-  }, [activeSessionId, sessionCount]);
+  }, [activeSessionId, terminalSessions]);
 
   // Sidebar drawer dimensions
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -670,46 +778,7 @@ function App() {
                   >
                     <span className="inline-flex min-w-0 items-center gap-1">
                       <span className="inline-flex shrink-0 items-center">
-                      {ts?.agentStatus === 'running' ? (
-                        <RiLoaderCircle
-                          size={11}
-                          className="shrink-0 animate-spin text-green-400"
-                        />
-                      ) : ts?.agentStatus === 'waiting' ? (
-                        session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={11} className="shrink-0 text-yellow-400" />
-                        ) : (
-                          <RiTerminalLine size={11} className="shrink-0 text-yellow-400" />
-                        )
-                      ) : ts?.agentNeedsReview ? (
-                        session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={11} className="shrink-0 text-yellow-400" />
-                        ) : (
-                          <RiTerminalLine size={11} className="shrink-0 text-yellow-400" />
-                        )
-                      ) : ts?.inCopyMode ? (
-                        session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={11} className="shrink-0 text-yellow-400" />
-                        ) : (
-                          <RiTerminalLine size={11} className="shrink-0 text-yellow-400" />
-                        )
-                      ) : ts?.agentStatus === 'idle' ? (
-                        session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={11} className="shrink-0 text-gray-500" />
-                        ) : (
-                          <RiTerminalLine size={11} className="shrink-0 text-gray-500" />
-                        )
-                      ) : ts?.agentColor ? (
-                        session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={11} className="shrink-0" style={{ color: ts.agentColor }} />
-                        ) : (
-                          <RiTerminalLine size={11} className="shrink-0" style={{ color: ts.agentColor }} />
-                        )
-                      ) : session.mode === 'tmux' ? (
-                        <RiLayoutGridLine size={11} className="shrink-0" />
-                      ) : (
-                        <RiTerminalLine size={11} className="shrink-0" />
-                      )}
+                        {renderTabIcon(session.mode, ts)}
                       </span>
                       {tabDirLabel ? (
                         <span className="flex min-w-0 flex-col justify-center leading-[0.72rem] sm:leading-[0.78rem]">
@@ -1653,9 +1722,9 @@ function App() {
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
               <p className="mb-4 text-[11px] text-muted-foreground">
-                Configure regex patterns to detect when an AI tool is running in a terminal tab.
-                When a pattern matches the terminal output, the tab shows a green dot. When it stops
-                and you haven't viewed the tab yet, it shows a yellow dot.
+                Configure regex patterns to detect what an AI tool is doing in a terminal tab.
+                Each rule can choose its label, color, icon style and how long the indicator is kept after output quiets down.
+                When it stops and you haven't viewed the tab yet, the tab keeps a yellow review hint.
               </p>
               <AgentRulesSettings
                 rules={agentRules}

@@ -128,8 +128,10 @@ interface TerminalSession {
   lastOscCwd: string | null;
   agentStatus: string | null;
   agentColor: string | null;
+  agentIndicator: AgentIndicator | null;
   agentStatusBuf: string;      // 去除 ANSI 后的纯文本滚动缓冲区
   agentStatusTimer: ReturnType<typeof setTimeout> | null;
+  agentStatusClearDelayMs: number;
 }
 
 interface PersistedClientSession {
@@ -1037,7 +1039,16 @@ interface AgentRule {
   pattern: string;   // regex pattern string
   status: string;    // status label, e.g. "running"
   color?: string;    // CSS color for the tab dot, e.g. "#4ade80" or "green"
+  indicator?: AgentIndicator;
+  clearDelayMs?: number;
 }
+
+type AgentIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal';
+
+const AGENT_INDICATORS = new Set<AgentIndicator>(['spinner', 'pulse', 'dot', 'ring', 'badge', 'terminal']);
+const DEFAULT_AGENT_CLEAR_DELAY_MS = 450;
+const MIN_AGENT_CLEAR_DELAY_MS = 80;
+const MAX_AGENT_CLEAR_DELAY_MS = 10_000;
 
 interface AgentProgramConfig {
   program: string;   // program name to match (case-insensitive)
@@ -1049,50 +1060,68 @@ const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
   {
     program: 'claude',
     rules: [
-      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80' },
-      { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80' },
-      { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80' },
+      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
+      { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
+      { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
+      { pattern: 'Do you want to proceed\\?|\\[y/N\\]|Approve|Allow', status: 'waiting', color: '#facc15', indicator: 'ring', clearDelayMs: 10000 },
     ],
   },
   {
     program: 'claude-code',
     rules: [
-      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80' },
-      { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80' },
-      { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80' },
+      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
+      { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
+      { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
+      { pattern: 'Do you want to proceed\\?|\\[y/N\\]|Approve|Allow', status: 'waiting', color: '#facc15', indicator: 'ring', clearDelayMs: 10000 },
     ],
   },
   {
     program: 'opencode',
     rules: [
-      { pattern: 'thinking|working|generating', status: 'running', color: '#4ade80' },
+      { pattern: 'thinking|working|generating', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
+      { pattern: 'confirm|approve|permission|continue\\?', status: 'waiting', color: '#facc15', indicator: 'ring', clearDelayMs: 10000 },
     ],
   },
   {
     program: 'coco',
     rules: [
-      { pattern: '[·✢❋❇✽] (thinking|working|generating)', status: 'running', color: '#4ade80' },
+      { pattern: 'Tab/Arrow keys to navigate|Esc to|select ·|Coco 等待态采样|AskUserQuestion|User\'s answers', status: 'waiting', color: '#facc15', indicator: 'ring', clearDelayMs: 10000 },
+      { pattern: '[·✢❋❇✽] (thinking|working|generating)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
+      { pattern: 'confirm|approve|permission|continue\\?', status: 'waiting', color: '#facc15', indicator: 'ring', clearDelayMs: 10000 },
     ],
   },
   {
     program: 'aider',
     rules: [
-      { pattern: 'Thinking|Generating|Working', status: 'running', color: '#4ade80' },
+      { pattern: 'Thinking|Generating|Working', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
     ],
   },
 ];
 
 // Runtime cache: program → compiled rules
-let agentRulesCache: Map<string, { status: string; color: string | undefined; regex: RegExp }[]> = new Map();
+let agentRulesCache: Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]> = new Map();
 let agentRulesVersion = 0;
 
-function loadAgentRules(): Map<string, { status: string; color: string | undefined; regex: RegExp }[]> {
+function normalizeAgentIndicator(value: unknown): AgentIndicator {
+  return typeof value === 'string' && AGENT_INDICATORS.has(value as AgentIndicator)
+    ? value as AgentIndicator
+    : 'pulse';
+}
+
+function normalizeAgentClearDelay(value: unknown): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : DEFAULT_AGENT_CLEAR_DELAY_MS;
+  return Math.min(MAX_AGENT_CLEAR_DELAY_MS, Math.max(MIN_AGENT_CLEAR_DELAY_MS, n));
+}
+
+function loadAgentRules(): Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]> {
   const rules = loadAgentRulesFromDisk();
-  const map = new Map<string, { status: string; color: string | undefined; regex: RegExp }[]>();
+  const map = new Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]>();
   for (const config of rules) {
     const compiled = config.rules.map(r => ({
       status: r.status,
       color: r.color,
+      indicator: normalizeAgentIndicator(r.indicator),
+      clearDelayMs: normalizeAgentClearDelay(r.clearDelayMs),
       regex: new RegExp(r.pattern, 'i'),
     }));
     map.set(config.program.toLowerCase(), compiled);
@@ -1144,7 +1173,7 @@ function stripAnsi(data: string): string {
  * 基于可配置规则匹配检测 AI 工具状态
  * 只看实际输出文本，不受 resize/布局变化影响
  */
-function detectAgentStatus(command: string, buf: string): { status: string; color: string | undefined } | null {
+function detectAgentStatus(command: string, buf: string): { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number } | null {
   if (!buf || buf.length < 2) return null;
 
   const rules = agentRulesCache.get(command.toLowerCase());
@@ -1155,14 +1184,12 @@ function detectAgentStatus(command: string, buf: string): { status: string; colo
 
   for (const rule of rules) {
     if (rule.regex.test(tail)) {
-      return { status: rule.status, color: rule.color };
+      return { status: rule.status, color: rule.color, indicator: rule.indicator, clearDelayMs: rule.clearDelayMs };
     }
   }
 
   return null;
 }
-
-const AGENT_STATUS_DEBOUNCE_MS = 200;
 
 function clearAgentStatusTimer(session: TerminalSession): void {
   if (session.agentStatusTimer) {
@@ -1180,7 +1207,9 @@ function evaluateAgentStatus(sessionId: string, session: TerminalSession, latest
       clearAgentStatusTimer(session);
       session.agentStatus = null;
       session.agentColor = null;
-      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null, agentColor: null });
+      session.agentIndicator = null;
+      session.agentStatusClearDelayMs = DEFAULT_AGENT_CLEAR_DELAY_MS;
+      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null, agentColor: null, agentIndicator: null });
     }
     return;
   }
@@ -1191,10 +1220,13 @@ function evaluateAgentStatus(sessionId: string, session: TerminalSession, latest
     clearAgentStatusTimer(session);
     const newStatus = detected.status;
     const newColor = detected.color ?? null;
-    if (newStatus !== previousStatus || newColor !== session.agentColor) {
+    const newIndicator = detected.indicator;
+    session.agentStatusClearDelayMs = detected.clearDelayMs;
+    if (newStatus !== previousStatus || newColor !== session.agentColor || newIndicator !== session.agentIndicator) {
       session.agentStatus = newStatus;
       session.agentColor = newColor;
-      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: newStatus, agentColor: newColor });
+      session.agentIndicator = newIndicator;
+      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: newStatus, agentColor: newColor, agentIndicator: newIndicator });
     }
     return;
   }
@@ -1206,9 +1238,11 @@ function evaluateAgentStatus(sessionId: string, session: TerminalSession, latest
       if (!recheck) {
         session.agentStatus = null;
         session.agentColor = null;
-        broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null, agentColor: null });
+        session.agentIndicator = null;
+        session.agentStatusClearDelayMs = DEFAULT_AGENT_CLEAR_DELAY_MS;
+        broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null, agentColor: null, agentIndicator: null });
       }
-    }, AGENT_STATUS_DEBOUNCE_MS);
+    }, session.agentStatusClearDelayMs);
   }
 }
 
@@ -1786,9 +1820,9 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
         if (stripped) {
           const buf = session.agentStatusBuf + stripped;
           session.agentStatusBuf = buf.length > AGENT_BUF_CAP ? buf.slice(-AGENT_BUF_CAP / 2) : buf;
-          // Log spinner patterns for debugging (capped at 512KB)
+          // Log spinner/prompt patterns for debugging (capped at 512KB)
           const tail = session.agentStatusBuf.slice(-200);
-          if (/[·✢✳✶✻✽❋❇⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊]/.test(tail)) {
+          if (/[·✢✳✶✻✽❋❇⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊]/.test(tail) || /Tab\/Arrow keys to navigate|Esc to|select ·|AskUserQuestion/i.test(tail)) {
             try {
               const logPath = `${os.homedir()}/.termdock/agent-debug.log`;
               const { statSync, appendFileSync } = fs;
@@ -1900,8 +1934,10 @@ async function spawnTerminalSession(req: express.Request, input: {
     lastOscCwd: null,
     agentStatus: null,
     agentColor: null,
+    agentIndicator: null,
     agentStatusBuf: '',
     agentStatusTimer: null,
+    agentStatusClearDelayMs: DEFAULT_AGENT_CLEAR_DELAY_MS,
   };
 
   terminalSessions.set(sessionId, session);
@@ -2277,6 +2313,17 @@ router.put('/agent-rules', (req, res) => {
         res.status(400).json({ error: `Invalid regex: ${rule.pattern}` });
         return;
       }
+      if (rule.indicator !== undefined && !AGENT_INDICATORS.has(rule.indicator)) {
+        res.status(400).json({ error: `Invalid indicator: ${rule.indicator}` });
+        return;
+      }
+      if (rule.clearDelayMs !== undefined) {
+        const delay = Number(rule.clearDelayMs);
+        if (!Number.isFinite(delay) || delay < MIN_AGENT_CLEAR_DELAY_MS || delay > MAX_AGENT_CLEAR_DELAY_MS) {
+          res.status(400).json({ error: `clearDelayMs must be ${MIN_AGENT_CLEAR_DELAY_MS}-${MAX_AGENT_CLEAR_DELAY_MS}` });
+          return;
+        }
+      }
     }
   }
   saveAgentRulesToDisk(rules);
@@ -2389,6 +2436,8 @@ router.get('/:sessionId/stream', async (req, res) => {
     activeProgram: session.activeProgram?.command ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
     agentStatus: session.agentStatus,
+    agentColor: session.agentColor,
+    agentIndicator: session.agentIndicator,
   });
 
   let tmuxInterval: ReturnType<typeof setInterval> | null = null;
@@ -2982,6 +3031,8 @@ export function handleTerminalWebSocket(
       activeProgram: session.activeProgram?.command ?? null,
       activeProgramSource: session.activeProgram?.source ?? null,
       agentStatus: session.agentStatus,
+      agentColor: session.agentColor,
+      agentIndicator: session.agentIndicator,
       // 短线重连补帧：
       // replayChunks 为补发数据；replayLastSeq 是客户端应记录的新基线；
       // replayOutOfWindow 表示客户端基线已被服务端淘汰，前端可以选择清屏后再回放。

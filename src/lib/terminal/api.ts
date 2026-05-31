@@ -3,6 +3,7 @@ import type {
   TerminalStreamEvent,
   CreateTerminalOptions,
   ConnectStreamOptions,
+  AgentIndicator,
   TmuxActionPayload,
   TmuxLayout,
   TmuxSessionSummary,
@@ -314,7 +315,12 @@ export function connectTerminalStream(
 
         // Handle agent-status broadcast
         if (msg.type === 'agent-status') {
-          onEvent({ type: 'agent-status', agentStatus: msg.agentStatus ?? null, agentColor: msg.agentColor ?? null });
+          onEvent({
+            type: 'agent-status',
+            agentStatus: msg.agentStatus ?? null,
+            agentColor: msg.agentColor ?? null,
+            agentIndicator: msg.agentIndicator ?? null,
+          });
           return;
         }
 
@@ -820,6 +826,8 @@ export interface AgentRule {
   pattern: string;
   status: string;
   color?: string;
+  indicator?: AgentIndicator;
+  clearDelayMs?: number;
 }
 
 export interface AgentProgramConfig {
