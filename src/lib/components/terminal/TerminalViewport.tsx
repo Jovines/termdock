@@ -6,6 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
+import { clientLog } from '../../utils/clientLog';
 import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
 import type { TerminalRendererMode } from '../../terminal/renderer';
@@ -1659,6 +1660,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // Handle data input
           localDisposables.push(
             terminal.onData((data: string) => {
+              clientLog('debug', '[onData]', { data, ts: Date.now() });
               inputHandlerRef.current(data);
             })
           );

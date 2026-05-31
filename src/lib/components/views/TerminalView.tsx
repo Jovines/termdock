@@ -11,6 +11,7 @@ import { buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, 
 import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
+import { clientLog } from '../../utils/clientLog';
 import type { TerminalRendererMode } from '../../terminal/renderer';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 
@@ -809,7 +810,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const handleViewportInput = React.useCallback(
     (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean }) => {
+      clientLog('debug', '[handleViewportInput] entry', { data, isActive: isActiveRef.current, suppressUntil: suppressInputUntilRef.current, now: Date.now(), terminalId: terminalIdRef.current });
       if (!isActiveRef.current) {
+        clientLog('warn', '[handleViewportInput] DROPPED: not active');
         return;
       }
 
@@ -818,6 +821,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
 
       if (Date.now() < suppressInputUntilRef.current) {
+        clientLog('warn', '[handleViewportInput] DROPPED: suppressed');
         return;
       }
 
@@ -846,7 +850,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
 
       const terminalId = terminalIdRef.current;
-      if (!terminalId) return;
+      if (!terminalId) {
+        clientLog('warn', '[handleViewportInput] DROPPED: no terminalId');
+        return;
+      }
 
       const sendPayload = async () => {
         try {
@@ -859,8 +866,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             }
           }
 
+          clientLog('debug', '[sendPayload] sending', { payload, terminalId });
           await terminal.sendInput(terminalId, payload);
         } catch (error) {
+          clientLog('error', '[sendPayload] ERROR', { error });
           setConnectionError(error instanceof Error ? error.message : 'Failed to send input');
         }
       };

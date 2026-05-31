@@ -16,6 +16,7 @@ const EDGE_ZONE_WIDTH = 30;
 const SNAP_PROGRESS_THRESHOLD = 0.5;
 // @use-gesture reports velocity in px/ms.
 const SNAP_VELOCITY_THRESHOLD = 0.5;
+const SNAP_DURATION_MS = 250;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -65,13 +66,39 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     setBackdropOpacity(nextX);
   }, [setBackdropOpacity]);
 
+  const animateToState = useCallback((open: boolean) => {
+    const panel = panelRef.current;
+    const backdrop = backdropRef.current;
+    const targetX = open ? 0 : closedX;
+    currentXRef.current = targetX;
+
+    if (panel) {
+      panel.style.transition = `transform ${SNAP_DURATION_MS}ms ease-out`;
+      panel.style.transform = `translateX(${targetX}px)`;
+    }
+    if (backdrop) {
+      const progress = isLeft
+        ? (targetX + drawerWidthPx) / drawerWidthPx
+        : (drawerWidthPx - targetX) / drawerWidthPx;
+      backdrop.style.transition = `opacity ${SNAP_DURATION_MS}ms ease-out`;
+      backdrop.style.opacity = String(clamp(progress, 0, 1));
+    }
+
+    const cleanup = () => {
+      if (panel) panel.style.transition = 'none';
+      if (backdrop) backdrop.style.transition = 'none';
+    };
+    panel?.addEventListener('transitionend', cleanup, { once: true });
+    setTimeout(cleanup, SNAP_DURATION_MS + 50);
+  }, [closedX, drawerWidthPx, isLeft]);
+
   const snapToState = useCallback((open: boolean) => {
     setPosition(open ? 0 : closedX);
   }, [closedX, setPosition]);
 
   useEffect(() => {
-    snapToState(isOpen);
-  }, [isOpen, snapToState]);
+    animateToState(isOpen);
+  }, [isOpen, animateToState]);
 
   // Keep the drawer aligned when viewport-derived width changes.
   useEffect(() => {
@@ -94,10 +121,10 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
 
     if (flingClose) {
       if (isOpenRef.current) onClose();
-      else snapToState(false);
+      else animateToState(false);
     } else if (flingOpen) {
       if (!isOpenRef.current) onOpen?.();
-      else snapToState(true);
+      else animateToState(true);
     } else {
       const currentX = currentXRef.current;
       const progress = isLeft
@@ -105,14 +132,14 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
         : (drawerWidthPx - currentX) / drawerWidthPx;
       if (progress > SNAP_PROGRESS_THRESHOLD) {
         if (!isOpenRef.current) onOpen?.();
-        else snapToState(true);
+        else animateToState(true);
       } else if (isOpenRef.current) {
         onClose();
       } else {
-        snapToState(false);
+        animateToState(false);
       }
     }
-  }, [drawerWidthPx, isLeft, onClose, onOpen, snapToState]);
+  }, [drawerWidthPx, isLeft, onClose, onOpen, animateToState]);
 
   const bindPanel = useDrag(
     ({ active, first, movement: [mx], velocity: [vx], direction: [dx] }) => {

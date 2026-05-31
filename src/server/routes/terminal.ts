@@ -3017,6 +3017,7 @@ export function handleTerminalWebSocket(ws: WebSocket, sessionId: string, client
         case 'input': {
           if (typeof msg.data === 'string' && msg.data.length > 0) {
             session.lastActivity = Date.now();
+            console.log('[WS input] sessionId=', sessionId, 'data=', JSON.stringify(msg.data), 'len=', msg.data.length, 'ts=', Date.now());
             session.ptyProcess.write(msg.data);
           }
           break;

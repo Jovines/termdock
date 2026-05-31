@@ -695,6 +695,18 @@ function App() {
                         ) : (
                           <RiTerminalLine size={12} className="shrink-0 animate-pulse text-yellow-400" />
                         )
+                      ) : ts?.agentStatus === 'idle' ? (
+                        session.mode === 'tmux' ? (
+                          <RiLayoutGridLine size={12} className="shrink-0 text-gray-500" />
+                        ) : (
+                          <RiTerminalLine size={12} className="shrink-0 text-gray-500" />
+                        )
+                      ) : ts?.agentColor ? (
+                        session.mode === 'tmux' ? (
+                          <RiLayoutGridLine size={12} className="shrink-0" style={{ color: ts.agentColor }} />
+                        ) : (
+                          <RiTerminalLine size={12} className="shrink-0" style={{ color: ts.agentColor }} />
+                        )
                       ) : session.mode === 'tmux' ? (
                         <RiLayoutGridLine size={12} className="shrink-0" />
                       ) : (
