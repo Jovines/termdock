@@ -284,7 +284,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const autoFocusRef = React.useRef(autoFocus);
     autoFocusRef.current = autoFocus;
 
-    const shouldUseWebgl = rendererMode !== 'canvas';
+    // xterm's WebGL renderer is fast, but on mobile tmux scrollback it can
+    // occasionally present stale row textures while tmux copy-mode is rapidly
+    // repainting the viewport.  The terminal buffer itself is correct, but the
+    // rendered rows appear to "jump".  Keep explicit WebGL available for users
+    // who opt in, but make Auto prefer the built-in renderer for mobile tmux
+    // sessions (identified by onTmuxScroll) where correctness matters more.
+    const shouldUseWebgl = rendererMode === 'webgl' || (rendererMode === 'auto' && !(enableTouchScroll && onTmuxScroll));
 
     React.useEffect(() => {
       if (enableTouchScroll) {
