@@ -148,10 +148,10 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
         {...bindEdge()}
         style={{
           position: 'fixed',
-          top: 0,
+          top: '1.5rem',
+          bottom: '10rem',
           ...(isLeft ? { left: 0 } : { right: 0 }),
           width: EDGE_ZONE_WIDTH,
-          height: 'var(--app-vh, 100vh)',
           zIndex: 30,
           touchAction: 'none',
           pointerEvents: isOpen ? 'none' : 'auto',
