@@ -12,7 +12,7 @@ interface SidebarProps {
   push?: boolean;
 }
 
-const EDGE_ZONE_WIDTH = 30;
+const EDGE_ZONE_WIDTH = 15;
 const SNAP_PROGRESS_THRESHOLD = 0.5;
 // @use-gesture reports velocity in px/ms.
 const SNAP_VELOCITY_THRESHOLD = 0.5;
