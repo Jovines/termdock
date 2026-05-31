@@ -677,14 +677,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // ---- Tmux-mode touch scroll (registered via GestureManager) ----
     // Priority PRIORITY_TMUX_SCROLL (80) fires AFTER long-press (90) but
     // BEFORE normal-scroll (70).  Sends SGR (1006) mouse wheel escape
-    // sequences directly through the PTY so tmux handles scrollback with the
-    // same low-latency path as a physical trackpad/wheel.
-    //
-    // Important: keep copy-mode scrolling deterministic.  tmux may already
-    // translate a single wheel event into multiple history rows depending on
-    // its wheel options/bindings, so client-side kinetic scrolling or dynamic
-    // acceleration easily feels like random line jumps while reviewing
-    // scrollback.
+    // sequences directly through the PTY instead of server-side tmux
+    // copy-mode commands.
 
     const tmuxScrollStateRef = React.useRef<{
       pointerId: number | null;
@@ -696,6 +690,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       remainder: number;
       didScroll: boolean;
       rafId: number | null;
+      velocity: number;
+      instantSpeed: number;
     }>({
       pointerId: null,
       lastX: null,
@@ -706,6 +702,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       remainder: 0,
       didScroll: false,
       rafId: null,
+      velocity: 0,
+      instantSpeed: 0,
     });
 
     const tmuxStopRaf = React.useCallback(() => {
@@ -741,7 +739,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     const tmuxDynamicEff = React.useCallback((): number => {
       const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
-      return lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
+      const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
+      const factor = 1 + tmuxScrollStateRef.current.instantSpeed * 0.10;
+      return eff / Math.min(6, factor);
     }, [fontSize, tmuxScrollSensitivity]);
 
     const tmuxTick = React.useCallback(() => {
@@ -752,11 +752,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       let linesUp = 0;
       let linesDown = 0;
 
-      while ((linesUp + linesDown) < 4 && st.remainder >= deff) {
+      while ((linesUp + linesDown) < 8 && st.remainder >= deff) {
         st.remainder -= deff;
         linesDown++;
       }
-      while ((linesUp + linesDown) < 4 && st.remainder <= -deff) {
+      while ((linesUp + linesDown) < 8 && st.remainder <= -deff) {
         st.remainder += deff;
         linesUp++;
       }
@@ -793,6 +793,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       st.startY = e.clientY;
       st.gestureAxis = null;
       st.remainder = 0;
+      st.velocity = 0;
+      st.instantSpeed = 0;
       st.didScroll = false;
       return false;
     }, [tmuxStopRaf]);
@@ -834,6 +836,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       const deltaPixels = -deltaY;
       st.remainder += deltaPixels;
+      st.instantSpeed = Math.abs(deltaPixels);
+      st.velocity = st.velocity * 0.45 + deltaPixels * 0.55;
 
       if (isClaimed) {
         const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
@@ -856,6 +860,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       st.lastY = null;
       st.startX = null;
       st.startY = null;
+      st.instantSpeed = 0;
 
       if (st.gestureAxis === 'x') {
         st.gestureAxis = null;
@@ -866,14 +871,45 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
       const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
 
-      if (Math.abs(st.remainder) >= eff / 3) {
+      if (st.didScroll && Math.abs(st.velocity) > eff * 0.05) {
+        const decay = () => {
+          st.velocity *= 0.96;
+          st.remainder += st.velocity;
+          const factor = 1 + Math.abs(st.velocity) * 0.10;
+          const deff = eff / Math.min(6, factor);
+          if (Math.abs(st.velocity) < eff * 0.08) {
+            if (Math.abs(st.remainder) >= deff / 3) {
+              const dir = st.remainder > 0 ? 'down' : 'up';
+              tmuxSendSgrScroll(dir, 1);
+              st.remainder = 0;
+            }
+            st.velocity = 0;
+            st.rafId = null;
+            return;
+          }
+          let linesUp = 0;
+          let linesDown = 0;
+          while ((linesUp + linesDown) < 8 && st.remainder >= deff) {
+            st.remainder -= deff;
+            linesDown++;
+          }
+          while ((linesUp + linesDown) < 8 && st.remainder <= -deff) {
+            st.remainder += deff;
+            linesUp++;
+          }
+          if (linesDown > 0) tmuxSendSgrScroll('down', linesDown);
+          if (linesUp > 0) tmuxSendSgrScroll('up', linesUp);
+          st.rafId = requestAnimationFrame(decay);
+        };
+        st.rafId = requestAnimationFrame(decay);
+      } else if (Math.abs(st.remainder) >= eff / 3) {
         tmuxScheduleTick();
       }
 
       if (st.didScroll) {
         e.stopImmediatePropagation();
       }
-    }, [tmuxStopRaf, tmuxScheduleTick, tmuxScrollSensitivity, fontSize]);
+    }, [tmuxStopRaf, tmuxSendSgrScroll, tmuxScheduleTick, tmuxScrollSensitivity, fontSize]);
 
     const tmux_onPointerCancel = React.useCallback((e: PointerEvent): void => {
       const st = tmuxScrollStateRef.current;
@@ -886,6 +922,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       st.startY = null;
       st.gestureAxis = null;
       st.remainder = 0;
+      st.velocity = 0;
       st.didScroll = false;
     }, [tmuxStopRaf]);
 

@@ -612,14 +612,8 @@ function App() {
                     setEditingSessionId(null);
                   };
 
-                  return (
-                    <React.Fragment key={session.id}>
-                      {index > 0 && (
-                        <span
-                          aria-hidden="true"
-                          className="mx-0.5 h-5 w-px shrink-0 self-center rounded-full bg-muted-foreground/45"
-                        />
-                      )}
+                return (
+                  <React.Fragment key={session.id}>
                     <Draggable draggableId={session.id} index={index}>
                       {(provided) => (
                     <div
@@ -655,12 +649,6 @@ function App() {
 
                 return (
                   <React.Fragment key={session.id}>
-                    {index > 0 && (
-                      <span
-                        aria-hidden="true"
-                        className="mx-0.5 h-5 w-px shrink-0 self-center rounded-full bg-muted-foreground/45"
-                      />
-                    )}
                   <Draggable draggableId={session.id} index={index}>
                     {(provided, snapshot) => (
                     <div
@@ -723,12 +711,16 @@ function App() {
                         <RiTerminalLine size={11} className="shrink-0" />
                       )}
                       </span>
-                      <span className="flex min-w-0 flex-col justify-center leading-[0.72rem] sm:leading-[0.78rem]">
-                        <span className={`truncate text-[10.5px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
-                        <span className={`truncate text-[8.5px] sm:text-[9px] ${tabDirLabel ? 'text-muted-foreground/80' : 'text-transparent'}`}>
-                          {tabDirLabel || '·'}
+                      {tabDirLabel ? (
+                        <span className="flex min-w-0 flex-col justify-center leading-[0.72rem] sm:leading-[0.78rem]">
+                          <span className={`truncate text-[10.5px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+                          <span className="truncate text-[8.5px] text-muted-foreground/80 sm:text-[9px]">
+                            {tabDirLabel}
+                          </span>
                         </span>
-                      </span>
+                      ) : (
+                        <span className={`truncate text-[10.5px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+                      )}
                     </span>
                   </button>
                     </div>
