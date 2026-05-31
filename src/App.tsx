@@ -747,14 +747,14 @@ function App() {
               <button
                 type="button"
                 onClick={() => {
-                  setDrawerTab('sessions');
+                  setDrawerTab('settings');
                   setIsDrawerOpen(true);
                 }}
-                className="inline-flex h-7 w-7 shrink-0 items-center justify-center gap-1 rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground sm:h-7 sm:w-auto sm:px-3"
-                aria-label="Open sessions and settings"
+                className="hidden lg:inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-full bg-surface-2 px-3 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                aria-label="Open settings"
               >
                 <RiSettings4Line size={14} />
-                <span className="ml-1.5 hidden text-xs sm:inline">Settings</span>
+                <span className="ml-1.5 text-xs">Settings</span>
               </button>
             </div>
           </div>
