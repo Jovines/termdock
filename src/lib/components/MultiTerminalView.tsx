@@ -10,7 +10,6 @@ import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { createDebugLogger } from '../utils/debug';
-import { clientLog } from '../utils/clientLog';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
 
 interface TerminalSession {
@@ -47,7 +46,6 @@ interface MultiTerminalViewProps {
   showDebug?: boolean;
   defaultSessionMode?: TerminalMode;
   defaultTmuxSessionName?: string;
-  showSessionStrip?: boolean;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
   onSessionDataUpdate?: (data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => void;
 }
@@ -68,99 +66,6 @@ function generateTmuxSessionName(seed?: string): string {
   return `wt-${timePart}${randomPart}`;
 }
 
-function SessionTabStrip({
-  sessions,
-  activeSessionId,
-  onSelect,
-  onRename,
-}: {
-  sessions: Array<Pick<TerminalSession, 'id' | 'name'>>;
-  activeSessionId: string | null;
-  onSelect: (sessionId: string) => void;
-  onRename: (sessionId: string, newName: string) => void;
-}) {
-  const activeTabRef = React.useRef<HTMLButtonElement | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  React.useEffect(() => {
-    activeTabRef.current?.scrollIntoView({
-      inline: 'center',
-      block: 'nearest',
-      behavior: 'smooth',
-    });
-  }, [activeSessionId]);
-
-  useEffect(() => {
-    if (editingId && inputRef.current) {
-      inputRef.current.select();
-    }
-  }, [editingId]);
-
-  const commitRename = useCallback((sessionId: string, value: string) => {
-    const trimmed = value.trim();
-    if (trimmed) {
-      onRename(sessionId, trimmed);
-    }
-    setEditingId(null);
-  }, [onRename]);
-
-  if (sessions.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="shrink-0 bg-background-2/50 px-1 py-1 sm:px-2">
-      <div className="scrollbar-thin flex items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
-        {sessions.map((session) => {
-          const isActive = session.id === activeSessionId;
-          const isEditing = session.id === editingId;
-
-          if (isEditing) {
-            return (
-              <input
-                key={session.id}
-                ref={inputRef}
-                type="text"
-                defaultValue={session.name}
-                maxLength={48}
-                className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] outline-none bg-background-elevated text-foreground shadow-sm ring-1 ring-primary/50 min-w-[6rem]`}
-                style={{ width: `${Math.min(Math.max(session.name.length, 6), 28)}ch` }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    commitRename(session.id, (e.target as HTMLInputElement).value);
-                  } else if (e.key === 'Escape') {
-                    setEditingId(null);
-                  }
-                }}
-                onBlur={(e) => commitRename(session.id, e.target.value)}
-              />
-            );
-          }
-
-          return (
-            <button
-              key={session.id}
-              ref={isActive ? activeTabRef : null}
-              type="button"
-              onClick={() => onSelect(session.id)}
-              onDoubleClick={() => setEditingId(session.id)}
-              className={`shrink-0 truncate rounded-full px-3 py-1.5 text-[11px] transition max-w-[16rem] ${
-                isActive
-                  ? 'bg-background-elevated text-foreground shadow-sm'
-                  : 'text-muted-foreground hover:bg-background-elevated/50 hover:text-foreground'
-              }`}
-              title={session.name}
-            >
-              {session.name}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   fontFamily = '"JetBrains Mono NL", "Symbols Nerd Font Mono"',
   fontSize = 13,
@@ -169,7 +74,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   showDebug,
   defaultSessionMode = 'shell',
   defaultTmuxSessionName = '',
-  showSessionStrip = true,
   onStatusChange,
   onSessionDataUpdate,
 }) => {
@@ -308,11 +212,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   // Notify parent of session data changes
   useEffect(() => {
-    clientLog('info', '[tab-bar] MultiTerminalView sessions changed', {
-      sessionCount: sessions.length,
-      sessionIds: sessions.map(s => s.id),
-      activeSessionId,
-    });
     onSessionDataUpdate?.({
       sessions: sessions.map((s) => ({
         id: s.id,
@@ -469,8 +368,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const seededRef = useRef(false);
   const sessionsRef = useRef<TerminalSession[]>(sessions);
   sessionsRef.current = sessions;
-  const activeSessionIdRef2 = useRef<string | null>(activeSessionId);
-  activeSessionIdRef2.current = activeSessionId;
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
   useEffect(() => {
     if (isRestoring) return;
 
@@ -534,7 +433,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     // Handle removed sessions: remove from local state (don't kill backend)
     if (removedSessionIds.length > 0) {
-      const currentActiveId = activeSessionIdRef2.current;
+      const currentActiveId = activeSessionIdRef.current;
       setSessions(prev => {
         const remaining = prev.filter(s => !removedSessionIds.includes(s.id));
         if (remaining.length !== prev.length) {
@@ -810,15 +709,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   return (
     <div className="h-full flex flex-col">
-      {showSessionStrip && (
-        <SessionTabStrip
-          sessions={sessions}
-          activeSessionId={activeSessionId}
-          onSelect={handleSwitchSession}
-          onRename={handleRenameSession}
-        />
-      )}
-
       <div className="flex-1 overflow-hidden">
         <Swiper
           onSwiper={(instance) => {

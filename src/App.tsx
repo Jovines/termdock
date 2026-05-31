@@ -31,7 +31,6 @@ import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc,
 import type { AgentProgramConfig } from './lib/terminal/api';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
-import { clientLog } from './lib/utils/clientLog';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
@@ -112,15 +111,6 @@ function App() {
     const ts = activeSessionId ? useTerminalStore.getState().sessions.get(activeSessionId) : null;
     useSidebarStore.getState().setRootPath(ts?.cwd ?? null);
   }, [activeSessionId, sessionCount]);
-
-  // Log tab bar state changes for debugging disappearance
-  useEffect(() => {
-    clientLog('info', '[tab-bar] state changed', {
-      sessionCount: sessions.length,
-      sessionIds: sessions.map(s => s.id),
-      activeSessionId,
-    });
-  }, [sessions, activeSessionId]);
 
   // Sidebar drawer dimensions
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -376,11 +366,6 @@ function App() {
   }, []);
 
   const handleSessionDataUpdate = useCallback((data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => {
-    clientLog('info', '[tab-bar] handleSessionDataUpdate', {
-      sessionCount: data.sessions.length,
-      sessionIds: data.sessions.map(s => s.id),
-      activeSessionId: data.activeSessionId,
-    });
     setSessions(data.sessions);
     setActiveSessionId(data.activeSessionId);
     useTerminalStore.getState().setActiveSessionId(data.activeSessionId);
@@ -583,7 +568,7 @@ function App() {
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="mx-auto flex h-full w-full max-w-[1440px] min-h-0 flex-col overflow-visible bg-background">
           <div
-            className="flex min-h-6 shrink-0 items-center justify-between gap-1 bg-background px-1 sm:min-h-7 sm:px-1.5"
+            className="flex h-6 shrink-0 items-center justify-between gap-1 bg-background px-1 sm:h-7 sm:px-1.5"
           >
             <button
               type="button"
@@ -599,7 +584,7 @@ function App() {
             <div
               ref={provided.innerRef}
               {...provided.droppableProps}
-              className="scrollbar-thin flex min-w-0 flex-1 items-center gap-px overflow-x-auto overflow-y-hidden whitespace-nowrap"
+              className="scrollbar-thin flex h-full min-w-0 flex-1 items-center gap-0.5 overflow-x-auto overflow-y-hidden whitespace-nowrap"
             >
               {sessions.map((session, index) => {
                 const isActive = session.id === activeSessionId;
@@ -610,6 +595,8 @@ function App() {
                   ts?.activeProgram ?? null,
                   ts?.cwd ?? null,
                 );
+                const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
+                const tabDirLabel = displaySubName ?? (cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null);
                 const tooltip = ts?.cwd || session.name;
 
                 if (isEditing) {
@@ -630,7 +617,7 @@ function App() {
                       {index > 0 && (
                         <span
                           aria-hidden="true"
-                          className="mx-px h-3 w-px shrink-0 self-center rounded-full bg-muted-foreground/30"
+                          className="mx-0.5 h-5 w-px shrink-0 self-center rounded-full bg-muted-foreground/45"
                         />
                       )}
                     <Draggable draggableId={session.id} index={index}>
@@ -639,6 +626,7 @@ function App() {
                       ref={provided.innerRef}
                       {...provided.draggableProps}
                       {...provided.dragHandleProps}
+                      className="flex h-full items-center"
                     >
                     <input
                       ref={(el) => {
@@ -647,8 +635,8 @@ function App() {
                       type="text"
                       defaultValue={session.name}
                       maxLength={48}
-                      className="shrink-0 rounded-md px-1 py-0.5 text-[11px] outline-none bg-surface-elevated text-foreground ring-1 ring-primary/50 min-w-[6rem]"
-                      style={{ width: `${Math.min(Math.max(session.name.length, 6), 24)}ch` }}
+                      className="h-6 shrink-0 rounded-full bg-surface-elevated px-1.5 text-[11px] leading-none text-foreground outline-none ring-1 ring-primary/50 sm:h-7 sm:px-2 min-w-[4.5rem]"
+                      style={{ width: `${Math.min(Math.max(session.name.length, 5), 18)}ch` }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                           commitRename(session.id, (e.target as HTMLInputElement).value);
@@ -670,7 +658,7 @@ function App() {
                     {index > 0 && (
                       <span
                         aria-hidden="true"
-                        className="mx-px h-3 w-px shrink-0 self-center rounded-full bg-muted-foreground/30"
+                        className="mx-0.5 h-5 w-px shrink-0 self-center rounded-full bg-muted-foreground/45"
                       />
                     )}
                   <Draggable draggableId={session.id} index={index}>
@@ -679,64 +667,68 @@ function App() {
                       ref={provided.innerRef}
                       {...provided.draggableProps}
                       {...provided.dragHandleProps}
-                      className={`shrink-0 ${snapshot.isDragging ? 'opacity-70' : ''}`}
+                      className={`flex h-full shrink-0 items-center ${snapshot.isDragging ? 'opacity-70' : ''}`}
                     >
                   <button
                     ref={isActive ? activeSessionTabRef : null}
                     type="button"
                     onClick={() => handleTabPress(session.id)}
-                    className={`inline-flex items-center shrink-0 truncate rounded-md px-1 py-0.5 text-[11px] leading-tight transition max-w-[14rem] ${
+                    className={`group relative inline-flex h-6 shrink-0 items-center overflow-hidden rounded-full px-1 text-[11px] leading-none transition max-w-[6.25rem] sm:h-7 sm:max-w-[10rem] sm:px-2 ${
                       isActive
-                        ? 'bg-surface-elevated text-foreground'
+                        ? 'bg-surface-elevated text-foreground shadow-sm ring-1 ring-primary/25'
                         : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
                     }`}
                     title={tooltip}
                   >
                     <span className="inline-flex min-w-0 items-center gap-1">
+                      <span className="inline-flex shrink-0 items-center">
                       {ts?.agentStatus === 'running' ? (
                         <RiLoaderCircle
-                          size={12}
+                          size={11}
                           className="shrink-0 animate-spin text-green-400"
                         />
                       ) : ts?.agentStatus === 'waiting' ? (
                         session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={12} className="shrink-0 animate-pulse text-yellow-400" />
+                          <RiLayoutGridLine size={11} className="shrink-0 text-yellow-400" />
                         ) : (
-                          <RiTerminalLine size={12} className="shrink-0 animate-pulse text-yellow-400" />
+                          <RiTerminalLine size={11} className="shrink-0 text-yellow-400" />
                         )
                       ) : ts?.agentNeedsReview ? (
                         session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={12} className="shrink-0 animate-pulse text-yellow-400" />
+                          <RiLayoutGridLine size={11} className="shrink-0 text-yellow-400" />
                         ) : (
-                          <RiTerminalLine size={12} className="shrink-0 animate-pulse text-yellow-400" />
+                          <RiTerminalLine size={11} className="shrink-0 text-yellow-400" />
+                        )
+                      ) : ts?.inCopyMode ? (
+                        session.mode === 'tmux' ? (
+                          <RiLayoutGridLine size={11} className="shrink-0 text-yellow-400" />
+                        ) : (
+                          <RiTerminalLine size={11} className="shrink-0 text-yellow-400" />
                         )
                       ) : ts?.agentStatus === 'idle' ? (
                         session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={12} className="shrink-0 text-gray-500" />
+                          <RiLayoutGridLine size={11} className="shrink-0 text-gray-500" />
                         ) : (
-                          <RiTerminalLine size={12} className="shrink-0 text-gray-500" />
+                          <RiTerminalLine size={11} className="shrink-0 text-gray-500" />
                         )
                       ) : ts?.agentColor ? (
                         session.mode === 'tmux' ? (
-                          <RiLayoutGridLine size={12} className="shrink-0" style={{ color: ts.agentColor }} />
+                          <RiLayoutGridLine size={11} className="shrink-0" style={{ color: ts.agentColor }} />
                         ) : (
-                          <RiTerminalLine size={12} className="shrink-0" style={{ color: ts.agentColor }} />
+                          <RiTerminalLine size={11} className="shrink-0" style={{ color: ts.agentColor }} />
                         )
                       ) : session.mode === 'tmux' ? (
-                        <RiLayoutGridLine size={12} className="shrink-0" />
+                        <RiLayoutGridLine size={11} className="shrink-0" />
                       ) : (
-                        <RiTerminalLine size={12} className="shrink-0" />
+                        <RiTerminalLine size={11} className="shrink-0" />
                       )}
-                      {displaySubName ? (
-                        <span className="flex min-w-0 flex-col leading-tight">
-                          <span className={`truncate ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
-                          <span className="truncate text-[9px] text-muted-foreground">
-                            {displaySubName}
-                          </span>
+                      </span>
+                      <span className="flex min-w-0 flex-col justify-center leading-[0.72rem] sm:leading-[0.78rem]">
+                        <span className={`truncate text-[10.5px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+                        <span className={`truncate text-[8.5px] sm:text-[9px] ${tabDirLabel ? 'text-muted-foreground/80' : 'text-transparent'}`}>
+                          {tabDirLabel || '·'}
                         </span>
-                      ) : (
-                        <span className={`truncate ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
-                      )}
+                      </span>
                     </span>
                   </button>
                     </div>
@@ -817,7 +809,6 @@ function App() {
                 showDebug={showDebug}
                 defaultSessionMode={newSessionMode}
                 defaultTmuxSessionName={newSessionTmuxName}
-                showSessionStrip={false}
                 onSessionDataUpdate={handleSessionDataUpdate}
               />
             </div>

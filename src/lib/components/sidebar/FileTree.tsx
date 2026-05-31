@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ChevronRight as RiChevronRight,
   ChevronDown as RiChevronDown,
@@ -15,9 +15,17 @@ interface FileTreeProps {
   rootPath: string;
   onFileSelect: (path: string) => void;
   selectedFilePath: string | null;
+  query?: string;
 }
 
 const CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.rb', '.php', '.swift', '.kt', '.sh', '.css', '.scss', '.html', '.json', '.yaml', '.yml', '.toml', '.md']);
+
+const CHANGE_STYLES: Record<string, { label: string; className: string; title: string }> = {
+  added: { label: 'A', className: 'text-[color:var(--diff-insert-strong)]', title: 'Added' },
+  modified: { label: 'M', className: 'text-[color:var(--diff-hunk-accent)]', title: 'Modified' },
+  deleted: { label: 'D', className: 'text-[color:var(--diff-delete-strong)]', title: 'Deleted' },
+  renamed: { label: 'R', className: 'text-muted-foreground', title: 'Renamed' },
+};
 
 function getFileIcon(name: string, type: 'file' | 'directory' | 'symlink') {
   if (type === 'directory') return null; // handled separately
@@ -28,9 +36,28 @@ function getFileIcon(name: string, type: 'file' | 'directory' | 'symlink') {
 function getChangeStatusBadge(path: string, changedFiles: Map<string, string>) {
   const status = changedFiles.get(path);
   if (!status) return null;
-  const label = status === 'modified' ? 'M' : status === 'added' ? 'A' : status === 'deleted' ? 'D' : 'R';
-  const color = status === 'added' ? 'text-green-400' : status === 'deleted' ? 'text-red-400' : status === 'renamed' ? 'text-yellow-400' : 'text-accent';
-  return <span className={`text-[10px] font-mono font-bold ${color}`}>{label}</span>;
+  const style = CHANGE_STYLES[status] ?? { label: '?', className: 'text-muted-foreground', title: status };
+  return (
+    <span
+      className={`w-4 shrink-0 text-center text-[10px] font-mono font-bold ${style.className}`}
+      title={style.title}
+    >
+      {style.label}
+    </span>
+  );
+}
+
+function nodeMatchesQuery(node: FileTreeNode, queryLower: string): boolean {
+  if (!queryLower) return true;
+  return `${node.name} ${node.path}`.toLowerCase().includes(queryLower);
+}
+
+function hasMatchingDescendant(node: FileTreeNode, queryLower: string, directoryCache: Map<string, FileTreeNode[]>): boolean {
+  if (!queryLower) return true;
+  if (nodeMatchesQuery(node, queryLower)) return true;
+  const children = directoryCache.get(node.path);
+  if (!children) return false;
+  return children.some((child) => hasMatchingDescendant(child, queryLower, directoryCache));
 }
 
 function FileTreeItem({
@@ -39,18 +66,26 @@ function FileTreeItem({
   onFileSelect,
   selectedFilePath,
   changedFiles,
+  queryLower,
 }: {
   node: FileTreeNode;
   depth: number;
   onFileSelect: (path: string) => void;
   selectedFilePath: string | null;
   changedFiles: Map<string, string>;
+  queryLower: string;
 }) {
   const { expandedPaths, toggleExpanded, directoryCache, setDirectoryCache } = useSidebarStore();
   const [loading, setLoading] = useState(false);
   const isExpanded = expandedPaths.has(node.path);
   const isSelected = node.path === selectedFilePath;
   const children = directoryCache.get(node.path);
+  const showChildren = node.type === 'directory' && (isExpanded || Boolean(queryLower));
+  const visibleChildren = useMemo(() => {
+    if (!children) return undefined;
+    if (!queryLower) return children;
+    return children.filter((child) => hasMatchingDescendant(child, queryLower, directoryCache));
+  }, [children, directoryCache, queryLower]);
 
   const handleToggle = useCallback(async () => {
     if (node.type !== 'directory') {
@@ -87,32 +122,35 @@ function FileTreeItem({
       <button
         type="button"
         onClick={handleToggle}
-        className={`w-full flex items-center gap-1 py-1 px-2 text-[13px] rounded-md transition ${
+        className={`flex w-full items-center gap-1 rounded px-2 py-1 text-[13px] ${
           isSelected
-            ? 'bg-primary/15 text-primary'
-            : 'text-foreground hover:bg-surface-2'
+            ? 'bg-surface-elevated text-foreground'
+            : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
         }`}
-        style={{ paddingLeft: `${depth * 16 + 8}px` }}
+        style={{ paddingLeft: `${depth * 14 + 8}px` }}
+        title={node.path}
       >
         {node.type === 'directory' ? (
           <>
-            {isExpanded ? <RiChevronDown size={14} className="shrink-0" /> : <RiChevronRight size={14} className="shrink-0" />}
-            {isExpanded ? <RiFolderOpen size={14} className="shrink-0 text-yellow-500" /> : <RiFolder size={14} className="shrink-0 text-yellow-500" />}
+            {showChildren ? <RiChevronDown size={14} className="shrink-0 text-muted-foreground/80" /> : <RiChevronRight size={14} className="shrink-0 text-muted-foreground/80" />}
+            {showChildren ? <RiFolderOpen size={14} className="shrink-0 text-amber-300/85" /> : <RiFolder size={14} className="shrink-0 text-amber-300/80" />}
           </>
         ) : (
           <>
             <span className="w-[14px] shrink-0" />
-            {getFileIcon(node.name, node.type)}
+            <span className={isSelected ? 'text-primary' : 'text-muted-foreground/80'}>
+              {getFileIcon(node.name, node.type)}
+            </span>
           </>
         )}
-        <span className="min-w-0 flex-1 truncate">{node.name}</span>
+        <span className={`min-w-0 flex-1 truncate ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
         {loading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
         {getChangeStatusBadge(node.path, changedFiles)}
       </button>
 
-      {isExpanded && children && (
-        <div>
-          {children.map((child) => (
+      {showChildren && visibleChildren && visibleChildren.length > 0 && (
+        <div className={depth === 0 ? 'mt-0.5' : ''}>
+          {visibleChildren.map((child) => (
             <FileTreeItem
               key={child.path}
               node={child}
@@ -120,6 +158,7 @@ function FileTreeItem({
               onFileSelect={onFileSelect}
               selectedFilePath={selectedFilePath}
               changedFiles={changedFiles}
+              queryLower={queryLower}
             />
           ))}
         </div>
@@ -128,10 +167,11 @@ function FileTreeItem({
   );
 }
 
-export function FileTree({ rootPath, onFileSelect, selectedFilePath }: FileTreeProps) {
+export function FileTree({ rootPath, onFileSelect, selectedFilePath, query = '' }: FileTreeProps) {
   const { directoryCache, setDirectoryCache, changedFiles } = useSidebarStore();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const queryLower = query.trim().toLowerCase();
 
   // Load root directory
   useEffect(() => {
@@ -167,6 +207,11 @@ export function FileTree({ rootPath, onFileSelect, selectedFilePath }: FileTreeP
   }, [rootPath, directoryCache.has(rootPath), setDirectoryCache]);
 
   const rootEntries = rootPath ? directoryCache.get(rootPath) : undefined;
+  const visibleRootEntries = useMemo(() => {
+    if (!rootEntries) return undefined;
+    if (!queryLower) return rootEntries;
+    return rootEntries.filter((node) => hasMatchingDescendant(node, queryLower, directoryCache));
+  }, [directoryCache, queryLower, rootEntries]);
 
   if (!rootPath) {
     return (
@@ -200,9 +245,17 @@ export function FileTree({ rootPath, onFileSelect, selectedFilePath }: FileTreeP
     );
   }
 
+  if (!visibleRootEntries || visibleRootEntries.length === 0) {
+    return (
+      <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
+        No matching files.
+      </div>
+    );
+  }
+
   return (
-    <div className="py-1">
-      {rootEntries.map((node) => (
+    <div className="space-y-px px-2 py-2">
+      {visibleRootEntries.map((node) => (
         <FileTreeItem
           key={node.path}
           node={node}
@@ -210,6 +263,7 @@ export function FileTree({ rootPath, onFileSelect, selectedFilePath }: FileTreeP
           onFileSelect={onFileSelect}
           selectedFilePath={selectedFilePath}
           changedFiles={changedFiles}
+          queryLower={queryLower}
         />
       ))}
     </div>

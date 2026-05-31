@@ -157,7 +157,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
       if (!existing) return state;
-      if (existing.agentStatus === agentStatus && existing.agentColor === (agentColor ?? existing.agentColor)) return state;
+      const nextAgentColor = agentStatus ? (agentColor ?? existing.agentColor) : null;
+      if (existing.agentStatus === agentStatus && existing.agentColor === nextAgentColor) return state;
 
       // any status → null: AI stopped. If user is NOT on this session, mark needs-review.
       const wasActive = existing.agentStatus !== null;
@@ -168,7 +169,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       newSessions.set(sessionId, {
         ...existing,
         agentStatus,
-        agentColor: agentColor ?? existing.agentColor,
+        agentColor: nextAgentColor,
         agentNeedsReview: agentNeedsReview || (existing.agentNeedsReview && !agentStatus),
         updatedAt: Date.now(),
       });
