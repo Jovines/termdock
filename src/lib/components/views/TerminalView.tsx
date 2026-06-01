@@ -19,6 +19,7 @@ import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 const TERMINAL_FONT_SIZE = 13;
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const RESIZE_THROTTLE_MS = 90;
+const ACTIVE_SURFACE_REFRESH_DELAY_MS = 360;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
 const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'termdock:mobile-keyboard-preset-mode';
 
@@ -215,6 +216,55 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     });
     return () => cancelAnimationFrame(raf);
   }, [isActive, debugSession]);
+
+  React.useEffect(() => {
+    if (!isActive) {
+      return;
+    }
+
+    const refreshVisibleSurface = (reason: string, recoverRenderer: boolean) => {
+      if (!isActiveRef.current) {
+        return;
+      }
+
+      const controller = terminalControllerRef.current;
+      if (!controller) {
+        return;
+      }
+
+      debugSession(`[active-surface-refresh] ${reason}`);
+      if (recoverRenderer) {
+        controller.recoverRenderer();
+      }
+      controller.fit();
+      controller.refreshNow();
+    };
+
+    let rafId: number | null = null;
+    let postLayoutRafId: number | null = null;
+    const postTransitionTimer = window.setTimeout(() => {
+      refreshVisibleSurface('post-transition', true);
+    }, ACTIVE_SURFACE_REFRESH_DELAY_MS);
+
+    // Swiper flips pages with CSS transforms. xterm WebGL/canvas can keep a
+    // stale frame while the slide is moving, so repaint once after layout has
+    // settled and once again after the 320ms transition has fully finished.
+    rafId = requestAnimationFrame(() => {
+      postLayoutRafId = requestAnimationFrame(() => {
+        refreshVisibleSurface('post-layout', false);
+      });
+    });
+
+    return () => {
+      window.clearTimeout(postTransitionTimer);
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+      }
+      if (postLayoutRafId !== null) {
+        cancelAnimationFrame(postLayoutRafId);
+      }
+    };
+  }, [isActive, terminalSessionId, debugSession]);
 
   // 1) 页面可见性变化（前后台切换）
   React.useEffect(() => {
@@ -853,9 +903,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const handleViewportInput = React.useCallback(
     (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean }) => {
-      clientLog('debug', '[handleViewportInput] entry', { data, isActive: isActiveRef.current, suppressUntil: suppressInputUntilRef.current, now: Date.now(), terminalId: terminalIdRef.current });
       if (!isActiveRef.current) {
-        clientLog('warn', '[handleViewportInput] DROPPED: not active');
         return;
       }
 
@@ -863,8 +911,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         return;
       }
 
+      // 桌面端：xterm 在 mouseTracking 模式下把触控板/滚轮上滑转成
+      // SGR mouse wheel（按钮码 64/65）。命中后标记 ref，让下一次真正的
+      // 键盘输入触发 tmux 退出 copy-mode（与移动端 onTmuxScroll 路径一致）。
+      // 注意：wheel 事件本身不退出 copy-mode（连续滚动要继续生效），
+      // 只是打个标记，等真正的键盘输入再退出。
+      const isMouseWheelSeq = /^\x1b\[<6[45];[0-9]+;[0-9]+M/.test(data);
+      if (isTmuxMode && isMouseWheelSeq) {
+        shouldExitTmuxCopyModeOnInputRef.current = true;
+      }
+
       if (Date.now() < suppressInputUntilRef.current) {
-        clientLog('warn', '[handleViewportInput] DROPPED: suppressed');
         return;
       }
 
@@ -894,13 +951,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       const terminalId = terminalIdRef.current;
       if (!terminalId) {
-        clientLog('warn', '[handleViewportInput] DROPPED: no terminalId');
         return;
       }
 
       const sendPayload = async () => {
         try {
-          if (isTmuxMode && shouldExitTmuxCopyModeOnInputRef.current && terminal.tmuxAction) {
+          // 只有非 wheel 的真键盘输入才触发退出 copy-mode；
+          // wheel 事件自身（包括首次进入 copy-mode 的那次滚轮）不退出。
+          if (
+            isTmuxMode &&
+            !isMouseWheelSeq &&
+            shouldExitTmuxCopyModeOnInputRef.current &&
+            terminal.tmuxAction
+          ) {
             shouldExitTmuxCopyModeOnInputRef.current = false;
             try {
               await terminal.tmuxAction(terminalId, { action: 'copy-mode', enabled: false });
@@ -909,7 +972,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             }
           }
 
-          clientLog('debug', '[sendPayload] sending', { payload, terminalId });
           await terminal.sendInput(terminalId, payload);
         } catch (error) {
           clientLog('error', '[sendPayload] ERROR', { error });

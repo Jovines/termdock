@@ -182,7 +182,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       <aside
         ref={setPanelRef}
         data-sidebar={side}
-        className={`shrink-0 flex flex-col bg-surface overflow-hidden transition-[width] duration-200 ease-out ${
+        className={`h-full shrink-0 flex flex-col bg-surface overflow-hidden transition-[width] duration-200 ease-out ${
           isLeft ? 'border-r border-border/15' : 'border-l border-border/15'
         }`}
         style={{

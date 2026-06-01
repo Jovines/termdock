@@ -144,15 +144,6 @@ export function LeftSidebar(
             </h2>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => { onNewSession(); closeIfOverlay(); }}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-primary/15 text-primary transition hover:bg-primary/25 active:scale-95"
-              aria-label="New session"
-              title="New session"
-            >
-              <RiAddLine size={17} />
-            </button>
             {!push && (
               <button
                 type="button"
@@ -301,14 +292,14 @@ export function LeftSidebar(
       </div>
 
       {/* Footer actions */}
-      <div className={`shrink-0 border-t border-border/15 p-3 ${push ? 'space-y-2' : 'grid grid-cols-2 gap-2'}`}>
+      <div className="shrink-0 border-t border-border/15 p-3 grid grid-cols-2 gap-2">
         <button
           type="button"
           onClick={() => { onNewSession(); closeIfOverlay(); }}
           className="w-full flex items-center justify-center gap-2 rounded-full bg-primary/15 px-4 py-2.5 text-sm font-medium text-primary transition hover:bg-primary/25 active:scale-[0.98]"
         >
           <RiAddLine size={16} />
-          <span className="truncate">{push ? 'New session' : 'New'}</span>
+          <span className="truncate">New session</span>
         </button>
         <button
           type="button"
@@ -316,7 +307,7 @@ export function LeftSidebar(
           className="w-full flex items-center justify-center gap-2 rounded-full bg-surface-2 px-4 py-2.5 text-sm font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-[0.98]"
         >
           <RiSettings4Line size={16} />
-          <span className="truncate">{push ? 'Settings' : 'Manage'}</span>
+          <span className="truncate">Settings</span>
         </button>
       </div>
     </Sidebar>

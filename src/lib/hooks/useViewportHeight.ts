@@ -109,8 +109,15 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
         const root = document.getElementById('root');
         if (root) safeBottom = parseFloat(getComputedStyle(root).paddingBottom) || 0;
       } catch { /* ignore */ }
-      const ty = Math.min(0, filteredHeight - baseVh + safeBottom);
-      const mt = Math.max(0, baseVh - filteredHeight - safeBottom);
+      // Keyboard movement must be based on the actual visual viewport height.
+      // `filteredHeight` may include a small offsetTop compensation for Safari
+      // browser-chrome jitter; using that compensated value here makes the
+      // terminal under-translate by exactly that intermittent offsetTop.
+      const keyboardViewportHeight = nextOffsetTop > 0
+        ? Math.min(filteredHeight, rawViewportHeight)
+        : filteredHeight;
+      const ty = Math.min(0, keyboardViewportHeight - baseVh + safeBottom);
+      const mt = Math.max(0, baseVh - keyboardViewportHeight - safeBottom);
       document.documentElement.style.setProperty('--kb-translate-y', `${ty}px`);
       document.documentElement.style.setProperty('--kb-margin-top', `${mt}px`);
 
@@ -123,6 +130,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
           offsetTop: nextOffsetTop,
           rawHeight: nextHeight,
           appliedHeight: filteredHeight,
+          keyboardHeight: keyboardViewportHeight,
           filtered: filteredHeight !== nextHeight,
         });
       }

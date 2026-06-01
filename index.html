@@ -81,6 +81,9 @@
     <link rel="preload" href="/fonts/JetBrainsMonoNL-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
     <link rel="preload" href="/fonts/JetBrainsMonoNL-Bold.woff2" as="font" type="font/woff2" crossorigin="anonymous">
     <link rel="preload" href="/fonts/SymbolsNerdFontMono-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <!-- 注意：NotoSansSymbols2-Subset 不 preload —— 终端首屏通常不出现
+         U+2300-23FF / U+2700-27BF 这种符号，配合下面的 unicode-range 让浏览器
+         按需加载，避免 33KB 在首屏阻塞带宽。 -->
 
     <!-- Self-hosted terminal fonts -->
     <style>
@@ -106,6 +109,18 @@
         font-weight: 400;
         font-style: normal;
         font-display: block;
+      }
+      /* Noto Sans Symbols 2 子集（33KB）：补足 JetBrains Mono / Nerd Font 都
+         未收录的 Misc Technical (U+2300-23FF) 与 Dingbats (U+2700-27BF) 区，
+         尤其是 ⏺ ⏸ ⏹ ⏻ ✓ ✗ 这类被错误回退到 Apple Color Emoji 的字符。
+         unicode-range 限定后，浏览器只在文本里出现该区间时才下载这个字体。 */
+      @font-face {
+        font-family: 'Noto Sans Symbols 2';
+        src: url('/fonts/NotoSansSymbols2-Subset.woff2') format('woff2');
+        font-weight: 400;
+        font-style: normal;
+        font-display: swap;
+        unicode-range: U+2300-23FF, U+2700-27BF;
       }
     </style>
   </head>

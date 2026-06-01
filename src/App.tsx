@@ -2,7 +2,6 @@ import React, { useEffect, useCallback, useState } from 'react';
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
 import {
   SquareTerminal as RiTerminalBoxLine,
-  Settings as RiSettings4Line,
   Plus as RiAddLine,
   X as RiCloseLine,
   PanelLeft as RiPanelLeftLine,
@@ -25,6 +24,7 @@ import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
+import { clientLog } from './lib/utils/clientLog';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules } from './lib/terminal/api';
@@ -238,7 +238,43 @@ function App() {
       }
     };
     document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
+
+    // [DEBUG fn] document 级捕获阶段监控所有 keydown / keyup，看 Fn 单按是否到 web 层
+    const dbgDown = (e: KeyboardEvent) => {
+      clientLog('debug', '[fn-debug][doc capture keydown]', {
+        key: e.key,
+        code: e.code,
+        keyCode: e.keyCode,
+        target: (e.target as HTMLElement)?.tagName,
+        activeEl: document.activeElement?.tagName,
+      });
+    };
+    const dbgUp = (e: KeyboardEvent) => {
+      clientLog('debug', '[fn-debug][doc capture keyup]', {
+        key: e.key,
+        code: e.code,
+        keyCode: e.keyCode,
+        target: (e.target as HTMLElement)?.tagName,
+        activeEl: document.activeElement?.tagName,
+      });
+    };
+    const dbgFocusIn = (e: FocusEvent) => {
+      const t = e.target as HTMLElement | null;
+      clientLog('debug', '[fn-debug][focusin]', {
+        tag: t?.tagName,
+        cls: t?.className,
+      });
+    };
+    document.addEventListener('keydown', dbgDown, true);
+    document.addEventListener('keyup', dbgUp, true);
+    document.addEventListener('focusin', dbgFocusIn);
+
+    return () => {
+      document.removeEventListener('keydown', handler);
+      document.removeEventListener('keydown', dbgDown, true);
+      document.removeEventListener('keyup', dbgUp, true);
+      document.removeEventListener('focusin', dbgFocusIn);
+    };
   }, []);
 
   const handleDragEnd = useCallback((result: DropResult) => {
@@ -674,14 +710,14 @@ function App() {
       className="w-screen h-full flex flex-col bg-background text-foreground"
     >
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
-        <div className="mx-auto flex h-full w-full max-w-[1440px] min-h-0 flex-col overflow-visible bg-background">
+        <div className="flex h-full w-full min-h-0 flex-col overflow-visible bg-background">
           <div
-            className="flex h-6 shrink-0 items-center justify-between gap-1 bg-background px-1 sm:h-7 sm:px-1.5"
+            className="flex h-8 shrink-0 items-center justify-between gap-1 bg-background px-1 sm:h-9 sm:px-1.5"
           >
             <button
               type="button"
               onClick={() => useSidebarStore.getState().toggleLeft()}
-              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground lg:bg-transparent lg:hover:bg-surface-2"
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-surface-elevated hover:text-foreground sm:h-8 sm:w-8"
               aria-label="Toggle sessions sidebar"
               title="Sessions"
             >
@@ -738,7 +774,7 @@ function App() {
                       type="text"
                       defaultValue={session.name}
                       maxLength={48}
-                      className="h-6 shrink-0 rounded-full bg-surface-elevated px-1.5 text-[11px] leading-none text-foreground outline-none ring-1 ring-primary/50 sm:h-7 sm:px-2 min-w-[4.5rem]"
+                      className="h-7 shrink-0 rounded-full bg-surface-elevated px-1.5 text-[11px] leading-none text-foreground outline-none ring-1 ring-primary/50 sm:h-8 sm:px-2 min-w-[4.5rem]"
                       style={{ width: `${Math.min(Math.max(session.name.length, 5), 18)}ch` }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
@@ -770,7 +806,7 @@ function App() {
                     ref={isActive ? activeSessionTabRef : null}
                     type="button"
                     onClick={() => handleTabPress(session.id)}
-                    className={`group relative inline-flex h-6 shrink-0 items-center overflow-hidden rounded-full px-1 text-[11px] leading-none transition max-w-[6.25rem] sm:h-7 sm:max-w-[10rem] sm:px-2 ${
+                    className={`group relative inline-flex h-7 shrink-0 items-center overflow-hidden rounded-full px-1 text-[11px] leading-none transition max-w-[6.25rem] sm:h-8 sm:max-w-[10rem] sm:px-2 ${
                       isActive
                         ? 'bg-surface-elevated text-foreground shadow-sm ring-1 ring-primary/25'
                         : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
@@ -826,30 +862,18 @@ function App() {
               <button
                 type="button"
                 onClick={() => useSidebarStore.getState().toggleRight()}
-                className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground lg:bg-transparent lg:hover:bg-surface-2"
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-surface-elevated hover:text-foreground sm:h-8 sm:w-8"
                 aria-label="Toggle explorer sidebar"
                 title="Explorer"
               >
                 <RiPanelRightLine size={14} />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setDrawerTab('settings');
-                  setIsDrawerOpen(true);
-                }}
-                className="hidden lg:inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-full bg-surface-2 px-3 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-                aria-label="Open settings"
-              >
-                <RiSettings4Line size={14} />
-                <span className="ml-1.5 text-xs">Settings</span>
               </button>
             </div>
           </div>
 
           <div className="min-h-0 flex-1 flex overflow-hidden bg-background">
             {/* Left Sidebar — push mode on desktop */}
-            <div className="hidden lg:block">
+            <div className="hidden h-full lg:block">
               <LeftSidebar
                 isOpen={sidebarLeftOpen}
                 drawerWidthPx={drawerWidthPx}
@@ -877,7 +901,7 @@ function App() {
             </div>
 
             {/* Right Sidebar — push mode on desktop */}
-            <div className="hidden lg:block">
+            <div className="hidden h-full lg:block">
               <RightSidebar
                 isOpen={sidebarRightOpen}
                 drawerWidthPx={drawerWidthPx}

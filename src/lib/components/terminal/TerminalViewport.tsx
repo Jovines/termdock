@@ -39,6 +39,48 @@ function sanitizeTerminalInput(input: string): string {
     .replace(/[\u200B-\u200D\uFEFF]/g, '');
 }
 
+/**
+ * 桌面端特殊键 → ANSI 转义序列映射
+ * 所有这些序列都不应再被 TerminalView.handleViewportInput 二次叠加修饰符，
+ * 由调用方传 { skipModifierTransform: true } 保证。
+ */
+const F_KEY_SEQ: Record<string, string> = {
+  F1: '\x1bOP',  F2: '\x1bOQ',  F3: '\x1bOR',  F4: '\x1bOS',
+  F5: '\x1b[15~', F6: '\x1b[17~', F7: '\x1b[18~', F8: '\x1b[19~',
+  F9: '\x1b[20~', F10: '\x1b[21~', F11: '\x1b[23~', F12: '\x1b[24~',
+};
+
+function buildArrowSeq(terminal: Terminal, dir: 'A' | 'B' | 'C' | 'D'): string {
+  // application cursor mode (DECCKM)：vim/less 等会切到 \x1bO?,
+  // shell 默认为 \x1b[?。xterm 在 modes 上暴露了这个状态。
+  const applicationCursor = terminal.modes?.applicationCursorKeysMode === true;
+  return applicationCursor ? `\x1bO${dir}` : `\x1b[${dir}`;
+}
+
+/**
+ * 把 React.KeyboardEvent 映射到终端转义序列。仅返回 PTY 应当收到的字节。
+ * 不命中返回 null，调用方继续走默认逻辑（textarea 接管打印字符）。
+ */
+function mapSpecialKey(event: React.KeyboardEvent, terminal: Terminal): string | null {
+  switch (event.key) {
+    case 'ArrowUp':    return buildArrowSeq(terminal, 'A');
+    case 'ArrowDown':  return buildArrowSeq(terminal, 'B');
+    case 'ArrowRight': return buildArrowSeq(terminal, 'C');
+    case 'ArrowLeft':  return buildArrowSeq(terminal, 'D');
+    case 'Home':       return '\x1b[H';
+    case 'End':        return '\x1b[F';
+    case 'PageUp':     return '\x1b[5~';
+    case 'PageDown':   return '\x1b[6~';
+    case 'Insert':     return '\x1b[2~';
+    case 'Delete':     return '\x1b[3~';
+    case 'Tab':        return '\t';
+    case 'Escape':     return '\x1b';
+    default:
+      if (F_KEY_SEQ[event.key]) return F_KEY_SEQ[event.key];
+      return null;
+  }
+}
+
 function decodeBase64Utf8(base64Data: string): string | null {
   try {
     const raw = atob(base64Data);
@@ -144,10 +186,15 @@ export type TerminalController = {
   scrollToBottom: () => void;
 };
 
+export type TerminalViewportInputOptions = {
+  skipModifierTransform?: boolean;
+  consumeModifier?: boolean;
+};
+
 interface TerminalViewportProps {
   sessionKey: string;
   chunks: TerminalChunk[];
-  onInput: (data: string) => void;
+  onInput: (data: string, options?: TerminalViewportInputOptions) => void;
   onResize: (cols: number, rows: number) => void;
   onFlowControl?: (paused: boolean) => void;
   onTmuxScroll?: (direction: 'up' | 'down', lines: number) => void;
@@ -172,7 +219,10 @@ const INPUT_BLUR_GUARD_RELEASE_MS = 140;
 const KEYBOARD_OPEN_THRESHOLD_PX = 80;
 
 const getTerminalFontFamily = (userFontFamily: string): string => {
-  return `${userFontFamily}, monospace`;
+  // 把覆盖更全的文本符号字体（自托管 Noto Sans Symbols 2）放在彩色 emoji
+  // 字体之前，避免诸如 ⏺ (U+23FA)、⏸ (U+23F8) 这种默认 text-presentation
+  // 的 Unicode 符号被回退成 Apple Color Emoji 渲染。
+  return `${userFontFamily}, "Noto Sans Symbols 2", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace`;
 };
 
 // Convert TerminalTheme to xterm.js theme format
@@ -232,7 +282,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const viewportRef = React.useRef<HTMLElement | null>(null);
     const terminalRef = React.useRef<Terminal | null>(null);
     const fitAddonRef = React.useRef<FitAddon | null>(null);
-    const inputHandlerRef = React.useRef<(data: string) => void>(onInput);
+    const inputHandlerRef = React.useRef<(data: string, options?: TerminalViewportInputOptions) => void>(onInput);
     const resizeHandlerRef = React.useRef<(cols: number, rows: number) => void>(onResize);
     const inputFocusHandlerRef = React.useRef<typeof onInputFocusChange>(onInputFocusChange);
     const flowControlHandlerRef = React.useRef<typeof onFlowControl>(onFlowControl);
@@ -254,8 +304,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       typeof window !== 'undefined' ? window.devicePixelRatio : 1
     );
     const isComposingRef = React.useRef(false);
+    // composition 刚结束的时间戳，用来吞掉 IME 选词紧随其后的那一记 Enter
+    const lastCompositionEndAtRef = React.useRef(0);
     const sentValueRef = React.useRef('');
     const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
+    // 桌面 tmux wheel：累积像素余数，凑满 1 行立即发
+    const desktopWheelRemainderRef = React.useRef(0);
     const keepInputFocusUntilRef = React.useRef(0);
     const lastTouchInteractionAtRef = React.useRef(0);
     const lastFocusHiddenInputAtRef = React.useRef(0);
@@ -274,6 +328,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       visible: boolean;
       activeDir: string; // 'up' | 'down' | 'left' | 'right' | ''
     }>({ visible: false, activeDir: '' });
+    // 桌面 IME 候选窗锚点：跟随 xterm 光标的 1 cell 大小区域
+    // mobile（enableTouchScroll=true）下不使用，textarea 仍然 inset:0 全覆盖
+    const [imeAnchor, setImeAnchor] = React.useState<{ x: number; y: number; cellW: number; cellH: number }>(
+      { x: 0, y: 0, cellW: 8, cellH: 17 }
+    );
     const arrowIndicatorRef = React.useRef<HTMLDivElement>(null);
     const tabIndicatorTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -391,10 +450,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         remainderPxRef.current = 0;
       }
 
+      clientLog('debug', '[handleTmuxScrollInternal]', {
+        deltaPixels,
+        lineHeightPx,
+        effectiveLineHeight,
+        total,
+        scrollLines,
+        remainderAfter: remainderPxRef.current,
+        tmuxScrollSensitivity,
+      });
+
       if (scrollLines === 0) return false;
 
       const direction = scrollLines > 0 ? 'down' : 'up';
-      onTmuxScroll!(direction, Math.max(1, Math.min(Math.abs(scrollLines), 10)));
+      const linesToSend = Math.max(1, Math.min(Math.abs(scrollLines), 10));
+      clientLog('debug', '[handleTmuxScrollInternal] -> onTmuxScroll', { direction, linesToSend });
+      onTmuxScroll!(direction, linesToSend);
       return true;
     }, [fontSize, onTmuxScroll, tmuxScrollSensitivity]);
 
@@ -498,6 +569,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // Send new content
         const newPart = sanitized.slice(commonLen);
         if (newPart) {
+          // 与 xterm 默认行为一致：输入即清选区，避免选区残留遮挡输出
+          try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
           inputHandlerRef.current(newPart);
         }
 
@@ -515,6 +588,72 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       },
       [syncTextareaToPty]
     );
+
+    /**
+     * 桌面端：发一段已经编码好的转义序列（特殊键 / Ctrl+letter / Alt+letter / 粘贴）。
+     * 1. 清空 textarea + sentValueRef，让下一次打印输入对齐
+     * 2. clearSelection()：与 xterm 默认"输入即清选区"行为一致
+     * 3. 带 skipModifierTransform 让 TerminalView 不再叠加移动端修饰符工具栏的状态
+     */
+    const sendTerminalSeq = React.useCallback((seq: string, textarea?: HTMLTextAreaElement | null) => {
+      if (!seq) return;
+      const target = textarea ?? hiddenInputRef.current;
+      if (target) {
+        target.value = '';
+      }
+      sentValueRef.current = '';
+      try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
+      inputHandlerRef.current(seq, { skipModifierTransform: true });
+    }, []);
+
+    /**
+     * 桌面端：根据 xterm 当前光标位置计算 IME 候选窗锚点。
+     * 候选窗会跟着 textarea 的视觉位置走；textarea 是 1 cell 大小，
+     * caret 在 (0,0) 即等于终端光标位置。
+     */
+    const updateImeAnchor = React.useCallback(() => {
+      if (enableTouchScroll) return;
+      const term = terminalRef.current;
+      if (!term || !term.element) return;
+
+      let cellW = 8;
+      let cellH = 17;
+      try {
+        const rowsEl = term.element.querySelector('.xterm-rows') as HTMLElement | null;
+        const firstRow = rowsEl?.firstElementChild as HTMLElement | null;
+        if (firstRow && firstRow.offsetHeight > 0) {
+          cellH = firstRow.offsetHeight;
+        }
+        if (rowsEl && rowsEl.offsetWidth > 0 && term.cols > 0) {
+          cellW = rowsEl.offsetWidth / term.cols;
+        }
+      } catch { /* fall through to fallback */ }
+
+      if (cellW <= 0 || cellH <= 0) {
+        const rect = term.element.getBoundingClientRect();
+        if (rect.width > 0 && term.cols > 0) cellW = rect.width / term.cols;
+        if (rect.height > 0 && term.rows > 0) cellH = rect.height / term.rows;
+      }
+
+      const buf = term.buffer.active;
+      const x = Math.round(buf.cursorX * cellW);
+      const y = Math.round(buf.cursorY * cellH);
+
+      setImeAnchor((prev) => {
+        if (
+          Math.abs(prev.x - x) < 0.5 &&
+          Math.abs(prev.y - y) < 0.5 &&
+          Math.abs(prev.cellW - cellW) < 0.5 &&
+          Math.abs(prev.cellH - cellH) < 0.5
+        ) {
+          return prev;
+        }
+        return { x, y, cellW, cellH };
+      });
+    }, [enableTouchScroll]);
+
+    const updateImeAnchorRef = React.useRef(updateImeAnchor);
+    updateImeAnchorRef.current = updateImeAnchor;
 
     const focusHiddenInput = React.useCallback((_clientX?: number, _clientY?: number) => {
       const input = hiddenInputRef.current;
@@ -720,13 +859,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
     }, []);
 
-    const tmuxBuildSgrScroll = React.useCallback((direction: 'up' | 'down'): string | null => {
+    const tmuxBuildSgrScroll = React.useCallback((direction: 'up' | 'down', clientX?: number, clientY?: number): string | null => {
       const term = terminalRef.current;
       if (!term || !term.element || !term.cols || !term.rows) return null;
       const st = tmuxScrollStateRef.current;
       const rect = term.element.getBoundingClientRect();
-      const rx = (st.lastX ?? rect.left + rect.width / 2) - rect.left;
-      const ry = (st.lastY ?? rect.top + rect.height / 2) - rect.top;
+      const sourceX = clientX ?? st.lastX ?? rect.left + rect.width / 2;
+      const sourceY = clientY ?? st.lastY ?? rect.top + rect.height / 2;
+      const rx = sourceX - rect.left;
+      const ry = sourceY - rect.top;
       const charW = term.element.offsetWidth / term.cols || 8;
       const charH = term.element.offsetHeight / term.rows || 16;
       const col = Math.max(1, Math.min(term.cols, Math.floor(rx / charW) + 1));
@@ -735,13 +876,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       return `\x1b[<${button};${col};${row}M`;
     }, []);
 
-    const tmuxSendSgrScroll = React.useCallback((direction: 'up' | 'down', count: number) => {
-      const seq = tmuxBuildSgrScroll(direction);
+    const tmuxSendSgrScroll = React.useCallback((direction: 'up' | 'down', count: number, clientX?: number, clientY?: number) => {
+      if (count <= 0) return;
+      const seq = tmuxBuildSgrScroll(direction, clientX, clientY);
       if (!seq) return;
-      for (let i = 0; i < count; i++) {
-        inputHandlerRef.current(seq);
-      }
+      // 把 N 个 SGR 序列拼成一条 string 一次性写进 PTY。
+      // tmux 在收到时会逐个解析为 mouse wheel 事件，效果完全等价，
+      // 但只产生 1 次 ws.send + 1 次 PTY write，不会被高频调用打爆。
+      inputHandlerRef.current(count === 1 ? seq : seq.repeat(count));
     }, [tmuxBuildSgrScroll]);
+
+    // 桌面 wheel handler 是闭包注册一次的，不能直接捕获 useCallback；
+    // 用 ref 桥接到最新版本。
+    const tmuxSendSgrScrollRef = React.useRef(tmuxSendSgrScroll);
+    tmuxSendSgrScrollRef.current = tmuxSendSgrScroll;
 
     const tmuxDynamicEff = React.useCallback((): number => {
       const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
@@ -1557,6 +1705,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           };
           terminal.loadAddon(fitAddon);
           terminal.loadAddon(new Unicode11Addon());
+          // xterm 默认 Unicode 宽度表偏旧，部分 emoji 会按 1 列计算，
+          // 导致后续字符紧贴甚至覆盖 emoji。启用 unicode11 让 emoji
+          // 走双列宽度，terminal 内部渲染间距才和真实终端一致。
+          terminal.unicode.activeVersion = '11';
           terminal.loadAddon(new SearchAddon());
           terminal.loadAddon(new WebLinksAddon());
 
@@ -1611,6 +1763,89 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             container.addEventListener('wheel', handleWheel, { passive: false });
           }
 
+          // 桌面 tmux 模式：拦截 xterm 默认的 wheel → SGR mouse 上报，
+          // 改成「按真实行高累积，凑满 1 行立即发 1 行」的模型，跟原生
+          // 终端 / iTerm / VSCode 终端一致。
+          //
+          // ⚠️ 不复用 handleTmuxScrollInternal —— 它是为移动端 touchmove
+          // 大幅 swipe 设计的，effectiveLineHeight = lineHeight/0.38 ≈ 124px，
+          // 触控板每帧只来 ~5px，要累积 25 帧才能凑 1 行，完全不跟手。
+          // 桌面这里：触控板/滚轮 deltaY 直接除以真实 lineHeight，
+          // 立刻发 lines = trunc(累积/lineHeight)。
+          //
+          // ⚠️ 不能在外面 if (onTmuxScrollRef.current) —— terminal.open()
+          // 初始化只跑一次，那一刻 isTmuxMode 还可能是 false。必须无条件
+          // 注册，handler 内部用 ref 动态判断当前模式。
+          if (!enableTouchScroll) {
+            // 桌面 tmux 模式 wheel：走 SGR mouse wheel 协议（和移动端 touch
+            // 滚动同一条路径），把 \x1b[<64;Cx;CyM / \x1b[<65;Cx;CyM 直接
+            // 写进 PTY，让 tmux 自己识别为鼠标滚轮 → 进入 / 滚动 copy-mode。
+            //
+            // 不再走 onTmuxScroll → HTTP `/api/.../action` → server-side
+            // `tmux send-keys -X scroll-up` —— 那条路径每行一次 fetch，
+            // 触控板 60Hz 直接打爆主线程和 tmux server。
+            //
+            // 用 rAF 节流：同一帧内多次 wheel 累积，下一帧统一发。
+            let pendingDeltaPx = 0;
+            let lastClientX: number | null = null;
+            let lastClientY: number | null = null;
+            let rafId: number | null = null;
+            const flushWheel = () => {
+              rafId = null;
+              const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+              const total = desktopWheelRemainderRef.current + pendingDeltaPx;
+              pendingDeltaPx = 0;
+              const lines = Math.trunc(total / lineHeightPx);
+              desktopWheelRemainderRef.current = total - lines * lineHeightPx;
+              if (lines !== 0) {
+                const direction = lines > 0 ? 'down' : 'up';
+                // 一帧最多滚 1/2 屏 —— 触控板惯性滑很猛时一次能堆到上百行，
+                // tmux 解析这种巨量序列会有可见停顿。超出部分直接丢（连同
+                // 累积余数清零），跟原生 macOS 终端"惯性减速"行为一致，
+                // 避免 backlog 持续在后续帧里释放造成回滚式跳动。
+                const term = terminalRef.current;
+                const maxPerFrame = Math.max(3, Math.floor((term?.rows ?? 24) / 2));
+                const absLines = Math.abs(lines);
+                if (absLines > maxPerFrame) {
+                  desktopWheelRemainderRef.current = 0;
+                }
+                tmuxSendSgrScrollRef.current(
+                  direction,
+                  Math.min(absLines, maxPerFrame),
+                  lastClientX ?? undefined,
+                  lastClientY ?? undefined,
+                );
+              }
+            };
+
+            terminal.attachCustomWheelEventHandler((ev: WheelEvent) => {
+              if (!onTmuxScrollRef.current) {
+                // 非 tmux 模式：让 xterm 走默认路径（vim/htop mouseTracking 仍能上报）
+                return true;
+              }
+              if (ev.ctrlKey || ev.metaKey || ev.shiftKey) return true;
+              if (ev.deltaY === 0) return false;
+
+              const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+              let deltaPixels = ev.deltaY;
+              if (ev.deltaMode === 1 /* DOM_DELTA_LINE */) {
+                deltaPixels = ev.deltaY * lineHeightPx;
+              } else if (ev.deltaMode === 2 /* DOM_DELTA_PAGE */) {
+                deltaPixels = ev.deltaY * (container.clientHeight || lineHeightPx * 20);
+              }
+
+              pendingDeltaPx += deltaPixels;
+              lastClientX = ev.clientX;
+              lastClientY = ev.clientY;
+              if (rafId === null) {
+                rafId = requestAnimationFrame(flushWheel);
+              }
+
+              ev.preventDefault();
+              return false;
+            });
+          }
+
           const viewport = findScrollableViewport(container);
           if (viewport) {
             viewport.classList.add('overlay-scrollbar-target', 'overlay-scrollbar-container');
@@ -1625,45 +1860,37 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             terminal.focus();
           }
 
-          terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
-            if (event.type !== 'keydown') {
-              return true;
-            }
+          // 初始化锚点位置（即便 0,0 也得是当前 cell 真实尺寸）
+          if (!enableTouchScroll) {
+            updateImeAnchorRef.current();
+          }
 
-            const key = event.key.toLowerCase();
-            const hasPrimaryModifier = event.metaKey || event.ctrlKey;
-
-            if (!hasPrimaryModifier || event.altKey) {
-              return true;
-            }
-
-            if (key === 'c') {
-              const selected = terminal.getSelection();
-              if (!selected) {
-                return true;
+          // 桌面端：让覆盖层 textarea 始终拥有焦点，xterm 自身的 textarea 不再
+          // 接收键盘输入。这样三方中文输入法（搜狗/微信）的 composition 不会
+          // 拦截 keystroke 后吞掉某个字母。
+          if (!enableTouchScroll) {
+            try {
+              const xtermTextarea = terminal.textarea;
+              if (xtermTextarea) {
+                xtermTextarea.tabIndex = -1;
+                xtermTextarea.setAttribute('aria-hidden', 'true');
+                // ⚠️ 不设 pointer-events:none：xterm 内部 wheel/mouse 上报
+                // （SGR mouse wheel → tmux copy-mode）会路由到 textarea 上，
+                // 屏蔽 hit-test 会导致触控板两指滚动收不到事件。
               }
-              event.preventDefault();
-              navigator.clipboard?.writeText(selected).catch(() => {
-              });
-              return false;
-            }
+            } catch { /* ignored */ }
 
-            if (key === 'v') {
-              event.preventDefault();
-              navigator.clipboard?.readText().then((text) => {
-                if (!text) {
-                  return;
-                }
-                inputHandlerRef.current(sanitizeTerminalInput(text));
-              }).catch(() => {
-              });
-              return false;
-            }
+            // IME 候选窗锚点跟随光标
+            try {
+              localDisposables.push(terminal.onCursorMove(() => updateImeAnchorRef.current()));
+              localDisposables.push(terminal.onRender(() => updateImeAnchorRef.current()));
+              localDisposables.push(terminal.onResize(() => updateImeAnchorRef.current()));
+            } catch { /* ignored */ }
+          }
 
-            return true;
-          });
-
-          // Handle data input
+          // terminal.onData 仍保留：键盘输入已不走此路径（覆盖层 textarea 直接
+          // 调 inputHandlerRef），剩下的都是终端内部产物——鼠标上报（mouseTracking）、
+          // DSR 响应、bracketed-paste 包裹等，这些都是必须送到 PTY 的。
           localDisposables.push(
             terminal.onData((data: string) => {
               clientLog('debug', '[onData]', { data, ts: Date.now() });
@@ -1900,7 +2127,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           touchAction: arrowIndicator.visible ? 'none' : undefined,
         }}
         role="button"
-        tabIndex={enableTouchScroll ? -1 : 0}
+        tabIndex={-1}
         onPointerDownCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
         onPointerMoveCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
         onPointerUpCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
@@ -1909,16 +2136,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         onTouchMoveCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
         onTouchEndCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
         onTouchCancelCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
-        onClick={() => {
-          if (!enableTouchScroll) {
-            terminalRef.current?.focus();
-          }
-        }}
-        onKeyDown={(event) => {
-          if (!enableTouchScroll && event.key === 'Enter') {
-            event.preventDefault();
-            terminalRef.current?.focus();
-          }
+        onMouseDown={(event) => {
+          // 桌面：让 xterm 先收到 mousedown 走选择 / 拖拽，rAF 后再把焦点
+          // 转给覆盖 textarea。textarea 自身 pointer-events:none，鼠标事件
+          // 直接落到 xterm canvas，不需要再额外转发。
+          if (enableTouchScroll) return;
+          if (event.button !== 0) return;
+          requestAnimationFrame(() => {
+            try { hiddenInputRef.current?.focus({ preventScroll: true }); } catch { /* ignored */ }
+          });
         }}
       >
         {/* Early initialization loading - shows before xterm.js loads */}
@@ -1940,150 +2166,304 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         {/* Terminal content - only show when ready */}
         {loadingState === 'ready' && (
           <>
-            {enableTouchScroll ? (
-              <textarea
-                ref={hiddenInputRef}
-                aria-label="Terminal input"
-                data-terminal-input-anchor="true"
-                inputMode="text"
-                enterKeyHint="enter"
-                autoCapitalize="off"
-                autoComplete="off"
-                autoCorrect="off"
-                spellCheck={false}
-                tabIndex={-1}
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  opacity: 0,
-                  zIndex: 20,
-                  touchAction: 'none',
-                  userSelect: 'none',
-                  WebkitUserSelect: 'none',
-                  WebkitTouchCallout: 'none',
-                  background: 'transparent',
-                  color: 'transparent',
-                  caretColor: 'transparent',
-                  resize: 'none',
-                  overflow: 'hidden',
-                  fontSize: '16px',
-                  border: 'none',
-                  padding: 0,
-                  margin: 0,
-                  outline: 'none',
-                }}
-                onFocus={() => {
-                  debugTerminal('input anchor focus');
-                  scheduleTextureAtlasRefresh('input-focus');
-                  inputFocusHandlerRef.current?.(true);
-                }}
-                onBlur={() => {
-                  const guarded = shouldGuardInputBlur();
-                  const activeElement = typeof document !== 'undefined'
-                    ? document.activeElement as HTMLElement | null
-                    : null;
-                  debugTerminal('input anchor blur', {
-                    guarded,
-                    activeTag: activeElement?.tagName ?? null,
-                    activeClass: activeElement?.className ?? null,
-                  });
-                  scheduleTextureAtlasRefresh('input-blur');
+            <textarea
+              ref={hiddenInputRef}
+              aria-label="Terminal input"
+              data-terminal-input-anchor="true"
+              inputMode="text"
+              enterKeyHint="enter"
+              autoCapitalize="off"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              tabIndex={-1}
+              style={{
+                position: 'absolute',
+                opacity: 0,
+                zIndex: 20,
+                background: 'transparent',
+                color: 'transparent',
+                caretColor: 'transparent',
+                resize: 'none',
+                overflow: 'hidden',
+                border: 'none',
+                padding: 0,
+                margin: 0,
+                outline: 'none',
+                ...(enableTouchScroll
+                  ? {
+                      // 移动端：覆盖整个终端，触控走 textarea，键盘走 textarea。
+                      inset: 0,
+                      touchAction: 'none',
+                      userSelect: 'none',
+                      WebkitUserSelect: 'none',
+                      WebkitTouchCallout: 'none',
+                      pointerEvents: 'auto',
+                      fontSize: '16px',
+                    }
+                  : {
+                      // 桌面端：1 cell 大小、跟随光标，鼠标事件透传给 xterm。
+                      // IME 候选窗会贴着这个小框出现 → 视觉上 == 终端光标位置。
+                      left: imeAnchor.x,
+                      top: imeAnchor.y,
+                      width: Math.max(1, Math.round(imeAnchor.cellW)),
+                      height: Math.max(1, Math.round(imeAnchor.cellH)),
+                      pointerEvents: 'none',
+                      touchAction: 'auto',
+                      fontSize: `${fontSize}px`,
+                      fontFamily,
+                      lineHeight: '1',
+                      whiteSpace: 'pre',
+                    }),
+              }}
+              onFocus={() => {
+                debugTerminal('input anchor focus');
+                scheduleTextureAtlasRefresh('input-focus');
+                inputFocusHandlerRef.current?.(true);
+              }}
+              onBlur={() => {
+                const guarded = shouldGuardInputBlur();
+                const activeElement = typeof document !== 'undefined'
+                  ? document.activeElement as HTMLElement | null
+                  : null;
+                debugTerminal('input anchor blur', {
+                  guarded,
+                  activeTag: activeElement?.tagName ?? null,
+                  activeClass: activeElement?.className ?? null,
+                });
+                scheduleTextureAtlasRefresh('input-blur');
 
-                  if (!guarded) {
+                if (!guarded) {
+                  // readonly 仅对移动端有意义（防止 iOS 长按放大镜）；
+                  // 桌面端绝不能 readonly，否则下次 focus 收不到键。
+                  if (enableTouchScroll) {
                     hiddenInputRef.current?.setAttribute('readonly', '');
-                    inputFocusHandlerRef.current?.(false);
+                  }
+                  inputFocusHandlerRef.current?.(false);
+                  return;
+                }
+
+                if (typeof window === 'undefined') {
+                  inputFocusHandlerRef.current?.(false);
+                  return;
+                }
+
+                window.setTimeout(() => {
+                  if (isHiddenInputFocused()) {
                     return;
                   }
 
-                  if (typeof window === 'undefined') {
-                    inputFocusHandlerRef.current?.(false);
-                    return;
-                  }
-
-                  window.setTimeout(() => {
-                    if (isHiddenInputFocused()) {
-                      return;
-                    }
-
-                    if (!isViewportKeyboardLikelyOpen()) {
+                  if (!isViewportKeyboardLikelyOpen()) {
+                    if (enableTouchScroll) {
                       hiddenInputRef.current?.setAttribute('readonly', '');
-                      inputFocusHandlerRef.current?.(false);
                     }
-                  }, INPUT_BLUR_GUARD_RELEASE_MS);
-                }}
-                onBeforeInput={(event) => {
-                  if (isComposingRef.current) {
-                    return;
+                    inputFocusHandlerRef.current?.(false);
                   }
+                }, INPUT_BLUR_GUARD_RELEASE_MS);
+              }}
+              onBeforeInput={(event) => {
+                if (isComposingRef.current) {
+                  return;
+                }
 
-                  const nativeEvent = event.nativeEvent;
-                  if (!(nativeEvent instanceof InputEvent)) {
-                    return;
-                  }
+                const nativeEvent = event.nativeEvent;
+                if (!(nativeEvent instanceof InputEvent)) {
+                  return;
+                }
 
-                  if (nativeEvent.inputType === 'insertLineBreak') {
+                if (nativeEvent.inputType === 'insertLineBreak') {
+                  event.preventDefault();
+                  flushAndSendEnter(event.currentTarget);
+                  return;
+                }
+
+                if (
+                  nativeEvent.inputType === 'deleteContentBackward' ||
+                  nativeEvent.inputType === 'deleteContentForward' ||
+                  nativeEvent.inputType === 'deleteByCut'
+                ) {
+                  if (!event.currentTarget.value) {
+                    // Textarea is empty — user is deleting from the terminal.
+                    // Prevent browser default and send \x7f directly.
                     event.preventDefault();
-                    flushAndSendEnter(event.currentTarget);
+                    inputHandlerRef.current('\x7f');
+                  }
+                  // Non-empty: let the browser handle the textarea deletion.
+                  // onInput → syncTextareaToPty will send \x7f for the diff.
+                  return;
+                }
+              }}
+              onInput={(event) => {
+                if (isComposingRef.current) {
+                  return;
+                }
+                syncTextareaToPty(event.currentTarget);
+              }}
+              onKeyDown={(event) => {
+                // [DEBUG fn] 监控 textarea 收到的所有 keydown
+                clientLog('debug', '[fn-debug][textarea keydown]', {
+                  key: event.key,
+                  code: event.code,
+                  keyCode: event.keyCode,
+                  which: event.which,
+                  metaKey: event.metaKey,
+                  ctrlKey: event.ctrlKey,
+                  altKey: event.altKey,
+                  shiftKey: event.shiftKey,
+                  repeat: event.repeat,
+                  isComposing: (event.nativeEvent as KeyboardEvent).isComposing,
+                });
+                // ===== 桌面端独有：先处理 Cmd/Ctrl/Alt 修饰组合 =====
+                if (!enableTouchScroll) {
+                  const term = terminalRef.current;
+                  const cmd = event.metaKey;
+                  const ctrl = event.ctrlKey;
+                  const alt = event.altKey;
+                  const shift = event.shiftKey;
+                  const key = event.key;
+
+                  // ---- Cmd/Ctrl + V：粘贴 ----
+                  if ((cmd || ctrl) && !alt && !shift && (key === 'v' || key === 'V')) {
+                    event.preventDefault();
+                    navigator.clipboard?.readText().then((text) => {
+                      if (!text) return;
+                      const cleaned = sanitizeTerminalInput(text);
+                      if (cleaned) sendTerminalSeq(cleaned, event.currentTarget);
+                    }).catch(() => { /* ignored */ });
                     return;
                   }
 
-                  if (
-                    nativeEvent.inputType === 'deleteContentBackward' ||
-                    nativeEvent.inputType === 'deleteContentForward' ||
-                    nativeEvent.inputType === 'deleteByCut'
-                  ) {
-                    if (!event.currentTarget.value) {
-                      // Textarea is empty — user is deleting from the terminal.
-                      // Prevent browser default and send \x7f directly.
+                  // ---- Cmd + C（Mac 风格）：有选区复制，无选区什么都不做 ----
+                  if (cmd && !ctrl && !alt && !shift && (key === 'c' || key === 'C')) {
+                    event.preventDefault();
+                    const sel = term?.hasSelection() ? term.getSelection() : '';
+                    if (sel) {
+                      navigator.clipboard?.writeText(sel).catch(() => { /* ignored */ });
+                    }
+                    return;
+                    // ⚠️ Mac Cmd+C 永远不发 SIGINT；Ctrl+C 走下面的 ctrl-letter 分支
+                  }
+
+                  // ---- Cmd/Ctrl + K：清空可视屏幕 ----
+                  if ((cmd || ctrl) && !alt && !shift && (key === 'k' || key === 'K')) {
+                    event.preventDefault();
+                    if (term) {
+                      term.reset();
+                      resetWriteState();
+                      fitTerminal('cmd-k-clear');
+                      refreshTextureAtlasNow('cmd-k-clear');
+                    }
+                    event.currentTarget.value = '';
+                    sentValueRef.current = '';
+                    return;
+                  }
+
+                  // ---- 其他 Cmd / Cmd+Shift / Cmd+Alt 组合 ----
+                  // 不识别就交给 App.tsx 的全局监听器（Cmd+B / Cmd+Shift+E 等）。
+                  // 不 preventDefault、也不发 PTY；textarea 对这些组合的默认行为
+                  // 就是 no-op，所以不会留下垃圾字符。
+                  if (cmd) {
+                    return;
+                  }
+
+                  // ---- Ctrl + Space → NUL ----
+                  if (ctrl && !alt && !shift && key === ' ') {
+                    event.preventDefault();
+                    sendTerminalSeq('\x00', event.currentTarget);
+                    return;
+                  }
+
+                  // ---- Ctrl + letter → 控制字符 ----
+                  if (ctrl && !alt && !cmd && key.length === 1) {
+                    const code = key.toLowerCase().charCodeAt(0);
+                    if (code >= 0x40 && code <= 0x7f) {
                       event.preventDefault();
-                      inputHandlerRef.current('\x7f');
-                    }
-                    // Non-empty: let the browser handle the textarea deletion.
-                    // onInput → syncTextareaToPty will send \x7f for the diff.
-                    return;
-                  }
-                }}
-                onInput={(event) => {
-                  if (isComposingRef.current) {
-                    return;
-                  }
-                  syncTextareaToPty(event.currentTarget);
-                }}
-                onKeyDown={(event) => {
-                  // Handle Enter key (including mobile keyboard confirm button)
-                  if (event.key === 'Enter' || event.key === 'Go' || event.key === 'done' || event.key === 'send') {
-                    event.preventDefault();
-                    flushAndSendEnter(event.currentTarget);
-                    return;
-                  }
-
-                  if (event.key === 'Backspace') {
-                    if (isComposingRef.current) {
+                      sendTerminalSeq(String.fromCharCode(code & 0x1f), event.currentTarget);
                       return;
                     }
-
-                    if (!event.currentTarget.value) {
-                      // Textarea empty — user is deleting from the terminal.
-                      event.preventDefault();
-                      inputHandlerRef.current('\x7f');
-                    }
-                    // Non-empty: let the browser handle deletion.
-                    // onBeforeInput won't preventDefault, browser deletes from
-                    // textarea, then syncTextareaToPty sends \x7f for the diff.
                   }
-                }}
-                onCompositionStart={() => {
-                  isComposingRef.current = true;
-                }}
-                onCompositionUpdate={() => {
-                  isComposingRef.current = true;
-                }}
-                onCompositionEnd={(event) => {
-                  isComposingRef.current = false;
-                  syncTextareaToPty(event.currentTarget);
-                }}
-              />
-            ) : null}
+
+                  // ---- Alt + letter → ESC-prefix ----
+                  if (alt && !ctrl && !cmd && key.length === 1) {
+                    event.preventDefault();
+                    sendTerminalSeq(`\x1b${key}`, event.currentTarget);
+                    return;
+                  }
+
+                  // ---- 特殊键（方向 / Home / End / F1–F12 / Tab / Esc 等）----
+                  if (term) {
+                    const seq = mapSpecialKey(event, term);
+                    if (seq !== null) {
+                      event.preventDefault();
+                      sendTerminalSeq(seq, event.currentTarget);
+                      return;
+                    }
+                  }
+                }
+
+                // ===== 通用 Enter 处理（桌面 + 移动）=====
+                // ⚠️ IME 合成中按 Enter 是用来「选中候选词上屏」，绝不能
+                // 当作回车发给 PTY，否则中文输入和 "Enter" 这种字符串完全
+                // 打不出来。判定条件：
+                //   - event.isComposing：标准 W3C 标记
+                //   - event.nativeEvent.isComposing：React 包装事件兜底
+                //   - keyCode === 229：Chrome/Safari IME 占用码，所有
+                //     IME 合成中的按键都会被映射到 229
+                //   - isComposingRef.current：composition* 事件维护的状态，
+                //     某些 IME（搜狗）首次按 Enter 不带 isComposing 标志，
+                //     只能靠这条兜底
+                //   - lastCompositionEndAt 50ms 内：搜狗/微软等输入法选词
+                //     的派发顺序是「compositionend → keydown(Enter)」，第二
+                //     次 Enter 已经是 keyCode=13、isComposing=false，所有
+                //     IME 状态都已经清理。靠"刚结束 composition"这个时间
+                //     窗口兜底，跟 VSCode / Monaco / CodeMirror 用同一招。
+                if (event.key === 'Enter' || event.key === 'Go' || event.key === 'done' || event.key === 'send') {
+                  const sinceCompositionEnd = Date.now() - lastCompositionEndAtRef.current;
+                  if (
+                    event.nativeEvent.isComposing ||
+                    (event as unknown as { isComposing?: boolean }).isComposing ||
+                    event.keyCode === 229 ||
+                    isComposingRef.current ||
+                    sinceCompositionEnd < 50
+                  ) {
+                    // IME 合成中 / 刚结束：让浏览器把 Enter 当作"选词上屏"
+                    // 处理；compositionend 触发的 syncTextareaToPty 已经把
+                    // 候选词发给 PTY，不需要再补回车。
+                    event.preventDefault();
+                    return;
+                  }
+                  event.preventDefault();
+                  flushAndSendEnter(event.currentTarget);
+                  return;
+                }
+
+                if (event.key === 'Backspace') {
+                  if (isComposingRef.current) {
+                    return;
+                  }
+
+                  if (!event.currentTarget.value) {
+                    // Textarea empty — user is deleting from the terminal.
+                    event.preventDefault();
+                    inputHandlerRef.current('\x7f');
+                  }
+                  // Non-empty: let the browser handle deletion.
+                  // onBeforeInput won't preventDefault, browser deletes from
+                  // textarea, then syncTextareaToPty sends \x7f for the diff.
+                }
+              }}
+              onCompositionStart={() => {
+                isComposingRef.current = true;
+              }}
+              onCompositionUpdate={() => {
+                isComposingRef.current = true;
+              }}
+              onCompositionEnd={(event) => {
+                isComposingRef.current = false;
+                lastCompositionEndAtRef.current = Date.now();
+                syncTextareaToPty(event.currentTarget);
+              }}
+            />
 
             {/* Double-tap Tab indicator */}
             <div

@@ -393,7 +393,7 @@ body {
     left: 0;
     right: 0;
     height: var(--app-base-vh, 100lvh);
-    padding-bottom: max(0px, env(safe-area-inset-bottom, 0px) - 16px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
   .terminal-viewport-container {
@@ -501,6 +501,10 @@ body {
   transition: none !important;
   image-rendering: crisp-edges;
   image-rendering: pixelated;
+  /* 强制所有 emoji-presentation-default 模糊的 Unicode 字符都走文本字形，
+     避免 ⏺ (U+23FA) 等被浏览器回退成彩色 Apple Color Emoji。
+     仅 Chrome 131+ / Safari 17.4+ 支持；老浏览器靠 fontFamily 末尾的字体链兜底。 */
+  font-variant-emoji: text;
 }
 
 /* Gradient text utility */
