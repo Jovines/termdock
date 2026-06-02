@@ -351,7 +351,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       typeof window !== 'undefined' ? window.devicePixelRatio : 1
     );
     const isComposingRef = React.useRef(false);
-    // composition 刚结束的时间戳，用来吞掉 IME 选词紧随其后的那一记 Enter
+    // composition 刚结束的时间戳：IME 选词紧随 compositionend 之后会补发一记
+    // keydown(Enter) / beforeinput(insertLineBreak)，我们用时间窗口吞掉。
     const lastCompositionEndAtRef = React.useRef(0);
     const sentValueRef = React.useRef('');
     const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
@@ -1910,7 +1911,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
           fitTerminal('init');
           if (autoFocusRef.current) {
-            terminal.focus();
+            // 桌面：焦点必须落在覆盖层 textarea，绝不能给 xterm 自身 textarea。
+            // 一旦 xterm.textarea 拿到焦点，IME（尤其搜狗英文联想）会把候选词
+            // 直接 set 进 xterm.textarea.value，xterm 通过 input 事件读取再
+            // 调 onData 发给 PTY，完全绕开我们的 diff-sync 路径。
+            if (!enableTouchScroll) {
+              hiddenInputRef.current?.focus({ preventScroll: true });
+            } else {
+              terminal.focus();
+            }
           }
 
           // 初始化锚点位置（即便 0,0 也得是当前 cell 真实尺寸）
@@ -1927,6 +1936,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               if (xtermTextarea) {
                 xtermTextarea.tabIndex = -1;
                 xtermTextarea.setAttribute('aria-hidden', 'true');
+                // 兜底：xterm 内部仍可能用 .focus() 主动拿焦点（比如鼠标点击
+                // 时 SelectionService → Terminal.focus()）。这里挂一个 focus
+                // 监听器，xterm.textarea 一拿到焦点就立即把它转给覆盖层；
+                // 同时让它彻底不参与输入：readonly + 清空 value，确保即使
+                // 某些 IME 抢先把候选词写进去，也不会被 xterm 的 input
+                // handler 捕获并通过 onData 发出。
+                xtermTextarea.setAttribute('readonly', '');
+                xtermTextarea.value = '';
+                const handleXtermTextareaFocus = () => {
+                  hiddenInputRef.current?.focus({ preventScroll: true });
+                };
+                xtermTextarea.addEventListener('focus', handleXtermTextareaFocus);
+                localDisposables.push({
+                  dispose: () => xtermTextarea.removeEventListener('focus', handleXtermTextareaFocus),
+                });
                 // ⚠️ 不设 pointer-events:none：xterm 内部 wheel/mouse 上报
                 // （SGR mouse wheel → tmux copy-mode）会路由到 textarea 上，
                 // 屏蔽 hit-test 会导致触控板两指滚动收不到事件。
@@ -1946,7 +1970,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // DSR 响应、bracketed-paste 包裹等，这些都是必须送到 PTY 的。
           localDisposables.push(
             terminal.onData((data: string) => {
-              clientLog('debug', '[onData]', { data, ts: Date.now() });
               inputHandlerRef.current(data);
             })
           );
@@ -2053,7 +2076,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       // reset 后立即同步刷新，避免同尺寸切换 session 时纹理图集残留旧字形
       refreshTextureAtlasNow('session-reset');
             if (autoFocusRef.current) {
-              terminal.focus();
+              // 桌面：焦点必须落在覆盖层 textarea（理由见 init 处注释）
+              if (!enableTouchScroll) {
+                hiddenInputRef.current?.focus({ preventScroll: true });
+              } else {
+                terminal.focus();
+              }
             }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionKey, terminalReadyVersion, fitTerminal, refreshTextureAtlasNow, resetWriteState]);
@@ -2116,7 +2144,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             focusHiddenInput();
             return;
           }
-          terminalRef.current?.focus();
+          // 桌面：与 init / session-reset 一致，焦点统一交给覆盖层 textarea，
+          // 否则 IME 会抢到 xterm.textarea 上绕开 diff-sync。
+          hiddenInputRef.current?.focus({ preventScroll: true });
         },
         clear: () => {
           const terminal = terminalRef.current;
@@ -2326,13 +2356,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 }
 
                 if (nativeEvent.inputType === 'insertLineBreak') {
-                  // ⚠️ IME 选词的常见派发顺序：compositionend → textarea 已经
-                  // 写入候选词 → 浏览器在末尾默认追加 \n → 触发 beforeinput
-                  // (insertLineBreak)。此时 isComposingRef 已 false，必须靠
-                  // 「刚结束 composition」时间窗口兜底，否则会把候选词 + \r
-                  // 一起发给 PTY，用户感知"直接换行"。
-                  const sinceCompositionEnd = Date.now() - lastCompositionEndAtRef.current;
-                  if (sinceCompositionEnd < 120) {
+                  const sinceCompEnd = Date.now() - lastCompositionEndAtRef.current;
+                  // IME 选词后浏览器会补一记 insertLineBreak，必须吞掉。
+                  if (sinceCompEnd < 200) {
                     event.preventDefault();
                     return;
                   }
@@ -2454,8 +2480,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
                 // ===== 通用 Enter 处理（桌面 + 移动）=====
                 // ⚠️ IME 合成中按 Enter 是用来「选中候选词上屏」，绝不能
-                // 当作回车发给 PTY，否则中文输入和 "Enter" 这种字符串完全
-                // 打不出来。判定条件：
+                // 当作回车发给 PTY。判定条件：
                 //   - event.isComposing：标准 W3C 标记
                 //   - event.nativeEvent.isComposing：React 包装事件兜底
                 //   - keyCode === 229：Chrome/Safari IME 占用码，所有
@@ -2463,23 +2488,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 //   - isComposingRef.current：composition* 事件维护的状态，
                 //     某些 IME（搜狗）首次按 Enter 不带 isComposing 标志，
                 //     只能靠这条兜底
-                //   - lastCompositionEndAt 50ms 内：搜狗/微软等输入法选词
-                //     的派发顺序是「compositionend → keydown(Enter)」，第二
-                //     次 Enter 已经是 keyCode=13、isComposing=false，所有
-                //     IME 状态都已经清理。靠"刚结束 composition"这个时间
-                //     窗口兜底，跟 VSCode / Monaco / CodeMirror 用同一招。
                 if (event.key === 'Enter' || event.key === 'Go' || event.key === 'done' || event.key === 'send') {
-                  const sinceCompositionEnd = Date.now() - lastCompositionEndAtRef.current;
+                  const sinceCompEnd = Date.now() - lastCompositionEndAtRef.current;
                   if (
                     event.nativeEvent.isComposing ||
                     (event as unknown as { isComposing?: boolean }).isComposing ||
                     event.keyCode === 229 ||
                     isComposingRef.current ||
-                    sinceCompositionEnd < 50
+                    sinceCompEnd < 200
                   ) {
-                    // IME 合成中 / 刚结束：让浏览器把 Enter 当作"选词上屏"
-                    // 处理；compositionend 触发的 syncTextareaToPty 已经把
-                    // 候选词发给 PTY，不需要再补回车。
+                    // IME 合成中 / 刚结束：吞掉这一记 Enter，候选词已经通过
+                    // compositionend → syncTextareaToPty 发出去了。
                     event.preventDefault();
                     return;
                   }
