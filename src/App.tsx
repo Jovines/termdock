@@ -991,6 +991,35 @@ function App() {
                   </div>
                 </div>
 
+                {/* Default mode for the top-tab + button */}
+                <div className="flex items-center gap-2 rounded-xl bg-surface-2 px-2.5 py-2">
+                  <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">New tab</span>
+                  <div className="flex flex-1 items-center gap-1 rounded-md bg-surface p-0.5">
+                    {(['shell', 'tmux'] as const).map((mode) => {
+                      const selected = newSessionMode === mode;
+                      const disabled = mode === 'tmux' && !tmuxStatus.available;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          disabled={disabled}
+                          onClick={() => setNewSessionMode(mode)}
+                          className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition ${
+                            selected
+                              ? 'bg-primary/20 text-primary'
+                              : disabled
+                                ? 'cursor-not-allowed text-muted-foreground/40'
+                                : 'text-muted-foreground hover:bg-surface-elevated'
+                          }`}
+                          title={disabled ? (tmuxStatus.reason || 'Install tmux on the server to enable.') : undefined}
+                        >
+                          {mode === 'shell' ? 'Shell' : 'Tmux'}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 {/* Toggles row */}
                 <div className="grid grid-cols-2 gap-2">
                   <button
