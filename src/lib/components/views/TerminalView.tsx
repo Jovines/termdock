@@ -49,7 +49,7 @@ interface TerminalViewProps {
 
 export const TerminalView: React.FC<TerminalViewProps> = ({
   sessionId: initialSessionId,
-  fontFamily = '"JetBrains Mono NL", "Symbols Nerd Font Mono"',
+  fontFamily = 'var(--font-mono)',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
   rendererMode = 'auto',
   toolbarPresets: configuredToolbarPresets = [],
@@ -990,6 +990,23 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     },
     [activeModifier, focusTerminalIfActive, isTmuxMode, lockedModifier, terminal]
   );
+
+  React.useEffect(() => {
+    const handleInsertReference = (event: Event) => {
+      if (!isActiveRef.current) return;
+      const customEvent = event as CustomEvent<{ text?: string }>;
+      const text = customEvent.detail?.text;
+      if (!text) return;
+      handleViewportInput(text, {
+        skipModifierTransform: true,
+        consumeModifier: false,
+      });
+      focusTerminalIfActive();
+    };
+
+    window.addEventListener('termdock-insert-reference', handleInsertReference);
+    return () => window.removeEventListener('termdock-insert-reference', handleInsertReference);
+  }, [focusTerminalIfActive, handleViewportInput]);
 
   const flushPendingResize = React.useCallback(() => {
     const resizeState = resizeStateRef.current;

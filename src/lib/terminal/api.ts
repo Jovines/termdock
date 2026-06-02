@@ -875,7 +875,7 @@ export interface FileEntry {
   modified?: string;
 }
 
-export async function listDirectory(dirPath: string): Promise<{ path: string; entries: FileEntry[] }> {
+export async function listDirectory(dirPath: string): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
   const response = await fetch(`/api/terminal/fs/list?path=${encodeURIComponent(dirPath)}`);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list directory' }));
@@ -911,7 +911,7 @@ export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: str
 }
 
 export async function getDiffFileList(cwd?: string): Promise<{
-  files: Array<{ path: string; status: string; oldPath?: string }>;
+  files: Array<{ path: string; absolutePath: string; status: string; oldPath?: string }>;
   error?: string;
 }> {
   const params = new URLSearchParams();
@@ -921,6 +921,54 @@ export async function getDiffFileList(cwd?: string): Promise<{
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get diff file list' }));
     throw new Error(error.error || 'Failed to get diff file list');
+  }
+  return response.json();
+}
+
+export interface GitContextFile {
+  path: string;
+  absolutePath: string;
+  status: string;
+}
+
+export interface GitContext {
+  available: boolean;
+  cwd?: string;
+  root?: string;
+  branch?: string | null;
+  status?: string;
+  recentCommits?: string[];
+  changedFiles?: GitContextFile[];
+  truncated?: boolean;
+  error?: string;
+}
+
+export async function getGitContext(cwd?: string): Promise<GitContext> {
+  const params = new URLSearchParams();
+  if (cwd) params.set('cwd', cwd);
+  const qs = params.toString();
+  const response = await fetch(`/api/terminal/fs/git-context${qs ? `?${qs}` : ''}`);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get git context' }));
+    throw new Error(error.error || 'Failed to get git context');
+  }
+  return response.json();
+}
+
+// Combined payload for sidebar open — saves a round-trip and a git rev-parse.
+export async function getGitBundle(cwd?: string): Promise<{
+  available: boolean;
+  files: Array<{ path: string; absolutePath: string; status: string; oldPath?: string }>;
+  context: GitContext | null;
+  error?: string;
+}> {
+  const params = new URLSearchParams();
+  if (cwd) params.set('cwd', cwd);
+  const qs = params.toString();
+  const response = await fetch(`/api/terminal/fs/git-bundle${qs ? `?${qs}` : ''}`);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get git bundle' }));
+    throw new Error(error.error || 'Failed to get git bundle');
   }
   return response.json();
 }

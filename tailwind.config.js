@@ -34,7 +34,10 @@ export default {
         hover: 'var(--hover)',
       },
       fontFamily: {
-        mono: ['var(--font-mono)', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+        // 单一来源：CSS 变量在 src/index.css 的 :root 定义。
+        // 字体改动只动那里，不再在 tailwind 配置里维护 fallback 链。
+        mono: ['var(--font-mono)'],
+        sans: ['var(--font-sans)'],
       },
       animation: {
         'spin-slow': 'spin 3s linear infinite',

@@ -67,7 +67,7 @@ function generateTmuxSessionName(seed?: string): string {
 }
 
 export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
-  fontFamily = '"JetBrains Mono NL", "Symbols Nerd Font Mono"',
+  fontFamily = 'var(--font-mono)',
   fontSize = 13,
   rendererMode = 'auto',
   toolbarPresets = [],

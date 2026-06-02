@@ -8,7 +8,10 @@ interface SidebarProps {
   onClose: () => void;
   onOpen?: () => void;
   children: React.ReactNode;
-  /** Push mode: sidebar takes horizontal space instead of overlaying (desktop) */
+  /**
+   * @deprecated Both desktop and mobile now render in overlay mode to keep the
+   * terminal column from resizing when toggling. The prop is accepted but ignored.
+   */
   push?: boolean;
 }
 
@@ -23,7 +26,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Sidebar(
-  { side, isOpen, drawerWidthPx, onClose, onOpen, children, push },
+  { side, isOpen, drawerWidthPx, onClose, onOpen, children },
   forwardedRef,
 ) {
   const isLeft = side === 'left';
@@ -153,6 +156,10 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     {
       axis: 'x',
       filterTaps: true,
+      // Only enable drag-to-close from touch / pen — desktop mouse users
+      // close via backdrop click, the X button, or Esc. This prevents
+      // accidental drags when selecting text inside the sidebar.
+      pointer: { touch: true },
     },
   );
 
@@ -173,35 +180,11 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     {
       axis: 'x',
       filterTaps: true,
+      pointer: { touch: true },
     },
   );
 
-  // ── Push mode (desktop): flex child, no overlay ──
-  if (push) {
-    return (
-      <aside
-        ref={setPanelRef}
-        data-sidebar={side}
-        className={`h-full shrink-0 flex flex-col bg-surface overflow-hidden transition-[width] duration-200 ease-out ${
-          isLeft ? 'border-r border-border/15' : 'border-l border-border/15'
-        }`}
-        style={{
-          width: isOpen ? drawerWidthPx : 0,
-          paddingTop: 'max(0px, env(safe-area-inset-top, 0px) - 24px)',
-          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
-          ...(isLeft
-            ? { paddingLeft: 'env(safe-area-inset-left, 0px)' }
-            : { paddingRight: 'env(safe-area-inset-right, 0px)' }),
-        }}
-      >
-        <div style={{ width: drawerWidthPx, minWidth: drawerWidthPx }}>
-          {children}
-        </div>
-      </aside>
-    );
-  }
-
-  // ── Overlay mode (mobile): fixed, draggable ──
+  // ── Overlay mode (used on both desktop & mobile) — fixed, draggable ──
   return (
     <>
       <div

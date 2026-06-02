@@ -86,9 +86,8 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
           the safe upper bound for `font-size` is roughly viewport / 42. */}
       <pre
         aria-hidden
-        className="max-w-full select-none overflow-hidden whitespace-pre leading-[1.05] text-primary/80"
+        className="max-w-full select-none overflow-hidden whitespace-pre leading-[1.05] text-primary/80 font-mono"
         style={{
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
           fontSize: 'clamp(5px, 2vw, 14px)',
         }}
       >
@@ -97,8 +96,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
 
       {/* Terminal-style prompt with blinking cursor for personality */}
       <div
-        className="flex items-center gap-2 text-sm text-muted-foreground"
-        style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}
+        className="flex items-center gap-2 text-sm text-muted-foreground font-mono"
       >
         <span className="text-primary">$</span>
         <span>termdock login</span>

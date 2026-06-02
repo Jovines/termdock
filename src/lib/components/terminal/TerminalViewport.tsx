@@ -218,11 +218,58 @@ const INPUT_BLUR_GUARD_ACTIVE_MS = 260;
 const INPUT_BLUR_GUARD_RELEASE_MS = 140;
 const KEYBOARD_OPEN_THRESHOLD_PX = 80;
 
+/**
+ * 等待终端使用的自托管字体加载完成，再让 xterm.js 实例化。
+ *
+ * 背景（xterm.js issue #1164 的根因）：xterm 在 `new Terminal()` 构造时就会
+ * 用 fontFamily 测量 cell 宽高，如果此时 webfont 还没下载完成，xterm 会拿到
+ * fallback 字体的尺寸，后续即使字体加载好也不会重新测量，从而导致光标错位
+ * / 字符宽度算错 / canvas 重叠。VS Code、Hyper 都采用 document.fonts.ready
+ * 守卫这一时机。
+ *
+ * 这里：
+ *   - 用 module 级 promise 缓存，整个应用只等一次。
+ *   - 显式 load 终端主字体 (JetBrains Mono NL Regular / Bold)，避免 unicode-range
+ *     懒加载导致 ready 提前 resolve（document.fonts.ready 只等当前已注册的
+ *     FontFace，懒加载字体在被使用前不会注册）。
+ *   - 兼容老浏览器 / 测试环境：API 缺失时直接 resolve。
+ *   - 任何加载失败都吞掉，让终端继续以 fallback 启动，不阻塞用户。
+ */
+let terminalFontsReadyPromise: Promise<void> | null = null;
+const ensureTerminalFontsReady = (): Promise<void> => {
+  if (terminalFontsReadyPromise) return terminalFontsReadyPromise;
+  if (typeof document === 'undefined' || !('fonts' in document)) {
+    terminalFontsReadyPromise = Promise.resolve();
+    return terminalFontsReadyPromise;
+  }
+  const fonts = document.fonts;
+  // 主字体显式预加载，触发 unicode-range 限定的 @font-face 真正下载。
+  const preload = Promise.allSettled([
+    fonts.load('400 13px "JetBrains Mono NL"'),
+    fonts.load('700 13px "JetBrains Mono NL"'),
+    fonts.load('400 13px "Symbols Nerd Font Mono"'),
+  ]);
+  terminalFontsReadyPromise = preload
+    .then(() => fonts.ready)
+    .then(() => undefined)
+    .catch(() => undefined);
+  return terminalFontsReadyPromise;
+};
+
 const getTerminalFontFamily = (userFontFamily: string): string => {
-  // 把覆盖更全的文本符号字体（自托管 Noto Sans Symbols 2）放在彩色 emoji
-  // 字体之前，避免诸如 ⏺ (U+23FA)、⏸ (U+23F8) 这种默认 text-presentation
-  // 的 Unicode 符号被回退成 Apple Color Emoji 渲染。
-  return `${userFontFamily}, "Noto Sans Symbols 2", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace`;
+  // 单一来源：所有终端字体都从 :root 上的 --font-mono CSS 变量读取
+  // （定义见 src/index.css）。这里保留 prop 形式只是兼容外部覆盖；当传入
+  // 的字符串就是 var(...) 或为空时，回退到 documentElement 上的实际值，
+  // xterm 的 canvas 渲染需要拿到一个具体的字体栈字符串而不是 var()。
+  if (!userFontFamily || userFontFamily.includes('var(')) {
+    if (typeof window !== 'undefined') {
+      const resolved = getComputedStyle(document.documentElement)
+        .getPropertyValue('--font-mono')
+        .trim();
+      if (resolved) return resolved;
+    }
+  }
+  return userFontFamily;
 };
 
 // Convert TerminalTheme to xterm.js theme format
@@ -1663,10 +1710,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       container.tabIndex = enableTouchScroll ? -1 : 0;
 
-      const initialize = () => {
+      const initialize = async () => {
         setLoadingState('loading');
         setErrorMessage(null);
         setIsInitializing(true);
+
+        // 等终端字体加载完成再实例化 xterm，否则 cell 测量会用 fallback 字体
+        // 的尺寸，事后字体加载好也不会重测，导致光标错位。详见
+        // ensureTerminalFontsReady 文档。
+        await ensureTerminalFontsReady();
+        if (disposed) return;
 
         try {
           // Create terminal with xterm.js
@@ -1943,6 +1996,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       initialize();
 
       return () => {
+        disposed = true;
         void disposed;
         inputFocusHandlerRef.current?.(false);
         touchScrollCleanupRef.current?.();
@@ -2272,6 +2326,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 }
 
                 if (nativeEvent.inputType === 'insertLineBreak') {
+                  // ⚠️ IME 选词的常见派发顺序：compositionend → textarea 已经
+                  // 写入候选词 → 浏览器在末尾默认追加 \n → 触发 beforeinput
+                  // (insertLineBreak)。此时 isComposingRef 已 false，必须靠
+                  // 「刚结束 composition」时间窗口兜底，否则会把候选词 + \r
+                  // 一起发给 PTY，用户感知"直接换行"。
+                  const sinceCompositionEnd = Date.now() - lastCompositionEndAtRef.current;
+                  if (sinceCompositionEnd < 120) {
+                    event.preventDefault();
+                    return;
+                  }
                   event.preventDefault();
                   flushAndSendEnter(event.currentTarget);
                   return;
@@ -2300,19 +2364,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 syncTextareaToPty(event.currentTarget);
               }}
               onKeyDown={(event) => {
-                // [DEBUG fn] 监控 textarea 收到的所有 keydown
-                clientLog('debug', '[fn-debug][textarea keydown]', {
-                  key: event.key,
-                  code: event.code,
-                  keyCode: event.keyCode,
-                  which: event.which,
-                  metaKey: event.metaKey,
-                  ctrlKey: event.ctrlKey,
-                  altKey: event.altKey,
-                  shiftKey: event.shiftKey,
-                  repeat: event.repeat,
-                  isComposing: (event.nativeEvent as KeyboardEvent).isComposing,
-                });
                 // ===== 桌面端独有：先处理 Cmd/Ctrl/Alt 修饰组合 =====
                 if (!enableTouchScroll) {
                   const term = terminalRef.current;

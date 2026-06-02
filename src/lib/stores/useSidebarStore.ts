@@ -15,7 +15,7 @@ interface SidebarState {
   rightOpen: boolean;
 
   // Right sidebar tab
-  rightTab: 'files' | 'diff';
+  rightTab: 'files' | 'diff' | 'file';
 
   // File tree state
   rootPath: string | null;
@@ -40,7 +40,7 @@ interface SidebarState {
   closeRight: () => void;
   toggleRight: () => void;
   closeAll: () => void;
-  setRightTab: (tab: 'files' | 'diff') => void;
+  setRightTab: (tab: 'files' | 'diff' | 'file') => void;
   setRootPath: (path: string | null) => void;
   toggleExpanded: (path: string) => void;
   selectFile: (path: string | null) => void;
@@ -73,7 +73,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
 
   setRightTab: (tab) => set({ rightTab: tab }),
   setRootPath: (path) => set((s) => {
-    if (s.rootPath === path) return { rootPath: path };
+    if (s.rootPath === path) return s;
     return {
       rootPath: path,
       expandedPaths: new Set(),

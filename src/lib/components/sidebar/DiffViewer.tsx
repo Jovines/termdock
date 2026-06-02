@@ -19,15 +19,24 @@ function getPathParts(path: string | null): { name: string; dir: string } {
 }
 
 export function DiffViewer({ filePath }: DiffViewerProps) {
-  const { diffContent, diffLoading, diffError, setDiff, rootPath } = useSidebarStore();
+  // 精确订阅 — 只关心 diff 相关字段
+  const diffContent = useSidebarStore((s) => s.diffContent);
+  const diffLoading = useSidebarStore((s) => s.diffLoading);
+  const diffError = useSidebarStore((s) => s.diffError);
+  const rootPath = useSidebarStore((s) => s.rootPath);
+  const setDiff = useSidebarStore((s) => s.setDiff);
 
   useEffect(() => {
     let cancelled = false;
     const path = filePath;
 
+    const requestPath = path && rootPath && path.startsWith(`${rootPath}/`)
+      ? path.slice(rootPath.length + 1)
+      : path;
+
     setDiff(path, null, true, null);
 
-    getFileDiff(path ?? undefined, undefined, rootPath ?? undefined)
+    getFileDiff(requestPath ?? undefined, undefined, rootPath ?? undefined)
       .then((result) => {
         if (cancelled) return;
         setDiff(path, result.diff, false, result.error ?? null);

@@ -22,13 +22,46 @@
   --destructive-foreground: #FFFCF0;
   --ring: #4385BE;
   --hover: #E6E4D9;
+
+  /*
+   * 字体单一来源 —— 所有 UI / 终端 / Tailwind / xterm 都从这两个变量读取。
+   * 任何字体改动只动这里，不再散落到 index.html / 业务组件 / tailwind.config。
+   *
+   * --font-mono 字体链顺序（"大和全"原则）:
+   *   1. JetBrains Mono NL          ASCII / 拉丁 / 数字
+   *   2. Symbols Nerd Font Mono     Powerline / devicons / Nerd Font 私有区
+   *   3. Noto Sans Symbols 2        Misc Technical (⏺⏸⏹) + Dingbats (✓✗)
+   *   4. Noto Sans Mono CJK SC      自托管中日韩等宽（GB2312 一级 + 标点）
+   *   5. ui-monospace, ...          系统等宽兜底
+   *
+   * 顺序原则：文本字形优先 → 符号 → CJK → 系统兜底。
+   * 各字体均通过 unicode-range 限定（见 index.html），不会互相抢字符。
+   *
+   * ⚠️ 故意不把 Apple Color Emoji / Segoe UI Emoji / Noto Color Emoji 写进
+   *    字体链。xterm.js 官方文档 ITerminalOptions 明确指出：Emoji / Powerline
+   *    / Nerd Font 字形不参与 rescaleOverlappingGlyphs 缩放，emoji 字体一旦
+   *    被 xterm 当成 fontFamily 一部分，emoji 会撑爆等宽 cell 让光标错位。
+   *    我们让浏览器自己处理 emoji 系统回退，同时配合 .xterm 上的
+   *    font-variant-emoji: text 抑制 ⏺⏸ 这类文本符号被误回退。
+   */
+  --font-mono:
+    'JetBrains Mono NL',
+    'Symbols Nerd Font Mono',
+    'Noto Sans Symbols 2',
+    'Noto Sans Mono CJK SC',
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Noto Sans Mono CJK SC',
+    Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
 }
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background-color: var(--background);
@@ -528,7 +561,7 @@ body {
 .termdock-diff {
   --diff-background-color: transparent;
   --diff-text-color: var(--foreground);
-  --diff-font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  --diff-font-family: var(--font-mono);
   --diff-selection-background-color: rgba(67, 133, 190, 0.08);
   --diff-selection-text-color: var(--foreground);
   --diff-gutter-insert-background-color: rgba(102, 128, 11, 0.14);

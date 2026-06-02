@@ -1,21 +1,18 @@
 import React, { useEffect, useCallback, useState } from 'react';
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
 import {
-  SquareTerminal as RiTerminalBoxLine,
   Plus as RiAddLine,
   X as RiCloseLine,
   PanelLeft as RiPanelLeftLine,
   PanelRight as RiPanelRightLine,
   LayoutGrid as RiLayoutGridLine,
   RefreshCw as RiRefreshLine,
-  Check as RiCheckLine,
   Terminal as RiTerminalLine,
   Keyboard as RiKeyboardLine,
   SlidersHorizontal as RiEqualizerLine,
   Layers as RiStackLine,
   Trash2 as RiDeleteBinLine,
   Unplug as RiLogoutBoxRLine,
-  GripVertical,
   Bot as RiBotLine,
   LoaderCircle as RiLoaderCircle,
 } from 'lucide-react';
@@ -24,7 +21,6 @@ import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
-import { clientLog } from './lib/utils/clientLog';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules } from './lib/terminal/api';
@@ -36,12 +32,6 @@ import { RightSidebar } from './lib/components/sidebar/RightSidebar';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import { AgentRulesSettings } from './lib/components/settings/AgentRulesSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
-
-type DrawerTab = 'sessions' | 'new' | 'tmux' | 'settings';
-
-function getSessionModeLabel(mode: 'shell' | 'tmux'): string {
-  return mode === 'tmux' ? 'tmux' : 'shell';
-}
 
 const SHELL_NAMES = new Set(['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu']);
 
@@ -180,7 +170,6 @@ function App() {
   const { fontSize, setFontSize } = useFontSize();
   const { rendererMode, setRendererMode } = useTerminalRenderer();
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
-  const [drawerTab, setDrawerTab] = React.useState<DrawerTab>('sessions');
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
   // Only re-render the chrome when tab metadata changes, not on every terminal output chunk.
@@ -200,6 +189,9 @@ function App() {
   // Sidebar state — only subscribe to the booleans we render, not the whole store.
   const sidebarLeftOpen = useSidebarStore((s) => s.leftOpen);
   const sidebarRightOpen = useSidebarStore((s) => s.rightOpen);
+  const [isDesktopViewport, setIsDesktopViewport] = useState(() => (
+    typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1024px)').matches
+  ));
 
   const [tmuxSessions, setTmuxSessions] = useState<TmuxSessionSummary[]>([]);
   const [tmuxStatus, setTmuxStatus] = useState<TmuxStatus>({ available: true, version: null, reason: null });
@@ -207,12 +199,22 @@ function App() {
   const [tmuxConfirmKillName, setTmuxConfirmKillName] = useState<string | null>(null);
   const [tmuxKillingName, setTmuxKillingName] = useState<string | null>(null);
   const [tmuxKillError, setTmuxKillError] = useState<string | null>(null);
-  const [sessionConfirmDestroyId, setSessionConfirmDestroyId] = useState<string | null>(null);
-  const [sessionDestroyingId, setSessionDestroyingId] = useState<string | null>(null);
-  const [sessionDestroyError, setSessionDestroyError] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [tabMenuSessionId, setTabMenuSessionId] = useState<string | null>(null);
+  const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
+  const tabLongPressTimerRef = React.useRef<number | null>(null);
+  const tabLongPressedRef = React.useRef(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const media = window.matchMedia('(min-width: 1024px)');
+    const updateViewportMode = () => setIsDesktopViewport(media.matches);
+    updateViewportMode();
+    media.addEventListener('change', updateViewportMode);
+    return () => media.removeEventListener('change', updateViewportMode);
+  }, []);
 
   // Sync active session's cwd to sidebar store
   useEffect(() => {
@@ -220,9 +222,62 @@ function App() {
     useSidebarStore.getState().setRootPath(ts?.cwd ?? null);
   }, [activeSessionId, terminalSessions]);
 
-  // Sidebar drawer dimensions
-  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
-  const drawerWidthPx = isMobile ? Math.min(window.innerWidth * 0.92, 420) : 360;
+  // Silently prewarm the git bundle when active cwd changes — populates
+  // the server-side findGitRoot cache and the front-end sidebar store so
+  // opening the right sidebar shows changes instantly. Throttled to avoid
+  // hammering during bursty cwd updates (cd; cd; cd…).
+  const prewarmTimerRef = React.useRef<number | null>(null);
+  useEffect(() => {
+    const ts = activeSessionId ? terminalSessions.get(activeSessionId) : null;
+    const cwd = ts?.cwd ?? null;
+    if (!cwd) return;
+    if (prewarmTimerRef.current !== null) {
+      window.clearTimeout(prewarmTimerRef.current);
+    }
+    let cancelled = false;
+    prewarmTimerRef.current = window.setTimeout(() => {
+      prewarmTimerRef.current = null;
+      // Lazy import via existing API. Fire-and-forget; failure is fine.
+      void import('./lib/terminal/api').then(({ getGitBundle }) => {
+        if (cancelled) return;
+        return getGitBundle(cwd).then((bundle) => {
+          if (cancelled) return;
+          // Only seed the store if user hasn't opened the sidebar yet OR
+          // the rootPath still matches — avoid clobbering an in-flight
+          // refresh from RightSidebar itself.
+          const state = useSidebarStore.getState();
+          if (state.rootPath !== cwd) return;
+          if (state.changedFiles.size > 0) return;
+          const map = new Map<string, string>();
+          for (const f of bundle.files) {
+            map.set(f.absolutePath || f.path, f.status);
+          }
+          state.setChangedFiles(map);
+        }).catch(() => { /* ignore — not a git repo */ });
+      });
+    }, 600);
+    return () => {
+      cancelled = true;
+      if (prewarmTimerRef.current !== null) {
+        window.clearTimeout(prewarmTimerRef.current);
+        prewarmTimerRef.current = null;
+      }
+    };
+  }, [activeSessionId, terminalSessions]);
+
+  // Sidebar drawer dimensions — overlays on both mobile & desktop, so we
+  // never cause the terminal column to resize when toggling the sidebar.
+  // Left and right have different ergonomic widths:
+  //  - Right (file tree + diff): wide so we can fit a dual-column workspace.
+  //  - Left  (session list):     narrow; one row per session is enough.
+  const isMobile = !isDesktopViewport;
+  const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
+  const rightDrawerWidthPx = isMobile
+    ? Math.min(viewportWidth * 0.92, 420)
+    : Math.min(Math.max(viewportWidth * 0.9, 360), viewportWidth - 56);
+  const leftDrawerWidthPx = isMobile
+    ? Math.min(viewportWidth * 0.86, 380)
+    : Math.min(Math.max(viewportWidth * 0.22, 280), 340);
 
   // Desktop keyboard shortcuts
   useEffect(() => {
@@ -238,42 +293,8 @@ function App() {
       }
     };
     document.addEventListener('keydown', handler);
-
-    // [DEBUG fn] document 级捕获阶段监控所有 keydown / keyup，看 Fn 单按是否到 web 层
-    const dbgDown = (e: KeyboardEvent) => {
-      clientLog('debug', '[fn-debug][doc capture keydown]', {
-        key: e.key,
-        code: e.code,
-        keyCode: e.keyCode,
-        target: (e.target as HTMLElement)?.tagName,
-        activeEl: document.activeElement?.tagName,
-      });
-    };
-    const dbgUp = (e: KeyboardEvent) => {
-      clientLog('debug', '[fn-debug][doc capture keyup]', {
-        key: e.key,
-        code: e.code,
-        keyCode: e.keyCode,
-        target: (e.target as HTMLElement)?.tagName,
-        activeEl: document.activeElement?.tagName,
-      });
-    };
-    const dbgFocusIn = (e: FocusEvent) => {
-      const t = e.target as HTMLElement | null;
-      clientLog('debug', '[fn-debug][focusin]', {
-        tag: t?.tagName,
-        cls: t?.className,
-      });
-    };
-    document.addEventListener('keydown', dbgDown, true);
-    document.addEventListener('keyup', dbgUp, true);
-    document.addEventListener('focusin', dbgFocusIn);
-
     return () => {
       document.removeEventListener('keydown', handler);
-      document.removeEventListener('keydown', dbgDown, true);
-      document.removeEventListener('keyup', dbgUp, true);
-      document.removeEventListener('focusin', dbgFocusIn);
     };
   }, []);
 
@@ -304,7 +325,6 @@ function App() {
     newSessionMode,
     newSessionTmuxName,
     setNewSessionMode,
-    setNewSessionTmuxName,
   } = useNewSessionDefaults();
 
   const [isToolbarPresetsOpen, setIsToolbarPresetsOpen] = React.useState(false);
@@ -445,14 +465,22 @@ function App() {
     setDebugInfo(info);
   }, []);
 
-  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
   const activeSessionIndex = activeSessionId
     ? sessions.findIndex((session) => session.id === activeSessionId)
     : -1;
-  const activeSessionModeLabel = activeSession ? getSessionModeLabel(activeSession.mode) : null;
   const activeSessionPositionLabel = sessions.length > 0 && activeSessionIndex >= 0
     ? `${activeSessionIndex + 1}/${sessions.length}`
     : `${sessions.length}`;
+  const agentTabCounts = React.useMemo(() => {
+    let running = 0;
+    let review = 0;
+    for (const s of sessions) {
+      const ts = terminalSessions.get(s.id);
+      if (ts?.agentStatus === 'running') running += 1;
+      if (ts?.agentNeedsReview) review += 1;
+    }
+    return { running, review };
+  }, [sessions, terminalSessions]);
   const connectedTmuxNames = React.useMemo(
     () => new Set(sessions.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName)),
     [sessions],
@@ -507,6 +535,56 @@ function App() {
       if (editingSessionIdRef.current === sessionId) return;
       handleTabClick(sessionId);
     }, DOUBLE_TAP_MS);
+  }, []);
+
+  const handleTabPointerDown = useCallback((sessionId: string) => {
+    tabLongPressedRef.current = false;
+    if (tabLongPressTimerRef.current !== null) {
+      window.clearTimeout(tabLongPressTimerRef.current);
+    }
+    tabLongPressTimerRef.current = window.setTimeout(() => {
+      tabLongPressedRef.current = true;
+      tabLongPressTimerRef.current = null;
+      // 取消挂起的单击切换
+      if (tabSingleClickTimerRef.current !== null) {
+        window.clearTimeout(tabSingleClickTimerRef.current);
+        tabSingleClickTimerRef.current = null;
+      }
+      lastTabTapRef.current = null;
+      setTabMenuSessionId(sessionId);
+      // 触觉反馈
+      try { window.navigator.vibrate?.(15); } catch { /* ignore */ }
+    }, 480);
+  }, []);
+
+  const cancelTabLongPress = useCallback(() => {
+    if (tabLongPressTimerRef.current !== null) {
+      window.clearTimeout(tabLongPressTimerRef.current);
+      tabLongPressTimerRef.current = null;
+    }
+  }, []);
+
+  const handleTabClickGuarded = useCallback((sessionId: string) => {
+    if (tabLongPressedRef.current) {
+      tabLongPressedRef.current = false;
+      return;
+    }
+    handleTabPress(sessionId);
+  }, [handleTabPress]);
+
+  const copyCwdToClipboard = useCallback(async (sessionId: string) => {
+    const ts = useTerminalStore.getState().sessions.get(sessionId);
+    const cwd = ts?.cwd;
+    if (!cwd) return;
+    try {
+      await navigator.clipboard?.writeText(cwd);
+      setTabCopiedHint(cwd);
+      window.setTimeout(() => {
+        setTabCopiedHint((current) => (current === cwd ? null : current));
+      }, 1400);
+    } catch {
+      /* ignore */
+    }
   }, []);
 
   const handleSessionDataUpdate = useCallback((data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => {
@@ -570,37 +648,9 @@ function App() {
     }
   }, [refreshTmuxSessions]);
 
-  // Close a session AND destroy its underlying tmux session in one shot.
-  // Only meaningful for `mode === 'tmux'` sessions. The backend
-  // `tmux/sessions DELETE` route already cleans up local pty sessions wired
-  // to that tmux session, so we just need to mirror frontend tab removal via
-  // the existing `close-terminal-session-by-backend` event.
-  const handleDestroyTmuxForSession = useCallback(async (session: TerminalSessionInfo) => {
-    if (session.mode !== 'tmux' || !session.tmuxSessionName) return;
-    setSessionDestroyingId(session.id);
-    setSessionDestroyError(null);
-    try {
-      const { cleanedSessions } = await killTmuxSession(session.tmuxSessionName);
-      for (const backendId of cleanedSessions) {
-        window.dispatchEvent(new CustomEvent('close-terminal-session-by-backend', { detail: backendId }));
-      }
-      // Fallback: if the backend reported no cleaned sessions (e.g. tmux
-      // session was already gone), still drop the local tab.
-      if (cleanedSessions.length === 0) {
-        window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: session.id }));
-      }
-      setSessionConfirmDestroyId(null);
-    } catch (error) {
-      setSessionDestroyError(error instanceof Error ? error.message : 'Failed to destroy tmux session');
-    } finally {
-      setSessionDestroyingId(null);
-    }
-  }, []);
-
-  // Auto-refresh tmux sessions when drawer is open and on tmux/new tabs
+  // Auto-refresh tmux sessions when drawer is open
   useEffect(() => {
     if (!isDrawerOpen) return;
-    if (drawerTab !== 'tmux' && drawerTab !== 'new') return;
 
     let cancelled = false;
     let pollingDisabled = false;
@@ -630,80 +680,7 @@ function App() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [isDrawerOpen, drawerTab]);
-
-  const tabDefs: Array<{ id: DrawerTab; label: string; icon: React.ReactNode; badge?: number | null }> = [
-    { id: 'sessions', label: 'Sessions', icon: <RiStackLine size={16} />, badge: sessions.length },
-    { id: 'new', label: 'New', icon: <RiAddLine size={16} /> },
-    {
-      id: 'tmux',
-      label: 'Tmux',
-      icon: <RiLayoutGridLine size={16} />,
-      badge: tmuxStatus.available ? tmuxSessions.length : null,
-    },
-    { id: 'settings', label: 'Settings', icon: <RiEqualizerLine size={16} /> },
-  ];
-
-  // Swipe-to-switch tab support for the settings drawer.
-  const swipeStateRef = React.useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    decided: 'h' | 'v' | null;
-    pointerType: string;
-  } | null>(null);
-
-  const goToTabByDelta = useCallback((delta: number) => {
-    const idx = tabDefs.findIndex((t) => t.id === drawerTab);
-    if (idx === -1) return;
-    const next = idx + delta;
-    if (next < 0 || next >= tabDefs.length) return;
-    setDrawerTab(tabDefs[next].id);
-  }, [drawerTab, tabDefs]);
-
-  const onSwipePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    // Only enable swipe for touch / pen, not mouse.
-    if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
-    // Skip if interaction starts on a horizontally scrollable element (chips, scrollers, etc.)
-    const target = event.target as HTMLElement | null;
-    if (target?.closest('input, textarea, button, [role="slider"], [data-no-swipe]')) {
-      return;
-    }
-    swipeStateRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      decided: null,
-      pointerType: event.pointerType,
-    };
-  }, []);
-
-  const onSwipePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const state = swipeStateRef.current;
-    if (!state || state.pointerId !== event.pointerId) return;
-    const dx = event.clientX - state.startX;
-    const dy = event.clientY - state.startY;
-    if (state.decided === null) {
-      const ax = Math.abs(dx);
-      const ay = Math.abs(dy);
-      if (ax < 8 && ay < 8) return;
-      // Vertical first → release ownership so scroll can happen.
-      state.decided = ay > ax ? 'v' : 'h';
-    }
-  }, []);
-
-  const onSwipePointerEnd = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const state = swipeStateRef.current;
-    if (!state || state.pointerId !== event.pointerId) return;
-    swipeStateRef.current = null;
-    if (state.decided !== 'h') return;
-    const dx = event.clientX - state.startX;
-    const ax = Math.abs(dx);
-    const ay = Math.abs(event.clientY - state.startY);
-    // Require a clearly horizontal swipe of meaningful distance.
-    if (ax < 60 || ax < ay * 1.5) return;
-    goToTabByDelta(dx < 0 ? 1 : -1);
-  }, [goToTabByDelta]);
+  }, [isDrawerOpen]);
 
   return (
     <div
@@ -712,7 +689,7 @@ function App() {
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="flex h-full w-full min-h-0 flex-col overflow-visible bg-background">
           <div
-            className="flex h-8 shrink-0 items-center justify-between gap-1 bg-background px-1 sm:h-9 sm:px-1.5"
+            className="flex h-9 shrink-0 items-center justify-between gap-1 bg-background px-1 sm:h-10 sm:px-1.5"
           >
             <button
               type="button"
@@ -729,7 +706,7 @@ function App() {
             <div
               ref={provided.innerRef}
               {...provided.droppableProps}
-              className="scrollbar-thin flex h-full min-w-0 flex-1 items-center gap-0.5 overflow-x-auto overflow-y-hidden whitespace-nowrap"
+              className="scrollbar-thin flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap"
             >
               {sessions.map((session, index) => {
                 const isActive = session.id === activeSessionId;
@@ -743,6 +720,13 @@ function App() {
                 const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
                 const tabDirLabel = displaySubName ?? (cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null);
                 const tooltip = ts?.cwd || session.name;
+                const accentColor = ts?.agentStatus === 'running'
+                  ? '#4ade80'
+                  : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
+                    ? '#facc15'
+                    : ts?.inCopyMode
+                      ? '#facc15'
+                      : null;
 
                 if (isEditing) {
                   const commitRename = (sessionId: string, value: string) => {
@@ -774,7 +758,7 @@ function App() {
                       type="text"
                       defaultValue={session.name}
                       maxLength={48}
-                      className="h-7 shrink-0 rounded-full bg-surface-elevated px-1.5 text-[11px] leading-none text-foreground outline-none ring-1 ring-primary/50 sm:h-8 sm:px-2 min-w-[4.5rem]"
+                      className="h-8 shrink-0 rounded-md bg-surface-elevated px-2 text-[12px] leading-none text-foreground outline-none ring-1 ring-primary/50 sm:h-8 min-w-[5rem]"
                       style={{ width: `${Math.min(Math.max(session.name.length, 5), 18)}ch` }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
@@ -805,27 +789,41 @@ function App() {
                   <button
                     ref={isActive ? activeSessionTabRef : null}
                     type="button"
-                    onClick={() => handleTabPress(session.id)}
-                    className={`group relative inline-flex h-7 shrink-0 items-center overflow-hidden rounded-full px-1 text-[11px] leading-none transition max-w-[6.25rem] sm:h-8 sm:max-w-[10rem] sm:px-2 ${
+                    onClick={() => handleTabClickGuarded(session.id)}
+                    onPointerDown={() => handleTabPointerDown(session.id)}
+                    onPointerUp={cancelTabLongPress}
+                    onPointerLeave={cancelTabLongPress}
+                    onPointerCancel={cancelTabLongPress}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      cancelTabLongPress();
+                      setTabMenuSessionId(session.id);
+                    }}
+                    className={`group relative inline-flex h-8 shrink-0 items-center overflow-hidden rounded-md pl-1.5 pr-2 text-[12px] leading-none transition max-w-[8rem] sm:h-8 sm:max-w-[12rem] ${
                       isActive
-                        ? 'bg-surface-elevated text-foreground shadow-sm ring-1 ring-primary/25'
+                        ? 'bg-surface-elevated text-foreground shadow-sm'
                         : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
                     }`}
+                    style={isActive && accentColor
+                      ? { boxShadow: `inset 2px 0 0 0 ${accentColor}` }
+                      : isActive
+                        ? { boxShadow: 'inset 2px 0 0 0 rgb(var(--primary-rgb, 99 102 241))' }
+                        : undefined}
                     title={tooltip}
                   >
-                    <span className="inline-flex min-w-0 items-center gap-1">
+                    <span className="inline-flex min-w-0 items-center gap-1.5">
                       <span className="inline-flex shrink-0 items-center">
                         {renderTabIcon(session.mode, ts)}
                       </span>
                       {tabDirLabel ? (
-                        <span className="flex min-w-0 flex-col justify-center leading-[0.72rem] sm:leading-[0.78rem]">
-                          <span className={`truncate text-[10.5px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
-                          <span className="truncate text-[8.5px] text-muted-foreground/80 sm:text-[9px]">
+                        <span className="flex min-w-0 flex-col justify-center leading-[0.85rem]">
+                          <span className={`truncate text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+                          <span className="truncate text-[9.5px] text-muted-foreground/80">
                             {tabDirLabel}
                           </span>
                         </span>
                       ) : (
-                        <span className={`truncate text-[10.5px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+                        <span className={`truncate text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
                       )}
                     </span>
                   </button>
@@ -835,22 +833,43 @@ function App() {
                   </React.Fragment>
                 );
               })}
-              <div className="hidden items-center gap-1.5 pl-2 lg:flex">
-                {activeSessionModeLabel && (
-                  <span className="rounded-full bg-surface-2 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
-                    {activeSessionModeLabel}
-                  </span>
-                )}
-                <span className="rounded-full bg-surface-2 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
-                  {fontSize}px
-                </span>
-              </div>
+              <button
+                type="button"
+                onClick={() => dispatchNewSession()}
+                className="ml-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-primary/15 hover:text-primary active:scale-95"
+                aria-label="New session"
+                title="New session"
+              >
+                <RiAddLine size={14} />
+              </button>
               {provided.placeholder}
             </div>
               )}
             </Droppable>
             </DragDropContext>
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex shrink-0 items-center gap-1.5">
+              {(agentTabCounts.running > 0 || agentTabCounts.review > 0) && (
+                <span className="hidden items-center gap-1 sm:inline-flex">
+                  {agentTabCounts.running > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full bg-green-400/10 px-1.5 py-0.5 text-[10px] font-medium text-green-400"
+                      title="AI running"
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
+                      {agentTabCounts.running}
+                    </span>
+                  )}
+                  {agentTabCounts.review > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full bg-yellow-400/10 px-1.5 py-0.5 text-[10px] font-medium text-yellow-400"
+                      title="Needs review"
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full bg-yellow-400" />
+                      {agentTabCounts.review}
+                    </span>
+                  )}
+                </span>
+              )}
               {sessions.length > 0 && (
               <span
                 className="inline-flex shrink-0 items-center px-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground sm:text-[11px]"
@@ -872,22 +891,6 @@ function App() {
           </div>
 
           <div className="min-h-0 flex-1 flex overflow-hidden bg-background">
-            {/* Left Sidebar — push mode on desktop */}
-            <div className="hidden h-full lg:block">
-              <LeftSidebar
-                isOpen={sidebarLeftOpen}
-                drawerWidthPx={drawerWidthPx}
-                onClose={useSidebarStore.getState().closeLeft}
-                onOpen={useSidebarStore.getState().openLeft}
-                sessions={sessions}
-                activeSessionId={activeSessionId}
-                sessionStates={terminalSessions}
-                onNewSession={() => dispatchNewSession()}
-                onOpenDrawer={() => { setDrawerTab('sessions'); setIsDrawerOpen(true); }}
-                push
-              />
-            </div>
-
             <div className="min-h-0 flex-1 overflow-hidden">
               <MultiTerminalView
                 fontSize={fontSize}
@@ -899,22 +902,11 @@ function App() {
                 onSessionDataUpdate={handleSessionDataUpdate}
               />
             </div>
-
-            {/* Right Sidebar — push mode on desktop */}
-            <div className="hidden h-full lg:block">
-              <RightSidebar
-                isOpen={sidebarRightOpen}
-                drawerWidthPx={drawerWidthPx}
-                onClose={useSidebarStore.getState().closeRight}
-                onOpen={useSidebarStore.getState().openRight}
-                push
-              />
-            </div>
           </div>
         </div>
       </main>
 
-      {/* Drawer with tabs */}
+      {/* Settings drawer (single page) */}
       {isDrawerOpen && (
         <>
           <button
@@ -923,474 +915,217 @@ function App() {
             onClick={() => setIsDrawerOpen(false)}
           />
           <div
-            className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[30rem] flex-col border-l border-border/15 bg-surface animate-fade-in"
+            className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[26rem] flex-col border-l border-border/15 bg-surface animate-fade-in"
             style={{ paddingTop: safeTopInset, paddingBottom: safeBottomInset }}
           >
-            {/* Header */}
-            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/15 px-4 py-3 sm:px-6">
-              <div className="min-w-0">
-                <div className="ui-kicker">Workspace</div>
-                <h2 className="section-title mt-0.5">
-                  {drawerTab === 'sessions' && 'Sessions'}
-                  {drawerTab === 'new' && 'New session'}
-                  {drawerTab === 'tmux' && 'Tmux server'}
-                  {drawerTab === 'settings' && 'Settings'}
-                </h2>
+            {/* Header — compact single row */}
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/15 px-3 py-2.5">
+              <div className="min-w-0 flex items-center gap-2">
+                <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-primary/15 text-primary">
+                  <RiEqualizerLine size={14} />
+                </span>
+                <h2 className="text-[14px] font-semibold text-foreground">Settings</h2>
               </div>
               <button
                 type="button"
                 onClick={() => setIsDrawerOpen(false)}
-                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive"
                 aria-label="Close"
               >
-                <RiCloseLine size={18} />
+                <RiCloseLine size={16} />
               </button>
             </div>
 
-            {/* Tab bar */}
-            <div className="shrink-0 border-b border-border/15 px-2 py-2 sm:px-4">
-              <div className="grid grid-cols-4 gap-1">
-                {tabDefs.map((tab) => {
-                  const isActive = drawerTab === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      onClick={() => setDrawerTab(tab.id)}
-                      className={`group flex flex-col items-center justify-center gap-1 rounded-2xl px-2 py-2 text-[11px] font-medium transition ${
-                        isActive
-                          ? 'bg-surface-elevated text-foreground'
-                          : 'text-muted-foreground hover:bg-surface-2'
-                      }`}
-                    >
-                      <span className={`relative flex h-6 w-6 items-center justify-center rounded-full ${
-                        isActive ? 'bg-primary/20 text-primary' : 'bg-surface-2 text-muted-foreground group-hover:bg-surface-elevated'
-                      }`}>
-                        {tab.icon}
-                        {typeof tab.badge === 'number' && tab.badge > 0 && (
-                          <span className="absolute -top-1 -right-1 inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-accent px-1 text-[9px] text-accent-foreground">
-                            {tab.badge}
-                          </span>
-                        )}
-                      </span>
-                      <span>{tab.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Tab content */}
-            <div
-              className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6"
-              onPointerDown={onSwipePointerDown}
-              onPointerMove={onSwipePointerMove}
-              onPointerUp={onSwipePointerEnd}
-              onPointerCancel={onSwipePointerEnd}
-              style={{ touchAction: 'pan-y' }}
-            >
-              <div key={drawerTab} className="animate-fade-in">
-              {drawerTab === 'sessions' && (
-                <div className="space-y-3">
-                  {sessions.length === 0 ? (
-                    <div className="rounded-2xl bg-surface-2/60 px-4 py-8 text-center">
-                      <RiTerminalBoxLine size={28} className="mx-auto mb-2 text-muted-foreground" />
-                      <p className="text-sm text-muted-foreground">No open sessions yet.</p>
-                      <button
-                        type="button"
-                        onClick={() => setDrawerTab('new')}
-                        className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-primary/15 px-4 py-2 text-sm font-medium text-primary"
-                      >
-                        <RiAddLine size={14} />
-                        Create one
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <DragDropContext onDragEnd={handleDragEnd}>
-                        <Droppable droppableId="sessions">
-                          {(provided) => (
-                          <div
-                            ref={provided.innerRef}
-                            {...provided.droppableProps}
-                            className="space-y-2"
-                          >
-                            {sessions.map((session, index) => {
-                          const ts = terminalSessions.get(session.id);
-                          const { primary: display } = getTabDisplayLines(
-                            session,
-                            ts?.activeProgram ?? null,
-                            ts?.cwd ?? null,
-                          );
-                          const isActive = session.id === activeSessionId;
-                          const isTmux = session.mode === 'tmux' && !!session.tmuxSessionName;
-                          const confirmingDestroy = sessionConfirmDestroyId === session.id;
-                          const destroying = sessionDestroyingId === session.id;
-                          return (
-                            <Draggable key={session.id} draggableId={`session-${session.id}`} index={index}>
-                              {(provided, snapshot) => (
-                            <div
-                              ref={provided.innerRef}
-                              {...provided.draggableProps}
-                              className={`flex items-center ${snapshot.isDragging ? 'opacity-70' : ''}`}
-                            >
-                              <div
-                                {...provided.dragHandleProps}
-                                className="shrink-0 cursor-grab touch-none p-1 text-muted-foreground/40 active:cursor-grabbing"
-                              >
-                                <GripVertical size={16} />
-                              </div>
-                            <div
-                              className={`w-full min-w-0 rounded-2xl text-sm transition ${
-                                isActive
-                                  ? 'bg-surface-elevated text-foreground ring-1 ring-primary/30'
-                                  : 'bg-surface-2 text-foreground hover:bg-surface-elevated'
-                              }`}
-                            >
-                              <div className="flex w-full items-center gap-2 px-3 py-3">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
-                                    setIsDrawerOpen(false);
-                                  }}
-                                  className="min-w-0 flex flex-1 items-center gap-3 text-left"
-                                >
-                                  <span className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
-                                    isActive ? 'bg-primary/20 text-primary' : 'bg-surface text-muted-foreground'
-                                  }`}>
-                                    {session.mode === 'tmux' ? <RiLayoutGridLine size={16} /> : <RiTerminalBoxLine size={16} />}
-                                  </span>
-                                  <span className="min-w-0 flex-1">
-                                    <span className="block truncate text-sm text-foreground">{display}</span>
-                                    <span className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                                      <span>{getSessionModeLabel(session.mode)}</span>
-                                      {session.tmuxSessionName && <span>· {session.tmuxSessionName}</span>}
-                                    </span>
-                                  </span>
-                                </button>
-                                {isTmux ? (
-                                  // tmux session: two distinct icon buttons —
-                                  // disconnect (logout arrow) + destroy (trash, with confirm).
-                                  <div className="shrink-0 inline-flex items-center gap-1">
-                                    <button
-                                      type="button"
-                                      disabled={destroying}
-                                      onClick={() => {
-                                        window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: session.id }));
-                                      }}
-                                      title="Disconnect (keep tmux session)"
-                                      aria-label={`Disconnect ${display}`}
-                                      className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
-                                    >
-                                      <RiLogoutBoxRLine size={15} />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={destroying}
-                                      onClick={() => {
-                                        setSessionDestroyError(null);
-                                        setSessionConfirmDestroyId(confirmingDestroy ? null : session.id);
-                                      }}
-                                      title="Destroy tmux session (kill-session)"
-                                      aria-label={`Destroy tmux session ${session.tmuxSessionName}`}
-                                      className={`inline-flex h-9 w-9 items-center justify-center rounded-full transition disabled:opacity-50 ${
-                                        confirmingDestroy
-                                          ? 'bg-destructive/20 text-destructive'
-                                          : 'bg-surface text-muted-foreground hover:bg-destructive/15 hover:text-destructive'
-                                      }`}
-                                    >
-                                      <RiDeleteBinLine size={15} />
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: session.id }));
-                                    }}
-                                    className="shrink-0 rounded-full p-2 text-muted-foreground transition hover:bg-destructive/15 hover:text-destructive"
-                                    aria-label={`Close ${display}`}
-                                  >
-                                    <RiCloseLine size={16} />
-                                  </button>
-                                )}
-                              </div>
-
-                              {isTmux && confirmingDestroy && (
-                                <div className="mx-3 mb-3 space-y-2 rounded-xl bg-surface/80 p-3">
-                                  <p className="text-[12px] leading-snug text-foreground">
-                                    Close session and permanently destroy tmux session <span className="font-mono font-semibold">{session.tmuxSessionName}</span>?
-                                  </p>
-                                  <p className="text-[11px] text-muted-foreground">
-                                    Runs <span className="font-mono">tmux kill-session</span>. All windows and panes inside will be terminated. Cannot be undone.
-                                  </p>
-                                  {sessionDestroyError && (
-                                    <p className="text-[11px] text-destructive">{sessionDestroyError}</p>
-                                  )}
-                                  <div className="flex items-center gap-2 pt-1">
-                                    <button
-                                      type="button"
-                                      disabled={destroying}
-                                      onClick={() => void handleDestroyTmuxForSession(session)}
-                                      className="flex-1 rounded-full bg-destructive/90 px-3 py-2 text-xs font-medium text-destructive-foreground transition hover:bg-destructive disabled:opacity-50"
-                                    >
-                                      {destroying ? 'Destroying…' : 'Destroy'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={destroying}
-                                      onClick={() => {
-                                        setSessionConfirmDestroyId(null);
-                                        setSessionDestroyError(null);
-                                      }}
-                                      className="flex-1 rounded-full bg-surface-2 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-surface-elevated disabled:opacity-50"
-                                    >
-                                      Cancel
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                            </div>
-                              )}
-                            </Draggable>
-                          );
-                        })}
-                          {provided.placeholder}
-                          </div>
-                          )}
-                        </Droppable>
-                      </DragDropContext>
-
-                      <button
-                        type="button"
-                        onClick={() => setDrawerTab('new')}
-                        className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-primary/10 px-4 py-3 text-sm font-medium text-primary transition hover:bg-primary/20 active:scale-[0.98]"
-                      >
-                        <RiAddLine size={16} />
-                        New session
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {drawerTab === 'new' && (
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <span className="ui-kicker">Mode</span>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setNewSessionMode('shell')}
-                        className={`rounded-2xl px-4 py-4 text-left transition ${
-                          newSessionMode === 'shell'
-                            ? 'bg-surface-elevated ring-1 ring-primary/30'
-                            : 'bg-surface-2 hover:bg-surface-elevated'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="inline-flex items-center gap-2 text-sm font-medium text-foreground">
-                            <RiTerminalLine size={14} /> Shell
-                          </span>
-                          {newSessionMode === 'shell' && <RiCheckLine size={16} className="text-primary" />}
-                        </div>
-                        <p className="mt-1.5 text-[11px] text-muted-foreground">
-                          Persistent PTY. Best default.
-                        </p>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (tmuxStatus.available) {
-                            setNewSessionMode('tmux');
-                          }
-                        }}
-                        disabled={!tmuxStatus.available}
-                        className={`rounded-2xl px-4 py-4 text-left transition ${
-                          newSessionMode === 'tmux'
-                            ? 'bg-surface-elevated ring-1 ring-primary/30'
-                            : 'bg-surface-2 hover:bg-surface-elevated'
-                        } ${!tmuxStatus.available ? 'opacity-60 cursor-not-allowed' : ''}`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="inline-flex items-center gap-2 text-sm font-medium text-foreground">
-                            <RiLayoutGridLine size={14} /> Tmux
-                          </span>
-                          {newSessionMode === 'tmux' && <RiCheckLine size={16} className="text-primary" />}
-                        </div>
-                        <p className="mt-1.5 text-[11px] text-muted-foreground">
-                          {tmuxStatus.available
-                            ? 'Named, multi-pane, reattachable.'
-                            : 'tmux not detected on server.'}
-                        </p>
-                      </button>
-                    </div>
-                  </div>
-
-                  {newSessionMode === 'tmux' && (
-                    <div className="space-y-2">
-                      <span className="ui-kicker">Tmux name (optional)</span>
-                      <input
-                        type="text"
-                        value={newSessionTmuxName}
-                        onChange={(e) => setNewSessionTmuxName(e.target.value)}
-                        onBlur={() => setNewSessionTmuxName(newSessionTmuxName.trim())}
-                        placeholder="auto-generated when empty"
-                        className="ui-input w-full"
-                        autoCapitalize="off"
-                        autoCorrect="off"
-                        autoComplete="off"
-                      />
-                      <p className="text-[11px] text-muted-foreground">
-                        Leave blank for an auto name. Reuse an existing name to attach to it.
-                      </p>
-                    </div>
-                  )}
-
+            {/* Content */}
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+              {/* Quick row: font size + renderer + toggles, all visible at-a-glance */}
+              <div className="space-y-2">
+                {/* Font size */}
+                <div className="flex items-center gap-2 rounded-xl bg-surface-2 px-2.5 py-2">
+                  <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">Font</span>
                   <button
                     type="button"
-                    onClick={() => {
-                      dispatchNewSession();
-                      setIsDrawerOpen(false);
-                    }}
-                    className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-primary px-4 py-3.5 text-sm font-semibold text-primary-foreground transition hover:opacity-90 active:scale-[0.98]"
+                    onClick={() => setFontSize(Math.max(8, fontSize - 1))}
+                    className="h-8 w-8 shrink-0 rounded-md bg-surface text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
                   >
-                    <RiAddLine size={16} />
-                    Create {newSessionMode === 'tmux' ? 'tmux' : 'shell'} session
+                    −
                   </button>
-
-                  {newSessionMode === 'tmux' && tmuxStatus.available && (
-                    <div className="rounded-2xl bg-surface-2/60 px-3 py-3">
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="ui-kicker">Quick attach</span>
-                        <button
-                          type="button"
-                          onClick={() => setDrawerTab('tmux')}
-                          className="text-[11px] text-primary hover:underline"
-                        >
-                          See all →
-                        </button>
-                      </div>
-                      {tmuxSessions.length === 0 ? (
-                        <p className="text-[11px] text-muted-foreground">No tmux sessions on the server yet.</p>
-                      ) : (
-                        <div className="space-y-1.5">
-                          {tmuxSessions.slice(0, 4).map((tmux) => {
-                            const connected = connectedTmuxNames.has(tmux.name);
-                            return (
-                              <button
-                                key={tmux.name}
-                                type="button"
-                                disabled={connected}
-                                onClick={() => {
-                                  dispatchNewSession({ mode: 'tmux', tmuxSessionName: tmux.name });
-                                  setIsDrawerOpen(false);
-                                }}
-                                className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-left transition ${
-                                  connected
-                                    ? 'bg-surface text-muted-foreground opacity-70 cursor-not-allowed'
-                                    : 'bg-surface text-foreground hover:bg-surface-elevated'
-                                }`}
-                              >
-                                <RiLayoutGridLine size={14} className="shrink-0 text-muted-foreground" />
-                                <span className="flex-1 truncate">{tmux.name}</span>
-                                <span className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                                  {connected ? 'attached' : `${tmux.windows}w`}
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  <input
+                    type="range"
+                    min="8"
+                    max="32"
+                    value={fontSize}
+                    onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
+                    className="min-w-0 flex-1"
+                    aria-label="Font size"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setFontSize(Math.min(32, fontSize + 1))}
+                    className="h-8 w-8 shrink-0 rounded-md bg-surface text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                  >
+                    +
+                  </button>
+                  <span className="w-8 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">{fontSize}px</span>
                 </div>
-              )}
 
-              {drawerTab === 'tmux' && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2 rounded-2xl bg-surface-2/60 px-3 py-3">
-                    <span className={`inline-flex h-2 w-2 rounded-full ${tmuxStatus.available ? 'bg-primary' : 'bg-destructive'}`} />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-foreground">
-                        {tmuxStatus.available ? 'tmux available' : 'tmux unavailable'}
-                      </div>
-                      <div className="truncate text-[11px] text-muted-foreground">
+                {/* Renderer + Debug + Prevent-sleep — single dense row */}
+                <div className="flex items-center gap-2 rounded-xl bg-surface-2 px-2.5 py-2">
+                  <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">Render</span>
+                  <div className="flex flex-1 items-center gap-1 rounded-md bg-surface p-0.5">
+                    {(['auto', 'webgl', 'canvas'] as TerminalRendererMode[]).map((mode) => {
+                      const selected = rendererMode === mode;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => setRendererMode(mode)}
+                          className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition ${
+                            selected ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:bg-surface-elevated'
+                          }`}
+                        >
+                          {mode === 'auto' ? 'Auto' : mode === 'webgl' ? 'WebGL' : 'Canvas'}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Toggles row */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowDebug(!showDebug)}
+                    className={`flex items-center justify-between rounded-xl px-3 py-2 text-[12px] transition ${
+                      showDebug ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'
+                    }`}
+                  >
+                    <span className="font-medium">Debug</span>
+                    <span className={`inline-flex h-4 w-7 items-center rounded-full transition ${
+                      showDebug ? 'bg-primary/70' : 'bg-surface-elevated'
+                    }`}>
+                      <span className={`mx-0.5 inline-block h-3 w-3 rounded-full bg-foreground/90 transition ${
+                        showDebug ? 'translate-x-3' : ''
+                      }`} />
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const newValue = !preventSleep;
+                      setPreventSleep(newValue);
+                      try {
+                        const result = await updateSettings({ preventSleep: newValue });
+                        setPreventSleep(result.preventSleep);
+                        setNetworkAvailable(result.networkAvailable);
+                      } catch {
+                        setPreventSleep(!newValue);
+                      }
+                    }}
+                    className={`flex items-center justify-between rounded-xl px-3 py-2 text-[12px] transition ${
+                      preventSleep ? 'bg-green-500/15 text-green-400' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'
+                    }`}
+                    title={!networkAvailable && preventSleep ? 'No network — disabled' : undefined}
+                  >
+                    <span className="font-medium truncate">No sleep</span>
+                    <span className={`inline-flex h-4 w-7 items-center rounded-full transition ${
+                      preventSleep ? 'bg-green-500' : 'bg-surface-elevated'
+                    }`}>
+                      <span className={`mx-0.5 inline-block h-3 w-3 rounded-full transition ${
+                        preventSleep ? 'translate-x-3 bg-white' : 'bg-foreground/90'
+                      }`} />
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {/* New session shortcut */}
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => { dispatchNewSession({ mode: 'shell' }); setIsDrawerOpen(false); }}
+                  className="flex items-center justify-center gap-1.5 rounded-xl bg-primary/15 px-3 py-2.5 text-[13px] font-medium text-primary transition hover:bg-primary/25 active:scale-[0.98]"
+                >
+                  <RiAddLine size={14} />
+                  <RiTerminalLine size={12} />
+                  Shell
+                </button>
+                <button
+                  type="button"
+                  disabled={!tmuxStatus.available}
+                  onClick={() => { dispatchNewSession({ mode: 'tmux' }); setIsDrawerOpen(false); }}
+                  className={`flex items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-[13px] font-medium transition active:scale-[0.98] ${
+                    tmuxStatus.available
+                      ? 'bg-surface-2 text-foreground hover:bg-surface-elevated'
+                      : 'bg-surface-2/50 text-muted-foreground/50 cursor-not-allowed'
+                  }`}
+                >
+                  <RiAddLine size={14} />
+                  <RiLayoutGridLine size={12} />
+                  Tmux
+                </button>
+              </div>
+
+              {/* Tmux server (only when available or has sessions) */}
+              {(tmuxStatus.available || tmuxSessions.length > 0) && (
+                <details className="mt-3 group rounded-xl bg-surface-2 [&[open]]:bg-surface-2">
+                  <summary className="flex cursor-pointer items-center justify-between rounded-xl px-3 py-2.5 text-[13px] hover:bg-surface-elevated">
+                    <span className="flex items-center gap-2">
+                      <span className={`inline-flex h-2 w-2 rounded-full ${tmuxStatus.available ? 'bg-primary' : 'bg-destructive'}`} />
+                      <span className="font-medium">Tmux server</span>
+                      <span className="text-[11px] text-muted-foreground">
                         {tmuxStatus.available
-                          ? (tmuxStatus.version || 'Detected on server')
-                          : (tmuxStatus.reason || 'Install tmux on the server to enable.')}
-                      </div>
-                    </div>
+                          ? `${tmuxSessions.length} session${tmuxSessions.length === 1 ? '' : 's'}`
+                          : 'unavailable'}
+                      </span>
+                    </span>
                     <button
                       type="button"
-                      onClick={() => void refreshTmuxSessions()}
+                      onClick={(e) => { e.preventDefault(); void refreshTmuxSessions(); }}
                       disabled={tmuxRefreshing}
-                      className="shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface text-muted-foreground transition hover:bg-surface-elevated disabled:opacity-50"
-                      aria-label="Refresh tmux sessions"
+                      className="inline-flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+                      aria-label="Refresh tmux"
                     >
-                      <RiRefreshLine size={14} className={tmuxRefreshing ? 'animate-spin' : ''} />
+                      <RiRefreshLine size={12} className={tmuxRefreshing ? 'animate-spin' : ''} />
                     </button>
-                  </div>
-
-                  {tmuxStatus.available && (
-                    <>
-                      {tmuxSessions.length === 0 ? (
-                        <div className="rounded-2xl bg-surface-2/60 px-4 py-8 text-center">
-                          <RiLayoutGridLine size={28} className="mx-auto mb-2 text-muted-foreground" />
-                          <p className="text-sm text-muted-foreground">No tmux sessions on the server.</p>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setNewSessionMode('tmux');
-                              setDrawerTab('new');
-                            }}
-                            className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-primary/15 px-4 py-2 text-sm font-medium text-primary"
-                          >
-                            <RiAddLine size={14} />
-                            Create one
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                          {tmuxSessions.map((tmux) => {
-                            const connected = connectedTmuxNames.has(tmux.name);
-                            const confirming = tmuxConfirmKillName === tmux.name;
-                            const killing = tmuxKillingName === tmux.name;
-                            return (
-                              <div
-                                key={tmux.name}
-                                className={`rounded-2xl px-3 py-3 transition ${
-                                  confirming
-                                    ? 'bg-destructive/10 ring-1 ring-destructive/40'
-                                    : connected
-                                      ? 'bg-surface-2/40'
-                                      : 'bg-surface-2 hover:bg-surface-elevated'
-                                }`}
-                              >
-                                <div className="flex items-center gap-3">
-                                  <span className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
-                                    connected ? 'bg-primary/20 text-primary' : 'bg-surface text-muted-foreground'
-                                  }`}>
-                                    <RiLayoutGridLine size={16} />
-                                  </span>
-                                  <div className="min-w-0 flex-1">
-                                    <div className="truncate text-sm font-medium text-foreground">{tmux.name}</div>
-                                    <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                                      {tmux.windows} window{tmux.windows === 1 ? '' : 's'}
-                                      {connected && ' · attached'}
-                                    </div>
-                                  </div>
+                  </summary>
+                  <div className="px-2 pb-2">
+                    {!tmuxStatus.available ? (
+                      <p className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                        {tmuxStatus.reason || 'Install tmux on the server to enable.'}
+                      </p>
+                    ) : tmuxSessions.length === 0 ? (
+                      <p className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                        No tmux sessions on the server.
+                      </p>
+                    ) : (
+                      <div className="space-y-1">
+                        {tmuxSessions.map((tmux) => {
+                          const connected = connectedTmuxNames.has(tmux.name);
+                          const confirming = tmuxConfirmKillName === tmux.name;
+                          const killing = tmuxKillingName === tmux.name;
+                          return (
+                            <div
+                              key={tmux.name}
+                              className={`flex items-center gap-2 rounded-lg px-2 py-1.5 ${
+                                confirming ? 'bg-destructive/10 ring-1 ring-destructive/40' : 'bg-surface'
+                              }`}
+                            >
+                              <RiLayoutGridLine size={12} className={connected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate text-[12px] font-medium text-foreground">{tmux.name}</div>
+                                <div className="text-[10px] text-muted-foreground">
+                                  {tmux.windows} window{tmux.windows === 1 ? '' : 's'}{connected && ' · attached'}
+                                </div>
+                              </div>
+                              {!confirming ? (
+                                <>
                                   <button
                                     type="button"
-                                    disabled={connected || confirming || killing}
-                                    onClick={() => {
-                                      dispatchNewSession({ mode: 'tmux', tmuxSessionName: tmux.name });
-                                    }}
-                                    className={`shrink-0 rounded-full px-4 py-2 text-xs font-medium transition ${
-                                      connected || confirming || killing
+                                    disabled={connected}
+                                    onClick={() => dispatchNewSession({ mode: 'tmux', tmuxSessionName: tmux.name })}
+                                    className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition ${
+                                      connected
                                         ? 'bg-surface text-muted-foreground cursor-not-allowed'
                                         : 'bg-primary/15 text-primary hover:bg-primary/25'
                                     }`}
@@ -1400,264 +1135,189 @@ function App() {
                                   <button
                                     type="button"
                                     disabled={killing}
-                                    onClick={() => {
-                                      setTmuxKillError(null);
-                                      setTmuxConfirmKillName(confirming ? null : tmux.name);
-                                    }}
-                                    className={`shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-full transition ${
-                                      confirming
-                                        ? 'bg-destructive/20 text-destructive'
-                                        : 'bg-surface text-muted-foreground hover:bg-destructive/15 hover:text-destructive'
-                                    } disabled:opacity-50`}
+                                    onClick={() => { setTmuxKillError(null); setTmuxConfirmKillName(tmux.name); }}
+                                    className="shrink-0 inline-flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground transition hover:bg-destructive/15 hover:text-destructive"
                                     aria-label={`Kill tmux session ${tmux.name}`}
                                   >
-                                    <RiDeleteBinLine size={14} />
+                                    <RiDeleteBinLine size={12} />
                                   </button>
-                                </div>
-
-                                {confirming && (
-                                  <div className="mt-3 space-y-2 rounded-xl bg-surface/80 p-3">
-                                    <p className="text-[12px] leading-snug text-foreground">
-                                      Permanently destroy tmux session <span className="font-mono font-semibold">{tmux.name}</span>?
-                                    </p>
-                                    <p className="text-[11px] text-muted-foreground">
-                                      Runs <span className="font-mono">tmux kill-session</span>. All windows and panes inside will be terminated. Cannot be undone.
-                                    </p>
-                                    {tmuxKillError && (
-                                      <p className="text-[11px] text-destructive">{tmuxKillError}</p>
-                                    )}
-                                    <div className="flex items-center gap-2 pt-1">
-                                      <button
-                                        type="button"
-                                        disabled={killing}
-                                        onClick={() => void handleKillTmuxSession(tmux.name)}
-                                        className="flex-1 rounded-full bg-destructive/90 px-3 py-2 text-xs font-medium text-destructive-foreground transition hover:bg-destructive disabled:opacity-50"
-                                      >
-                                        {killing ? 'Destroying…' : 'Destroy'}
-                                      </button>
-                                      <button
-                                        type="button"
-                                        disabled={killing}
-                                        onClick={() => {
-                                          setTmuxConfirmKillName(null);
-                                          setTmuxKillError(null);
-                                        }}
-                                        className="flex-1 rounded-full bg-surface-2 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-surface-elevated disabled:opacity-50"
-                                      >
-                                        Cancel
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      <p className="text-center text-[11px] text-muted-foreground">
-                        Attach opens a new tab without closing this panel.
-                      </p>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {drawerTab === 'settings' && (
-                <div className="space-y-5">
-                  {/* Font Size */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="ui-label">Font size</span>
-                      <span className="text-xs text-muted-foreground tabular-nums">{fontSize}px</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setFontSize(Math.max(8, fontSize - 1))}
-                        className="h-10 w-10 shrink-0 rounded-full bg-surface-2 text-muted-foreground hover:bg-surface-elevated"
-                      >
-                        −
-                      </button>
-                      <input
-                        type="range"
-                        min="8"
-                        max="32"
-                        value={fontSize}
-                        onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
-                        className="flex-1"
-                        aria-label="Font size"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setFontSize(Math.min(32, fontSize + 1))}
-                        className="h-10 w-10 shrink-0 rounded-full bg-surface-2 text-muted-foreground hover:bg-surface-elevated"
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Renderer */}
-                  <div className="space-y-2">
-                    <span className="ui-label">Renderer</span>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {(['auto', 'webgl', 'canvas'] as TerminalRendererMode[]).map((mode) => {
-                        const selected = rendererMode === mode;
-                        return (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => setRendererMode(mode)}
-                            className={`rounded-full px-3 py-2 text-xs font-medium transition ${
-                              selected
-                                ? 'bg-primary/20 text-primary ring-1 ring-primary/30'
-                                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated'
-                            }`}
-                          >
-                            {mode === 'auto' ? 'Auto' : mode === 'webgl' ? 'WebGL' : 'Canvas'}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <p className="text-[11px] text-muted-foreground">
-                      WebGL is sharper. Canvas is more compatible.
-                    </p>
-                  </div>
-
-                  {/* Toolbar Presets */}
-                  <button
-                    type="button"
-                    onClick={() => setIsToolbarPresetsOpen(true)}
-                    className="flex w-full items-center justify-between rounded-2xl bg-surface-2 px-4 py-3.5 text-left text-sm transition hover:bg-surface-elevated"
-                  >
-                    <span className="flex items-center gap-3">
-                      <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface text-muted-foreground">
-                        <RiKeyboardLine size={16} />
-                      </span>
-                      <span>
-                        <span className="block font-medium text-foreground">Mobile keyboard toolbar</span>
-                        <span className="block text-[11px] text-muted-foreground">
-                          {toolbarPresets.length} preset{toolbarPresets.length === 1 ? '' : 's'}
-                        </span>
-                      </span>
-                    </span>
-                    <span className="text-muted-foreground">›</span>
-                  </button>
-
-                  {/* Agent Detection Rules */}
-                  <button
-                    type="button"
-                    onClick={() => setIsAgentRulesOpen(true)}
-                    className="flex w-full items-center justify-between rounded-2xl bg-surface-2 px-4 py-3.5 text-left text-sm transition hover:bg-surface-elevated"
-                  >
-                    <span className="flex items-center gap-3">
-                      <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface text-muted-foreground">
-                        <RiBotLine size={16} />
-                      </span>
-                      <span>
-                        <span className="block font-medium text-foreground">AI agent detection</span>
-                        <span className="block text-[11px] text-muted-foreground">
-                          {agentRulesLoaded ? `${agentRules.length} program${agentRules.length === 1 ? '' : 's'}` : 'Loading…'}
-                        </span>
-                      </span>
-                    </span>
-                    <span className="text-muted-foreground">›</span>
-                  </button>
-
-                  {/* Debug toggle */}
-                  <div className="flex items-center justify-between rounded-2xl bg-surface-2 px-4 py-3">
-                    <span className="ui-label">Debug overlay</span>
-                    <button
-                      type="button"
-                      onClick={() => setShowDebug(!showDebug)}
-                      className={`inline-flex h-6 w-10 items-center rounded-full transition ${
-                        showDebug ? 'bg-primary/70' : 'bg-surface-elevated'
-                      }`}
-                      aria-label="Toggle debug overlay"
-                    >
-                      <span
-                        className={`mx-0.5 inline-block h-5 w-5 rounded-full bg-foreground/90 transition ${
-                          showDebug ? 'translate-x-4' : ''
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  {/* Prevent sleep toggle */}
-                  <div>
-                    <div className="flex items-center justify-between rounded-2xl bg-surface-2 px-4 py-3">
-                      <span className="flex items-center gap-2">
-                        <span className="ui-label">Prevent sleep</span>
-                        {!networkAvailable && preventSleep && (
-                          <span className="text-[11px] text-yellow-500">No network</span>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={killing}
+                                    onClick={() => void handleKillTmuxSession(tmux.name)}
+                                    className="shrink-0 rounded-full bg-destructive/90 px-2.5 py-1 text-[11px] font-medium text-destructive-foreground transition hover:bg-destructive disabled:opacity-50"
+                                  >
+                                    {killing ? '…' : 'Destroy'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={killing}
+                                    onClick={() => { setTmuxConfirmKillName(null); setTmuxKillError(null); }}
+                                    className="shrink-0 rounded-full bg-surface-2 px-2.5 py-1 text-[11px] font-medium text-foreground transition hover:bg-surface-elevated"
+                                  >
+                                    Cancel
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          );
+                        })}
+                        {tmuxKillError && (
+                          <p className="px-2 text-[11px] text-destructive">{tmuxKillError}</p>
                         )}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          const newValue = !preventSleep;
-                          setPreventSleep(newValue);
-                          try {
-                            const result = await updateSettings({ preventSleep: newValue });
-                            setPreventSleep(result.preventSleep);
-                            setNetworkAvailable(result.networkAvailable);
-                          } catch {
-                            setPreventSleep(!newValue);
-                          }
-                        }}
-                        className={`inline-flex h-6 w-10 items-center rounded-full transition ${
-                          preventSleep ? 'bg-green-500' : 'bg-surface-elevated'
-                        }`}
-                        aria-label="Toggle prevent sleep"
-                      >
-                        <span
-                          className={`mx-0.5 inline-block h-5 w-5 rounded-full transition ${
-                            preventSleep ? 'translate-x-4 bg-white' : 'bg-foreground/90'
-                          }`}
-                        />
-                      </button>
-                    </div>
-                    <p className="mt-1 px-1 text-[11px] text-muted-foreground">
-                      Keeps Mac awake while network is available. Turns off if WiFi is lost.
-                    </p>
+                      </div>
+                    )}
                   </div>
-
-                  {/* Sign out — only visible when password protection is enabled. */}
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        await logout();
-                      } catch {
-                        // Even if the request fails, the global 401 interceptor or
-                        // the next status check will eventually flip us back to login.
-                      }
-                      // Force the AuthGate to re-render the LoginScreen immediately.
-                      window.dispatchEvent(new CustomEvent('auth:unauthorized'));
-                    }}
-                    className="flex w-full items-center justify-between rounded-2xl bg-surface-2 px-4 py-3.5 text-left text-sm transition hover:bg-surface-elevated"
-                  >
-                    <span className="flex items-center gap-3">
-                      <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface text-muted-foreground">
-                        <RiLogoutBoxRLine size={16} />
-                      </span>
-                      <span>
-                        <span className="block font-medium text-foreground">Sign out</span>
-                        <span className="block text-[11px] text-muted-foreground">
-                          End this session and return to the password screen.
-                        </span>
-                      </span>
-                    </span>
-                    <span className="text-muted-foreground">›</span>
-                  </button>
-                </div>
+                </details>
               )}
-              </div>
+
+              {/* Toolbar presets */}
+              <button
+                type="button"
+                onClick={() => setIsToolbarPresetsOpen(true)}
+                className="mt-2 flex w-full items-center justify-between gap-2 rounded-xl bg-surface-2 px-3 py-2.5 text-left text-[13px] transition hover:bg-surface-elevated"
+              >
+                <span className="flex items-center gap-2">
+                  <RiKeyboardLine size={14} className="text-muted-foreground" />
+                  <span className="font-medium text-foreground">Keyboard toolbar</span>
+                </span>
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <span>{toolbarPresets.length} preset{toolbarPresets.length === 1 ? '' : 's'}</span>
+                  <span>›</span>
+                </span>
+              </button>
+
+              {/* Agent detection */}
+              <button
+                type="button"
+                onClick={() => setIsAgentRulesOpen(true)}
+                className="mt-2 flex w-full items-center justify-between gap-2 rounded-xl bg-surface-2 px-3 py-2.5 text-left text-[13px] transition hover:bg-surface-elevated"
+              >
+                <span className="flex items-center gap-2">
+                  <RiBotLine size={14} className="text-muted-foreground" />
+                  <span className="font-medium text-foreground">AI agent detection</span>
+                </span>
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <span>{agentRulesLoaded ? `${agentRules.length} prog${agentRules.length === 1 ? '' : 's'}` : '…'}</span>
+                  <span>›</span>
+                </span>
+              </button>
+
+              {/* Sign out */}
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await logout();
+                  } catch {
+                    // ignore — auth gate will handle 401
+                  }
+                  window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+                }}
+                className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-destructive/10 px-3 py-2.5 text-[13px] font-medium text-destructive transition hover:bg-destructive/20 active:scale-[0.98]"
+              >
+                <RiLogoutBoxRLine size={14} />
+                Sign out
+              </button>
             </div>
           </div>
         </>
       )}
+
+      {/* Tab long-press menu */}
+      {tabMenuSessionId && (() => {
+        const menuSession = sessions.find((s) => s.id === tabMenuSessionId);
+        if (!menuSession) return null;
+        const ts = terminalSessions.get(menuSession.id);
+        const { primary: menuName } = getTabDisplayLines(
+          menuSession,
+          ts?.activeProgram ?? null,
+          ts?.cwd ?? null,
+        );
+        return (
+          <>
+            <button
+              type="button"
+              className="fixed inset-0 z-[55] bg-[rgba(0,0,0,0.4)] backdrop-blur-sm cursor-default animate-fade-in"
+              onClick={() => setTabMenuSessionId(null)}
+              aria-label="Close menu"
+            />
+            <div
+              className="fixed inset-x-3 bottom-6 z-[60] mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_rgba(0,0,0,0.18)] animate-fade-in sm:bottom-auto sm:top-[15%]"
+              style={{ paddingBottom: safeBottomInset }}
+            >
+              <div className="border-b border-border/15 px-4 py-3">
+                <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Session</div>
+                <div className="mt-0.5 truncate text-[14px] font-medium text-foreground">{menuName}</div>
+                {ts?.cwd && (
+                  <div className="mt-0.5 truncate text-[11px] text-muted-foreground/80">{ts.cwd}</div>
+                )}
+              </div>
+              <div className="flex flex-col py-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTabMenuSessionId(null);
+                    setEditingSessionId(menuSession.id);
+                  }}
+                  className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-foreground transition hover:bg-surface-2"
+                >
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
+                    <RiTerminalLine size={14} />
+                  </span>
+                  Rename
+                </button>
+                <button
+                  type="button"
+                  disabled={!ts?.cwd}
+                  onClick={() => {
+                    void copyCwdToClipboard(menuSession.id);
+                    setTabMenuSessionId(null);
+                  }}
+                  className={`flex items-center gap-3 px-4 py-3 text-left text-[13px] transition ${
+                    ts?.cwd
+                      ? 'text-foreground hover:bg-surface-2'
+                      : 'text-muted-foreground/50 cursor-not-allowed'
+                  }`}
+                >
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
+                    <RiStackLine size={14} />
+                  </span>
+                  Copy cwd
+                  {tabCopiedHint && tabCopiedHint === ts?.cwd && (
+                    <span className="ml-auto text-[11px] text-primary">Copied</span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTabMenuSessionId(null);
+                    window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: menuSession.id }));
+                  }}
+                  className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-destructive transition hover:bg-destructive/10"
+                >
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-destructive/15 text-destructive">
+                    <RiCloseLine size={14} />
+                  </span>
+                  Close session
+                </button>
+              </div>
+              <div className="border-t border-border/15 px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => setTabMenuSessionId(null)}
+                  className="w-full rounded-full bg-surface-2 px-3 py-2 text-[12px] font-medium text-muted-foreground transition hover:bg-surface hover:text-foreground"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </>
+        );
+      })()}
 
       {isToolbarPresetsOpen && (
         <>
@@ -1775,30 +1435,30 @@ function App() {
         </>
       )}
 
-      {/* Left Sidebar — overlay mode on mobile */}
-      <div className="lg:hidden">
-        <LeftSidebar
-          isOpen={sidebarLeftOpen}
-          drawerWidthPx={drawerWidthPx}
-          onClose={useSidebarStore.getState().closeLeft}
-          onOpen={useSidebarStore.getState().openLeft}
-          sessions={sessions}
-          activeSessionId={activeSessionId}
-          sessionStates={terminalSessions}
-          onNewSession={() => dispatchNewSession()}
-          onOpenDrawer={() => { setDrawerTab('sessions'); setIsDrawerOpen(true); }}
-        />
-      </div>
-
-      {/* Right Sidebar — overlay mode on mobile */}
-      <div className="lg:hidden">
-        <RightSidebar
-          isOpen={sidebarRightOpen}
-          drawerWidthPx={drawerWidthPx}
-          onClose={useSidebarStore.getState().closeRight}
-          onOpen={useSidebarStore.getState().openRight}
-        />
-      </div>
+      {/* Overlay sidebars (both desktop and mobile) — overlays prevent the
+          terminal area from resizing when the user toggles them, which would
+          otherwise force xterm.js to refit on every open/close. */}
+      <LeftSidebar
+        isOpen={sidebarLeftOpen}
+        drawerWidthPx={leftDrawerWidthPx}
+        onClose={useSidebarStore.getState().closeLeft}
+        onOpen={useSidebarStore.getState().openLeft}
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        sessionStates={terminalSessions}
+        onNewSession={(opts) => dispatchNewSession(opts)}
+        onCloseSession={(sessionId) => {
+          window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: sessionId }));
+        }}
+        onOpenSettings={() => setIsDrawerOpen(true)}
+        tmuxAvailable={tmuxStatus.available}
+      />
+      <RightSidebar
+        isOpen={sidebarRightOpen}
+        drawerWidthPx={rightDrawerWidthPx}
+        onClose={useSidebarStore.getState().closeRight}
+        onOpen={useSidebarStore.getState().openRight}
+      />
 
       {/* Debug Info Panel */}
       {showDebug && (
