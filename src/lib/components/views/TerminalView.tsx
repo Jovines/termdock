@@ -994,14 +994,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   React.useEffect(() => {
     const handleInsertReference = (event: Event) => {
       if (!isActiveRef.current) return;
-      const customEvent = event as CustomEvent<{ text?: string }>;
+      const customEvent = event as CustomEvent<{ text?: string; focus?: boolean }>;
       const text = customEvent.detail?.text;
       if (!text) return;
       handleViewportInput(text, {
         skipModifierTransform: true,
         consumeModifier: false,
       });
-      focusTerminalIfActive();
+      if (customEvent.detail?.focus !== false) {
+        focusTerminalIfActive();
+      }
     };
 
     window.addEventListener('termdock-insert-reference', handleInsertReference);

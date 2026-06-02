@@ -32,6 +32,7 @@ const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; ti
 
 const RECENT_REFERENCES_STORAGE_KEY = 'termdock:recent-file-references';
 const MAX_RECENT_REFERENCES = 8;
+const MAX_CONTEXT_PACK_FILES = 14;
 
 interface RecentReference {
   path: string;
@@ -77,13 +78,29 @@ function ChangeBadge({ status }: { status: string }) {
 }
 
 function buildFileReference(path: string, rootPath: string | null): string {
-  if (!rootPath || !path.startsWith(`${rootPath}/`)) return path;
-  return path.slice(rootPath.length + 1);
+  if (!rootPath || !path.startsWith(`${rootPath}/`)) {
+    if (!path.startsWith('/') && !path.startsWith('./')) {
+      return `./${path}`;
+    }
+    return path;
+  }
+  return `./${path.slice(rootPath.length + 1)}`;
 }
 
 function buildReferenceInputText(path: string, rootPath: string | null): string {
-  const reference = buildFileReference(path, rootPath).replace(/^\.\//, '');
+  const reference = buildFileReference(path, rootPath);
   return reference.includes(' ') ? `"${reference}" ` : `${reference} `;
+}
+
+function buildPromptReference(path: string, rootPath: string | null): string {
+  const reference = buildFileReference(path, rootPath);
+  return reference.includes(' ') ? `"${reference}"` : reference;
+}
+
+function buildLineReference(path: string, rootPath: string | null, lineRange: { start: number; end: number } | null): string {
+  if (!lineRange) return buildPromptReference(path, rootPath);
+  const suffix = lineRange.start === lineRange.end ? `${lineRange.start}` : `${lineRange.start}-${lineRange.end}`;
+  return `${buildPromptReference(path, rootPath)}:${suffix}`;
 }
 
 function FilePreview({ filePath, onInsertReference }: { filePath: string | null; onInsertReference: (path: string) => void }) {
@@ -92,6 +109,7 @@ function FilePreview({ filePath, onInsertReference }: { filePath: string | null;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [meta, setMeta] = useState<{ size: number; truncated?: boolean } | null>(null);
+  const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
 
   useEffect(() => {
     if (!filePath) return;
@@ -101,6 +119,7 @@ function FilePreview({ filePath, onInsertReference }: { filePath: string | null;
     setError(null);
     setContent('');
     setMeta(null);
+    setLineRange(null);
     readFileContent(readablePath)
       .then((result) => {
         if (cancelled) return;
@@ -124,6 +143,23 @@ function FilePreview({ filePath, onInsertReference }: { filePath: string | null;
   const readablePath = rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
   const display = getRelativeDisplayPath(readablePath, rootPath);
   const reference = buildFileReference(readablePath, rootPath);
+  const lines = content ? content.split('\n') : [];
+  const lineReference = buildLineReference(readablePath, rootPath, lineRange);
+  const selectedLineLabel = lineRange
+    ? (lineRange.start === lineRange.end ? `L${lineRange.start}` : `L${lineRange.start}-${lineRange.end}`)
+    : null;
+
+  const handleLineClick = (lineNumber: number) => {
+    setLineRange((current) => {
+      if (!current || current.start !== current.end) {
+        return { start: lineNumber, end: lineNumber };
+      }
+      if (current.start === lineNumber) {
+        return null;
+      }
+      return { start: Math.min(current.start, lineNumber), end: Math.max(current.start, lineNumber) };
+    });
+  };
 
   return (
     <div className="flex min-h-full flex-col px-3 py-2">
@@ -134,6 +170,16 @@ function FilePreview({ filePath, onInsertReference }: { filePath: string | null;
             {display.dir && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{display.dir}</div>}
           </div>
           <div className="flex shrink-0 items-center gap-1">
+            {lineRange && (
+              <button
+                type="button"
+                onClick={() => onInsertReference(`${readablePath}:${lineRange.start === lineRange.end ? lineRange.start : `${lineRange.start}-${lineRange.end}`}`)}
+                className="inline-flex h-9 items-center gap-1 rounded-full bg-accent/15 px-3 text-xs font-semibold text-accent transition hover:bg-accent/25 active:scale-95"
+                title={`Insert code reference: ${lineReference}`}
+              >
+                引用{selectedLineLabel}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => onInsertReference(readablePath)}
@@ -159,15 +205,49 @@ function FilePreview({ filePath, onInsertReference }: { filePath: string | null;
             {meta.truncated && <span className="text-yellow-400">preview truncated to 1MB</span>}
           </div>
         )}
+        <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground/75">
+          <span>{lineRange ? `已选 ${selectedLineLabel} · 点引用按钮插入` : '多行引用：先点起始行，再点结束行'}</span>
+          {lineRange && (
+            <button
+              type="button"
+              onClick={() => setLineRange(null)}
+              className="rounded-full bg-background-subtle px-1.5 py-0.5 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+            >
+              清除
+            </button>
+          )}
+        </div>
       </div>
       {loading ? (
         <div className="px-3 py-8 text-center text-sm text-muted-foreground">Loading file…</div>
       ) : error ? (
         <div className="mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">{error}</div>
       ) : (
-        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-background-subtle p-3 font-mono text-[11px] leading-relaxed text-foreground">
-          {content || 'Empty file.'}
-        </pre>
+        <div className="min-h-0 flex-1 overflow-auto rounded-xl bg-background-subtle p-2 font-mono text-[11px] leading-relaxed text-foreground">
+          {lines.length > 0 ? (
+            <div className="min-w-full">
+              {lines.map((line, index) => {
+                const lineNumber = index + 1;
+                const isSelected = Boolean(lineRange && lineNumber >= lineRange.start && lineNumber <= lineRange.end);
+                return (
+                  <button
+                    // eslint-disable-next-line react/no-array-index-key
+                    key={index}
+                    type="button"
+                    onClick={() => handleLineClick(lineNumber)}
+                    className={`grid w-full grid-cols-[2.8rem_1fr] gap-2 rounded px-1 text-left transition active:scale-[0.995] ${
+                      isSelected ? 'bg-primary/15 text-foreground' : 'hover:bg-surface-2'
+                    }`}
+                    title={`Tap to reference ${reference}:${lineNumber}`}
+                  >
+                    <span className={`select-none text-right text-[10px] ${isSelected ? 'text-primary' : 'text-muted-foreground/55'}`}>{lineNumber}</span>
+                    <span className="min-w-0 whitespace-pre-wrap break-words">{line || ' '}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : 'Empty file.'}
+        </div>
       )}
     </div>
   );
@@ -284,11 +364,20 @@ export function RightSidebar(
     const absolutePath = rootPath && !path.startsWith('/') ? `${rootPath}/${path}` : path;
     const reference = rememberReference(absolutePath);
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: { text: buildReferenceInputText(absolutePath, rootPath) },
+      detail: { text: buildReferenceInputText(absolutePath, rootPath), focus: false },
     }));
     setLastInsertedReference(reference);
     window.setTimeout(() => setLastInsertedReference((current) => (current === reference ? null : current)), 1400);
   }, [rememberReference, rootPath]);
+
+  const insertContextText = useCallback((label: string, text: string) => {
+    if (!text) return;
+    window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
+      detail: { text: text.endsWith(' ') ? text : `${text} `, focus: false },
+    }));
+    setLastInsertedReference(label);
+    window.setTimeout(() => setLastInsertedReference((current) => (current === label ? null : current)), 1400);
+  }, []);
 
   const rootName = useMemo(() => {
     if (!rootPath) return 'Workspace';
@@ -317,7 +406,7 @@ export function RightSidebar(
 
   const gitContextText = useMemo(() => {
     if (!gitContext?.available) return '';
-    const changed = (gitContext.changedFiles ?? []).map((file) => `- ${file.status} ${file.path}`).join('\n');
+    const changed = (gitContext.changedFiles ?? []).map((file) => `- ${file.status} ./${file.path}`).join('\n');
     const commits = (gitContext.recentCommits ?? []).map((commit) => `- ${commit}`).join('\n');
     return [
       `Git root: ${gitContext.root ?? rootPath ?? ''}`,
@@ -331,7 +420,7 @@ export function RightSidebar(
     if (!gitContext?.available) return '';
     const changed = (gitContext.changedFiles ?? [])
       .slice(0, 20)
-      .map((file) => `${file.status} ${file.path}`)
+      .map((file) => `${file.status} ./${file.path}`)
       .join('; ');
     const more = (gitContext.changedFiles?.length ?? 0) > 20 ? '; ...' : '';
     return [
@@ -341,15 +430,57 @@ export function RightSidebar(
     ].join('; ') + ' ';
   }, [gitContext, rootPath]);
 
+  const changedFileContextLines = useMemo(() => {
+    const files = gitContext?.changedFiles?.length ? gitContext.changedFiles : Array.from(changedFiles.entries()).map(([path, status]) => ({ path, absolutePath: path, status }));
+    return files
+      .slice(0, MAX_CONTEXT_PACK_FILES)
+      .map((file) => `- ${file.status} ${buildPromptReference(file.absolutePath || file.path, rootPath)}`);
+  }, [changedFiles, gitContext, rootPath]);
+
+  const currentFileContextText = useMemo(() => {
+    if (!selectedFilePath) return '';
+    const absolutePath = rootPath && !selectedFilePath.startsWith('/') ? `${rootPath}/${selectedFilePath}` : selectedFilePath;
+    return `${buildPromptReference(absolutePath, rootPath)} `;
+  }, [rootPath, selectedFilePath]);
+
+  const changeContextPackText = useMemo(() => {
+    if (!gitContext?.available && changedFileContextLines.length === 0) return '';
+    return [
+      gitContext?.root || rootPath ? `Git root：${gitContext?.root ?? rootPath}` : '',
+      gitContext?.branch ? `Branch：${gitContext.branch}` : '',
+      changedFileContextLines.length > 0
+        ? `Changed files：\n${changedFileContextLines.join('\n')}`
+        : 'Changed files：none',
+    ].filter(Boolean).join('\n') + '\n';
+  }, [changedFileContextLines, gitContext, rootPath]);
+
+  const selectedDiffContextText = useMemo(() => {
+    if (!selectedFilePath) return '';
+    const absolutePath = rootPath && !selectedFilePath.startsWith('/') ? `${rootPath}/${selectedFilePath}` : selectedFilePath;
+    return `${buildPromptReference(absolutePath, rootPath)} `;
+  }, [rootPath, selectedFilePath]);
+
+  const searchContextText = useMemo(() => {
+    if (!deferredFileQuery.trim()) return '';
+    const results = filteredChangedFiles
+      .slice(0, MAX_CONTEXT_PACK_FILES)
+      .map(([path, status]) => `- ${status} ${buildPromptReference(path, rootPath)}`);
+    return results.length > 0 ? `${results.join('\n')}\n` : '';
+  }, [deferredFileQuery, filteredChangedFiles, rootPath]);
+
+  const recentContextText = useMemo(() => {
+    if (recentReferences.length === 0) return '';
+    const refs = recentReferences
+      .slice(0, MAX_CONTEXT_PACK_FILES)
+      .map((item) => `- ${buildPromptReference(item.path, rootPath)}`);
+    return `${refs.join('\n')}\n`;
+  }, [recentReferences, rootPath]);
+
   const insertGitContext = useCallback(() => {
     if (!gitContextInputText) return;
-    window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: { text: gitContextInputText },
-    }));
-    setLastInsertedReference('Git context');
-    window.setTimeout(() => setLastInsertedReference((current) => (current === 'Git context' ? null : current)), 1400);
+    insertContextText('Git context', gitContextInputText);
     if (!push) onClose();
-  }, [gitContextInputText, onClose, push]);
+  }, [gitContextInputText, insertContextText, onClose, push]);
 
   const selectDiffFile = useCallback((path: string | null) => {
     selectFile(path);
@@ -487,6 +618,61 @@ export function RightSidebar(
                   Copy
                 </button>
               </>
+            )}
+          </div>
+        )}
+
+        {(changeContextPackText || currentFileContextText || selectedDiffContextText || searchContextText || recentContextText) && (
+          <div className="mt-2 flex gap-1 overflow-x-auto pb-0.5 text-[11px] font-semibold">
+            {changeContextPackText && (
+              <button
+                type="button"
+                onClick={() => insertContextText('改动上下文', changeContextPackText)}
+                className="inline-flex shrink-0 items-center rounded-full bg-primary/15 px-2.5 py-1 text-primary transition hover:bg-primary/25 active:scale-95"
+                title="插入当前分支、改动文件列表和 AI 任务说明"
+              >
+                改动包
+              </button>
+            )}
+            {currentFileContextText && (
+              <button
+                type="button"
+                onClick={() => insertContextText('当前文件上下文', currentFileContextText)}
+                className="inline-flex shrink-0 items-center rounded-full bg-accent/15 px-2.5 py-1 text-accent transition hover:bg-accent/25 active:scale-95"
+                title="插入当前选中文件的上下文说明"
+              >
+                当前文件
+              </button>
+            )}
+            {selectedDiffContextText && rightTab === 'diff' && (
+              <button
+                type="button"
+                onClick={() => insertContextText('重点 diff 上下文', selectedDiffContextText)}
+                className="inline-flex shrink-0 items-center rounded-full bg-background-subtle px-2.5 py-1 text-foreground transition hover:bg-surface-2 active:scale-95"
+                title="插入当前选中 diff 文件的上下文说明"
+              >
+                重点 diff
+              </button>
+            )}
+            {searchContextText && (
+              <button
+                type="button"
+                onClick={() => insertContextText('搜索结果上下文', searchContextText)}
+                className="inline-flex shrink-0 items-center rounded-full bg-background-subtle px-2.5 py-1 text-foreground transition hover:bg-surface-2 active:scale-95"
+                title="插入当前搜索词和匹配的改动文件"
+              >
+                搜索结果
+              </button>
+            )}
+            {recentContextText && (
+              <button
+                type="button"
+                onClick={() => insertContextText('最近引用上下文', recentContextText)}
+                className="inline-flex shrink-0 items-center rounded-full bg-background-subtle px-2.5 py-1 text-foreground transition hover:bg-surface-2 active:scale-95"
+                title="插入最近引用过的文件集合"
+              >
+                最近包
+              </button>
             )}
           </div>
         )}
@@ -683,7 +869,7 @@ export function RightSidebar(
               </div>
             </div>
             <div className="min-w-0 flex-1 overflow-y-auto overscroll-contain">
-              <DiffViewer filePath={selectedFilePath} />
+              <DiffViewer filePath={selectedFilePath} onInsertDiffReference={insertContextText} />
             </div>
           </div>
         ) : (
@@ -748,7 +934,7 @@ export function RightSidebar(
               </div>
             )}
             <div className="min-h-0 flex-1">
-              <DiffViewer filePath={selectedFilePath} />
+              <DiffViewer filePath={selectedFilePath} onInsertDiffReference={insertContextText} />
             </div>
           </div>
         )}
