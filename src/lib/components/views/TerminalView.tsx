@@ -16,7 +16,7 @@ import { clientLog } from '../../utils/clientLog';
 import type { TerminalRendererMode } from '../../terminal/renderer';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 
-const TERMINAL_FONT_SIZE = 13;
+const TERMINAL_FONT_SIZE = 10;
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const RESIZE_THROTTLE_MS = 90;
 const ACTIVE_SURFACE_REFRESH_DELAY_MS = 360;
