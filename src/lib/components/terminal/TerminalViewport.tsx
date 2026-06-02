@@ -381,6 +381,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const [imeAnchor, setImeAnchor] = React.useState<{ x: number; y: number; cellW: number; cellH: number }>(
       { x: 0, y: 0, cellW: 8, cellH: 17 }
     );
+    // composition 期间锚点冻结：后台 PTY 仍可能输出导致 onRender 触发，
+    // 此时若仍跟着 cursor 移动 textarea，候选窗会甩飞、文字会抖。
+    const imeFrozenAnchorRef = React.useRef<{ x: number; y: number; cellW: number; cellH: number } | null>(null);
+    // 桌面 IME 行内显示状态：composition 期间把 textarea 显形为
+    // 「带下划线、不透明背景遮住下方 xterm」的可见 overlay。
+    const [imeComposition, setImeComposition] = React.useState<{ active: boolean; text: string }>({
+      active: false,
+      text: '',
+    });
     const arrowIndicatorRef = React.useRef<HTMLDivElement>(null);
     const tabIndicatorTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -661,6 +670,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
      */
     const updateImeAnchor = React.useCallback(() => {
       if (enableTouchScroll) return;
+      // composition 中冻结：后台 PTY 输出会触发 onRender，不能让 textarea
+      // 跟着 cursor 走，否则候选窗会漂、文字会抖。
+      if (imeFrozenAnchorRef.current) return;
       const term = terminalRef.current;
       if (!term || !term.element) return;
 
@@ -702,6 +714,90 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     const updateImeAnchorRef = React.useRef(updateImeAnchor);
     updateImeAnchorRef.current = updateImeAnchor;
+
+    /**
+     * 估算 IME composition 文本在终端格子坐标系下的视觉宽度(单位:cell)。
+     * CJK / East-Asian-Wide 一字 2 cell，其余 1 cell。
+     */
+    const estimateImeTextCells = React.useCallback((text: string): number => {
+      let cells = 0;
+      for (const ch of text) {
+        const cp = ch.codePointAt(0) ?? 0;
+        // 简化判断：CJK 统一汉字、平假名/片假名、CJK 标点、全角符号、Hangul 等
+        const isWide =
+          (cp >= 0x1100 && cp <= 0x115F) ||
+          (cp >= 0x2E80 && cp <= 0x303E) ||
+          (cp >= 0x3041 && cp <= 0x33FF) ||
+          (cp >= 0x3400 && cp <= 0x4DBF) ||
+          (cp >= 0x4E00 && cp <= 0x9FFF) ||
+          (cp >= 0xA000 && cp <= 0xA4CF) ||
+          (cp >= 0xAC00 && cp <= 0xD7A3) ||
+          (cp >= 0xF900 && cp <= 0xFAFF) ||
+          (cp >= 0xFE30 && cp <= 0xFE4F) ||
+          (cp >= 0xFF00 && cp <= 0xFF60) ||
+          (cp >= 0xFFE0 && cp <= 0xFFE6) ||
+          (cp >= 0x1F300 && cp <= 0x1FAFF);
+        cells += isWide ? 2 : 1;
+      }
+      return cells;
+    }, []);
+
+    /**
+     * 根据 composition text + 当前锚点 + term.cols 计算 textarea overlay 尺寸。
+     * 单行能放下就单行；放不下走 wrap 到下一(可视)行。
+     */
+    const getImeOverlayMetrics = React.useCallback(
+      (text: string): {
+        width: number;
+        height: number;
+        whiteSpace: 'pre' | 'pre-wrap';
+      } => {
+        const term = terminalRef.current;
+        const { cellW, cellH } = imeAnchor;
+        if (!term || !text) {
+          return {
+            width: Math.max(1, Math.round(cellW)),
+            height: Math.max(1, Math.round(cellH)),
+            whiteSpace: 'pre',
+          };
+        }
+        // 当前光标格子（从冻结快照取，避免 buffer 在 onRender 中变动）
+        const frozen = imeFrozenAnchorRef.current;
+        const cursorX = frozen
+          ? Math.floor(frozen.x / Math.max(1, cellW))
+          : term.buffer.active.cursorX;
+        const cols = Math.max(1, term.cols);
+        const estCells = Math.max(1, estimateImeTextCells(text));
+        const availInline = Math.max(1, cols - cursorX);
+
+        if (estCells <= availInline) {
+          return {
+            width: Math.max(1, Math.round(estCells * cellW)),
+            height: Math.max(1, Math.round(cellH)),
+            whiteSpace: 'pre',
+          };
+        }
+        // wrap：第一行从 cursorX 开始；之后每行 cols 个 cell
+        const remaining = estCells - availInline;
+        const extraLines = Math.ceil(remaining / cols);
+        const totalLines = 1 + extraLines;
+        return {
+          width: Math.max(1, Math.round(availInline * cellW)),
+          height: Math.max(1, Math.round(totalLines * cellH)),
+          whiteSpace: 'pre-wrap',
+        };
+      },
+      [imeAnchor, estimateImeTextCells]
+    );
+
+    const freezeImeAnchor = React.useCallback(() => {
+      imeFrozenAnchorRef.current = { ...imeAnchor };
+    }, [imeAnchor]);
+
+    const releaseImeAnchor = React.useCallback(() => {
+      imeFrozenAnchorRef.current = null;
+    }, []);
+
 
     const focusHiddenInput = React.useCallback((_clientX?: number, _clientY?: number) => {
       const input = hiddenInputRef.current;
@@ -2025,6 +2121,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         touchScrollCleanupRef.current?.();
         touchScrollCleanupRef.current = null;
 
+        // composition 中 unmount / 切 session：浏览器不会派 compositionend，
+        // 不复位的话下一次进来 isComposingRef 仍是 true，所有 input 会被
+        // gate 掉。同时把 IME overlay 状态归零。
+        isComposingRef.current = false;
+        imeFrozenAnchorRef.current = null;
+        setImeComposition({ active: false, text: '' });
+
         for (const disposable of localDisposables) {
           disposable.dispose();
         }
@@ -2285,20 +2388,42 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                       pointerEvents: 'auto',
                       fontSize: '16px',
                     }
-                  : {
+                  : (() => {
                       // 桌面端：1 cell 大小、跟随光标，鼠标事件透传给 xterm。
                       // IME 候选窗会贴着这个小框出现 → 视觉上 == 终端光标位置。
-                      left: imeAnchor.x,
-                      top: imeAnchor.y,
-                      width: Math.max(1, Math.round(imeAnchor.cellW)),
-                      height: Math.max(1, Math.round(imeAnchor.cellH)),
-                      pointerEvents: 'none',
-                      touchAction: 'auto',
-                      fontSize: `${fontSize}px`,
-                      fontFamily,
-                      lineHeight: '1',
-                      whiteSpace: 'pre',
-                    }),
+                      const base: React.CSSProperties = {
+                        left: imeAnchor.x,
+                        top: imeAnchor.y,
+                        pointerEvents: 'none',
+                        touchAction: 'auto',
+                        fontSize: `${fontSize}px`,
+                        fontFamily,
+                        lineHeight: '1',
+                        whiteSpace: 'pre',
+                        boxSizing: 'content-box',
+                        width: Math.max(1, Math.round(imeAnchor.cellW)),
+                        height: Math.max(1, Math.round(imeAnchor.cellH)),
+                      };
+                      if (!imeComposition.active) return base;
+                      // composition 态：textarea 显形为「带下划线、不透明
+                      // 背景遮住 xterm」的可见 overlay；候选窗紧贴它出现。
+                      const metrics = getImeOverlayMetrics(imeComposition.text);
+                      return {
+                        ...base,
+                        opacity: 1,
+                        color: theme.foreground,
+                        background: theme.background,
+                        caretColor: theme.cursor || theme.foreground,
+                        textDecorationLine: 'underline',
+                        textDecorationStyle: 'solid',
+                        textDecorationColor: theme.foreground,
+                        wordBreak: 'break-all',
+                        zIndex: 21,
+                        width: metrics.width,
+                        height: metrics.height,
+                        whiteSpace: metrics.whiteSpace,
+                      } as React.CSSProperties;
+                    })()),
               }}
               onFocus={() => {
                 debugTerminal('input anchor focus');
@@ -2524,14 +2649,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }}
               onCompositionStart={() => {
                 isComposingRef.current = true;
+                freezeImeAnchor();
+                setImeComposition({ active: true, text: '' });
               }}
-              onCompositionUpdate={() => {
+              onCompositionUpdate={(e) => {
                 isComposingRef.current = true;
+                const text = e.data ?? e.currentTarget.value;
+                setImeComposition(prev =>
+                  prev.active && prev.text === text ? prev : { active: true, text });
               }}
               onCompositionEnd={(event) => {
                 isComposingRef.current = false;
                 lastCompositionEndAtRef.current = Date.now();
+                setImeComposition({ active: false, text: '' });
                 syncTextareaToPty(event.currentTarget);
+                releaseImeAnchor();
               }}
             />
 
