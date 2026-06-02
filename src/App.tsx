@@ -14,7 +14,6 @@ import {
   Trash2 as RiDeleteBinLine,
   Unplug as RiLogoutBoxRLine,
   Bot as RiBotLine,
-  LoaderCircle as RiLoaderCircle,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
 import { useFontSize } from './lib/hooks/useFontSize';
@@ -29,6 +28,7 @@ import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
+import { AgentTabIcon, AgentCountBadge } from './lib/components/AgentIndicators';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import { AgentRulesSettings } from './lib/components/settings/AgentRulesSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
@@ -119,41 +119,7 @@ function renderTabIcon(
   sessionMode: 'shell' | 'tmux',
   state?: TabTerminalSessionState,
 ): React.ReactNode {
-  const baseIcon = sessionMode === 'tmux'
-    ? <RiLayoutGridLine size={11} className="shrink-0" />
-    : <RiTerminalLine size={11} className="shrink-0" />;
-  const color = state?.agentColor || (state?.agentStatus === 'waiting' || state?.agentNeedsReview || state?.inCopyMode ? '#facc15' : undefined);
-
-  if (state?.agentStatus) {
-    const indicator = state.agentIndicator || (state.agentStatus === 'running' ? 'spinner' : 'pulse');
-    const style = color ? { color } : undefined;
-    if (indicator === 'spinner') {
-      return <RiLoaderCircle size={11} className="shrink-0 animate-spin" style={style} />;
-    }
-    if (indicator === 'dot') {
-      return <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color || '#4ade80' }} />;
-    }
-    if (indicator === 'ring') {
-      return <span className="h-2.5 w-2.5 shrink-0 rounded-full border-2 animate-pulse" style={{ borderColor: color || '#facc15' }} />;
-    }
-    if (indicator === 'badge') {
-      return <span className="shrink-0 rounded bg-surface px-1 text-[8px] font-semibold uppercase leading-3" style={style}>{state.agentStatus.slice(0, 2)}</span>;
-    }
-    if (indicator === 'terminal') {
-      return sessionMode === 'tmux'
-        ? <RiLayoutGridLine size={11} className="shrink-0" style={style} />
-        : <RiTerminalLine size={11} className="shrink-0" style={style} />;
-    }
-    return <span className="h-2 w-2 shrink-0 animate-pulse rounded-full" style={{ backgroundColor: color || '#4ade80' }} />;
-  }
-
-  if (state?.agentNeedsReview || state?.inCopyMode) {
-    return sessionMode === 'tmux'
-      ? <RiLayoutGridLine size={11} className="shrink-0 text-yellow-400" />
-      : <RiTerminalLine size={11} className="shrink-0 text-yellow-400" />;
-  }
-
-  return baseIcon;
+  return <AgentTabIcon sessionMode={sessionMode} state={state} />;
 }
 
 
@@ -850,24 +816,8 @@ function App() {
             <div className="flex shrink-0 items-center gap-1.5">
               {(agentTabCounts.running > 0 || agentTabCounts.review > 0) && (
                 <span className="hidden items-center gap-1 sm:inline-flex">
-                  {agentTabCounts.running > 0 && (
-                    <span
-                      className="inline-flex items-center gap-1 rounded-full bg-green-400/10 px-1.5 py-0.5 text-[10px] font-medium text-green-400"
-                      title="AI running"
-                    >
-                      <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
-                      {agentTabCounts.running}
-                    </span>
-                  )}
-                  {agentTabCounts.review > 0 && (
-                    <span
-                      className="inline-flex items-center gap-1 rounded-full bg-yellow-400/10 px-1.5 py-0.5 text-[10px] font-medium text-yellow-400"
-                      title="Needs review"
-                    >
-                      <span className="h-1.5 w-1.5 rounded-full bg-yellow-400" />
-                      {agentTabCounts.review}
-                    </span>
-                  )}
+                  <AgentCountBadge count={agentTabCounts.running} tone="running" title="AI running" />
+                  <AgentCountBadge count={agentTabCounts.review} tone="review" title="Needs review" />
                 </span>
               )}
               {sessions.length > 0 && (

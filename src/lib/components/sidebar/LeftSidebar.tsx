@@ -10,6 +10,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus } from '../../terminal/types';
+import { AgentSessionDot, AgentCountBadge } from '../AgentIndicators';
 
 interface LeftSidebarProps {
   isOpen: boolean;
@@ -78,31 +79,7 @@ function StatusDot({
   needsReview,
   inCopyMode,
 }: { status: AgentStatus | null; needsReview?: boolean; inCopyMode?: boolean }) {
-  if (status === 'running') {
-    return (
-      <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-green-400 ring-2 ring-surface animate-pulse"
-        title="AI running"
-      />
-    );
-  }
-  if (status === 'waiting' || needsReview) {
-    return (
-      <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-yellow-400 ring-2 ring-surface"
-        title={needsReview ? 'AI finished — needs review' : 'AI waiting'}
-      />
-    );
-  }
-  if (inCopyMode) {
-    return (
-      <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-yellow-400/80 ring-2 ring-surface"
-        title="Copy mode"
-      />
-    );
-  }
-  return null;
+  return <AgentSessionDot status={status} needsReview={needsReview} inCopyMode={inCopyMode} />;
 }
 
 export function LeftSidebar(
@@ -167,24 +144,8 @@ export function LeftSidebar(
               <span className="text-[11px] text-muted-foreground">{sessions.length}</span>
               {(runningCount > 0 || reviewCount > 0) && (
                 <span className="ml-1 flex items-center gap-1.5">
-                  {runningCount > 0 && (
-                    <span
-                      className="inline-flex items-center gap-1 rounded-full bg-green-400/10 px-1.5 py-0.5 text-[10px] font-medium text-green-400"
-                      title={`${runningCount} running`}
-                    >
-                      <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
-                      {runningCount}
-                    </span>
-                  )}
-                  {reviewCount > 0 && (
-                    <span
-                      className="inline-flex items-center gap-1 rounded-full bg-yellow-400/10 px-1.5 py-0.5 text-[10px] font-medium text-yellow-400"
-                      title={`${reviewCount} need review`}
-                    >
-                      <span className="h-1.5 w-1.5 rounded-full bg-yellow-400" />
-                      {reviewCount}
-                    </span>
-                  )}
+                  <AgentCountBadge count={runningCount} tone="running" title={`${runningCount} running`} />
+                  <AgentCountBadge count={reviewCount} tone="review" title={`${reviewCount} need review`} />
                 </span>
               )}
             </div>
