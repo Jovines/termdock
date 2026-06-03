@@ -3007,19 +3007,36 @@ export function handleTerminalWebSocket(
       }
     } catch { /* ignore */ }
 
-    // 计算重连补帧：仅 shell 模式有 history。
-    // - sinceSeq > 0：客户端带了基线，只补增量；若已被淘汰则发 outOfWindow + 全量窗口。
-    // - sinceSeq == 0：客户端是首次连或刷新，不在 connected 里发 history（走 /attach 一次性回放，避免重复）。
+    // 计算重连补帧：
+    // - sinceSeq > 0：短线重连，shell 模式按 seq 补增量；超出窗口则发 outOfWindow + 全量。
+    // - sinceSeq == 0：首次连接（包括手机 PWA 冷启动）。以前这里只回 lastSeq、不带数据，
+    //   靠客户端单独走 HTTP /attach 拿 scrollback；但那条路径会阻塞 MultiTerminalView 的
+    //   "Restoring sessions..." 全屏 loading（蜂窝 RTT 1-3 秒）。现在直接把 restore history
+    //   塞进 'connected' 事件，省掉一次 HTTP 往返，前端 UI 可以立刻渲染、scrollback 随 WS
+    //   到达即填充。tmux 模式发 capture-pane 输出（带 clear-screen 前缀，避免与 xterm 默认
+    //   内容拼接），shell 模式发 ring buffer 内容（最多 100KB）。
+    //
+    //   replayOutOfWindow=true 的语义在 sinceSeq=0 时是"你没有基线，请清空已有内容
+    //   再应用 replayChunks"。这正好覆盖客户端"localStorage hydrate 出来的缓存 buffer"
+    //   场景：缓存内容会被服务端权威版本干净地替换，不会出现重复或顺序错位。
     let replayChunks: string[] = [];
     let replayLastSeq = 0;
     let replayOutOfWindow = false;
-    if (session.mode === 'shell' && sinceSeq > 0) {
+    if (sinceSeq > 0 && session.mode === 'shell') {
       const since = getHistorySince(sessionId, sinceSeq);
       replayChunks = since.chunks.map((c) => c.data);
       replayLastSeq = since.lastSeq;
       replayOutOfWindow = since.outOfWindow;
-    } else if (session.mode === 'shell') {
-      replayLastSeq = getHistoryLastSeq(sessionId);
+    } else {
+      // 首次连接：直接补全量 scrollback，并强制让客户端清空已有内容（处理缓存 hydrate）
+      try {
+        replayChunks = await getRestoreHistory(sessionId, session);
+      } catch (error) {
+        console.warn(`[ws] getRestoreHistory failed for ${sessionId}: ${getErrorMessage(error)}`);
+        replayChunks = [];
+      }
+      replayLastSeq = session.mode === 'shell' ? getHistoryLastSeq(sessionId) : 0;
+      replayOutOfWindow = replayChunks.length > 0;
     }
 
     // Send connected event (after initial detection)

@@ -5,7 +5,9 @@ import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
-import { attachTerminalSession, createTerminalSession, closeTerminal, setTerminalInitialSeq } from '../terminal/api';
+import { createTerminalSession, closeTerminal } from '../terminal/api';
+import { readBufferCache } from '../utils/terminalBufferCache';
+import { readMetaCache } from '../utils/terminalMetaCache';
 import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
@@ -210,6 +212,27 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
   }, [activeSessionIndex, sessions.length]);
 
+  // 同步 Swiper.allowTouchMove。
+  //
+  // 之前 MultiTerminalView 一进来就有"Restoring sessions..."全屏 loading，等
+  // restore 完才渲染 <Swiper>，所以 onSwiper 回调里那行 `allowTouchMove =
+  // sessions.length > 1` 一上来就拿到正确值。
+  //
+  // 现在我们把全屏 loading 干掉了 → Swiper 第一次 mount 时 sessions=[]
+  // → allowTouchMove 被设成 false → 之后 sessions 填进来也没人再更新这个值
+  // → 用户左右滑不动。
+  //
+  // 这里加 useEffect 显式跟随 sessions.length 同步。gesture-lock 事件路径
+  // 另算（那是临时禁用），稳态由这条 effect 决定。
+  useEffect(() => {
+    const swiper = swiperRef.current;
+    if (!swiper) return;
+    const nextAllow = sessions.length > 1;
+    if (swiper.allowTouchMove !== nextAllow) {
+      swiper.allowTouchMove = nextAllow;
+    }
+  }, [sessions.length]);
+
   // Notify parent of session data changes
   useEffect(() => {
     onSessionDataUpdate?.({
@@ -225,6 +248,18 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [sessions, activeSessionId, onSessionDataUpdate]);
 
   // 尝试为单个 session 恢复或创建 session
+  //
+  // 重要：有 backendSessionId 时**立即**返回 placeholder，不 await attach。
+  // 之前会卡在 attach 的 HTTP RTT（蜂窝网络下 1-3 秒）→ MultiTerminalView 持续显示
+  // 全屏 "Restoring sessions..."。手机 PWA 长时间后台后 OS 会把页面踢出内存，
+  // 回来时就是冷启动跑这段，于是用户每次都看到 loading。
+  //
+  // 现在的链路：
+  //  1. 这里立刻返回 placeholder（backend ID 用持久化的）→ UI 秒渲染
+  //  2. TerminalView 的 ensureSession 自己跑 checkHealth(backendId)
+  //     - 健康 → startStream，WS 'connected' 事件里 server 现在会直接补 restore history
+  //     - 不健康（server 重启 / idle 清理）→ 创建新 session，复用 Fix 2 的 auto-recreate 路径
+  //  3. scrollback 由 WS 'connected' 的 replayChunks 携带，不再需要单独 HTTP /attach
   const restoreOrCreateSession = useCallback(async (
     session: typeof persistedSessions[0],
   ): Promise<TerminalSession> => {
@@ -238,41 +273,23 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       ? (persistedTmuxName || configuredDefaultTmuxName || generateTmuxSessionName(sessionId))
       : null;
 
-    // 如果有 backendSessionId，优先附着到现有持久进程
+    // 快路径：有 backend ID 时直接返回，不阻塞 UI
     if (backendSessionId) {
-      try {
-        const attached = await attachTerminalSession(backendSessionId);
-        debugSession('[Session] Attached to existing session:', {
-          backendSessionId,
-          frontendSessionId: sessionId,
-          attachedSessionId: attached.sessionId,
-          cwd: attached.cwd,
-          backend: attached.backend,
-          clients: attached.clients,
-          historyLength: attached.history?.length ?? 0,
-          lastSeq: (attached as { lastSeq?: number }).lastSeq,
-        });
-        // 把 attach 返回的 lastSeq 记下，作为后续 WS 重连补帧的基线。
-        // 这样网络抖动后只补增量，不会重复回放整段 history。
-        const seq = (attached as { lastSeq?: number }).lastSeq;
-        if (typeof seq === 'number' && seq > 0) {
-          setTerminalInitialSeq(attached.sessionId, seq);
-        }
-        return {
-          id: sessionId,
-          name,
-          customName: session.customName === true,
-          sessionId: attached.sessionId,
-          mode: attached.mode ?? mode,
-          tmuxSessionName: attached.tmuxSessionName ?? tmuxSessionName,
-          history: attached.history,
-        };
-      } catch {
-        debugSession('[Session] Attach failed, creating new session:', backendSessionId);
-      }
+      debugSession('[Session] Fast restore (no attach):', {
+        backendSessionId,
+        frontendSessionId: sessionId,
+      });
+      return {
+        id: sessionId,
+        name,
+        customName: session.customName === true,
+        sessionId: backendSessionId,
+        mode,
+        tmuxSessionName,
+      };
     }
 
-    // 创建新 session（服务端会自动使用 home 目录）
+    // 没有 backend ID（首次使用 / 之前 session 被彻底删了）：必须 await 创建
     const newSession = await createTerminalSession({
       mode,
       tmuxSessionName: tmuxSessionName ?? undefined,
@@ -287,7 +304,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       mode: newSession.mode ?? mode,
       tmuxSessionName: newSession.tmuxSessionName ?? tmuxSessionName,
     };
-  }, [defaultSessionMode, defaultTmuxSessionName]);
+  }, [defaultSessionMode, defaultTmuxSessionName, debugSession]);
 
   // 恢复会话（尝试复用现有 session）- 只执行一次
   useEffect(() => {
@@ -321,6 +338,45 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               tmuxSessionName: session.tmuxSessionName,
               history: session.history,
             });
+            // Hydrate tab metadata（program / cwd / agent 状态）：让 tab 顶上立刻
+            // 显示正确的程序名和目录名，不用等 WS 'connected' 才切到友好名。
+            // server 推到的最新值会覆盖这些缓存值，保持以服务端为准。
+            const cachedMeta = readMetaCache(session.id);
+            if (cachedMeta) {
+              if (cachedMeta.activeProgram || cachedMeta.activeProgramSource) {
+                store.setSessionActiveProgram(
+                  session.id,
+                  cachedMeta.activeProgram,
+                  cachedMeta.activeProgramSource,
+                );
+              }
+              if (cachedMeta.cwd) {
+                store.setSessionCwd(session.id, cachedMeta.cwd);
+              }
+              if (cachedMeta.agentStatus) {
+                store.setSessionAgentStatus(
+                  session.id,
+                  cachedMeta.agentStatus,
+                  cachedMeta.agentColor,
+                  cachedMeta.agentIndicator,
+                );
+              }
+            }
+            // Hydrate xterm scrollback 缓存：让用户从 PWA 后台返回 / iOS 内存被踢
+            // 后冷启动重开时立刻看到上次的输出，不用等 WS 'connected' 把
+            // replayChunks 送回来再有画面。
+            // 数据源仍以服务端为准 —— 等 WS 'connected' 携带 replayChunks 时，
+            // server 会发 replayOutOfWindow=true（sinceSeq=0 时永远 true），
+            // 触发 TerminalView 的 'connected' handler 清空 + 重放，确保最终
+            // 与服务端权威版本一致。
+            const cachedBuffer = readBufferCache(session.id);
+            if (cachedBuffer && cachedBuffer.length > 0) {
+              store.appendToBuffer(session.id, cachedBuffer);
+              debugSession('[Session] Hydrated buffer cache:', {
+                frontendId: session.id,
+                bytes: cachedBuffer.length,
+              });
+            }
             debugSession('[Session] Updated store for frontend session:', {
               frontendId: session.id,
               backendId: session.sessionId,
@@ -696,16 +752,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
   }, [isRestoring, sessions.length, handleNewSession]);
 
-  if (isRestoring) {
-    return (
-      <div className="h-full flex items-center justify-center bg-background">
-        <div className="rounded-full bg-surface-2 px-4 py-2 flex items-center gap-3 shadow-sm">
-          <div className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-          <span className="text-sm text-muted-foreground">Restoring sessions...</span>
-        </div>
-      </div>
-    );
-  }
+  // 注意：以前这里有 `if (isRestoring) { 全屏 spinner }`，但它在两种场景下都很烦：
+  // 1. PWA 从后台返回（iOS 会把页面踢出内存重新加载）：每次都看一遍全屏 loading
+  // 2. 真·首次启动：也是 1-3s 蜂窝 RTT 的全屏 loading
+  // 现在 useSessionPersistence 走 localStorage 缓存命中时 isRestoring 几乎是
+  // 瞬间 false，UI 直接渲染；缓存未命中时 sessions=[]，下面 useEffect 会自动
+  // 触发 handleNewSession() 创建一个新 session（瞬间空白比全屏 spinner 优雅）。
 
   return (
     <div className="h-full flex flex-col">
