@@ -395,7 +395,10 @@ loadToolbarPresetsFromDisk();
 
 // 开发模式下使用更激进的清理策略
 const isDevelopment = process.env.NODE_ENV === 'development';
-const TERMINAL_IDLE_TIMEOUT = parseInt(process.env.TERMINAL_IDLE_TIMEOUT || (isDevelopment ? '300000' : '21600000'), 10);
+// idle 超时：手机锁屏后客户端 JS 被 OS 暂停 → 无法发心跳维持活动。
+// DEV 原本是 5 分钟，太短，手机后台一会儿就被清掉触发 auto-recreate；
+// 调到 30 分钟覆盖大多数日常使用。生产 6 小时保持不变。
+const TERMINAL_IDLE_TIMEOUT = parseInt(process.env.TERMINAL_IDLE_TIMEOUT || (isDevelopment ? '1800000' : '21600000'), 10);
 const CLEANUP_INTERVAL = isDevelopment ? 60 * 1000 : 5 * 60 * 1000;
 const RECONNECT_SCROLLBACK = parseInt(process.env.TERMINAL_RECONNECT_SCROLLBACK || '200', 10);
 const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10);
@@ -3179,6 +3182,9 @@ export function handleTerminalWebSocket(
           break;
         }
         case 'ping': {
+          // 心跳算活动：客户端每 20s 发一次 ping，没有这一行就会出现
+          // "用户开着页面看 agent 跑、自己不动键盘"被 idle-cleanup 误杀的情况。
+          session.lastActivity = Date.now();
           ws.send(JSON.stringify({ type: 'pong' }));
           break;
         }

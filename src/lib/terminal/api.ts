@@ -63,8 +63,9 @@ export function resetCsrfTokenCache(): void {
 // iOS PWA 后台返回时这个机制比 TCP keepalive 更快发现"半开连接"。
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const PONG_TIMEOUT_MS = 8_000;
-// visibilitychange / online 唤醒后做一次健康探测：发 ping 等 500ms，超时直接重连。
-const WAKEUP_PROBE_TIMEOUT_MS = 500;
+// visibilitychange / online 唤醒后做一次健康探测：发 ping 等若干毫秒，超时直接重连。
+// 1500ms 是给蜂窝网络/弱 Wi-Fi 唤醒首包留的余量（实测 500ms 经常误判半开导致无谓 close）。
+const WAKEUP_PROBE_TIMEOUT_MS = 1500;
 
 interface WsConnection {
   ws: WebSocket;
@@ -452,14 +453,19 @@ export async function sendTerminalInput(
 }
 
 // 主动探测：visibilitychange/online/pageshow 唤醒后调用，确认 WS 是否还活着。
-// - 没有 conn 或 WS 不在 OPEN 态：直接当成已断，调用方应触发重连。
-// - WS OPEN：发一个 ping，等 WAKEUP_PROBE_TIMEOUT_MS 内有任何消息就算活着；
+// - 没有 conn：说明已彻底断开，连重连机器都不存在，调用方需要自行重建。
+// - WS 非 OPEN（CONNECTING/CLOSING/CLOSED）：iOS PWA 后台时 OS 可能撕掉底层 TCP
+//   但 JS 引擎收不到任何 onerror/onclose；这种"僵尸 socket"必须主动 close()，
+//   才能触发 onclose → handleError → 进入指数退避重连。早期版本在这里 early
+//   return，结果用户回前台后页面永远转圈。
+// - WS OPEN：发 ping，等 WAKEUP_PROBE_TIMEOUT_MS 内有任何消息就算活着；
 //   超时则主动 close 触发 onclose 走重连补帧路径。
 export function probeTerminalConnection(sessionId: string): void {
   const conn = wsConnections.get(sessionId);
   if (!conn) return;
   if (conn.ws.readyState !== WebSocket.OPEN) {
-    // 不是 OPEN 就由现有重连机制处理，不在这里干预。
+    // 卡死的握手 / 僵尸连接：直接 close，让 onclose 触发重连。
+    try { conn.ws.close(); } catch { /* ignore */ }
     return;
   }
   const baseline = conn.lastInboundAt;

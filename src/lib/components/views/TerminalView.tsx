@@ -131,6 +131,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [connectionError, setConnectionError] = React.useState<string | null>(null);
   const [isFatalError, setIsFatalError] = React.useState(false);
   const [isRestarting, setIsRestarting] = React.useState(false);
+  // 触发器：当后端 session 丢失（服务端重启 / idle 清理）后，bump 这个值
+  // 让 ensureSession 的 useEffect 重新跑。只改 ref 没用，React 不会因此 re-run effect。
+  const [restartTrigger, setRestartTrigger] = React.useState(0);
   const [_tmuxLayout, setTmuxLayout] = React.useState<TmuxLayout | null>(null);
   const showDebug = externalShowDebug !== undefined ? externalShowDebug : false;
 
@@ -668,16 +671,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               // recreate instead of making the user manually refresh.
               if (error.message === 'Session not found on server') {
                 debugSession(`[onError] Session lost, auto-recreating`);
+                // 友好提示：先把红字 "Connection failed" 替换成普通灰字 "Reconnecting..."，
+                // 这样 200ms 过渡期 UI 不会闪一下错误，紧接着 setConnectionError(null) 收尾。
+                setConnectionError('Reconnecting...');
+                setIsFatalError(false);
                 clearTerminalSession(storeSessionId);
                 clearBuffer(storeSessionId);
                 terminalIdRef.current = null;
                 // Allow ensureSession to run again
                 hasInitializedRef.current = false;
-                // Small delay to let cleanup settle, then re-init
+                // Small delay to let cleanup settle, then re-init.
+                // 关键：bump restartTrigger 才能真正让 useEffect 重跑；
+                // 只重置 ref + 清 error state 不会触发 effect。
                 setTimeout(() => {
                   hasInitializedRef.current = false;
-                  setConnectionError(null);
-                  setIsFatalError(false);
+                  setRestartTrigger((t) => t + 1);
                 }, 200);
               }
             }
@@ -854,7 +862,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => {
       debugSession(`[useEffect] Cleanup for sessionId=${sessionId}, runId=${runId}`);
     };
-  }, [sessionId, startStream, disconnectStream, terminal, debugSession]);
+  }, [sessionId, restartTrigger, startStream, disconnectStream, terminal, debugSession]);
 
   const handleHardRestart = React.useCallback(async () => {
     if (!sessionId) return;
@@ -1271,9 +1279,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const xtermTheme = FLEXOKI_DARK;
 
   const terminalSessionKey = React.useMemo(() => {
-    const terminalPart = terminalSessionId ?? 'pending';
-    return `terminal::${terminalPart}`;
-  }, [terminalSessionId]);
+    // 故意只用前端 sessionId（每个 tab 一个，整个生命周期不变），
+    // 不绑后端 terminalSessionId。否则 auto-recreate（后端 session 被 idle 清掉后
+    // 重建）会让 key 从 `terminal::abc` → `terminal::pending` → `terminal::xyz`
+    // 走两次，TerminalViewport 整个被 unmount/remount，loadingState 回到 'loading'，
+    // 用户看到一次"全屏 loading"。
+    //
+    // 改成前端 sessionId 后，viewport 实例稳定不动，xterm/WebGL 都不需要重建；
+    // 后端 session 变更时由 'connected' 事件里的显式 clear() 处理画面同步。
+    return `terminal::${sessionId}`;
+  }, [sessionId]);
 
   React.useEffect(() => {
     onStatusChange?.({
