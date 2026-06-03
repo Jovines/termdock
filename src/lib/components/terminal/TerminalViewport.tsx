@@ -539,6 +539,53 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const onTmuxScrollRef = React.useRef(onTmuxScroll);
     onTmuxScrollRef.current = onTmuxScroll;
 
+    // Touch pointerdown 与 props 更新可能错开 1-2 帧，导致偶发：
+    // 手势开始时 onTmuxScroll 还没切到 true，normal-scroll 抢先 claim 一段；
+    // 随后 tmux-scroll 生效又接管，表现为“先普通滚动再内部滚动”。
+    // 锁定 pointerdown 时刻的 tmux 判定，整次手势内保持一致，避免双路径串行。
+    const gestureModeSnapshotRef = React.useRef<{
+      pointerId: number | null;
+      tmuxActiveAtDown: boolean;
+    }>({ pointerId: null, tmuxActiveAtDown: false });
+
+    React.useEffect(() => {
+      if (!enableTouchScroll) return;
+
+      const container = containerRef.current;
+      if (!container) return;
+
+      const handlePointerDownCapture = (event: PointerEvent) => {
+        if (event.pointerType !== 'touch') return;
+        gestureModeSnapshotRef.current.pointerId = event.pointerId;
+        gestureModeSnapshotRef.current.tmuxActiveAtDown = !!onTmuxScrollRef.current;
+      };
+
+      const clearSnapshotIfMatches = (event: PointerEvent) => {
+        if (event.pointerType !== 'touch') return;
+        if (gestureModeSnapshotRef.current.pointerId !== event.pointerId) return;
+        gestureModeSnapshotRef.current.pointerId = null;
+        gestureModeSnapshotRef.current.tmuxActiveAtDown = false;
+      };
+
+      container.addEventListener('pointerdown', handlePointerDownCapture, { capture: true, passive: true });
+      container.addEventListener('pointerup', clearSnapshotIfMatches, { capture: true, passive: true });
+      container.addEventListener('pointercancel', clearSnapshotIfMatches, { capture: true, passive: true });
+
+      return () => {
+        container.removeEventListener('pointerdown', handlePointerDownCapture, true);
+        container.removeEventListener('pointerup', clearSnapshotIfMatches, true);
+        container.removeEventListener('pointercancel', clearSnapshotIfMatches, true);
+      };
+    }, [enableTouchScroll]);
+
+    const canNormalScrollGestureClaim = React.useCallback(() => {
+      const snap = gestureModeSnapshotRef.current;
+      if (snap.pointerId !== null) {
+        return !snap.tmuxActiveAtDown;
+      }
+      return !onTmuxScrollRef.current;
+    }, []);
+
     // Top-level dispatch: pre-checks first, then mode-specific handler.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     const handleScroll = React.useCallback((deltaPixels: number, touchX?: number, touchY?: number): boolean => {
@@ -847,8 +894,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [markInputBlurGuard, nowMs]);
 
     // ---- Normal-mode touch scroll (useTouchScroll) ----
-    // Only active when NOT in tmux mode; tmux mode uses its own dedicated
-    // touch handler below so the two scroll systems never share state.
+    // Handlers stay mounted in both modes, but claim is gated by
+    // pointerdown-time tmux snapshot so one gesture only runs one path.
     const touchScrollConfig: TouchScrollConfig = React.useMemo(
       () => ({ enableKinetic: true }),
       [],
@@ -880,10 +927,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const { setupTouchScroll } = useTouchScroll(containerRef, {
       ...touchScrollConfig,
       shouldCaptureTouch: noCaptureRef.current,
+      canStartScrollGesture: canNormalScrollGestureClaim,
       onScroll: handleScroll,
       onScrollWithCoords: handleScroll,
       onClickWithCoords: handleClick,
       onTap: stableOnTap,
+      onClaimChange: notifyGestureLock,
       tapThreshold: 12,
       gestureName: `normal-scroll:${sessionKey}`,
     });

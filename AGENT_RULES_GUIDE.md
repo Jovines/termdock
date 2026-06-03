@@ -89,6 +89,9 @@ Settings → AI agent detection → Add program，填入程序名、正则、状
 - `pattern`：正则表达式（大小写不敏感）
 - `status`：状态名，自由文本
 - `color`：CSS 颜色值，如 `#4ade80`、`red`、`rgb(74,222,128)`
+- `indicator`：图标样式，可选 `spinner` / `pulse` / `dot` / `ring` / `badge` / `terminal` / `question`
+  - 推荐：`waiting` 用 `question`（黄色问号跳动）
+  - `needsReview` 由前端状态控制，仍是黄色呼吸提醒
 
 规则按顺序匹配，第一个命中即生效。所以 `running` 规则放前面，`waiting` 规则放后面。
 

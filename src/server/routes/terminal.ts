@@ -1046,9 +1046,9 @@ interface AgentRule {
   clearDelayMs?: number;
 }
 
-type AgentIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal';
+type AgentIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal' | 'question';
 
-const AGENT_INDICATORS = new Set<AgentIndicator>(['spinner', 'pulse', 'dot', 'ring', 'badge', 'terminal']);
+const AGENT_INDICATORS = new Set<AgentIndicator>(['spinner', 'pulse', 'dot', 'ring', 'badge', 'terminal', 'question']);
 const DEFAULT_AGENT_CLEAR_DELAY_MS = 450;
 const MIN_AGENT_CLEAR_DELAY_MS = 80;
 const MAX_AGENT_CLEAR_DELAY_MS = 10_000;
@@ -1066,7 +1066,7 @@ const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
       { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
       { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
       { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
-      { pattern: 'Do you want to proceed\\?|\\[y/N\\]|Approve|Allow', status: 'waiting', color: '#facc15', indicator: 'ring', clearDelayMs: 10000 },
+      { pattern: 'Do you want to proceed\\?|\\[y/N\\]|Approve|Allow', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
     ],
   },
   {
@@ -1075,22 +1075,22 @@ const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
       { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
       { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
       { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
-      { pattern: 'Do you want to proceed\\?|\\[y/N\\]|Approve|Allow', status: 'waiting', color: '#facc15', indicator: 'ring', clearDelayMs: 10000 },
+      { pattern: 'Do you want to proceed\\?|\\[y/N\\]|Approve|Allow', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
     ],
   },
   {
     program: 'opencode',
     rules: [
       { pattern: 'thinking|working|generating', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
-      { pattern: 'confirm|approve|permission|continue\\?', status: 'waiting', color: '#facc15', indicator: 'ring', clearDelayMs: 10000 },
+      { pattern: 'confirm|approve|permission|continue\\?', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
     ],
   },
   {
     program: 'coco',
     rules: [
-      { pattern: 'Tab/Arrow keys to navigate|Esc to|select ·|Coco 等待态采样|AskUserQuestion|User\'s answers', status: 'waiting', color: '#facc15', indicator: 'ring', clearDelayMs: 10000 },
+      { pattern: 'Tab/Arrow keys to navigate|Esc to|select ·|Coco 等待态采样|AskUserQuestion|User\'s answers', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
       { pattern: '[·✢❋❇✽] (thinking|working|generating)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: 'confirm|approve|permission|continue\\?', status: 'waiting', color: '#facc15', indicator: 'ring', clearDelayMs: 10000 },
+      { pattern: 'confirm|approve|permission|continue\\?', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
     ],
   },
   {
@@ -2746,7 +2746,7 @@ router.delete('/:sessionId', (req, res) => {
   const session = terminalSessions.get(sessionId);
 
   if (!session) {
-    return res.status(404).json({ error: 'Terminal session not found' });
+    return res.json({ success: true, alreadyGone: true });
   }
 
   try {

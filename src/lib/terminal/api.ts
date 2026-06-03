@@ -555,6 +555,12 @@ export async function closeTerminal(sessionId: string): Promise<void> {
     method: 'DELETE',
     headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
   });
+  // Closing is idempotent from the UI perspective: after fast-restore or a
+  // server-side cleanup race the backend session may already be gone, but the
+  // local tab still needs to be removable.
+  if (response.status === 404) {
+    return;
+  }
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to close terminal' }));
     throw new Error(error.error || 'Failed to close terminal');

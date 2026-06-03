@@ -21,6 +21,7 @@ const INDICATOR_OPTIONS: Array<{ value: NonNullable<AgentRule['indicator']>; lab
   { value: 'pulse', label: 'Pulse' },
   { value: 'dot', label: 'Dot' },
   { value: 'ring', label: 'Ring' },
+  { value: 'question', label: 'Question' },
   { value: 'badge', label: 'Badge' },
   { value: 'terminal', label: 'Icon' },
 ];

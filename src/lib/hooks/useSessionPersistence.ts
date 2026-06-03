@@ -97,6 +97,8 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const [isLoading, setIsLoading] = useState<boolean>(initialCached === null);
   const initialized = useRef(false);
   const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const persistGenerationRef = useRef(0);
+  const completedPersistGenerationRef = useRef(0);
   const activeSessionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -113,7 +115,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   }, []);
 
   const queuePersist = useCallback((sessionList: PersistedSession[]) => {
-    writeActiveSessionId(activeSessionIdRef.current);
+    const generation = ++persistGenerationRef.current;
     // 同步写本地缓存，让下次冷启动可以 hydrate 出最新列表
     writeSessionsCache(sessionList);
 
@@ -129,6 +131,11 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
           await replaceTerminalClientState({ sessions: sessionList });
         } catch (error) {
           console.error('Failed to persist sessions to server:', error);
+        } finally {
+          completedPersistGenerationRef.current = Math.max(
+            completedPersistGenerationRef.current,
+            generation,
+          );
         }
       });
   }, []);
@@ -367,8 +374,18 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     if (isLoading) return;
 
     const poll = async () => {
+      // A local close/create/rename has already updated React state and
+      // localStorage synchronously. Do not let a stale server snapshot from the
+      // 5s poll resurrect a just-closed tab before the queued PUT/DELETE lands.
+      if (completedPersistGenerationRef.current < persistGenerationRef.current) {
+        return;
+      }
+
       try {
         const data = await getTerminalClientState();
+        if (completedPersistGenerationRef.current < persistGenerationRef.current) {
+          return;
+        }
         const serverSessions = normalizeSessionList(data.sessions || []);
 
         setSessions(prev => {

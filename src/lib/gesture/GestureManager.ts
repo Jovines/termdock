@@ -219,9 +219,13 @@ class GestureManagerClass {
       const action: GestureAction = handler.onPointerMove(e, isClaimed);
 
       if (action === 'claim' && !didClaim) {
+        const prevOwner = this.active.get(e.pointerId) ?? null;
         this.active.set(e.pointerId, handler.name);
         didClaim = true;
         e.preventDefault();
+        if (prevOwner && prevOwner !== handler.name) {
+          this.log('handoff', `${prevOwner}->${handler.name}`, `pid=${e.pointerId}`);
+        }
         this.log('claim', handler.name, `pid=${e.pointerId} onPointerMove`);
         this.emitChange('claim', e.pointerId, handler.name);
       }

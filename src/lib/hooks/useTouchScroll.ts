@@ -13,10 +13,12 @@ export interface TouchScrollConfig {
   deceleration?: number;
   enableKinetic?: boolean;
   shouldCaptureTouch?: () => boolean;
+  canStartScrollGesture?: () => boolean;
   onScroll?: (deltaPixels: number) => boolean;
   onScrollWithCoords?: (deltaPixels: number, x: number, y: number) => boolean;
   onTap?: (x: number, y: number) => void;
   onClickWithCoords?: (x: number, y: number) => void;
+  onClaimChange?: (claimed: boolean) => void;
   tapThreshold?: number;
   gestureName?: string;
 }
@@ -48,10 +50,12 @@ const {
     deceleration = 0.0008,
     enableKinetic = true,
     shouldCaptureTouch,
+    canStartScrollGesture,
     onScroll,
     onScrollWithCoords,
     onTap,
     onClickWithCoords,
+    onClaimChange,
   tapThreshold = 8,
   gestureName = 'normal-scroll',
   } = config;
@@ -77,6 +81,7 @@ const {
   const rafIdRef = React.useRef<number | null>(null);
 
   const consecutiveNoScrollRef = React.useRef(0);
+  const isClaimingRef = React.useRef(false);
 
   const nowMs = React.useCallback(() => {
     return typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -126,6 +131,14 @@ const {
 
     return moved;
   }, [onScroll]);
+
+  const setClaimingState = React.useCallback((claimed: boolean) => {
+    if (isClaimingRef.current === claimed) {
+      return;
+    }
+    isClaimingRef.current = claimed;
+    onClaimChange?.(claimed);
+  }, [onClaimChange]);
 
   const stopKinetic = React.useCallback(() => {
     const state = stateRef.current;
@@ -208,9 +221,10 @@ const {
 
           if (state.gestureAxis === 'x') {
             state.isCurrentlyScrolling = false;
+            setClaimingState(false);
             state.lastY = currentY;
             state.lastTime = currentTime;
-            return 'release';
+            return isClaimed ? 'release' : 'neutral';
           }
 
           if (state.gestureAxis === null) {
@@ -220,29 +234,43 @@ const {
           }
         }
 
+        if (state.gestureAxis === 'y' && !isClaimed && !(canStartScrollGesture?.() ?? true)) {
+          state.lastY = currentY;
+          state.lastTime = currentTime;
+          setClaimingState(false);
+          return 'neutral';
+        }
+
         const instantaneousVelocity = deltaY / Math.max(deltaTime, 1);
         state.velocity = state.velocity * (1 - velocityAlpha) + instantaneousVelocity * velocityAlpha;
         state.velocity = Math.max(-maxVelocity, Math.min(maxVelocity, state.velocity));
 
-        if (isClaimed && Math.abs(deltaY) > 1) {
-          state.isCurrentlyScrolling = true;
+        if (Math.abs(deltaY) > 1) {
+          if (!isClaimed) {
+            setClaimingState(true);
+            state.lastY = currentY;
+            state.lastTime = currentTime;
+            return 'claim';
+          }
 
+          state.isCurrentlyScrolling = true;
           const scrollMultiplierAdjusted = scrollMultiplier +
             Math.min(maxScrollBoost, Math.abs(deltaY) / boostDenominator);
           const deltaPixels = -deltaY * scrollMultiplierAdjusted;
-
           accumulateAndRequestScroll(deltaPixels, currentX, currentY);
+          setClaimingState(true);
         }
 
         state.lastY = currentY;
         state.lastTime = currentTime;
-        return 'claim';
+        return isClaimed ? 'claim' : 'neutral';
       },
 
       onPointerUp: (event: PointerEvent) => {
         if (event.pointerType !== 'touch' || state.pointerId !== event.pointerId) return;
 
         state.isCurrentlyScrolling = false;
+        setClaimingState(false);
 
         const isScrolling = state.rafId !== null || rafIdRef.current !== null;
         if (!state.didMove && !isScrolling && state.startX !== null && state.startY !== null) {
@@ -290,6 +318,7 @@ const {
         if (event.pointerType !== 'touch' || state.pointerId !== event.pointerId) return;
 
         state.isCurrentlyScrolling = false;
+        setClaimingState(false);
         state.pointerId = null;
         state.startX = null;
         state.startY = null;
@@ -303,6 +332,7 @@ const {
     container.style.touchAction = 'none';
 
     return () => {
+      setClaimingState(false);
       unregister();
       container.style.touchAction = previousTouchAction;
       stopKinetic();
@@ -323,6 +353,8 @@ const {
     accumulateAndRequestScroll,
     tapThreshold,
     enableKinetic,
+    setClaimingState,
+    canStartScrollGesture,
   ]);
 
   const setupTouchEvents = React.useCallback(() => {

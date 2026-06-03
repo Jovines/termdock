@@ -2,10 +2,9 @@
  * Agent / 会话状态相关的展示原语，统一收敛在这里。
  *
  * 设计约定：
- *   - "running"   → 绿色 + 呼吸动效 (animate-pulse)
- *   - "review/waiting/copy-mode" → 黄色 + 呼吸动效 (animate-pulse)
- *
- * 即"未读/需关注"一律是黄色呼吸动效，避免出现"有时静态黄图标 / 有时黄呼吸"的不一致。
+ *   - "running"   → 绿色 + 动效（常见为 spinner/pulse）
+ *   - "waiting"   → 黄色问号图标 + 跳动动效（indicator=question）
+ *   - "review/copy-mode" → 黄色呼吸动效（needsReview/inCopyMode）
  */
 
 import React from 'react';
@@ -13,6 +12,7 @@ import {
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
   LoaderCircle as RiLoaderCircle,
+  CircleHelp as RiCircleHelp,
 } from 'lucide-react';
 import type { AgentStatus, AgentIndicator } from '../terminal/types';
 
@@ -61,6 +61,9 @@ export function AgentTabIcon({
     }
     if (indicator === 'ring') {
       return <span className="h-2.5 w-2.5 shrink-0 rounded-full border-2 animate-pulse" style={{ borderColor: color || AGENT_COLOR_ATTENTION }} />;
+    }
+    if (indicator === 'question') {
+      return <RiCircleHelp size={size} className="shrink-0 animate-bounce" style={style} />;
     }
     if (indicator === 'badge') {
       return (

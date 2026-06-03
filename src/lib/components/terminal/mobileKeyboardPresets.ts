@@ -117,7 +117,7 @@ export function normalizeActiveProgram(program: string | null | undefined): stri
   return normalized.length > 0 ? normalized : null;
 }
 
-// A program-match entry may be either a plain (case-insensitive) program name
+// A program-match entry may be either a plain case-insensitive substring
 // like `claude` or a JS-style regex literal like `/^claude(-code)?$/i`.
 const PROGRAM_REGEX_PATTERN = /^\/(.+)\/([gimsuy]*)$/;
 
@@ -150,7 +150,7 @@ export function normalizeProgramMatchEntry(input: unknown): string | null {
     // entries that fail to compile so we never throw at match time.
     return tryCompileProgramRegex(trimmed) ? trimmed : null;
   }
-  // Plain program name: case-insensitive comparison via lowercase.
+  // Plain program name: case-insensitive substring comparison via lowercase.
   return trimmed.toLowerCase();
 }
 
@@ -237,7 +237,7 @@ export function detectToolbarPreset(program: string | null | undefined, presets:
         if (regex.test(normalized)) {
           return preset.id;
         }
-      } else if (entry === normalized) {
+      } else if (normalized.includes(entry)) {
         return preset.id;
       }
     }

@@ -151,7 +151,7 @@ function ChipInput({
                     ? 'bg-accent/15 font-mono text-accent'
                     : 'bg-surface-elevated text-foreground'
               }`}
-              title={isRegex ? (invalid ? 'Invalid regex' : 'Regex match') : 'Exact match (case-insensitive)'}
+              title={isRegex ? (invalid ? 'Invalid regex' : 'Regex match') : 'Substring match (case-insensitive)'}
             >
               {isRegex && <span className="text-[10px] opacity-70">re</span>}
               {token}
@@ -404,7 +404,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
             placeholder="vim, nvim, /^claude(-code)?$/i …"
           />
           <p className="text-[10px] text-muted-foreground">
-            Plain names match case-insensitively. Wrap in <code className="font-mono">/…/flags</code> for regex (tested against the lowercase program name).
+            Plain names match as case-insensitive substrings. Wrap in <code className="font-mono">/…/flags</code> for regex (tested against the lowercase program name).
           </p>
         </div>
 

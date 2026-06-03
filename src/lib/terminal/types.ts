@@ -1,7 +1,7 @@
 export type TerminalMode = 'shell' | 'tmux';
 
 export type AgentStatus = string;
-export type AgentIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal';
+export type AgentIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal' | 'question';
 
 export interface TmuxPane {
   id: string;
