@@ -1,0 +1,26 @@
+{
+  "skill_name": "debug-with-logs",
+  "evals": [
+    {
+      "id": 0,
+      "name": "tab-meta-stale-on-cold-reload",
+      "prompt": "我刚刚强制刷新了 PWA 一次（让新代码进去），然后等了几秒看到 tab 上显示成 `claude web-terminal` 正常的。但我再完全关掉 PWA、重新打开，tab 顶上还是先显示 `tmux:wt-...` 这种带 tmux 前缀的名字，过一两秒才切回 `claude web-terminal`。我看了一下 src/App.tsx 里 tab 渲染的逻辑、src/lib/utils/terminalMetaCache.ts 的读写、还有 src/lib/components/MultiTerminalView.tsx restore loop 里调 readMetaCache 的地方，看不出哪里有问题。看起来逻辑都对啊，但实际表现就是不对。帮我定位一下。dev server 已经跑着了（server PID 见 restart-dev.sh），9833 是前端端口。",
+      "expected_output": "Agent should instrument the cache write site + the hydrate read site + the tab render site with diagnostic logs, reproduce the issue (ideally via agent-browser), inspect the log sequence, identify that the store subscription writes all-null state to cache during the transient empty-entry phase right after setTerminalSession, propose and apply the fix (skip writing when all metadata is null), then verify.",
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "ws-reconnect-shows-old-prompt",
+      "prompt": "我手机锁屏放兜里一会儿（大概 5-10 分钟），解锁回到 PWA。底部短暂显示 'Reconnecting...' 然后稳定了。但是我在终端里之前跑的 `htop` 应该一直在跑，可是 xterm 显示的是普通 shell prompt，没有 htop 的界面，而且我敲 q 也没反应（按 keys 不被 PTY 接收）。看起来 WS 重连成功了但内容对不上。帮我搞清楚到底发生了什么。注意：用我手机不太方便，最好你能用 agent-browser 自动复现一下，模拟 background+resume 的场景（visibilitychange 事件或者断网+恢复）。",
+      "expected_output": "Agent should use agent-browser to drive the reproduction (simulate visibilitychange via document event dispatch, or use browser devtools API to simulate offline/online), instrument the WS message handler and store buffer updates with logs, identify what's actually happening (e.g., session was idle-cleaned, fresh PTY created, htop not preserved), and either explain the limitation or propose a fix.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "settings-toggle-not-persisting",
+      "prompt": "Settings 面板里的 'Prevent sleep' 开关有问题。我打开它，刷新页面，它又变回关闭状态了。但是有时候又能保留住，挺迷的。代码看起来该写 localStorage 缓存 + 调 server updateSettings 的都有。帮我看看到底问题在哪。",
+      "expected_output": "Agent should instrument the toggle handler (the onClick that calls updateSettings + writeCache) and the initial hydrate path (the useEffect that reads cache + calls getSettings). Reproduce via agent-browser: toggle, reload, observe. Identify the race or order issue (possibly the getSettings response overwrites the user's local change, or cache write happens AFTER server response in a way that loses an intermediate state). Apply fix.",
+      "files": []
+    }
+  ]
+}
