@@ -6,8 +6,6 @@ import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
 import { createTerminalSession, closeTerminal } from '../terminal/api';
-import { readBufferCache } from '../utils/terminalBufferCache';
-import { readMetaCache } from '../utils/terminalMetaCache';
 import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
@@ -338,45 +336,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               tmuxSessionName: session.tmuxSessionName,
               history: session.history,
             });
-            // Hydrate tab metadata（program / cwd / agent 状态）：让 tab 顶上立刻
-            // 显示正确的程序名和目录名，不用等 WS 'connected' 才切到友好名。
-            // server 推到的最新值会覆盖这些缓存值，保持以服务端为准。
-            const cachedMeta = readMetaCache(session.id);
-            if (cachedMeta) {
-              if (cachedMeta.activeProgram || cachedMeta.activeProgramSource) {
-                store.setSessionActiveProgram(
-                  session.id,
-                  cachedMeta.activeProgram,
-                  cachedMeta.activeProgramSource,
-                );
-              }
-              if (cachedMeta.cwd) {
-                store.setSessionCwd(session.id, cachedMeta.cwd);
-              }
-              if (cachedMeta.agentStatus) {
-                store.setSessionAgentStatus(
-                  session.id,
-                  cachedMeta.agentStatus,
-                  cachedMeta.agentColor,
-                  cachedMeta.agentIndicator,
-                );
-              }
-            }
-            // Hydrate xterm scrollback 缓存：让用户从 PWA 后台返回 / iOS 内存被踢
-            // 后冷启动重开时立刻看到上次的输出，不用等 WS 'connected' 把
-            // replayChunks 送回来再有画面。
-            // 数据源仍以服务端为准 —— 等 WS 'connected' 携带 replayChunks 时，
-            // server 会发 replayOutOfWindow=true（sinceSeq=0 时永远 true），
-            // 触发 TerminalView 的 'connected' handler 清空 + 重放，确保最终
-            // 与服务端权威版本一致。
-            const cachedBuffer = readBufferCache(session.id);
-            if (cachedBuffer && cachedBuffer.length > 0) {
-              store.appendToBuffer(session.id, cachedBuffer);
-              debugSession('[Session] Hydrated buffer cache:', {
-                frontendId: session.id,
-                bytes: cachedBuffer.length,
-              });
-            }
             debugSession('[Session] Updated store for frontend session:', {
               frontendId: session.id,
               backendId: session.sessionId,

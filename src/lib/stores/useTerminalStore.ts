@@ -74,19 +74,13 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     set((state) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
-      // 故意不再 reset buffer：以前会在 terminalSessionId 变化时把 bufferChunks
-      // 清空，但这会跟"localStorage 缓存 hydrate"打架——MultiTerminalView 在
-      // restore 时先 setTerminalSession（写入持久化的 backend id）+ appendToBuffer
-      // （灌入缓存）；ensureSession 随后 checkHealth 发现 session 已被 idle 清掉，
-      // 创建新 session 再 setTerminalSession，老的隐式 reset 就会把刚 hydrate 的
-      // 缓存擦光，xterm 变空白等新 PTY prompt——用户感觉"打开就是空的"。
-      //
-      // 改成只保留 metadata 字段，buffer 由显式路径管理：
-      //   - 用户主动 hard restart → handleHardRestart 显式 clearBuffer + clear()
-      //   - 服务端 4001 'Session not found' → onError handler 显式 clearBuffer
-      //   - WS 'connected' replayOutOfWindow=true → handler 显式 clearBuffer + clear()
-      // 这些路径都已经在干净地做清屏，不需要 setTerminalSession 兜底。
-      const baseState = existing ?? createEmptySessionState(sessionId);
+      const shouldResetBuffer =
+        !existing ||
+        existing.terminalSessionId !== terminalSession.sessionId;
+
+      const baseState = shouldResetBuffer
+        ? createEmptySessionState(sessionId)
+        : existing ?? createEmptySessionState(sessionId);
 
       // Preserve history if provided, otherwise keep existing history
       const history = terminalSession.history ?? existing?.history ?? [];

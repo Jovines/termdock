@@ -30,8 +30,6 @@ import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules } from './lib/terminal/api';
 import type { AgentProgramConfig } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
-import { writeBufferCache, clearBufferCache } from './lib/utils/terminalBufferCache';
-import { writeMetaCache, clearMetaCache } from './lib/utils/terminalMetaCache';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
@@ -237,62 +235,10 @@ function App() {
     });
   }, []);
 
-  // Per-session xterm scrollback + tab metadata cache：让 PWA 冷启动 / iOS 内存被
-  // 踢出后重开时，xterm 立刻显示上次的内容，tab 顶上立刻显示正确的程序名/目录名，
-  // 不用等 WS 'connected' 才有画面。
-  // 服务端始终是真值：'connected' / poll 推到的最新值会覆盖缓存到一致。
-  useEffect(() => {
-    let prevSessions = useTerminalStore.getState().sessions;
-    const unsubscribe = useTerminalStore.subscribe((state) => {
-      // 写：buffer 和 metadata 分别独立 throttle，只写实际变化的字段。
-      for (const [sessionId, sessionState] of state.sessions) {
-        const prev = prevSessions.get(sessionId);
-        if (!prev || prev.buffer !== sessionState.buffer) {
-          writeBufferCache(sessionId, sessionState.buffer);
-        }
-        // tab 元数据（program / cwd / agent 状态）：任何字段变了就写一次。
-        const metaChanged = !prev
-          || prev.activeProgram !== sessionState.activeProgram
-          || prev.activeProgramSource !== sessionState.activeProgramSource
-          || prev.cwd !== sessionState.cwd
-          || prev.agentStatus !== sessionState.agentStatus
-          || prev.agentColor !== sessionState.agentColor
-          || prev.agentIndicator !== sessionState.agentIndicator;
-        if (metaChanged) {
-          // 跳过"全 null"瞬态：setTerminalSession 创建初始 entry 时所有 metadata
-          // 都是 null，这条订阅会立刻 fire 一次。如果照写就会把上次保存的真值
-          // （如 activeProgram="claude"）盖成 null，下次冷启动 hydrate 就拿不到东西了。
-          // 真实的 program/cwd 通常不会同时为 null（zsh 模式至少有 cwd，tmux 模式
-          // 至少有 activeProgram），所以全 null 一定是过渡态，跳掉无损。
-          const allNull = sessionState.activeProgram === null
-            && sessionState.activeProgramSource === null
-            && sessionState.cwd === null
-            && sessionState.agentStatus === null
-            && sessionState.agentColor === null
-            && sessionState.agentIndicator === null;
-          if (!allNull) {
-            writeMetaCache(sessionId, {
-              activeProgram: sessionState.activeProgram,
-              activeProgramSource: sessionState.activeProgramSource,
-              cwd: sessionState.cwd,
-              agentStatus: sessionState.agentStatus,
-              agentColor: sessionState.agentColor,
-              agentIndicator: sessionState.agentIndicator,
-            });
-          }
-        }
-      }
-      // 清：从 store 移除的 session（手动关闭 / tmux destroy 等）也把缓存抹掉。
-      for (const [sessionId] of prevSessions) {
-        if (!state.sessions.has(sessionId)) {
-          clearBufferCache(sessionId);
-          clearMetaCache(sessionId);
-        }
-      }
-      prevSessions = state.sessions;
-    });
-    return unsubscribe;
-  }, []);
+  // Per-session xterm scrollback + tab metadata cache 已撤回：高频写 + 多种边界
+  // （clearBuffer 写空、setTerminalSession reset、auto-recreate 路径等）导致缓存
+  // 经常被脏写，xterm 首帧反而经常拿到空内容。等想清楚每一种状态变迁该不该入缓存
+  // 之前，先不做这一层。设置 / 工具栏 / agent rules 这种简单 KV 缓存继续保留。
 
   // Sidebar state — only subscribe to the booleans we render, not the whole store.
   const sidebarLeftOpen = useSidebarStore((s) => s.leftOpen);
