@@ -1,9 +1,19 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 const SETTINGS_STORAGE_KEY = 'termdock-settings';
-const DEFAULT_FONT_SIZE = 10;  // 默认字体大小（像素）
+const DEFAULT_DESKTOP_FONT_SIZE = 13;
+const DEFAULT_MOBILE_FONT_SIZE = 10;
+const DEFAULT_FONT_SIZE = DEFAULT_DESKTOP_FONT_SIZE;  // 桌面端默认字体大小（像素）
 const MIN_FONT_SIZE = 8;
 const MAX_FONT_SIZE = 32;
+
+function getDefaultFontSize(): number {
+  if (typeof window === 'undefined') return DEFAULT_DESKTOP_FONT_SIZE;
+
+  const isMobileViewport = window.matchMedia('(max-width: 767px)').matches;
+  const isCoarsePointer = window.matchMedia('(pointer: coarse)').matches;
+  return isMobileViewport || isCoarsePointer ? DEFAULT_MOBILE_FONT_SIZE : DEFAULT_DESKTOP_FONT_SIZE;
+}
 
 interface UseFontSizeReturn {
   fontSize: number;
@@ -15,13 +25,13 @@ interface UseFontSizeReturn {
 }
 
 export function useFontSize(): UseFontSizeReturn {
-  const [fontSize, setFontSizeState] = useState<number>(DEFAULT_FONT_SIZE);
+  const [fontSize, setFontSizeState] = useState<number>(getDefaultFontSize);
   const [isLoading, setIsLoading] = useState(true);
   const initialized = useRef(false);
 
   // 从 localStorage 读取设置
   const loadSettings = useCallback(() => {
-    if (typeof window === 'undefined') return DEFAULT_FONT_SIZE;
+    if (typeof window === 'undefined') return getDefaultFontSize();
 
     try {
       const stored = localStorage.getItem(SETTINGS_STORAGE_KEY);
@@ -37,7 +47,7 @@ export function useFontSize(): UseFontSizeReturn {
       console.error('Failed to load fontSize from localStorage:', error);
     }
 
-    return DEFAULT_FONT_SIZE;
+    return getDefaultFontSize();
   }, []);
 
   // 保存设置到 localStorage
@@ -86,8 +96,9 @@ export function useFontSize(): UseFontSizeReturn {
 
   // 重置为默认设置
   const resetToDefault = useCallback(() => {
-    setFontSizeState(DEFAULT_FONT_SIZE);
-    persistSettings(DEFAULT_FONT_SIZE);
+    const defaultFontSize = getDefaultFontSize();
+    setFontSizeState(defaultFontSize);
+    persistSettings(defaultFontSize);
   }, [persistSettings]);
 
   return {
@@ -101,4 +112,4 @@ export function useFontSize(): UseFontSizeReturn {
 }
 
 // 导出常量供外部使用
-export { DEFAULT_FONT_SIZE, MIN_FONT_SIZE, MAX_FONT_SIZE };
+export { DEFAULT_FONT_SIZE, DEFAULT_DESKTOP_FONT_SIZE, DEFAULT_MOBILE_FONT_SIZE, MIN_FONT_SIZE, MAX_FONT_SIZE };
