@@ -3,6 +3,10 @@ import { clearTerminalClientState, getTerminalClientState, replaceTerminalClient
 
 const LEGACY_STORAGE_KEY = 'termdock-sessions';
 const ACTIVE_SESSION_STORAGE_KEY = 'termdock-active-session';
+// 本地 session 列表缓存：用来让"返回 PWA / 冷启动"瞬间渲染 UI，避免卡在
+// HTTP GET /api/terminal/client-state 的蜂窝 RTT（500ms-3s）期间显示全屏 loading。
+// 数据源仍以服务端为准：缓存命中后照常发起后台请求 reconcile，只有差异才更新 state。
+const SESSIONS_CACHE_STORAGE_KEY = 'termdock-sessions-cache';
 const SESSIONS_POLL_INTERVAL = 5000; // 5 seconds
 
 function readActiveSessionId(): string | null {
@@ -16,6 +20,41 @@ function writeActiveSessionId(id: string | null): void {
   try {
     if (id) localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, id);
     else localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+  } catch { /* ignore */ }
+}
+
+// 缓存读取/写入：损坏或缺失时返回 null，调用方走 HTTP fallback。
+function readSessionsCache(): PersistedSession[] | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(SESSIONS_CACHE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    // 轻量校验：保留外形对得上的条目，挡掉旧版本字段不全的脏数据
+    return parsed.filter((s): s is PersistedSession =>
+      typeof s === 'object' && s !== null &&
+      typeof (s as { sessionId?: unknown }).sessionId === 'string' &&
+      typeof (s as { name?: unknown }).name === 'string'
+    );
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionsCache(sessions: PersistedSession[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(SESSIONS_CACHE_STORAGE_KEY, JSON.stringify(sessions));
+  } catch {
+    // localStorage 写满 / 隐私模式：忽略，下次启动靠 HTTP fallback
+  }
+}
+
+function clearSessionsCache(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(SESSIONS_CACHE_STORAGE_KEY);
   } catch { /* ignore */ }
 }
 
@@ -47,9 +86,15 @@ interface UseSessionPersistenceReturn {
 }
 
 export function useSessionPersistence(): UseSessionPersistenceReturn {
-  const [sessions, setSessions] = useState<PersistedSession[]>([]);
-  const [activeSessionId, setActiveSessionIdState] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  // 同步从 localStorage hydrate 初始状态：缓存命中时 isLoading 直接 false，
+  // UI 可以瞬间渲染；缓存未命中（真·第一次启动 / 清过缓存）才走 HTTP fetch。
+  const initialCached = useRef<PersistedSession[] | null>(readSessionsCache()).current;
+  const initialActiveId = useRef<string | null>(readActiveSessionId()).current;
+  const [sessions, setSessions] = useState<PersistedSession[]>(initialCached ?? []);
+  const [activeSessionId, setActiveSessionIdState] = useState<string | null>(
+    initialCached && initialCached.length > 0 ? initialActiveId : null
+  );
+  const [isLoading, setIsLoading] = useState<boolean>(initialCached === null);
   const initialized = useRef(false);
   const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
   const activeSessionIdRef = useRef<string | null>(null);
@@ -69,6 +114,8 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
   const queuePersist = useCallback((sessionList: PersistedSession[]) => {
     writeActiveSessionId(activeSessionIdRef.current);
+    // 同步写本地缓存，让下次冷启动可以 hydrate 出最新列表
+    writeSessionsCache(sessionList);
 
     persistQueueRef.current = persistQueueRef.current
       .catch(() => undefined)
@@ -120,6 +167,9 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
   // 从服务端读取会话；首次访问时迁移旧版 localStorage 数据。
   // activeSessionId 从 localStorage 读取（不再从服务器）。
+  //
+  // 如果本地缓存已经 hydrate 出 sessions，这里只是在背景 reconcile，发现一致就 no-op，
+  // 避免 setSessions 触发无意义的 re-render（会让 Swiper 闪一下）。
   const restoreSessions = useCallback(async (): Promise<PersistedSession[]> => {
     if (typeof window === 'undefined') return [];
 
@@ -130,13 +180,21 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
       const restoredActiveSessionId = readActiveSessionId();
 
       if (sessionList.length > 0) {
-        setSessions(sessionList);
+        // Diff: 服务端列表与现有 state 一致就跳过 setSessions
+        setSessions((prev) => {
+          const key = (s: PersistedSession) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}`;
+          const prevKey = prev.map(key).join('|');
+          const nextKey = sessionList.map(key).join('|');
+          if (prevKey === nextKey) return prev;
+          return sessionList;
+        });
         // Only set activeSessionId if it still exists in the session list
         const validActiveId = sessionList.some(s => s.sessionId === restoredActiveSessionId)
           ? restoredActiveSessionId
           : (sessionList[0]?.sessionId ?? null);
-        setActiveSessionIdState(validActiveId);
+        setActiveSessionIdState((prev) => (prev === validActiveId ? prev : validActiveId));
         writeActiveSessionId(validActiveId);
+        writeSessionsCache(sessionList);
         return sessionList;
       }
 
@@ -278,6 +336,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     setSessions([]);
     setActiveSessionIdState(null);
     writeActiveSessionId(null);
+    clearSessionsCache();
     queuePersist([]);
     if (typeof window !== 'undefined') {
       localStorage.removeItem(LEGACY_STORAGE_KEY);

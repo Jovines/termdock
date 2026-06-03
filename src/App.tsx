@@ -24,6 +24,7 @@ import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules } from './lib/terminal/api';
 import type { AgentProgramConfig } from './lib/terminal/api';
+import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
@@ -33,6 +34,39 @@ import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSe
 import { AgentRulesSettings } from './lib/components/settings/AgentRulesSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 
+// Cache keys for app-level lazy data fetched from the server. 缓存只是"上次看到"的
+// 快照，每次启动还是会发 HTTP 校准；命中时让 UI 不再闪烁默认值 → 自定义值。
+const AGENT_RULES_CACHE_KEY = 'termdock-agent-rules-cache';
+const TOOLBAR_PRESETS_CACHE_KEY = 'termdock-toolbar-presets-cache';
+const SETTINGS_CACHE_KEY = 'termdock-settings-cache';
+
+function isAgentRulesArray(v: unknown): v is AgentProgramConfig[] {
+  return Array.isArray(v) && v.every((entry) =>
+    typeof entry === 'object' && entry !== null &&
+    typeof (entry as { program?: unknown }).program === 'string' &&
+    Array.isArray((entry as { rules?: unknown }).rules)
+  );
+}
+
+interface ToolbarPresetsCacheDoc {
+  version: number;
+  presets: ToolbarPresetDefinition[];
+}
+function isToolbarPresetsCacheDoc(v: unknown): v is ToolbarPresetsCacheDoc {
+  return typeof v === 'object' && v !== null &&
+    typeof (v as { version?: unknown }).version === 'number' &&
+    Array.isArray((v as { presets?: unknown }).presets);
+}
+
+interface SettingsCacheDoc {
+  preventSleep: boolean;
+  networkAvailable: boolean;
+}
+function isSettingsCacheDoc(v: unknown): v is SettingsCacheDoc {
+  return typeof v === 'object' && v !== null &&
+    typeof (v as { preventSleep?: unknown }).preventSleep === 'boolean' &&
+    typeof (v as { networkAvailable?: unknown }).networkAvailable === 'boolean';
+}
 const SHELL_NAMES = new Set(['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu']);
 
 function getCwdLeafName(cwd: string | null): string | null {
@@ -130,8 +164,11 @@ function App() {
   useViewportHeight();
 
   const [showDebug, setShowDebug] = React.useState(false);
-  const [preventSleep, setPreventSleep] = React.useState(false);
-  const [networkAvailable, setNetworkAvailable] = React.useState(true);
+  // Hydrate settings from cache so the toggles show user's real choice on cold
+  // start instead of flashing the defaults until the HTTP fetch resolves.
+  const cachedSettings = React.useRef<SettingsCacheDoc | null>(readCache(SETTINGS_CACHE_KEY, isSettingsCacheDoc)).current;
+  const [preventSleep, setPreventSleep] = React.useState(cachedSettings?.preventSleep ?? false);
+  const [networkAvailable, setNetworkAvailable] = React.useState(cachedSettings?.networkAvailable ?? true);
   const [debugInfo, setDebugInfo] = React.useState<Record<string, any>>({});
   const { fontSize, setFontSize } = useFontSize();
   const { rendererMode, setRendererMode } = useTerminalRenderer();
@@ -151,6 +188,11 @@ function App() {
       ));
     });
   }, []);
+
+  // Per-session xterm scrollback + tab metadata cache 已撤回：高频写 + 多种边界
+  // （clearBuffer 写空、setTerminalSession reset、auto-recreate 路径等）导致缓存
+  // 经常被脏写，xterm 首帧反而经常拿到空内容。等想清楚每一种状态变迁该不该入缓存
+  // 之前，先不做这一层。设置 / 工具栏 / agent rules 这种简单 KV 缓存继续保留。
 
   // Sidebar state — only subscribe to the booleans we render, not the whole store.
   const sidebarLeftOpen = useSidebarStore((s) => s.leftOpen);
@@ -298,19 +340,44 @@ function App() {
   // and shared across every browser pointing at this server. We start with the
   // built-in defaults so the UI is usable on first paint, then load + reconcile
   // with the server state on mount.
-  const [toolbarPresets, setToolbarPresets] = React.useState<ToolbarPresetDefinition[]>(() => createDefaultToolbarPresets());
+  //
+  // 缓存：上次从服务端拿到的 presets 也会缓存到 localStorage，下次冷启动同步
+  // hydrate，避免短暂出现"内置默认 → 用户自定义"的闪烁。
+  const cachedToolbarPresets = React.useRef<ToolbarPresetsCacheDoc | null>(
+    readCache(TOOLBAR_PRESETS_CACHE_KEY, isToolbarPresetsCacheDoc)
+  ).current;
+  const [toolbarPresets, setToolbarPresets] = React.useState<ToolbarPresetDefinition[]>(() => {
+    // 注意：必须把 cached 取出来用作 type narrowing，否则 closure 里 cached?.presets
+    // ?? [] 在 sanitize 后可能返回非空数组（sanitize 会补默认字段），又会回到 if
+    // 分支去用 cached!.presets 引发 null 解引用。直接显式判 null 最稳。
+    const cached = cachedToolbarPresets?.presets;
+    if (cached && cached.length > 0) {
+      const sanitized = sanitizeToolbarPresets(cached);
+      if (sanitized.length > 0) return sanitized;
+    }
+    return createDefaultToolbarPresets();
+  });
   const [toolbarPresetsLoaded, setToolbarPresetsLoaded] = React.useState(false);
   const [selectedToolbarPresetId, setSelectedToolbarPresetId] = React.useState<string>('default');
 
   // Agent detection rules — owned by server (~/.termdock/agent-rules.json)
+  // 同样缓存到 localStorage，让 agent 检测在冷启动后立即生效。
+  const cachedAgentRules = React.useRef<AgentProgramConfig[] | null>(
+    readCache(AGENT_RULES_CACHE_KEY, isAgentRulesArray)
+  ).current;
   const [isAgentRulesOpen, setIsAgentRulesOpen] = React.useState(false);
-  const [agentRules, setAgentRules] = React.useState<AgentProgramConfig[]>([]);
-  const [agentRulesLoaded, setAgentRulesLoaded] = React.useState(false);
+  const [agentRules, setAgentRules] = React.useState<AgentProgramConfig[]>(cachedAgentRules ?? []);
+  const [agentRulesLoaded, setAgentRulesLoaded] = React.useState(cachedAgentRules !== null);
   const [agentRulesSaving, setAgentRulesSaving] = React.useState(false);
 
   useEffect(() => {
     getAgentRules()
-      .then((rules) => { setAgentRules(rules); setAgentRulesLoaded(true); })
+      .then((rules) => {
+        // 写缓存；diff 后只在不同才 setState，避免无谓 re-render。
+        writeCache(AGENT_RULES_CACHE_KEY, rules);
+        setAgentRules((current) => (shallowJsonEqual(current, rules) ? current : rules));
+        setAgentRulesLoaded(true);
+      })
       .catch(() => { /* use empty state */ });
   }, []);
 
@@ -354,7 +421,15 @@ function App() {
             if (!storedIds.has(preset.id)) next.push(preset);
           }
         }
-        setToolbarPresets(next);
+        setToolbarPresets((current) => {
+          if (shallowJsonEqual(current, next)) return current;
+          return next;
+        });
+        // 缓存最新合成结果，下次冷启动直接 hydrate。
+        writeCache(TOOLBAR_PRESETS_CACHE_KEY, {
+          version: BUILTIN_TOOLBAR_PRESETS_VERSION,
+          presets: next,
+        });
       } catch (error) {
         console.warn('[toolbar-presets] Failed to load from server:', error);
       } finally {
@@ -371,6 +446,11 @@ function App() {
   // the server doc with the temporary defaults seed.
   useEffect(() => {
     if (!toolbarPresetsLoaded) return;
+    // 同步写本地缓存
+    writeCache(TOOLBAR_PRESETS_CACHE_KEY, {
+      version: BUILTIN_TOOLBAR_PRESETS_VERSION,
+      presets: toolbarPresets,
+    });
     void replaceToolbarPresetsDoc({
       version: BUILTIN_TOOLBAR_PRESETS_VERSION,
       presets: toolbarPresets,
@@ -383,8 +463,12 @@ function App() {
   useEffect(() => {
     getSettings()
       .then((s) => {
-        setPreventSleep(s.preventSleep);
-        setNetworkAvailable(s.networkAvailable);
+        setPreventSleep((cur) => (cur === s.preventSleep ? cur : s.preventSleep));
+        setNetworkAvailable((cur) => (cur === s.networkAvailable ? cur : s.networkAvailable));
+        writeCache(SETTINGS_CACHE_KEY, {
+          preventSleep: s.preventSleep,
+          networkAvailable: s.networkAvailable,
+        });
       })
       .catch(() => { /* ignore — settings not available */ });
   }, []);
@@ -997,6 +1081,10 @@ function App() {
                         const result = await updateSettings({ preventSleep: newValue });
                         setPreventSleep(result.preventSleep);
                         setNetworkAvailable(result.networkAvailable);
+                        writeCache(SETTINGS_CACHE_KEY, {
+                          preventSleep: result.preventSleep,
+                          networkAvailable: result.networkAvailable,
+                        });
                       } catch {
                         setPreventSleep(!newValue);
                       }
@@ -1395,16 +1483,23 @@ function App() {
                 rules={agentRules}
                 onChange={(rules) => {
                   setAgentRules(rules);
+                  writeCache(AGENT_RULES_CACHE_KEY, rules);
                   setAgentRulesSaving(true);
                   replaceAgentRules(rules)
-                    .then((saved) => setAgentRules(saved))
+                    .then((saved) => {
+                      setAgentRules(saved);
+                      writeCache(AGENT_RULES_CACHE_KEY, saved);
+                    })
                     .catch(() => { /* keep local state */ })
                     .finally(() => setAgentRulesSaving(false));
                 }}
                 onResetDefaults={() => {
                   setAgentRulesSaving(true);
                   resetAgentRules()
-                    .then((rules) => setAgentRules(rules))
+                    .then((rules) => {
+                      setAgentRules(rules);
+                      writeCache(AGENT_RULES_CACHE_KEY, rules);
+                    })
                     .catch(() => { /* keep local state */ })
                     .finally(() => setAgentRulesSaving(false));
                 }}
