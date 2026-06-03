@@ -2391,9 +2391,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   : (() => {
                       // 桌面端：1 cell 大小、跟随光标，鼠标事件透传给 xterm。
                       // IME 候选窗会贴着这个小框出现 → 视觉上 == 终端光标位置。
+                      //
+                      // ⚠️ 必须用 fixed，而不是 absolute：这个 textarea 长期处于
+                      // focus 状态，浏览器会对 focused input/textarea 自动做
+                      // scroll-into-view。若它是 absolute 且随着终端光标上下移动，
+                      // 普通桌面键盘输入也可能触发页面/visualViewport 被顶上去，
+                      // 表现为整个 terminal 先上抬再落回。fixed 元素不参与文档
+                      // 滚动布局，同时仍可作为 IME candidate window 的锚点。
+                      const containerRect = containerRef.current?.getBoundingClientRect();
+                      const viewportLeft = Math.round((containerRect?.left ?? 0) + imeAnchor.x);
+                      const viewportTop = Math.round((containerRect?.top ?? 0) + imeAnchor.y);
                       const base: React.CSSProperties = {
-                        left: imeAnchor.x,
-                        top: imeAnchor.y,
+                        position: 'fixed',
+                        left: viewportLeft,
+                        top: viewportTop,
                         pointerEvents: 'none',
                         touchAction: 'auto',
                         fontSize: `${fontSize}px`,
