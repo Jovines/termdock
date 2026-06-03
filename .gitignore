@@ -16,3 +16,12 @@ npm-debug.log*
 *.sw?
 .terminal-sessions.json
 .dev-*.pid
+.dev-*.log
+
+# vite-plugin-pwa dev mode service worker artifacts
+dev-dist/
+
+# Local Claude Code settings (personal permissions; .claude/skills/ is shared)
+.claude/settings.local.json
+.claude/scheduled_tasks.json
+.claude/worktrees/
