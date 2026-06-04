@@ -365,6 +365,19 @@ input:autofill {
   animation: spin 1s linear infinite;
 }
 
+@keyframes bounce-y {
+  0%, 100% {
+    transform: translateY(-12.5%);
+  }
+  50% {
+    transform: translateY(12.5%);
+  }
+}
+
+.animate-bounce-y {
+  animation: bounce-y 1s ease-in-out infinite;
+}
+
 @keyframes pulse {
   0%, 100% {
     opacity: 1;

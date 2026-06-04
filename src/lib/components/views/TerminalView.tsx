@@ -509,6 +509,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     mode: event.mode,
                     tmuxSessionName: event.tmuxSessionName ?? null,
                     cwd: event.cwd ?? null,
+                    activeProgram: event.activeProgram ?? null,
+                    activeProgramRaw: event.activeProgramRaw ?? null,
+                    activeProgramSource: event.activeProgramSource ?? null,
                   });
                 }
 
@@ -609,7 +612,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setSessionActiveProgram(
                   storeSessionId,
                   event.activeProgram ?? null,
-                  event.activeProgramSource ?? null
+                  event.activeProgramSource ?? null,
+                  event.activeProgramRaw ?? null,
                 );
                 break;
               }
@@ -775,6 +779,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 rows: 24,
                 mode: health.mode,
                 tmuxSessionName: health.tmuxSessionName ?? null,
+                activeProgram: health.activeProgram ?? null,
+                activeProgramRaw: health.activeProgramRaw ?? null,
+                activeProgramSource: health.activeProgramSource ?? null,
               });
             }
             debugSession(`[ensureSession] Setting terminalIdRef to ${terminalId} and starting stream`);

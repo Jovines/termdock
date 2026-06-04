@@ -32,17 +32,40 @@ interface AgentRulesSettingsProps {
   onResetDefaults: () => void;
 }
 
+function getProgramList(config: AgentProgramConfig): string[] {
+  if (Array.isArray(config.programs) && config.programs.length > 0) {
+    return config.programs;
+  }
+  if (typeof config.program === 'string' && config.program.trim().length > 0) {
+    return [config.program];
+  }
+  return [];
+}
+
+function normalizeProgramListInput(input: string): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const token of input.split(',')) {
+    const next = token.trim().toLowerCase();
+    if (!next || seen.has(next)) continue;
+    seen.add(next);
+    normalized.push(next);
+  }
+  return normalized;
+}
+
 function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSettingsProps) {
   const addProgram = () => {
-    onChange([...rules, { program: '', rules: [{ pattern: '', status: 'running', indicator: 'pulse', clearDelayMs: 700 }] }]);
+    onChange([...rules, { programs: [], rules: [{ pattern: '', status: 'running', indicator: 'pulse', clearDelayMs: 700 }] }]);
   };
 
   const removeProgram = (index: number) => {
     onChange(rules.filter((_, i) => i !== index));
   };
 
-  const updateProgram = (index: number, field: 'program', value: string) => {
-    onChange(rules.map((r, i) => (i === index ? { ...r, [field]: value } : r)));
+  const updateProgramList = (index: number, value: string) => {
+    const programs = normalizeProgramListInput(value);
+    onChange(rules.map((r, i) => (i === index ? { ...r, programs, program: undefined } : r)));
   };
 
   const addRule = (progIndex: number) => {
@@ -83,9 +106,9 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
           <div className="flex items-center gap-2">
             <input
               type="text"
-              value={prog.program}
-              onChange={(e) => updateProgram(pi, 'program', e.target.value)}
-              placeholder="Program name (e.g. claude)"
+              value={getProgramList(prog).join(', ')}
+              onChange={(e) => updateProgramList(pi, e.target.value)}
+              placeholder="Programs (comma-separated, e.g. claude, claude-code)"
               className="flex-1 rounded-lg bg-surface px-3 py-1.5 text-sm font-medium text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 focus:ring-primary/30"
             />
             <button
@@ -97,6 +120,10 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
               <RiDeleteBinLine size={14} />
             </button>
           </div>
+
+          <p className="-mt-1 text-[10px] text-muted-foreground">
+            Supports multiple programs in one config. Separate with commas.
+          </p>
 
           {/* Rules list */}
           {prog.rules.map((rule, ri) => {

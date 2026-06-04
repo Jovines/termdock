@@ -118,6 +118,7 @@ interface TerminalSession {
   hasWrittenData: boolean;
   activeProgram: {
     command: string | null;
+    rawCommand: string | null;
     source: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown';
     updatedAt: number;
   } | null;
@@ -967,6 +968,48 @@ function getPtyProcessPid(ptyProcess: PtyProcess): number | null {
   return null;
 }
 
+async function detectShellCwd(session: TerminalSession): Promise<string | null> {
+  const pid = getPtyProcessPid(session.ptyProcess);
+  if (pid === null) {
+    return null;
+  }
+
+  // Linux: cheapest path
+  if (process.platform === 'linux') {
+    try {
+      return await fs.promises.readlink(`/proc/${pid}/cwd`);
+    } catch {
+      return null;
+    }
+  }
+
+  // macOS: use lsof to resolve cwd of PTY process
+  if (process.platform === 'darwin') {
+    try {
+      const { stdout } = await execFileAsync('lsof', [
+        '-a',
+        '-p',
+        String(pid),
+        '-d',
+        'cwd',
+        '-Fn',
+      ], {
+        timeout: 1500,
+        maxBuffer: 64 * 1024,
+      });
+      const line = stdout
+        .split('\n')
+        .map((entry) => entry.trim())
+        .find((entry) => entry.startsWith('n') && entry.length > 1);
+      return line ? line.slice(1) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
 function normalizeProgramName(command: string | null | undefined): string | null {
   if (typeof command !== 'string') {
     return null;
@@ -979,6 +1022,131 @@ function normalizeProgramName(command: string | null | undefined): string | null
 
   const lastSegment = normalized.split(/[\\/]/).pop()?.trim();
   return lastSegment && lastSegment.length > 0 ? lastSegment : normalized;
+}
+
+const PROGRAM_WRAPPERS = new Set([
+  'env',
+  'sudo',
+  'nohup',
+  'time',
+  'node',
+  'nodejs',
+  'python',
+  'python3',
+  'bash',
+  'zsh',
+  'sh',
+  'fish',
+  'npx',
+  'pnpm',
+  'yarn',
+  'bunx',
+  'tsx',
+]);
+
+const SCRIPT_EXTENSIONS = /\.(?:mjs|cjs|js|jsx|ts|tsx|py|rb|php|pl|sh|bash|zsh|fish)$/i;
+
+function normalizeProgramAlias(program: string | null): string | null {
+  if (!program) return null;
+  const normalized = program.toLowerCase();
+  if (normalized === 'claude-code') return 'claude';
+  return normalized;
+}
+
+function tokenizeCommandLine(commandLine: string): string[] {
+  const tokens: string[] = [];
+  const regex = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|\S+/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(commandLine)) !== null) {
+    const raw = match[0] || '';
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === '"' && last === '"') || (first === '\'' && last === '\'') || (first === '`' && last === '`')) {
+      tokens.push(trimmed.slice(1, -1));
+      continue;
+    }
+    tokens.push(trimmed);
+  }
+  return tokens;
+}
+
+function looksLikeEnvAssignment(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+}
+
+function normalizeScriptToken(token: string): string | null {
+  if (!token || token.startsWith('-')) return null;
+  if (looksLikeEnvAssignment(token)) return null;
+
+  let candidate = token;
+  if (candidate.startsWith('@') && candidate.includes('/')) {
+    candidate = candidate.split('/').pop() || candidate;
+  }
+
+  const normalized = normalizeProgramName(candidate);
+  if (!normalized) return null;
+
+  const withoutExt = normalized.replace(SCRIPT_EXTENSIONS, '');
+  return withoutExt || normalized;
+}
+
+function extractProgramFromCommandLine(rawCommand: string | null, rawArgs: string | null): string | null {
+  const baseCommand = normalizeProgramAlias(normalizeProgramName(rawCommand));
+  const args = typeof rawArgs === 'string' ? rawArgs.trim() : '';
+  if (!args) return baseCommand;
+
+  const tokens = tokenizeCommandLine(args);
+  if (tokens.length === 0) return baseCommand;
+
+  const normalizedFirst = normalizeProgramAlias(normalizeProgramName(tokens[0]));
+  const rest = (normalizedFirst && normalizedFirst === baseCommand)
+    ? tokens.slice(1)
+    : tokens;
+
+  if (!baseCommand) {
+    const fallback = rest.map(normalizeScriptToken).find((name) => !!name) ?? null;
+    return normalizeProgramAlias(fallback);
+  }
+
+  const pickFirstMeaningful = (): string | null => {
+    for (const token of rest) {
+      const candidate = normalizeScriptToken(token);
+      if (!candidate) continue;
+      const aliased = normalizeProgramAlias(candidate);
+      if (!aliased) continue;
+      if (PROGRAM_WRAPPERS.has(aliased)) continue;
+      return aliased;
+    }
+    return null;
+  };
+
+  if (baseCommand === 'npx' || baseCommand === 'bunx') {
+    for (let i = 0; i < rest.length; i += 1) {
+      const token = rest[i];
+      if (token.startsWith('-')) continue;
+      const candidate = normalizeScriptToken(token);
+      if (!candidate) continue;
+      return normalizeProgramAlias(candidate);
+    }
+    return baseCommand;
+  }
+
+  if (baseCommand === 'pnpm' || baseCommand === 'yarn') {
+    let cursor = 0;
+    while (cursor < rest.length && rest[cursor]?.startsWith('-')) cursor += 1;
+    if (rest[cursor] === 'dlx') cursor += 1;
+    while (cursor < rest.length && rest[cursor]?.startsWith('-')) cursor += 1;
+    const candidate = normalizeScriptToken(rest[cursor] || '');
+    return normalizeProgramAlias(candidate) ?? baseCommand;
+  }
+
+  if (PROGRAM_WRAPPERS.has(baseCommand)) {
+    return pickFirstMeaningful() ?? baseCommand;
+  }
+
+  return baseCommand;
 }
 
 // ── OSC 0/2 title sniffing for CWD tracking ──
@@ -1054,49 +1222,44 @@ const MIN_AGENT_CLEAR_DELAY_MS = 80;
 const MAX_AGENT_CLEAR_DELAY_MS = 10_000;
 
 interface AgentProgramConfig {
-  program: string;   // program name to match (case-insensitive)
+  // 新格式：一个规则配置可匹配多个程序
+  programs?: string[];
+  // 兼容旧格式：单程序字段
+  program?: string;
   rules: AgentRule[];
+}
+
+interface ProgramLabelRule {
+  id: string;
+  enabled?: boolean;
+  priority?: number;
+  matchType: 'exact' | 'includes' | 'prefix' | 'regex';
+  pattern: string;
+  output: string;
+  source?: Array<'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown'>;
 }
 
 // Built-in default rules
 const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
   {
-    program: 'claude',
+    programs: ['claude', 'claude-code'],
     rules: [
       { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
       { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
       { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
-      { pattern: 'Do you want to proceed\\?|\\[y/N\\]|Approve|Allow', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
     ],
   },
   {
-    program: 'claude-code',
-    rules: [
-      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
-      { pattern: 'Do you want to proceed\\?|\\[y/N\\]|Approve|Allow', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
-    ],
-  },
-  {
-    program: 'opencode',
+    programs: ['opencode'],
     rules: [
       { pattern: 'thinking|working|generating', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
-      { pattern: 'confirm|approve|permission|continue\\?', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
     ],
   },
   {
-    program: 'coco',
+    programs: ['coco'],
     rules: [
-      { pattern: 'Tab/Arrow keys to navigate|Esc to|select ·|Coco 等待态采样|AskUserQuestion|User\'s answers', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
+      { pattern: '⏺ AskUserQuestion|⎿ ·', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
       { pattern: '[·✢❋❇✽] (thinking|working|generating)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: 'confirm|approve|permission|continue\\?', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
-    ],
-  },
-  {
-    program: 'aider',
-    rules: [
-      { pattern: 'Thinking|Generating|Working', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
     ],
   },
 ];
@@ -1116,6 +1279,45 @@ function normalizeAgentClearDelay(value: unknown): number {
   return Math.min(MAX_AGENT_CLEAR_DELAY_MS, Math.max(MIN_AGENT_CLEAR_DELAY_MS, n));
 }
 
+function normalizeAgentPrograms(config: AgentProgramConfig): string[] {
+  const rawPrograms = Array.isArray(config.programs)
+    ? config.programs
+    : (typeof config.program === 'string' ? [config.program] : []);
+
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const program of rawPrograms) {
+    if (typeof program !== 'string') continue;
+    const next = program.trim().toLowerCase();
+    if (!next || seen.has(next)) continue;
+    seen.add(next);
+    normalized.push(next);
+  }
+
+  return normalized;
+}
+
+function normalizeAgentRulesConfigs(input: unknown): AgentProgramConfig[] {
+  if (!Array.isArray(input)) return [];
+  const normalized: AgentProgramConfig[] = [];
+
+  for (const rawConfig of input) {
+    if (!rawConfig || typeof rawConfig !== 'object') continue;
+    const config = rawConfig as Partial<AgentProgramConfig> & { rules?: unknown };
+    if (!Array.isArray(config.rules)) continue;
+
+    const programs = normalizeAgentPrograms(config as AgentProgramConfig);
+    if (programs.length === 0) continue;
+
+    normalized.push({
+      programs,
+      rules: config.rules as AgentRule[],
+    });
+  }
+
+  return normalized;
+}
+
 function loadAgentRules(): Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]> {
   const rules = loadAgentRulesFromDisk();
   const map = new Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]>();
@@ -1127,7 +1329,10 @@ function loadAgentRules(): Map<string, { status: string; color: string | undefin
       clearDelayMs: normalizeAgentClearDelay(r.clearDelayMs),
       regex: new RegExp(r.pattern, 'i'),
     }));
-    map.set(config.program.toLowerCase(), compiled);
+    const programs = normalizeAgentPrograms(config);
+    for (const program of programs) {
+      map.set(program, compiled);
+    }
   }
   agentRulesCache = map;
   agentRulesVersion++;
@@ -1135,21 +1340,145 @@ function loadAgentRules(): Map<string, { status: string; color: string | undefin
 }
 
 const AGENT_RULES_FILE = `${os.homedir()}/.termdock/agent-rules.json`;
+const PROGRAM_RULES_FILE = `${os.homedir()}/.termdock/program-rules.json`;
 
 function loadAgentRulesFromDisk(): AgentProgramConfig[] {
   try {
     const data = fs.readFileSync(AGENT_RULES_FILE, 'utf-8');
     const parsed = JSON.parse(data);
-    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    const normalized = normalizeAgentRulesConfigs(parsed);
+    if (normalized.length > 0) return normalized;
   } catch { /* file doesn't exist or invalid, use builtins */ }
   return BUILTIN_AGENT_RULES;
 }
 
 function saveAgentRulesToDisk(rules: AgentProgramConfig[]): void {
+  const normalized = normalizeAgentRulesConfigs(rules);
   const dir = path.dirname(AGENT_RULES_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(AGENT_RULES_FILE, JSON.stringify(rules, null, 2));
+  fs.writeFileSync(AGENT_RULES_FILE, JSON.stringify(normalized, null, 2));
   loadAgentRules();
+}
+
+const BUILTIN_PROGRAM_LABEL_RULES: ProgramLabelRule[] = [
+  {
+    id: 'builtin-claude-wrapper',
+    enabled: true,
+    priority: 100,
+    matchType: 'regex',
+    pattern: '(^|\\s)(claude|claude-code|@anthropic-ai/claude-code)(\\s|$)',
+    output: 'claude',
+  },
+];
+
+const programRulesCache = {
+  mtimeMs: 0,
+  rules: BUILTIN_PROGRAM_LABEL_RULES,
+};
+
+function normalizeProgramLabelRules(input: unknown): ProgramLabelRule[] {
+  if (!Array.isArray(input)) return [];
+  const result: ProgramLabelRule[] = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') continue;
+    const item = raw as Partial<ProgramLabelRule>;
+    if (typeof item.id !== 'string' || item.id.trim().length === 0) continue;
+    if (typeof item.pattern !== 'string' || item.pattern.trim().length === 0) continue;
+    if (typeof item.output !== 'string' || item.output.trim().length === 0) continue;
+    const matchType = item.matchType;
+    if (matchType !== 'exact' && matchType !== 'includes' && matchType !== 'prefix' && matchType !== 'regex') continue;
+    if (matchType === 'regex') {
+      try { new RegExp(item.pattern, 'i'); } catch { continue; }
+    }
+    const source = Array.isArray(item.source)
+      ? item.source.filter((v): v is 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' => v === 'tmux-pane' || v === 'shell-tty' || v === 'shell-pid' || v === 'unknown')
+      : undefined;
+    result.push({
+      id: item.id,
+      enabled: item.enabled !== false,
+      priority: typeof item.priority === 'number' && Number.isFinite(item.priority) ? item.priority : 100,
+      matchType,
+      pattern: item.pattern,
+      output: item.output,
+      source: source && source.length > 0 ? source : undefined,
+    });
+  }
+  return result;
+}
+
+function loadProgramRulesFromDisk(): ProgramLabelRule[] {
+  try {
+    if (!fs.existsSync(PROGRAM_RULES_FILE)) {
+      programRulesCache.mtimeMs = 0;
+      programRulesCache.rules = BUILTIN_PROGRAM_LABEL_RULES;
+      return BUILTIN_PROGRAM_LABEL_RULES;
+    }
+    const stat = fs.statSync(PROGRAM_RULES_FILE);
+    if (programRulesCache.mtimeMs === stat.mtimeMs) {
+      return programRulesCache.rules;
+    }
+    const data = fs.readFileSync(PROGRAM_RULES_FILE, 'utf-8');
+    const parsed = JSON.parse(data);
+    const normalized = normalizeProgramLabelRules(parsed);
+    const next = normalized.length > 0 ? normalized : BUILTIN_PROGRAM_LABEL_RULES;
+    programRulesCache.mtimeMs = stat.mtimeMs;
+    programRulesCache.rules = next;
+    return next;
+  } catch {
+    programRulesCache.mtimeMs = 0;
+    programRulesCache.rules = BUILTIN_PROGRAM_LABEL_RULES;
+    return BUILTIN_PROGRAM_LABEL_RULES;
+  }
+}
+
+function saveProgramRulesToDisk(rules: ProgramLabelRule[]): ProgramLabelRule[] {
+  const normalized = normalizeProgramLabelRules(rules);
+  const dir = path.dirname(PROGRAM_RULES_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(PROGRAM_RULES_FILE, JSON.stringify(normalized, null, 2));
+  programRulesCache.mtimeMs = 0;
+  programRulesCache.rules = normalized.length > 0 ? normalized : BUILTIN_PROGRAM_LABEL_RULES;
+  return normalized;
+}
+
+function matchProgramLabelRule(
+  rule: ProgramLabelRule,
+  raw: string,
+  source: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown',
+): boolean {
+  if (rule.enabled === false) return false;
+  if (Array.isArray(rule.source) && rule.source.length > 0 && !rule.source.includes(source)) return false;
+  const pattern = rule.pattern;
+  if (!pattern) return false;
+  if (rule.matchType === 'exact') return raw === pattern;
+  if (rule.matchType === 'prefix') return raw.startsWith(pattern);
+  if (rule.matchType === 'includes') return raw.includes(pattern);
+  if (rule.matchType === 'regex') {
+    try { return new RegExp(pattern, 'i').test(raw); } catch { return false; }
+  }
+  return false;
+}
+
+function resolveProgramWithRules(
+  detectedProgram: string | null,
+  rawCommand: string | null,
+  source: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown',
+): string | null {
+  const raw = (rawCommand || '').trim();
+  if (!raw) return detectedProgram;
+
+  const userRules = loadProgramRulesFromDisk()
+    .slice()
+    .sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
+
+  for (const rule of userRules) {
+    if (matchProgramLabelRule(rule, raw, source)) {
+      const output = normalizeProgramAlias(normalizeProgramName(rule.output));
+      if (output) return output;
+    }
+  }
+
+  return detectedProgram;
 }
 
 // Initialize on startup
@@ -1251,10 +1580,12 @@ function evaluateAgentStatus(sessionId: string, session: TerminalSession, latest
 
 // ── end Agent status detection ──
 
-function getActiveProgramFromTmuxLayout(layout: TmuxLayout): { command: string | null; source: 'tmux-pane'; updatedAt: number } | null {
+function getActiveProgramFromTmuxLayout(layout: TmuxLayout): { command: string | null; rawCommand: string | null; source: 'tmux-pane'; updatedAt: number } | null {
   const activeWindow = layout.windows.find((window) => window.id === layout.activeWindowId);
   const activePane = activeWindow?.panes.find((pane) => pane.id === layout.activePaneId);
-  const command = normalizeProgramName(activePane?.command);
+  const rawCommand = activePane?.command || null;
+  const detected = normalizeProgramName(rawCommand);
+  const command = resolveProgramWithRules(detected, rawCommand, 'tmux-pane');
 
   if (!command) {
     return null;
@@ -1262,6 +1593,7 @@ function getActiveProgramFromTmuxLayout(layout: TmuxLayout): { command: string |
 
   return {
     command,
+    rawCommand,
     source: 'tmux-pane',
     updatedAt: Date.now(),
   };
@@ -1383,6 +1715,7 @@ function syncDynamicTmuxMetadata(input: {
 
 async function detectShellActiveProgram(session: TerminalSession): Promise<{
   command: string | null;
+  rawCommand: string | null;
   source: 'shell-tty' | 'shell-pid' | 'unknown';
   updatedAt: number;
 } | null> {
@@ -1399,7 +1732,7 @@ async function detectShellActiveProgram(session: TerminalSession): Promise<{
       '-t',
       ttyName,
       '-o',
-      'pid=,ppid=,pgid=,tpgid=,stat=,comm=',
+      'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args=',
     ], {
       timeout: 3000,
       maxBuffer: 512 * 1024,
@@ -1410,27 +1743,33 @@ async function detectShellActiveProgram(session: TerminalSession): Promise<{
       .map((line) => line.trim())
       .filter(Boolean)
       .map((line) => {
-        const match = line.match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(.+)$/);
+        const match = line.match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s*(.*)$/);
         if (!match) {
           return null;
         }
 
+        const comm = normalizeProgramName(match[6] || null);
+        const args = (match[7] || '').trim();
+        const rawCommand = args || comm;
+        const detected = extractProgramFromCommandLine(comm, args);
         return {
           pid: Number.parseInt(match[1] || '0', 10),
           pgid: Number.parseInt(match[3] || '0', 10),
           tpgid: Number.parseInt(match[4] || '0', 10),
           stat: match[5] || '',
-          command: normalizeProgramName(match[6]),
+          command: detected,
+          rawCommand,
         };
       })
-      .filter((row): row is { pid: number; pgid: number; tpgid: number; stat: string; command: string | null } => row !== null);
+      .filter((row): row is { pid: number; pgid: number; tpgid: number; stat: string; command: string | null; rawCommand: string | null } => row !== null);
 
     if (rows.length > 0) {
       const foregroundRows = rows.filter((row) => row.command && row.tpgid > 0 && row.pgid === row.tpgid && !row.stat.startsWith('Z'));
       const preferredForeground = foregroundRows.find((row) => row.pid !== pid) ?? foregroundRows[foregroundRows.length - 1];
       if (preferredForeground?.command) {
         return {
-          command: preferredForeground.command,
+          command: resolveProgramWithRules(preferredForeground.command, preferredForeground.rawCommand, 'shell-tty'),
+          rawCommand: preferredForeground.rawCommand,
           source: 'shell-tty',
           updatedAt: Date.now(),
         };
@@ -1439,7 +1778,8 @@ async function detectShellActiveProgram(session: TerminalSession): Promise<{
       const shellRow = rows.find((row) => row.pid === pid && row.command);
       if (shellRow?.command) {
         return {
-          command: shellRow.command,
+          command: resolveProgramWithRules(shellRow.command, shellRow.rawCommand, 'shell-pid'),
+          rawCommand: shellRow.rawCommand,
           source: 'shell-pid',
           updatedAt: Date.now(),
         };
@@ -1449,8 +1789,11 @@ async function detectShellActiveProgram(session: TerminalSession): Promise<{
     // Fall through to shell fallback.
   }
 
+  const fallbackRaw = normalizeProgramName(process.env.SHELL || '/bin/sh');
+  const fallback = resolveProgramWithRules(fallbackRaw, fallbackRaw, 'unknown');
   return {
-    command: normalizeProgramName(process.env.SHELL || '/bin/sh'),
+    command: fallback,
+    rawCommand: fallbackRaw,
     source: 'unknown',
     updatedAt: Date.now(),
   };
@@ -2098,26 +2441,107 @@ setInterval(() => {
   }
 }, CLEANUP_INTERVAL);
 
+async function listManagedTmuxSessions(): Promise<Array<{ name: string; createdAt: number | null }>> {
+  const raw = await runTmux([
+    'list-sessions',
+    '-F',
+    `#{session_name}${TMUX_DELIMITER}#{@termdock-version}${TMUX_DELIMITER}#{@termdock-created-at}`,
+  ]);
+
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => parseDelimitedRow(line, 3))
+    .filter((row): row is string[] => row !== null)
+    .map(([name, version, createdAtRaw]) => {
+      const createdAt = Number.parseInt(createdAtRaw || '', 10);
+      return {
+        name,
+        version,
+        createdAt: Number.isFinite(createdAt) ? createdAt : null,
+      };
+    })
+    .filter((row) => typeof row.version === 'string' && row.version.length > 0)
+    .map(({ name, createdAt }) => ({ name, createdAt }))
+    .sort((a, b) => {
+      const aCreated = typeof a.createdAt === 'number' ? a.createdAt : Number.MAX_SAFE_INTEGER;
+      const bCreated = typeof b.createdAt === 'number' ? b.createdAt : Number.MAX_SAFE_INTEGER;
+      if (aCreated !== bCreated) return aCreated - bCreated;
+      return a.name.localeCompare(b.name);
+    });
+}
+
+function mergeManagedTmuxSessionsIntoGlobalState(rows: Array<{ name: string; createdAt: number | null }>): boolean {
+  if (rows.length === 0) return false;
+
+  let changed = false;
+  const existingTmux = new Set(
+    globalSessionState.sessions
+      .filter((s) => s.mode === 'tmux' && typeof s.tmuxSessionName === 'string' && s.tmuxSessionName.length > 0)
+      .map((s) => s.tmuxSessionName as string),
+  );
+
+  const additions: PersistedClientSession[] = [];
+  for (const row of rows) {
+    if (existingTmux.has(row.name)) continue;
+    changed = true;
+    const createdAt = typeof row.createdAt === 'number' ? row.createdAt : Date.now();
+    additions.push({
+      sessionId: `tmux:${row.name}`,
+      name: `tmux:${row.name}`,
+      customName: false,
+      backendSessionId: null,
+      mode: 'tmux',
+      tmuxSessionName: row.name,
+      createdAt,
+      lastActivity: createdAt,
+    });
+    existingTmux.add(row.name);
+  }
+
+  if (!changed) return false;
+
+  globalSessionState = {
+    sessions: deduplicateGlobalSessions([...globalSessionState.sessions, ...additions]),
+    updatedAt: Date.now(),
+  };
+  schedulePersistGlobalState();
+  return true;
+}
+
 router.get('/tmux/sessions', async (_req, res) => {
   try {
+    const managed = await listManagedTmuxSessions();
+    mergeManagedTmuxSessionsIntoGlobalState(managed);
+
     const raw = await runTmux([
       'list-sessions',
       '-F',
-      `#{session_name}${TMUX_DELIMITER}#{session_windows}${TMUX_DELIMITER}#{session_attached}`,
+      `#{session_name}${TMUX_DELIMITER}#{session_windows}${TMUX_DELIMITER}#{session_attached}${TMUX_DELIMITER}#{@termdock-created-at}`,
     ]);
 
     const sessions = raw
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
-      .map((line) => parseDelimitedRow(line, 3))
+      .map((line) => parseDelimitedRow(line, 4))
       .filter((row): row is string[] => row !== null)
-      .map(([name, windowsRaw, attachedRaw]) => ({
-        name,
-        windows: Number.parseInt(windowsRaw || '0', 10) || 0,
-        attached: Number.parseInt(attachedRaw || '0', 10) || 0,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .map(([name, windowsRaw, attachedRaw, createdAtRaw]) => {
+        const createdAt = Number.parseInt(createdAtRaw || '', 10);
+        return {
+          name,
+          windows: Number.parseInt(windowsRaw || '0', 10) || 0,
+          attached: Number.parseInt(attachedRaw || '0', 10) || 0,
+          createdAt: Number.isFinite(createdAt) ? createdAt : null,
+        };
+      })
+      .sort((a, b) => {
+        const aCreated = typeof a.createdAt === 'number' ? a.createdAt : Number.MAX_SAFE_INTEGER;
+        const bCreated = typeof b.createdAt === 'number' ? b.createdAt : Number.MAX_SAFE_INTEGER;
+        if (aCreated !== bCreated) return aCreated - bCreated;
+        return a.name.localeCompare(b.name);
+      });
 
     return res.json({ sessions });
   } catch (error) {
@@ -2209,7 +2633,15 @@ router.post('/serialize-state', async (req, res) => {
   });
 });
 
-router.get('/client-state', (_req, res) => {
+router.get('/client-state', async (_req, res) => {
+  // Pull in any managed tmux sessions created outside the web UI (e.g. CLI)
+  // so sidebar tabs can appear without manual refresh/re-save.
+  try {
+    const managed = await listManagedTmuxSessions();
+    mergeManagedTmuxSessionsIntoGlobalState(managed);
+  } catch {
+    // Non-fatal: fallback to current persisted state.
+  }
   res.json(globalSessionState);
 });
 
@@ -2300,10 +2732,17 @@ router.put('/agent-rules', (req, res) => {
     res.status(400).json({ error: 'Expected array of program configs' });
     return;
   }
+
+  const normalized = normalizeAgentRulesConfigs(rules);
+  if (rules.length > 0 && normalized.length === 0) {
+    res.status(400).json({ error: 'Each config must include program(s) and rules' });
+    return;
+  }
+
   // Basic validation
-  for (const config of rules) {
-    if (!config.program || !Array.isArray(config.rules)) {
-      res.status(400).json({ error: 'Each config must have program and rules' });
+  for (const config of normalized) {
+    if (!Array.isArray(config.rules) || config.rules.length === 0) {
+      res.status(400).json({ error: 'Each config must have rules' });
       return;
     }
     for (const rule of config.rules) {
@@ -2329,8 +2768,9 @@ router.put('/agent-rules', (req, res) => {
       }
     }
   }
-  saveAgentRulesToDisk(rules);
-  res.json(rules);
+
+  saveAgentRulesToDisk(normalized);
+  res.json(normalized);
 });
 
 router.delete('/agent-rules', (_req, res) => {
@@ -2338,6 +2778,33 @@ router.delete('/agent-rules', (_req, res) => {
   try { fs.unlinkSync(AGENT_RULES_FILE); } catch { /* already gone */ }
   loadAgentRules();
   res.json(BUILTIN_AGENT_RULES);
+});
+
+router.get('/program-rules', (_req, res) => {
+  res.json(loadProgramRulesFromDisk());
+});
+
+router.put('/program-rules', (req, res) => {
+  const rules = req.body;
+  if (!Array.isArray(rules)) {
+    res.status(400).json({ error: 'Expected array of program rules' });
+    return;
+  }
+  const normalized = normalizeProgramLabelRules(rules);
+  // if user sent non-empty but all invalid, reject to avoid silent data loss
+  if (rules.length > 0 && normalized.length === 0) {
+    res.status(400).json({ error: 'No valid program rules' });
+    return;
+  }
+  const saved = saveProgramRulesToDisk(normalized);
+  res.json(saved);
+});
+
+router.delete('/program-rules', (_req, res) => {
+  try { fs.unlinkSync(PROGRAM_RULES_FILE); } catch { /* already gone */ }
+  programRulesCache.mtimeMs = 0;
+  programRulesCache.rules = BUILTIN_PROGRAM_LABEL_RULES;
+  res.json(BUILTIN_PROGRAM_LABEL_RULES);
 });
 
 router.post('/create', async (req, res) => {
@@ -2365,6 +2832,7 @@ router.post('/create', async (req, res) => {
             mode: s.mode,
             tmuxSessionName: s.tmuxSessionName,
             activeProgram: s.activeProgram?.command ?? null,
+            activeProgramRaw: s.activeProgram?.rawCommand ?? null,
             activeProgramSource: s.activeProgram?.source ?? null,
           });
         }
@@ -2387,6 +2855,7 @@ router.post('/create', async (req, res) => {
       mode: spawned.session.mode,
       tmuxSessionName: spawned.session.tmuxSessionName,
       activeProgram: spawned.session.activeProgram?.command ?? null,
+      activeProgramRaw: spawned.session.activeProgram?.rawCommand ?? null,
       activeProgramSource: spawned.session.activeProgram?.source ?? null,
     });
   } catch (error) {
@@ -2437,6 +2906,7 @@ router.get('/:sessionId/stream', async (req, res) => {
     tmuxSessionName: session.tmuxSessionName,
     cwd: session.cwd ?? null,
     activeProgram: session.activeProgram?.command ?? null,
+    activeProgramRaw: session.activeProgram?.rawCommand ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
     agentStatus: session.agentStatus,
     agentColor: session.agentColor,
@@ -2468,6 +2938,7 @@ router.get('/:sessionId/stream', async (req, res) => {
     writeSse(res, {
       type: 'active-program',
       activeProgram: activeProgram?.command ?? null,
+      activeProgramRaw: activeProgram?.rawCommand ?? null,
       activeProgramSource: activeProgram?.source ?? null,
     });
   };
@@ -2520,6 +2991,19 @@ router.get('/:sessionId/stream', async (req, res) => {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.warn(`Failed to detect active shell program for ${sessionId}: ${errorMessage}`);
+    }
+
+    try {
+      const newCwd = await detectShellCwd(session);
+      if (newCwd && newCwd !== session.cwd) {
+        const previousCwd = session.cwd;
+        session.cwd = newCwd;
+        console.log(`[shell-cwd-poll][sse] session=${sessionId} from=${previousCwd ?? 'null'} to=${newCwd}`);
+        writeSse(res, { type: 'cwd', cwd: newCwd });
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.warn(`Failed to detect shell cwd for ${sessionId}: ${errorMessage}`);
     }
   };
 
@@ -2591,6 +3075,7 @@ router.get('/:sessionId/health', (req, res) => {
       mode: session.mode,
       tmuxSessionName: session.tmuxSessionName,
       activeProgram: session.activeProgram?.command ?? null,
+      activeProgramRaw: session.activeProgram?.rawCommand ?? null,
       activeProgramSource: session.activeProgram?.source ?? null,
     });
  });
@@ -2620,6 +3105,7 @@ router.get('/:sessionId/attach', async (req, res) => {
     history,
     lastSeq,
     activeProgram: session.activeProgram?.command ?? null,
+    activeProgramRaw: session.activeProgram?.rawCommand ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
   });
 });
@@ -3049,6 +3535,7 @@ export function handleTerminalWebSocket(
       tmuxSessionName: session.tmuxSessionName,
       cwd: session.cwd ?? null,
       activeProgram: session.activeProgram?.command ?? null,
+      activeProgramRaw: session.activeProgram?.rawCommand ?? null,
       activeProgramSource: session.activeProgram?.source ?? null,
       agentStatus: session.agentStatus,
       agentColor: session.agentColor,
@@ -3089,6 +3576,7 @@ export function handleTerminalWebSocket(
           ws.send(JSON.stringify({
             type: 'active-program',
             activeProgram: ap?.command ?? null,
+            activeProgramRaw: ap?.rawCommand ?? null,
             activeProgramSource: ap?.source ?? null,
           }));
         }
@@ -3141,8 +3629,19 @@ export function handleTerminalWebSocket(
           ws.send(JSON.stringify({
             type: 'active-program',
             activeProgram: ap?.command ?? null,
+            activeProgramRaw: ap?.rawCommand ?? null,
             activeProgramSource: ap?.source ?? null,
           }));
+        }
+      } catch { /* ignore */ }
+
+      try {
+        const newCwd = await detectShellCwd(session);
+        if (newCwd && newCwd !== session.cwd) {
+          const previousCwd = session.cwd;
+          session.cwd = newCwd;
+          console.log(`[shell-cwd-poll][ws] session=${sessionId} from=${previousCwd ?? 'null'} to=${newCwd}`);
+          ws.send(JSON.stringify({ type: 'cwd', cwd: newCwd }));
         }
       } catch { /* ignore */ }
     };

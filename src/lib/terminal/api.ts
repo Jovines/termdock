@@ -303,6 +303,7 @@ export function connectTerminalStream(
           onEvent({
             type: 'active-program',
             activeProgram: msg.activeProgram,
+            activeProgramRaw: msg.activeProgramRaw,
             activeProgramSource: msg.activeProgramSource,
           });
           return;
@@ -597,7 +598,7 @@ export async function restartTerminalSession(
 export async function checkTerminalHealth(sessionId: string): Promise<{
   healthy: boolean; sessionId: string; cwd?: string; clients?: number; lastActivity?: number;
   backend?: string; mode?: 'shell' | 'tmux'; tmuxSessionName?: string | null;
-  activeProgram?: string | null; activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+  activeProgram?: string | null; activeProgramRaw?: string | null; activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }> {
   const response = await fetch(`/api/terminal/${sessionId}/health`, { method: 'GET' });
   if (!response.ok) {
@@ -611,7 +612,7 @@ export async function checkTerminalHealth(sessionId: string): Promise<{
 export async function attachTerminalSession(sessionId: string): Promise<{
   sessionId: string; cwd: string; backend: string; clients: number; mode: 'shell' | 'tmux';
   tmuxSessionName: string | null; history: string[];
-  activeProgram: string | null; activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+  activeProgram: string | null; activeProgramRaw?: string | null; activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }> {
   const response = await fetch(`/api/terminal/${sessionId}/attach`, { method: 'GET' });
   if (!response.ok) {
@@ -843,8 +844,21 @@ export interface AgentRule {
 }
 
 export interface AgentProgramConfig {
-  program: string;
+  // 新格式：一个规则配置可匹配多个程序
+  programs?: string[];
+  // 兼容旧格式：单程序字段
+  program?: string;
   rules: AgentRule[];
+}
+
+export interface ProgramLabelRule {
+  id: string;
+  enabled?: boolean;
+  priority?: number;
+  matchType: 'exact' | 'includes' | 'prefix' | 'regex';
+  pattern: string;
+  output: string;
+  source?: Array<'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown'>;
 }
 
 export async function getAgentRules(): Promise<AgentProgramConfig[]> {
@@ -874,6 +888,36 @@ export async function resetAgentRules(): Promise<AgentProgramConfig[]> {
     headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
   });
   if (!response.ok) throw new Error('Failed to reset agent rules');
+  return response.json();
+}
+
+export async function getProgramRules(): Promise<ProgramLabelRule[]> {
+  const response = await fetch('/api/terminal/program-rules');
+  if (!response.ok) throw new Error('Failed to get program rules');
+  return response.json();
+}
+
+export async function replaceProgramRules(rules: ProgramLabelRule[]): Promise<ProgramLabelRule[]> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/program-rules', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(rules),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update program rules' }));
+    throw new Error(error.error || 'Failed to update program rules');
+  }
+  return response.json();
+}
+
+export async function resetProgramRules(): Promise<ProgramLabelRule[]> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/program-rules', {
+    method: 'DELETE',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) throw new Error('Failed to reset program rules');
   return response.json();
 }
 

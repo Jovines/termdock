@@ -78,6 +78,7 @@ export const createTermdockAPI = (): TerminalAPI => ({
     mode?: 'shell' | 'tmux';
     tmuxSessionName?: string | null;
     activeProgram?: string | null;
+    activeProgramRaw?: string | null;
     activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   }> {
     return checkTerminalHealth(sessionId);

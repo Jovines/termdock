@@ -8,6 +8,7 @@ import {
   LayoutGrid as RiLayoutGridLine,
   RefreshCw as RiRefreshLine,
   Terminal as RiTerminalLine,
+  PenLine as RiPencilLine,
   Keyboard as RiKeyboardLine,
   SlidersHorizontal as RiEqualizerLine,
   Layers as RiStackLine,
@@ -22,8 +23,8 @@ import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules } from './lib/terminal/api';
-import type { AgentProgramConfig } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules } from './lib/terminal/api';
+import type { AgentProgramConfig, ProgramLabelRule } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
@@ -37,15 +38,29 @@ import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuilti
 // Cache keys for app-level lazy data fetched from the server. 缓存只是"上次看到"的
 // 快照，每次启动还是会发 HTTP 校准；命中时让 UI 不再闪烁默认值 → 自定义值。
 const AGENT_RULES_CACHE_KEY = 'termdock-agent-rules-cache';
+const PROGRAM_RULES_CACHE_KEY = 'termdock-program-rules-cache';
 const TOOLBAR_PRESETS_CACHE_KEY = 'termdock-toolbar-presets-cache';
 const SETTINGS_CACHE_KEY = 'termdock-settings-cache';
 
 function isAgentRulesArray(v: unknown): v is AgentProgramConfig[] {
-  return Array.isArray(v) && v.every((entry) =>
-    typeof entry === 'object' && entry !== null &&
-    typeof (entry as { program?: unknown }).program === 'string' &&
-    Array.isArray((entry as { rules?: unknown }).rules)
-  );
+  return Array.isArray(v) && v.every((entry) => {
+    if (typeof entry !== 'object' || entry === null) return false;
+    const cfg = entry as { program?: unknown; programs?: unknown; rules?: unknown };
+    const hasLegacyProgram = typeof cfg.program === 'string';
+    const hasPrograms = Array.isArray(cfg.programs) && cfg.programs.every((item) => typeof item === 'string');
+    return (hasLegacyProgram || hasPrograms) && Array.isArray(cfg.rules);
+  });
+}
+
+function isProgramRulesArray(v: unknown): v is ProgramLabelRule[] {
+  return Array.isArray(v) && v.every((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const rule = entry as Partial<ProgramLabelRule>;
+    return typeof rule.id === 'string'
+      && typeof rule.pattern === 'string'
+      && typeof rule.output === 'string'
+      && (rule.matchType === 'exact' || rule.matchType === 'includes' || rule.matchType === 'prefix' || rule.matchType === 'regex');
+  });
 }
 
 interface ToolbarPresetsCacheDoc {
@@ -96,6 +111,7 @@ type TabTerminalSessionState = Pick<
   TerminalSessionState,
   | 'cwd'
   | 'activeProgram'
+  | 'activeProgramRaw'
   | 'inCopyMode'
   | 'isConnecting'
   | 'agentStatus'
@@ -112,6 +128,7 @@ function pickTabTerminalSessions(
     picked.set(id, {
       cwd: state.cwd,
       activeProgram: state.activeProgram,
+      activeProgramRaw: state.activeProgramRaw,
       inCopyMode: state.inCopyMode,
       isConnecting: state.isConnecting,
       agentStatus: state.agentStatus,
@@ -135,6 +152,7 @@ function areTabTerminalSessionsEqual(
     if (
       currentState.cwd !== nextState.cwd ||
       currentState.activeProgram !== nextState.activeProgram ||
+      currentState.activeProgramRaw !== nextState.activeProgramRaw ||
       currentState.inCopyMode !== nextState.inCopyMode ||
       currentState.isConnecting !== nextState.isConnecting ||
       currentState.agentStatus !== nextState.agentStatus ||
@@ -156,6 +174,11 @@ function renderTabIcon(
   return <AgentTabIcon sessionMode={sessionMode} state={state} />;
 }
 
+interface CloseSessionEventDetail {
+  sessionId: string;
+  source?: 'sidebar' | 'tab-menu' | 'other';
+  closeMode?: 'auto' | 'detach' | 'destroy';
+}
 
 function App() {
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
@@ -210,6 +233,7 @@ function App() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [tabMenuSessionId, setTabMenuSessionId] = useState<string | null>(null);
   const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
+  const [sidebarCloseChoiceSessionId, setSidebarCloseChoiceSessionId] = useState<string | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
   const tabLongPressTimerRef = React.useRef<number | null>(null);
@@ -370,6 +394,13 @@ function App() {
   const [agentRulesLoaded, setAgentRulesLoaded] = React.useState(cachedAgentRules !== null);
   const [agentRulesSaving, setAgentRulesSaving] = React.useState(false);
 
+  const cachedProgramRules = React.useRef<ProgramLabelRule[] | null>(
+    readCache(PROGRAM_RULES_CACHE_KEY, isProgramRulesArray)
+  ).current;
+  const [programRules, setProgramRules] = React.useState<ProgramLabelRule[]>(cachedProgramRules ?? []);
+  const [programRulesLoaded, setProgramRulesLoaded] = React.useState(cachedProgramRules !== null);
+  const [programRulesSaving, setProgramRulesSaving] = React.useState(false);
+
   useEffect(() => {
     getAgentRules()
       .then((rules) => {
@@ -377,6 +408,16 @@ function App() {
         writeCache(AGENT_RULES_CACHE_KEY, rules);
         setAgentRules((current) => (shallowJsonEqual(current, rules) ? current : rules));
         setAgentRulesLoaded(true);
+      })
+      .catch(() => { /* use empty state */ });
+  }, []);
+
+  useEffect(() => {
+    getProgramRules()
+      .then((rules) => {
+        writeCache(PROGRAM_RULES_CACHE_KEY, rules);
+        setProgramRules((current) => (shallowJsonEqual(current, rules) ? current : rules));
+        setProgramRulesLoaded(true);
       })
       .catch(() => { /* use empty state */ });
   }, []);
@@ -550,41 +591,8 @@ function App() {
     }
   }, [editingSessionId]);
 
-  const editingSessionIdRef = React.useRef<string | null>(null);
-  React.useEffect(() => {
-    editingSessionIdRef.current = editingSessionId;
-  }, [editingSessionId]);
-  const lastTabTapRef = React.useRef<{ id: string; time: number } | null>(null);
-  const tabSingleClickTimerRef = React.useRef<number | null>(null);
-
   const handleTabClick = useCallback((sessionId: string) => {
     window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
-  }, []);
-
-  const handleTabPress = useCallback((sessionId: string) => {
-    const DOUBLE_TAP_MS = 320;
-    const now = performance.now();
-    const last = lastTabTapRef.current;
-    if (last && last.id === sessionId && now - last.time <= DOUBLE_TAP_MS) {
-      // 双击 → 进入编辑态;取消挂起的单击切换
-      if (tabSingleClickTimerRef.current !== null) {
-        window.clearTimeout(tabSingleClickTimerRef.current);
-        tabSingleClickTimerRef.current = null;
-      }
-      lastTabTapRef.current = null;
-      setEditingSessionId(sessionId);
-      return;
-    }
-    lastTabTapRef.current = { id: sessionId, time: now };
-    if (tabSingleClickTimerRef.current !== null) {
-      window.clearTimeout(tabSingleClickTimerRef.current);
-    }
-    tabSingleClickTimerRef.current = window.setTimeout(() => {
-      tabSingleClickTimerRef.current = null;
-      // 编辑态下不再发起切换
-      if (editingSessionIdRef.current === sessionId) return;
-      handleTabClick(sessionId);
-    }, DOUBLE_TAP_MS);
   }, []);
 
   const handleTabPointerDown = useCallback((sessionId: string) => {
@@ -595,12 +603,6 @@ function App() {
     tabLongPressTimerRef.current = window.setTimeout(() => {
       tabLongPressedRef.current = true;
       tabLongPressTimerRef.current = null;
-      // 取消挂起的单击切换
-      if (tabSingleClickTimerRef.current !== null) {
-        window.clearTimeout(tabSingleClickTimerRef.current);
-        tabSingleClickTimerRef.current = null;
-      }
-      lastTabTapRef.current = null;
       setTabMenuSessionId(sessionId);
       // 触觉反馈
       try { window.navigator.vibrate?.(15); } catch { /* ignore */ }
@@ -619,8 +621,8 @@ function App() {
       tabLongPressedRef.current = false;
       return;
     }
-    handleTabPress(sessionId);
-  }, [handleTabPress]);
+    handleTabClick(sessionId);
+  }, [handleTabClick]);
 
   const copyCwdToClipboard = useCallback(async (sessionId: string) => {
     const ts = useTerminalStore.getState().sessions.get(sessionId);
@@ -697,6 +699,25 @@ function App() {
       setTmuxKillingName(null);
     }
   }, [refreshTmuxSessions]);
+
+  const dispatchCloseSession = useCallback((detail: string | CloseSessionEventDetail) => {
+    window.dispatchEvent(new CustomEvent('close-terminal-session', { detail }));
+  }, []);
+
+  const handleSidebarCloseSession = useCallback((sessionId: string) => {
+    const session = sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    if (session.mode !== 'tmux') {
+      dispatchCloseSession({ sessionId, source: 'sidebar', closeMode: 'auto' });
+      return;
+    }
+    setSidebarCloseChoiceSessionId(sessionId);
+  }, [sessions, dispatchCloseSession]);
+
+  const sidebarCloseChoiceSession = React.useMemo(
+    () => sessions.find((s) => s.id === sidebarCloseChoiceSessionId) ?? null,
+    [sessions, sidebarCloseChoiceSessionId],
+  );
 
   // Auto-refresh tmux sessions when drawer is open
   useEffect(() => {
@@ -849,7 +870,7 @@ function App() {
                       cancelTabLongPress();
                       setTabMenuSessionId(session.id);
                     }}
-                    className={`group relative inline-flex h-8 shrink-0 items-center overflow-hidden rounded-md pl-1.5 pr-2 text-[12px] leading-none transition max-w-[8rem] sm:h-8 sm:max-w-[12rem] ${
+                    className={`group relative inline-flex h-8 shrink-0 items-center overflow-hidden rounded-md pl-1 pr-1.5 text-[12px] leading-none transition max-w-[6.25rem] sm:h-8 sm:max-w-[12rem] sm:pl-1.5 sm:pr-2 ${
                       isActive
                         ? 'bg-surface-elevated text-foreground shadow-sm'
                         : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
@@ -866,14 +887,14 @@ function App() {
                         {renderTabIcon(session.mode, ts)}
                       </span>
                       {tabDirLabel ? (
-                        <span className="flex min-w-0 flex-col justify-center leading-[0.85rem]">
-                          <span className={`truncate text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
-                          <span className="truncate text-[9.5px] text-muted-foreground/80">
+                        <span className="flex min-w-0 flex-col justify-center leading-[0.82rem] sm:leading-[0.85rem]">
+                          <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+                          <span className="truncate text-[9px] text-muted-foreground/80 sm:text-[9.5px]">
                             {tabDirLabel}
                           </span>
                         </span>
                       ) : (
-                        <span className={`truncate text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+                        <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
                       )}
                     </span>
                   </button>
@@ -1294,6 +1315,89 @@ function App() {
         </>
       )}
 
+      {/* Sidebar close action chooser for tmux sessions */}
+      {sidebarCloseChoiceSession && (
+        <>
+          <button
+            type="button"
+            className="fixed inset-0 z-[55] bg-[rgba(0,0,0,0.4)] backdrop-blur-sm cursor-default animate-fade-in"
+            onClick={() => {
+              setSidebarCloseChoiceSessionId(null);
+              setTmuxKillError(null);
+            }}
+            aria-label="Close close-session chooser"
+          />
+          <div
+            className="fixed inset-x-3 bottom-6 z-[60] mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_rgba(0,0,0,0.18)] animate-fade-in sm:bottom-auto sm:top-[15%]"
+            style={{ paddingBottom: safeBottomInset }}
+          >
+            <div className="border-b border-border/15 px-4 py-3">
+              <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Tmux session</div>
+              <div className="mt-0.5 truncate text-[14px] font-medium text-foreground">{sidebarCloseChoiceSession.tmuxSessionName ?? sidebarCloseChoiceSession.name}</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground/80">Choose what "Close" should do for this tmux session.</div>
+            </div>
+            <div className="flex flex-col py-1">
+              <button
+                type="button"
+                onClick={() => {
+                  dispatchCloseSession({
+                    sessionId: sidebarCloseChoiceSession.id,
+                    source: 'sidebar',
+                    closeMode: 'detach',
+                  });
+                  setSidebarCloseChoiceSessionId(null);
+                  setTmuxKillError(null);
+                }}
+                className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-foreground transition hover:bg-surface-2"
+              >
+                <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
+                  <RiTerminalLine size={14} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block font-medium">Detach</span>
+                  <span className="block text-[11px] text-muted-foreground">Close this tab only, keep tmux session running.</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  dispatchCloseSession({
+                    sessionId: sidebarCloseChoiceSession.id,
+                    source: 'sidebar',
+                    closeMode: 'destroy',
+                  });
+                  setSidebarCloseChoiceSessionId(null);
+                }}
+                className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-destructive transition hover:bg-destructive/10"
+              >
+                <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-destructive/15 text-destructive">
+                  <RiDeleteBinLine size={14} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block font-medium">Destroy</span>
+                  <span className="block text-[11px] text-muted-foreground">Kill the tmux session and all processes inside it.</span>
+                </span>
+              </button>
+              {tmuxKillError && (
+                <p className="px-4 py-2 text-[11px] text-destructive">{tmuxKillError}</p>
+              )}
+            </div>
+            <div className="border-t border-border/15 px-3 py-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setSidebarCloseChoiceSessionId(null);
+                  setTmuxKillError(null);
+                }}
+                className="w-full rounded-full bg-surface-2 px-3 py-2 text-[12px] font-medium text-muted-foreground transition hover:bg-surface hover:text-foreground"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
       {/* Tab long-press menu */}
       {tabMenuSessionId && (() => {
         const menuSession = sessions.find((s) => s.id === tabMenuSessionId);
@@ -1332,10 +1436,13 @@ function App() {
                   }}
                   className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-foreground transition hover:bg-surface-2"
                 >
-                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
-                    <RiTerminalLine size={14} />
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-primary/15 text-primary">
+                    <RiPencilLine size={14} />
                   </span>
-                  Rename
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-medium">Rename tab</span>
+                    <span className="block text-[11px] text-muted-foreground">Edit tab title directly</span>
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -1353,23 +1460,39 @@ function App() {
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
                     <RiStackLine size={14} />
                   </span>
-                  Copy cwd
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-medium">Copy cwd</span>
+                    <span className="block text-[11px] text-muted-foreground">Copy current working directory</span>
+                  </span>
                   {tabCopiedHint && tabCopiedHint === ts?.cwd && (
                     <span className="ml-auto text-[11px] text-primary">Copied</span>
                   )}
                 </button>
+                <div className="my-1 border-t border-border/15" />
                 <button
                   type="button"
                   onClick={() => {
                     setTabMenuSessionId(null);
-                    window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: menuSession.id }));
+                    dispatchCloseSession({ sessionId: menuSession.id, source: 'tab-menu', closeMode: 'auto' });
                   }}
                   className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-destructive transition hover:bg-destructive/10"
                 >
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-destructive/15 text-destructive">
                     <RiCloseLine size={14} />
                   </span>
-                  Close session
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-medium">Close tab</span>
+                    <span className="block text-[11px] text-muted-foreground">Remove this tab from the list</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="flex items-center justify-center px-4 py-2 text-[11px] text-muted-foreground/80 transition hover:text-foreground"
+                  onClick={() => {
+                    setTabMenuSessionId(null);
+                  }}
+                >
+                  Tip: tap switches instantly, long-press opens this menu.
                 </button>
               </div>
               <div className="border-t border-border/15 px-3 py-2">
@@ -1504,6 +1627,164 @@ function App() {
                     .finally(() => setAgentRulesSaving(false));
                 }}
               />
+
+              <div className="mt-6 border-t border-border/15 pt-4">
+                <div className="ui-kicker">Program label resolution</div>
+                <h3 className="mt-1 text-sm font-semibold text-foreground">Raw command mapping</h3>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Rules below map the raw command line to the tab display label. User rules run before built-ins.
+                </p>
+                <div className="mt-3 space-y-2 rounded-xl bg-surface-2 p-3">
+                  {sessions.map((session) => {
+                    const ts = terminalSessions.get(session.id);
+                    const raw = ts?.activeProgramRaw ?? null;
+                    const display = ts?.activeProgram ?? null;
+                    return (
+                      <div key={`raw-${session.id}`} className="rounded-lg bg-surface/60 px-2.5 py-2">
+                        <div className="truncate text-[11px] text-muted-foreground">{session.name}</div>
+                        <div className="mt-0.5 text-[11px] text-foreground"><span className="text-muted-foreground">display:</span> {display || '—'}</div>
+                        <div className="mt-0.5 break-all font-mono text-[10px] text-muted-foreground"><span className="text-muted-foreground/80">raw:</span> {raw || '—'}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-3">
+                  <div className="mb-1 text-[11px] font-medium text-foreground">Custom rules</div>
+                  {programRules.map((rule, idx) => (
+                    <div key={rule.id} className="mb-2 rounded-lg bg-surface-2 p-2.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={rule.enabled !== false}
+                          onChange={(e) => {
+                            const next = programRules.map((r, i) => i === idx ? { ...r, enabled: e.target.checked } : r);
+                            setProgramRules(next);
+                            writeCache(PROGRAM_RULES_CACHE_KEY, next);
+                            setProgramRulesSaving(true);
+                            replaceProgramRules(next).then((saved) => {
+                              setProgramRules(saved);
+                              writeCache(PROGRAM_RULES_CACHE_KEY, saved);
+                            }).catch(() => { /* keep local */ }).finally(() => setProgramRulesSaving(false));
+                          }}
+                        />
+                        <select
+                          value={rule.matchType}
+                          onChange={(e) => {
+                            const next = programRules.map((r, i) => i === idx ? { ...r, matchType: e.target.value as ProgramLabelRule['matchType'] } : r);
+                            setProgramRules(next);
+                            writeCache(PROGRAM_RULES_CACHE_KEY, next);
+                            setProgramRulesSaving(true);
+                            replaceProgramRules(next).then((saved) => {
+                              setProgramRules(saved);
+                              writeCache(PROGRAM_RULES_CACHE_KEY, saved);
+                            }).catch(() => { /* keep local */ }).finally(() => setProgramRulesSaving(false));
+                          }}
+                          className="rounded bg-surface px-2 py-1 text-[11px]"
+                        >
+                          <option value="includes">includes</option>
+                          <option value="exact">exact</option>
+                          <option value="prefix">prefix</option>
+                          <option value="regex">regex</option>
+                        </select>
+                        <input
+                          value={rule.pattern}
+                          onChange={(e) => {
+                            const next = programRules.map((r, i) => i === idx ? { ...r, pattern: e.target.value } : r);
+                            setProgramRules(next);
+                            writeCache(PROGRAM_RULES_CACHE_KEY, next);
+                          }}
+                          onBlur={() => {
+                            setProgramRulesSaving(true);
+                            replaceProgramRules(programRules).then((saved) => {
+                              setProgramRules(saved);
+                              writeCache(PROGRAM_RULES_CACHE_KEY, saved);
+                            }).catch(() => { /* keep local */ }).finally(() => setProgramRulesSaving(false));
+                          }}
+                          placeholder="pattern"
+                          className="min-w-[180px] flex-1 rounded bg-surface px-2 py-1 text-[11px] font-mono"
+                        />
+                        <input
+                          value={rule.output}
+                          onChange={(e) => {
+                            const next = programRules.map((r, i) => i === idx ? { ...r, output: e.target.value } : r);
+                            setProgramRules(next);
+                            writeCache(PROGRAM_RULES_CACHE_KEY, next);
+                          }}
+                          onBlur={() => {
+                            setProgramRulesSaving(true);
+                            replaceProgramRules(programRules).then((saved) => {
+                              setProgramRules(saved);
+                              writeCache(PROGRAM_RULES_CACHE_KEY, saved);
+                            }).catch(() => { /* keep local */ }).finally(() => setProgramRulesSaving(false));
+                          }}
+                          placeholder="output"
+                          className="w-28 rounded bg-surface px-2 py-1 text-[11px]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = programRules.filter((_, i) => i !== idx);
+                            setProgramRules(next);
+                            writeCache(PROGRAM_RULES_CACHE_KEY, next);
+                            setProgramRulesSaving(true);
+                            replaceProgramRules(next).then((saved) => {
+                              setProgramRules(saved);
+                              writeCache(PROGRAM_RULES_CACHE_KEY, saved);
+                            }).catch(() => { /* keep local */ }).finally(() => setProgramRulesSaving(false));
+                          }}
+                          className="rounded bg-surface px-2 py-1 text-[11px] text-muted-foreground hover:text-destructive"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next: ProgramLabelRule[] = [
+                          ...programRules,
+                          {
+                            id: `rule-${Date.now()}`,
+                            enabled: true,
+                            priority: 100,
+                            matchType: 'includes',
+                            pattern: '',
+                            output: '',
+                          },
+                        ];
+                        setProgramRules(next);
+                        writeCache(PROGRAM_RULES_CACHE_KEY, next);
+                        setProgramRulesSaving(true);
+                        replaceProgramRules(next).then((saved) => {
+                          setProgramRules(saved);
+                          writeCache(PROGRAM_RULES_CACHE_KEY, saved);
+                        }).catch(() => { /* keep local */ }).finally(() => setProgramRulesSaving(false));
+                      }}
+                      className="rounded-full bg-primary/15 px-3 py-1.5 text-[11px] font-medium text-primary hover:bg-primary/25"
+                    >
+                      Add rule
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProgramRulesSaving(true);
+                        resetProgramRules().then((rules) => {
+                          setProgramRules(rules);
+                          writeCache(PROGRAM_RULES_CACHE_KEY, rules);
+                        }).catch(() => { /* keep local */ }).finally(() => setProgramRulesSaving(false));
+                      }}
+                      className="rounded-full bg-surface-2 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
+                    >
+                      Reset defaults
+                    </button>
+                    <span className="text-[11px] text-muted-foreground">{programRulesSaving ? 'Saving…' : (programRulesLoaded ? `${programRules.length} rules` : '…')}</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </>
@@ -1521,9 +1802,7 @@ function App() {
         activeSessionId={activeSessionId}
         sessionStates={terminalSessions}
         onNewSession={(opts) => dispatchNewSession(opts)}
-        onCloseSession={(sessionId) => {
-          window.dispatchEvent(new CustomEvent('close-terminal-session', { detail: sessionId }));
-        }}
+        onCloseSession={handleSidebarCloseSession}
         onOpenSettings={() => setIsDrawerOpen(true)}
         tmuxAvailable={tmuxStatus.available}
       />

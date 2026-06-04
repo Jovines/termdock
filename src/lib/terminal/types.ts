@@ -36,6 +36,7 @@ export interface TmuxSessionSummary {
   name: string;
   windows: number;
   attached: number;
+  createdAt?: number | null;
 }
 
 export interface TmuxStatus {
@@ -52,6 +53,7 @@ export interface TerminalSession {
   mode?: TerminalMode;
   tmuxSessionName?: string | null;
   activeProgram?: string | null;
+  activeProgramRaw?: string | null;
   activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   cwd?: string | null;
 }
@@ -71,6 +73,7 @@ export interface TerminalStreamEvent {
   mode?: TerminalMode;
   tmuxSessionName?: string | null;
   activeProgram?: string | null;
+  activeProgramRaw?: string | null;
   activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   agentStatus?: AgentStatus | null;
   agentColor?: string | null;
@@ -156,6 +159,7 @@ export interface TerminalAPI {
     mode?: TerminalMode;
     tmuxSessionName?: string | null;
     activeProgram?: string | null;
+    activeProgramRaw?: string | null;
     activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   }>;
 }
@@ -186,6 +190,7 @@ export interface TerminalSessionState {
   mode: TerminalMode;
   tmuxSessionName: string | null;
   activeProgram: string | null;
+  activeProgramRaw: string | null;
   activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   cwd: string | null;
   inCopyMode: boolean;

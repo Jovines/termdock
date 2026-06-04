@@ -25,6 +25,19 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function isTouchLikePointer(event: unknown): boolean {
+  if (!event || typeof event !== 'object') {
+    return false;
+  }
+
+  const maybePointer = event as { pointerType?: string; type?: string };
+  if (typeof maybePointer.pointerType === 'string') {
+    return maybePointer.pointerType === 'touch' || maybePointer.pointerType === 'pen';
+  }
+
+  return typeof maybePointer.type === 'string' && maybePointer.type.startsWith('touch');
+}
+
 export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Sidebar(
   { side, isOpen, drawerWidthPx, onClose, onOpen, children },
   forwardedRef,
@@ -141,7 +154,10 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   }, [drawerWidthPx, isLeft, onClose, onOpen, animateToState]);
 
   const bindPanel = useDrag(
-    ({ active, first, movement: [mx], velocity: [vx], direction: [dx] }) => {
+    ({ active, first, movement: [mx], velocity: [vx], direction: [dx], event }) => {
+      if (!isTouchLikePointer(event)) {
+        return;
+      }
       if (first) {
         dragStartXRef.current = currentXRef.current;
       }
@@ -164,7 +180,11 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   );
 
   const bindEdge = useDrag(
-    ({ active, cancel, movement: [mx], velocity: [vx], direction: [dx] }) => {
+    ({ active, cancel, movement: [mx], velocity: [vx], direction: [dx], event }) => {
+      if (!isTouchLikePointer(event)) {
+        cancel();
+        return;
+      }
       if (isOpenRef.current) {
         cancel();
         return;
