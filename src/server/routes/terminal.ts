@@ -1063,19 +1063,15 @@ const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
   {
     program: 'claude',
     rules: [
-      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
-      { pattern: 'Do you want to proceed\\?|\\[y/N\\]|Approve|Allow', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
+      // 雪花符号(spinner) + 1-25 个中英文字母 + 3 个点(英文 ... 或中文 …)
+      // 严格按"结构"匹配,不依赖具体词,排除 token 数字/输入回显
+      { pattern: '[✢✶✻✽][A-Za-z\\u4E00-\\u9FA5]{1,25}(?:\\.{3}|…)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
     ],
   },
   {
     program: 'claude-code',
     rules: [
-      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
-      { pattern: 'Do you want to proceed\\?|\\[y/N\\]|Approve|Allow', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
+      { pattern: '[✢✶✻✽][A-Za-z\\u4E00-\\u9FA5]{1,25}(?:\\.{3}|…)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
     ],
   },
   {
