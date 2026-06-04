@@ -1069,12 +1069,6 @@ const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
     ],
   },
   {
-    program: 'claude-code',
-    rules: [
-      { pattern: '[✢✶✻✽][A-Za-z\\u4E00-\\u9FA5]{1,25}(?:\\.{3}|…)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-    ],
-  },
-  {
     program: 'opencode',
     rules: [
       { pattern: 'thinking|working|generating', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
