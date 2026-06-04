@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo, useState, useDeferredValue } from 'react';
+import { useEffect, useCallback, useMemo, useState, useDeferredValue, useRef } from 'react';
 import {
   X as RiCloseLine,
   Folder as RiFolder,
@@ -33,6 +33,7 @@ const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; ti
 const RECENT_REFERENCES_STORAGE_KEY = 'termdock:recent-file-references';
 const MAX_RECENT_REFERENCES = 8;
 const MAX_CONTEXT_PACK_FILES = 14;
+const GIT_BUNDLE_SLOW_THRESHOLD_MS = 700;
 
 interface RecentReference {
   path: string;
@@ -260,7 +261,6 @@ export function RightSidebar(
   const [searchOpen, setSearchOpen] = useState(false);
   const deferredFileQuery = useDeferredValue(fileQuery);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
-  const [gitRefreshing, setGitRefreshing] = useState(false);
   const [lastInsertedReference, setLastInsertedReference] = useState<string | null>(null);
   const [recentReferences, setRecentReferences] = useState<RecentReference[]>(() => loadRecentReferences());
   // Wide mode: when the panel is at least 720px we switch to a dual-column
@@ -274,12 +274,58 @@ export function RightSidebar(
   const selectFile = useSidebarStore((s) => s.selectFile);
   const changedFiles = useSidebarStore((s) => s.changedFiles);
   const setChangedFiles = useSidebarStore((s) => s.setChangedFiles);
+  const gitBundleLoading = useSidebarStore((s) => s.gitBundleLoading);
+  const gitBundleSlow = useSidebarStore((s) => s.gitBundleSlow);
+  const gitBundleError = useSidebarStore((s) => s.gitBundleError);
+  const setGitBundleLoading = useSidebarStore((s) => s.setGitBundleLoading);
+  const setGitBundleSlow = useSidebarStore((s) => s.setGitBundleSlow);
+  const setGitBundleError = useSidebarStore((s) => s.setGitBundleError);
+  const markGitBundleLoaded = useSidebarStore((s) => s.markGitBundleLoaded);
 
-  const refreshGitState = useCallback(async () => {
-    if (!rootPath) return;
-    setGitRefreshing(true);
+  const gitBundleRequestIdRef = useRef(0);
+  const gitBundleAbortRef = useRef<AbortController | null>(null);
+  const gitBundleSlowTimerRef = useRef<number | null>(null);
+
+  const clearGitBundleSlowTimer = useCallback(() => {
+    if (gitBundleSlowTimerRef.current !== null) {
+      window.clearTimeout(gitBundleSlowTimerRef.current);
+      gitBundleSlowTimerRef.current = null;
+    }
+  }, []);
+
+  const loadGitBundle = useCallback(async (opts?: { immediate?: boolean }) => {
+    const immediate = opts?.immediate === true;
+    if (!rootPath) {
+      setGitContext(null);
+      setChangedFiles(new Map());
+      setGitBundleError(null);
+      setGitBundleSlow(false);
+      setGitBundleLoading(false);
+      return;
+    }
+
+    const requestId = gitBundleRequestIdRef.current + 1;
+    gitBundleRequestIdRef.current = requestId;
+
+    gitBundleAbortRef.current?.abort();
+    const controller = new AbortController();
+    gitBundleAbortRef.current = controller;
+
+    setGitBundleError(null);
+    setGitBundleSlow(false);
+    setGitBundleLoading(true);
+
+    clearGitBundleSlowTimer();
+    gitBundleSlowTimerRef.current = window.setTimeout(() => {
+      if (gitBundleRequestIdRef.current === requestId) {
+        setGitBundleSlow(true);
+      }
+    }, GIT_BUNDLE_SLOW_THRESHOLD_MS);
+
     try {
-      const bundle = await getGitBundle(rootPath);
+      const bundle = await getGitBundle(rootPath ?? undefined, controller.signal);
+      if (gitBundleRequestIdRef.current !== requestId) return;
+
       const map = new Map<string, string>();
       for (const f of bundle.files) {
         map.set(f.absolutePath || f.path, f.status);
@@ -289,48 +335,49 @@ export function RightSidebar(
       if (bundle.files.length > 0 && useSidebarStore.getState().selectedFilePath === null) {
         setRightTab('diff');
       }
-    } catch {
+      markGitBundleLoaded();
+    } catch (error) {
+      if (gitBundleRequestIdRef.current !== requestId) return;
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+
       // Not a git repo or git not available — keep file explorer usable.
       setGitContext(null);
+      setGitBundleLoading(false);
+      setGitBundleSlow(false);
+      setGitBundleError(immediate ? '刷新失败，点击重试。' : '加载失败，点击重试。');
     } finally {
-      setGitRefreshing(false);
+      if (gitBundleRequestIdRef.current === requestId) {
+        clearGitBundleSlowTimer();
+        setGitBundleLoading(false);
+      }
     }
-  }, [rootPath, setChangedFiles, setRightTab]);
+  }, [clearGitBundleSlowTimer, markGitBundleLoaded, rootPath, setChangedFiles, setGitBundleError, setGitBundleLoading, setGitBundleSlow, setRightTab]);
+
+  useEffect(() => {
+    return () => {
+      gitBundleAbortRef.current?.abort();
+      clearGitBundleSlowTimer();
+    };
+  }, [clearGitBundleSlowTimer]);
+
+  const refreshGitState = useCallback(async () => {
+    await loadGitBundle({ immediate: true });
+  }, [loadGitBundle]);
 
   // Load changed files when sidebar opens — debounced to avoid bursts when
   // the user rapidly switches sessions / cwd. The server already caches
   // findGitRoot; this guards against React render-burst storms.
   useEffect(() => {
     if (!isOpen) return;
-    let cancelled = false;
     const handle = window.setTimeout(() => {
-      if (cancelled) return;
-      setGitRefreshing(true);
-      getGitBundle(rootPath ?? undefined)
-        .then((bundle) => {
-          if (cancelled) return;
-          const map = new Map<string, string>();
-          for (const f of bundle.files) {
-            map.set(f.absolutePath || f.path, f.status);
-          }
-          setChangedFiles(map);
-          setGitContext(bundle.context);
-          if (bundle.files.length > 0 && useSidebarStore.getState().selectedFilePath === null) {
-            setRightTab('diff');
-          }
-        })
-        .catch(() => {
-          if (!cancelled) setGitContext(null);
-        })
-        .finally(() => {
-          if (!cancelled) setGitRefreshing(false);
-        });
+      void loadGitBundle();
     }, 80);
     return () => {
-      cancelled = true;
       window.clearTimeout(handle);
+      gitBundleAbortRef.current?.abort();
+      clearGitBundleSlowTimer();
     };
-  }, [isOpen, rootPath, setChangedFiles, setRightTab]);
+  }, [clearGitBundleSlowTimer, isOpen, loadGitBundle]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -533,16 +580,16 @@ export function RightSidebar(
           >
             <RiSearch size={14} />
           </button>
-          {gitContext?.available && (
+          {rootPath && (
             <button
               type="button"
               onClick={() => void refreshGitState()}
-              disabled={gitRefreshing}
+              disabled={gitBundleLoading}
               className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50 active:scale-95"
               aria-label="Refresh git"
               title="Refresh"
             >
-              <RiRefresh size={13} className={gitRefreshing ? 'animate-spin' : ''} />
+              <RiRefresh size={13} className={gitBundleLoading ? 'animate-spin' : ''} />
             </button>
           )}
           <button
@@ -581,6 +628,22 @@ export function RightSidebar(
                 <RiCloseLine size={12} />
               </button>
             )}
+          </div>
+        )}
+
+        {(gitBundleLoading || gitBundleSlow || gitBundleError) && (
+          <div className={`mt-2 rounded-lg border px-3 py-1.5 text-[11px] ${
+            gitBundleError
+              ? 'border-destructive/30 bg-destructive/10 text-destructive'
+              : gitBundleSlow
+                ? 'border-yellow-400/30 bg-yellow-400/10 text-yellow-300'
+                : 'border-border/20 bg-background-subtle text-muted-foreground'
+          }`}>
+            {gitBundleError
+              ? gitBundleError
+              : gitBundleSlow
+                ? '加载较慢，可继续操作，稍后会自动更新。'
+                : '正在加载改动信息…'}
           </div>
         )}
 

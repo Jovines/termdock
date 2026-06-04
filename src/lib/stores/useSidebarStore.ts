@@ -32,6 +32,12 @@ interface SidebarState {
   // Changed files (from git diff --name-status)
   changedFiles: Map<string, string>;
 
+  // Git bundle loading state (for right sidebar UX)
+  gitBundleLoading: boolean;
+  gitBundleSlow: boolean;
+  gitBundleError: string | null;
+  gitBundleLastLoadedAt: number | null;
+
   // Actions
   openLeft: () => void;
   closeLeft: () => void;
@@ -47,6 +53,10 @@ interface SidebarState {
   setDirectoryCache: (path: string, entries: FileTreeNode[]) => void;
   setDiff: (filePath: string | null, content: string | null, loading: boolean, error: string | null) => void;
   setChangedFiles: (files: Map<string, string>) => void;
+  setGitBundleLoading: (loading: boolean) => void;
+  setGitBundleSlow: (slow: boolean) => void;
+  setGitBundleError: (error: string | null) => void;
+  markGitBundleLoaded: () => void;
 }
 
 export const useSidebarStore = create<SidebarState>((set) => ({
@@ -62,6 +72,10 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   diffLoading: false,
   diffError: null,
   changedFiles: new Map(),
+  gitBundleLoading: false,
+  gitBundleSlow: false,
+  gitBundleError: null,
+  gitBundleLastLoadedAt: null,
 
   openLeft: () => set({ leftOpen: true }),
   closeLeft: () => set({ leftOpen: false }),
@@ -84,6 +98,10 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       diffLoading: false,
       diffError: null,
       changedFiles: new Map(),
+      gitBundleLoading: false,
+      gitBundleSlow: false,
+      gitBundleError: null,
+      gitBundleLastLoadedAt: null,
     };
   }),
 
@@ -108,4 +126,8 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     set({ diffFilePath: filePath, diffContent: content, diffLoading: loading, diffError: error }),
 
   setChangedFiles: (files) => set({ changedFiles: files }),
+  setGitBundleLoading: (loading) => set({ gitBundleLoading: loading }),
+  setGitBundleSlow: (slow) => set({ gitBundleSlow: slow }),
+  setGitBundleError: (error) => set({ gitBundleError: error }),
+  markGitBundleLoaded: () => set({ gitBundleLastLoadedAt: Date.now(), gitBundleLoading: false, gitBundleSlow: false, gitBundleError: null }),
 }));

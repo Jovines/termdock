@@ -86,7 +86,7 @@ echo "my-secret" | termdock --set-password
 termdock --clear-password
 ```
 
-密码状态存放在 `~/.termdock/auth.json`（mode 0600，scrypt 哈希）。修改密码会使所有已登录会话失效。
+密码状态存放在 `~/.termdock/auth.json`（mode 0600，scrypt 哈希，不可逆）。修改密码会使所有已登录会话失效。
 
 服务在未设置密码时启动会打印醒目的安全警告。
 
@@ -99,6 +99,22 @@ cd termdock
 ```
 
 脚本会执行 `npm install` → `npm rebuild node-pty --build-from-source` → `npm run build` → `npm install -g .`。在 macOS 上会额外检查 `node-pty` 的 `spawn-helper` 是否生成成功，若失败会提示安装 Xcode Command Line Tools。
+
+若你开启了访问密码，并希望在自动化脚本里无交互访问（不关闭鉴权），可先尝试复用 cookie，再按需登录刷新：
+
+```bash
+# 首先直接尝试复用已有 cookie（推荐）
+bash auth-login.sh
+
+# 仅当 cookie 失效时，再提供原密码刷新登录态
+export TERMDOCK_PASSWORD="<your-termdock-password>"
+bash auth-login.sh
+
+# 自动化请求统一带 cookie
+curl -b ~/.termdock/automation.cookies http://localhost:9834/api/auth/status
+```
+
+这不会创建第二套密码，也不会关闭鉴权。
 
 卸载：
 

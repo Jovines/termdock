@@ -11,6 +11,8 @@ export interface TmuxPane {
   height: number;
   top: number;
   left: number;
+  pid?: number | null;
+  tty?: string | null;
   command: string;
   title: string;
 }
@@ -54,13 +56,13 @@ export interface TerminalSession {
   tmuxSessionName?: string | null;
   activeProgram?: string | null;
   activeProgramRaw?: string | null;
-  activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+  activeProgramSource?: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   cwd?: string | null;
 }
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -74,7 +76,7 @@ export interface TerminalStreamEvent {
   tmuxSessionName?: string | null;
   activeProgram?: string | null;
   activeProgramRaw?: string | null;
-  activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+  activeProgramSource?: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   agentStatus?: AgentStatus | null;
   agentColor?: string | null;
   agentIndicator?: AgentIndicator | null;
@@ -85,6 +87,11 @@ export interface TerminalStreamEvent {
   replayChunks?: string[];
   replayLastSeq?: number;
   replayOutOfWindow?: boolean;
+  seq?: number;
+  cols?: number;
+  rows?: number;
+  ok?: boolean;
+  error?: string;
 }
 
 // Create Session Options
@@ -123,6 +130,7 @@ export interface ResizeTerminalPayload {
   sessionId: string;
   cols: number;
   rows: number;
+  seq?: number;
 }
 
 // Event Handlers
@@ -160,7 +168,7 @@ export interface TerminalAPI {
     tmuxSessionName?: string | null;
     activeProgram?: string | null;
     activeProgramRaw?: string | null;
-    activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+    activeProgramSource?: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   }>;
 }
 
@@ -191,7 +199,7 @@ export interface TerminalSessionState {
   tmuxSessionName: string | null;
   activeProgram: string | null;
   activeProgramRaw: string | null;
-  activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+  activeProgramSource: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   cwd: string | null;
   inCopyMode: boolean;
   isConnecting: boolean;

@@ -40,6 +40,7 @@ const exitedAtBottom = new Set<string>();
 
 
 type TerminalMode = 'shell' | 'tmux';
+type ActiveProgramSource = 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown';
 
 interface TmuxPane {
   id: string;
@@ -49,6 +50,8 @@ interface TmuxPane {
   height: number;
   top: number;
   left: number;
+  pid: number | null;
+  tty: string | null;
   command: string;
   title: string;
   currentPath: string;
@@ -119,7 +122,7 @@ interface TerminalSession {
   activeProgram: {
     command: string | null;
     rawCommand: string | null;
-    source: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown';
+    source: ActiveProgramSource;
     updatedAt: number;
   } | null;
   dataDisposable?: { dispose: () => void };
@@ -404,6 +407,11 @@ const CLEANUP_INTERVAL = isDevelopment ? 60 * 1000 : 5 * 60 * 1000;
 const RECONNECT_SCROLLBACK = parseInt(process.env.TERMINAL_RECONNECT_SCROLLBACK || '200', 10);
 const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10);
 const ACTIVE_PROGRAM_POLL_INTERVAL = parseInt(process.env.TERMINAL_ACTIVE_PROGRAM_POLL_INTERVAL || '1200', 10);
+const TERMINAL_DEGRADED_IDLE_MS = parseInt(process.env.TERMINAL_DEGRADED_IDLE_MS || '5000', 10);
+const TERMINAL_DEGRADED_INPUT_BURST = parseInt(process.env.TERMINAL_DEGRADED_INPUT_BURST || '80', 10);
+const TERMINAL_INPUT_BURST_WINDOW_MS = parseInt(process.env.TERMINAL_INPUT_BURST_WINDOW_MS || '1000', 10);
+const TMUX_POLL_INTERVAL_DEGRADED = parseInt(process.env.TMUX_POLL_INTERVAL_DEGRADED || '1200', 10);
+const ACTIVE_PROGRAM_POLL_INTERVAL_DEGRADED = parseInt(process.env.TERMINAL_ACTIVE_PROGRAM_POLL_INTERVAL_DEGRADED || '2500', 10);
 const TMUX_DELIMITER = '\x1f';
 // 输出历史缓冲区（限制大小）
 const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
@@ -1236,7 +1244,7 @@ interface ProgramLabelRule {
   matchType: 'exact' | 'includes' | 'prefix' | 'regex';
   pattern: string;
   output: string;
-  source?: Array<'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown'>;
+  source?: ActiveProgramSource[];
 }
 
 // Built-in default rules
@@ -1244,9 +1252,7 @@ const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
   {
     programs: ['claude', 'claude-code'],
     rules: [
-      { pattern: '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: '[·✢✳✶✻✽] (Thinking|Generating|Reading|Writing|Searching|Analyzing|Processing)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: 'Thinking\\.\\.\\.|Generating\\.\\.\\.|Reading\\.\\.\\.|Writing\\.\\.\\.|Searching\\.\\.\\.|Analyzing\\.\\.\\.|Processing\\.\\.\\.', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
+      { pattern: '[·✢✳✶✻✽]\\s?[A-Za-z\\u4e00-\\u9fff][A-Za-z\\u4e00-\\u9fff\\s]{1,23}…', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
     ],
   },
   {
@@ -1391,7 +1397,7 @@ function normalizeProgramLabelRules(input: unknown): ProgramLabelRule[] {
       try { new RegExp(item.pattern, 'i'); } catch { continue; }
     }
     const source = Array.isArray(item.source)
-      ? item.source.filter((v): v is 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' => v === 'tmux-pane' || v === 'shell-tty' || v === 'shell-pid' || v === 'unknown')
+      ? item.source.filter((v): v is ActiveProgramSource => v === 'tmux-pane' || v === 'tmux-tty' || v === 'shell-tty' || v === 'shell-pid' || v === 'unknown')
       : undefined;
     result.push({
       id: item.id,
@@ -1444,7 +1450,7 @@ function saveProgramRulesToDisk(rules: ProgramLabelRule[]): ProgramLabelRule[] {
 function matchProgramLabelRule(
   rule: ProgramLabelRule,
   raw: string,
-  source: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown',
+  source: ActiveProgramSource,
 ): boolean {
   if (rule.enabled === false) return false;
   if (Array.isArray(rule.source) && rule.source.length > 0 && !rule.source.includes(source)) return false;
@@ -1462,7 +1468,7 @@ function matchProgramLabelRule(
 function resolveProgramWithRules(
   detectedProgram: string | null,
   rawCommand: string | null,
-  source: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown',
+  source: ActiveProgramSource,
 ): string | null {
   const raw = (rawCommand || '').trim();
   if (!raw) return detectedProgram;
@@ -1580,20 +1586,171 @@ function evaluateAgentStatus(sessionId: string, session: TerminalSession, latest
 
 // ── end Agent status detection ──
 
-function getActiveProgramFromTmuxLayout(layout: TmuxLayout): { command: string | null; rawCommand: string | null; source: 'tmux-pane'; updatedAt: number } | null {
+interface ProcessSnapshotRow {
+  pid: number;
+  ppid: number;
+  pgid: number;
+  tpgid: number;
+  stat: string;
+  comm: string | null;
+  args: string;
+  rawCommand: string | null;
+  detected: string | null;
+}
+
+function parseProcessSnapshotRows(stdout: string): ProcessSnapshotRow[] {
+  return stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s*(.*)$/);
+      if (!match) {
+        return null;
+      }
+
+      const comm = normalizeProgramName(match[6] || null);
+      const args = (match[7] || '').trim();
+      const rawCommand = args || comm;
+      const detected = extractProgramFromCommandLine(comm, args);
+
+      return {
+        pid: Number.parseInt(match[1] || '0', 10),
+        ppid: Number.parseInt(match[2] || '0', 10),
+        pgid: Number.parseInt(match[3] || '0', 10),
+        tpgid: Number.parseInt(match[4] || '0', 10),
+        stat: match[5] || '',
+        comm,
+        args,
+        rawCommand,
+        detected,
+      } satisfies ProcessSnapshotRow;
+    })
+    .filter((row): row is ProcessSnapshotRow => row !== null);
+}
+
+const LOW_SIGNAL_PROGRAMS = new Set([
+  'caffeinate',
+  'sleep',
+  'cat',
+  'less',
+  'more',
+  'tail',
+  'tee',
+]);
+
+function scoreProcessCandidate(row: ProcessSnapshotRow, rootPid: number | null): number {
+  if (!row.detected) return Number.NEGATIVE_INFINITY;
+
+  let score = 0;
+  if (rootPid !== null && row.pid !== rootPid) score += 5;
+  if (isAiToolProgram(row.detected)) score += 120;
+  if (!PROGRAM_WRAPPERS.has(row.detected)) score += 25;
+  if (LOW_SIGNAL_PROGRAMS.has(row.detected)) score -= 70;
+
+  return score;
+}
+
+function pickBestCandidate(rows: ProcessSnapshotRow[], rootPid: number | null): ProcessSnapshotRow | null {
+  let best: ProcessSnapshotRow | null = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const row of rows) {
+    const score = scoreProcessCandidate(row, rootPid);
+    if (!Number.isFinite(score)) continue;
+    if (score > bestScore) {
+      best = row;
+      bestScore = score;
+      continue;
+    }
+    // Tie-breaker: prefer later rows so we bias to most recent foreground task.
+    if (score === bestScore && best) {
+      best = row;
+    }
+  }
+
+  return best;
+}
+
+function pickPreferredProcessForTty(rows: ProcessSnapshotRow[], rootPid: number | null): ProcessSnapshotRow | null {
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const nonZombieRows = rows.filter((row) => !row.stat.startsWith('Z'));
+  const rowsForScan = nonZombieRows.length > 0 ? nonZombieRows : rows;
+
+  const foregroundRows = rowsForScan.filter((row) => row.detected && row.tpgid > 0 && row.pgid === row.tpgid);
+  const bestForeground = pickBestCandidate(foregroundRows, rootPid);
+  if (bestForeground?.detected) {
+    return bestForeground;
+  }
+
+  if (rootPid !== null) {
+    const rootRow = rowsForScan.find((row) => row.pid === rootPid && row.detected);
+    if (rootRow) return rootRow;
+  }
+
+  const bestAny = pickBestCandidate(rowsForScan, rootPid);
+  if (bestAny?.detected) {
+    return bestAny;
+  }
+
+  return rowsForScan.slice().reverse().find((row) => !!row.detected) ?? null;
+}
+
+async function detectTmuxActiveProgram(layout: TmuxLayout): Promise<{ command: string | null; rawCommand: string | null; source: ActiveProgramSource; updatedAt: number } | null> {
   const activeWindow = layout.windows.find((window) => window.id === layout.activeWindowId);
   const activePane = activeWindow?.panes.find((pane) => pane.id === layout.activePaneId);
-  const rawCommand = activePane?.command || null;
-  const detected = normalizeProgramName(rawCommand);
-  const command = resolveProgramWithRules(detected, rawCommand, 'tmux-pane');
+  if (!activePane) {
+    return null;
+  }
 
+  const paneRawCommand = activePane.command || null;
+  const paneDetected = normalizeProgramName(paneRawCommand);
+
+  if (activePane.tty) {
+    const ttyName = activePane.tty.startsWith('/dev/') ? activePane.tty.slice('/dev/'.length) : activePane.tty;
+    if (ttyName) {
+      try {
+        const { stdout } = await execFileAsync('ps', [
+          '-t',
+          ttyName,
+          '-o',
+          'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args=',
+        ], {
+          timeout: 2500,
+          maxBuffer: 512 * 1024,
+        });
+
+        const rows = parseProcessSnapshotRows(stdout);
+        const preferred = pickPreferredProcessForTty(rows, activePane.pid);
+
+        if (preferred?.detected) {
+          const command = resolveProgramWithRules(preferred.detected, preferred.rawCommand, 'tmux-tty');
+          if (command) {
+            return {
+              command,
+              rawCommand: preferred.rawCommand,
+              source: 'tmux-tty',
+              updatedAt: Date.now(),
+            };
+          }
+        }
+      } catch {
+        // Fall through to pane-level detection.
+      }
+    }
+  }
+
+  const command = resolveProgramWithRules(paneDetected, paneRawCommand, 'tmux-pane');
   if (!command) {
     return null;
   }
 
   return {
     command,
-    rawCommand,
+    rawCommand: paneRawCommand,
     source: 'tmux-pane',
     updatedAt: Date.now(),
   };
@@ -1885,16 +2042,17 @@ async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
       '-t',
       windowId,
       '-F',
-      `#{pane_id}${TMUX_DELIMITER}#{pane_index}${TMUX_DELIMITER}#{pane_active}${TMUX_DELIMITER}#{pane_width}${TMUX_DELIMITER}#{pane_height}${TMUX_DELIMITER}#{pane_top}${TMUX_DELIMITER}#{pane_left}${TMUX_DELIMITER}#{pane_current_command}${TMUX_DELIMITER}#{pane_title}${TMUX_DELIMITER}#{pane_current_path}`,
+      `#{pane_id}${TMUX_DELIMITER}#{pane_index}${TMUX_DELIMITER}#{pane_active}${TMUX_DELIMITER}#{pane_width}${TMUX_DELIMITER}#{pane_height}${TMUX_DELIMITER}#{pane_top}${TMUX_DELIMITER}#{pane_left}${TMUX_DELIMITER}#{pane_pid}${TMUX_DELIMITER}#{pane_tty}${TMUX_DELIMITER}#{pane_current_command}${TMUX_DELIMITER}#{pane_title}${TMUX_DELIMITER}#{pane_current_path}`,
     ]);
 
     const panes: TmuxPane[] = panesRaw.trim().split('\n').filter(Boolean).map((paneLine) => {
-      const paneRow = parseDelimitedRow(paneLine, 10);
+      const paneRow = parseDelimitedRow(paneLine, 12);
       if (!paneRow) {
         return null;
       }
 
-      const [paneId, paneIndexRaw, paneActiveRaw, widthRaw, heightRaw, topRaw, leftRaw, command, title, currentPath] = paneRow;
+      const [paneId, paneIndexRaw, paneActiveRaw, widthRaw, heightRaw, topRaw, leftRaw, panePidRaw, paneTty, command, title, currentPath] = paneRow;
+      const panePid = Number.parseInt(panePidRaw || '', 10);
       return {
         id: paneId,
         index: parseInt(paneIndexRaw || '0', 10),
@@ -1903,6 +2061,8 @@ async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
         height: parseInt(heightRaw || '0', 10),
         top: parseInt(topRaw || '0', 10),
         left: parseInt(leftRaw || '0', 10),
+        pid: Number.isFinite(panePid) && panePid > 0 ? panePid : null,
+        tty: (paneTty || '').trim() || null,
         command: command || '',
         title: title || '',
         currentPath: currentPath || '',
@@ -2880,7 +3040,7 @@ router.get('/:sessionId/stream', async (req, res) => {
       if (ap) session.activeProgram = ap;
     } else if (session.mode === 'tmux' && session.tmuxSessionName) {
       const layout = await getTmuxLayout(session.tmuxSessionName);
-      const ap = getActiveProgramFromTmuxLayout(layout);
+      const ap = await detectTmuxActiveProgram(layout);
       if (ap) session.activeProgram = ap;
     }
   } catch { /* ignore */ }
@@ -2950,7 +3110,7 @@ router.get('/:sessionId/stream', async (req, res) => {
 
     try {
       const layout = await getTmuxLayout(session.tmuxSessionName);
-      maybeWriteActiveProgram(getActiveProgramFromTmuxLayout(layout));
+      maybeWriteActiveProgram(await detectTmuxActiveProgram(layout));
       const newCwd = getCwdFromTmuxLayout(layout);
       if (newCwd && newCwd !== session.cwd) {
         session.cwd = newCwd;
@@ -3139,19 +3299,22 @@ router.post('/:sessionId/resize', (req, res) => {
     return res.status(404).json({ error: 'Terminal session not found' });
   }
 
-  const { cols, rows } = req.body;
-  if (!cols || !rows) {
+  const cols = Number(req.body?.cols);
+  const rows = Number(req.body?.rows);
+  const seq = Number(req.body?.seq);
+  const hasSeq = Number.isFinite(seq) && seq > 0;
+  if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) {
     return res.status(400).json({ error: 'cols and rows are required' });
   }
 
   try {
     session.ptyProcess.resize(cols, rows);
     session.lastActivity = Date.now();
-    res.json({ success: true, cols, rows });
+    res.json({ success: true, ok: true, cols, rows, seq: hasSeq ? seq : undefined });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('Failed to resize terminal:', errorMessage);
-    res.status(500).json({ error: errorMessage || 'Failed to resize terminal' });
+    res.status(500).json({ error: errorMessage || 'Failed to resize terminal', ok: false, seq: hasSeq ? seq : undefined });
   }
 });
 
@@ -3463,22 +3626,47 @@ export function handleTerminalWebSocket(
   clientId: string,
   options: { sinceSeq?: number } = {},
 ): void {
+  let lastResizeSeq = 0;
+  let inputCountWindowStart = Date.now();
+  let inputCountInWindow = 0;
+  let degradedMode = false;
+
+  const markInputAndEvaluateDegraded = () => {
+    const now = Date.now();
+    if (now - inputCountWindowStart > TERMINAL_INPUT_BURST_WINDOW_MS) {
+      inputCountWindowStart = now;
+      inputCountInWindow = 0;
+    }
+    inputCountInWindow += 1;
+    degradedMode = inputCountInWindow >= TERMINAL_DEGRADED_INPUT_BURST;
+  };
+
   const session = terminalSessions.get(sessionId);
   if (!session) {
     ws.close(4001, 'Session not found');
     return;
   }
-  const sinceSeq = options.sinceSeq ?? 0;
 
-  // Register client
-  let clients = wsClients.get(sessionId);
-  if (!clients) {
-    clients = new Map();
-    wsClients.set(sessionId, clients);
-  }
-  clients.set(clientId, ws);
-  session.lastActivity = Date.now();
-  syncClientCountToTmux(sessionId);
+  const shouldUseDegradedPolling = () => {
+    const now = Date.now();
+    const idleTooLong = now - session.lastActivity >= TERMINAL_DEGRADED_IDLE_MS;
+    return degradedMode || idleTooLong;
+  };
+  const sinceSeq = options.sinceSeq ?? 0;
+  let clientRegistered = false;
+
+  const registerClient = () => {
+    if (clientRegistered) return;
+    let clients = wsClients.get(sessionId);
+    if (!clients) {
+      clients = new Map();
+      wsClients.set(sessionId, clients);
+    }
+    clients.set(clientId, ws);
+    clientRegistered = true;
+    session.lastActivity = Date.now();
+    syncClientCountToTmux(sessionId);
+  };
 
   void (async () => {
     // 连接时立即检测一次 activeProgram，避免前端首次显示闪烁
@@ -3488,7 +3676,7 @@ export function handleTerminalWebSocket(
         if (ap) session.activeProgram = ap;
       } else if (session.mode === 'tmux' && session.tmuxSessionName) {
         const layout = await getTmuxLayout(session.tmuxSessionName);
-        const ap = getActiveProgramFromTmuxLayout(layout);
+        const ap = await detectTmuxActiveProgram(layout);
         if (ap) session.activeProgram = ap;
       }
     } catch { /* ignore */ }
@@ -3547,11 +3735,17 @@ export function handleTerminalWebSocket(
       replayLastSeq,
       replayOutOfWindow,
     }));
+
+    // 首帧边界：先把 connected（含 replay）交付给客户端，
+    // 再加入 WS 广播集合，避免同一连接出现“先 data 后 connected”。
+    registerClient();
   })();
 
   // Tmux layout polling (per-client, like the SSE stream does)
   let tmuxInterval: ReturnType<typeof setInterval> | null = null;
   let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
+  let tmuxPollTimer: ReturnType<typeof setTimeout> | null = null;
+  let shellPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   if (session.mode === 'tmux' && session.tmuxSessionName) {
     let lastTmuxLayoutSnapshot = '';
@@ -3560,11 +3754,11 @@ export function handleTerminalWebSocket(
     let lastTmuxMetaWriteAt = 0;
 
     const sendTmuxLayout = async () => {
-      if (ws.readyState !== ws.OPEN) return;
+      if (!clientRegistered || ws.readyState !== ws.OPEN) return;
       try {
         const layout = await getTmuxLayout(session.tmuxSessionName!);
         // Update active program
-        const ap = getActiveProgramFromTmuxLayout(layout);
+        const ap = await detectTmuxActiveProgram(layout);
         const apSnapshot = JSON.stringify(ap ?? null);
         if (apSnapshot !== lastActiveProgramSnapshot) {
           lastActiveProgramSnapshot = apSnapshot;
@@ -3606,8 +3800,16 @@ export function handleTerminalWebSocket(
       } catch { /* ignore polling errors */ }
     };
 
-    sendTmuxLayout();
-    tmuxInterval = setInterval(sendTmuxLayout, TMUX_POLL_INTERVAL);
+    const runTmuxLayout = async () => {
+      await sendTmuxLayout();
+      if (ws.readyState !== ws.OPEN) return;
+      const nextInterval = shouldUseDegradedPolling() ? TMUX_POLL_INTERVAL_DEGRADED : TMUX_POLL_INTERVAL;
+      tmuxPollTimer = setTimeout(() => {
+        void runTmuxLayout();
+      }, nextInterval);
+    };
+
+    void runTmuxLayout();
   }
 
   // Active program polling (shell mode)
@@ -3615,7 +3817,7 @@ export function handleTerminalWebSocket(
     let lastApSnapshot = JSON.stringify(session.activeProgram ?? null);
 
     const pollActiveProgram = async () => {
-      if (ws.readyState !== ws.OPEN) return;
+      if (!clientRegistered || ws.readyState !== ws.OPEN) return;
       try {
         const ap = await detectShellActiveProgram(session);
         const snapshot = JSON.stringify(ap ?? null);
@@ -3646,7 +3848,18 @@ export function handleTerminalWebSocket(
       } catch { /* ignore */ }
     };
 
-    activeProgramInterval = setInterval(pollActiveProgram, ACTIVE_PROGRAM_POLL_INTERVAL);
+    const runShellPoll = async () => {
+      await pollActiveProgram();
+      if (ws.readyState !== ws.OPEN) return;
+      const nextInterval = shouldUseDegradedPolling()
+        ? ACTIVE_PROGRAM_POLL_INTERVAL_DEGRADED
+        : ACTIVE_PROGRAM_POLL_INTERVAL;
+      shellPollTimer = setTimeout(() => {
+        void runShellPoll();
+      }, nextInterval);
+    };
+
+    void runShellPoll();
   }
 
   // Handle client → server messages
@@ -3663,7 +3876,7 @@ export function handleTerminalWebSocket(
         case 'input': {
           if (typeof msg.data === 'string' && msg.data.length > 0) {
             session.lastActivity = Date.now();
-            console.log('[WS input] sessionId=', sessionId, 'data=', JSON.stringify(msg.data), 'len=', msg.data.length, 'ts=', Date.now());
+            markInputAndEvaluateDegraded();
             session.ptyProcess.write(msg.data);
           }
           break;
@@ -3671,8 +3884,35 @@ export function handleTerminalWebSocket(
         case 'resize': {
           const cols = Number(msg.cols);
           const rows = Number(msg.rows);
-          if (cols > 0 && rows > 0) {
+          const seq = Number(msg.seq);
+          const hasSeq = Number.isFinite(seq) && seq > 0;
+
+          if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) {
+            ws.send(JSON.stringify({ type: 'resize-ack', ok: false, error: 'Invalid resize payload', seq: hasSeq ? seq : undefined }));
+            break;
+          }
+
+          if (hasSeq && seq <= lastResizeSeq) {
+            ws.send(JSON.stringify({ type: 'resize-ack', ok: true, stale: true, seq, cols, rows }));
+            break;
+          }
+
+          try {
             session.ptyProcess.resize(cols, rows);
+            session.lastActivity = Date.now();
+            if (hasSeq) {
+              lastResizeSeq = Math.max(lastResizeSeq, seq);
+            }
+            ws.send(JSON.stringify({ type: 'resize-ack', ok: true, seq: hasSeq ? seq : undefined, cols, rows }));
+          } catch (error) {
+            ws.send(JSON.stringify({
+              type: 'resize-ack',
+              ok: false,
+              seq: hasSeq ? seq : undefined,
+              cols,
+              rows,
+              error: error instanceof Error ? error.message : 'Failed to resize terminal',
+            }));
           }
           break;
         }
@@ -3717,6 +3957,8 @@ export function handleTerminalWebSocket(
   ws.on('close', () => {
     if (tmuxInterval) clearInterval(tmuxInterval);
     if (activeProgramInterval) clearInterval(activeProgramInterval);
+    if (tmuxPollTimer) clearTimeout(tmuxPollTimer);
+    if (shellPollTimer) clearTimeout(shellPollTimer);
     const clients = wsClients.get(sessionId);
     if (clients) {
       clients.delete(clientId);

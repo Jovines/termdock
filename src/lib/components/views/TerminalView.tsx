@@ -106,6 +106,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const clearTerminalSession = terminalStore.clearTerminalSession;
   const removeTerminalSession = terminalStore.removeTerminalSession;
   const clearBuffer = terminalStore.clearBuffer;
+  const replaceBuffer = terminalStore.replaceBuffer;
   const setSessionActiveProgram = terminalStore.setSessionActiveProgram;
   const setSessionCwd = terminalStore.setSessionCwd;
   const setSessionCopyMode = terminalStore.setSessionCopyMode;
@@ -158,10 +159,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     timerId: number | null;
     pending: { cols: number; rows: number } | null;
     lastSent: { cols: number; rows: number } | null;
+    nextSeq: number;
+    inflightSeq: number | null;
+    lastAckedSeq: number;
   }>({
     timerId: null,
     pending: null,
     lastSent: null,
+    nextSeq: 0,
+    inflightSeq: null,
+    lastAckedSeq: 0,
   });
 
   React.useEffect(() => {
@@ -341,6 +348,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const resizeState = resizeStateRef.current;
     resizeState.lastSent = null;
     resizeState.pending = null;
+    resizeState.inflightSeq = null;
+    resizeState.lastAckedSeq = 0;
+    resizeState.nextSeq = 0;
     if (resizeState.timerId !== null) {
       window.clearTimeout(resizeState.timerId);
       resizeState.timerId = null;
@@ -534,6 +544,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   setSessionCopyMode(storeSessionId, false);
                 } else {
                   resizeStateRef.current.lastSent = null;
+                  resizeStateRef.current.inflightSeq = null;
+                  resizeStateRef.current.lastAckedSeq = 0;
+                  resizeStateRef.current.nextSeq = 0;
                   tmuxSessionResizedRef.current = null;
                   skipLayoutResizeRef.current = true;
                 }
@@ -568,19 +581,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 const replayChunks = event.replayChunks;
                 if (replayChunks && replayChunks.length > 0) {
                   if (event.replayOutOfWindow) {
-                    debugSession(`[Terminal] Replay out-of-window, clearing buffer before replay (${replayChunks.length} chunks)`);
-                    clearBuffer(storeSessionId);
+                    debugSession(`[Terminal] Replay out-of-window, replacing buffer before replay (${replayChunks.length} chunks)`);
                     terminalControllerRef.current?.clear();
+                    replaceBuffer(storeSessionId, replayChunks);
                   } else {
                     debugSession(`[Terminal] Replay incremental: ${replayChunks.length} chunks`);
+                    for (const chunk of replayChunks) {
+                      appendToBuffer(storeSessionId, chunk);
+                    }
                   }
                   // 抑制 replay 期间的用户输入，避免 echo 顺序错乱。
                   const replayBytes = replayChunks.reduce((total, chunk) => total + chunk.length, 0);
                   const suppressionMs = Math.max(200, Math.min(1500, Math.ceil(replayBytes / 200)));
                   suppressInputUntilRef.current = Math.max(suppressInputUntilRef.current, Date.now() + suppressionMs);
-                  for (const chunk of replayChunks) {
-                    appendToBuffer(storeSessionId, chunk);
-                  }
                 }
                 break;
               }
@@ -628,6 +641,55 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   event.agentColor ?? null,
                   event.agentIndicator ?? null,
                 );
+                break;
+              }
+              case 'resize-ack': {
+                const ackSeq = typeof event.seq === 'number' ? event.seq : null;
+                if (ackSeq === null || !Number.isFinite(ackSeq) || ackSeq <= 0) {
+                  break;
+                }
+
+                const resizeState = resizeStateRef.current;
+                if (ackSeq <= resizeState.lastAckedSeq) {
+                  debugKeyboard('resize ack dropped (stale)', {
+                    ackSeq,
+                    lastAckedSeq: resizeState.lastAckedSeq,
+                    ok: event.ok !== false,
+                  });
+                  break;
+                }
+
+                resizeState.lastAckedSeq = ackSeq;
+                if (resizeState.inflightSeq !== null && ackSeq >= resizeState.inflightSeq) {
+                  resizeState.inflightSeq = null;
+                }
+
+                if (event.ok === false) {
+                  const errMsg = typeof event.error === 'string' && event.error.length > 0
+                    ? event.error
+                    : 'Resize failed';
+                  debugKeyboard('resize ack error', {
+                    ackSeq,
+                    error: errMsg,
+                    cols: event.cols,
+                    rows: event.rows,
+                  });
+                  setConnectionError(errMsg);
+                } else {
+                  debugKeyboard('resize ack accepted', {
+                    ackSeq,
+                    cols: event.cols,
+                    rows: event.rows,
+                  });
+                }
+
+                if (resizeState.pending) {
+                  if (resizeState.timerId !== null) {
+                    window.clearTimeout(resizeState.timerId);
+                    resizeState.timerId = null;
+                  }
+                  flushPendingResize();
+                }
                 break;
               }
               case 'exit': {
@@ -706,7 +768,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearTerminalSession, debugSession, disconnectStream, setConnecting, setSessionActiveProgram, terminal, sessionId]
+    [appendToBuffer, clearTerminalSession, debugSession, disconnectStream, replaceBuffer, setConnecting, setSessionActiveProgram, terminal, sessionId]
   );
 
   const hasInitializedRef = React.useRef(false);
@@ -1046,13 +1108,36 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
 
+    const seq = resizeState.nextSeq + 1;
+    resizeState.nextSeq = seq;
+    resizeState.inflightSeq = seq;
     resizeState.lastSent = pending;
     resizeState.pending = null;
 
-    debugKeyboard('resize flush', pending);
+    debugKeyboard('resize flush', {
+      ...pending,
+      seq,
+    });
 
-    void terminal.resize({ sessionId: terminalId, cols: pending.cols, rows: pending.rows }).catch(() => {
+    void terminal.resize({ sessionId: terminalId, cols: pending.cols, rows: pending.rows, seq }).catch((error) => {
+      const errMsg = error instanceof Error ? error.message : 'Failed to resize terminal';
+      debugKeyboard('resize send error', {
+        seq,
+        cols: pending.cols,
+        rows: pending.rows,
+        error: errMsg,
+      });
 
+      const current = resizeStateRef.current;
+      if (current.lastSent && current.lastSent.cols === pending.cols && current.lastSent.rows === pending.rows) {
+        current.pending = { cols: pending.cols, rows: pending.rows };
+      }
+
+      if (current.timerId === null) {
+        current.timerId = window.setTimeout(() => {
+          flushPendingResize();
+        }, RESIZE_THROTTLE_MS);
+      }
     });
   }, [terminal, debugKeyboard]);
 

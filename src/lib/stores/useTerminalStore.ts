@@ -13,7 +13,7 @@ export interface TerminalStore {
   setSessionActiveProgram: (
     sessionId: string,
     activeProgram: string | null,
-    activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null,
+    activeProgramSource?: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null,
     activeProgramRaw?: string | null,
   ) => void;
   setSessionCwd: (sessionId: string, cwd: string | null) => void;
@@ -22,6 +22,7 @@ export interface TerminalStore {
   clearAgentNeedsReview: (sessionId: string) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string) => void;
+  replaceBuffer: (sessionId: string, chunks: string[]) => void;
   clearTerminalSession: (sessionId: string) => void;
   clearBuffer: (sessionId: string) => void;
   removeTerminalSession: (sessionId: string) => void;
@@ -249,6 +250,56 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       });
 
       return { sessions: newSessions, nextChunkId: chunkId + 1 };
+    });
+  },
+
+  replaceBuffer: (sessionId: string, chunks: string[]) => {
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      const existing = newSessions.get(sessionId);
+      if (!existing) {
+        return state;
+      }
+
+      if (!chunks || chunks.length === 0) {
+        newSessions.set(sessionId, {
+          ...existing,
+          buffer: '',
+          bufferChunks: [],
+          bufferLength: 0,
+          updatedAt: Date.now(),
+        });
+        return { sessions: newSessions };
+      }
+
+      let nextChunkId = state.nextChunkId;
+      const bufferChunks: TerminalChunk[] = [];
+      let bufferLength = 0;
+
+      for (const chunk of chunks) {
+        if (!chunk) continue;
+        const chunkEntry: TerminalChunk = { id: nextChunkId, data: chunk };
+        nextChunkId += 1;
+        bufferChunks.push(chunkEntry);
+        bufferLength += chunk.length;
+      }
+
+      while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
+        const removed = bufferChunks.shift();
+        if (!removed) break;
+        bufferLength -= removed.data.length;
+      }
+
+      const buffer = bufferChunks.map((entry) => entry.data).join('');
+      newSessions.set(sessionId, {
+        ...existing,
+        buffer,
+        bufferChunks,
+        bufferLength,
+        updatedAt: Date.now(),
+      });
+
+      return { sessions: newSessions, nextChunkId };
     });
   },
 
