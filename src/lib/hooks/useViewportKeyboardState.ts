@@ -117,11 +117,26 @@ export function useViewportKeyboardState(
     window.visualViewport?.addEventListener('resize', schedule);
     window.visualViewport?.addEventListener('scroll', schedule);
 
+    // 从后台返回 / BFCache 恢复时强制重读 visualViewport，避免 isOpen 卡在
+    // "软键盘打开"状态。和 useViewportHeight 一样要多次 schedule 覆盖 iOS
+    // 异步 settle。
+    const handleResume = () => {
+      schedule();
+      window.setTimeout(schedule, 50);
+      window.setTimeout(schedule, 200);
+    };
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) handleResume();
+    });
+    window.addEventListener('pageshow', handleResume);
+
     return () => {
       window.removeEventListener('resize', schedule);
       window.removeEventListener('orientationchange', schedule);
       window.visualViewport?.removeEventListener('resize', schedule);
       window.visualViewport?.removeEventListener('scroll', schedule);
+      document.removeEventListener('visibilitychange', handleResume);
+      window.removeEventListener('pageshow', handleResume);
 
       if (rafId !== null) window.cancelAnimationFrame(rafId);
       if (settleTimerRef.current !== null) {

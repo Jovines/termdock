@@ -368,6 +368,12 @@ export function connectTerminalStream(
 
       // Server closed with 4001 = session not found — fatal, no point retrying
       if (ev.code === 4001) {
+        // eslint-disable-next-line no-console
+        console.warn('[Terminal] WS 4001: Session not found on server', {
+          code: ev.code,
+          reason: ev.reason,
+          stack: new Error().stack,
+        });
         handleError(new Error('Session not found on server'), true);
         return;
       }

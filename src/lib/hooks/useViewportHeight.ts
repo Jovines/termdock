@@ -150,11 +150,30 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     window.visualViewport?.addEventListener('resize', scheduleSync);
     window.visualViewport?.addEventListener('scroll', scheduleSync);
 
+    // 从后台返回时，visualViewport.height 可能还是"软键盘打开"时的旧值，
+    // 而 resize 事件不会 fire（值未变），导致 --app-vh 维持半高，xterm fit
+    // 出半行数，屏幕就只显示一半内容。visibilitychange + pageshow 都要监听：
+    //   - visibilitychange：标签页从 hidden 变 visible
+    //   - pageshow：从 BFCache 恢复（persisted=true 时更明显）
+    // 多次 scheduleSync（立即 + 50ms + 200ms）覆盖 iOS 上 visualViewport
+    // 异步 settle 的窗口。
+    const handleResume = () => {
+      scheduleSync();
+      window.setTimeout(scheduleSync, 50);
+      window.setTimeout(scheduleSync, 200);
+    };
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) handleResume();
+    });
+    window.addEventListener('pageshow', handleResume);
+
     return () => {
       window.removeEventListener('resize', scheduleSync);
       window.removeEventListener('orientationchange', scheduleSync);
       window.visualViewport?.removeEventListener('resize', scheduleSync);
       window.visualViewport?.removeEventListener('scroll', scheduleSync);
+      document.removeEventListener('visibilitychange', handleResume);
+      window.removeEventListener('pageshow', handleResume);
 
       if (rafId !== null) {
         window.cancelAnimationFrame(rafId);
