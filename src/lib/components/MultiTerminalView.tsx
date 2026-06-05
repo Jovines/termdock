@@ -5,7 +5,7 @@ import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
-import { createTerminalSession, closeTerminal } from '../terminal/api';
+import { createTerminalSession, closeTerminal, killTmuxSession } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
@@ -36,7 +36,32 @@ interface NewSessionEventDetail {
   cwd?: string;
 }
 
+interface CloseSessionEventDetail {
+  sessionId: string;
+  source?: 'sidebar' | 'tab-menu' | 'other';
+  closeMode?: 'auto' | 'detach' | 'destroy';
+}
+
 const SWIPE_ANIMATION_SPEED_MS = 320;
+
+function getSwipeEventPointerType(event: unknown): string {
+  if (!event || typeof event !== 'object') {
+    return 'unknown';
+  }
+
+  const maybeEvent = event as { pointerType?: string; type?: string };
+  if (typeof maybeEvent.pointerType === 'string' && maybeEvent.pointerType) {
+    return maybeEvent.pointerType;
+  }
+
+  if (typeof maybeEvent.type === 'string') {
+    if (maybeEvent.type.startsWith('touch')) return 'touch';
+    if (maybeEvent.type.startsWith('mouse')) return 'mouse';
+    if (maybeEvent.type.startsWith('pointer')) return 'pointer';
+  }
+
+  return 'unknown';
+}
 
 interface MultiTerminalViewProps {
   fontFamily?: string;
@@ -78,6 +103,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   onSessionDataUpdate,
 }) => {
   const debugSession = useMemo(() => createDebugLogger('session'), []);
+  const debugTerminal = useMemo(() => createDebugLogger('terminal'), []);
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
@@ -483,11 +509,19 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       const tmuxSessionName = mode === 'tmux'
         ? (requestedTmuxName || configuredDefaultTmuxName || generateTmuxSessionName())
         : null;
-      // 服务端会自动使用 home 目录，不需要客户端传递
+
+      const requestedCwd = typeof options?.cwd === 'string' ? options.cwd : null;
+      const activeCwd = activeSessionId
+        ? (useTerminalStore.getState().sessions.get(activeSessionId)?.cwd ?? null)
+        : null;
+      const effectiveCwd = typeof requestedCwd === 'string' && requestedCwd.trim().length > 0
+        ? requestedCwd
+        : (typeof activeCwd === 'string' && activeCwd.trim().length > 0 ? activeCwd : undefined);
+
       const newTerminalSession = await createTerminalSession({
         mode,
         tmuxSessionName: tmuxSessionName ?? undefined,
-        cwd: options?.cwd,
+        cwd: effectiveCwd,
       });
       const sessionId = uuidv4();
       const effectiveTmuxSessionName = newTerminalSession.tmuxSessionName ?? tmuxSessionName;
@@ -536,7 +570,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);
     }
-  }, [defaultSessionMode, defaultTmuxSessionName, saveSession, debugSession]);
+  }, [defaultSessionMode, defaultTmuxSessionName, activeSessionId, saveSession, debugSession]);
   handleNewSessionRef.current = handleNewSession;
 
   // Handle session switching from custom event
@@ -584,13 +618,28 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [reorderSessions, debugSession]);
 
   // Handle session closing from custom event
-  const handleCloseSession = useCallback(async (sessionId: string) => {
+  const handleCloseSession = useCallback(async (
+    detail: string | CloseSessionEventDetail,
+  ) => {
+    const sessionId = typeof detail === 'string' ? detail : detail.sessionId;
+    const closeMode = typeof detail === 'string' ? 'auto' : (detail.closeMode ?? 'auto');
     const session = sessions.find(s => s.id === sessionId);
     if (!session) return;
 
     try {
-      // Close the backend terminal session if it exists
-      if (session.sessionId) {
+      // tmux destroy: kill the tmux server session itself.
+      if (
+        closeMode === 'destroy' &&
+        session.mode === 'tmux' &&
+        session.tmuxSessionName
+      ) {
+        await killTmuxSession(session.tmuxSessionName);
+        debugSession('[Session] Destroyed tmux session:', {
+          frontendSessionId: session.id,
+          tmuxSessionName: session.tmuxSessionName,
+        });
+      } else if (session.sessionId) {
+        // default/detach path: close backend terminal wrapper session.
         await closeTerminal(session.sessionId);
         debugSession('[Session] Closed backend terminal:', session.sessionId);
       }
@@ -611,7 +660,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     removePersistedSession(sessionId);
     delete keyboardOpenBySessionRef.current[sessionId];
 
-    debugSession('[Session] Closed session:', sessionId);
+    debugSession('[Session] Closed session:', { sessionId, closeMode });
   }, [sessions, removePersistedSession, debugSession]);
 
   // Drop a frontend session whose backend pty was already cleaned up server-side
@@ -652,7 +701,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     };
 
     const handleCloseSessionEvent = (event: Event) => {
-      const customEvent = event as CustomEvent<string>;
+      const customEvent = event as CustomEvent<string | CloseSessionEventDetail>;
       handleCloseSession(customEvent.detail);
     };
 
@@ -727,10 +776,22 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             instance.allowTouchMove = sessions.length > 1;
           }}
           onSlideChange={handleSwiperChange}
-          onTouchStart={() => {
+          onTouchStart={(_, event) => {
+            const pointerType = getSwipeEventPointerType(event);
+            const allowed = pointerType === 'touch' || pointerType === 'pen' || pointerType === 'unknown';
+            debugTerminal('[swipe:touch-start]', { pointerType, allowed });
+            if (!allowed) {
+              return;
+            }
             isTouchSwipeRef.current = true;
           }}
-          onTouchEnd={() => {
+          onTouchEnd={(_, event) => {
+            const pointerType = getSwipeEventPointerType(event);
+            const allowed = pointerType === 'touch' || pointerType === 'pen' || pointerType === 'unknown';
+            debugTerminal('[swipe:touch-end]', { pointerType, allowed });
+            if (!allowed) {
+              return;
+            }
             const swiper = swiperRef.current;
             if (!swiper || !swiper.animating) {
               isTouchSwipeRef.current = false;
@@ -747,6 +808,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           longSwipesRatio={0.2}
           touchAngle={45}
           touchStartPreventDefault={false}
+          simulateTouch={false}
           noSwiping
           noSwipingSelector="[data-mobile-keyboard='true']"
           className="h-full"

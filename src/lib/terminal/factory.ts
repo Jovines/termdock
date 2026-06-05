@@ -34,7 +34,7 @@ export const createTermdockAPI = (): TerminalAPI => ({
   },
 
   async resize(payload: ResizeTerminalPayload): Promise<void> {
-    await resizeTerminal(payload.sessionId, payload.cols, payload.rows);
+    await resizeTerminal(payload.sessionId, payload.cols, payload.rows, payload.seq);
   },
 
   async close(sessionId: string): Promise<void> {
@@ -78,7 +78,8 @@ export const createTermdockAPI = (): TerminalAPI => ({
     mode?: 'shell' | 'tmux';
     tmuxSessionName?: string | null;
     activeProgram?: string | null;
-    activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+    activeProgramRaw?: string | null;
+    activeProgramSource?: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   }> {
     return checkTerminalHealth(sessionId);
   },

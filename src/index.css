@@ -365,6 +365,19 @@ input:autofill {
   animation: spin 1s linear infinite;
 }
 
+@keyframes bounce-y {
+  0%, 100% {
+    transform: translateY(-12.5%);
+  }
+  50% {
+    transform: translateY(12.5%);
+  }
+}
+
+.animate-bounce-y {
+  animation: bounce-y 1s ease-in-out infinite;
+}
+
 @keyframes pulse {
   0%, 100% {
     opacity: 1;
@@ -653,6 +666,40 @@ body {
 .diff-code-insert .diff-code-edit,
 .diff-code-delete .diff-code-edit {
   border-radius: 3px;
+}
+
+/*
+ * Horizontal scroll on the diff rows:
+ * The parent sidebar is `overflow-y-auto` on mobile so the file list +
+ * diff stack scroll vertically as one column. Without this rule, that
+ * parent claims horizontal panning on touch and the diff rows never get
+ * a chance to scroll sideways. `touch-action: pan-x` tells the browser
+ * this element wants horizontal pan gestures; vertical pan still
+ * propagates up to the parent because pan-y is the default complement.
+ *
+ * `pan-x pan-y` would also work but explicitly listing both helps avoid
+ * surprises if a future ancestor sets `touch-action: none`.
+ */
+.termdock-diff-scroll {
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+}
+
+/*
+ * Wrap long diff lines instead of forcing horizontal scroll.
+ * The user opts in via the "Aa" toggle in the changes tab; off by default
+ * so desktop reads the same as before.
+ *
+ * `word-break: break-word` is intentionally used over `break-all` so we
+ * still try to break on whitespace first, keeping identifiers readable.
+ */
+.termdock-diff-wrap .diff-code,
+.termdock-diff-wrap .diff-code-edit,
+.termdock-diff-wrap pre,
+.termdock-diff-wrap code {
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  overflow-wrap: anywhere !important;
 }
 
 /* Keyboard button active state delay - keeps active color longer for better feedback */

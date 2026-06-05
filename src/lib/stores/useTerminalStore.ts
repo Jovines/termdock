@@ -10,13 +10,19 @@ export interface TerminalStore {
   setActiveSessionId: (id: string | null) => void;
   setTerminalSession: (sessionId: string, terminalSession: TerminalSession & { history?: string[] }) => void;
   setSessionHistory: (sessionId: string, history: string[]) => void;
-  setSessionActiveProgram: (sessionId: string, activeProgram: string | null, activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null) => void;
+  setSessionActiveProgram: (
+    sessionId: string,
+    activeProgram: string | null,
+    activeProgramSource?: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null,
+    activeProgramRaw?: string | null,
+  ) => void;
   setSessionCwd: (sessionId: string, cwd: string | null) => void;
   setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => void;
   setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null, agentIndicator?: AgentIndicator | null) => void;
   clearAgentNeedsReview: (sessionId: string) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string) => void;
+  replaceBuffer: (sessionId: string, chunks: string[]) => void;
   clearTerminalSession: (sessionId: string) => void;
   clearBuffer: (sessionId: string) => void;
   removeTerminalSession: (sessionId: string) => void;
@@ -33,6 +39,7 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     mode: 'shell',
     tmuxSessionName: null,
     activeProgram: null,
+    activeProgramRaw: null,
     activeProgramSource: null,
     cwd: null,
     inCopyMode: false,
@@ -91,6 +98,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         mode: terminalSession.mode ?? baseState.mode,
         tmuxSessionName: terminalSession.tmuxSessionName ?? baseState.tmuxSessionName,
         activeProgram: terminalSession.activeProgram ?? baseState.activeProgram,
+        activeProgramRaw: terminalSession.activeProgramRaw ?? baseState.activeProgramRaw,
         activeProgramSource: terminalSession.activeProgramSource ?? baseState.activeProgramSource,
         cwd: terminalSession.cwd ?? baseState.cwd,
         sessionId,
@@ -116,13 +124,14 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     });
   },
 
-  setSessionActiveProgram: (sessionId: string, activeProgram: string | null, activeProgramSource = null) => {
+  setSessionActiveProgram: (sessionId: string, activeProgram: string | null, activeProgramSource = null, activeProgramRaw = null) => {
     set((state) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
       newSessions.set(sessionId, {
         ...existing,
         activeProgram,
+        activeProgramRaw,
         activeProgramSource,
         updatedAt: Date.now(),
       });
@@ -244,6 +253,56 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     });
   },
 
+  replaceBuffer: (sessionId: string, chunks: string[]) => {
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      const existing = newSessions.get(sessionId);
+      if (!existing) {
+        return state;
+      }
+
+      if (!chunks || chunks.length === 0) {
+        newSessions.set(sessionId, {
+          ...existing,
+          buffer: '',
+          bufferChunks: [],
+          bufferLength: 0,
+          updatedAt: Date.now(),
+        });
+        return { sessions: newSessions };
+      }
+
+      let nextChunkId = state.nextChunkId;
+      const bufferChunks: TerminalChunk[] = [];
+      let bufferLength = 0;
+
+      for (const chunk of chunks) {
+        if (!chunk) continue;
+        const chunkEntry: TerminalChunk = { id: nextChunkId, data: chunk };
+        nextChunkId += 1;
+        bufferChunks.push(chunkEntry);
+        bufferLength += chunk.length;
+      }
+
+      while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
+        const removed = bufferChunks.shift();
+        if (!removed) break;
+        bufferLength -= removed.data.length;
+      }
+
+      const buffer = bufferChunks.map((entry) => entry.data).join('');
+      newSessions.set(sessionId, {
+        ...existing,
+        buffer,
+        bufferChunks,
+        bufferLength,
+        updatedAt: Date.now(),
+      });
+
+      return { sessions: newSessions, nextChunkId };
+    });
+  },
+
   clearTerminalSession: (sessionId: string) => {
     set((state) => {
       const newSessions = new Map(state.sessions);
@@ -253,6 +312,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           ...existing,
           terminalSessionId: null,
           activeProgram: null,
+          activeProgramRaw: null,
           activeProgramSource: null,
           isConnecting: false,
           agentStatus: null,

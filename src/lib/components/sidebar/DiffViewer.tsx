@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useMemo } from 'react';
-import { GitCompare as RiGitCompare, Loader2 as RiLoader } from 'lucide-react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
+import { GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMoveHorizontal } from 'lucide-react';
 import { parseDiff, Diff, Hunk, Decoration } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
@@ -9,6 +9,17 @@ import { useI18n } from '../../i18n';
 interface DiffViewerProps {
   filePath: string | null;
   onInsertDiffReference?: (label: string, text: string) => void;
+  /**
+   * When true, long diff lines wrap inside each cell instead of forcing a
+   * horizontal scroll. Helpful on phone-sized panels.
+   */
+  wrap?: boolean;
+  /**
+   * When true, render a small inline hint above each file's diff row to
+   * tell the user the content can be swiped horizontally. Only shown when
+   * `wrap` is off — the hint would lie otherwise.
+   */
+  showScrollHint?: boolean;
 }
 
 function getPathParts(path: string | null, fallback: { name: string; dir: string }): { name: string; dir: string } {
@@ -24,7 +35,29 @@ function formatDiffReference(diffText: string): string {
   return `${diffText.trimEnd()}\n`;
 }
 
-export function DiffViewer({ filePath, onInsertDiffReference }: DiffViewerProps) {
+/**
+ * Inline hint that says "swipe to see more" above a file's diff row.
+ * Self-dismisses on first tap so it doesn't get in the way of repeat
+ * visits — the user has seen it once, they know now.
+ */
+function DiffScrollHint() {
+  const { t } = useI18n();
+  const [dismissed, setDismissed] = useState(false);
+  if (dismissed) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => setDismissed(true)}
+      className="flex w-full items-center justify-center gap-1.5 border-b border-border/15 bg-surface-2/40 px-2 py-1 text-[10px] text-muted-foreground transition active:scale-[0.99] hover:bg-surface-2 hover:text-foreground"
+      title={t('rightSidebar.horizontalScrollHint')}
+    >
+      <RiMoveHorizontal size={11} className="shrink-0" />
+      <span className="truncate">{t('rightSidebar.horizontalScrollHint')}</span>
+    </button>
+  );
+}
+
+export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, showScrollHint = false }: DiffViewerProps) {
   const { t } = useI18n();
   // 精确订阅 — 只关心 diff 相关字段
   const diffContent = useSidebarStore((s) => s.diffContent);
@@ -162,7 +195,14 @@ export function DiffViewer({ filePath, onInsertDiffReference }: DiffViewerProps)
           ...file.hunks.flatMap((hunk) => [hunk.content, ...hunk.changes.map((change) => change.content)]),
         ].join('\n');
         return (
-        <div key={key} className="mt-3 overflow-hidden border border-border/20 bg-surface">
+        // `data-diff-file-anchor` is the contract RightSidebar uses to
+        // scrollIntoView a specific file from the jump-list. We always set
+        // it on the file's relative path; the list sends the same string.
+        <div
+          key={key}
+          data-diff-file-anchor={displayPath}
+          className="mt-3 overflow-hidden border border-border/20 bg-surface"
+        >
           <div className="flex items-center justify-between gap-3 border-b border-border/15 bg-background-subtle px-2 py-1.5">
             <div className="min-w-0" title={file.newPath || file.oldPath}>
               <div className="truncate font-mono text-[11px] text-foreground">{pathParts.name}</div>
@@ -186,7 +226,20 @@ export function DiffViewer({ filePath, onInsertDiffReference }: DiffViewerProps)
               </span>
             </div>
           </div>
-          <div className="overflow-x-auto">
+          {/* Scroll hint: only shown when wrap is off (otherwise it would
+              lie) and only once per file per visit, dismissed by tap. The
+              user still gets the visual cue without it nagging on every
+              open. */}
+          {showScrollHint && !wrap && <DiffScrollHint />}
+          {/*
+            `termdock-diff-scroll` opts this card into a CSS rule that
+            sets `touch-action: pan-x` on the inner overflow element. That
+            tells the browser the user wants horizontal panning on touch
+            here, so it doesn't get hijacked by the parent vertical
+            scroller's overscroll/pan-y chain.
+            `termdock-diff-wrap` flips long lines to wrap mode instead.
+          */}
+          <div className={`overflow-x-auto termdock-diff-scroll ${wrap ? 'termdock-diff-wrap' : ''}`}>
             <Diff
               viewType="unified"
               diffType={file.type}

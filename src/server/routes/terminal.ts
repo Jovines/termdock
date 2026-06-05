@@ -1054,7 +1054,10 @@ const MIN_AGENT_CLEAR_DELAY_MS = 80;
 const MAX_AGENT_CLEAR_DELAY_MS = 10_000;
 
 interface AgentProgramConfig {
-  program: string;   // program name to match (case-insensitive)
+  // 兼容旧格式：单程序字段
+  program?: string;
+  // 新格式：一组程序名
+  programs?: string[];
   rules: AgentRule[];
 }
 
@@ -1117,7 +1120,16 @@ function loadAgentRules(): Map<string, { status: string; color: string | undefin
       clearDelayMs: normalizeAgentClearDelay(r.clearDelayMs),
       regex: new RegExp(r.pattern, 'i'),
     }));
-    map.set(config.program.toLowerCase(), compiled);
+
+    const programNames = Array.isArray(config.programs)
+      ? config.programs
+      : (typeof config.program === 'string' ? [config.program] : []);
+
+    for (const name of programNames) {
+      const normalized = typeof name === 'string' ? name.trim().toLowerCase() : '';
+      if (!normalized) continue;
+      map.set(normalized, compiled);
+    }
   }
   agentRulesCache = map;
   agentRulesVersion++;
@@ -2292,8 +2304,10 @@ router.put('/agent-rules', (req, res) => {
   }
   // Basic validation
   for (const config of rules) {
-    if (!config.program || !Array.isArray(config.rules)) {
-      res.status(400).json({ error: 'Each config must have program and rules' });
+    const hasProgram = typeof config.program === 'string' && config.program.trim().length > 0;
+    const hasPrograms = Array.isArray(config.programs) && config.programs.some((name: unknown) => typeof name === 'string' && name.trim().length > 0);
+    if ((!hasProgram && !hasPrograms) || !Array.isArray(config.rules)) {
+      res.status(400).json({ error: 'Each config must have program/programs and rules' });
       return;
     }
     for (const rule of config.rules) {

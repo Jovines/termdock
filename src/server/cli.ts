@@ -7,6 +7,7 @@ import readline from 'readline';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { Writable } from 'stream';
+import { createRequire } from 'module';
 import { PORT, DEFAULT_HOST } from './config.js';
 import {
   clearAuthFile,
@@ -17,6 +18,22 @@ import {
 } from './utils/authProtection.js';
 
 const execFileAsync = promisify(execFile);
+
+const TERMDOCK_VERSION: string = (() => {
+  try {
+    const require_ = createRequire(import.meta.url);
+    const pkg = require_(path.join(__dirname || '', '..', '..', 'package.json'));
+    if (typeof pkg?.version === 'string') return pkg.version;
+  } catch { /* fall through */ }
+  try {
+    const require_ = createRequire(import.meta.url);
+    const pkg = require_('../../package.json');
+    if (typeof pkg?.version === 'string') return pkg.version;
+  } catch { /* ignore */ }
+  return '0.0.0';
+})();
+const TERMDOCK_HOST = os.hostname();
+const TERMDOCK_PID = String(process.pid);
 
 const stateDir = path.join(os.homedir(), '.termdock');
 const stateFilePath = path.join(stateDir, 'server.json');
@@ -64,6 +81,8 @@ interface CliOptions {
   tlsJson: boolean;
   attachTmux: boolean;
   attachTmuxName?: string;
+  newTmux: boolean;
+  newTmuxName?: string;
 }
 
 interface ServerState {
@@ -92,6 +111,9 @@ Options:
   --attach-tmux [n]  Attach to a termdock-managed tmux session.
                      With no name: interactive picker.
                      With name: attach directly (e.g. --attach-tmux wt-foo).
+  --new-tmux [name]  Create (or ensure) and stamp a tmux session for termdock.
+                     With no name: auto-generate a wt-* name.
+                     Prints the session name; pair with --attach-tmux to enter it.
   -h, --help         Show this help message
 
 Password examples:
@@ -180,6 +202,8 @@ function parseArgs(argv: string[]): CliOptions {
   let tlsJson = false;
   let attachTmux = false;
   let attachTmuxName: string | undefined;
+  let newTmux = false;
+  let newTmuxName: string | undefined;
 
   // Allow `termdock tls` as shorthand for `termdock --tls`. Only honour the
   // bare token when it's the first argument so we don't accidentally swallow
@@ -265,12 +289,37 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === '--new-tmux') {
+      newTmux = true;
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        newTmuxName = next;
+        index += 1;
+      }
+      continue;
+    }
+
     console.error(`${ICON.err} ${c.red(`Unknown argument: ${arg}`)}`);
     printHelp();
     process.exit(1);
   }
 
-  return { host, port, foreground, status, stop, setPassword, clearPassword, tls, tlsAll, tlsJson, attachTmux, attachTmuxName };
+  return {
+    host,
+    port,
+    foreground,
+    status,
+    stop,
+    setPassword,
+    clearPassword,
+    tls,
+    tlsAll,
+    tlsJson,
+    attachTmux,
+    attachTmuxName,
+    newTmux,
+    newTmuxName,
+  };
 }
 
 // Reads a single line from stdin without echoing keystrokes. Used for password
@@ -443,6 +492,68 @@ interface TlsRow {
   lastActiveAt: string;
 }
 
+function normalizeTmuxSessionName(input: unknown): string {
+  if (typeof input !== 'string') {
+    const timePart = Date.now().toString(36);
+    const randomPart = Math.random().toString(36).slice(2, 8);
+    return `wt-${timePart}${randomPart}`;
+  }
+  const normalized = input.trim();
+  if (normalized.length > 0) return normalized;
+  const timePart = Date.now().toString(36);
+  const randomPart = Math.random().toString(36).slice(2, 8);
+  return `wt-${timePart}${randomPart}`;
+}
+
+async function tmuxSessionExists(sessionName: string): Promise<boolean> {
+  try {
+    await execFileAsync('tmux', ['has-session', '-t', sessionName], { timeout: 5000, maxBuffer: 64 * 1024 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function setTmuxOption(sessionName: string, key: string, value: string): Promise<void> {
+  await execFileAsync('tmux', ['set-option', '-t', sessionName, key, value], {
+    timeout: 5000,
+    maxBuffer: 256 * 1024,
+  });
+}
+
+async function getTmuxOption(sessionName: string, key: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('tmux', ['show-option', '-vqt', sessionName, key], {
+      timeout: 5000,
+      maxBuffer: 128 * 1024,
+    });
+    const value = stdout.trim();
+    return value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureStampedTmuxSession(sessionName: string): Promise<{ sessionName: string; created: boolean }> {
+  const exists = await tmuxSessionExists(sessionName);
+  if (!exists) {
+    await execFileAsync('tmux', ['new-session', '-d', '-s', sessionName], {
+      timeout: 5000,
+      maxBuffer: 256 * 1024,
+    });
+  }
+
+  await setTmuxOption(sessionName, '@termdock-version', TERMDOCK_VERSION);
+  await setTmuxOption(sessionName, '@termdock-host', TERMDOCK_HOST);
+  await setTmuxOption(sessionName, '@termdock-pid', TERMDOCK_PID);
+  const existingCreatedAt = await getTmuxOption(sessionName, '@termdock-created-at');
+  if (!existingCreatedAt) {
+    await setTmuxOption(sessionName, '@termdock-created-at', String(Date.now()));
+  }
+
+  return { sessionName, created: !exists };
+}
+
 const TLS_FIELDS: Array<keyof TlsRow | 'name'> = [
   'name',
   'friendlyName',
@@ -484,6 +595,17 @@ function formatIdle(lastActiveAtRaw: string): string {
   if (hr < 24) return `${hr}h`;
   const days = Math.floor(hr / 24);
   return `${days}d`;
+}
+
+function toSortableTs(raw: string): number {
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : Number.POSITIVE_INFINITY;
+}
+
+function compareTmuxRowsByCreation(a: TlsRow, b: TlsRow): number {
+  const byCreatedAt = toSortableTs(a.createdAt) - toSortableTs(b.createdAt);
+  if (byCreatedAt !== 0) return byCreatedAt;
+  return a.name.localeCompare(b.name);
 }
 
 function renderBlocks(rows: TlsRow[]): string {
@@ -562,7 +684,9 @@ async function runTls(opts: { all: boolean; json: boolean }): Promise<void> {
     return;
   }
 
-  const rows = opts.all ? allRows : allRows.filter((row) => row.version.length > 0);
+  const rows = (opts.all ? allRows : allRows.filter((row) => row.version.length > 0))
+    .slice()
+    .sort(compareTmuxRowsByCreation);
 
   if (opts.json) {
     const json = rows.map((row) => ({
@@ -703,12 +827,30 @@ async function runAttachTmux(opts: { name?: string }): Promise<void> {
   execTmuxAttach(picked);
 }
 
-// ── end --attach-tmux ──
+async function runNewTmux(opts: { name?: string; attach?: boolean }): Promise<void> {
+  const sessionName = normalizeTmuxSessionName(opts.name);
+  const result = await ensureStampedTmuxSession(sessionName);
+  const verb = result.created ? 'Created' : 'Reused';
+  console.log(`${ICON.ok} ${c.green(`${verb} tmux session:`)} ${c.cyan(result.sessionName)}`);
+  if (opts.attach) {
+    console.log(`${ICON.info} ${c.dim('Attaching...')}`);
+    execTmuxAttach(result.sessionName);
+    return;
+  }
+  console.log(`  ${c.dim('Tip: attach with')} ${c.cyan(`termdock --attach-tmux ${result.sessionName}`)}`);
+}
+
+// ── end --attach-tmux / --new-tmux ──
 
 async function main(): Promise<void> {
   if (options.tls) {
     await runTls({ all: options.tlsAll, json: options.tlsJson });
     process.exit(0);
+  }
+
+  if (options.newTmux) {
+    await runNewTmux({ name: options.newTmuxName, attach: options.attachTmux });
+    return; // execTmuxAttach handles process exit when attach=true
   }
 
   if (options.attachTmux) {

@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo, useState, useDeferredValue, type Dispatch, type SetStateAction } from 'react';
+import { useEffect, useCallback, useMemo, useRef, useState, useDeferredValue, type Dispatch, type SetStateAction } from 'react';
 import {
   X as RiCloseLine,
   ArrowLeft as RiArrowLeft,
@@ -338,6 +338,16 @@ export function RightSidebar(
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
   const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
+  // Narrow-screen changes view: 'all' shows every file's diff inline (the
+  // phone-friendly default — no per-file navigation needed); 'single' shows
+  // only the file the user picked from the list.
+  const [diffViewMode, setDiffViewMode] = useState<'all' | 'single'>('all');
+  // When on, long diff lines wrap instead of overflowing horizontally. The
+  // user can opt in per-session without leaving the panel.
+  const [diffWrap, setDiffWrap] = useState(false);
+  // Ref to the diff scroll container so the file list can scrollIntoView a
+  // specific file's diff card when the user taps a file in 'all' mode.
+  const diffScrollerRef = useRef<HTMLDivElement | null>(null);
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
   const isWide = !isMobile && drawerWidthPx >= WIDE_WIDTH_THRESHOLD_PX;
   const rightTab = useSidebarStore((s) => s.rightTab);
@@ -410,6 +420,8 @@ export function RightSidebar(
       setFileQuery('');
       setSearchOpen(false);
       setLineRange(null);
+      // Keep diff view mode + wrap preference across close/open so the
+      // user's chosen reading mode is preserved within a session.
     }
   }, [isOpen]);
 
@@ -565,6 +577,25 @@ export function RightSidebar(
     selectFile(null);
     setLineRange(null);
   }, [selectFile]);
+
+  // In 'all' mode, tapping a file in the list scrolls the diff scroller to
+  // that file's card. DiffViewer tags each file with `data-diff-file-anchor`
+  // (its newPath or oldPath). Falls back to oldPath when a file is new.
+  const scrollToDiffFile = useCallback((path: string) => {
+    const container = diffScrollerRef.current;
+    if (!container) return;
+    const target = container.querySelector<HTMLElement>(
+      `[data-diff-file-anchor="${CSS.escape(path)}"]`,
+    );
+    if (!target) return;
+    // Compute the scroll position manually so we land the file card just
+    // below the sticky toggle bar instead of at the very top of the
+    // container (where the file header would be clipped by the bar).
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const top = container.scrollTop + (targetRect.top - containerRect.top);
+    container.scrollTo({ top, behavior: 'smooth' });
+  }, []);
 
   return (
     <Sidebar
@@ -972,12 +1003,75 @@ export function RightSidebar(
             </div>
           </div>
         ) : (
-          // Narrow changes view: stacked. Mobile navigates list → diff → back.
+          // Narrow changes view: stacked. The view-mode + wrap toggles at
+          // the top let the user switch between seeing all file diffs at
+          // once (default, phone-friendly) and the old single-file flow.
           <div className="flex h-full min-h-0 flex-col overflow-hidden">
             {changedFiles.size > 0 && (
-              <div className="shrink-0 border-b border-border/15 px-3 py-2">
-                {isMobile && selectedFilePath ? (
-                  <div className="flex items-center gap-2">
+              <>
+                {/* View mode + wrap toggle bar — sticky at the top of the
+                    content so it stays reachable as the diff scroller moves. */}
+                <div className="shrink-0 flex items-center justify-between gap-2 border-b border-border/15 px-3 py-2">
+                  <div
+                    role="tablist"
+                    aria-label={t('rightSidebar.viewModeAll')}
+                    className="flex items-center gap-0.5 rounded-full bg-background-subtle p-0.5"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={diffViewMode === 'all'}
+                      onClick={() => {
+                        setDiffViewMode('all');
+                        // Switching to 'all' should not leave a stale file
+                        // selected from the previous 'single' session.
+                        if (selectedFilePath) selectDiffFile(null);
+                      }}
+                      className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:scale-[0.98] ${
+                        diffViewMode === 'all'
+                          ? 'bg-surface-elevated text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {t('rightSidebar.viewModeAll')}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={diffViewMode === 'single'}
+                      onClick={() => setDiffViewMode('single')}
+                      className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:scale-[0.98] ${
+                        diffViewMode === 'single'
+                          ? 'bg-surface-elevated text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {t('rightSidebar.viewModeSingle')}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDiffWrap((prev) => !prev)}
+                    aria-pressed={diffWrap}
+                    title={t('rightSidebar.wrapLongLines')}
+                    className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
+                      diffWrap
+                        ? 'bg-primary/15 text-primary'
+                        : 'bg-background-subtle text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    <span className="font-mono text-[12px] leading-none">Aa</span>
+                    <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
+                  </button>
+                </div>
+
+                {/* File list — behavior depends on view mode:
+                      • 'all'   → click scrolls the diff scroller to that file
+                      • 'single' → click makes it the only file shown
+                    The list stays visible in both modes so the user can
+                    switch/jump at any time without going through a "back" hop. */}
+                {diffViewMode === 'single' && selectedFilePath ? (
+                  <div className="shrink-0 flex items-center gap-2 border-b border-border/15 px-3 py-2">
                     <button
                       type="button"
                       onClick={closeDiffView}
@@ -987,23 +1081,19 @@ export function RightSidebar(
                     >
                       <RiArrowLeft size={14} />
                     </button>
-                    <span className="text-[12px] font-medium text-foreground">{t('rightSidebar.viewDiff')}</span>
+                    <span className="truncate text-[12px] font-medium text-foreground">
+                      {t('rightSidebar.viewDiff')}
+                    </span>
                   </div>
                 ) : (
-                  <>
+                  <div className="shrink-0 border-b border-border/15 px-3 py-2">
                     <div className="mb-2 flex items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => selectDiffFile(null)}
-                        className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-                          selectedFilePath === null
-                            ? 'bg-surface-elevated text-foreground'
-                            : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
-                        }`}
-                      >
+                      <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
                         {t('rightSidebar.allChanges')}
-                      </button>
-                      <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {filteredChangedFiles.length}/{changedFiles.size}
+                      </span>
                     </div>
                     <div className="space-y-px">
                       {filteredChangedFiles.length === 0 ? (
@@ -1013,12 +1103,20 @@ export function RightSidebar(
                       ) : filteredChangedFiles.map(([absolutePath, status]) => {
                         const display = getRelativeDisplayPath(absolutePath, rootPath);
                         const relativePath = rootPath && absolutePath.startsWith(`${rootPath}/`) ? absolutePath.slice(rootPath.length + 1) : absolutePath;
-                        const isSelected = selectedFilePath === relativePath || selectedFilePath === absolutePath;
+                        const isSelected = diffViewMode === 'single' && (
+                          selectedFilePath === relativePath || selectedFilePath === absolutePath
+                        );
                         return (
                           <button
                             key={absolutePath}
                             type="button"
-                            onClick={() => selectDiffFile(relativePath)}
+                            onClick={() => {
+                              if (diffViewMode === 'all') {
+                                scrollToDiffFile(relativePath);
+                              } else {
+                                selectDiffFile(relativePath);
+                              }
+                            }}
                             className={`group flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition active:scale-[0.99] ${
                               isSelected
                                 ? 'bg-surface-elevated text-foreground'
@@ -1031,9 +1129,6 @@ export function RightSidebar(
                               <span className="block truncate text-xs font-medium">{display.name}</span>
                               {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
                             </span>
-                            {/* On mobile the inline cite button is always
-                                visible (no hover state). On desktop narrow
-                                it appears on row hover. */}
                             <span
                               onClick={(event) => {
                                 event.stopPropagation();
@@ -1048,15 +1143,29 @@ export function RightSidebar(
                         );
                       })}
                     </div>
-                  </>
+                  </div>
                 )}
-              </div>
+              </>
             )}
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-              {isMobile && !selectedFilePath ? (
-                <div className="px-3 py-6 text-center text-xs text-muted-foreground">{t('rightSidebar.selectFileForDiff')}</div>
+            <div
+              ref={diffScrollerRef}
+              className="min-h-0 flex-1 overflow-y-auto"
+            >
+              {changedFiles.size === 0 ? (
+                <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                  {t('rightSidebar.noChanges')}
+                </div>
+              ) : diffViewMode === 'single' && !selectedFilePath ? (
+                <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                  {t('rightSidebar.selectFileForDiff')}
+                </div>
               ) : (
-                <DiffViewer filePath={selectedFilePath} onInsertDiffReference={insertContextText} />
+                <DiffViewer
+                  filePath={diffViewMode === 'all' ? null : selectedFilePath}
+                  wrap={diffWrap}
+                  showScrollHint
+                  onInsertDiffReference={insertContextText}
+                />
               )}
             </div>
           </div>

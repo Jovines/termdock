@@ -64,7 +64,7 @@ export function AgentTabIcon({
       return <span className="h-2.5 w-2.5 shrink-0 rounded-full border-2 animate-pulse" style={{ borderColor: color || AGENT_COLOR_ATTENTION }} />;
     }
     if (indicator === 'question') {
-      return <RiCircleHelp size={size} className="shrink-0 animate-bounce" style={style} />;
+      return <RiCircleHelp size={size} className="shrink-0 animate-bounce-y" style={style} />;
     }
     if (indicator === 'badge') {
       return (

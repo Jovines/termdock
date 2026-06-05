@@ -86,6 +86,8 @@ interface WsConnection {
   lastSeq: number;
   // 输入端缓冲：WS 没开时把用户输入暂存，连上后批量 flush，避免短线期间丢字。
   pendingInputs: string[];
+  // 仅在拥塞时启用短窗口批量 flush，快网保持逐条直发。
+  inputFlushTimer: ReturnType<typeof setTimeout> | null;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   pongTimer: ReturnType<typeof setTimeout> | null;
   // 上次收到任意服务端消息的时间戳，用于判断半开连接。
@@ -93,6 +95,49 @@ interface WsConnection {
 }
 
 const wsConnections = new Map<string, WsConnection>();
+
+type LinkQuality = 'good' | 'degraded' | 'congested';
+
+const INPUT_MICROBATCH_MS_DEGRADED = 24;
+const INPUT_MICROBATCH_MS_CONGESTED = 40;
+const INPUT_PENDING_CONGESTED_THRESHOLD = 40;
+
+function estimateLinkQuality(conn: WsConnection): LinkQuality {
+  if (conn.retryState.retryCount >= 2 || conn.pendingInputs.length >= INPUT_PENDING_CONGESTED_THRESHOLD) {
+    return 'congested';
+  }
+  if (conn.retryState.retryCount >= 1 || conn.pendingInputs.length >= 8) {
+    return 'degraded';
+  }
+  return 'good';
+}
+
+function flushPendingInputs(c: WsConnection): void {
+  if (c.pendingInputs.length === 0 || c.ws.readyState !== WebSocket.OPEN) return;
+  const queued = c.pendingInputs.splice(0);
+  for (const data of queued) {
+    try { c.ws.send(JSON.stringify({ type: 'input', data })); } catch { /* ignore */ }
+  }
+}
+
+function scheduleInputFlush(c: WsConnection): void {
+  if (c.ws.readyState !== WebSocket.OPEN) return;
+  const quality = estimateLinkQuality(c);
+  if (quality === 'good') {
+    flushPendingInputs(c);
+    return;
+  }
+
+  if (c.inputFlushTimer) {
+    return;
+  }
+
+  const delay = quality === 'congested' ? INPUT_MICROBATCH_MS_CONGESTED : INPUT_MICROBATCH_MS_DEGRADED;
+  c.inputFlushTimer = setTimeout(() => {
+    c.inputFlushTimer = null;
+    flushPendingInputs(c);
+  }, delay);
+}
 
 // Pending tmux request resolvers keyed by reqId.
 const pendingTmuxRequests = new Map<
@@ -202,6 +247,7 @@ export function connectTerminalStream(
   const stopHeartbeat = (c: WsConnection) => {
     if (c.heartbeatTimer) { clearInterval(c.heartbeatTimer); c.heartbeatTimer = null; }
     if (c.pongTimer) { clearTimeout(c.pongTimer); c.pongTimer = null; }
+    if (c.inputFlushTimer) { clearTimeout(c.inputFlushTimer); c.inputFlushTimer = null; }
   };
 
   const startHeartbeat = (c: WsConnection) => {
@@ -232,13 +278,6 @@ export function connectTerminalStream(
     }
   };
 
-  const flushPendingInputs = (c: WsConnection) => {
-    if (c.pendingInputs.length === 0) return;
-    const queued = c.pendingInputs.splice(0);
-    for (const data of queued) {
-      try { c.ws.send(JSON.stringify({ type: 'input', data })); } catch { /* ignore */ }
-    }
-  };
 
   const connect = () => {
     if (retryState.isClosed) return;
@@ -261,6 +300,7 @@ export function connectTerminalStream(
       retryState,
       lastSeq,
       pendingInputs,
+      inputFlushTimer: null,
       heartbeatTimer: null,
       pongTimer: null,
       lastInboundAt: Date.now(),
@@ -271,8 +311,8 @@ export function connectTerminalStream(
       retryState.retryCount = 0;
       newConn.lastInboundAt = Date.now();
       startHeartbeat(newConn);
-      // WS 重新打开后立刻把断线期间的输入 flush 到后端。
-      flushPendingInputs(newConn);
+      // WS 重新打开后优先按当前链路质量 flush 输入。
+      scheduleInputFlush(newConn);
     };
 
     ws.onmessage = (event) => {
@@ -303,6 +343,7 @@ export function connectTerminalStream(
           onEvent({
             type: 'active-program',
             activeProgram: msg.activeProgram,
+            activeProgramRaw: msg.activeProgramRaw,
             activeProgramSource: msg.activeProgramSource,
           });
           return;
@@ -321,6 +362,19 @@ export function connectTerminalStream(
             agentStatus: msg.agentStatus ?? null,
             agentColor: msg.agentColor ?? null,
             agentIndicator: msg.agentIndicator ?? null,
+          });
+          return;
+        }
+
+        // Handle resize ack
+        if (msg.type === 'resize-ack') {
+          onEvent({
+            type: 'resize-ack',
+            seq: typeof msg.seq === 'number' ? msg.seq : undefined,
+            cols: typeof msg.cols === 'number' ? msg.cols : undefined,
+            rows: typeof msg.rows === 'number' ? msg.rows : undefined,
+            ok: msg.ok !== false,
+            error: typeof msg.error === 'string' ? msg.error : undefined,
           });
           return;
         }
@@ -436,7 +490,8 @@ export async function sendTerminalInput(
   const conn = wsConnections.get(sessionId);
   if (conn) {
     if (conn.ws.readyState === WebSocket.OPEN) {
-      conn.ws.send(JSON.stringify({ type: 'input', data }));
+      conn.pendingInputs.push(data);
+      scheduleInputFlush(conn);
       return;
     }
     if (conn.ws.readyState === WebSocket.CONNECTING) {
@@ -489,23 +544,33 @@ export function probeTerminalConnection(sessionId: string): void {
 export async function resizeTerminal(
   sessionId: string,
   cols: number,
-  rows: number
+  rows: number,
+  seq?: number,
 ): Promise<void> {
   const conn = wsConnections.get(sessionId);
   if (conn && conn.ws.readyState === WebSocket.OPEN) {
-    conn.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-    return;
+    try {
+      conn.ws.send(JSON.stringify({ type: 'resize', cols, rows, seq }));
+      return;
+    } catch {
+      // Fall through to HTTP fallback.
+    }
   }
   // Fallback to HTTP
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch(`/api/terminal/${sessionId}/resize`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
-    body: JSON.stringify({ cols, rows }),
+    body: JSON.stringify({ cols, rows, seq }),
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to resize terminal' }));
     throw new Error(error.error || 'Failed to resize terminal');
+  }
+
+  const payload = await response.json().catch(() => ({ success: true }));
+  if (payload?.success === false || payload?.ok === false) {
+    throw new Error(payload?.error || 'Failed to resize terminal');
   }
 }
 
@@ -603,7 +668,7 @@ export async function restartTerminalSession(
 export async function checkTerminalHealth(sessionId: string): Promise<{
   healthy: boolean; sessionId: string; cwd?: string; clients?: number; lastActivity?: number;
   backend?: string; mode?: 'shell' | 'tmux'; tmuxSessionName?: string | null;
-  activeProgram?: string | null; activeProgramSource?: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+  activeProgram?: string | null; activeProgramRaw?: string | null; activeProgramSource?: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }> {
   const response = await fetch(`/api/terminal/${sessionId}/health`, { method: 'GET' });
   if (!response.ok) {
@@ -617,7 +682,7 @@ export async function checkTerminalHealth(sessionId: string): Promise<{
 export async function attachTerminalSession(sessionId: string): Promise<{
   sessionId: string; cwd: string; backend: string; clients: number; mode: 'shell' | 'tmux';
   tmuxSessionName: string | null; history: string[];
-  activeProgram: string | null; activeProgramSource: 'tmux-pane' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
+  activeProgram: string | null; activeProgramRaw?: string | null; activeProgramSource: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }> {
   const response = await fetch(`/api/terminal/${sessionId}/attach`, { method: 'GET' });
   if (!response.ok) {
@@ -849,8 +914,21 @@ export interface AgentRule {
 }
 
 export interface AgentProgramConfig {
-  program: string;
+  // 新格式：一个规则配置可匹配多个程序
+  programs?: string[];
+  // 兼容旧格式：单程序字段
+  program?: string;
   rules: AgentRule[];
+}
+
+export interface ProgramLabelRule {
+  id: string;
+  enabled?: boolean;
+  priority?: number;
+  matchType: 'exact' | 'includes' | 'prefix' | 'regex';
+  pattern: string;
+  output: string;
+  source?: Array<'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown'>;
 }
 
 export async function getAgentRules(): Promise<AgentProgramConfig[]> {
@@ -880,6 +958,36 @@ export async function resetAgentRules(): Promise<AgentProgramConfig[]> {
     headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
   });
   if (!response.ok) throw new Error('Failed to reset agent rules');
+  return response.json();
+}
+
+export async function getProgramRules(): Promise<ProgramLabelRule[]> {
+  const response = await fetch('/api/terminal/program-rules');
+  if (!response.ok) throw new Error('Failed to get program rules');
+  return response.json();
+}
+
+export async function replaceProgramRules(rules: ProgramLabelRule[]): Promise<ProgramLabelRule[]> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/program-rules', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(rules),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update program rules' }));
+    throw new Error(error.error || 'Failed to update program rules');
+  }
+  return response.json();
+}
+
+export async function resetProgramRules(): Promise<ProgramLabelRule[]> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/program-rules', {
+    method: 'DELETE',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) throw new Error('Failed to reset program rules');
   return response.json();
 }
 
@@ -974,7 +1082,7 @@ export async function getGitContext(cwd?: string): Promise<GitContext> {
 }
 
 // Combined payload for sidebar open — saves a round-trip and a git rev-parse.
-export async function getGitBundle(cwd?: string): Promise<{
+export async function getGitBundle(cwd?: string, signal?: AbortSignal): Promise<{
   available: boolean;
   files: Array<{ path: string; absolutePath: string; status: string; oldPath?: string }>;
   context: GitContext | null;
@@ -983,7 +1091,7 @@ export async function getGitBundle(cwd?: string): Promise<{
   const params = new URLSearchParams();
   if (cwd) params.set('cwd', cwd);
   const qs = params.toString();
-  const response = await fetch(`/api/terminal/fs/git-bundle${qs ? `?${qs}` : ''}`);
+  const response = await fetch(`/api/terminal/fs/git-bundle${qs ? `?${qs}` : ''}`, { signal });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get git bundle' }));
     throw new Error(error.error || 'Failed to get git bundle');

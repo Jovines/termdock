@@ -95,6 +95,12 @@ export type TranslationDictionary = {
     viewDiff: string;
     selectFileForDiff: string;
     gitInfo: string;
+    viewModeAll: string;
+    viewModeSingle: string;
+    wrapLongLines: string;
+    wrapOn: string;
+    wrapOff: string;
+    horizontalScrollHint: string;
   };
   fileTree: {
     insertRef: string;
@@ -158,6 +164,7 @@ export type TranslationDictionary = {
     mobileKeyboard: string;
     saving: string;
     rulesHint: string;
+    programsHelp: string;
   };
   toolbarPresets: {
     preview: string;
@@ -214,9 +221,13 @@ export type TranslationDictionary = {
     session: string;
     new: string;
     rename: string;
+    renameHint: string;
     copyCwd: string;
+    copyCwdHint: string;
     copied: string;
     close: string;
+    closeHint: string;
+    longPressTip: string;
     sessionsTitle: string;
     explorerTitle: string;
   };
