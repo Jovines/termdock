@@ -157,6 +157,28 @@ const GLOBAL_SESSION_STATE_FILE = `${os.homedir()}/.termdock/global-session-stat
 const CLIENT_STATES_FILE = `${os.homedir()}/.termdock/client-states.json`; // 保留用于迁移
 let persistGlobalStateTimer: ReturnType<typeof setTimeout> | null = null;
 
+// ── Control WebSocket: pushes the canonical client-state to every connected
+// browser in real time. Each client gets a fresh snapshot on connect, then
+// receives deltas on every mutation (PUT/DELETE client-state, dead-session
+// reconciliation, etc.). Replaces the 5-second poll on the front-end. ──
+const controlClients = new Map<string, WebSocket>();
+
+function broadcastClientState(): void {
+  if (controlClients.size === 0) return;
+  const payload = JSON.stringify({ type: 'client-state', state: globalSessionState });
+  for (const [clientId, ws] of controlClients) {
+    if (ws.readyState !== ws.OPEN) {
+      controlClients.delete(clientId);
+      continue;
+    }
+    try {
+      ws.send(payload);
+    } catch {
+      controlClients.delete(clientId);
+    }
+  }
+}
+
 function deduplicateGlobalSessions(sessions: PersistedClientSession[]): PersistedClientSession[] {
   const seen = new Map<string, number>();
   let hasDuplicates = false;
@@ -303,6 +325,7 @@ caffeinateManager.startNetworkMonitor();
     updatedAt: Date.now(),
   };
   schedulePersistGlobalState();
+  broadcastClientState();
 })();
 
 // On boot, backfill termdock metadata onto every tmux session referenced by
@@ -1770,6 +1793,24 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   if (options.clearHistoryBuffer !== false) {
     clearHistory(sessionId);
   }
+
+  // Fast-path cleanup for natural shell exits (PTY died on its own, not via
+  // our DELETE /:id path). Drop the persisted client-state entry so every
+  // browser sees the tab vanish within one WS tick, instead of waiting up to
+  // 30s for the reconciler. Only fires for shell mode: a tmux wrapper
+  // exiting is normal (the user can detach/reconnect) and the tmux daemon
+  // itself is independent of the wrapper.
+  if (options.killProcess === false && session.mode === 'shell') {
+    const beforeCount = globalSessionState.sessions.length;
+    globalSessionState = {
+      sessions: globalSessionState.sessions.filter((s) => s.backendSessionId !== sessionId),
+      updatedAt: Date.now(),
+    };
+    if (globalSessionState.sessions.length !== beforeCount) {
+      schedulePersistGlobalState();
+      broadcastClientState();
+    }
+  }
 }
 
 function broadcastToWs(sessionId: string, data: string): void {
@@ -2181,7 +2222,21 @@ router.delete('/tmux/sessions/:name', async (req, res) => {
     }
   }
 
-  console.log(`[tmux] killed session: ${rawName} (cleaned ${affectedSessionIds.length} attached pty)`);
+  // Also drop any persisted client-state entries that pointed at this tmux
+  // session. Without this, every connected browser would still see a tab
+  // whose backing tmux server is gone, and only the 30s reconciler would
+  // notice. Doing it inline + broadcasting keeps cross-device UX instant.
+  const beforeCount = globalSessionState.sessions.length;
+  globalSessionState = {
+    sessions: globalSessionState.sessions.filter((s) => !(s.mode === 'tmux' && s.tmuxSessionName === rawName)),
+    updatedAt: Date.now(),
+  };
+  if (globalSessionState.sessions.length !== beforeCount) {
+    schedulePersistGlobalState();
+    broadcastClientState();
+  }
+
+  console.log(`[tmux] killed session: ${rawName} (cleaned ${affectedSessionIds.length} attached pty, dropped ${beforeCount - globalSessionState.sessions.length} client-state entries)`);
   res.json({ success: true, cleanedSessions: affectedSessionIds });
 });
 
@@ -2220,6 +2275,7 @@ router.put('/client-state', (req, res) => {
   const state = normalizeGlobalSessionState(req.body);
   globalSessionState = state;
   schedulePersistGlobalState();
+  broadcastClientState();
 
   // Sync friendly-name to tmux user options for any tmux session whose
   // customName flag flipped, or whose name changed while customName=true.
@@ -2253,6 +2309,7 @@ router.put('/client-state', (req, res) => {
 router.delete('/client-state', (_req, res) => {
   globalSessionState = { sessions: [], updatedAt: Date.now() };
   schedulePersistGlobalState();
+  broadcastClientState();
   res.status(204).send();
 });
 
@@ -3240,5 +3297,111 @@ export function handleTerminalWebSocket(
 // Refresh global WheelUpPane/WheelDownPane bindings on every server start
 // so existing tmux sessions pick up the latest copy-mode flags.
 configureTmuxWheelBindings().catch(() => {});
+
+// ── Control WebSocket handler ──
+//
+// A separate, lightweight WS that exists purely to push client-state changes
+// to every connected browser. We don't accept commands here (mutations still
+// go through HTTP PUT/DELETE for CSRF + auth reuse); this channel is one-way
+// server→client, with a server-initiated snapshot on connect and a small
+// heartbeat to detect zombie sockets on iOS PWA resumes.
+export function handleControlWebSocket(ws: WebSocket, clientId: string): void {
+  controlClients.set(clientId, ws);
+
+  // Initial snapshot — same shape the HTTP GET returns, so the client can
+  // hydrate directly without a separate round-trip.
+  try {
+    ws.send(JSON.stringify({ type: 'client-state', state: globalSessionState }));
+  } catch {
+    controlClients.delete(clientId);
+    return;
+  }
+
+  // Heartbeat: client never has to send anything. We just send a tiny ping
+  // every 30s; if the underlying socket is dead the close will surface and
+  // the reconnect-on-client-side path takes over.
+  const heartbeat = setInterval(() => {
+    if (ws.readyState !== ws.OPEN) {
+      clearInterval(heartbeat);
+      controlClients.delete(clientId);
+      return;
+    }
+    try {
+      ws.send(JSON.stringify({ type: 'control-ping', ts: Date.now() }));
+    } catch {
+      clearInterval(heartbeat);
+      controlClients.delete(clientId);
+    }
+  }, 30_000);
+
+  // Clients may send pong (or nothing). We accept and ignore.
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg?.type === 'pong') {
+        // heartbeat ack, nothing to do
+      }
+    } catch { /* ignore malformed input */ }
+  });
+
+  const cleanup = (): void => {
+    clearInterval(heartbeat);
+    if (controlClients.get(clientId) === ws) {
+      controlClients.delete(clientId);
+    }
+  };
+  ws.on('close', cleanup);
+  ws.on('error', cleanup);
+}
+
+// ── Periodic reconciler ──
+//
+// `pruneOrphanSessions` only runs at boot, so anything that goes wrong at
+// runtime (external `tmux kill-session`, a shell wrapper whose PTY exited
+// but whose entry was never PUT/DELETE'd) leaks into globalSessionState.
+// Walk the persisted list every 30s and drop entries whose backing
+// session/tmux server is no longer alive; broadcast the cleaned list.
+const CLIENT_STATE_RECONCILE_INTERVAL_MS = 30_000;
+const reconcileTimer: ReturnType<typeof setInterval> = setInterval(() => {
+  void reconcileClientState();
+}, CLIENT_STATE_RECONCILE_INTERVAL_MS);
+// Don't keep the event loop alive for housekeeping.
+reconcileTimer.unref?.();
+
+async function reconcileClientState(): Promise<void> {
+  if (globalSessionState.sessions.length === 0) return;
+
+  const toRemove: string[] = [];
+  for (const entry of globalSessionState.sessions) {
+    if (entry.mode === 'shell') {
+      // Shell wrapper: backendSessionId must map to a live terminal session.
+      // No live wrapper → the shell process is gone, can't reattach.
+      if (!entry.backendSessionId || !terminalSessions.has(entry.backendSessionId)) {
+        toRemove.push(entry.sessionId);
+      }
+    } else if (entry.mode === 'tmux' && entry.tmuxSessionName) {
+      // Tmux entry: the tmux daemon (independent of termdock) must still
+      // own this session name. We deliberately do NOT require a live
+      // terminal wrapper here — detaching from the wrapper doesn't kill
+      // the tmux session.
+      try {
+        const alive = await tmuxSessionExists(entry.tmuxSessionName);
+        if (!alive) toRemove.push(entry.sessionId);
+      } catch {
+        // tmux itself is down — leave the entry alone; the next tick (or
+        // boot-time prune) will clean it up once tmux is back.
+      }
+    }
+  }
+
+  if (toRemove.length === 0) return;
+  globalSessionState = {
+    sessions: globalSessionState.sessions.filter((s) => !toRemove.includes(s.sessionId)),
+    updatedAt: Date.now(),
+  };
+  schedulePersistGlobalState();
+  broadcastClientState();
+  console.log(`[reconcile] removed ${toRemove.length} orphan client-state entries: ${toRemove.join(', ')}`);
+}
 
 export default router;

@@ -7,7 +7,7 @@ import { homedir } from 'os';
 import cookieParser from 'cookie-parser';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
-import terminalRoutes, { handleTerminalWebSocket } from './routes/terminal.js';
+import terminalRoutes, { handleTerminalWebSocket, handleControlWebSocket } from './routes/terminal.js';
 import filesystemRoutes from './routes/filesystem.js';
 import authRoutes from './routes/auth.js';
 import { csrfProtection } from './utils/csrfProtection.js';
@@ -130,22 +130,35 @@ export function startServer(options: ServerOptions = {}) {
   const wss = new WebSocketServer({ noServer: true });
 
   const WS_PATH_RE = /^\/api\/terminal\/([^/]+)\/ws$/;
+  const CONTROL_WS_PATH = '/api/control/ws';
 
   server.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
-    const match = url.pathname.match(WS_PATH_RE);
+    const pathname = url.pathname;
 
-    if (!match) {
+    // Reject the upgrade before the WebSocket handshake completes if auth
+    // is enabled and the client cookie is missing/expired. We respond with
+    // a real HTTP 401 so the browser surfaces a useful error. Applied to
+    // both per-terminal and control paths.
+    const cookieHeader = request.headers.cookie;
+    if (!isUpgradeRequestAuthenticated(typeof cookieHeader === 'string' ? cookieHeader : undefined)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
     }
 
-    // Reject the upgrade before the WebSocket handshake completes if auth
-    // is enabled and the client cookie is missing/expired. We respond with
-    // a real HTTP 401 so the browser surfaces a useful error.
-    const cookieHeader = request.headers.cookie;
-    if (!isUpgradeRequestAuthenticated(typeof cookieHeader === 'string' ? cookieHeader : undefined)) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+    // Control WS: server-pushed global client-state events. One per browser.
+    if (pathname === CONTROL_WS_PATH) {
+      const clientId = crypto.randomUUID();
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        handleControlWebSocket(ws, clientId);
+      });
+      return;
+    }
+
+    // Per-terminal WS: bidirectional I/O for a single terminal session.
+    const match = pathname.match(WS_PATH_RE);
+    if (!match) {
       socket.destroy();
       return;
     }

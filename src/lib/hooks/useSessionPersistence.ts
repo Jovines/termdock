@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { clearTerminalClientState, getTerminalClientState, replaceTerminalClientState, type PersistedTerminalClientSession } from '../terminal/api';
+import { subscribeClientState } from '../utils/clientStateSync';
 
 const LEGACY_STORAGE_KEY = 'termdock-sessions';
 const ACTIVE_SESSION_STORAGE_KEY = 'termdock-active-session';
@@ -7,7 +8,6 @@ const ACTIVE_SESSION_STORAGE_KEY = 'termdock-active-session';
 // HTTP GET /api/terminal/client-state 的蜂窝 RTT（500ms-3s）期间显示全屏 loading。
 // 数据源仍以服务端为准：缓存命中后照常发起后台请求 reconcile，只有差异才更新 state。
 const SESSIONS_CACHE_STORAGE_KEY = 'termdock-sessions-cache';
-const SESSIONS_POLL_INTERVAL = 5000; // 5 seconds
 
 function readActiveSessionId(): string | null {
   try {
@@ -100,6 +100,10 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const persistGenerationRef = useRef(0);
   const completedPersistGenerationRef = useRef(0);
   const activeSessionIdRef = useRef<string | null>(null);
+  // Mirror of `isLoading` for use inside the WS subscribe effect, whose
+  // body cannot read the React state value at subscribe time.
+  const isLoadingRef = useRef<boolean>(initialCached === null);
+  useEffect(() => { isLoadingRef.current = isLoading; }, [isLoading]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -369,41 +373,37 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     }
   }, [restoreSessions]);
 
-  // 轮询同步：定期从服务器获取 session 列表，检测其他客户端的变更
+  // 服务器推送的 client-state 同步：通过 control WebSocket 实时接收。
+  // 取代了之前 5s 一次的 HTTP 轮询——多设备 / 多 tab 之间的修改现在
+  // 走的是"谁先 PUT 到服务器就立刻广播给所有订阅者"，延迟从秒级降到
+  // 单个 WS RTT。
+  //
+  // 同样通过 persistGenerationRef 防止一次本地 close/create/rename
+  // 的乐观更新被服务器的旧快照覆盖（旧快照 vs 本地最新状态：本地赢）。
   useEffect(() => {
-    if (isLoading) return;
-
-    const poll = async () => {
-      // A local close/create/rename has already updated React state and
-      // localStorage synchronously. Do not let a stale server snapshot from the
-      // 5s poll resurrect a just-closed tab before the queued PUT/DELETE lands.
+    const unsubscribe = subscribeClientState((snapshot) => {
+      if (isLoadingRef.current) return;
+      // Skip applying server snapshots while a local mutation is in flight.
+      // The PUT will land and the next snapshot will reflect the change.
       if (completedPersistGenerationRef.current < persistGenerationRef.current) {
         return;
       }
 
-      try {
-        const data = await getTerminalClientState();
-        if (completedPersistGenerationRef.current < persistGenerationRef.current) {
-          return;
-        }
-        const serverSessions = normalizeSessionList(data.sessions || []);
+      const serverSessions = normalizeSessionList(snapshot.sessions || []);
 
-        setSessions(prev => {
-          // Check if anything actually changed (avoid unnecessary re-renders)
-          const key = (s: PersistedSession) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}`;
-          const prevKey = prev.map(key).join('|');
-          const nextKey = serverSessions.map(key).join('|');
-          if (prevKey === nextKey) return prev;
-          return serverSessions;
-        });
-      } catch {
-        // Polling failure is non-fatal
-      }
-    };
+      setSessions(prev => {
+        const key = (s: PersistedSession) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}`;
+        const prevKey = prev.map(key).join('|');
+        const nextKey = serverSessions.map(key).join('|');
+        if (prevKey === nextKey) return prev;
+        return serverSessions;
+      });
 
-    const intervalId = setInterval(poll, SESSIONS_POLL_INTERVAL);
-    return () => clearInterval(intervalId);
-  }, [isLoading, normalizeSessionList]);
+      // 同步本地缓存：下次冷启动直接 hydrate 出最新列表。
+      writeSessionsCache(serverSessions);
+    });
+    return unsubscribe;
+  }, [normalizeSessionList]);
 
   return {
     sessions,
