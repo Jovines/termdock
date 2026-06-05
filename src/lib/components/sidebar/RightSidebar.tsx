@@ -15,6 +15,7 @@ import { FileTree } from './FileTree';
 import { DiffViewer } from './DiffViewer';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { getGitBundle, readFileContent, type GitContext } from '../../terminal/api';
+import { useI18n } from '../../i18n';
 
 interface RightSidebarProps {
   isOpen: boolean;
@@ -121,6 +122,7 @@ interface FilePreviewProps {
 }
 
 function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange, onLineRangeChange }: FilePreviewProps) {
+  const { t } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const [content, setContent] = useState<string>('');
   const [loading, setLoading] = useState(false);
@@ -153,7 +155,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   }, [filePath, rootPath, onLineRangeChange]);
 
   if (!filePath) {
-    return <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">选择文件以预览内容</div>;
+    return <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
   }
 
   const readablePath = rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
@@ -196,8 +198,8 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
                 type="button"
                 onClick={onClose}
                 className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-                aria-label="返回文件列表"
-                title="返回"
+                aria-label={t('rightSidebar.backToFileList')}
+                title={t('common.back')}
               >
                 <RiArrowLeft size={14} />
               </button>
@@ -215,7 +217,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
                 className="inline-flex h-9 items-center gap-1 rounded-full bg-accent/15 px-3 text-xs font-semibold text-accent transition hover:bg-accent/25 active:scale-95"
                 title={`Insert code reference: ${lineReference}`}
               >
-                引用{selectedLineLabel}
+                {t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
               </button>
             )}
             {!isMobile && (
@@ -225,7 +227,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
                 className="inline-flex h-9 items-center gap-1 rounded-full bg-primary/15 px-3 text-xs font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
                 title={`Insert reference: ${reference}`}
               >
-                引用
+                {t('rightSidebar.insertFileRef')}
               </button>
             )}
             <button
@@ -233,7 +235,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
               onClick={() => void navigator.clipboard?.writeText(reference)}
               className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-background-subtle text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95"
               title={`Copy reference: ${reference}`}
-              aria-label="Copy file reference"
+              aria-label={t('rightSidebar.copyFileRef')}
             >
               <RiCopy size={13} />
             </button>
@@ -250,8 +252,8 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
         <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
           <span className="truncate">
             {lineRange
-              ? `已选 ${selectedLineLabel} · 点下方「引用」按钮插入`
-              : '多行引用：先点起始行，再点结束行'}
+              ? t('rightSidebar.selectedLineHint', { lineLabel: selectedLineLabel ?? '' })
+              : t('rightSidebar.multiLineHint')}
           </span>
         </div>
       </div>
@@ -299,14 +301,14 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
       >
         <div className="flex items-center gap-2">
           <div className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">
-            已选 {selectedLineLabel}
+            {t('rightSidebar.selectedLineFooter', { lineLabel: selectedLineLabel ?? '' })}
           </div>
           <button
             type="button"
             onClick={() => onLineRangeChange(null)}
             className="inline-flex h-9 items-center rounded-full bg-background-subtle px-3 text-[12px] font-medium text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95"
           >
-            清除
+            {t('rightSidebar.clearSelection')}
           </button>
           <button
             type="button"
@@ -314,7 +316,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
             className="inline-flex h-9 items-center gap-1 rounded-full bg-primary px-4 text-[12px] font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 active:scale-95"
             title={`Insert code reference: ${lineReference}`}
           >
-            引用{selectedLineLabel}
+            {t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
           </button>
         </div>
       </div>
@@ -325,6 +327,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
 export function RightSidebar(
   { isOpen, drawerWidthPx, onClose, onOpen, push }: RightSidebarProps,
 ) {
+  const { t } = useI18n();
   const [fileQuery, setFileQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const deferredFileQuery = useDeferredValue(fileQuery);
@@ -452,10 +455,10 @@ export function RightSidebar(
   }, []);
 
   const rootName = useMemo(() => {
-    if (!rootPath) return '工作区';
+    if (!rootPath) return t('rightSidebar.workspace');
     const normalized = rootPath.replace(/\/+$/, '');
     return normalized.split('/').pop() || normalized;
-  }, [rootPath]);
+  }, [rootPath, t]);
 
   const changedSummary = useMemo(() => {
     const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, other: 0 };
@@ -544,9 +547,9 @@ export function RightSidebar(
 
   const insertGitContext = useCallback(() => {
     if (!gitContextInputText) return;
-    insertContextText('Git 信息', gitContextInputText);
+    insertContextText(t('rightSidebar.gitInfo'), gitContextInputText);
     if (!push) onClose();
-  }, [gitContextInputText, insertContextText, onClose, push]);
+  }, [gitContextInputText, insertContextText, onClose, push, t]);
 
   const selectDiffFile = useCallback((path: string | null) => {
     selectFile(path);
@@ -608,8 +611,8 @@ export function RightSidebar(
                 ? 'bg-primary/15 text-primary'
                 : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
             }`}
-            aria-label="切换搜索"
-            title="搜索"
+            aria-label={t('rightSidebar.toggleSearch')}
+            title={t('common.search')}
           >
             <RiSearch size={14} />
           </button>
@@ -619,8 +622,8 @@ export function RightSidebar(
               onClick={() => void refreshGitState()}
               disabled={gitRefreshing}
               className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50 active:scale-95"
-              aria-label="刷新 Git 状态"
-              title="刷新"
+              aria-label={t('rightSidebar.refreshGit')}
+              title={t('common.refresh')}
             >
               <RiRefresh size={13} className={gitRefreshing ? 'animate-spin' : ''} />
             </button>
@@ -629,7 +632,7 @@ export function RightSidebar(
             type="button"
             onClick={onClose}
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive active:scale-95"
-            aria-label="关闭"
+            aria-label={t('rightSidebar.close')}
           >
             <RiCloseLine size={14} />
           </button>
@@ -643,7 +646,7 @@ export function RightSidebar(
               type="search"
               value={fileQuery}
               onChange={(event) => setFileQuery(event.target.value)}
-              placeholder="过滤改动或文件"
+              placeholder={t('rightSidebar.filterChanges')}
               className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground"
               autoCapitalize="off"
               autoCorrect="off"
@@ -656,7 +659,7 @@ export function RightSidebar(
                 type="button"
                 onClick={() => setFileQuery('')}
                 className="rounded-full p-0.5 text-muted-foreground hover:bg-surface hover:text-foreground"
-                aria-label="清除搜索"
+                aria-label={t('rightSidebar.clearSearch')}
               >
                 <RiCloseLine size={12} />
               </button>
@@ -685,17 +688,17 @@ export function RightSidebar(
                   type="button"
                   onClick={insertGitContext}
                   className="ml-auto rounded-full bg-primary/10 px-2 py-0.5 font-medium text-primary hover:bg-primary/20"
-                  title="把当前 Git 信息插入 Terminal"
+                  title={t('rightSidebar.insertGitContext')}
                 >
-                  插入 Git 信息
+                  {t('rightSidebar.insertPreset', { label: t('rightSidebar.gitInfo') })}
                 </button>
                 <button
                   type="button"
                   onClick={() => void navigator.clipboard?.writeText(gitContextText)}
                   className="rounded-full bg-surface-2 px-2 py-0.5 text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
-                  title="复制 Git 信息"
+                  title={t('rightSidebar.copyGitContext')}
                 >
-                  复制
+                  {t('common.copy')}
                 </button>
               </>
             )}
@@ -707,10 +710,10 @@ export function RightSidebar(
             and each chip occupies its own slot; we just hide unused ones. */}
         {(() => {
           const presets: { key: string; text: string; label: string; tone: 'primary' | 'accent' | 'subtle'; title: string }[] = [
-            { key: 'changes', text: changeContextPackText, label: '全部改动', tone: 'primary', title: '插入当前分支、全部改动文件列表' },
-            { key: 'current', text: currentFileContextText, label: '当前文件', tone: 'accent', title: '插入当前选中的文件' },
-            { key: 'search', text: searchContextText, label: '搜索结果', tone: 'subtle', title: '插入当前搜索词匹配的改动文件' },
-            { key: 'recent', text: recentContextText, label: '最近引用', tone: 'subtle', title: '插入最近引用过的文件' },
+            { key: 'changes', text: changeContextPackText, label: t('rightSidebar.presetAllChanges'), tone: 'primary', title: t('rightSidebar.insertGitContext') },
+            { key: 'current', text: currentFileContextText, label: t('rightSidebar.presetCurrentFile'), tone: 'accent', title: t('rightSidebar.presetCurrentFile') },
+            { key: 'search', text: searchContextText, label: t('rightSidebar.presetSearchResults'), tone: 'subtle', title: t('rightSidebar.presetSearchResults') },
+            { key: 'recent', text: recentContextText, label: t('rightSidebar.presetRecent'), tone: 'subtle', title: t('rightSidebar.presetRecent') },
           ];
           const visible = presets.filter((p) => Boolean(p.text));
           return (
@@ -734,7 +737,7 @@ export function RightSidebar(
                     className={`inline-flex shrink-0 items-center rounded-full px-2.5 py-1 transition active:scale-95 ${toneClass}`}
                     title={preset.title}
                   >
-                    插入：{preset.label}
+                    {t('rightSidebar.insertPreset', { label: preset.label })}
                   </button>
                   );
               })}
@@ -748,7 +751,7 @@ export function RightSidebar(
         <div className="mt-2 h-6">
           {recentReferences.length > 0 && (
             <div className="flex h-full items-center gap-1 overflow-x-auto pb-0.5">
-              <span className="shrink-0 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">最近</span>
+              <span className="shrink-0 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">{t('rightSidebar.recent')}</span>
               {recentReferences.slice(0, MAX_RECENT_REFERENCES).map((item) => {
                 const display = getRelativeDisplayPath(item.path, rootPath);
                 return (
@@ -768,9 +771,9 @@ export function RightSidebar(
                 type="button"
                 onClick={() => setRecentReferences([])}
                 className="ml-auto shrink-0 rounded-full bg-background-subtle px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-surface-2 hover:text-foreground"
-                title="清空最近引用"
+                title={t('rightSidebar.clearRecent')}
               >
-                清空
+                {t('common.clear')}
               </button>
             </div>
           )}
@@ -791,7 +794,7 @@ export function RightSidebar(
             }`}
           >
             <RiGitCompare size={12} />
-            改动
+            {t('rightSidebar.tabChanges')}
             {changedFiles.size > 0 && (
               <span className="text-[10px] text-accent">{changedFiles.size}</span>
             )}
@@ -806,7 +809,7 @@ export function RightSidebar(
             }`}
           >
             <RiFolder size={12} />
-            文件
+            {t('rightSidebar.tabFiles')}
           </button>
           {!isMobile && !isWide && (
             <button
@@ -819,7 +822,7 @@ export function RightSidebar(
               }`}
             >
               <RiFileText size={12} />
-              预览
+              {t('rightSidebar.tabPreview')}
             </button>
           )}
         </div>
@@ -829,7 +832,7 @@ export function RightSidebar(
             the tab bar or scroller. */}
         {lastInsertedReference && (
           <div className="pointer-events-none absolute right-12 top-2 z-10 max-w-[60%] truncate rounded-full bg-primary/90 px-3 py-1 text-[11px] font-medium text-primary-foreground shadow-md animate-fade-in">
-            已插入 {lastInsertedReference}
+            {t('rightSidebar.insertedToast', { label: lastInsertedReference })}
           </div>
         )}
       </div>
@@ -909,7 +912,7 @@ export function RightSidebar(
                           : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
                       }`}
                     >
-                      全部改动
+                      {t('rightSidebar.allChanges')}
                     </button>
                     <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
                   </div>
@@ -918,11 +921,11 @@ export function RightSidebar(
               <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
                 {changedFiles.size === 0 ? (
                   <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-                    没有改动
+                    {t('rightSidebar.noChanges')}
                   </div>
                 ) : filteredChangedFiles.length === 0 ? (
                   <div className="bg-background-subtle px-3 py-4 text-center text-xs text-muted-foreground">
-                    没有匹配的改动
+                    {t('rightSidebar.noMatchingChanges')}
                   </div>
                 ) : (
                   <div className="space-y-px">
@@ -953,9 +956,9 @@ export function RightSidebar(
                               insertPathReference(absolutePath);
                             }}
                             className="inline-flex h-6 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100"
-                            title="把这个文件引用插入 Terminal"
+                            title={t('rightSidebar.insertThisFile')}
                           >
-                            引用
+                            {t('rightSidebar.insertFileRef')}
                           </span>
                         </button>
                       );
@@ -979,12 +982,12 @@ export function RightSidebar(
                       type="button"
                       onClick={closeDiffView}
                       className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-                      aria-label="返回改动列表"
-                      title="返回"
+                      aria-label={t('rightSidebar.backToChangeList')}
+                      title={t('common.back')}
                     >
                       <RiArrowLeft size={14} />
                     </button>
-                    <span className="text-[12px] font-medium text-foreground">查看 diff</span>
+                    <span className="text-[12px] font-medium text-foreground">{t('rightSidebar.viewDiff')}</span>
                   </div>
                 ) : (
                   <>
@@ -998,14 +1001,14 @@ export function RightSidebar(
                             : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
                         }`}
                       >
-                        全部改动
+                        {t('rightSidebar.allChanges')}
                       </button>
                       <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
                     </div>
                     <div className="space-y-px">
                       {filteredChangedFiles.length === 0 ? (
                         <div className="bg-background-subtle px-3 py-4 text-center text-xs text-muted-foreground">
-                          没有匹配的改动
+                          {t('rightSidebar.noMatchingChanges')}
                         </div>
                       ) : filteredChangedFiles.map(([absolutePath, status]) => {
                         const display = getRelativeDisplayPath(absolutePath, rootPath);
@@ -1037,9 +1040,9 @@ export function RightSidebar(
                                 insertPathReference(absolutePath);
                               }}
                               className="inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary transition active:scale-95 sm:h-6 sm:min-w-8 md:opacity-0 md:group-hover:opacity-100"
-                              title="把这个文件引用插入 Terminal"
+                              title={t('rightSidebar.insertThisFile')}
                             >
-                              引用
+                              {t('rightSidebar.insertFileRef')}
                             </span>
                           </button>
                         );
@@ -1051,7 +1054,7 @@ export function RightSidebar(
             )}
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
               {isMobile && !selectedFilePath ? (
-                <div className="px-3 py-6 text-center text-xs text-muted-foreground">选择上面的文件查看 diff</div>
+                <div className="px-3 py-6 text-center text-xs text-muted-foreground">{t('rightSidebar.selectFileForDiff')}</div>
               ) : (
                 <DiffViewer filePath={selectedFilePath} onInsertDiffReference={insertContextText} />
               )}

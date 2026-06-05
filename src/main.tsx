@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { LoginScreen } from './lib/components/auth/LoginScreen';
+import { I18nProvider, useI18n } from './lib/i18n';
 import {
   AUTH_UNAUTHORIZED_EVENT,
   getAuthStatus,
@@ -12,6 +13,7 @@ import {
 // App. Listens to `auth:unauthorized` from the global fetch interceptor so
 // that any 401 (e.g. session expired mid-use) drops back to login.
 function AuthGate() {
+  const { t } = useI18n();
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,7 +47,7 @@ function AuthGate() {
         className="flex w-screen items-center justify-center bg-background text-muted-foreground"
         style={{ height: 'var(--app-vh, 100vh)' }}
       >
-        {error ? `Error: ${error}` : 'Loading…'}
+        {error ? `${t('common.error')}: ${error}` : t('common.loading')}
       </div>
     );
   }
@@ -59,6 +61,8 @@ function AuthGate() {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <AuthGate />
+    <I18nProvider>
+      <AuthGate />
+    </I18nProvider>
   </React.StrictMode>
 );

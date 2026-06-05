@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowRight as RiArrowRightLine, Loader2 as RiLoader4Line } from 'lucide-react';
 import { loginWithPassword } from '../../terminal/api';
+import { useI18n } from '../../i18n';
 
 interface LoginScreenProps {
   onLoginSuccess: () => void;
@@ -20,6 +21,7 @@ const ASCII_LOGO = String.raw`
 // Renders a fullscreen password form. Stays mounted for the lifetime of the
 // "logged out" state — the parent App swaps it in/out based on auth status.
 export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
+  const { t } = useI18n();
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,10 +36,10 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
   // remaining seconds are visible to the user.
   useEffect(() => {
     if (retrySecondsLeft <= 0) return;
-    const t = setInterval(() => {
+    const tick = setInterval(() => {
       setRetrySecondsLeft((s) => (s > 1 ? s - 1 : 0));
     }, 1000);
-    return () => clearInterval(t);
+    return () => clearInterval(tick);
   }, [retrySecondsLeft]);
 
   const blocked = retrySecondsLeft > 0;
@@ -55,18 +57,18 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
         onLoginSuccess();
         return;
       }
-      setError(result.error || '密码错误');
+      setError(result.error || t('login.invalidPassword'));
       if (result.rateLimited && typeof result.retryAfterMs === 'number') {
         setRetrySecondsLeft(Math.max(1, Math.ceil(result.retryAfterMs / 1000)));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败');
+      setError(err instanceof Error ? err.message : t('login.failed'));
     } finally {
       setSubmitting(false);
     }
   };
 
-  const placeholder = blocked ? `请稍候 ${retrySecondsLeft}s` : '请输入密码';
+  const placeholder = blocked ? t('login.placeholderBlocked', { s: retrySecondsLeft }) : t('login.placeholder');
 
   return (
     <div
@@ -99,7 +101,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
         className="flex items-center gap-2 text-sm text-muted-foreground font-mono"
       >
         <span className="text-primary">$</span>
-        <span>termdock login</span>
+        <span>{t('login.prompt')}</span>
         <span className="terminal-cursor" aria-hidden>
           ▍
         </span>
@@ -130,7 +132,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
           <button
             type="submit"
             disabled={!canSubmit}
-            aria-label="登录"
+            aria-label={t('login.submit')}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {submitting ? (

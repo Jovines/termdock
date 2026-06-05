@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
 import { listDirectory, type FileEntry } from '../../terminal/api';
+import { useI18n } from '../../i18n';
 
 interface FileTreeProps {
   rootPath: string;
@@ -80,6 +81,7 @@ const FileTreeItem = memo(function FileTreeItem({
   selectedFilePath,
   queryLower,
 }: FileTreeItemProps) {
+  const { t } = useI18n();
   // 精确订阅：每个节点只关心和自己相关的字段
   const isExpanded = useSidebarStore((s) => s.expandedPaths.has(node.path));
   const children = useSidebarStore((s) => s.directoryCache.get(node.path));
@@ -167,9 +169,9 @@ const FileTreeItem = memo(function FileTreeItem({
           <span
             onClick={handleReferenceClick}
             className="ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100"
-            title="Insert file reference into active terminal"
+            title={t('fileTree.insertRefTitle')}
           >
-            引用
+            {t('fileTree.insertRef')}
           </span>
         )}
       </button>
@@ -194,6 +196,7 @@ const FileTreeItem = memo(function FileTreeItem({
 });
 
 export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFilePath, query = '' }: FileTreeProps) {
+  const { t } = useI18n();
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
   const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
@@ -246,7 +249,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
   if (!rootPath) {
     return (
       <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-        No working directory detected.
+        {t('fileTree.noWorkingDir')}
       </div>
     );
   }
@@ -270,7 +273,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
   if (!rootEntries || rootEntries.length === 0) {
     return (
       <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-        Empty directory.
+        {t('fileTree.emptyDir')}
       </div>
     );
   }
@@ -278,7 +281,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
   if (!visibleRootEntries || visibleRootEntries.length === 0) {
     return (
       <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
-        No matching files.
+        {t('fileTree.noMatchingFiles')}
       </div>
     );
   }
@@ -287,7 +290,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
     <div className="space-y-px px-2 py-2">
       {rootTruncated && (
         <div className="mb-2 rounded-xl bg-yellow-400/10 px-3 py-2 text-[11px] text-yellow-300">
-          Showing first 1000 entries. Use search or open a smaller folder for better performance.
+          {t('fileTree.truncatedHint')}
         </div>
       )}
       {visibleRootEntries.map((node) => (

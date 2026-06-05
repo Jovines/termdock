@@ -15,6 +15,7 @@ import {
   CircleHelp as RiCircleHelp,
 } from 'lucide-react';
 import type { AgentStatus, AgentIndicator } from '../terminal/types';
+import { useI18n } from '../i18n';
 
 /** 黄色（待查看 / 等待用户 / copy mode） */
 export const AGENT_COLOR_ATTENTION = '#facc15';
@@ -107,11 +108,12 @@ export function AgentSessionDot({
   needsReview?: boolean;
   inCopyMode?: boolean;
 }): React.ReactElement | null {
+  const { t } = useI18n();
   if (status === 'running') {
     return (
       <span
         className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-green-400 ring-2 ring-surface animate-pulse"
-        title="AI running"
+        title={t('agent.aiRunning')}
       />
     );
   }
@@ -119,7 +121,7 @@ export function AgentSessionDot({
     return (
       <span
         className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-yellow-400 ring-2 ring-surface animate-pulse"
-        title={needsReview ? 'AI finished — needs review' : 'AI waiting'}
+        title={needsReview ? t('agent.finishedReview') : t('agent.aiWaiting')}
       />
     );
   }
@@ -127,7 +129,7 @@ export function AgentSessionDot({
     return (
       <span
         className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-yellow-400/80 ring-2 ring-surface animate-pulse"
-        title="Copy mode"
+        title={t('agent.copyMode')}
       />
     );
   }

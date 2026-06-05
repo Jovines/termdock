@@ -5,16 +5,7 @@ import {
   RotateCcw as RiResetLine,
 } from 'lucide-react';
 import type { AgentProgramConfig, AgentRule } from '../../terminal/api';
-
-const PRESET_COLORS = [
-  { value: '#4ade80', label: 'Green' },
-  { value: '#facc15', label: 'Yellow' },
-  { value: '#f87171', label: 'Red' },
-  { value: '#60a5fa', label: 'Blue' },
-  { value: '#c084fc', label: 'Purple' },
-  { value: '#fb923c', label: 'Orange' },
-  { value: '#888888', label: 'Gray' },
-];
+import { useI18n } from '../../i18n';
 
 const INDICATOR_OPTIONS: Array<{ value: NonNullable<AgentRule['indicator']>; label: string }> = [
   { value: 'spinner', label: 'Spinner' },
@@ -33,6 +24,16 @@ interface AgentRulesSettingsProps {
 }
 
 function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSettingsProps) {
+  const { t } = useI18n();
+  const presetColors = [
+    { value: '#4ade80', label: t('agentRules.ruleColors.green') },
+    { value: '#facc15', label: t('agentRules.ruleColors.yellow') },
+    { value: '#f87171', label: t('agentRules.ruleColors.red') },
+    { value: '#60a5fa', label: t('agentRules.ruleColors.blue') },
+    { value: '#c084fc', label: t('agentRules.ruleColors.purple') },
+    { value: '#fb923c', label: t('agentRules.ruleColors.orange') },
+    { value: '#888888', label: t('agentRules.ruleColors.gray') },
+  ] as const;
   const addProgram = () => {
     onChange([...rules, { program: '', rules: [{ pattern: '', status: 'running', indicator: 'pulse', clearDelayMs: 700 }] }]);
   };
@@ -71,7 +72,7 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
       new RegExp(pattern, 'i');
       return null;
     } catch {
-      return 'Invalid regex';
+      return t('settings.invalidRegex');
     }
   };
 
@@ -85,14 +86,14 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
               type="text"
               value={prog.program}
               onChange={(e) => updateProgram(pi, 'program', e.target.value)}
-              placeholder="Program name (e.g. claude)"
+              placeholder={t('settings.programNamePlaceholder')}
               className="flex-1 rounded-lg bg-surface px-3 py-1.5 text-sm font-medium text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 focus:ring-primary/30"
             />
             <button
               type="button"
               onClick={() => removeProgram(pi)}
               className="shrink-0 rounded-lg p-1.5 text-muted-foreground hover:bg-surface-elevated hover:text-red-400 transition"
-              aria-label="Remove program"
+              aria-label={t('settings.removeProgram')}
             >
               <RiDeleteBinLine size={14} />
             </button>
@@ -108,7 +109,7 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
                     type="text"
                     value={rule.pattern}
                     onChange={(e) => updateRule(pi, ri, 'pattern', e.target.value)}
-                    placeholder="Regex pattern (e.g. Thinking|Generating)"
+                    placeholder={t('settings.patternPlaceholder')}
                     className={`flex-1 rounded-lg bg-surface px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 ${
                       regexError ? 'ring-1 ring-red-400' : 'focus:ring-primary/30'
                     }`}
@@ -117,7 +118,7 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
                     type="button"
                     onClick={() => removeRule(pi, ri)}
                     className="shrink-0 rounded p-1 text-muted-foreground/60 hover:text-red-400 transition"
-                    aria-label="Remove rule"
+                    aria-label={t('settings.removeRule')}
                   >
                     <RiCloseLine size={12} />
                   </button>
@@ -130,10 +131,10 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
                     type="text"
                     value={rule.status}
                     onChange={(e) => updateRule(pi, ri, 'status', e.target.value)}
-                    placeholder="Status"
+                    placeholder={t('settings.statusPlaceholder')}
                     className="w-20 shrink-0 rounded-lg bg-surface px-2 py-1.5 text-[11px] text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 focus:ring-primary/30"
                   />
-                  {PRESET_COLORS.map((c) => (
+                  {presetColors.map((c) => (
                     <button
                       key={c.value}
                       type="button"
@@ -150,20 +151,20 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
                     value={rule.color || '#4ade80'}
                     onChange={(e) => updateRule(pi, ri, 'color', e.target.value)}
                     className="h-5 w-5 shrink-0 cursor-pointer rounded-full border-0 bg-transparent p-0"
-                    title="Custom color"
+                    title={t('settings.customColor')}
                   />
                   <select
                     value={rule.indicator || 'pulse'}
                     onChange={(e) => updateRule(pi, ri, 'indicator', e.target.value)}
                     className="rounded-lg bg-surface px-2 py-1.5 text-[11px] text-foreground outline-none focus:ring-1 focus:ring-primary/30"
-                    title="Tab indicator style"
+                    title={t('settings.tabIndicator')}
                   >
                     {INDICATOR_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>{option.label}</option>
                     ))}
                   </select>
                   <label className="inline-flex items-center gap-1 rounded-lg bg-surface px-2 py-1.5 text-[11px] text-muted-foreground">
-                    keep
+                    {t('settings.keepLabel')}
                     <input
                       type="number"
                       min={80}
@@ -185,7 +186,7 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
             onClick={() => addRule(pi)}
             className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-muted-foreground hover:bg-surface-elevated hover:text-foreground transition"
           >
-            <RiAddLine size={12} /> Add pattern
+            <RiAddLine size={12} /> {t('settings.addPattern')}
           </button>
         </div>
       ))}
@@ -197,14 +198,14 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
           onClick={addProgram}
           className="flex items-center gap-1.5 rounded-full bg-primary/15 px-4 py-2 text-xs font-medium text-primary hover:bg-primary/25 transition"
         >
-          <RiAddLine size={14} /> Add program
+          <RiAddLine size={14} /> {t('settings.addProgram')}
         </button>
         <button
           type="button"
           onClick={onResetDefaults}
           className="flex items-center gap-1.5 rounded-full bg-surface-2 px-4 py-2 text-xs font-medium text-muted-foreground hover:bg-surface-elevated hover:text-foreground transition"
         >
-          <RiResetLine size={14} /> Reset defaults
+          <RiResetLine size={14} /> {t('settings.resetDefaults')}
         </button>
       </div>
     </div>

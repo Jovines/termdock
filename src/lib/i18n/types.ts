@@ -1,0 +1,279 @@
+// Shared type for the translation dictionary.
+//
+// Every key is a dotted path like `common.cancel` or `auth.invalidPassword`.
+// Parameters use `{name}` placeholders that get substituted at lookup time.
+//
+// Two locales only for now (en, zh). Add a third by:
+//   1. Drop a new dictionary file with the same shape.
+//   2. Add the locale code to the `Locale` union and the `dictionaries` map.
+//   3. Add an option to `<LanguageSwitcher>`.
+
+export type Locale = 'en' | 'zh';
+
+export const SUPPORTED_LOCALES: Locale[] = ['en', 'zh'];
+export const DEFAULT_LOCALE: Locale = 'en';
+
+export type TranslatorParams = Record<string, string | number>;
+
+// Function-typed entries take the params object so callers can pass
+// { name: 'foo' } and the implementation can destructure what it needs.
+export type TranslationDictionary = {
+  app: {
+    name: string;
+  };
+  common: {
+    cancel: string;
+    close: string;
+    save: string;
+    reset: string;
+    loading: string;
+    error: string;
+    retry: string;
+    refresh: string;
+    search: string;
+    clear: string;
+    back: string;
+    copy: string;
+    decrease: string;
+    increase: string;
+  };
+  login: {
+    prompt: string;
+    placeholder: string;
+    placeholderBlocked: (params: TranslatorParams) => string;
+    submit: string;
+    invalidPassword: string;
+    failed: string;
+  };
+  sidebar: {
+    sessions: string;
+    noSessions: string;
+    noMatchingSessions: string;
+    toggleSearch: string;
+    settings: string;
+    filterSessions: string;
+    clearSearch: string;
+    closeSession: (params: TranslatorParams) => string;
+    newShell: string;
+    newTmux: string;
+    newTmuxDisabled: string;
+  };
+  rightSidebar: {
+    workspace: string;
+    toggleSearch: string;
+    refreshGit: string;
+    close: string;
+    filterChanges: string;
+    clearSearch: string;
+    insertGitContext: string;
+    copyGitContext: string;
+    insertPreset: (params: TranslatorParams) => string;
+    presetAllChanges: string;
+    presetCurrentFile: string;
+    presetSearchResults: string;
+    presetRecent: string;
+    recent: string;
+    clearRecent: string;
+    tabChanges: string;
+    tabFiles: string;
+    tabPreview: string;
+    insertedToast: (params: TranslatorParams) => string;
+    selectFilePrompt: string;
+    backToFileList: string;
+    insertLineRef: (params: TranslatorParams) => string;
+    insertFileRef: string;
+    copyFileRef: string;
+    selectedLineHint: (params: TranslatorParams) => string;
+    multiLineHint: string;
+    selectedLineFooter: (params: TranslatorParams) => string;
+    clearSelection: string;
+    allChanges: string;
+    noChanges: string;
+    noMatchingChanges: string;
+    insertThisFile: string;
+    backToChangeList: string;
+    viewDiff: string;
+    selectFileForDiff: string;
+    gitInfo: string;
+  };
+  fileTree: {
+    insertRef: string;
+    insertRefTitle: string;
+    noWorkingDir: string;
+    emptyDir: string;
+    noMatchingFiles: string;
+    truncatedHint: string;
+  };
+  diffViewer: {
+    noFileChanges: string;
+    noUnstagedChanges: string;
+    insertAllDiff: string;
+    insertFileDiff: string;
+    insertHunkDiff: string;
+    allDiffLabel: string;
+    workingTree: string;
+    allUnstaged: string;
+  };
+  settings: {
+    title: string;
+    font: string;
+    render: string;
+    newTab: string;
+    debug: string;
+    noSleep: string;
+    noSleepUnavailable: string;
+    shell: string;
+    tmux: string;
+    auto: string;
+    webgl: string;
+    canvas: string;
+    tmuxServer: string;
+    tmuxUnavailable: string;
+    noTmuxSessions: string;
+    installTmuxHint: string;
+    refresh: string;
+    attached: string;
+    attach: string;
+    destroy: string;
+    sessions: (params: TranslatorParams) => string;
+    windows: (params: TranslatorParams) => string;
+    keyboardToolbar: string;
+    aiAgentDetection: string;
+    signOut: string;
+    language: string;
+    programNamePlaceholder: string;
+    patternPlaceholder: string;
+    statusPlaceholder: string;
+    addProgram: string;
+    addPattern: string;
+    resetDefaults: string;
+    invalidRegex: string;
+    removeProgram: string;
+    removeRule: string;
+    keepLabel: string;
+    customColor: string;
+    tabIndicator: string;
+    toolbarPresets: string;
+    detectionRules: string;
+    mobileKeyboard: string;
+    saving: string;
+    rulesHint: string;
+  };
+  toolbarPresets: {
+    preview: string;
+    presets: string;
+    label: string;
+    new: string;
+    reset: string;
+    presetLabelPlaceholder: string;
+    deletePreset: (params: TranslatorParams) => string;
+    matchPrograms: string;
+    typeEnterHint: string;
+    programsPlaceholder: string;
+    programsHelp: string;
+    altSlot: string;
+    altSlotHint: string;
+    rowLayout: string;
+    rowLayoutHint: string;
+    addRow: string;
+    rowN: (params: TranslatorParams) => string;
+    del: string;
+    buttons: string;
+    buttonsHint: string;
+    addButton: string;
+    noCustomButtons: string;
+    moveUp: string;
+    moveDown: string;
+    removeRow: (params: TranslatorParams) => string;
+    removeAction: (params: TranslatorParams) => string;
+    labelField: string;
+    labelPlaceholder: string;
+    sequence: string;
+    sequencePlaceholder: string;
+    sequenceHint: string;
+    doubleTap: string;
+    doubleTapAdd: string;
+    doubleTapPlaceholder: string;
+    remove: string;
+    noSequence: string;
+    preset: string;
+    overCapacityHint: string;
+  };
+  agentRules: {
+    ruleColors: {
+      green: string;
+      yellow: string;
+      red: string;
+      blue: string;
+      purple: string;
+      orange: string;
+      gray: string;
+    };
+  };
+  tab: {
+    session: string;
+    new: string;
+    rename: string;
+    copyCwd: string;
+    copied: string;
+    close: string;
+    sessionsTitle: string;
+    explorerTitle: string;
+  };
+  agent: {
+    aiRunning: string;
+    needsReview: string;
+    finishedReview: string;
+    aiWaiting: string;
+    copyMode: string;
+  };
+  connection: {
+    reconnecting: string;
+  };
+  terminal: {
+    input: string;
+    error: string;
+  };
+  errorBoundary: {
+    title: string;
+    unexpected: string;
+    retry: string;
+  };
+  error: {
+    type: {
+      network: string;
+      session: string;
+      terminal: string;
+      auth: string;
+      validation: string;
+      unknown: string;
+    };
+    severity: {
+      low: string;
+      medium: string;
+      high: string;
+      critical: string;
+    };
+    suggestion: {
+      networkCheck: string;
+      networkRetry: string;
+      networkProxy: string;
+      networkWait: string;
+      sessionRecreate: string;
+      sessionServer: string;
+      sessionCache: string;
+      terminalRestart: string;
+      terminalConfig: string;
+      terminalClear: string;
+      authRelogin: string;
+      authCredentials: string;
+      authAdmin: string;
+      validationFormat: string;
+      validationParams: string;
+      validationDocs: string;
+      unknownReload: string;
+      unknownApp: string;
+      unknownSupport: string;
+    };
+  };
+};

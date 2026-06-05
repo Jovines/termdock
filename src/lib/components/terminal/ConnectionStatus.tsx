@@ -1,4 +1,5 @@
 import React from 'react';
+import { useI18n } from '../../i18n';
 
 interface ConnectionStatusProps {
   connectionError: string | null;
@@ -20,13 +21,14 @@ export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
   isConnecting,
   onHardRestart,
 }) => {
+  const { t } = useI18n();
   const isTransientReconnect = !!connectionError && !isFatalError && RECONNECTING_RE.test(connectionError);
 
   if ((isConnecting && !connectionError) || isTransientReconnect) {
     return (
       <div className="absolute inset-x-0 bottom-0 flex items-end justify-center pb-2 pointer-events-none">
         <span className="text-[11px] text-muted-foreground/60 animate-pulse tracking-wide">
-          {connectionError || 'Reconnecting...'}
+          {connectionError || t('connection.reconnecting')}
         </span>
       </div>
     );
@@ -44,7 +46,7 @@ export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
               disabled={isRestarting}
               className="text-[11px] text-destructive/90 hover:text-destructive underline underline-offset-2 transition-colors disabled:opacity-40"
             >
-              Retry
+              {t('common.retry')}
             </button>
           )}
         </div>

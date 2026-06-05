@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus } from '../../terminal/types';
 import { AgentSessionDot, AgentCountBadge } from '../AgentIndicators';
+import { useI18n } from '../../i18n';
 
 interface LeftSidebarProps {
   isOpen: boolean;
@@ -91,6 +92,7 @@ export function LeftSidebar(
     push,
   }: LeftSidebarProps,
 ) {
+  const { t } = useI18n();
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
@@ -140,12 +142,12 @@ export function LeftSidebar(
         <div className="flex items-center gap-1.5">
           <div className="min-w-0 flex-1 px-1">
             <div className="flex items-baseline gap-1.5">
-              <span className="text-[13px] font-semibold text-foreground">Sessions</span>
+              <span className="text-[13px] font-semibold text-foreground">{t('sidebar.sessions')}</span>
               <span className="text-[11px] text-muted-foreground">{sessions.length}</span>
               {(runningCount > 0 || reviewCount > 0) && (
                 <span className="ml-1 flex items-center gap-1.5">
-                  <AgentCountBadge count={runningCount} tone="running" title={`${runningCount} running`} />
-                  <AgentCountBadge count={reviewCount} tone="review" title={`${reviewCount} need review`} />
+                  <AgentCountBadge count={runningCount} tone="running" title={t('agent.aiRunning')} />
+                  <AgentCountBadge count={reviewCount} tone="review" title={t('agent.needsReview')} />
                 </span>
               )}
             </div>
@@ -163,8 +165,8 @@ export function LeftSidebar(
                 ? 'bg-primary/15 text-primary'
                 : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
             }`}
-            aria-label="Toggle search"
-            title="Search"
+            aria-label={t('sidebar.toggleSearch')}
+            title={t('common.search')}
           >
             <RiSearchLine size={14} />
           </button>
@@ -172,8 +174,8 @@ export function LeftSidebar(
             type="button"
             onClick={() => { onOpenSettings(); closeIfOverlay(); }}
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-            aria-label="Settings"
-            title="Settings"
+            aria-label={t('sidebar.settings')}
+            title={t('sidebar.settings')}
           >
             <RiSettings4Line size={14} />
           </button>
@@ -182,7 +184,7 @@ export function LeftSidebar(
               type="button"
               onClick={onClose}
               className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive active:scale-95"
-              aria-label="Close"
+              aria-label={t('common.close')}
             >
               <RiCloseLine size={14} />
             </button>
@@ -197,7 +199,7 @@ export function LeftSidebar(
               type="search"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Filter sessions"
+              placeholder={t('sidebar.filterSessions')}
               className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground"
               autoCapitalize="off"
               autoCorrect="off"
@@ -209,7 +211,7 @@ export function LeftSidebar(
                 type="button"
                 onClick={() => setQuery('')}
                 className="rounded-full p-0.5 text-muted-foreground hover:bg-surface hover:text-foreground"
-                aria-label="Clear search"
+                aria-label={t('sidebar.clearSearch')}
               >
                 <RiCloseLine size={12} />
               </button>
@@ -223,11 +225,11 @@ export function LeftSidebar(
         {sessions.length === 0 ? (
           <div className="rounded-xl bg-surface-2/60 px-4 py-8 text-center">
             <RiTerminalLine size={26} className="mx-auto mb-2 text-muted-foreground" />
-            <p className="text-[12px] text-muted-foreground">No open sessions yet.</p>
+            <p className="text-[12px] text-muted-foreground">{t('sidebar.noSessions')}</p>
           </div>
         ) : visibleSessions.length === 0 ? (
           <div className="rounded-xl bg-surface-2/60 px-4 py-6 text-center">
-            <p className="text-[12px] text-muted-foreground">No matching sessions.</p>
+            <p className="text-[12px] text-muted-foreground">{t('sidebar.noMatchingSessions')}</p>
           </div>
         ) : (
           <div className="space-y-0.5">
@@ -309,8 +311,8 @@ export function LeftSidebar(
                       onCloseSession(session.id);
                     }}
                     className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition hover:bg-destructive/15 hover:text-destructive active:scale-95"
-                    aria-label={`Close ${displayName}`}
-                    title="Close"
+                    aria-label={t('sidebar.closeSession', { name: displayName })}
+                    title={t('common.close')}
                   >
                     <RiCloseLine size={13} />
                   </button>
@@ -331,7 +333,7 @@ export function LeftSidebar(
           >
             <RiAddLine size={14} />
             <RiTerminalLine size={12} />
-            <span>Shell</span>
+            <span>{t('sidebar.newShell')}</span>
           </button>
           <button
             type="button"
@@ -342,11 +344,11 @@ export function LeftSidebar(
                 ? 'bg-surface-2 text-foreground hover:bg-surface-elevated'
                 : 'bg-surface-2/50 text-muted-foreground/50 cursor-not-allowed'
             }`}
-            title={tmuxAvailable ? 'New tmux session' : 'tmux not available on server'}
+            title={tmuxAvailable ? t('sidebar.newTmux') : t('sidebar.newTmuxDisabled')}
           >
             <RiAddLine size={14} />
             <RiLayoutGridLine size={12} />
-            <span>Tmux</span>
+            <span>{t('sidebar.newTmux')}</span>
           </button>
         </div>
       </div>

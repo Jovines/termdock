@@ -19,6 +19,7 @@ import {
   type ToolbarPresetDefinition,
 } from '../terminal/mobileKeyboardPresets';
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from '../terminal/PresetModeButton';
+import { useI18n } from '../../i18n';
 
 interface ToolbarPresetSettingsProps {
   presets: ToolbarPresetDefinition[];
@@ -75,6 +76,7 @@ function ChipInput({
   onChange: (next: string[]) => void;
   placeholder: string;
 }) {
+  const { t } = useI18n();
   const [draft, setDraft] = React.useState('');
 
   const addChip = (raw: string) => {
@@ -151,7 +153,7 @@ function ChipInput({
                     ? 'bg-accent/15 font-mono text-accent'
                     : 'bg-surface-elevated text-foreground'
               }`}
-              title={isRegex ? (invalid ? 'Invalid regex' : 'Regex match') : 'Substring match (case-insensitive)'}
+              title={isRegex ? (invalid ? t('settings.invalidRegex') : 'Regex match') : 'Substring match (case-insensitive)'}
             >
               {isRegex && <span className="text-[10px] opacity-70">re</span>}
               {token}
@@ -159,7 +161,7 @@ function ChipInput({
                 type="button"
                 onClick={() => removeChip(token)}
                 className="rounded-full p-0.5 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
-                aria-label={`Remove ${token}`}
+                aria-label={t('toolbarPresets.removeAction', { name: token })}
               >
                 <RiCloseLine size={12} />
               </button>
@@ -203,6 +205,7 @@ function Stepper({
   max: number;
   onChange: (next: number) => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="inline-flex items-center gap-1 rounded-full bg-surface px-1 py-1 ring-1 ring-border/15">
       <button
@@ -210,7 +213,7 @@ function Stepper({
         onClick={() => onChange(Math.max(min, value - 1))}
         disabled={value <= min}
         className="h-7 w-7 rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated disabled:opacity-40 inline-flex items-center justify-center"
-        aria-label="Decrease"
+        aria-label={t('common.decrease')}
       >
         <RiSubtractLine size={14} />
       </button>
@@ -220,7 +223,7 @@ function Stepper({
         onClick={() => onChange(Math.min(max, value + 1))}
         disabled={value >= max}
         className="h-7 w-7 rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated disabled:opacity-40 inline-flex items-center justify-center"
-        aria-label="Increase"
+        aria-label={t('common.increase')}
       >
         <RiAddLine size={14} />
       </button>
@@ -237,6 +240,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
   onRemovePreset,
   onResetDefaults,
 }) => {
+  const { t } = useI18n();
   const selectedPreset = presets.find((preset) => preset.id === selectedPresetId) ?? presets[0] ?? null;
   const [editingActionId, setEditingActionId] = React.useState<string | null>(null);
 
@@ -274,7 +278,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
       {/* Sticky Preview at the top */}
       <div className="sticky top-[-1rem] sm:top-[-1.5rem] z-10 -mx-4 -mt-4 sm:-mx-6 sm:-mt-6 border-b border-border/15 bg-surface/95 backdrop-blur px-4 py-3 sm:px-6">
         <div className="mb-2 flex items-center justify-between">
-          <span className="ui-kicker">Preview</span>
+          <span className="ui-kicker">{t('toolbarPresets.preview')}</span>
           <span className="text-[10px] text-muted-foreground">
             {selectedPreset.actions.length} button{selectedPreset.actions.length === 1 ? '' : 's'} · {totalCapacity} slot{totalCapacity === 1 ? '' : 's'}
           </span>
@@ -311,7 +315,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
         </div>
         {selectedPreset.actions.length > totalCapacity - reservedSlots && (
           <p className="mt-1.5 text-[10px] text-muted-foreground">
-            More buttons than slots. Extra rows will use the last row size.
+            {t('toolbarPresets.overCapacityHint')}
           </p>
         )}
       </div>
@@ -319,7 +323,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
       {/* Preset selector */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <span className="ui-kicker">Presets</span>
+          <span className="ui-kicker">{t('toolbarPresets.presets')}</span>
           <div className="flex items-center gap-1">
             <button
               type="button"
@@ -327,7 +331,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
               className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-3 py-2 text-xs font-medium hover:bg-surface-elevated transition"
             >
               <RiAddLine size={14} />
-              New
+              {t('toolbarPresets.new')}
             </button>
             <button
               type="button"
@@ -335,7 +339,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
               className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-3 py-2 text-xs font-medium hover:bg-surface-elevated transition"
             >
               <RiRefreshLine size={14} />
-              Reset
+              {t('toolbarPresets.reset')}
             </button>
           </div>
         </div>
@@ -364,7 +368,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
       <div className="space-y-4 rounded-2xl bg-surface p-4 ring-1 ring-border/10">
         {/* Label */}
         <div className="space-y-1.5">
-          <span className="ui-kicker">Label</span>
+          <span className="ui-kicker">{t('toolbarPresets.label')}</span>
           <div className="flex items-center gap-2">
             <input
               type="text"
@@ -373,7 +377,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                 onUpdatePreset(selectedPreset.id, (preset) => ({ ...preset, label: event.target.value }))
               }
               className="flex-1 rounded-full bg-surface-2 px-4 py-2.5 text-sm placeholder:text-muted/60 outline-none ring-1 ring-transparent focus:ring-accent/40"
-              placeholder="Preset label"
+              placeholder={t('toolbarPresets.presetLabelPlaceholder')}
               autoCapitalize="off"
               autoCorrect="off"
             />
@@ -382,7 +386,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                 type="button"
                 onClick={() => onRemovePreset(selectedPreset.id)}
                 className="shrink-0 rounded-full bg-surface-2 px-3 py-2.5 text-destructive hover:bg-destructive/15"
-                aria-label={`Delete preset ${selectedPreset.label}`}
+                aria-label={t('toolbarPresets.deletePreset', { name: selectedPreset.label })}
               >
                 <RiDeleteBinLine size={14} />
               </button>
@@ -393,18 +397,18 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
         {/* Programs */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
-            <span className="ui-kicker">Match programs</span>
-            <span className="text-[10px] text-muted-foreground">Type & Enter</span>
+            <span className="ui-kicker">{t('toolbarPresets.matchPrograms')}</span>
+            <span className="text-[10px] text-muted-foreground">{t('toolbarPresets.typeEnterHint')}</span>
           </div>
           <ChipInput
             value={selectedPreset.programs}
             onChange={(next) =>
               onUpdatePreset(selectedPreset.id, (preset) => ({ ...preset, programs: next }))
             }
-            placeholder="vim, nvim, /^claude(-code)?$/i …"
+            placeholder={t('toolbarPresets.programsPlaceholder')}
           />
           <p className="text-[10px] text-muted-foreground">
-            Plain names match as case-insensitive substrings. Wrap in <code className="font-mono">/…/flags</code> for regex (tested against the lowercase program name).
+            {t('toolbarPresets.programsHelp')}
           </p>
         </div>
 
@@ -417,9 +421,9 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
           className="flex w-full items-center justify-between rounded-2xl bg-surface-2 px-4 py-3 text-sm transition hover:bg-surface-elevated"
         >
           <span>
-            <span className="block font-medium text-foreground">Alt modifier slot</span>
+            <span className="block font-medium text-foreground">{t('toolbarPresets.altSlot')}</span>
             <span className="block text-[11px] text-muted-foreground">
-              Reserve one preview slot for the Alt key.
+              {t('toolbarPresets.altSlotHint')}
             </span>
           </span>
           <span
@@ -439,8 +443,8 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <div>
-              <span className="ui-kicker">Row layout</span>
-              <p className="text-[11px] text-muted-foreground">Buttons per expanded row.</p>
+              <span className="ui-kicker">{t('toolbarPresets.rowLayout')}</span>
+              <p className="text-[11px] text-muted-foreground">{t('toolbarPresets.rowLayoutHint')}</p>
             </div>
             <button
               type="button"
@@ -453,13 +457,13 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
               className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-3 py-1.5 text-xs font-medium hover:bg-surface-elevated"
             >
               <RiAddLine size={12} />
-              Row
+              {t('toolbarPresets.addRow')}
             </button>
           </div>
           <div className="space-y-2">
             {selectedPreset.rowLayout.map((columns, rowIndex) => (
               <div key={`row-${rowIndex}`} className="flex items-center gap-3 rounded-2xl bg-surface-2 px-3 py-2">
-                <span className="w-12 shrink-0 text-xs text-muted-foreground">Row {rowIndex + 1}</span>
+                <span className="w-12 shrink-0 text-xs text-muted-foreground">{t('toolbarPresets.rowN', { n: rowIndex + 1 })}</span>
                 <div className="flex-1" />
                 <Stepper
                   value={columns}
@@ -482,9 +486,9 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                       }))
                     }
                     className="rounded-full bg-surface px-2.5 py-1 text-[11px] text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
-                    aria-label={`Remove row ${rowIndex + 1}`}
+                    aria-label={t('toolbarPresets.removeRow', { n: rowIndex + 1 })}
                   >
-                    Del
+                    {t('toolbarPresets.del')}
                   </button>
                 )}
               </div>
@@ -496,8 +500,8 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <div>
-              <span className="ui-kicker">Buttons</span>
-              <p className="text-[11px] text-muted-foreground">Tap to edit. Use ↑↓ to reorder.</p>
+              <span className="ui-kicker">{t('toolbarPresets.buttons')}</span>
+              <p className="text-[11px] text-muted-foreground">{t('toolbarPresets.buttonsHint')}</p>
             </div>
             <button
               type="button"
@@ -519,13 +523,13 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
               className="inline-flex items-center gap-1 rounded-full bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25"
             >
               <RiAddLine size={12} />
-              Add button
+              {t('toolbarPresets.addButton')}
             </button>
           </div>
 
           {selectedPreset.actions.length === 0 && (
             <div className="rounded-2xl bg-surface-2/60 px-4 py-6 text-center text-[11px] text-muted-foreground">
-              No custom buttons yet. Add one to override the default toolbar.
+              {t('toolbarPresets.noCustomButtons')}
             </div>
           )}
 
@@ -545,7 +549,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                       onClick={() => moveAction(action.id, -1)}
                       disabled={index === 0}
                       className="h-6 w-6 rounded-full bg-surface text-muted-foreground hover:bg-surface-elevated disabled:opacity-30 inline-flex items-center justify-center"
-                      aria-label="Move up"
+                      aria-label={t('toolbarPresets.moveUp')}
                     >
                       <RiArrowUpLine size={12} />
                     </button>
@@ -554,7 +558,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                       onClick={() => moveAction(action.id, 1)}
                       disabled={index === selectedPreset.actions.length - 1}
                       className="h-6 w-6 rounded-full bg-surface text-muted-foreground hover:bg-surface-elevated disabled:opacity-30 inline-flex items-center justify-center"
-                      aria-label="Move down"
+                      aria-label={t('toolbarPresets.moveDown')}
                     >
                       <RiArrowDownLine size={12} />
                     </button>
@@ -568,7 +572,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                       {getToolbarActionLabel(action, index)}
                     </div>
                     <div className="truncate text-[11px] text-muted-foreground">
-                      {action.sequence ? action.sequence : 'No sequence'}
+                      {action.sequence ? action.sequence : t('toolbarPresets.noSequence')}
                       {action.doubleTapSequence && (
                         <span className="ml-1 text-accent/70">· 2× {action.doubleTapSequence}</span>
                       )}
@@ -583,7 +587,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                       }))
                     }
                     className="shrink-0 rounded-full bg-surface p-2 text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
-                    aria-label={`Remove ${action.label}`}
+                    aria-label={t('toolbarPresets.removeAction', { name: action.label })}
                   >
                     <RiDeleteBinLine size={14} />
                   </button>
@@ -592,7 +596,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                 {isEditing && (
                   <div className="space-y-3 border-t border-border/10 px-3 py-3">
                     <div className="space-y-1.5">
-                      <span className="text-[11px] uppercase tracking-wider text-muted-foreground">Label</span>
+                      <span className="text-[11px] uppercase tracking-wider text-muted-foreground">{t('toolbarPresets.labelField')}</span>
                       <input
                         type="text"
                         value={action.label}
@@ -605,14 +609,14 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                           }))
                         }
                         className="w-full rounded-full bg-surface px-4 py-2.5 text-sm outline-none ring-1 ring-transparent focus:ring-accent/40"
-                        placeholder="Label shown on the button"
+                        placeholder={t('toolbarPresets.labelPlaceholder')}
                         autoCapitalize="off"
                         autoCorrect="off"
                       />
                     </div>
 
                     <div className="space-y-1.5">
-                      <span className="text-[11px] uppercase tracking-wider text-muted-foreground">Sequence</span>
+                      <span className="text-[11px] uppercase tracking-wider text-muted-foreground">{t('toolbarPresets.sequence')}</span>
                       <input
                         type="text"
                         value={action.sequence}
@@ -625,7 +629,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                           }))
                         }
                         className="w-full rounded-full bg-surface px-4 py-2.5 font-mono text-sm outline-none ring-1 ring-transparent focus:ring-accent/40"
-                        placeholder="e.g. /undo or \t or /||undo"
+                        placeholder={t('toolbarPresets.sequencePlaceholder')}
                         autoCapitalize="off"
                         autoCorrect="off"
                         spellCheck={false}
@@ -653,7 +657,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
 
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between">
-                        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">Double-tap sequence</span>
+                        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">{t('toolbarPresets.doubleTap')}</span>
                         {!action.doubleTapSequence && (
                           <button
                             type="button"
@@ -667,7 +671,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                             }
                             className="text-[10px] text-accent hover:text-accent/80"
                           >
-                            + Add
+                            {t('toolbarPresets.doubleTapAdd')}
                           </button>
                         )}
                       </div>
@@ -685,7 +689,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                               }))
                             }
                             className="w-full rounded-full bg-surface px-4 py-2.5 font-mono text-sm outline-none ring-1 ring-transparent focus:ring-accent/40"
-                            placeholder="e.g. /undo\r or /||undo ||\r"
+                            placeholder={t('toolbarPresets.doubleTapPlaceholder')}
                             autoCapitalize="off"
                             autoCorrect="off"
                             spellCheck={false}
@@ -724,7 +728,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
                               }
                               className="rounded-full bg-destructive/10 px-2.5 py-1 text-[11px] font-medium text-destructive/70 hover:bg-destructive/20 hover:text-destructive"
                             >
-                              Remove
+                              {t('toolbarPresets.remove')}
                             </button>
                           </div>
                         </>

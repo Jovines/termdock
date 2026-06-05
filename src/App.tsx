@@ -27,6 +27,7 @@ import type { AgentProgramConfig } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
+import { useI18n } from './lib/i18n';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
 import { AgentTabIcon, AgentCountBadge } from './lib/components/AgentIndicators';
@@ -158,6 +159,7 @@ function renderTabIcon(
 
 
 function App() {
+  const { t, locale, setLocale } = useI18n();
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
   const safeBottomInset = 'env(safe-area-inset-bottom, 0px)';
 
@@ -745,8 +747,8 @@ function App() {
               type="button"
               onClick={() => useSidebarStore.getState().toggleLeft()}
               className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-surface-elevated hover:text-foreground sm:h-8 sm:w-8"
-              aria-label="Toggle sessions sidebar"
-              title="Sessions"
+              aria-label={t('tab.sessionsTitle')}
+              title={t('tab.sessionsTitle')}
             >
               <RiPanelLeftLine size={14} />
             </button>
@@ -887,8 +889,8 @@ function App() {
                 type="button"
                 onClick={() => dispatchNewSession()}
                 className="ml-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-primary/15 hover:text-primary active:scale-95"
-                aria-label="New session"
-                title="New session"
+                aria-label={t('tab.new')}
+                title={t('tab.new')}
               >
                 <RiAddLine size={14} />
               </button>
@@ -916,8 +918,8 @@ function App() {
                 type="button"
                 onClick={() => useSidebarStore.getState().toggleRight()}
                 className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-surface-elevated hover:text-foreground sm:h-8 sm:w-8"
-                aria-label="Toggle explorer sidebar"
-                title="Explorer"
+                aria-label={t('tab.explorerTitle')}
+                title={t('tab.explorerTitle')}
               >
                 <RiPanelRightLine size={14} />
               </button>
@@ -958,7 +960,7 @@ function App() {
                 <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-primary/15 text-primary">
                   <RiEqualizerLine size={14} />
                 </span>
-                <h2 className="text-[14px] font-semibold text-foreground">Settings</h2>
+                <h2 className="text-[14px] font-semibold text-foreground">{t('settings.title')}</h2>
               </div>
               <button
                 type="button"
@@ -976,7 +978,7 @@ function App() {
               <div className="space-y-2">
                 {/* Font size */}
                 <div className="flex items-center gap-2 rounded-xl bg-surface-2 px-2.5 py-2">
-                  <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">Font</span>
+                  <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.font')}</span>
                   <button
                     type="button"
                     onClick={() => setFontSize(Math.max(8, fontSize - 1))}
@@ -991,7 +993,7 @@ function App() {
                     value={fontSize}
                     onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
                     className="min-w-0 flex-1"
-                    aria-label="Font size"
+                    aria-label={t('settings.font')}
                   />
                   <button
                     type="button"
@@ -1005,7 +1007,7 @@ function App() {
 
                 {/* Renderer + Debug + Prevent-sleep — single dense row */}
                 <div className="flex items-center gap-2 rounded-xl bg-surface-2 px-2.5 py-2">
-                  <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">Render</span>
+                  <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.render')}</span>
                   <div className="flex flex-1 items-center gap-1 rounded-md bg-surface p-0.5">
                     {(['auto', 'webgl', 'canvas'] as TerminalRendererMode[]).map((mode) => {
                       const selected = rendererMode === mode;
@@ -1018,7 +1020,7 @@ function App() {
                             selected ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:bg-surface-elevated'
                           }`}
                         >
-                          {mode === 'auto' ? 'Auto' : mode === 'webgl' ? 'WebGL' : 'Canvas'}
+                          {mode === 'auto' ? t('settings.auto') : mode === 'webgl' ? t('settings.webgl') : t('settings.canvas')}
                         </button>
                       );
                     })}
@@ -1027,7 +1029,7 @@ function App() {
 
                 {/* Default mode for the top-tab + button */}
                 <div className="flex items-center gap-2 rounded-xl bg-surface-2 px-2.5 py-2">
-                  <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">New tab</span>
+                  <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.newTab')}</span>
                   <div className="flex flex-1 items-center gap-1 rounded-md bg-surface p-0.5">
                     {(['shell', 'tmux'] as const).map((mode) => {
                       const selected = newSessionMode === mode;
@@ -1045,9 +1047,9 @@ function App() {
                                 ? 'cursor-not-allowed text-muted-foreground/40'
                                 : 'text-muted-foreground hover:bg-surface-elevated'
                           }`}
-                          title={disabled ? (tmuxStatus.reason || 'Install tmux on the server to enable.') : undefined}
+                          title={disabled ? (tmuxStatus.reason || t('settings.installTmuxHint')) : undefined}
                         >
-                          {mode === 'shell' ? 'Shell' : 'Tmux'}
+                          {mode === 'shell' ? t('settings.shell') : t('settings.tmux')}
                         </button>
                       );
                     })}
@@ -1063,7 +1065,7 @@ function App() {
                       showDebug ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'
                     }`}
                   >
-                    <span className="font-medium">Debug</span>
+                    <span className="font-medium">{t('settings.debug')}</span>
                     <span className={`inline-flex h-4 w-7 items-center rounded-full transition ${
                       showDebug ? 'bg-primary/70' : 'bg-surface-elevated'
                     }`}>
@@ -1092,9 +1094,9 @@ function App() {
                     className={`flex items-center justify-between rounded-xl px-3 py-2 text-[12px] transition ${
                       preventSleep ? 'bg-green-500/15 text-green-400' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'
                     }`}
-                    title={!networkAvailable && preventSleep ? 'No network — disabled' : undefined}
+                    title={!networkAvailable && preventSleep ? t('settings.noSleepUnavailable') : undefined}
                   >
-                    <span className="font-medium truncate">No sleep</span>
+                    <span className="font-medium truncate">{t('settings.noSleep')}</span>
                     <span className={`inline-flex h-4 w-7 items-center rounded-full transition ${
                       preventSleep ? 'bg-green-500' : 'bg-surface-elevated'
                     }`}>
@@ -1115,7 +1117,7 @@ function App() {
                 >
                   <RiAddLine size={14} />
                   <RiTerminalLine size={12} />
-                  Shell
+                  {t('settings.shell')}
                 </button>
                 <button
                   type="button"
@@ -1129,7 +1131,7 @@ function App() {
                 >
                   <RiAddLine size={14} />
                   <RiLayoutGridLine size={12} />
-                  Tmux
+                  {t('settings.tmux')}
                 </button>
               </div>
 
@@ -1139,11 +1141,11 @@ function App() {
                   <summary className="flex cursor-pointer items-center justify-between rounded-xl px-3 py-2.5 text-[13px] hover:bg-surface-elevated">
                     <span className="flex items-center gap-2">
                       <span className={`inline-flex h-2 w-2 rounded-full ${tmuxStatus.available ? 'bg-primary' : 'bg-destructive'}`} />
-                      <span className="font-medium">Tmux server</span>
+                      <span className="font-medium">{t('settings.tmuxServer')}</span>
                       <span className="text-[11px] text-muted-foreground">
                         {tmuxStatus.available
-                          ? `${tmuxSessions.length} session${tmuxSessions.length === 1 ? '' : 's'}`
-                          : 'unavailable'}
+                          ? t('settings.sessions', { n: tmuxSessions.length })
+                          : t('settings.tmuxUnavailable')}
                       </span>
                     </span>
                     <button
@@ -1151,7 +1153,7 @@ function App() {
                       onClick={(e) => { e.preventDefault(); void refreshTmuxSessions(); }}
                       disabled={tmuxRefreshing}
                       className="inline-flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
-                      aria-label="Refresh tmux"
+                      aria-label={t('settings.refresh')}
                     >
                       <RiRefreshLine size={12} className={tmuxRefreshing ? 'animate-spin' : ''} />
                     </button>
@@ -1159,11 +1161,11 @@ function App() {
                   <div className="px-2 pb-2">
                     {!tmuxStatus.available ? (
                       <p className="px-2 py-1.5 text-[11px] text-muted-foreground">
-                        {tmuxStatus.reason || 'Install tmux on the server to enable.'}
+                        {tmuxStatus.reason || t('settings.installTmuxHint')}
                       </p>
                     ) : tmuxSessions.length === 0 ? (
                       <p className="px-2 py-1.5 text-[11px] text-muted-foreground">
-                        No tmux sessions on the server.
+                        {t('settings.noTmuxSessions')}
                       </p>
                     ) : (
                       <div className="space-y-1">
@@ -1182,7 +1184,7 @@ function App() {
                               <div className="min-w-0 flex-1">
                                 <div className="truncate text-[12px] font-medium text-foreground">{tmux.name}</div>
                                 <div className="text-[10px] text-muted-foreground">
-                                  {tmux.windows} window{tmux.windows === 1 ? '' : 's'}{connected && ' · attached'}
+                                  {t('settings.windows', { n: tmux.windows })}{connected && ` · ${t('settings.attached')}`}
                                 </div>
                               </div>
                               {!confirming ? (
@@ -1197,7 +1199,7 @@ function App() {
                                         : 'bg-primary/15 text-primary hover:bg-primary/25'
                                     }`}
                                   >
-                                    {connected ? 'Attached' : 'Attach'}
+                                    {connected ? t('settings.attached') : t('settings.attach')}
                                   </button>
                                   <button
                                     type="button"
@@ -1217,7 +1219,7 @@ function App() {
                                     onClick={() => void handleKillTmuxSession(tmux.name)}
                                     className="shrink-0 rounded-full bg-destructive/90 px-2.5 py-1 text-[11px] font-medium text-destructive-foreground transition hover:bg-destructive disabled:opacity-50"
                                   >
-                                    {killing ? '…' : 'Destroy'}
+                                    {killing ? '…' : t('settings.destroy')}
                                   </button>
                                   <button
                                     type="button"
@@ -1225,7 +1227,7 @@ function App() {
                                     onClick={() => { setTmuxConfirmKillName(null); setTmuxKillError(null); }}
                                     className="shrink-0 rounded-full bg-surface-2 px-2.5 py-1 text-[11px] font-medium text-foreground transition hover:bg-surface-elevated"
                                   >
-                                    Cancel
+                                    {t('common.cancel')}
                                   </button>
                                 </>
                               )}
@@ -1249,10 +1251,10 @@ function App() {
               >
                 <span className="flex items-center gap-2">
                   <RiKeyboardLine size={14} className="text-muted-foreground" />
-                  <span className="font-medium text-foreground">Keyboard toolbar</span>
+                  <span className="font-medium text-foreground">{t('settings.keyboardToolbar')}</span>
                 </span>
                 <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                  <span>{toolbarPresets.length} preset{toolbarPresets.length === 1 ? '' : 's'}</span>
+                  <span>{t('settings.sessions', { n: toolbarPresets.length })}</span>
                   <span>›</span>
                 </span>
               </button>
@@ -1265,13 +1267,40 @@ function App() {
               >
                 <span className="flex items-center gap-2">
                   <RiBotLine size={14} className="text-muted-foreground" />
-                  <span className="font-medium text-foreground">AI agent detection</span>
+                  <span className="font-medium text-foreground">{t('settings.aiAgentDetection')}</span>
                 </span>
                 <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                   <span>{agentRulesLoaded ? `${agentRules.length} prog${agentRules.length === 1 ? '' : 's'}` : '…'}</span>
                   <span>›</span>
                 </span>
               </button>
+
+              {/* Language switcher */}
+              <div className="mt-3 flex items-center gap-2 rounded-xl bg-surface-2 px-2.5 py-2">
+                <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.language')}</span>
+                <div className="flex flex-1 items-center gap-1 rounded-md bg-surface p-0.5">
+                  {([
+                    { code: 'en' as const, label: 'English' },
+                    { code: 'zh' as const, label: '中文' },
+                  ]).map((opt) => {
+                    const selected = locale === opt.code;
+                    return (
+                      <button
+                        key={opt.code}
+                        type="button"
+                        onClick={() => setLocale(opt.code)}
+                        className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition ${
+                          selected
+                            ? 'bg-primary/20 text-primary'
+                            : 'text-muted-foreground hover:bg-surface-elevated'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
               {/* Sign out */}
               <button
@@ -1287,7 +1316,7 @@ function App() {
                 className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-destructive/10 px-3 py-2.5 text-[13px] font-medium text-destructive transition hover:bg-destructive/20 active:scale-[0.98]"
               >
                 <RiLogoutBoxRLine size={14} />
-                Sign out
+                {t('settings.signOut')}
               </button>
             </div>
           </div>
@@ -1317,7 +1346,7 @@ function App() {
               style={{ paddingBottom: safeBottomInset }}
             >
               <div className="border-b border-border/15 px-4 py-3">
-                <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Session</div>
+                <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{t('tab.session')}</div>
                 <div className="mt-0.5 truncate text-[14px] font-medium text-foreground">{menuName}</div>
                 {ts?.cwd && (
                   <div className="mt-0.5 truncate text-[11px] text-muted-foreground/80">{ts.cwd}</div>
@@ -1335,7 +1364,7 @@ function App() {
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
                     <RiTerminalLine size={14} />
                   </span>
-                  Rename
+                  {t('tab.rename')}
                 </button>
                 <button
                   type="button"
@@ -1353,9 +1382,9 @@ function App() {
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
                     <RiStackLine size={14} />
                   </span>
-                  Copy cwd
+                  {t('tab.copyCwd')}
                   {tabCopiedHint && tabCopiedHint === ts?.cwd && (
-                    <span className="ml-auto text-[11px] text-primary">Copied</span>
+                    <span className="ml-auto text-[11px] text-primary">{t('tab.copied')}</span>
                   )}
                 </button>
                 <button
@@ -1369,7 +1398,7 @@ function App() {
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-destructive/15 text-destructive">
                     <RiCloseLine size={14} />
                   </span>
-                  Close session
+                  {t('tab.close')}
                 </button>
               </div>
               <div className="border-t border-border/15 px-3 py-2">
@@ -1378,7 +1407,7 @@ function App() {
                   onClick={() => setTabMenuSessionId(null)}
                   className="w-full rounded-full bg-surface-2 px-3 py-2 text-[12px] font-medium text-muted-foreground transition hover:bg-surface hover:text-foreground"
                 >
-                  Cancel
+                  {t('common.cancel')}
                 </button>
               </div>
             </div>
@@ -1396,8 +1425,8 @@ function App() {
           <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
-                <div className="ui-kicker">Mobile keyboard</div>
-                <h2 className="section-title mt-1">Toolbar presets</h2>
+                <div className="ui-kicker">{t('settings.mobileKeyboard')}</div>
+                <h2 className="section-title mt-1">{t('settings.toolbarPresets')}</h2>
               </div>
               <button
                 type="button"
@@ -1456,12 +1485,12 @@ function App() {
           <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
-                <div className="ui-kicker">AI agent detection</div>
-                <h2 className="section-title mt-1">Detection rules</h2>
+                <div className="ui-kicker">{t('settings.aiAgentDetection')}</div>
+                <h2 className="section-title mt-1">{t('settings.detectionRules')}</h2>
               </div>
               <div className="flex items-center gap-2">
                 {agentRulesSaving && (
-                  <span className="text-[11px] text-muted-foreground">Saving…</span>
+                  <span className="text-[11px] text-muted-foreground">{t('settings.saving')}</span>
                 )}
                 <button
                   type="button"

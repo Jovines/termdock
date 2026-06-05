@@ -4,14 +4,15 @@ import { parseDiff, Diff, Hunk, Decoration } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { getFileDiff } from '../../terminal/api';
+import { useI18n } from '../../i18n';
 
 interface DiffViewerProps {
   filePath: string | null;
   onInsertDiffReference?: (label: string, text: string) => void;
 }
 
-function getPathParts(path: string | null): { name: string; dir: string } {
-  if (!path) return { name: 'Working tree changes', dir: 'All unstaged changes' };
+function getPathParts(path: string | null, fallback: { name: string; dir: string }): { name: string; dir: string } {
+  if (!path) return fallback;
   const parts = path.split('/').filter(Boolean);
   return {
     name: parts.pop() || path,
@@ -24,6 +25,7 @@ function formatDiffReference(diffText: string): string {
 }
 
 export function DiffViewer({ filePath, onInsertDiffReference }: DiffViewerProps) {
+  const { t } = useI18n();
   // 精确订阅 — 只关心 diff 相关字段
   const diffContent = useSidebarStore((s) => s.diffContent);
   const diffLoading = useSidebarStore((s) => s.diffLoading);
@@ -91,11 +93,11 @@ export function DiffViewer({ filePath, onInsertDiffReference }: DiffViewerProps)
     return stats;
   }, [files]);
 
-  const titleParts = getPathParts(filePath);
+  const titleParts = getPathParts(filePath, { name: t('diffViewer.workingTree'), dir: t('diffViewer.allUnstaged') });
 
   const insertWholeDiff = () => {
     if (!diffContent || !onInsertDiffReference) return;
-    onInsertDiffReference(filePath ? `${titleParts.name} diff` : '全部 diff', formatDiffReference(diffContent));
+    onInsertDiffReference(filePath ? `${titleParts.name} diff` : t('diffViewer.allDiffLabel'), formatDiffReference(diffContent));
   };
 
   if (diffLoading) {
@@ -118,7 +120,7 @@ export function DiffViewer({ filePath, onInsertDiffReference }: DiffViewerProps)
     return (
       <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
         <RiGitCompare size={24} className="mx-auto mb-2 text-muted-foreground/80" />
-        {filePath ? 'No changes in this file.' : 'No unstaged changes.'}
+        {filePath ? t('diffViewer.noFileChanges') : t('diffViewer.noUnstagedChanges')}
       </div>
     );
   }
@@ -143,7 +145,7 @@ export function DiffViewer({ filePath, onInsertDiffReference }: DiffViewerProps)
               type="button"
               onClick={insertWholeDiff}
               className="inline-flex h-8 shrink-0 items-center rounded-full bg-primary/15 px-3 text-[11px] font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
-              title="把当前 diff 内容作为上下文插入 Terminal"
+              title={t('diffViewer.insertAllDiff')}
             >
               引用diff
             </button>
@@ -153,7 +155,7 @@ export function DiffViewer({ filePath, onInsertDiffReference }: DiffViewerProps)
       {files.map((file) => {
         const key = `${file.oldRevision}-${file.newRevision}-${file.newPath}`;
         const stats = fileStats.get(key) ?? { additions: 0, deletions: 0 };
-        const pathParts = getPathParts(file.newPath || file.oldPath);
+        const pathParts = getPathParts(file.newPath || file.oldPath, { name: 'unknown file', dir: '' });
         const displayPath = file.newPath || file.oldPath || 'unknown file';
         const fileDiffText = [
           `diff --git a/${file.oldPath || displayPath} b/${file.newPath || displayPath}`,
@@ -174,7 +176,7 @@ export function DiffViewer({ filePath, onInsertDiffReference }: DiffViewerProps)
                   type="button"
                   onClick={() => onInsertDiffReference(`${pathParts.name} diff`, formatDiffReference(fileDiffText))}
                   className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/20 active:scale-95"
-                  title="引用这个文件的 diff"
+                  title={t('diffViewer.insertFileDiff')}
                 >
                   引用
                 </button>
@@ -203,7 +205,7 @@ export function DiffViewer({ filePath, onInsertDiffReference }: DiffViewerProps)
                             type="button"
                             onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, formatDiffReference(hunkDiffText))}
                             className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/25 active:scale-95"
-                            title="引用这段 diff hunk"
+                            title={t('diffViewer.insertHunkDiff')}
                           >
                             引用hunk
                           </button>
