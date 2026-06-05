@@ -2196,7 +2196,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             cursorBlink: true,
             cursorStyle: 'block',
             cursorInactiveStyle: 'bar',
-            scrollback: 1000,
+            // tmux 模式下初始就 0 — 历史在 tmux 那一侧维护(Ctrl-b [),xterm
+            // 不需要再留一份本地 scrollback。留 1000 行的副作用:任何代码
+            // 路径(Shift+PageUp、xterm 默认 wheel 兜底、touchpad 惯性等)
+            // 一旦碰到本地 scrollback,就会把那段历史"漏"到 tmux 重绘下面,
+            // 视觉上表现为某一层画面冻死。下面还有 effect 会随 onTmuxScroll
+            // 动态切换 — 但构造时就把对的初始值给到,避免首帧出现 ghost。
+            scrollback: onTmuxScroll ? 0 : 1000,
             allowTransparency: false,
             allowProposedApi: true,
             convertEol: true,
@@ -2344,12 +2350,24 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             };
 
             terminal.attachCustomWheelEventHandler((ev: WheelEvent) => {
-              if (!onTmuxScrollRef.current) {
-                // 非 tmux 模式：让 xterm 走默认路径（vim/htop mouseTracking 仍能上报）
-                return true;
-              }
+              // 通用早返:修饰键留给上一层(pinch-zoom 等),0 delta 直接吃掉。
               if (ev.ctrlKey || ev.metaKey || ev.shiftKey) return true;
               if (ev.deltaY === 0) return false;
+
+              const term = terminalRef.current;
+              if (!term) return true;
+
+              // 非 tmux session 模式:交还给 xterm 默认处理。
+              //   - mouseTracking on → xterm 自带 SGR mouse wheel 上报(完整且无副作用)
+              //   - alt-screen only → xterm 自带 alt-buffer wheel → Up/Down 兜底
+              //   - 主屏 + 无 mouseTracking → xterm 滚自己的本地 scrollback
+              //     (这正是普通 shell 翻历史想要的;唯一会出问题的是用户在
+              //     shell session 里手动 tmux 又关 mouse,那是个边角场景,
+              //     真要修需要服务端把 activeProgram=tmux 透出来做检测,
+              //     不属于本次 "tmux session 模式最佳实践" 的范围。)
+              if (!onTmuxScrollRef.current) {
+                return true;
+              }
 
               const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
               let deltaPixels = ev.deltaY;
@@ -2444,6 +2462,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               inputHandlerRef.current(data);
             })
           );
+
+          // buffer 切换(进出 alt-screen)立即同步刷一次 atlas。
+          // 触发场景:tmux 里打开/退出 vim/less/htop、进出 copy-mode、
+          // 切 pane 到一个跑 TUI 的 pane 等。WebGL renderer 在两个 buffer 之间
+          // 切换时 dirty rect 计算偶尔会漏一两行,残留旧字形,正好命中用户描述
+          // 的"某一部分像被冻死"。这里用 onBufferChange 兜一道,代价只是切
+          // buffer 时多刷一次,远低于 alt-screen 内任意一帧的代价。
+          try {
+            localDisposables.push(
+              terminal.buffer.onBufferChange(() => {
+                refreshTextureAtlasNow('buffer-change');
+              })
+            );
+          } catch { /* ignored */ }
 
           localResizeObserver = new ResizeObserver((entries) => {
             const firstEntry = entries[0];
@@ -2575,6 +2607,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         touchScrollCleanupRef.current = null;
       };
     }, [enableTouchScroll, setupTouchScroll]);
+
+    // tmux 模式动态切换 xterm 本地 scrollback。
+    // shell ↔ tmux 切换不会重建 terminal,所以构造时设的 scrollback 不够 —
+    // 必须随 onTmuxScroll 变化重设。tmux 模式下 0 行避免任何路径漏出
+    // "本地历史在 tmux 重绘下面" 的冻死视觉。
+    // terminalReadyVersion 依赖确保终端真正初始化完(包括 reset / session-switch)
+    // 之后再写,避免在 xterm 还没准备好时静默丢弃 options。
+    React.useEffect(() => {
+      const terminal = terminalRef.current;
+      if (!terminal) return;
+      try {
+        terminal.options.scrollback = onTmuxScroll ? 0 : 1000;
+      } catch { /* ignored */ }
+    }, [onTmuxScroll, terminalReadyVersion]);
 
     React.useEffect(() => {
       const terminal = terminalRef.current;
