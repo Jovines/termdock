@@ -172,18 +172,72 @@ function findScrollableViewport(container: HTMLElement): HTMLElement | null {
   return fallback;
 }
 
+/**
+ * 触发一次刷新的原因。所有刷新路径（mount / visibility / resize / swiper /
+ * tmux-layout / session-reset / cmd-k / focus / WebGL 上下文丢失）都走
+ * `requestRefresh(reason, options?)` 这一个入口，编排器在内部决定：
+ *   - 是否重建 WebGL renderer
+ *   - 是否需要 fit
+ *   - 是否要推 resize 给服务端（first-fit immediate / 90ms debounce / skip）
+ *   - 是否滚到底
+ *   - 触发 throttle / dedupe
+ */
+export type RefreshReason =
+  | 'mount'                  // xterm 首次初始化
+  | 'init-fit'               // post-init timeout 之后的二次 fit
+  | 'connected'              // WebSocket 已 connected
+  | 'visibility'             // 页面从 hidden→visible
+  | 'bfcache'                // 从 BFCache 恢复
+  | 'online'                 // 网络恢复
+  | 'page-flip'              // swiper 翻到本页（isActive 从 false→true）
+  | 'resize'                 // ResizeObserver / 视口高度变化
+  | 'dpr-change'             // devicePixelRatio 变化
+  | 'tmux-layout'            // tmux 服务端报上来的布局
+  | 'session-key-change'     // sessionKey 变化（切到别的 session）
+  | 'session-reset'          // 新 chunks 到达（replay / history restore）
+  | 'buffer-reset'           // terminal.reset() 之后
+  | 'clear'                  // 用户主动 clear（cmd-k）
+  | 'focus'                  // 输入框获焦
+  | 'blur'                   // 输入框失焦
+  | 'webgl-context-loss';    // onContextLoss 回调
+
+export type RefreshOptions = {
+  /** 强制重建 renderer（即便 context 看起来还活着）。仅 'webgl-context-loss' 等极少数场景。 */
+  forceRendererRecreate?: boolean;
+  /** 不推 resize 给服务端（layout 来自服务端时，避免回环）。 */
+  skipResizePush?: boolean;
+  /** 不滚到底（alternate buffer / tmux copy-mode）。 */
+  skipScrollToBottom?: boolean;
+  /** 服务端报上来的尺寸；如果比当前 xterm 小则忽略（防 shrink）。 */
+  candidateSize?: { cols: number; rows: number };
+  /** resize 推送的去抖窗口，默认 0（first-fit immediate）。 */
+  resizeDebounceMs?: number;
+  /** 跳过 throttle / dedupe。 */
+  force?: boolean;
+  /**
+   * 自定义 dedupe key。编排器对每个 reason 维护"上次处理过的 key"：
+   * 再次调用时 key 相同则整次跳过（不进 runRefreshSequence）。
+   * 用途：tmux-layout 用 `sessionId:activePaneId` 过滤服务端重复推送。
+   */
+  dedupeKey?: string;
+};
+
 export type TerminalController = {
   focus: () => void;
   clear: () => void;
-  fit: () => void;
-  /** 同步立即清纹理图集 + 重绘所有行（恢复 / 切换 session 关键路径用） */
-  refreshNow: () => void;
-  /** 防抖延迟刷新（高频场景，如 ResizeObserver 回调） */
-  refreshTextureAtlas: () => void;
-  /** 恢复 WebGL renderer：addon 丢失时重建 + 立即刷新 */
-  recoverRenderer: () => void;
-  /** 滚动到底部（除非用户在 alternate buffer 或 tmux copy-mode） */
-  scrollToBottom: () => void;
+  /** 当前 xterm 的 cols/rows；xterm 未初始化时返回 null */
+  getDimensions: () => { cols: number; rows: number } | null;
+  /**
+   * 唯一刷新入口。所有"我想让终端重画一下"的需求都走这里。
+   * 多次连续调用会按 reason 合并，最后一次调用生效（last-call-wins per reason）。
+   */
+  requestRefresh: (reason: RefreshReason, options?: RefreshOptions) => void;
+  /**
+   * 标记 WS 已收到 connected 事件，之后的 resize push 才会真正发出去。
+   * 必须在 TerminalView 的 `connected` 事件回调里调一次。
+   * 切 session（session-key-change reason）会自动重置。
+   */
+  setSessionReady: (ready: boolean) => void;
 };
 
 export type TerminalViewportInputOptions = {
@@ -346,6 +400,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const osc52RemainderRef = React.useRef('');
     const webglAddonRef = React.useRef<WebglAddon | null>(null);
     const webglContextLossDisposableRef = React.useRef<{ dispose: () => void } | null>(null);
+    // 标记"我们已知 WebGL 上下文死了"。仅由 onContextLoss 回调置 true，
+    // 每次新建 renderer 时由 enableWebglRenderer 置回 false。recoverRenderer
+    // 只在确认死了时才走 dispose+recreate，避免盲拆活上下文导致一帧空白。
+    const webglContextLostRef = React.useRef(false);
     const textureAtlasRefreshTimerRef = React.useRef<number | null>(null);
     const lastDevicePixelRatioRef = React.useRef(
       typeof window !== 'undefined' ? window.devicePixelRatio : 1
@@ -1722,21 +1780,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
         webglContextLossDisposableRef.current = webglAddon.onContextLoss(() => {
           debugTerminal('webgl context loss', { reason: 'onContextLoss' });
-          disposeWebglRenderer('context-loss');
-          fitTerminal('webgl-context-loss');
-          // 异步重建 WebGL renderer（避免在 onContextLoss 回调内同步重建死循环）
-          if (typeof window !== 'undefined' && shouldUseWebgl) {
+          webglContextLostRef.current = true;
+          // 走编排器：forceRendererRecreate=true 一定重建；异步 setTimeout
+          // 是为了避开 onContextLoss 回调内同步重建的死循环（xterm 内部
+          // 同步调用 nextTick，会卡住）。
+          if (typeof window !== 'undefined') {
             window.setTimeout(() => {
-              const term = terminalRef.current;
-              if (term && !webglAddonRef.current) {
-                enableWebglRenderer(term, 'auto-recover-after-context-loss');
-              }
+              requestRefresh('webgl-context-loss', { forceRendererRecreate: true });
             }, 0);
           }
         });
 
         terminal.loadAddon(webglAddon);
         webglAddonRef.current = webglAddon;
+        // 拿到一个新 renderer，先乐观地认为它的上下文是活的
+        webglContextLostRef.current = false;
 
         debugTerminal('renderer', {
           type: 'webgl',
@@ -1746,6 +1804,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         });
         // 新建 renderer 后立即同步刷新一次，确保字符立刻正确
         refreshTextureAtlasNow(`webgl-enabled:${reason}`);
+        rendererReadyRef.current = true;
         return true;
       } catch (error) {
         debugTerminal('webgl load failed, fallback to canvas', {
@@ -1754,6 +1813,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           mobile: enableTouchScroll,
           mode: rendererMode,
         });
+        // WebGL 失败后会落到 canvas renderer（init useEffect 会跑下面的
+        // 兜底分支并显式 setReady）。这里保持 false 即可。
         return false;
       }
     }, [
@@ -1765,6 +1826,265 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       rendererMode,
       shouldUseWebgl,
     ]);
+
+    // ============================================================
+    // 刷新编排器（orchestrator）
+    // ------------------------------------------------------------
+    // 所有"我想让终端重画一下"的入口都收编到 requestRefresh()。
+    // 每次调用按 reason 走同一条确定性序列：
+    //   1) throttle：visibility/bfcache/online 在 200ms 内只跑一次
+    //   2) dedupe：同 reason 的连续调用合并，最后一次生效
+    //   3) renderer：context 已知死或 forceRendererRecreate → 重建
+    //                否则 → refreshTextureAtlasNow（清 atlas + 重绘）
+    //   4) fit() → 拿到新 cols/rows
+    //   5) resize push：first-fit immediate / 90ms debounce / skip-if-same /
+    //                   candidateSize 防 shrink
+    //   6) 滚底（非 alternate buffer 且未 skipScrollToBottom）→ rAF 等稳定
+    // ============================================================
+
+    const DEFAULT_RESIZE_DEBOUNCE_MS = 90;
+    const RESUME_THROTTLE_MS = 200;
+
+    // 每个 reason 上一次被调用的时间戳（用于 visibility/bfcache/online 互斥）
+    const lastResumeAtRef = React.useRef(0);
+    // 同 reason 的 pending rAF 句柄：连续调用只保留最后一次
+    const pendingReasonRafRef = React.useRef<Map<RefreshReason, number>>(new Map());
+    // resize 推送给服务端的 debounce 句柄（per fit cycle）
+    const pendingResizeTimerRef = React.useRef<number | null>(null);
+    // last sent to server，first-fit immediate 路径用它做"和上次一样就不发"判定
+    const lastServerSizeRef = React.useRef<{ cols: number; rows: number } | null>(null);
+    // 上次 fit 后 xterm 实际尺寸（用于 tmux candidateSize 防 shrink 等比较）
+    const lastFittedDimsRef = React.useRef<{ cols: number; rows: number } | null>(null);
+    // 每个 reason 上一次处理的 dedupeKey（用于 tmux-layout 之类的服务端重复推送）
+    const lastDedupeKeyRef = React.useRef<Map<RefreshReason, string>>(new Map());
+    // renderer 是否已就绪（enableWebglRenderer / canvas fallback 完成）
+    const rendererReadyRef = React.useRef(false);
+    // session（WS）是否已 ready：必须等 WS connected 事件到达，pushResizeToServer
+    // 才会真正发出去。否则 reload 后 ResizeObserver 在 ensureSession 跑完之前
+    // 就会用 OLD session id 推 resize，server 直接 404。
+    const sessionReadyRef = React.useRef(false);
+
+    const cancelPendingReasonRaf = React.useCallback((reason: RefreshReason) => {
+      const map = pendingReasonRafRef.current;
+      const id = map.get(reason);
+      if (id !== undefined) {
+        cancelAnimationFrame(id);
+        map.delete(reason);
+      }
+    }, []);
+
+    const cancelAllPendingReasonRafs = React.useCallback(() => {
+      const map = pendingReasonRafRef.current;
+      map.forEach((id) => cancelAnimationFrame(id));
+      map.clear();
+    }, []);
+
+    const cancelPendingResizeTimer = React.useCallback(() => {
+      if (pendingResizeTimerRef.current !== null) {
+        window.clearTimeout(pendingResizeTimerRef.current);
+        pendingResizeTimerRef.current = null;
+      }
+    }, []);
+
+    const pushResizeToServer = React.useCallback(
+      (cols: number, rows: number, debounceMs: number) => {
+        cancelPendingResizeTimer();
+        const last = lastServerSizeRef.current;
+        if (last && last.cols === cols && last.rows === rows) {
+          // 尺寸没变，不发
+          return;
+        }
+        if (!sessionReadyRef.current) {
+          // WS 还没收到 connected 事件：不能推 resize 给服务端。
+          // 之前 (没有这个 gate) 会用旧的 terminalIdRef 直接 POST，
+          // 后端 404、WS 4001，触发 auto-recreate，白白浪费一次往返。
+          // 这里把 dims "记账" 一下，等 sessionReady 后由 connected 自身
+          // 的 pushResizeToServer（first-fit immediate 路径）来真正发。
+          // 关键：lastServerSizeRef 不更新，否则后续 same-size 会被 skip，
+          // connected 那次就发不出来了。
+          return;
+        }
+        if (debounceMs <= 0 || last === null) {
+          // first-fit immediate
+          lastServerSizeRef.current = { cols, rows };
+          resizeHandlerRef.current(cols, rows);
+          return;
+        }
+        pendingResizeTimerRef.current = window.setTimeout(() => {
+          pendingResizeTimerRef.current = null;
+          lastServerSizeRef.current = { cols, rows };
+          resizeHandlerRef.current(cols, rows);
+        }, debounceMs);
+      },
+      [cancelPendingResizeTimer]
+    );
+
+    const runRefreshSequence = React.useCallback(
+      (reason: RefreshReason, options: RefreshOptions) => {
+        const terminal = terminalRef.current;
+        const fitAddon = fitAddonRef.current;
+        if (!terminal || !fitAddon) {
+          return;
+        }
+
+        // 0) renderer 必须就绪（init useEffect 已经调过 enableWebglRenderer
+        //    或 canvas fallback）。否则这次 requestRefresh 是 useImperativeHandle
+        //    ref attach 早于 init useEffect 时跑出来的早期调用——直接 bail，
+        //    后续的 mount/connected/tmux-layout 会再触发一次。
+        if (!rendererReadyRef.current) {
+          debugTerminal('refresh skipped: renderer not ready', { reason });
+          return;
+        }
+
+        // 0.5) dedupeKey：相同 reason + 相同 key 直接跳过，避免 tmux 服务端
+        //      重复 layout 推送造成 fit/refresh 风暴。
+        if (options.dedupeKey !== undefined) {
+          const lastKey = lastDedupeKeyRef.current.get(reason);
+          if (lastKey === options.dedupeKey) {
+            debugTerminal('refresh deduped', { reason, dedupeKey: options.dedupeKey });
+            return;
+          }
+          lastDedupeKeyRef.current.set(reason, options.dedupeKey);
+        }
+
+        debugTerminal('refresh', { reason, options });
+
+        // 1) Renderer 决策
+        const needsRecreate = options.forceRendererRecreate === true || webglContextLostRef.current;
+        if (needsRecreate) {
+          webglContextLostRef.current = false;
+          if (shouldUseWebgl) {
+            disposeWebglRenderer(`refresh:${reason}`);
+            enableWebglRenderer(terminal, `refresh:${reason}`);
+          } else {
+            refreshTextureAtlasNow(`refresh:${reason}`);
+          }
+        } else {
+          // 上下文还活着或 canvas renderer：只清 atlas + 重绘
+          refreshTextureAtlasNow(`refresh:${reason}`);
+        }
+
+        // 2) fit() —— 这一步会触发 xterm 的 onResize
+        const before = { cols: terminal.cols, rows: terminal.rows };
+        fitTerminal(`refresh:${reason}`);
+        const after = { cols: terminal.cols, rows: terminal.rows };
+        lastFittedDimsRef.current = after;
+
+        // 3) Resize push
+        if (!options.skipResizePush) {
+          // candidateSize 防 shrink：服务端报上来的尺寸如果比当前 xterm 小，忽略
+          if (options.candidateSize) {
+            const c = options.candidateSize;
+            if (c.cols < after.cols || c.rows < after.rows) {
+              // 已经在请求的尺寸之上，不缩
+            } else {
+              const debounce = options.resizeDebounceMs ?? DEFAULT_RESIZE_DEBOUNCE_MS;
+              pushResizeToServer(c.cols, c.rows, debounce);
+            }
+          } else {
+            // 跳过没变化的情况（before/after 完全一致 + 上次 fit 之后没新数据）
+            if (before.cols !== after.cols || before.rows !== after.rows || lastServerSizeRef.current === null) {
+              const debounce = options.resizeDebounceMs ?? DEFAULT_RESIZE_DEBOUNCE_MS;
+              pushResizeToServer(after.cols, after.rows, debounce);
+            }
+          }
+        }
+
+        // 4) ScrollToBottom：等 viewport 切到新 rows 后再滚
+        if (!options.skipScrollToBottom) {
+          const raf = requestAnimationFrame(() => {
+            const t = terminalRef.current;
+            if (!t) return;
+            if (t.buffer.active.type === 'alternate') return;
+            try {
+              t.scrollToBottom();
+            } catch { /* ignore */ }
+          });
+          // 存进 pendingReasonRafRef 以便 unmount 时一起取消
+          const map = pendingReasonRafRef.current;
+          const prev = map.get(reason);
+          if (prev !== undefined) cancelAnimationFrame(prev);
+          map.set(reason, raf);
+        }
+      },
+      [
+        debugTerminal,
+        shouldUseWebgl,
+        disposeWebglRenderer,
+        enableWebglRenderer,
+        refreshTextureAtlasNow,
+        fitTerminal,
+        pushResizeToServer,
+      ]
+    );
+
+    const requestRefresh = React.useCallback(
+      (reason: RefreshReason, options: RefreshOptions = {}) => {
+        const terminal = terminalRef.current;
+        if (!terminal) {
+          // xterm 还没初始化，mount/connected/init-fit 这些 reason 在 init useEffect
+          // 里调也没问题，编排器会等下一帧再跑。
+        }
+
+        // 0) session-key-change 强制重置所有跟踪状态（lastServerSize、lastFittedDims、
+        //    dedupe keys、pending rAF、pending timer），让下一个 session 的 first-fit 走 immediate 路径
+        if (reason === 'session-key-change') {
+          lastServerSizeRef.current = null;
+          lastFittedDimsRef.current = null;
+          lastDedupeKeyRef.current.clear();
+          cancelPendingResizeTimer();
+          cancelAllPendingReasonRafs();
+        }
+
+        // 1) Throttle：visibility / bfcache / online 互斥，200ms 内只跑一次
+        if (!options.force) {
+          if (reason === 'visibility' || reason === 'bfcache' || reason === 'online') {
+            const now = Date.now();
+            if (now - lastResumeAtRef.current < RESUME_THROTTLE_MS) {
+              debugTerminal('refresh throttled', { reason });
+              return;
+            }
+            lastResumeAtRef.current = now;
+          }
+        }
+
+        // 2) Dedupe：同 reason 的 pending rAF 取消，只保留最后一次
+        cancelPendingReasonRaf(reason);
+
+        // 3) 调度：rAF 内跑序列；runRefreshSequence 内部还会再开 rAF 做 scrollToBottom
+        const raf = requestAnimationFrame(() => {
+          pendingReasonRafRef.current.delete(reason);
+          runRefreshSequence(reason, options);
+        });
+        pendingReasonRafRef.current.set(reason, raf);
+      },
+      [
+        debugTerminal,
+        cancelPendingReasonRaf,
+        cancelAllPendingReasonRafs,
+        cancelPendingResizeTimer,
+        runRefreshSequence,
+      ]
+    );
+
+    // 组件 unmount / sessionKey 变化时清理所有 pending raf 和 timer
+    React.useEffect(() => {
+      return () => {
+        cancelAllPendingReasonRafs();
+        cancelPendingResizeTimer();
+      };
+    }, [sessionKey, cancelAllPendingReasonRafs, cancelPendingResizeTimer]);
+
+    // sessionKey 变化 = 切到别的 session = 重置 lastServerSize / lastFittedDims /
+    // dedupe keys / renderer-ready，让下一个 session 的 first-fit 走 immediate 路径
+    React.useEffect(() => {
+      lastServerSizeRef.current = null;
+      lastFittedDimsRef.current = null;
+      lastDedupeKeyRef.current.clear();
+      cancelPendingResizeTimer();
+      // renderer 状态不在这里重置：disposeWebglRenderer 在 cleanup 跑，
+      // 下一次 init useEffect 会再 enableWebglRenderer 并把 ready 置 true。
+    }, [sessionKey, cancelPendingResizeTimer]);
 
     const flushWrites = React.useCallback(() => {
       if (isWritingRef.current) {
@@ -1876,7 +2196,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             cursorBlink: true,
             cursorStyle: 'block',
             cursorInactiveStyle: 'bar',
-            scrollback: 1000,
+            // tmux 模式下初始就 0 — 历史在 tmux 那一侧维护(Ctrl-b [),xterm
+            // 不需要再留一份本地 scrollback。留 1000 行的副作用:任何代码
+            // 路径(Shift+PageUp、xterm 默认 wheel 兜底、touchpad 惯性等)
+            // 一旦碰到本地 scrollback,就会把那段历史"漏"到 tmux 重绘下面,
+            // 视觉上表现为某一层画面冻死。下面还有 effect 会随 onTmuxScroll
+            // 动态切换 — 但构造时就把对的初始值给到,避免首帧出现 ghost。
+            scrollback: onTmuxScroll ? 0 : 1000,
             allowTransparency: false,
             allowProposedApi: true,
             convertEol: true,
@@ -1935,6 +2261,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
           if (shouldUseWebgl) {
             enableWebglRenderer(terminal, 'init');
+            // enableWebglRenderer 成功路径会自己把 rendererReadyRef 置 true；
+            // 失败时它会 return false，下面兜底置 ready 避免后续 mount refresh 卡死。
+            rendererReadyRef.current = true;
           } else {
             debugTerminal('renderer', {
               type: 'dom',
@@ -1942,6 +2271,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               mobile: enableTouchScroll,
               mode: rendererMode,
             });
+            // canvas 路径：xterm 自带 DOM renderer，没有"挂载"事件，terminal.open
+            // 已经渲染完一帧了，标记 ready 让 runRefreshSequence 放行。
+            rendererReadyRef.current = true;
           }
           setIsInitializing(false);
           bumpTerminalReady();
@@ -2018,12 +2350,24 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             };
 
             terminal.attachCustomWheelEventHandler((ev: WheelEvent) => {
-              if (!onTmuxScrollRef.current) {
-                // 非 tmux 模式：让 xterm 走默认路径（vim/htop mouseTracking 仍能上报）
-                return true;
-              }
+              // 通用早返:修饰键留给上一层(pinch-zoom 等),0 delta 直接吃掉。
               if (ev.ctrlKey || ev.metaKey || ev.shiftKey) return true;
               if (ev.deltaY === 0) return false;
+
+              const term = terminalRef.current;
+              if (!term) return true;
+
+              // 非 tmux session 模式:交还给 xterm 默认处理。
+              //   - mouseTracking on → xterm 自带 SGR mouse wheel 上报(完整且无副作用)
+              //   - alt-screen only → xterm 自带 alt-buffer wheel → Up/Down 兜底
+              //   - 主屏 + 无 mouseTracking → xterm 滚自己的本地 scrollback
+              //     (这正是普通 shell 翻历史想要的;唯一会出问题的是用户在
+              //     shell session 里手动 tmux 又关 mouse,那是个边角场景,
+              //     真要修需要服务端把 activeProgram=tmux 透出来做检测,
+              //     不属于本次 "tmux session 模式最佳实践" 的范围。)
+              if (!onTmuxScrollRef.current) {
+                return true;
+              }
 
               const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
               let deltaPixels = ev.deltaY;
@@ -2054,7 +2398,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             viewportRef.current = null;
           }
 
-          fitTerminal('init');
+          requestRefresh('mount', { skipResizePush: true, skipScrollToBottom: true });
           if (autoFocusRef.current) {
             // 桌面：焦点必须落在覆盖层 textarea，绝不能给 xterm 自身 textarea。
             // 一旦 xterm.textarea 拿到焦点，IME（尤其搜狗英文联想）会把候选词
@@ -2119,6 +2463,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             })
           );
 
+          // buffer 切换(进出 alt-screen)立即同步刷一次 atlas。
+          // 触发场景:tmux 里打开/退出 vim/less/htop、进出 copy-mode、
+          // 切 pane 到一个跑 TUI 的 pane 等。WebGL renderer 在两个 buffer 之间
+          // 切换时 dirty rect 计算偶尔会漏一两行,残留旧字形,正好命中用户描述
+          // 的"某一部分像被冻死"。这里用 onBufferChange 兜一道,代价只是切
+          // buffer 时多刷一次,远低于 alt-screen 内任意一帧的代价。
+          try {
+            localDisposables.push(
+              terminal.buffer.onBufferChange(() => {
+                refreshTextureAtlasNow('buffer-change');
+              })
+            );
+          } catch { /* ignored */ }
+
           localResizeObserver = new ResizeObserver((entries) => {
             const firstEntry = entries[0];
             if (firstEntry) {
@@ -2135,20 +2493,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               debugTerminal('device pixel ratio changed', { value: nextDevicePixelRatio });
             }
 
-            fitTerminal('resize-observer');
-            // DPR 变化必须立即刷（屏幕在缩放/移动），其他场景走防抖即可
+            // ResizeObserver 触发：所有刷新都走编排器。
+            //   - 普通 resize：reason='resize'，default debounce 90ms 推给服务端
+            //   - DPR 变化：reason='dpr-change'，debounce 0 立即刷 atlas + 立即推
             if (dprChanged) {
-              refreshTextureAtlasNow('device-pixel-ratio-change');
+              requestRefresh('dpr-change', { resizeDebounceMs: 0 });
             } else {
-              scheduleTextureAtlasRefresh('resize-observer');
+              requestRefresh('resize');
             }
           });
           localResizeObserver.observe(container);
 
           if (typeof window !== 'undefined') {
+            // post-init 二次 fit：等一帧让 layout 真正稳定再算 cols/rows
             window.setTimeout(() => {
-              fitTerminal('post-init-timeout');
-              scheduleTextureAtlasRefresh('post-init-timeout');
+              requestRefresh('init-fit', { skipScrollToBottom: true });
             }, 0);
           }
 
@@ -2224,9 +2583,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (hiddenInputRef.current) {
         hiddenInputRef.current.value = '';
       }
-      fitTerminal('session-reset');
-      // reset 后立即同步刷新，避免同尺寸切换 session 时纹理图集残留旧字形
-      refreshTextureAtlasNow('session-reset');
+      // session-reset：先重置状态，fit + atlas 刷新都走编排器
+      // （sessionKey 变化时 lastServerSizeRef 已被 useEffect 重置为 null，
+      //   所以这里推 resize 走 first-fit immediate 路径）
+      requestRefresh('session-reset', { skipScrollToBottom: true });
             if (autoFocusRef.current) {
               // 桌面：焦点必须落在覆盖层 textarea（理由见 init 处注释）
               if (!enableTouchScroll) {
@@ -2236,7 +2596,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }
             }
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [sessionKey, terminalReadyVersion, fitTerminal, refreshTextureAtlasNow, resetWriteState]);
+    }, [sessionKey, terminalReadyVersion, requestRefresh, resetWriteState]);
 
     React.useEffect(() => {
       if (!enableTouchScroll) return;
@@ -2248,6 +2608,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       };
     }, [enableTouchScroll, setupTouchScroll]);
 
+    // tmux 模式动态切换 xterm 本地 scrollback。
+    // shell ↔ tmux 切换不会重建 terminal,所以构造时设的 scrollback 不够 —
+    // 必须随 onTmuxScroll 变化重设。tmux 模式下 0 行避免任何路径漏出
+    // "本地历史在 tmux 重绘下面" 的冻死视觉。
+    // terminalReadyVersion 依赖确保终端真正初始化完(包括 reset / session-switch)
+    // 之后再写,避免在 xterm 还没准备好时静默丢弃 options。
+    React.useEffect(() => {
+      const terminal = terminalRef.current;
+      if (!terminal) return;
+      try {
+        terminal.options.scrollback = onTmuxScroll ? 0 : 1000;
+      } catch { /* ignored */ }
+    }, [onTmuxScroll, terminalReadyVersion]);
+
     React.useEffect(() => {
       const terminal = terminalRef.current;
       if (!terminal) {
@@ -2258,8 +2632,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (lastProcessedChunkIdRef.current !== null) {
           terminal.reset();
           resetWriteState();
-          fitTerminal('buffer-reset');
-          refreshTextureAtlasNow('buffer-reset');
+          requestRefresh('buffer-reset', { skipResizePush: true, skipScrollToBottom: true });
         }
         return;
       }
@@ -2286,7 +2659,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       lastProcessedChunkIdRef.current = chunks[chunks.length - 1].id;
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [chunks, terminalReadyVersion, enqueueWrite, fitTerminal, refreshTextureAtlasNow, resetWriteState]);
+    }, [chunks, terminalReadyVersion, enqueueWrite, requestRefresh, resetWriteState]);
 
     React.useImperativeHandle(
       ref,
@@ -2307,50 +2680,24 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
           terminal.reset();
           resetWriteState();
-          fitTerminal('imperative-clear');
-          refreshTextureAtlasNow('imperative-clear');
+          // clear 走 requestRefresh 统一路径（renderer 不重建、resize 不推）
+          requestRefresh('clear', { skipResizePush: true, skipScrollToBottom: true });
         },
-        fit: () => {
-          fitTerminal('imperative-fit');
-        },
-        refreshNow: () => {
-          refreshTextureAtlasNow('imperative-refresh-now');
-        },
-        refreshTextureAtlas: () => {
-          scheduleTextureAtlasRefresh('imperative-refresh');
-        },
-        recoverRenderer: () => {
+        getDimensions: () => {
           const terminal = terminalRef.current;
-          if (!terminal) return;
-          if (shouldUseWebgl) {
-            // iOS Safari 可能在后台静默丢失 WebGL 上下文而不触发 onContextLoss，
-            // 导致 webglAddonRef 仍存在但底层 GL 上下文已死（僵尸状态）。
-            // 仅在死上下文上刷新纹理图集是无效操作，必须销毁重建。
-            disposeWebglRenderer('recover');
-            enableWebglRenderer(terminal, 'recover');
-          } else {
-            refreshTextureAtlasNow('recover');
-          }
+          if (!terminal || !terminal.cols || !terminal.rows) return null;
+          return { cols: terminal.cols, rows: terminal.rows };
         },
-        scrollToBottom: () => {
-          const terminal = terminalRef.current;
-          if (!terminal) return;
-          // alternate buffer（vim/less/tmux 等）下不能强制滚到底，会破坏内容定位
-          if (terminal.buffer.active.type === 'alternate') return;
-          try {
-            terminal.scrollToBottom();
-          } catch { /* ignored */ }
+        requestRefresh,
+        setSessionReady: (ready: boolean) => {
+          sessionReadyRef.current = ready;
         },
       }),
       [
         enableTouchScroll,
         focusHiddenInput,
-        fitTerminal,
         resetWriteState,
-        refreshTextureAtlasNow,
-        scheduleTextureAtlasRefresh,
-        enableWebglRenderer,
-        shouldUseWebgl,
+        requestRefresh,
       ]
     );
 
@@ -2487,7 +2834,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }}
               onFocus={() => {
                 debugTerminal('input anchor focus');
-                scheduleTextureAtlasRefresh('input-focus');
+                requestRefresh('focus', { skipResizePush: true, skipScrollToBottom: true });
                 inputFocusHandlerRef.current?.(true);
               }}
               onBlur={() => {
@@ -2500,7 +2847,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   activeTag: activeElement?.tagName ?? null,
                   activeClass: activeElement?.className ?? null,
                 });
-                scheduleTextureAtlasRefresh('input-blur');
+                requestRefresh('blur', { skipResizePush: true, skipScrollToBottom: true });
 
                 if (!guarded) {
                   // readonly 仅对移动端有意义（防止 iOS 长按放大镜）；
@@ -2612,8 +2959,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                     if (term) {
                       term.reset();
                       resetWriteState();
-                      fitTerminal('cmd-k-clear');
-                      refreshTextureAtlasNow('cmd-k-clear');
+                      // cmd-k 走编排器：clear reason，不重建 renderer、不推 resize、不滚底
+                      requestRefresh('clear', { skipResizePush: true, skipScrollToBottom: true });
                     }
                     event.currentTarget.value = '';
                     sentValueRef.current = '';

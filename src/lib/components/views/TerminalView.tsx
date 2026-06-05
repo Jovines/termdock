@@ -18,8 +18,6 @@ import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 
 const TERMINAL_FONT_SIZE = 10;
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
-const RESIZE_THROTTLE_MS = 90;
-const ACTIVE_SURFACE_REFRESH_DELAY_MS = 360;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
 const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'termdock:mobile-keyboard-preset-mode';
 
@@ -106,7 +104,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const clearTerminalSession = terminalStore.clearTerminalSession;
   const removeTerminalSession = terminalStore.removeTerminalSession;
   const clearBuffer = terminalStore.clearBuffer;
-  const replaceBuffer = terminalStore.replaceBuffer;
   const setSessionActiveProgram = terminalStore.setSessionActiveProgram;
   const setSessionCwd = terminalStore.setSessionCwd;
   const setSessionCopyMode = terminalStore.setSessionCopyMode;
@@ -155,25 +152,35 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const streamVersionRef = React.useRef(0);
   const isActiveRef = React.useRef(isActive);
   const isMobileRef = React.useRef(isMobile);
-  const resizeStateRef = React.useRef<{
-    timerId: number | null;
-    pending: { cols: number; rows: number } | null;
-    lastSent: { cols: number; rows: number } | null;
-    nextSeq: number;
-    inflightSeq: number | null;
-    lastAckedSeq: number;
-  }>({
-    timerId: null,
-    pending: null,
-    lastSent: null,
-    nextSeq: 0,
-    inflightSeq: null,
-    lastAckedSeq: 0,
-  });
 
   React.useEffect(() => {
     isActiveRef.current = isActive;
   }, [isActive]);
+
+  // Swiper 翻到本页（isActive 从 false→true）：请求编排器重画一次。
+  // swiper 用 CSS transform 翻页，xterm canvas 在翻页过程中可能留有 stale frame，
+  // 翻完后容器是当前可视的，fit + atlas 刷新能把画面拉正。
+  // 编排器内部会做 throttle / dedupe，无需在外层再加。
+  React.useEffect(() => {
+    if (!isActive) return;
+    // 双 rAF 等 swiper 的 transform 收尾，容器尺寸稳定后再 fit
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        terminalControllerRef.current?.requestRefresh('page-flip');
+      });
+    });
+    // 320ms transition 收尾后再做一次（保险：处理 WebGL canvas 残留）
+    const postTransitionTimer = window.setTimeout(() => {
+      terminalControllerRef.current?.requestRefresh('page-flip');
+    }, 360);
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      window.clearTimeout(postTransitionTimer);
+    };
+  }, [isActive, terminalSessionId]);
 
   React.useEffect(() => {
     isMobileRef.current = isMobile;
@@ -200,117 +207,42 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => document.removeEventListener('termfontchange', handleFontChange);
   }, []);
 
-  // 统一恢复入口：从后台返回 / BFCache 恢复 / 网络恢复时调用。
-  // 单一职责：清 resize 去重 → fit → 同步刷新纹理图集 → 滚动到底（非 alternate buffer）。
-  // 不使用 setTimeout 重试链：rAF 内一次性同步完成，避免与 ResizeObserver / 防抖刷新互相覆盖。
-  const recoverActive = React.useCallback((reason: string) => {
-    if (!isActive) return;
-    debugSession(`[recoverActive] ${reason}`);
-
-    // 清掉 resize 去重，强制下一帧把本地尺寸推给后端 / tmux
-    resizeStateRef.current.lastSent = null;
-    tmuxSessionResizedRef.current = null;
-    skipLayoutResizeRef.current = true;
-
-    const controller = terminalControllerRef.current;
-    if (!controller) return;
-
-    // 在浏览器下一帧（容器尺寸已经稳定后）：fit → 立即同步刷新 → 滚到底
-    const raf = requestAnimationFrame(() => {
-      const c = terminalControllerRef.current;
-      if (!c) return;
-      c.recoverRenderer();   // WebGL addon 丢失时重建 + 同步刷新
-      c.fit();               // 重新 fit 容器
-      c.refreshNow();        // 同步立即清纹理 + 重绘所有行
-      c.scrollToBottom();    // 滚到底（alternate buffer 内部会自动跳过）
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [isActive, debugSession]);
-
-  React.useEffect(() => {
-    if (!isActive) {
-      return;
-    }
-
-    const refreshVisibleSurface = (reason: string, recoverRenderer: boolean) => {
-      if (!isActiveRef.current) {
-        return;
-      }
-
-      const controller = terminalControllerRef.current;
-      if (!controller) {
-        return;
-      }
-
-      debugSession(`[active-surface-refresh] ${reason}`);
-      if (recoverRenderer) {
-        controller.recoverRenderer();
-      }
-      controller.fit();
-      controller.refreshNow();
-    };
-
-    let rafId: number | null = null;
-    let postLayoutRafId: number | null = null;
-    const postTransitionTimer = window.setTimeout(() => {
-      refreshVisibleSurface('post-transition', true);
-    }, ACTIVE_SURFACE_REFRESH_DELAY_MS);
-
-    // Swiper flips pages with CSS transforms. xterm WebGL/canvas can keep a
-    // stale frame while the slide is moving, so repaint once after layout has
-    // settled and once again after the 320ms transition has fully finished.
-    rafId = requestAnimationFrame(() => {
-      postLayoutRafId = requestAnimationFrame(() => {
-        refreshVisibleSurface('post-layout', false);
-      });
-    });
-
-    return () => {
-      window.clearTimeout(postTransitionTimer);
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-      }
-      if (postLayoutRafId !== null) {
-        cancelAnimationFrame(postLayoutRafId);
-      }
-    };
-  }, [isActive, terminalSessionId, debugSession]);
-
-  // 1) 页面可见性变化（前后台切换）
+  // 统一恢复入口：visibility / bfcache / online 全部走 controller.requestRefresh。
+  // 编排器在内部完成 throttle（200ms 互斥）、fit/refresh/scrollToBottom 序列、
+  // resize 推送（first-fit immediate / 90ms debounce）、renderer 按需重建。
+  // 真正"重绘"的逻辑收编到 TerminalViewport 的 refresh 编排器里，本组件不再持有
+  // rAF 句柄、throttle 时间戳、tmux sessionId 等任何同步状态。
   React.useEffect(() => {
     const handleVisibility = () => {
-      if (!document.hidden) {
-        recoverActive('visibilitychange');
+      if (!document.hidden && isActive) {
+        terminalControllerRef.current?.requestRefresh('visibility');
         // 唤醒后立刻探测 WS 是否还活着（iOS PWA 后台返回常出现"半开连接"）。
         // probe 内部会发 ping，500ms 没回应就主动 close 触发重连补帧。
         const tid = terminalIdRef.current;
         if (tid) probeTerminalConnection(tid);
       }
     };
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [recoverActive]);
-
-  // 2) BFCache 恢复（iOS Safari PWA 从后台回来不会触发 visibilitychange）
-  //    online：网络恢复时也强制刷一遍，与 WS 重连联动
-  React.useEffect(() => {
     const handlePageShow = (event: PageTransitionEvent) => {
-      recoverActive(event.persisted ? 'pageshow:bfcache' : 'pageshow');
+      if (!isActive) return;
+      terminalControllerRef.current?.requestRefresh(event.persisted ? 'bfcache' : 'visibility');
       const tid = terminalIdRef.current;
       if (tid) probeTerminalConnection(tid);
     };
     const handleOnline = () => {
-      recoverActive('online');
+      if (!isActive) return;
+      terminalControllerRef.current?.requestRefresh('online');
       const tid = terminalIdRef.current;
       if (tid) probeTerminalConnection(tid);
     };
+    document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('pageshow', handlePageShow);
     window.addEventListener('online', handleOnline);
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('pageshow', handlePageShow);
       window.removeEventListener('online', handleOnline);
     };
-  }, [recoverActive]);
+  }, [isActive]);
 
   // iOS detection
   React.useEffect(() => {
@@ -344,28 +276,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [isTmuxMode]);
 
+  // 后端 session 切换（auto-recreate / 显式重启）时通知编排器重置 lastServerSize，
+  // 让下一个 first-fit 走 immediate 路径，把新 session 的真实尺寸告诉服务端。
   React.useEffect(() => {
-    const resizeState = resizeStateRef.current;
-    resizeState.lastSent = null;
-    resizeState.pending = null;
-    resizeState.inflightSeq = null;
-    resizeState.lastAckedSeq = 0;
-    resizeState.nextSeq = 0;
-    if (resizeState.timerId !== null) {
-      window.clearTimeout(resizeState.timerId);
-      resizeState.timerId = null;
-    }
+    if (!terminalSessionId) return;
+    terminalControllerRef.current?.requestRefresh('session-key-change', { force: true });
   }, [terminalSessionId]);
-
-  React.useEffect(() => {
-    return () => {
-      const resizeState = resizeStateRef.current;
-      if (resizeState.timerId !== null) {
-        window.clearTimeout(resizeState.timerId);
-        resizeState.timerId = null;
-      }
-    };
-  }, []);
 
   React.useEffect(() => {
     const visible = isActive && isMobile && isViewportKeyboardOpen;
@@ -463,6 +379,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const cleanup = streamCleanupRef.current;
     streamCleanupRef.current = null;
     activeTerminalIdRef.current = null;
+    // 断开后立即把 sessionReady 复位：后续 resize push 会被编排器 gate 住，
+    // 直到下次 connected 事件再 setSessionReady(true)。
+    // 这样避免把新 resize 用旧 terminalId 发出去。
+    terminalControllerRef.current?.setSessionReady(false);
     cleanup?.();
   }, []);
 
@@ -500,6 +420,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setConnectionError(null);
                 setIsFatalError(false);
 
+                // 标记 WS 已就绪：编排器从这一刻起才允许 push resize 给服务端。
+                // 之前没有这个 gate，reload 时 ResizeObserver 在 ensureSession
+                // 跑完前就拿 OLD terminalId POST 出去，server 直接 404 + WS 4001
+                // 触发 auto-recreate，必须完全重连才能用。
+                terminalControllerRef.current?.setSessionReady(true);
+
                 // Sync agent status from server on connect
                 if (event.agentStatus !== undefined) {
                   setSessionAgentStatus(
@@ -519,37 +445,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     mode: event.mode,
                     tmuxSessionName: event.tmuxSessionName ?? null,
                     cwd: event.cwd ?? null,
-                    activeProgram: event.activeProgram ?? null,
-                    activeProgramRaw: event.activeProgramRaw ?? null,
-                    activeProgramSource: event.activeProgramSource ?? null,
                   });
                 }
 
-                // 连接建立后强制刷新：数据写入与 WebGL 纹理图集构建存在时序差，
-                // 不刷新会导致部分单元格未绘制（花屏/空白），必须等数据写入后
-                // 再清纹理图集 + 全量重绘。延迟两帧确保 history 数据已落盘。
+                // 连接建立后强制刷新：等 history 落盘后由编排器完成 fit + atlas + scroll。
+                // 编排器内部默认会推 first-fit immediate resize 告诉服务端真实尺寸。
                 requestAnimationFrame(() => {
                   requestAnimationFrame(() => {
-                    const c = terminalControllerRef.current;
-                    if (!c) return;
-                    c.recoverRenderer();
-                    c.fit();
-                    c.refreshNow();
-                    c.scrollToBottom();
+                    terminalControllerRef.current?.requestRefresh('connected');
                   });
                 });
 
                 if (event.mode !== 'tmux') {
                   setTmuxLayout(null);
                   setSessionCopyMode(storeSessionId, false);
-                } else {
-                  resizeStateRef.current.lastSent = null;
-                  resizeStateRef.current.inflightSeq = null;
-                  resizeStateRef.current.lastAckedSeq = 0;
-                  resizeStateRef.current.nextSeq = 0;
-                  tmuxSessionResizedRef.current = null;
-                  skipLayoutResizeRef.current = true;
                 }
+                // tmux 模式不需要单独复位：编排器内 session-key-change 已经
+                // 处理了 lastServerSize 重置；tmux-layout 第一次到达时由 useEffect
+                // 触发 candidateSize 防 shrink 路径。
 
                 debugSession('[Terminal] Connected event received:', {
                   frontendSessionId: storeSessionId,
@@ -581,19 +494,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 const replayChunks = event.replayChunks;
                 if (replayChunks && replayChunks.length > 0) {
                   if (event.replayOutOfWindow) {
-                    debugSession(`[Terminal] Replay out-of-window, replacing buffer before replay (${replayChunks.length} chunks)`);
+                    debugSession(`[Terminal] Replay out-of-window, clearing buffer before replay (${replayChunks.length} chunks)`);
+                    clearBuffer(storeSessionId);
                     terminalControllerRef.current?.clear();
-                    replaceBuffer(storeSessionId, replayChunks);
                   } else {
                     debugSession(`[Terminal] Replay incremental: ${replayChunks.length} chunks`);
-                    for (const chunk of replayChunks) {
-                      appendToBuffer(storeSessionId, chunk);
-                    }
                   }
                   // 抑制 replay 期间的用户输入，避免 echo 顺序错乱。
                   const replayBytes = replayChunks.reduce((total, chunk) => total + chunk.length, 0);
                   const suppressionMs = Math.max(200, Math.min(1500, Math.ceil(replayBytes / 200)));
                   suppressInputUntilRef.current = Math.max(suppressInputUntilRef.current, Date.now() + suppressionMs);
+                  for (const chunk of replayChunks) {
+                    appendToBuffer(storeSessionId, chunk);
+                  }
                 }
                 break;
               }
@@ -625,8 +538,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setSessionActiveProgram(
                   storeSessionId,
                   event.activeProgram ?? null,
-                  event.activeProgramSource ?? null,
-                  event.activeProgramRaw ?? null,
+                  event.activeProgramSource ?? null
                 );
                 break;
               }
@@ -641,55 +553,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   event.agentColor ?? null,
                   event.agentIndicator ?? null,
                 );
-                break;
-              }
-              case 'resize-ack': {
-                const ackSeq = typeof event.seq === 'number' ? event.seq : null;
-                if (ackSeq === null || !Number.isFinite(ackSeq) || ackSeq <= 0) {
-                  break;
-                }
-
-                const resizeState = resizeStateRef.current;
-                if (ackSeq <= resizeState.lastAckedSeq) {
-                  debugKeyboard('resize ack dropped (stale)', {
-                    ackSeq,
-                    lastAckedSeq: resizeState.lastAckedSeq,
-                    ok: event.ok !== false,
-                  });
-                  break;
-                }
-
-                resizeState.lastAckedSeq = ackSeq;
-                if (resizeState.inflightSeq !== null && ackSeq >= resizeState.inflightSeq) {
-                  resizeState.inflightSeq = null;
-                }
-
-                if (event.ok === false) {
-                  const errMsg = typeof event.error === 'string' && event.error.length > 0
-                    ? event.error
-                    : 'Resize failed';
-                  debugKeyboard('resize ack error', {
-                    ackSeq,
-                    error: errMsg,
-                    cols: event.cols,
-                    rows: event.rows,
-                  });
-                  setConnectionError(errMsg);
-                } else {
-                  debugKeyboard('resize ack accepted', {
-                    ackSeq,
-                    cols: event.cols,
-                    rows: event.rows,
-                  });
-                }
-
-                if (resizeState.pending) {
-                  if (resizeState.timerId !== null) {
-                    window.clearTimeout(resizeState.timerId);
-                    resizeState.timerId = null;
-                  }
-                  flushPendingResize();
-                }
                 break;
               }
               case 'exit': {
@@ -725,6 +588,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               ? `Connection failed: ${error.message}`
               : error.message || 'Terminal stream connection error';
             console.error(`[Terminal] Stream error (fatal=${fatal}):`, errorMsg);
+
+            // 单独高亮 Session not found，方便 grep / 自动化检测
+            if (error.message === 'Session not found on server') {
+              // eslint-disable-next-line no-console
+              console.warn('[Terminal] SESSION_NOT_FOUND_DETECTED', {
+                terminalIdAtError: terminalIdRef.current,
+                frontendSessionId: storeSessionId,
+                isActive,
+                isMobile,
+                fatal,
+                stack: new Error().stack,
+              });
+            }
 
             setConnectionError(errorMsg);
             setIsFatalError(!!fatal);
@@ -768,7 +644,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearTerminalSession, debugSession, disconnectStream, replaceBuffer, setConnecting, setSessionActiveProgram, terminal, sessionId]
+    [appendToBuffer, clearTerminalSession, debugSession, disconnectStream, setConnecting, setSessionActiveProgram, terminal, sessionId]
   );
 
   const hasInitializedRef = React.useRef(false);
@@ -841,9 +717,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 rows: 24,
                 mode: health.mode,
                 tmuxSessionName: health.tmuxSessionName ?? null,
-                activeProgram: health.activeProgram ?? null,
-                activeProgramRaw: health.activeProgramRaw ?? null,
-                activeProgramSource: health.activeProgramSource ?? null,
               });
             }
             debugSession(`[ensureSession] Setting terminalIdRef to ${terminalId} and starting stream`);
@@ -883,10 +756,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             debugSession(`[ensureSession] Created new session ${session.sessionId}`);
 
             if (runId !== currentRunIdRef.current) {
-              debugSession(`[ensureSession] Stale run after session creation (runId=${runId}, currentRunId=${currentRunIdRef.current}), closing session`);
-              try {
-                await terminal.close(session.sessionId);
-              } catch { /* ignored */ }
+              // 这次 ensureSession 是 stale 的：另一个并发 run 已经接管了。
+              // 关键：绝对不能 close 刚创建的 session！它可能正是 sibling 即将
+              // 通过 store 里 recheckedState 拿到的同一个 ID（tmux-reuse 路径
+              // 会让多个 ensureSession 拿到相同的 backend sessionId）。如果
+              // 这里 close，sibling 的 WS 立刻 4001，整条 tmux 链路挂掉。
+              // 正确做法：让 sibling 自然走自己的"复用"分支，session 留在服务端
+              // 给所有人用。
+              debugSession(`[ensureSession] Stale run after session creation (runId=${runId}, currentRunId=${currentRunIdRef.current}), leaving ${session.sessionId} for sibling`);
               return;
             }
 
@@ -1087,96 +964,33 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => window.removeEventListener('termdock-insert-reference', handleInsertReference);
   }, [focusTerminalIfActive, handleViewportInput]);
 
-  const flushPendingResize = React.useCallback(() => {
-    const resizeState = resizeStateRef.current;
-    resizeState.timerId = null;
-
-    const pending = resizeState.pending;
-    if (!pending) {
-      return;
-    }
-
-    const terminalId = terminalIdRef.current;
-    if (!terminalId) {
-      return;
-    }
-
-    const lastSent = resizeState.lastSent;
-    if (lastSent && lastSent.cols === pending.cols && lastSent.rows === pending.rows) {
-      resizeState.pending = null;
-      debugKeyboard('resize skipped (duplicate)', pending);
-      return;
-    }
-
-    const seq = resizeState.nextSeq + 1;
-    resizeState.nextSeq = seq;
-    resizeState.inflightSeq = seq;
-    resizeState.lastSent = pending;
-    resizeState.pending = null;
-
-    debugKeyboard('resize flush', {
-      ...pending,
-      seq,
-    });
-
-    void terminal.resize({ sessionId: terminalId, cols: pending.cols, rows: pending.rows, seq }).catch((error) => {
-      const errMsg = error instanceof Error ? error.message : 'Failed to resize terminal';
-      debugKeyboard('resize send error', {
-        seq,
-        cols: pending.cols,
-        rows: pending.rows,
-        error: errMsg,
-      });
-
-      const current = resizeStateRef.current;
-      if (current.lastSent && current.lastSent.cols === pending.cols && current.lastSent.rows === pending.rows) {
-        current.pending = { cols: pending.cols, rows: pending.rows };
-      }
-
-      if (current.timerId === null) {
-        current.timerId = window.setTimeout(() => {
-          flushPendingResize();
-        }, RESIZE_THROTTLE_MS);
-      }
-    });
-  }, [terminal, debugKeyboard]);
-
-  const queueViewportResize = React.useCallback((cols: number, rows: number) => {
-    const resizeState = resizeStateRef.current;
-    const pending = resizeState.pending;
-    if (pending && pending.cols === cols && pending.rows === rows) {
-      return;
-    }
-
-    resizeState.pending = { cols, rows };
-
-    debugKeyboard('resize queued', {
-      cols,
-      rows,
-      immediate: resizeState.lastSent === null,
-      hasTimer: resizeState.timerId !== null,
-    });
-
-    if (resizeState.lastSent === null) {
-      flushPendingResize();
-      return;
-    }
-
-    if (resizeState.timerId !== null) {
-      window.clearTimeout(resizeState.timerId);
-    }
-
-    resizeState.timerId = window.setTimeout(() => {
-      flushPendingResize();
-    }, RESIZE_THROTTLE_MS);
-  }, [flushPendingResize, debugKeyboard]);
-
+  // 推 resize 给服务端。本组件不再做 debounce / skip-if-same —— 编排器在
+  // TerminalViewport 内部已经决定了 first-fit immediate / 90ms debounce /
+  // skip-if-same，调用本函数说明编排器已经决策好了，直接发。
   const handleViewportResize = React.useCallback(
     (cols: number, rows: number) => {
-      debugKeyboard('xterm resize detected', { cols, rows });
-      queueViewportResize(cols, rows);
+      const terminalId = terminalIdRef.current;
+      if (!terminalId) {
+        debugKeyboard('xterm resize push skipped: no terminalId', { cols, rows });
+        return;
+      }
+      debugKeyboard('xterm resize push', { cols, rows });
+      void terminal.resize({ sessionId: terminalId, cols, rows }).catch((err) => {
+        // 静默失败：resize 失败不影响终端渲染
+        // 但需要知道是不是 session-not-found——这通常是后端 session 已被清掉
+        // 而前端 ref 还指着旧 id，是 race 的明确信号。
+        if (err && /session not found/i.test(String(err.message || err))) {
+          // eslint-disable-next-line no-console
+          console.warn('[Terminal] resize 404 session not found', {
+            sessionId: terminalId,
+            cols,
+            rows,
+            stack: new Error().stack,
+          });
+        }
+      });
     },
-    [queueViewportResize]
+    [terminal, debugKeyboard]
   );
 
   const sendTmuxAction = React.useCallback(async (payload: TmuxActionPayload) => {
@@ -1204,23 +1018,28 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [sessionId, setTerminalSession, terminal]);
 
-  const tmuxSessionResizedRef = React.useRef<string | null>(null);
-  const skipLayoutResizeRef = React.useRef(false); // 重连时跳过 layout resize，优先用本地尺寸
+  // tmux-layout 事件：把"服务端报的尺寸"作为 candidate 交给编排器。
+  // 编排器内部做：
+  //   1) dedupe by sessionId+activePaneId（避免同会话内重复 resize）
+  //   2) candidateSize 防 shrink：比当前 xterm 小就忽略
+  //   3) skipScrollToBottom：tmux 模式下不应强制滚底（vim/less 位置）
+  // 这样原来散在 useEffect 里的三个 ref 全部下沉到编排器内部。
   React.useEffect(() => {
-    if (!_tmuxLayout) return;
-    const layoutSessionId = _tmuxLayout.sessionId;
-    if (tmuxSessionResizedRef.current === layoutSessionId) return;
-    // 重连后跳过 layout 尺寸，因为那是其他客户端的窗口大小
-    if (skipLayoutResizeRef.current) {
-      skipLayoutResizeRef.current = false;
-      return;
-    }
-    tmuxSessionResizedRef.current = layoutSessionId;
+    // 必须等 terminalSessionId 就绪后再用 dedupeKey：reload 期间 tmux-layout
+    // 事件可能比 connected 事件先到，那时 terminalSessionId 还是 null/旧值，
+    // 会用旧 key 调一次 requestRefresh，编排器会拿新 key 比对旧的 lastDedupeKeyRef
+    // 直接判重复。等 terminalSessionId 更新后再用新 key 重跑。
+    if (!_tmuxLayout || !terminalSessionId) return;
     const activeWindow = _tmuxLayout.windows.find((w) => w.id === _tmuxLayout.activeWindowId);
     const activePane = activeWindow?.panes.find((p) => p.id === _tmuxLayout.activePaneId);
     if (!activePane) return;
-    handleViewportResize(activePane.width, activePane.height);
-  }, [_tmuxLayout, handleViewportResize]);
+
+    terminalControllerRef.current?.requestRefresh('tmux-layout', {
+      candidateSize: { cols: activePane.width, rows: activePane.height },
+      skipScrollToBottom: true,
+      dedupeKey: `${terminalSessionId}:${_tmuxLayout.sessionId}:${activePane.id}:${activePane.width}x${activePane.height}`,
+    });
+  }, [_tmuxLayout, terminalSessionId]);
 
   const handleTmuxScroll = React.useCallback((direction: 'up' | 'down', lines = 5) => {
     const normalizedLines = Math.max(1, Math.min(Math.floor(lines) || 1, 40));
