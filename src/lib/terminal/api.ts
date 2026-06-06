@@ -991,6 +991,41 @@ export async function resetProgramRules(): Promise<ProgramLabelRule[]> {
   return response.json();
 }
 
+// ---- Program Detection Config API ----
+
+export interface ProgramDetectionConfig {
+  genericProgramNames: string[];
+  wrapperScriptNames: string[];
+  shellNames: string[];
+}
+
+export async function getProgramDetection(): Promise<ProgramDetectionConfig> {
+  const response = await fetch('/api/terminal/program-detection');
+  if (!response.ok) throw new Error('Failed to get program detection config');
+  return response.json();
+}
+
+export async function replaceProgramDetection(config: ProgramDetectionConfig): Promise<ProgramDetectionConfig> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/program-detection', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(config),
+  });
+  if (!response.ok) throw new Error('Failed to save program detection config');
+  return response.json();
+}
+
+export async function resetProgramDetection(): Promise<ProgramDetectionConfig> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/program-detection', {
+    method: 'DELETE',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) throw new Error('Failed to reset program detection config');
+  return response.json();
+}
+
 // ---- Filesystem API ----
 
 export interface FileEntry {

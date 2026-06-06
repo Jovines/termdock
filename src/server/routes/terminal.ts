@@ -1287,8 +1287,54 @@ function evaluateAgentStatus(sessionId: string, session: TerminalSession, latest
  * and extract a meaningful label from its full command line.
  */
 
-/** Programs where `pane_current_command` is too generic and we should try harder */
-const GENERIC_PROGRAM_NAMES = new Set(['node', 'python', 'python3', 'ruby', 'perl', 'java']);
+// ── Program detection config (persisted to ~/.termdock/program-detection.json) ──
+
+const PROGRAM_DETECTION_FILE = `${os.homedir()}/.termdock/program-detection.json`;
+
+interface ProgramDetectionConfig {
+  genericProgramNames: string[];
+  wrapperScriptNames: string[];
+  shellNames: string[];
+}
+
+const DEFAULT_PROGRAM_DETECTION: ProgramDetectionConfig = {
+  genericProgramNames: ['node', 'python', 'python3', 'ruby', 'perl', 'java'],
+  wrapperScriptNames: ['aiden', 'ttadk', 'coco', 'npx', 'yarn', 'dlx'],
+  shellNames: ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu'],
+};
+
+let genericProgramNames = new Set(DEFAULT_PROGRAM_DETECTION.genericProgramNames);
+let wrapperScriptNames = new Set(DEFAULT_PROGRAM_DETECTION.wrapperScriptNames);
+let shellNamesBackend = new Set(DEFAULT_PROGRAM_DETECTION.shellNames);
+
+function loadProgramDetectionFromDisk(): ProgramDetectionConfig {
+  try {
+    const data = fs.readFileSync(PROGRAM_DETECTION_FILE, 'utf-8');
+    const parsed = JSON.parse(data);
+    return {
+      genericProgramNames: Array.isArray(parsed.genericProgramNames) ? parsed.genericProgramNames : DEFAULT_PROGRAM_DETECTION.genericProgramNames,
+      wrapperScriptNames: Array.isArray(parsed.wrapperScriptNames) ? parsed.wrapperScriptNames : DEFAULT_PROGRAM_DETECTION.wrapperScriptNames,
+      shellNames: Array.isArray(parsed.shellNames) ? parsed.shellNames : DEFAULT_PROGRAM_DETECTION.shellNames,
+    };
+  } catch { /* file doesn't exist or invalid, use defaults */ }
+  return { ...DEFAULT_PROGRAM_DETECTION };
+}
+
+function applyProgramDetectionConfig(config: ProgramDetectionConfig): void {
+  genericProgramNames = new Set(config.genericProgramNames);
+  wrapperScriptNames = new Set(config.wrapperScriptNames);
+  shellNamesBackend = new Set(config.shellNames);
+}
+
+function saveProgramDetectionToDisk(config: ProgramDetectionConfig): void {
+  const dir = path.dirname(PROGRAM_DETECTION_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(PROGRAM_DETECTION_FILE, JSON.stringify(config, null, 2));
+  applyProgramDetectionConfig(config);
+}
+
+// Initialize on startup
+applyProgramDetectionConfig(loadProgramDetectionFromDisk());
 
 async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
   command: string | null;
@@ -1296,9 +1342,9 @@ async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
   rawArgs: string | null;
 } | null> {
   // If pane command is a known shell, try to find a child foreground process
-  const isShell = pane.command && SHELL_NAMES_BACKEND.has(pane.command);
+  const isShell = pane.command && shellNamesBackend.has(pane.command);
   // If pane command is NOT a shell but also too generic (e.g. "node"), also try
-  const isGeneric = pane.command && GENERIC_PROGRAM_NAMES.has(pane.command);
+  const isGeneric = pane.command && genericProgramNames.has(pane.command);
 
   if (!isShell && !isGeneric) {
     // Non-shell, non-generic command — pane_current_command is good enough
@@ -1367,9 +1413,6 @@ async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
   return { command: normalizeProgramName(pane.command), source: 'tmux-pane', rawArgs: null };
 }
 
-/** Known CLI wrapper scripts that wrap another tool. */
-const WRAPPER_SCRIPT_NAMES = new Set(['aiden', 'ttadk', 'coco', 'npx', 'yarn', 'dlx']);
-
 /**
  * Extract a human-readable program label from a full command line.
  *
@@ -1389,7 +1432,7 @@ function extractProgramLabel(args: string): string | null {
   const exeName = exe.split(/[\\/]/).pop() || exe; // basename
 
   // For generic interpreters/runtimes, try to derive label from the script
-  if (GENERIC_PROGRAM_NAMES.has(exeName) && parts.length > 1) {
+  if (genericProgramNames.has(exeName) && parts.length > 1) {
     const script = parts[1];
     const scriptName = script.split(/[\\/]/).pop() || script;
 
@@ -1398,7 +1441,7 @@ function extractProgramLabel(args: string): string | null {
 
     if (withoutExt && withoutExt.length > 0) {
       // If the script is a known wrapper, try to find the real program inside
-      if (WRAPPER_SCRIPT_NAMES.has(withoutExt)) {
+      if (wrapperScriptNames.has(withoutExt)) {
         const remaining = parts.slice(2);
         // Known CLI wrapper patterns: <script> <subcommand> <real-program>
         // "x" is a common subcommand in CLI wrappers (e.g. "aiden x claude")
@@ -1460,18 +1503,6 @@ function getCwdFromTmuxLayout(layout: TmuxLayout): string | null {
 // (e.g. `termdock --tls`) can show a meaningful one-line summary that matches
 // what the user sees on the tab in the browser.
 
-const SHELL_NAMES_BACKEND = new Set([
-  'bash',
-  'zsh',
-  'fish',
-  'sh',
-  'dash',
-  'ksh',
-  'tcsh',
-  'csh',
-  'nu',
-]);
-
 function getCwdLeafBackend(cwd: string | null | undefined): string | null {
   if (!cwd) return null;
   const trimmed = cwd.trim();
@@ -1496,7 +1527,7 @@ function buildTermdockLabel(input: {
   const program = input.program?.trim();
   const dir = getCwdLeafBackend(input.cwd);
 
-  if (program && !SHELL_NAMES_BACKEND.has(program)) {
+  if (program && !shellNamesBackend.has(program)) {
     return dir ? `${program} · ${dir}` : program;
   }
 
@@ -2560,6 +2591,39 @@ router.delete('/agent-rules', (_req, res) => {
   try { fs.unlinkSync(AGENT_RULES_FILE); } catch { /* already gone */ }
   loadAgentRules();
   res.json(BUILTIN_AGENT_RULES);
+});
+
+// ── Program detection config API ──
+
+router.get('/program-detection', (_req, res) => {
+  res.json(loadProgramDetectionFromDisk());
+});
+
+router.put('/program-detection', (req, res) => {
+  const config = req.body;
+  if (!config || typeof config !== 'object') {
+    res.status(400).json({ error: 'Expected object with genericProgramNames, wrapperScriptNames, shellNames' });
+    return;
+  }
+  const validated: ProgramDetectionConfig = {
+    genericProgramNames: Array.isArray(config.genericProgramNames)
+      ? config.genericProgramNames.filter((s: unknown) => typeof s === 'string' && s.trim())
+      : DEFAULT_PROGRAM_DETECTION.genericProgramNames,
+    wrapperScriptNames: Array.isArray(config.wrapperScriptNames)
+      ? config.wrapperScriptNames.filter((s: unknown) => typeof s === 'string' && s.trim())
+      : DEFAULT_PROGRAM_DETECTION.wrapperScriptNames,
+    shellNames: Array.isArray(config.shellNames)
+      ? config.shellNames.filter((s: unknown) => typeof s === 'string' && s.trim())
+      : DEFAULT_PROGRAM_DETECTION.shellNames,
+  };
+  saveProgramDetectionToDisk(validated);
+  res.json(validated);
+});
+
+router.delete('/program-detection', (_req, res) => {
+  try { fs.unlinkSync(PROGRAM_DETECTION_FILE); } catch { /* already gone */ }
+  applyProgramDetectionConfig({ ...DEFAULT_PROGRAM_DETECTION });
+  res.json(DEFAULT_PROGRAM_DETECTION);
 });
 
 router.post('/create', async (req, res) => {

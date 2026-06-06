@@ -23,8 +23,8 @@ import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules } from './lib/terminal/api';
-import type { AgentProgramConfig, ProgramLabelRule } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
+import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
@@ -83,7 +83,8 @@ function isSettingsCacheDoc(v: unknown): v is SettingsCacheDoc {
     typeof (v as { preventSleep?: unknown }).preventSleep === 'boolean' &&
     typeof (v as { networkAvailable?: unknown }).networkAvailable === 'boolean';
 }
-const SHELL_NAMES = new Set(['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu']);
+const DEFAULT_SHELL_NAMES = ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu'];
+let SHELL_NAMES = new Set(DEFAULT_SHELL_NAMES);
 
 function getCwdLeafName(cwd: string | null): string | null {
   if (!cwd) return null;
@@ -446,6 +447,24 @@ function App() {
         setProgramRulesLoaded(true);
       })
       .catch(() => { /* use empty state */ });
+  }, []);
+
+  // Program detection config (generic names, wrapper scripts, shell names)
+  const [programDetection, setProgramDetection] = React.useState<ProgramDetectionConfig>({
+    genericProgramNames: ['node', 'python', 'python3', 'ruby', 'perl', 'java'],
+    wrapperScriptNames: ['aiden', 'ttadk', 'coco', 'npx', 'yarn', 'dlx'],
+    shellNames: DEFAULT_SHELL_NAMES,
+  });
+  const [, setProgramDetectionLoaded] = React.useState(false);
+
+  useEffect(() => {
+    getProgramDetection()
+      .then((config) => {
+        setProgramDetection(config);
+        SHELL_NAMES = new Set(config.shellNames);
+        setProgramDetectionLoaded(true);
+      })
+      .catch(() => { /* use defaults */ });
   }, []);
 
   // Initial load from server: merge any stored custom presets with the latest
@@ -1700,6 +1719,68 @@ function App() {
                       </div>
                     );
                   })}
+                </div>
+
+                <div className="mt-3 space-y-3">
+                  {/* Detection config tag lists */}
+                  {([
+                    { key: 'genericProgramNames' as const, label: 'Generic program names', hint: 'Trigger ps-based deep detection (e.g. node, python)' },
+                    { key: 'wrapperScriptNames' as const, label: 'Wrapper script names', hint: 'CLI wrappers that launch another tool (e.g. aiden, npx)' },
+                    { key: 'shellNames' as const, label: 'Shell names', hint: 'Filtered out from tab display (e.g. bash, zsh)' },
+                  ] as const).map(({ key, label, hint }) => (
+                    <div key={key}>
+                      <div className="mb-0.5 text-[11px] font-medium text-foreground">{label}</div>
+                      <div className="text-[10px] text-muted-foreground">{hint}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1">
+                        {programDetection[key].map((name) => (
+                          <span
+                            key={name}
+                            className="inline-flex items-center gap-0.5 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-mono text-foreground"
+                          >
+                            {name}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = { ...programDetection, [key]: programDetection[key].filter((n) => n !== name) };
+                                setProgramDetection(next);
+                                if (key === 'shellNames') SHELL_NAMES = new Set(next.shellNames);
+                                replaceProgramDetection(next).catch(() => {});
+                              }}
+                              className="ml-0.5 text-muted-foreground hover:text-destructive"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                        <input
+                          placeholder="+ add"
+                          className="w-16 rounded bg-surface px-1.5 py-0.5 text-[11px] font-mono"
+                          onKeyDown={(e) => {
+                            if (e.key !== 'Enter') return;
+                            const val = (e.target as HTMLInputElement).value.trim().toLowerCase();
+                            if (!val || programDetection[key].includes(val)) return;
+                            const next = { ...programDetection, [key]: [...programDetection[key], val] };
+                            setProgramDetection(next);
+                            if (key === 'shellNames') SHELL_NAMES = new Set(next.shellNames);
+                            (e.target as HTMLInputElement).value = '';
+                            replaceProgramDetection(next).catch(() => {});
+                          }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      resetProgramDetection().then((config) => {
+                        setProgramDetection(config);
+                        SHELL_NAMES = new Set(config.shellNames);
+                      }).catch(() => {});
+                    }}
+                    className="rounded-full bg-surface-2 px-3 py-1 text-[11px] text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
+                  >
+                    Reset defaults
+                  </button>
                 </div>
 
                 <div className="mt-3">
