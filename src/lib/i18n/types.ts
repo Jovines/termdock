@@ -32,6 +32,7 @@ export type TranslationDictionary = {
     refresh: string;
     search: string;
     clear: string;
+    delete: string;
     back: string;
     copy: string;
     decrease: string;
@@ -192,6 +193,18 @@ export type TranslationDictionary = {
     saving: string;
     rulesHint: string;
     programsHelp: string;
+    programLabelResolution: string;
+    rawCommandMapping: string;
+    rawCommandMappingHint: string;
+    genericProgramNames: string;
+    genericProgramNamesHint: string;
+    wrapperScriptNames: string;
+    wrapperScriptNamesHint: string;
+    shellNamesConfig: string;
+    shellNamesHint: string;
+    addTag: string;
+    customRules: string;
+    addRule: string;
   };
   toolbarPresets: {
     preview: string;

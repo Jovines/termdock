@@ -1704,10 +1704,10 @@ function App() {
               />
 
               <div className="mt-6 border-t border-border/15 pt-4">
-                <div className="ui-kicker">Program label resolution</div>
-                <h3 className="mt-1 text-sm font-semibold text-foreground">Raw command mapping</h3>
+                <div className="ui-kicker">{t('settings.programLabelResolution')}</div>
+                <h3 className="mt-1 text-sm font-semibold text-foreground">{t('settings.rawCommandMapping')}</h3>
                 <p className="mt-1 text-[11px] text-muted-foreground">
-                  Rules below map the raw command line to the tab display label. User rules run before built-ins.
+                  {t('settings.rawCommandMappingHint')}
                 </p>
                 <div className="mt-3 space-y-2 rounded-xl bg-surface-2 p-3">
                   {sessions.map((session) => {
@@ -1727,9 +1727,9 @@ function App() {
                 <div className="mt-3 space-y-3">
                   {/* Detection config tag lists */}
                   {([
-                    { key: 'genericProgramNames' as const, label: 'Generic program names', hint: 'Trigger ps-based deep detection (e.g. node, python)' },
-                    { key: 'wrapperScriptNames' as const, label: 'Wrapper script names', hint: 'CLI wrappers that launch another tool (e.g. aiden, npx)' },
-                    { key: 'shellNames' as const, label: 'Shell names', hint: 'Filtered out from tab display (e.g. bash, zsh)' },
+                    { key: 'genericProgramNames' as const, label: t('settings.genericProgramNames'), hint: t('settings.genericProgramNamesHint') },
+                    { key: 'wrapperScriptNames' as const, label: t('settings.wrapperScriptNames'), hint: t('settings.wrapperScriptNamesHint') },
+                    { key: 'shellNames' as const, label: t('settings.shellNamesConfig'), hint: t('settings.shellNamesHint') },
                   ] as const).map(({ key, label, hint }) => (
                     <div key={key}>
                       <div className="mb-0.5 text-[11px] font-medium text-foreground">{label}</div>
@@ -1756,7 +1756,7 @@ function App() {
                           </span>
                         ))}
                         <input
-                          placeholder="+ add"
+                          placeholder={t('settings.addTag')}
                           className="w-16 rounded bg-surface px-1.5 py-0.5 text-[11px] font-mono"
                           onKeyDown={(e) => {
                             if (e.key !== 'Enter') return;
@@ -1782,12 +1782,12 @@ function App() {
                     }}
                     className="rounded-full bg-surface-2 px-3 py-1 text-[11px] text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
                   >
-                    Reset defaults
+                    {t('settings.resetDefaults')}
                   </button>
                 </div>
 
                 <div className="mt-3">
-                  <div className="mb-1 text-[11px] font-medium text-foreground">Custom rules</div>
+                  <div className="mb-1 text-[11px] font-medium text-foreground">{t('settings.customRules')}</div>
                   {programRules.map((rule, idx) => (
                     <div key={rule.id} className="mb-2 rounded-lg bg-surface-2 p-2.5">
                       <div className="flex flex-wrap items-center gap-2">
@@ -1872,7 +1872,7 @@ function App() {
                           }}
                           className="rounded bg-surface px-2 py-1 text-[11px] text-muted-foreground hover:text-destructive"
                         >
-                          Delete
+                          {t('common.delete')}
                         </button>
                       </div>
                     </div>
@@ -1903,7 +1903,7 @@ function App() {
                       }}
                       className="rounded-full bg-primary/15 px-3 py-1.5 text-[11px] font-medium text-primary hover:bg-primary/25"
                     >
-                      Add rule
+                      {t('settings.addRule')}
                     </button>
                     <button
                       type="button"
@@ -1916,9 +1916,9 @@ function App() {
                       }}
                       className="rounded-full bg-surface-2 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
                     >
-                      Reset defaults
+                      {t('settings.resetDefaults')}
                     </button>
-                    <span className="text-[11px] text-muted-foreground">{programRulesSaving ? 'Saving…' : (programRulesLoaded ? `${programRules.length} rules` : '…')}</span>
+                    <span className="text-[11px] text-muted-foreground">{programRulesSaving ? t('settings.saving') : (programRulesLoaded ? `${programRules.length} rules` : '…')}</span>
                   </div>
                 </div>
               </div>
