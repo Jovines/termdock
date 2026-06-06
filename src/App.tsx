@@ -225,6 +225,14 @@ function App() {
   const [isDesktopViewport, setIsDesktopViewport] = useState(() => (
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1024px)').matches
   ));
+  // Landscape orientation. A phone in landscape (typically 667-896px wide)
+  // has plenty of room for a wide workbench-style drawer, even though
+  // its *short* side is < 1024px so the regular desktop check returns
+  // false. We re-derive the drawer width when orientation flips so the
+  // layout upgrades immediately after the user rotates the device.
+  const [isLandscape, setIsLandscape] = useState(() => (
+    typeof window === 'undefined' ? false : window.matchMedia('(orientation: landscape)').matches
+  ));
 
   const [tmuxSessions, setTmuxSessions] = useState<TmuxSessionSummary[]>([]);
   const [tmuxStatus, setTmuxStatus] = useState<TmuxStatus>({ available: true, version: null, reason: null });
@@ -248,6 +256,15 @@ function App() {
     updateViewportMode();
     media.addEventListener('change', updateViewportMode);
     return () => media.removeEventListener('change', updateViewportMode);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const media = window.matchMedia('(orientation: landscape)');
+    const updateOrientation = () => setIsLandscape(media.matches);
+    updateOrientation();
+    media.addEventListener('change', updateOrientation);
+    return () => media.removeEventListener('change', updateOrientation);
   }, []);
 
   // Sync active session's cwd to sidebar store
@@ -304,14 +321,21 @@ function App() {
   // Left and right have different ergonomic widths:
   //  - Right (file tree + diff): wide so we can fit a dual-column workspace.
   //  - Left  (session list):     narrow; one row per session is enough.
-  const isMobile = !isDesktopViewport;
+  //
+  // Landscape phones get the desktop-sized right drawer so the diff
+  // viewer can show its full workbench (file list + diff + hunk
+  // outline) instead of the cramped single-column mobile layout. The
+  // device's *short* side is < 1024px so the regular desktop check
+  // returns false — the orientation check is what tells us there's
+  // enough horizontal real estate for a wide drawer.
+  const useDesktopDrawer = isDesktopViewport || isLandscape;
   const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
-  const rightDrawerWidthPx = isMobile
-    ? Math.min(viewportWidth * 0.92, 420)
-    : Math.min(Math.max(viewportWidth * 0.9, 360), viewportWidth - 56);
-  const leftDrawerWidthPx = isMobile
-    ? Math.min(viewportWidth * 0.86, 380)
-    : Math.min(Math.max(viewportWidth * 0.22, 280), 340);
+  const rightDrawerWidthPx = useDesktopDrawer
+    ? Math.min(Math.max(viewportWidth * 0.9, 360), viewportWidth - 56)
+    : Math.min(viewportWidth * 0.92, 420);
+  const leftDrawerWidthPx = useDesktopDrawer
+    ? Math.min(Math.max(viewportWidth * 0.22, 280), 340)
+    : Math.min(viewportWidth * 0.86, 380);
 
   // Desktop keyboard shortcuts
   useEffect(() => {

@@ -621,6 +621,21 @@ body {
   word-break: break-word;
 }
 
+/* When the user toggles "Raw" / wrap-off we want truly non-wrapping
+   diff lines so long identifiers don't get torn across multiple rows
+   — that's the whole point of the toggle. The body element becomes
+   horizontally scrollable, so the user can swipe sideways to see
+   what's beyond the viewport. We do NOT touch `.diff-gutter` because
+   the line-number column should always fit. */
+.termdock-diff-scroll:not(.termdock-diff-wrap) .diff-code,
+.termdock-diff-scroll:not(.termdock-diff-wrap) .diff-code-edit,
+.termdock-diff-scroll:not(.termdock-diff-wrap) pre,
+.termdock-diff-scroll:not(.termdock-diff-wrap) code {
+  white-space: pre !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+}
+
 .diff-decoration {
   font-size: 11px;
 }
@@ -672,16 +687,25 @@ body {
  * Horizontal scroll on the diff rows:
  * The parent sidebar is `overflow-y-auto` on mobile so the file list +
  * diff stack scroll vertically as one column. Without this rule, that
- * parent claims horizontal panning on touch and the diff rows never get
- * a chance to scroll sideways. `touch-action: pan-x` tells the browser
- * this element wants horizontal pan gestures; vertical pan still
- * propagates up to the parent because pan-y is the default complement.
+ * The diff body can overflow horizontally for long lines (when wrap
+ * is off). We declare `touch-action: pan-x` so the browser routes
+ * horizontal pans to *this* element's horizontal scrollbar, while
+ * vertical pans fall through to the outer scroller (the file list).
  *
- * `pan-x pan-y` would also work but explicitly listing both helps avoid
- * surprises if a future ancestor sets `touch-action: none`.
+ * Why not `pan-y` here? Because this element is INSIDE a vertically-
+ * scrolling ancestor. If we said "I only handle vertical pan", the
+ * browser would have no reason to chain the gesture up to the
+ * ancestor — and the file list would stop scrolling. Conversely, if
+ * we said "I only handle horizontal pan", the inner horizontal scroll
+ * is what gets registered.
+ *
+ * `overscroll-behavior: contain` on the body keeps the horizontal
+ * rubber-band from leaking sideways into the page when the user
+ * scrolls past the start/end of a long diff line.
  */
 .termdock-diff-scroll {
   touch-action: pan-x;
+  overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -705,4 +729,289 @@ body {
 /* Keyboard button active state delay - keeps active color longer for better feedback */
 .keyboard-button-active {
   transition: background-color 0.15s ease-out;
+}
+
+/*
+ * New diff viewer styles.
+ * The previous `DiffViewer` was a single component with inline styles;
+ * the new module ships its own CSS so the layout pieces can be
+ * styled without prop-drilling Tailwind classNames through 5 levels.
+ */
+
+.diff-file-card {
+  border: 1px solid rgba(64, 62, 60, 0.28);
+  background: var(--surface);
+  border-radius: 0.5rem;
+  margin-bottom: 0.625rem;
+  transition: border-color 0.15s ease;
+  /* IMPORTANT: no `overflow: hidden` on the card itself — it would
+     clip the diff body's horizontal overflow (long lines + the
+     `.termdock-diff-scroll` scrollbar). The rounded corners still
+     work because the header has its own background and clips via
+     the `border-radius` on the body element. */
+}
+
+.diff-file-card:hover {
+  border-color: rgba(64, 62, 60, 0.5);
+}
+
+.diff-file-card__header {
+  background: linear-gradient(180deg, rgba(67, 133, 190, 0.04) 0%, transparent 100%);
+  border-bottom: 1px solid rgba(64, 62, 60, 0.18);
+  /* Clip the header background to the card's rounded top corners.
+     The body uses `border-bottom-left-radius` / `border-bottom-right-radius`
+     to match the card's bottom curve. */
+  border-top-left-radius: 0.5rem;
+  border-top-right-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.diff-file-card--wide {
+  border-radius: 0.5rem;
+}
+
+.diff-file-card--narrow {
+  border-radius: 0.5rem;
+}
+
+/* Tighter touch targets for the file card body. The mobile card is a
+   full-width "page" inside the diff scroller — we drop the rounded
+   corners and the margin so multiple cards flow into one another. */
+.termdock-diff-card-mobile {
+  border-radius: 0;
+}
+
+/* Desktop / narrow card body: match the card's bottom corners so the
+   scrollbar hugs the rounded edge instead of sticking out flat. */
+.termdock-diff-card {
+  border-bottom-left-radius: 0.5rem;
+  border-bottom-right-radius: 0.5rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Outer scroller for the whole file list. We declare `touch-action:
+   pan-y` so vertical pan gestures scroll THIS element, and horizontal
+   pans are left to the inner `.termdock-diff-scroll` body. Without
+   this split, the outer scroller eats both axes (it's the bigger
+   scroll target in the user's hand) and the inner horizontal scroll
+   becomes unreachable. */
+.diff-panel__scroller {
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+}
+
+.diff-toolbar {
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.diff-toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * Mobile file chip strip.
+ * The strip scrolls horizontally and the active chip is highlighted.
+ * We use `scroll-snap-type: x mandatory` so the active chip always
+ * lands on a snap point when the user finishes a swipe.
+ */
+.diff-file-strip {
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.diff-file-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.diff-file-strip__chip {
+  scroll-snap-align: center;
+  white-space: nowrap;
+}
+
+/*
+ * Sticky overflow container on the right edge of the chip strip.
+ * The button is always reachable, even when the user has scrolled
+ * deep into the chip list. A gradient background makes it stand
+ * out against the chips and prevents the chips from showing through.
+ */
+.diff-file-strip__overflow {
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--background-subtle, rgba(28, 27, 26, 0.6)) 12px
+  );
+  padding-left: 12px;
+  z-index: 2;
+}
+
+/*
+ * Hunk outline rail.
+ * The active hunk is highlighted with a primary-colored left border
+ * and tinted background — both are inherited from `.diff-hunk-outline__item`.
+ */
+.diff-hunk-outline {
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-hunk-outline__item {
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.diff-hunk-outline__item:active {
+  transform: scale(0.99);
+}
+
+/* Collapsed hunk style: header only, no body. */
+.diff-hunk--collapsed {
+  background: rgba(67, 133, 190, 0.025);
+}
+
+.diff-hunk {
+  /* Smooth fade-in for the body when the user expands a collapsed
+     hunk. The element re-renders, so this only kicks in on the
+     expand toggle. */
+  animation: diff-hunk-expand 0.18s ease-out;
+}
+
+@keyframes diff-hunk-expand {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/*
+ * Smooth file-switch transition. The body of `DiffFileCard` carries
+ * this animation so every time the user navigates to a different
+ * file the new content fades in. The 0.18s is short enough to feel
+ * snappy but long enough to register — pure instant swaps felt
+ * jarring in user testing, especially when going through a list
+ * quickly with prev/next.
+ */
+.diff-file-card__body {
+  animation: diff-file-body-fade 0.18s ease-out;
+}
+
+@keyframes diff-file-body-fade {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diff-file-card__body,
+  .diff-hunk {
+    animation: none;
+  }
+}
+
+/*
+ * Chip strip selection — when a file becomes "active", a brief
+ * background pulse on the new chip draws the eye to where focus
+ * moved. Subtle enough to not annoy, loud enough to be felt.
+ */
+.diff-file-strip__chip[aria-current="true"] {
+  animation: diff-chip-activate 0.22s ease-out;
+}
+
+@keyframes diff-chip-activate {
+  0%   { transform: scale(0.94); }
+  60%  { transform: scale(1.04); }
+  100% { transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diff-file-strip__chip[aria-current="true"] {
+    animation: none;
+  }
+}
+
+/*
+ * Split (side-by-side) view on desktop.
+ * `react-diff-view` ships its own `.diff.split` styles; we only need
+ * to constrain the layout so both halves share the row.
+ */
+.diff-split .diff {
+  table-layout: fixed;
+}
+
+.diff-split .diff-code,
+.diff-split .diff-gutter {
+  width: 50%;
+}
+
+/*
+ * Mobile file body. We give the diff rows a bit more horizontal
+ * padding so the +/- gutter doesn't crowd the line numbers on
+ * touch screens, and bump the line height for legibility.
+ */
+.termdock-diff-card-mobile .diff {
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.termdock-diff-card-mobile .diff-gutter {
+  padding: 0 8px;
+  min-width: 38px;
+}
+
+.termdock-diff-card-mobile .diff-code {
+  padding: 0 12px;
+}
+
+/*
+ * Empty state. Centered with a soft icon background — same visual
+ * language as the rest of the right sidebar.
+ */
+.diff-empty {
+  color: var(--muted-foreground);
+}
+
+/*
+ * Loading skeleton for the diff body. A muted base + a horizontal
+ * shimmer that travels across each bar. The bars use the same
+ * rounded geometry as the real text rows so the transition from
+ * skeleton → real content doesn't reflow.
+ *
+ * The animation is paused when the user has
+ * `prefers-reduced-motion: reduce`.
+ */
+.diff-skeleton__bar {
+  background-color: rgba(255, 255, 255, 0.06);
+  position: relative;
+  overflow: hidden;
+}
+
+.diff-skeleton__bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.08) 50%,
+    transparent
+  );
+  animation: diff-skeleton-shimmer 1.6s ease-in-out infinite;
+}
+
+.diff-skeleton__bar--insert {
+  background-color: rgba(102, 128, 11, 0.12);
+}
+
+.diff-skeleton__bar--delete {
+  background-color: rgba(175, 48, 41, 0.12);
+}
+
+@keyframes diff-skeleton-shimmer {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diff-skeleton__bar::after {
+    animation: none;
+  }
 }
