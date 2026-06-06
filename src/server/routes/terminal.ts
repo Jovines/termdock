@@ -120,6 +120,7 @@ interface TerminalSession {
   activeProgram: {
     command: string | null;
     source: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown';
+    rawArgs: string | null;
     updatedAt: number;
   } | null;
   dataDisposable?: { dispose: () => void };
@@ -1564,6 +1565,7 @@ function syncDynamicTmuxMetadata(input: {
 async function detectShellActiveProgram(session: TerminalSession): Promise<{
   command: string | null;
   source: 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown';
+  rawArgs: string | null;
   updatedAt: number;
 } | null> {
   const pid = getPtyProcessPid(session.ptyProcess);
@@ -1612,6 +1614,7 @@ async function detectShellActiveProgram(session: TerminalSession): Promise<{
         return {
           command: preferredForeground.command,
           source: 'shell-tty',
+          rawArgs: null,
           updatedAt: Date.now(),
         };
       }
@@ -1621,6 +1624,7 @@ async function detectShellActiveProgram(session: TerminalSession): Promise<{
         return {
           command: shellRow.command,
           source: 'shell-pid',
+          rawArgs: null,
           updatedAt: Date.now(),
         };
       }
@@ -1632,6 +1636,7 @@ async function detectShellActiveProgram(session: TerminalSession): Promise<{
   return {
     command: normalizeProgramName(process.env.SHELL || '/bin/sh'),
     source: 'unknown',
+    rawArgs: null,
     updatedAt: Date.now(),
   };
 }
@@ -2582,6 +2587,7 @@ router.post('/create', async (req, res) => {
             mode: s.mode,
             tmuxSessionName: s.tmuxSessionName,
             activeProgram: s.activeProgram?.command ?? null,
+            activeProgramRaw: s.activeProgram?.rawArgs ?? null,
             activeProgramSource: s.activeProgram?.source ?? null,
           });
         }
@@ -2604,6 +2610,7 @@ router.post('/create', async (req, res) => {
       mode: spawned.session.mode,
       tmuxSessionName: spawned.session.tmuxSessionName,
       activeProgram: spawned.session.activeProgram?.command ?? null,
+      activeProgramRaw: spawned.session.activeProgram?.rawArgs ?? null,
       activeProgramSource: spawned.session.activeProgram?.source ?? null,
     });
   } catch (error) {
@@ -2654,6 +2661,7 @@ router.get('/:sessionId/stream', async (req, res) => {
     tmuxSessionName: session.tmuxSessionName,
     cwd: session.cwd ?? null,
     activeProgram: session.activeProgram?.command ?? null,
+    activeProgramRaw: session.activeProgram?.rawArgs ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
     agentStatus: session.agentStatus,
     agentColor: session.agentColor,
@@ -2685,6 +2693,7 @@ router.get('/:sessionId/stream', async (req, res) => {
     writeSse(res, {
       type: 'active-program',
       activeProgram: activeProgram?.command ?? null,
+      activeProgramRaw: activeProgram?.rawArgs ?? null,
       activeProgramSource: activeProgram?.source ?? null,
     });
   };
@@ -2706,6 +2715,7 @@ router.get('/:sessionId/stream', async (req, res) => {
           maybeWriteActiveProgram({
             command: resolved.command,
             source: resolved.source,
+            rawArgs: resolved.rawArgs,
             updatedAt: Date.now(),
           });
         } else {
@@ -2826,6 +2836,7 @@ router.get('/:sessionId/health', (req, res) => {
       mode: session.mode,
       tmuxSessionName: session.tmuxSessionName,
       activeProgram: session.activeProgram?.command ?? null,
+      activeProgramRaw: session.activeProgram?.rawArgs ?? null,
       activeProgramSource: session.activeProgram?.source ?? null,
     });
  });
@@ -2855,6 +2866,7 @@ router.get('/:sessionId/attach', async (req, res) => {
     history,
     lastSeq,
     activeProgram: session.activeProgram?.command ?? null,
+    activeProgramRaw: session.activeProgram?.rawArgs ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
   });
 });
@@ -3284,6 +3296,7 @@ export function handleTerminalWebSocket(
       tmuxSessionName: session.tmuxSessionName,
       cwd: session.cwd ?? null,
       activeProgram: session.activeProgram?.command ?? null,
+      activeProgramRaw: session.activeProgram?.rawArgs ?? null,
       activeProgramSource: session.activeProgram?.source ?? null,
       agentStatus: session.agentStatus,
       agentColor: session.agentColor,
@@ -3318,7 +3331,7 @@ export function handleTerminalWebSocket(
         if (activePane) {
           const resolved = await resolveTmuxPaneProgram(activePane);
           if (resolved) {
-            ap = { command: resolved.command, source: resolved.source, updatedAt: Date.now() };
+            ap = { command: resolved.command, source: resolved.source, rawArgs: resolved.rawArgs, updatedAt: Date.now() };
           } else {
             ap = getActiveProgramFromTmuxLayout(layout);
           }
@@ -3339,6 +3352,7 @@ export function handleTerminalWebSocket(
           ws.send(JSON.stringify({
             type: 'active-program',
             activeProgram: ap?.command ?? null,
+            activeProgramRaw: ap?.rawArgs ?? null,
             activeProgramSource: ap?.source ?? null,
           }));
         }
@@ -3391,6 +3405,7 @@ export function handleTerminalWebSocket(
           ws.send(JSON.stringify({
             type: 'active-program',
             activeProgram: ap?.command ?? null,
+            activeProgramRaw: ap?.rawArgs ?? null,
             activeProgramSource: ap?.source ?? null,
           }));
         }
