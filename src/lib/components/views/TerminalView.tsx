@@ -538,7 +538,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setSessionActiveProgram(
                   storeSessionId,
                   event.activeProgram ?? null,
-                  event.activeProgramSource ?? null
+                  event.activeProgramSource ?? null,
+                  event.activeProgramRaw ?? null,
                 );
                 break;
               }
