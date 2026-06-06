@@ -83,6 +83,8 @@ function isSettingsCacheDoc(v: unknown): v is SettingsCacheDoc {
     typeof (v as { preventSleep?: unknown }).preventSleep === 'boolean' &&
     typeof (v as { networkAvailable?: unknown }).networkAvailable === 'boolean';
 }
+// Default shell names for initial render — overridden once the server responds
+// with the actual config. Kept in sync with the backend DEFAULT_PROGRAM_DETECTION.shellNames.
 const DEFAULT_SHELL_NAMES = ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu'];
 let SHELL_NAMES = new Set(DEFAULT_SHELL_NAMES);
 
@@ -449,10 +451,11 @@ function App() {
       .catch(() => { /* use empty state */ });
   }, []);
 
-  // Program detection config (generic names, wrapper scripts, shell names)
+  // Program detection config — single source of truth is the backend;
+  // initial state is empty until the server responds.
   const [programDetection, setProgramDetection] = React.useState<ProgramDetectionConfig>({
-    genericProgramNames: ['node', 'python', 'python3', 'ruby', 'perl', 'java'],
-    wrapperScriptNames: ['aiden', 'ttadk', 'npx', 'yarn', 'dlx'],
+    genericProgramNames: [],
+    wrapperScriptNames: [],
     shellNames: DEFAULT_SHELL_NAMES,
   });
   const [, setProgramDetectionLoaded] = React.useState(false);
