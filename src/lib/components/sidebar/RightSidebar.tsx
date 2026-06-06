@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo, useState, useDeferredValue, type Dispatch, type SetStateAction } from 'react';
+import { useEffect, useCallback, useMemo, useRef, useState, useDeferredValue, type Dispatch, type SetStateAction } from 'react';
 import {
   X as RiCloseLine,
   ArrowLeft as RiArrowLeft,
@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
-import { DiffViewer } from './diff';
+import { DiffViewer } from './DiffViewer';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { getGitBundle, readFileContent, type GitContext } from '../../terminal/api';
 import { useI18n } from '../../i18n';
@@ -25,6 +25,13 @@ interface RightSidebarProps {
   push?: boolean;
 }
 
+const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; title: string }> = {
+  added: { label: 'A', className: 'text-[color:var(--diff-insert-strong)]', title: 'Added' },
+  modified: { label: 'M', className: 'text-[color:var(--diff-hunk-accent)]', title: 'Modified' },
+  deleted: { label: 'D', className: 'text-[color:var(--diff-delete-strong)]', title: 'Deleted' },
+  renamed: { label: 'R', className: 'text-muted-foreground', title: 'Renamed' },
+};
+
 const RECENT_REFERENCES_STORAGE_KEY = 'termdock:recent-file-references';
 const MAX_RECENT_REFERENCES = 8;
 const MAX_CONTEXT_PACK_FILES = 14;
@@ -32,10 +39,8 @@ const MAX_CONTEXT_PACK_FILES = 14;
 // mode collapses to a single column with back-navigation, and the third
 // "File" tab is hidden (its content is reachable via the Files tab).
 const MOBILE_WIDTH_THRESHOLD_PX = 600;
-// Wide mode unlocks the dual-pane workbench. The hunk rail is
-// collapsible below this, and the file list switches to a compact
-// mode without directory paths. Above this threshold we render the
-// full layout (file list + diff + hunk rail at full width).
+// Wide mode keeps the dual-pane workspace; below this width the panel falls
+// back to stacked tabs even on desktop.
 const WIDE_WIDTH_THRESHOLD_PX = 720;
 
 interface RecentReference {
@@ -70,6 +75,15 @@ function getRelativeDisplayPath(path: string, rootPath: string | null): { name: 
     name: parts.pop() || relative,
     dir: parts.join('/'),
   };
+}
+
+function ChangeBadge({ status }: { status: string }) {
+  const style = CHANGE_BADGE_STYLES[status] ?? { label: '?', className: 'text-muted-foreground', title: status };
+  return (
+    <span className={`w-4 shrink-0 text-center text-[10px] font-mono font-bold ${style.className}`} title={style.title}>
+      {style.label}
+    </span>
+  );
 }
 
 function buildFileReference(path: string, rootPath: string | null): string {
@@ -324,10 +338,16 @@ export function RightSidebar(
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
   const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
-  // User preference: long diff lines wrap vs. horizontal scroll. The
-  // new DiffViewer is responsible for the actual toggle UI; we just
-  // own the preference so it persists across file switches.
-  const [diffWrap] = useState(false);
+  // Narrow-screen changes view: 'all' shows every file's diff inline (the
+  // phone-friendly default — no per-file navigation needed); 'single' shows
+  // only the file the user picked from the list.
+  const [diffViewMode, setDiffViewMode] = useState<'all' | 'single'>('all');
+  // When on, long diff lines wrap instead of overflowing horizontally. The
+  // user can opt in per-session without leaving the panel.
+  const [diffWrap, setDiffWrap] = useState(false);
+  // Ref to the diff scroll container so the file list can scrollIntoView a
+  // specific file's diff card when the user taps a file in 'all' mode.
+  const diffScrollerRef = useRef<HTMLDivElement | null>(null);
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
   const isWide = !isMobile && drawerWidthPx >= WIDE_WIDTH_THRESHOLD_PX;
   const rightTab = useSidebarStore((s) => s.rightTab);
@@ -543,10 +563,39 @@ export function RightSidebar(
     if (!push) onClose();
   }, [gitContextInputText, insertContextText, onClose, push, t]);
 
+  const selectDiffFile = useCallback((path: string | null) => {
+    selectFile(path);
+    setRightTab('diff');
+  }, [selectFile, setRightTab]);
+
   const closeFilePreview = useCallback(() => {
     selectFile(null);
     setLineRange(null);
   }, [selectFile]);
+
+  const closeDiffView = useCallback(() => {
+    selectFile(null);
+    setLineRange(null);
+  }, [selectFile]);
+
+  // In 'all' mode, tapping a file in the list scrolls the diff scroller to
+  // that file's card. DiffViewer tags each file with `data-diff-file-anchor`
+  // (its newPath or oldPath). Falls back to oldPath when a file is new.
+  const scrollToDiffFile = useCallback((path: string) => {
+    const container = diffScrollerRef.current;
+    if (!container) return;
+    const target = container.querySelector<HTMLElement>(
+      `[data-diff-file-anchor="${CSS.escape(path)}"]`,
+    );
+    if (!target) return;
+    // Compute the scroll position manually so we land the file card just
+    // below the sticky toggle bar instead of at the very top of the
+    // container (where the file header would be clipped by the bar).
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const top = container.scrollTop + (targetRect.top - containerRect.top);
+    container.scrollTo({ top, behavior: 'smooth' });
+  }, []);
 
   return (
     <Sidebar
@@ -879,44 +928,246 @@ export function RightSidebar(
             />
           </div>
         ) : isWide ? (
-          // Wide changes view: one column, the diff panel itself. The
-          // cards ARE the file list — each card header has the file
-          // path, expand/collapse, and an insert button. This used to
-          // be a dual-pane layout (file list + diff body) but the dual
-          // layout was the source of the +0/-0 ghost-stats bug: the
-          // sidebar's file list rendered real stats from the repo's
-          // `git diff --name-status` while the diff body was driven by
-          // a single-file fetch that the chip strip tried to reuse —
-          // they drifted, and the chip strip showed zeros for files
-          // it had no per-file fetch for. One data source = one truth.
-          <div className="flex h-full min-h-0 flex-col overflow-hidden">
-            {changedFiles.size === 0 ? (
-              <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-                {t('rightSidebar.noChanges')}
+          // Wide changes view: list on the left, diff on the right
+          <div className="flex h-full min-h-0">
+            <div className="w-[320px] min-w-[260px] shrink-0 flex flex-col overflow-hidden border-r border-border/15">
+              {changedFiles.size > 0 && (
+                <div className="shrink-0 border-b border-border/15 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => selectDiffFile(null)}
+                      className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+                        selectedFilePath === null
+                          ? 'bg-surface-elevated text-foreground'
+                          : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+                      }`}
+                    >
+                      {t('rightSidebar.allChanges')}
+                    </button>
+                    <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                  </div>
+                </div>
+              )}
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
+                {changedFiles.size === 0 ? (
+                  <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                    {t('rightSidebar.noChanges')}
+                  </div>
+                ) : filteredChangedFiles.length === 0 ? (
+                  <div className="bg-background-subtle px-3 py-4 text-center text-xs text-muted-foreground">
+                    {t('rightSidebar.noMatchingChanges')}
+                  </div>
+                ) : (
+                  <div className="space-y-px">
+                    {filteredChangedFiles.map(([absolutePath, status]) => {
+                      const display = getRelativeDisplayPath(absolutePath, rootPath);
+                      const relativePath = rootPath && absolutePath.startsWith(`${rootPath}/`) ? absolutePath.slice(rootPath.length + 1) : absolutePath;
+                      const isSelected = selectedFilePath === relativePath || selectedFilePath === absolutePath;
+                      return (
+                        <button
+                          key={absolutePath}
+                          type="button"
+                          onClick={() => selectDiffFile(relativePath)}
+                          className={`group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition active:scale-[0.99] ${
+                            isSelected
+                              ? 'bg-surface-elevated text-foreground'
+                              : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+                          }`}
+                          title={absolutePath}
+                        >
+                          <ChangeBadge status={status} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[12px] font-medium">{display.name}</span>
+                            {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
+                          </span>
+                          <span
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              insertPathReference(absolutePath);
+                            }}
+                            className="inline-flex h-6 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100"
+                            title={t('rightSidebar.insertThisFile')}
+                          >
+                            {t('rightSidebar.insertFileRef')}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            ) : (
-              <DiffViewer
-                onInsertDiffReference={insertContextText}
-                layout="wide"
-              />
-            )}
+            </div>
+            <div className="min-w-0 flex-1 overflow-y-auto overscroll-contain">
+              <DiffViewer filePath={selectedFilePath} onInsertDiffReference={insertContextText} />
+            </div>
           </div>
         ) : (
-          // Narrow / mobile: same single-column layout, smaller chrome
-          // and larger touch targets via the `mobile` / `narrow` layout
-          // hints inside DiffViewer.
+          // Narrow changes view: stacked. The view-mode + wrap toggles at
+          // the top let the user switch between seeing all file diffs at
+          // once (default, phone-friendly) and the old single-file flow.
           <div className="flex h-full min-h-0 flex-col overflow-hidden">
-            {changedFiles.size === 0 ? (
-              <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-                {t('rightSidebar.noChanges')}
-              </div>
-            ) : (
-              <DiffViewer
-                layout={isMobile ? 'mobile' : 'narrow'}
-                defaultWrap={diffWrap}
-                onInsertDiffReference={insertContextText}
-              />
+            {changedFiles.size > 0 && (
+              <>
+                {/* View mode + wrap toggle bar — sticky at the top of the
+                    content so it stays reachable as the diff scroller moves. */}
+                <div className="shrink-0 flex items-center justify-between gap-2 border-b border-border/15 px-3 py-2">
+                  <div
+                    role="tablist"
+                    aria-label={t('rightSidebar.viewModeAll')}
+                    className="flex items-center gap-0.5 rounded-full bg-background-subtle p-0.5"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={diffViewMode === 'all'}
+                      onClick={() => {
+                        setDiffViewMode('all');
+                        // Switching to 'all' should not leave a stale file
+                        // selected from the previous 'single' session.
+                        if (selectedFilePath) selectDiffFile(null);
+                      }}
+                      className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:scale-[0.98] ${
+                        diffViewMode === 'all'
+                          ? 'bg-surface-elevated text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {t('rightSidebar.viewModeAll')}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={diffViewMode === 'single'}
+                      onClick={() => setDiffViewMode('single')}
+                      className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:scale-[0.98] ${
+                        diffViewMode === 'single'
+                          ? 'bg-surface-elevated text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {t('rightSidebar.viewModeSingle')}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDiffWrap((prev) => !prev)}
+                    aria-pressed={diffWrap}
+                    title={t('rightSidebar.wrapLongLines')}
+                    className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
+                      diffWrap
+                        ? 'bg-primary/15 text-primary'
+                        : 'bg-background-subtle text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    <span className="font-mono text-[12px] leading-none">Aa</span>
+                    <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
+                  </button>
+                </div>
+
+                {/* File list — behavior depends on view mode:
+                      • 'all'   → click scrolls the diff scroller to that file
+                      • 'single' → click makes it the only file shown
+                    The list stays visible in both modes so the user can
+                    switch/jump at any time without going through a "back" hop. */}
+                {diffViewMode === 'single' && selectedFilePath ? (
+                  <div className="shrink-0 flex items-center gap-2 border-b border-border/15 px-3 py-2">
+                    <button
+                      type="button"
+                      onClick={closeDiffView}
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                      aria-label={t('rightSidebar.backToChangeList')}
+                      title={t('common.back')}
+                    >
+                      <RiArrowLeft size={14} />
+                    </button>
+                    <span className="truncate text-[12px] font-medium text-foreground">
+                      {t('rightSidebar.viewDiff')}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="shrink-0 border-b border-border/15 px-3 py-2">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                        {t('rightSidebar.allChanges')}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {filteredChangedFiles.length}/{changedFiles.size}
+                      </span>
+                    </div>
+                    <div className="space-y-px">
+                      {filteredChangedFiles.length === 0 ? (
+                        <div className="bg-background-subtle px-3 py-4 text-center text-xs text-muted-foreground">
+                          {t('rightSidebar.noMatchingChanges')}
+                        </div>
+                      ) : filteredChangedFiles.map(([absolutePath, status]) => {
+                        const display = getRelativeDisplayPath(absolutePath, rootPath);
+                        const relativePath = rootPath && absolutePath.startsWith(`${rootPath}/`) ? absolutePath.slice(rootPath.length + 1) : absolutePath;
+                        const isSelected = diffViewMode === 'single' && (
+                          selectedFilePath === relativePath || selectedFilePath === absolutePath
+                        );
+                        return (
+                          <button
+                            key={absolutePath}
+                            type="button"
+                            onClick={() => {
+                              if (diffViewMode === 'all') {
+                                scrollToDiffFile(relativePath);
+                              } else {
+                                selectDiffFile(relativePath);
+                              }
+                            }}
+                            className={`group flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition active:scale-[0.99] ${
+                              isSelected
+                                ? 'bg-surface-elevated text-foreground'
+                                : 'hover:bg-surface-2'
+                            }`}
+                            title={absolutePath}
+                          >
+                            <ChangeBadge status={status} />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-xs font-medium">{display.name}</span>
+                              {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
+                            </span>
+                            <span
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                insertPathReference(absolutePath);
+                              }}
+                              className="inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary transition active:scale-95 sm:h-6 sm:min-w-8 md:opacity-0 md:group-hover:opacity-100"
+                              title={t('rightSidebar.insertThisFile')}
+                            >
+                              {t('rightSidebar.insertFileRef')}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </>
             )}
+            <div
+              ref={diffScrollerRef}
+              className="min-h-0 flex-1 overflow-y-auto"
+            >
+              {changedFiles.size === 0 ? (
+                <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                  {t('rightSidebar.noChanges')}
+                </div>
+              ) : diffViewMode === 'single' && !selectedFilePath ? (
+                <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                  {t('rightSidebar.selectFileForDiff')}
+                </div>
+              ) : (
+                <DiffViewer
+                  filePath={diffViewMode === 'all' ? null : selectedFilePath}
+                  wrap={diffWrap}
+                  showScrollHint
+                  onInsertDiffReference={insertContextText}
+                />
+              )}
+            </div>
           </div>
         )}
       </div>
