@@ -1299,7 +1299,7 @@ interface ProgramDetectionConfig {
 
 const DEFAULT_PROGRAM_DETECTION: ProgramDetectionConfig = {
   genericProgramNames: ['node', 'python', 'python3', 'ruby', 'perl', 'java'],
-  wrapperScriptNames: ['aiden', 'ttadk', 'coco', 'npx', 'yarn', 'dlx'],
+  wrapperScriptNames: ['aiden', 'ttadk', 'npx', 'yarn', 'dlx'],
   shellNames: ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu'],
 };
 
