@@ -559,6 +559,23 @@ body {
   font-variant-emoji: text;
 }
 
+/* Swiper bug fix: when there are 2+ slides, the wrapper's flex children
+   (each `width: 100%`) overflow the swiper element. In ghostty mode the
+   timing of the WASM init makes the browser's scroll model kick in and
+   propagate an implicit scrollLeft (~half a slide width) to the swiper
+   itself, splitting the first and second slides down the middle of the
+   screen. swiper-react's default CSS uses `overflow: hidden` which
+   still leaves the element as a scroll container in the browser's
+   model — the browser happily maintains a scrollLeft even though no
+   scrollbar is shown. `overflow: clip` keeps the visual clipping but
+   demotes the element out of the scroll container role entirely, so
+   scrollLeft is pinned at 0 and slides land where swiper's translate3d
+   says they should. `div.swiper` (specificity 0,1,1) overrides the
+   library's bare `.swiper` (0,1,0) without needing !important. */
+div.swiper {
+  overflow: clip;
+}
+
 /* Gradient text utility */
 .text-gradient {
   background-clip: text;
