@@ -41,6 +41,7 @@ export function getSequenceForKey(key: MobileKey, _modifier: Modifier | null): s
 
 interface MobileKeyboardProps {
   visible: boolean;
+  presentation?: 'mobile' | 'desktop-actions';
   activeModifier: Modifier | null;
   lockedModifier: Modifier | null;
   disabled: boolean;
@@ -61,6 +62,7 @@ interface MobileKeyboardProps {
 
 export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   visible,
+  presentation = 'mobile',
   activeModifier,
   lockedModifier,
   disabled,
@@ -79,6 +81,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   onExpandedChange,
 }) => {
   const [showExtended, setShowExtended] = React.useState(defaultShowExtended);
+  const isDesktopActions = presentation === 'desktop-actions';
+  const isExpandedVisible = isDesktopActions || showExtended;
   const [showPresetMenu, setShowPresetMenu] = React.useState(false);
   const [presetMenuPosition, setPresetMenuPosition] = React.useState<{ top: number; left: number } | null>(null);
   const toolbarDisabled = disabled || !visible;
@@ -131,8 +135,11 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   }, [defaultShowExtended]);
 
   React.useEffect(() => {
+    if (isDesktopActions) {
+      return;
+    }
     onExpandedChange?.(showExtended);
-  }, [onExpandedChange, showExtended]);
+  }, [isDesktopActions, onExpandedChange, showExtended]);
 
   React.useEffect(() => {
     if (toolbarDisabled) {
@@ -285,7 +292,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       { id: 'preset', kind: 'preset' },
     ];
 
-    if (includeAlt) {
+    if (!isDesktopActions && includeAlt) {
       defaultItems.push({ id: 'alt', kind: 'alt' });
     }
 
@@ -293,13 +300,18 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       return defaultItems.concat(extraActions.map((action) => ({ id: action.id, kind: 'text' as const, action })));
     }
 
+    if (isDesktopActions) {
+      return defaultItems;
+    }
+
     return defaultItems.concat([
       { id: 'home', kind: 'key', keyName: 'home' as const },
       { id: 'end', kind: 'key', keyName: 'end' as const },
       { id: 'ctrl-d', kind: 'key', keyName: 'ctrl-d' as const },
     ]);
-  }, [extraActions, hasPresetActions, includeAlt]);
+  }, [extraActions, hasPresetActions, includeAlt, isDesktopActions]);
   const expandedRows = React.useMemo(() => splitButtonsIntoRows(expandedItems, presetRowLayout), [expandedItems, presetRowLayout]);
+  const expandedContainerClassName = isDesktopActions ? 'space-y-1' : 'mt-1 space-y-1';
   const presetMenu = showPresetMenu && presetMenuPosition
     ? createPortal(
       <div
@@ -334,7 +346,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       {presetMenu}
       <div
         data-mobile-keyboard="true"
-        className={`z-20 select-none overflow-hidden bg-background transition-all duration-150 ease-out max-h-40 px-1 py-0 ${
+        className={`z-20 select-none overflow-hidden bg-background transition-all duration-150 ease-out px-1 py-0 ${
+          visible ? (isDesktopActions ? 'max-h-24' : 'max-h-40') : 'max-h-0'
+        } ${
           visible
             ? 'opacity-100 pointer-events-auto'
             : 'opacity-0 pointer-events-none'
@@ -345,7 +359,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         onFocusCapture={handleToolbarButtonFocus}
       >
       <div className="rounded-2xl bg-surface-elevated p-0.5 space-y-0.5">
-      <div className="grid grid-cols-8 gap-1">
+      {!isDesktopActions && (
+        <div className="grid grid-cols-8 gap-1">
         <button
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'esc')}
@@ -425,9 +440,10 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           {showExtended ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
         </button>
       </div>
+      )}
 
-      {showExtended && (
-        <div className="mt-1 space-y-1">
+      {isExpandedVisible && (
+        <div className={expandedContainerClassName}>
           {expandedRows.map((row: { columns: number; items: ExpandedItem[] }, rowIndex: number) => {
             const hasPresetSlot = row.items[0]?.kind === 'preset';
             const baseCols = Math.max(2, row.columns);

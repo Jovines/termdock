@@ -2,9 +2,9 @@
 
 set -euo pipefail
 
-# 端口配置 (与 src/shared/config.ts 保持一致)
+# 端口配置 (与 src/server/config.ts 保持一致)
 FRONTEND_PORT=9833
-BACKEND_PORT=9834
+BACKEND_PORT=9835
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 

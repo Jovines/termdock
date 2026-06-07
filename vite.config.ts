@@ -94,7 +94,7 @@ export default defineConfig({
     host: DEFAULT_HOST,
     proxy: {
       '/api': {
-        target: `http://localhost:${PORT.backend}`,
+        target: `http://localhost:${PORT.devBackend}`,
         changeOrigin: true,
         ws: true,
         configure: (proxy, options) => {

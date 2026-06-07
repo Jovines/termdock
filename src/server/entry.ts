@@ -1,5 +1,7 @@
 import express from 'express';
-import { createServer } from 'http';
+import { createServer as createHttpServer } from 'http';
+import { createServer as createHttpsServer } from 'https';
+import type { Server as HttpServer } from 'http';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -10,9 +12,18 @@ import { WebSocketServer } from 'ws';
 import terminalRoutes, { handleTerminalWebSocket, handleControlWebSocket } from './routes/terminal.js';
 import filesystemRoutes from './routes/filesystem.js';
 import authRoutes from './routes/auth.js';
+import { createOnboardingRouter } from './routes/onboarding.js';
 import { csrfProtection } from './utils/csrfProtection.js';
 import { pathValidator } from './utils/pathValidator.js';
 import { isUpgradeRequestAuthenticated, requireAuth } from './utils/authProtection.js';
+import { localAccessManager, type LocalAccessState } from './utils/localAccess.js';
+import {
+  isAllowedHost,
+  isUpgradeOriginAllowed,
+  validateHostMiddleware,
+} from './utils/requestSecurity.js';
+import { getCookieSecurityOptions, setSecureCookieMode } from './utils/cookieSecurity.js';
+import { startOnboardingServer, stopOnboardingServer } from './onboardingServer.js';
 
 import { PORT, DEFAULT_HOST } from './config.js';
 
@@ -27,10 +38,28 @@ const clientIndexPath = path.join(clientDistPath, 'index.html');
 export interface ServerOptions {
   host?: string;
   port?: number;
+  httpsCertPath?: string;
+  httpsKeyPath?: string;
+  httpsCaPath?: string;
+  onboardingPort?: number;
 }
 
-export function createApp(): express.Express {
+export interface StartServerResult {
+  server: HttpServer;
+  scheme: 'http' | 'https';
+  getLocalAccessState: () => LocalAccessState;
+  getOnboardingUrl: () => string | null;
+}
+
+export interface AppOptions {
+  port?: number;
+  httpsCaPath?: string;
+}
+
+export function createApp(options: AppOptions = {}): express.Express {
   const app = express();
+
+  app.use(validateHostMiddleware);
 
   // 基础中间件
   app.use(express.json());
@@ -47,8 +76,7 @@ export function createApp(): express.Express {
     if (existingClientId !== clientId) {
       res.cookie(CLIENT_STATE_COOKIE, clientId, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
+        ...getCookieSecurityOptions(),
         maxAge: 30 * 24 * 60 * 60 * 1000,
       });
     }
@@ -82,7 +110,18 @@ export function createApp(): express.Express {
     res.json({ ok: true });
   });
 
+  // 手机首次接入引导（未信任 CA 前需要从 HTTP 内网页面下载证书）
+  app.use('/onboarding', createOnboardingRouter({ port: options.port, caCertPath: options.httpsCaPath }));
+  app.get('/ca', (_req, res) => {
+    if (!options.httpsCaPath || !fs.existsSync(options.httpsCaPath)) {
+      res.status(404).json({ error: 'CA certificate is not configured', code: 'CA_NOT_CONFIGURED' });
+      return;
+    }
+    res.download(options.httpsCaPath, 'rootCA.pem');
+  });
+
   // 鉴权路由（公开：登录 / 登出 / 状态查询）
+  app.use('/api/auth/logout', csrfProtection.verifyMiddleware());
   app.use('/api/auth', authRoutes);
 
   // CSRF令牌获取端点（必须先登录后才能拿，避免未授权探测）
@@ -110,7 +149,7 @@ export function createApp(): express.Express {
 
   if (fs.existsSync(clientIndexPath)) {
     app.use(express.static(clientDistPath));
-    app.get(/^(?!\/api(?:\/|$)|\/health$).*/, (_req, res) => {
+    app.get(/^(?!\/api(?:\/|$)|\/health$|\/onboarding(?:\/|$)|\/ca(?:\/|$)).*/, (_req, res) => {
       res.sendFile(clientIndexPath);
     });
   }
@@ -118,11 +157,24 @@ export function createApp(): express.Express {
   return app;
 }
 
-export function startServer(options: ServerOptions = {}) {
+function createServerForApp(app: express.Express, options: ServerOptions): { server: HttpServer; scheme: 'http' | 'https' } {
+  if (options.httpsCertPath && options.httpsKeyPath) {
+    const cert = fs.readFileSync(options.httpsCertPath);
+    const key = fs.readFileSync(options.httpsKeyPath);
+    return { server: createHttpsServer({ cert, key }, app), scheme: 'https' };
+  }
+  return { server: createHttpServer(app), scheme: 'http' };
+}
+
+export function startServer(options: ServerOptions = {}): StartServerResult {
   const port = options.port ?? Number(process.env.PORT || DEFAULT_PORT);
   const host = options.host ?? (process.env.HOST || DEFAULT_HOST);
-  const app = createApp();
-  const server = createServer(app);
+  const app = createApp({ port: options.onboardingPort ?? port, httpsCaPath: options.httpsCaPath });
+  const { server, scheme } = createServerForApp(app, options);
+  setSecureCookieMode(scheme === 'https');
+
+  let latestLocalAccessState = localAccessManager.getState();
+  let latestOnboardingUrl: string | null = null;
 
   // WebSocket for bidirectional terminal communication.
   // Replaces SSE (server→client) + HTTP POST (client→server) with a single
@@ -133,7 +185,13 @@ export function startServer(options: ServerOptions = {}) {
   const CONTROL_WS_PATH = '/api/control/ws';
 
   server.on('upgrade', (request, socket, head) => {
-    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+    if (!isAllowedHost(request.headers.host) || !isUpgradeOriginAllowed(request.headers.origin, request.headers.host)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    const url = new URL(request.url ?? '/', `${scheme}://${request.headers.host ?? 'localhost'}`);
     const pathname = url.pathname;
 
     // Reject the upgrade before the WebSocket handshake completes if auth
@@ -176,8 +234,31 @@ export function startServer(options: ServerOptions = {}) {
 
   server.listen(port, host, () => {
     const displayHost = host === '0.0.0.0' ? 'localhost' : host;
-    console.log(`Termdock server running at http://${displayHost}:${port}`);
-    console.log(`Health check: http://${displayHost}:${port}/health`);
+    console.log(`Termdock server running at ${scheme}://${displayHost}:${port}`);
+    console.log(`Health check: ${scheme}://${displayHost}:${port}/health`);
+    const onboardingServerState = scheme === 'https'
+      ? startOnboardingServer({ httpsPort: port, caCertPath: options.httpsCaPath })
+      : { server: null, url: null };
+    void localAccessManager.start({ host, port, scheme, caCertPath: options.httpsCaPath, onboardingPort: options.onboardingPort ?? port }).then((state) => {
+      const publishState = () => {
+        const onboardingUrl = onboardingServerState.url ?? state.onboardingUrl;
+        latestLocalAccessState = state;
+        latestOnboardingUrl = onboardingUrl;
+        if (state.status === 'active') {
+          console.log(`LAN access: ${state.url}`);
+          if (onboardingUrl) console.log(`Mobile setup: ${onboardingUrl} (open this on your phone to download the CA certificate)`);
+        } else {
+          console.log(`LAN access: ${state.status}${state.reason ? ` (${state.reason})` : ''}`);
+        }
+      };
+      if (onboardingServerState.server && !onboardingServerState.url) {
+        onboardingServerState.server.once('listening', publishState);
+      } else {
+        publishState();
+      }
+    }).catch((error) => {
+      console.warn('[local-access] failed to start:', error);
+    });
   });
 
   server.on('error', (error: NodeJS.ErrnoException) => {
@@ -190,7 +271,17 @@ export function startServer(options: ServerOptions = {}) {
     process.exit(1);
   });
 
-  return server;
+  server.on('close', () => {
+    stopOnboardingServer();
+    void localAccessManager.stop();
+  });
+
+  return {
+    server,
+    scheme,
+    getLocalAccessState: () => latestLocalAccessState,
+    getOnboardingUrl: () => latestOnboardingUrl,
+  };
 }
 
 const isDirectExecution = process.argv[1] && path.resolve(process.argv[1]) === currentFilePath;

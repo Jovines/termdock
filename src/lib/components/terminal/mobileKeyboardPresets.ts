@@ -14,6 +14,7 @@ export interface ToolbarPresetDefinition {
   includeAlt: boolean;
   rowLayout: number[];
   actions: MobileToolbarAction[];
+  showOnDesktop?: boolean;
 }
 
 export interface ToolbarPresetOption {
@@ -30,7 +31,7 @@ export function getToolbarActionLabel(action: MobileToolbarAction, index: number
 // actions/programs changed). The App reads this on startup and, when the
 // stored version differs, overwrites all built-in preset ids with the latest
 // definitions while keeping any user-authored custom presets intact.
-export const BUILTIN_TOOLBAR_PRESETS_VERSION = 8;
+export const BUILTIN_TOOLBAR_PRESETS_VERSION = 9;
 
 export function getBuiltinToolbarPresetIds(): string[] {
   return DEFAULT_PRESETS.map((preset) => preset.id);
@@ -44,6 +45,7 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     includeAlt: true,
     rowLayout: [3, 3, 3],
     actions: [],
+    showOnDesktop: false,
   },
   {
     id: 'opencode',
@@ -57,6 +59,7 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
       { id: 'opencode-models', label: '/models', sequence: '/models', doubleTapSequence: '/models||\r' },
       { id: 'opencode-compact', label: '/compact', sequence: '/compact', doubleTapSequence: '/compact||\r' },
     ],
+    showOnDesktop: true,
   },
   {
     id: 'claude',
@@ -69,6 +72,7 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
       { id: 'claude-clear', label: '/clear', sequence: '/clear', doubleTapSequence: '/clear\r' },
       { id: 'claude-compact', label: '/compact', sequence: '/compact', doubleTapSequence: '/compact\r' },
     ],
+    showOnDesktop: true,
   },
   {
     id: 'coco',
@@ -82,6 +86,7 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
       { id: 'coco-model', label: '/model', sequence: '/||model ', doubleTapSequence: '/||model ||\r' },
       { id: 'coco-resume', label: '/resume', sequence: '/||resume ', doubleTapSequence: '/||resume ||\r' },
     ],
+    showOnDesktop: true,
   },
 ];
 
@@ -95,6 +100,7 @@ export function createDefaultToolbarPresets(): ToolbarPresetDefinition[] {
       const copy: MobileToolbarAction = { ...action };
       return copy;
     }),
+    showOnDesktop: preset.showOnDesktop,
   }));
 }
 
@@ -176,9 +182,9 @@ export function splitToolbarSequenceSegments(sequence: string): string[] {
   return sequence.split(TOOLBAR_SEGMENT_DELIMITER).filter((segment) => segment.length > 0);
 }
 
-export function sanitizeToolbarPresets(input: ToolbarPresetDefinition[]): ToolbarPresetDefinition[] {
+export function sanitizeToolbarPresets(input: Partial<ToolbarPresetDefinition>[]): ToolbarPresetDefinition[] {
   const seen = new Set<string>();
-  const sanitized = input
+  const sanitized: ToolbarPresetDefinition[] = input
     .map((preset, presetIndex) => {
       const baseId = typeof preset.id === 'string' && preset.id.trim().length > 0
         ? preset.id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-')
@@ -192,10 +198,13 @@ export function sanitizeToolbarPresets(input: ToolbarPresetDefinition[]): Toolba
         programs: Array.isArray(preset.programs)
           ? preset.programs.map((program) => normalizeProgramMatchEntry(program)).filter((program): program is string => !!program)
           : [],
-        includeAlt: typeof (preset as Partial<ToolbarPresetDefinition>).includeAlt === 'boolean'
-          ? Boolean((preset as Partial<ToolbarPresetDefinition>).includeAlt)
+        includeAlt: typeof preset.includeAlt === 'boolean'
+          ? Boolean(preset.includeAlt)
           : false,
-        rowLayout: sanitizeRowLayout((preset as Partial<ToolbarPresetDefinition>).rowLayout),
+        rowLayout: sanitizeRowLayout(preset.rowLayout),
+        showOnDesktop: typeof preset.showOnDesktop === 'boolean'
+          ? Boolean(preset.showOnDesktop)
+          : false,
         actions: Array.isArray(preset.actions)
           ? preset.actions
             .map((action, actionIndex) => {
@@ -214,8 +223,9 @@ export function sanitizeToolbarPresets(input: ToolbarPresetDefinition[]): Toolba
     })
     .filter((preset) => preset.id !== 'auto');
 
-  if (!sanitized.some((preset) => preset.id === 'default')) {
-    sanitized.unshift(createDefaultToolbarPresets()[0]);
+  const defaultPreset = createDefaultToolbarPresets()[0];
+  if (defaultPreset && !sanitized.some((preset) => preset.id === 'default')) {
+    sanitized.unshift(defaultPreset);
   }
 
   return sanitized;
@@ -274,6 +284,15 @@ export function buildToolbarPresetOptions(presets: ToolbarPresetDefinition[]): T
   return [
     { id: 'auto', label: 'Auto' },
     ...presets.map((preset) => ({ id: preset.id, label: preset.label })),
+  ];
+}
+
+export function buildDesktopToolbarPresetOptions(presets: ToolbarPresetDefinition[]): ToolbarPresetOption[] {
+  return [
+    { id: 'auto', label: 'Auto' },
+    ...presets
+      .filter((preset) => preset.showOnDesktop === true)
+      .map((preset) => ({ id: preset.id, label: preset.label })),
   ];
 }
 

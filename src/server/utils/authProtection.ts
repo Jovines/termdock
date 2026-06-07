@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import type { Request, Response, NextFunction } from 'express';
+import { getCookieSecurityOptions } from './cookieSecurity.js';
 
 // Auth state lives under ~/.termdock/. We keep two separate files:
 //   - auth.json:          password hash (mode 0600). Presence enables auth.
@@ -314,15 +315,14 @@ export function getClientIp(req: Request): string {
 export function setSessionCookie(res: Response, token: string): void {
   res.cookie(AUTH_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
+    ...getCookieSecurityOptions(),
     maxAge: SESSION_TTL_MS,
     path: '/',
   });
 }
 
 export function clearSessionCookie(res: Response): void {
-  res.clearCookie(AUTH_COOKIE, { path: '/' });
+  res.clearCookie(AUTH_COOKIE, { path: '/', ...getCookieSecurityOptions() });
 }
 
 export function verifyPassword(password: string): boolean {

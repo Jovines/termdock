@@ -736,7 +736,11 @@ export async function killTmuxSession(name: string): Promise<{ cleanedSessions: 
   if (!trimmed) {
     throw new Error('tmux session name is required');
   }
-  const response = await fetch(`/api/terminal/tmux/sessions/${encodeURIComponent(trimmed)}`, { method: 'DELETE' });
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/tmux/sessions/${encodeURIComponent(trimmed)}`, {
+    method: 'DELETE',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to kill tmux session' }));
     throw new Error(error.error || 'Failed to kill tmux session');
@@ -906,10 +910,36 @@ export async function replaceToolbarPresetsDoc(doc: ToolbarPresetsDoc): Promise<
 
 // ---- Settings (prevent sleep) ----
 
+export interface LocalAccessInterfaceAddress {
+  name: string;
+  address: string;
+  family: 'IPv4';
+  label: string;
+  qrDataUrl?: string | null;
+  url?: string;
+}
+
+export interface LocalAccessState {
+  name: string;
+  source: 'auto' | 'manual';
+  hostname: string;
+  fallbackHostname: string;
+  url: string;
+  fallbackUrl: string;
+  onboardingUrl: string | null;
+  status: 'active' | 'disabled' | 'needs-auth' | 'loopback-only' | 'conflict' | 'error';
+  reason: string | null;
+  httpsEnabled: boolean;
+  caAvailable: boolean;
+  lanAddresses: string[];
+  interfaces: LocalAccessInterfaceAddress[];
+}
+
 export interface SettingsState {
   preventSleep: boolean;
   caffeinateActive: boolean;
   networkAvailable: boolean;
+  localAccess: LocalAccessState;
 }
 
 export async function getSettings(): Promise<SettingsState> {
@@ -921,7 +951,7 @@ export async function getSettings(): Promise<SettingsState> {
   return response.json();
 }
 
-export async function updateSettings(settings: { preventSleep: boolean }): Promise<SettingsState> {
+export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean } }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -983,7 +1013,11 @@ export async function loginWithPassword(password: string): Promise<LoginResult> 
 }
 
 export async function logout(): Promise<void> {
-  await fetch('/api/auth/logout', { method: 'POST' });
+  const csrfTokenHeader = await getCsrfToken();
+  await fetch('/api/auth/logout', {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
   resetCsrfTokenCache();
 }
 

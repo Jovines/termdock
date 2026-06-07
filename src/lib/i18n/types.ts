@@ -208,6 +208,13 @@ export type TranslationDictionary = {
     addTag: string;
     customRules: string;
     addRule: string;
+    localAccess: string;
+    localAccessHint: string;
+    resetAutoName: string;
+    onboardingUrl: string;
+    httpsActive: string;
+    httpsInactive: string;
+    caMissing: string;
   };
   toolbarPresets: {
     preview: string;
@@ -223,6 +230,8 @@ export type TranslationDictionary = {
     programsHelp: string;
     altSlot: string;
     altSlotHint: string;
+    desktopVisibility: string;
+    desktopVisibilityHint: string;
     rowLayout: string;
     rowLayoutHint: string;
     addRow: string;

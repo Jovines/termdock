@@ -90,6 +90,71 @@ termdock --clear-password
 
 服务在未设置密码时启动会打印醒目的安全警告。
 
+### 局域网 HTTPS 访问（手机 / 本机）
+
+Termdock 可以为当前机器发布一个产品化的局域网地址：
+
+```text
+https://<name>.termdock.local:9834
+```
+
+`<name>` 会在首次启动时自动生成一个 4 位默认值，也可以在设置抽屉里的「本地访问」中自定义。自定义名称不做人为长度限制，但必须是合法 hostname label。
+
+第一版仍然保留 `:9834` 端口；无端口的 `https://<name>.termdock.local` 需要后续单独引入 443 代理/Helper。
+
+第一次直接运行 `termdock` 时，CLI 会先引导你选择 `.termdock.local` 前缀，并询问是否立刻启用 HTTPS；选择启用后会自动安装/配置 mkcert、生成证书，然后继续启动服务。
+
+使用建议：
+
+```bash
+# 1. 先启用密码，避免把 shell 暴露给同一内网其他人
+termdock --set-password
+
+# 2. 自动准备本地 HTTPS 证书
+#    若未安装 mkcert，会自动通过 Homebrew 执行 brew install mkcert
+termdock --setup-local-https
+
+# 3. 正常启动；如果 ~/.termdock/certs/ 下已有证书，会自动启用 HTTPS
+termdock
+
+# 4. 查看正式地址和手机首次接入地址
+termdock --status
+```
+
+该命令会生成并保存：
+
+```text
+~/.termdock/certs/termdock-local.pem
+~/.termdock/certs/termdock-local-key.pem
+~/.termdock/certs/rootCA.pem
+```
+
+也可以手动覆盖证书路径：
+
+```bash
+termdock --https-cert <cert.pem> --https-key <key.pem> --https-ca <rootCA.pem>
+```
+
+手机首次接入时，先在同一 Wi‑Fi 下打开 `termdock --status` 或服务启动日志输出的 onboarding 地址，例如：
+
+```text
+http://192.168.1.23:52741/onboarding
+```
+
+该页面会提供 CA 证书下载和 iPhone / Android 安装步骤；如果只想直接下载证书，也可以打开更短的：
+
+```text
+http://192.168.1.23:52741/ca
+```
+
+安装并信任 CA 后，再打开正式地址：
+
+```text
+https://<name>.termdock.local:9834
+```
+
+注意：mDNS 依赖同一局域网的 `.local` 组播；访客 Wi‑Fi、客户端隔离、VPN 或部分企业网络可能会阻止解析。此时 `localhost` 访问仍然可用，但手机上的漂亮域名可能不可用。
+
 ### 从源码安装
 
 ```bash
@@ -130,10 +195,10 @@ npm run dev
 
 # 或分开启动
 npm run dev:client   # Vite 前端：9833
-npm run dev:server   # tsx watch 后端：9834
+npm run dev:server   # tsx watch 后端：9835
 ```
 
-开发期请访问 `http://localhost:9833`，Vite 会把 API/WebSocket 代理到后端 9834。
+开发期请访问 `http://localhost:9833`，Vite 会把 API/WebSocket 代理到后端开发端口 9835。正式/本地安装服务独立使用 9834。
 
 ### 构建
 
@@ -186,7 +251,7 @@ termdock/
 │   └── server/
 │       ├── cli.ts                        # CLI 入口（前后台、密码管理）
 │       ├── entry.ts                      # Express + WebSocket 启动
-│       ├── config.ts                     # 端口配置（9833/9834）
+│       ├── config.ts                     # 端口配置（dev: 9833/9835，prod: 9834）
 │       ├── routes/
 │       │   ├── auth.ts                   # 登录 / 登出 / 状态
 │       │   └── terminal.ts               # 终端 + tmux 路由
@@ -256,7 +321,7 @@ termdock/
 ### 环境变量
 
 ```bash
-PORT=9834                      # 后端端口
+PORT=9834                      # 正式/安装后服务端口；dev:server 使用 9835
 HOST=0.0.0.0                   # 绑定地址
 NODE_ENV=development           # 运行环境
 TERM=xterm-256color            # 终端类型

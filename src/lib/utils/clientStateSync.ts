@@ -21,6 +21,7 @@ export interface ClientStateSnapshot {
 export interface ControlSnapshot {
   clientState: ClientStateSnapshot;
   inventory?: SessionInventory;
+  seq?: number;
 }
 
 type Listener = (state: ControlSnapshot) => void;
@@ -144,7 +145,7 @@ function connect(): void {
 
   ws.onmessage = (event) => {
     lastServerPingAt = Date.now();
-    let msg: { type?: string; state?: ClientStateSnapshot; inventory?: SessionInventory } | null = null;
+    let msg: { type?: string; state?: ClientStateSnapshot; inventory?: SessionInventory; seq?: number } | null = null;
     try {
       msg = JSON.parse(event.data as string);
     } catch {
@@ -157,6 +158,7 @@ function connect(): void {
         updatedAt: typeof msg.state.updatedAt === 'number' ? msg.state.updatedAt : Date.now(),
       },
       inventory: msg.inventory,
+      seq: typeof msg.seq === 'number' ? msg.seq : undefined,
     };
     for (const listener of sync.listeners) {
       try { listener(snapshot); } catch (error) {

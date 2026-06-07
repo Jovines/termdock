@@ -3,11 +3,15 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { createRequire } from 'module';
+import QRCode from 'qrcode';
 import { execFile, spawn, type ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
 import { promisify } from 'util';
 import type { WebSocket } from 'ws';
 import { caffeinateManager } from '../utils/caffeinate.js';
+import { localAccessManager } from '../utils/localAccess.js';
+import { normalizeLocalAccessName } from '../utils/settings.js';
+import { getOnboardingServerUrl } from '../onboardingServer.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -242,11 +246,18 @@ function broadcastClientState(): void {
       console.warn('[session-inventory] failed to build snapshot for broadcast:', getErrorMessage(error));
       return latestSessionInventory;
     });
-    if (inventory && seq >= broadcastInventorySeq) {
+
+    if (seq !== broadcastInventorySeq) {
+      console.log(`[session-inventory] dropped stale broadcast seq=${seq} current=${broadcastInventorySeq}`);
+      return;
+    }
+
+    if (inventory) {
       latestSessionInventory = inventory;
     }
     const payload = JSON.stringify({
       type: 'client-state',
+      seq,
       state: globalSessionState,
       inventory: inventory ?? latestSessionInventory,
     });
@@ -3124,25 +3135,59 @@ router.put('/toolbar-presets', (req, res) => {
   res.json(toolbarPresetsDoc);
 });
 
-// ── Settings (prevent sleep) ──────────────────────────────────────────
-router.get('/settings', (_req, res) => {
-  res.json({
+async function getSettingsPayload() {
+  const localAccess = localAccessManager.getState();
+  const interfaces = await Promise.all(localAccess.interfaces.map(async (entry) => {
+    const url = `${localAccess.httpsEnabled ? 'https' : 'http'}://${entry.address}:9834`;
+    const qrDataUrl = await QRCode.toDataURL(url, {
+      margin: 1,
+      width: 132,
+      errorCorrectionLevel: 'M',
+    }).catch(() => null);
+    return { ...entry, url, qrDataUrl };
+  }));
+  return {
     preventSleep: caffeinateManager.getPreventSleep(),
     caffeinateActive: caffeinateManager.isActive(),
     networkAvailable: caffeinateManager.isNetworkAvailable(),
-  });
+    localAccess: {
+      ...localAccess,
+      interfaces,
+      onboardingUrl: getOnboardingServerUrl() ?? null,
+    },
+  };
+}
+
+// ── Settings (prevent sleep) ──────────────────────────────────────────
+router.get('/settings', async (_req, res) => {
+  res.json(await getSettingsPayload());
 });
 
-router.put('/settings', (req, res) => {
+router.put('/settings', async (req, res) => {
   const body = req.body ?? {};
   if (typeof body.preventSleep === 'boolean') {
     caffeinateManager.setPreventSleep(body.preventSleep);
   }
-  res.json({
-    preventSleep: caffeinateManager.getPreventSleep(),
-    caffeinateActive: caffeinateManager.isActive(),
-    networkAvailable: caffeinateManager.isNetworkAvailable(),
-  });
+
+  if (body.localAccess && typeof body.localAccess === 'object') {
+    const localAccessBody = body.localAccess as { name?: unknown; reset?: unknown };
+    if (localAccessBody.reset === true) {
+      await localAccessManager.resetAutoName();
+    } else if (localAccessBody.name !== undefined) {
+      const normalized = normalizeLocalAccessName(localAccessBody.name);
+      if (!normalized) {
+        res.status(400).json({ error: 'Invalid local access name', code: 'INVALID_LOCAL_ACCESS_NAME' });
+        return;
+      }
+      const state = await localAccessManager.updateName(normalized, 'manual');
+      if (state.status === 'conflict') {
+        res.status(409).json({ error: state.reason ?? 'Local access name is already in use', code: 'LOCAL_ACCESS_CONFLICT', localAccess: state });
+        return;
+      }
+    }
+  }
+
+  res.json(await getSettingsPayload());
 });
 
 // ── Agent detection rules API ──
@@ -4209,13 +4254,18 @@ export function handleControlWebSocket(ws: WebSocket, clientId: string): void {
   // Initial snapshot — same shape the HTTP GET returns, with an inventory
   // projection when tmux/backend state can be queried immediately.
   void (async () => {
+    const seq = broadcastInventorySeq;
     const inventory = await buildSessionInventory().catch((error) => {
       console.warn('[session-inventory] failed to build initial control snapshot:', getErrorMessage(error));
       return latestSessionInventory;
     });
+    if (seq !== broadcastInventorySeq) {
+      console.log(`[session-inventory] dropped stale initial control snapshot seq=${seq} current=${broadcastInventorySeq}`);
+      return;
+    }
     if (inventory) latestSessionInventory = inventory;
     try {
-      ws.send(JSON.stringify({ type: 'client-state', state: globalSessionState, inventory: inventory ?? latestSessionInventory }));
+      ws.send(JSON.stringify({ type: 'client-state', seq, state: globalSessionState, inventory: inventory ?? latestSessionInventory }));
     } catch {
       controlClients.delete(clientId);
       return;

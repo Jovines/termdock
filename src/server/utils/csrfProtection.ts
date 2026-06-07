@@ -1,5 +1,6 @@
 import crypto from 'crypto';
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
+import { getCookieSecurityOptions } from './cookieSecurity.js';
 
 /**
  * CSRF保护配置
@@ -29,8 +30,8 @@ export class CsrfProtection {
       tokenLength: config.tokenLength || 32,
       cookieOptions: {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
+        secure: config.cookieOptions?.secure ?? false,
+        sameSite: config.cookieOptions?.sameSite ?? 'strict',
         maxAge: 24 * 60 * 60 * 1000, // 24小时
         ...config.cookieOptions,
       },
@@ -68,11 +69,13 @@ export class CsrfProtection {
     */
    tokenMiddleware() {
      return (req: Request, res: Response, next: NextFunction) => {
-       // 如果是GET请求，生成并设置令牌
-       if (req.method === 'GET') {
+       if (req.method === 'GET' && !req.cookies?.[this.config.cookieName]) {
          const token = this.generateToken();
          
-         res.cookie(this.config.cookieName, token, this.config.cookieOptions);
+         res.cookie(this.config.cookieName, token, {
+           ...this.config.cookieOptions,
+           ...getCookieSecurityOptions(),
+         });
          
          // 对于API端点，也返回令牌在响应头中
          if (req.path.startsWith('/api/')) {
@@ -92,11 +95,6 @@ export class CsrfProtection {
        // 跳过安全检查和GET/HEAD/OPTIONS请求
        const safeMethods = ['GET', 'HEAD', 'OPTIONS'];
        if (safeMethods.includes(req.method)) {
-         return next();
-       }
-       
-       // 开发模式下跳过 CSRF 验证
-       if (process.env.NODE_ENV !== 'production') {
          return next();
        }
        
@@ -127,10 +125,16 @@ export class CsrfProtection {
    * 获取CSRF令牌端点处理器
    */
   getTokenHandler() {
-    return (_req: Request, res: Response) => {
-      const token = this.generateToken();
+    return (req: Request, res: Response) => {
+      const existing = req.cookies?.[this.config.cookieName];
+      const token = typeof existing === 'string' && existing.length > 0
+        ? existing
+        : this.generateToken();
       
-      res.cookie(this.config.cookieName, token, this.config.cookieOptions);
+      res.cookie(this.config.cookieName, token, {
+        ...this.config.cookieOptions,
+        ...getCookieSecurityOptions(),
+      });
       
       res.json({
         csrfToken: token,

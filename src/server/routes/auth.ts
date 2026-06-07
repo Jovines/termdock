@@ -13,6 +13,7 @@ import {
   setSessionCookie,
   verifyPassword,
 } from '../utils/authProtection.js';
+import { validateOriginMiddleware } from '../utils/requestSecurity.js';
 
 const router: express.Router = express.Router();
 
@@ -27,7 +28,7 @@ router.get('/status', (req, res) => {
 
 // POST /api/auth/login — public; verifies password, issues session cookie.
 // Rate-limited per source IP via exponential backoff.
-router.post('/login', (req, res) => {
+router.post('/login', validateOriginMiddleware, (req, res) => {
   if (!isAuthEnabled()) {
     return res.status(400).json({ error: 'Authentication is not enabled', code: 'AUTH_DISABLED' });
   }
@@ -58,7 +59,7 @@ router.post('/login', (req, res) => {
 
 // POST /api/auth/logout — public (idempotent). Invalidates the cookie's
 // session, if any.
-router.post('/logout', (req, res) => {
+router.post('/logout', validateOriginMiddleware, (req, res) => {
   const token = typeof req.cookies?.[AUTH_COOKIE] === 'string' ? req.cookies[AUTH_COOKIE] : undefined;
   destroySession(token);
   clearSessionCookie(res);

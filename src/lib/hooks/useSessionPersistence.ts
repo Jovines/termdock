@@ -140,6 +140,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const initialized = useRef(false);
   const activeSessionIdRef = useRef<string | null>(null);
   const isLoadingRef = useRef<boolean>(initialCached === null);
+  const lastSnapshotSeqRef = useRef(0);
   useEffect(() => { isLoadingRef.current = isLoading; }, [isLoading]);
 
   useEffect(() => {
@@ -386,6 +387,17 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   useEffect(() => {
     const unsubscribe = subscribeClientState((snapshot) => {
       if (isLoadingRef.current) return;
+      const snapshotSeq = typeof snapshot.seq === 'number' ? snapshot.seq : null;
+      if (snapshotSeq !== null) {
+        if (snapshotSeq < lastSnapshotSeqRef.current) {
+          console.warn('[session-inventory] ignored stale control snapshot', {
+            seq: snapshotSeq,
+            latestSeq: lastSnapshotSeqRef.current,
+          });
+          return;
+        }
+        lastSnapshotSeqRef.current = snapshotSeq;
+      }
       if (snapshot.inventory) {
         applyInventory(snapshot.inventory);
         return;

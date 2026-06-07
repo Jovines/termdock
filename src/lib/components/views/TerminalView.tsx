@@ -1,14 +1,14 @@
 import React from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { useTerminalStore } from '../../stores/useTerminalStore';
-import type { TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
+import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
 import { FLEXOKI_DARK } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
 import { probeTerminalConnection, updateSessionInventoryEntry } from '../../terminal/api';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
-import { buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, splitToolbarSequenceSegments, TOOLBAR_SEGMENT_DELAY_MS, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
+import { buildDesktopToolbarPresetOptions, buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, splitToolbarSequenceSegments, TOOLBAR_SEGMENT_DELAY_MS, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
 import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
@@ -33,6 +33,8 @@ const STREAM_OPTIONS = {
 
 interface TerminalViewProps {
   sessionId?: string;
+  mode?: TerminalMode;
+  tmuxSessionName?: string | null;
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
@@ -47,6 +49,8 @@ interface TerminalViewProps {
 
 export const TerminalView: React.FC<TerminalViewProps> = ({
   sessionId: initialSessionId,
+  mode: expectedMode,
+  tmuxSessionName: expectedTmuxSessionName = null,
   fontFamily = 'var(--font-mono)',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
   rendererMode = 'auto',
@@ -126,6 +130,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const bufferChunks = terminalState?.bufferChunks ?? [];
   const isConnecting = terminalState?.isConnecting ?? false;
   const terminalSessionId = terminalSessionRef;
+  const desiredSessionMode: TerminalMode = expectedMode ?? terminalState?.mode ?? 'shell';
+  const desiredTmuxSessionName = desiredSessionMode === 'tmux'
+    ? (expectedTmuxSessionName ?? terminalState?.tmuxSessionName ?? null)
+    : null;
 
   const [connectionError, setConnectionError] = React.useState<string | null>(null);
   const [isFatalError, setIsFatalError] = React.useState(false);
@@ -660,6 +668,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     };
   }, [disconnectStream]);
 
+  const desiredSessionModeRef = React.useRef<TerminalMode>(desiredSessionMode);
+  const desiredTmuxSessionNameRef = React.useRef<string | null>(desiredTmuxSessionName);
+  React.useEffect(() => {
+    const previousMode = desiredSessionModeRef.current;
+    const previousTmuxSessionName = desiredTmuxSessionNameRef.current;
+    desiredSessionModeRef.current = desiredSessionMode;
+    desiredTmuxSessionNameRef.current = desiredTmuxSessionName;
+    if (sessionIdRef.current !== sessionId) return;
+    if (previousMode === desiredSessionMode && previousTmuxSessionName === desiredTmuxSessionName) return;
+    hasInitializedRef.current = false;
+    disconnectStream();
+    setRestartTrigger((token) => token + 1);
+  }, [desiredSessionMode, desiredTmuxSessionName, disconnectStream, sessionId]);
+
   React.useEffect(() => {
     if (sessionIdRef.current !== sessionId) {
       debugSession(`[useEffect] sessionId changed from ${sessionIdRef.current} to ${sessionId}, allowing reinitialization`);
@@ -691,13 +713,32 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       const store = useTerminalStore.getState();
       const currentState = store.getTerminalSession(sessionId);
+      const currentMode = currentState?.mode ?? desiredSessionMode;
       debugSession(`[ensureSession] Current state from store:`, {
         terminalSessionId: currentState?.terminalSessionId,
+        mode: currentState?.mode,
+        tmuxSessionName: currentState?.tmuxSessionName,
         isConnecting: currentState?.isConnecting
       });
 
       let terminalId = currentState?.terminalSessionId ?? null;
       let shouldCreateNewSession = !terminalId;
+      if (terminalId && currentMode !== desiredSessionMode) {
+        debugSession(`[ensureSession] Store mode mismatch for ${terminalId}: current=${currentMode} desired=${desiredSessionMode}, will create new session`);
+        shouldCreateNewSession = true;
+        store.clearTerminalSession(sessionId);
+        terminalId = null;
+      } else if (
+        terminalId &&
+        desiredSessionMode === 'tmux' &&
+        desiredTmuxSessionName &&
+        currentState?.tmuxSessionName !== desiredTmuxSessionName
+      ) {
+        debugSession(`[ensureSession] Store tmux name mismatch for ${terminalId}: current=${currentState?.tmuxSessionName} desired=${desiredTmuxSessionName}, will create new session`);
+        shouldCreateNewSession = true;
+        store.clearTerminalSession(sessionId);
+        terminalId = null;
+      }
 
       if (terminalId && terminal.checkHealth) {
         debugSession(`[ensureSession] Checking health of existing session ${terminalId}`);
@@ -742,15 +783,23 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
         const currentStore = useTerminalStore.getState();
         const recheckedState = currentStore.getTerminalSession(sessionId);
-        if (recheckedState?.terminalSessionId) {
+        const recheckedMode = recheckedState?.mode ?? desiredSessionMode;
+        const recheckedMatchesDesired =
+          recheckedMode === desiredSessionMode &&
+          (
+            desiredSessionMode !== 'tmux' ||
+            !desiredTmuxSessionName ||
+            recheckedState?.tmuxSessionName === desiredTmuxSessionName
+          );
+        if (recheckedState?.terminalSessionId && recheckedMatchesDesired) {
           debugSession(`[ensureSession] Race condition avoided: another instance already created session ${recheckedState.terminalSessionId}`);
           store.setConnecting(sessionId, false);
           terminalId = recheckedState.terminalSessionId;
           shouldCreateNewSession = false;
         } else {
           try {
-            const modeForNewSession = currentState?.mode ?? 'shell';
-            const tmuxSessionNameForNewSession = currentState?.tmuxSessionName || fallbackTmuxSessionName;
+            const modeForNewSession = desiredSessionMode;
+            const tmuxSessionNameForNewSession = desiredTmuxSessionName || fallbackTmuxSessionName;
             const session = await terminal.createSession({
               mode: modeForNewSession,
               tmuxSessionName: modeForNewSession === 'tmux' ? tmuxSessionNameForNewSession : undefined,
@@ -816,7 +865,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => {
       debugSession(`[useEffect] Cleanup for sessionId=${sessionId}, runId=${runId}`);
     };
-  }, [sessionId, restartTrigger, startStream, disconnectStream, terminal, debugSession]);
+  }, [sessionId, restartTrigger, startStream, disconnectStream, terminal, debugSession, desiredSessionMode, desiredTmuxSessionName, fallbackTmuxSessionName]);
 
   const handleHardRestart = React.useCallback(async () => {
     if (!sessionId) return;
@@ -1188,7 +1237,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [activeModifier, handleViewportInput]);
 
   const detectedPreset = React.useMemo(() => detectToolbarPreset(detectedActiveProgram, toolbarPresets), [detectedActiveProgram, toolbarPresets]);
-  const effectivePresetId = toolbarPresetMode === 'auto' ? detectedPreset : toolbarPresetMode;
+  const storedPreset = React.useMemo(() => getToolbarPreset(toolbarPresets, toolbarPresetMode), [toolbarPresetMode, toolbarPresets]);
+  const renderPresetMode = !isMobile && toolbarPresetMode !== 'auto' && storedPreset.showOnDesktop !== true
+    ? 'auto'
+    : toolbarPresetMode;
+  const effectivePresetId = renderPresetMode === 'auto' ? detectedPreset : renderPresetMode;
   const toolbarPreset = React.useMemo(() => getToolbarPreset(toolbarPresets, effectivePresetId), [effectivePresetId, toolbarPresets]);
   const runtimeToolbarActions = React.useMemo(
     () => toolbarPreset.actions
@@ -1202,21 +1255,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const activeProgramLabel = React.useMemo(() => normalizeActiveProgram(detectedActiveProgram), [detectedActiveProgram]);
   const presetLabel = toolbarPreset.label;
   const presetModeLabel = React.useMemo(() => {
-    if (toolbarPresetMode !== 'auto') {
+    if (renderPresetMode !== 'auto') {
       return `Manual preset: ${toolbarPreset.label}`;
     }
 
     return activeProgramLabel
       ? `Auto preset · ${toolbarPreset.label} (${activeProgramLabel})`
       : 'Auto preset';
-  }, [activeProgramLabel, toolbarPreset.label, toolbarPresetMode]);
+  }, [activeProgramLabel, renderPresetMode, toolbarPreset.label]);
   const handlePresetSelect = React.useCallback((mode: ToolbarPresetMode) => {
     setToolbarPresetMode(mode);
   }, []);
   const handleExpandedChange = React.useCallback((nextExpanded: boolean) => {
     setShowExtendedKeyboard(nextExpanded);
   }, []);
-  const presetOptions = React.useMemo(() => buildToolbarPresetOptions(toolbarPresets), [toolbarPresets]);
+  const presetOptions = React.useMemo(
+    () => (isMobile ? buildToolbarPresetOptions(toolbarPresets) : buildDesktopToolbarPresetOptions(toolbarPresets)),
+    [isMobile, toolbarPresets],
+  );
 
   const xtermTheme = FLEXOKI_DARK;
 
@@ -1260,7 +1316,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     });
   }, [isActive, isMobile, isViewportKeyboardOpen, viewportKeyboardHeight, engine, sessionId]);
 
-  const isKeyboardVisible = isActive && isMobile;
+  const isKeyboardVisible = isActive && (isMobile || toolbarPreset.showOnDesktop === true);
 
   // The translateY / margin-top formulas are always applied on mobile.
   // They naturally evaluate to 0 when the keyboard is closed (appVh ===
@@ -1354,13 +1410,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       <MobileKeyboard
         visible={isKeyboardVisible}
+        presentation={isMobile ? 'mobile' : 'desktop-actions'}
         activeModifier={activeModifier}
         lockedModifier={lockedModifier}
         disabled={quickKeysDisabled}
         defaultShowExtended={showExtendedKeyboard}
         presetLabel={presetLabel}
         presetModeLabel={presetModeLabel}
-        presetMode={toolbarPresetMode}
+        presetMode={renderPresetMode}
         presetOptions={presetOptions}
         includeAlt={toolbarPreset.includeAlt}
         presetRowLayout={toolbarPreset.rowLayout}

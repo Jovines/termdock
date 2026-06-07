@@ -439,6 +439,33 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
           </span>
         </button>
 
+        {/* Desktop visibility */}
+        <button
+          type="button"
+          onClick={() =>
+            onUpdatePreset(selectedPreset.id, (preset) => ({ ...preset, showOnDesktop: !preset.showOnDesktop }))
+          }
+          className="flex w-full items-center justify-between rounded-2xl bg-surface-2 px-4 py-3 text-sm transition hover:bg-surface-elevated"
+        >
+          <span>
+            <span className="block font-medium text-foreground">{t('toolbarPresets.desktopVisibility')}</span>
+            <span className="block text-[11px] text-muted-foreground">
+              {t('toolbarPresets.desktopVisibilityHint')}
+            </span>
+          </span>
+          <span
+            className={`inline-flex h-6 w-10 shrink-0 items-center rounded-full transition ${
+              selectedPreset.showOnDesktop ? 'bg-primary/70' : 'bg-surface-elevated'
+            }`}
+          >
+            <span
+              className={`mx-0.5 inline-block h-5 w-5 rounded-full bg-foreground/90 transition ${
+                selectedPreset.showOnDesktop ? 'translate-x-4' : ''
+              }`}
+            />
+          </span>
+        </button>
+
         {/* Rows */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">

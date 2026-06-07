@@ -25,7 +25,7 @@ import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib
 import { getCwdLeafName, getSessionDisplayLines } from './lib/terminal/display';
 import type { TerminalRendererMode, TerminalEngine } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
-import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig } from './lib/terminal/api';
+import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
@@ -78,12 +78,29 @@ function isToolbarPresetsCacheDoc(v: unknown): v is ToolbarPresetsCacheDoc {
 interface SettingsCacheDoc {
   preventSleep: boolean;
   networkAvailable: boolean;
+  localAccess?: LocalAccessState;
 }
 function isSettingsCacheDoc(v: unknown): v is SettingsCacheDoc {
   return typeof v === 'object' && v !== null &&
     typeof (v as { preventSleep?: unknown }).preventSleep === 'boolean' &&
     typeof (v as { networkAvailable?: unknown }).networkAvailable === 'boolean';
 }
+
+const DEFAULT_LOCAL_ACCESS: LocalAccessState = {
+  name: '',
+  source: 'auto',
+  hostname: '',
+  fallbackHostname: '',
+  url: '',
+  fallbackUrl: '',
+  onboardingUrl: null,
+  status: 'disabled',
+  reason: null,
+  httpsEnabled: false,
+  caAvailable: false,
+  lanAddresses: [],
+  interfaces: [],
+};
 // Default shell names for initial render — overridden once the server responds
 // with the actual config. Kept in sync with the backend DEFAULT_PROGRAM_DETECTION.shellNames.
 const DEFAULT_SHELL_NAMES = ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu'];
@@ -175,6 +192,11 @@ function App() {
   const cachedSettings = React.useRef<SettingsCacheDoc | null>(readCache(SETTINGS_CACHE_KEY, isSettingsCacheDoc)).current;
   const [preventSleep, setPreventSleep] = React.useState(cachedSettings?.preventSleep ?? false);
   const [networkAvailable, setNetworkAvailable] = React.useState(cachedSettings?.networkAvailable ?? true);
+  const [localAccess, setLocalAccess] = React.useState<LocalAccessState>(cachedSettings?.localAccess ?? DEFAULT_LOCAL_ACCESS);
+  const [localAccessNameInput, setLocalAccessNameInput] = React.useState(cachedSettings?.localAccess?.name ?? '');
+  const [localAccessSaving, setLocalAccessSaving] = React.useState(false);
+  const [localAccessError, setLocalAccessError] = React.useState<string | null>(null);
+  const [localAccessCopied, setLocalAccessCopied] = React.useState<string | null>(null);
   const [debugInfo, setDebugInfo] = React.useState<Record<string, any>>({});
   const { fontSize, setFontSize } = useFontSize();
   const { rendererMode, setRendererMode, engine, setEngine } = useTerminalRenderer();
@@ -337,6 +359,67 @@ function App() {
     };
   }, []);
 
+  const handleSaveLocalAccess = useCallback(async () => {
+    setLocalAccessSaving(true);
+    setLocalAccessError(null);
+    try {
+      const result = await updateSettings({ localAccess: { name: localAccessNameInput } });
+      setLocalAccess(result.localAccess);
+      setLocalAccessNameInput(result.localAccess.name);
+      writeCache(SETTINGS_CACHE_KEY, {
+        preventSleep: result.preventSleep,
+        networkAvailable: result.networkAvailable,
+        localAccess: result.localAccess,
+      });
+    } catch (error) {
+      setLocalAccessError(error instanceof Error ? error.message : 'Failed to save local access name');
+    } finally {
+      setLocalAccessSaving(false);
+    }
+  }, [localAccessNameInput]);
+
+  const handleResetLocalAccess = useCallback(async () => {
+    setLocalAccessSaving(true);
+    setLocalAccessError(null);
+    try {
+      const result = await updateSettings({ localAccess: { reset: true } });
+      setLocalAccess(result.localAccess);
+      setLocalAccessNameInput(result.localAccess.name);
+      writeCache(SETTINGS_CACHE_KEY, {
+        preventSleep: result.preventSleep,
+        networkAvailable: result.networkAvailable,
+        localAccess: result.localAccess,
+      });
+    } catch (error) {
+      setLocalAccessError(error instanceof Error ? error.message : 'Failed to reset local access name');
+    } finally {
+      setLocalAccessSaving(false);
+    }
+  }, []);
+
+  const handleCopyText = useCallback(async (value: string | null | undefined, label = 'url') => {
+    if (!value) return;
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = value;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setLocalAccessCopied(label);
+      window.setTimeout(() => setLocalAccessCopied((current) => current === label ? null : current), 1600);
+    } catch {
+      setLocalAccessCopied(null);
+    }
+  }, []);
+
   const handleDragEnd = useCallback((result: DropResult) => {
     if (!result.destination || result.source.index === result.destination.index) return;
     const newOrder = [...sessions];
@@ -459,9 +542,8 @@ function App() {
         if (cancelled) return;
         const defaults = createDefaultToolbarPresets();
         const builtinIds = new Set(getBuiltinToolbarPresetIds());
-        const stored = sanitizeToolbarPresets(
-          Array.isArray(doc.presets) ? (doc.presets as ToolbarPresetDefinition[]) : [],
-        );
+        const rawStoredPresets = Array.isArray(doc.presets) ? (doc.presets as Partial<ToolbarPresetDefinition>[]) : [];
+        const stored = sanitizeToolbarPresets(rawStoredPresets);
         const storedVersion = typeof doc.version === 'number' ? doc.version : 0;
         const versionMismatch = storedVersion < BUILTIN_TOOLBAR_PRESETS_VERSION;
 
@@ -472,11 +554,19 @@ function App() {
           // Replace built-in presets with the latest definitions, but
           // preserve user-customized rowLayout from stored presets.
           const storedMap = new Map(stored.map((p) => [p.id, p]));
+          const rawStoredMap = new Map(rawStoredPresets.map((p) => [typeof p.id === 'string' ? p.id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-') : '', p]));
           const customPresets = stored.filter((preset) => !builtinIds.has(preset.id));
           const updatedDefaults = defaults.map((preset) => {
             const existing = storedMap.get(preset.id);
+            const rawExisting = rawStoredMap.get(preset.id);
             if (existing) {
-              return { ...preset, rowLayout: existing.rowLayout };
+              return {
+                ...preset,
+                rowLayout: existing.rowLayout,
+                showOnDesktop: typeof rawExisting?.showOnDesktop === 'boolean'
+                  ? rawExisting.showOnDesktop
+                  : preset.showOnDesktop,
+              };
             }
             return preset;
           });
@@ -532,9 +622,12 @@ function App() {
       .then((s) => {
         setPreventSleep((cur) => (cur === s.preventSleep ? cur : s.preventSleep));
         setNetworkAvailable((cur) => (cur === s.networkAvailable ? cur : s.networkAvailable));
+        setLocalAccess(s.localAccess);
+        setLocalAccessNameInput(s.localAccess.name);
         writeCache(SETTINGS_CACHE_KEY, {
           preventSleep: s.preventSleep,
           networkAvailable: s.networkAvailable,
+          localAccess: s.localAccess,
         });
       })
       .catch(() => { /* ignore — settings not available */ });
@@ -1151,9 +1244,11 @@ function App() {
                         const result = await updateSettings({ preventSleep: newValue });
                         setPreventSleep(result.preventSleep);
                         setNetworkAvailable(result.networkAvailable);
+                        setLocalAccess(result.localAccess);
                         writeCache(SETTINGS_CACHE_KEY, {
                           preventSleep: result.preventSleep,
                           networkAvailable: result.networkAvailable,
+                          localAccess: result.localAccess,
                         });
                       } catch {
                         setPreventSleep(!newValue);
@@ -1175,6 +1270,97 @@ function App() {
                   </button>
                 </div>
               </div>
+
+              <details className="mt-3 rounded-xl bg-surface-2 px-3 py-3" open={false}>
+                <summary className="flex cursor-pointer items-start justify-between gap-2 list-none">
+                  <div>
+                    <div className="text-[12px] font-medium text-foreground/90">{t('settings.localAccess')}</div>
+                    <div className="mt-0.5 text-[10px] text-muted-foreground">{t('settings.localAccessHint')}</div>
+                  </div>
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] ${localAccess.status === 'active' ? 'bg-primary/15 text-primary' : 'bg-surface text-muted-foreground'}`}>
+                    {localAccess.status}
+                  </span>
+                </summary>
+                <div className="mt-3 flex items-center overflow-hidden rounded-lg bg-surface ring-1 ring-border/10 focus-within:ring-primary/40">
+                  <input
+                    value={localAccessNameInput}
+                    onChange={(event) => setLocalAccessNameInput(event.target.value.toLowerCase())}
+                    className="min-w-0 flex-1 bg-transparent px-2.5 py-2 text-[12px] text-foreground outline-none"
+                    placeholder="jovn"
+                    spellCheck={false}
+                  />
+                  <span className="shrink-0 border-l border-border/10 px-2.5 py-2 text-[11px] text-muted-foreground">.termdock.local</span>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={localAccessSaving}
+                    onClick={() => void handleSaveLocalAccess()}
+                    className="rounded-full bg-primary/15 px-3 py-1.5 text-[11px] font-medium text-primary transition hover:bg-primary/25 disabled:opacity-50"
+                  >
+                    {localAccessSaving ? t('settings.saving') : t('common.save')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={localAccessSaving}
+                    onClick={() => void handleResetLocalAccess()}
+                    className="rounded-full bg-surface px-3 py-1.5 text-[11px] font-medium text-muted-foreground transition hover:bg-surface-elevated disabled:opacity-50"
+                  >
+                    {t('settings.resetAutoName')}
+                  </button>
+                </div>
+                <div className="mt-3 space-y-1.5 text-[11px]">
+                  {localAccess.url && (
+                    <button type="button" onClick={() => void handleCopyText(localAccess.url, 'lan')} className="flex w-full items-center justify-between gap-2 rounded-lg bg-surface px-2.5 py-2 text-left text-primary transition hover:bg-surface-elevated">
+                      <span className="min-w-0 truncate">{localAccess.url}</span>
+                      <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium">{localAccessCopied === 'lan' ? 'Copied' : t('common.copy')}</span>
+                    </button>
+                  )}
+                  {localAccess.fallbackUrl && localAccess.fallbackUrl !== localAccess.url && (
+                    <button type="button" onClick={() => void handleCopyText(localAccess.fallbackUrl, 'fallback')} className="flex w-full items-center justify-between gap-2 rounded-lg bg-surface px-2.5 py-2 text-left text-amber-300 transition hover:bg-surface-elevated">
+                      <span className="min-w-0 truncate">Fallback: {localAccess.fallbackUrl}</span>
+                      <span className="shrink-0 rounded-full bg-amber-400/10 px-2 py-0.5 text-[10px] font-medium">{localAccessCopied === 'fallback' ? 'Copied' : t('common.copy')}</span>
+                    </button>
+                  )}
+                  {localAccess.interfaces.length > 0 && (
+                    <details className="rounded-lg bg-surface px-2.5 py-2 text-muted-foreground" open={false}>
+                      <summary className="cursor-pointer text-[11px] font-medium text-foreground/80">IP fallback addresses</summary>
+                      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {localAccess.interfaces.map((entry) => {
+                          const url = entry.url ?? `${localAccess.httpsEnabled ? 'https' : 'http'}://${entry.address}:9834`;
+                          return (
+                            <div key={`${entry.name}-${entry.address}`} className="rounded-lg bg-surface-2 p-2">
+                              <div className="text-[11px] font-medium text-foreground/85">{entry.label} ({entry.name})</div>
+                              <div className="mt-0.5 text-[10px] text-muted-foreground">{entry.address}</div>
+                              {entry.qrDataUrl && (
+                                <div className="mt-2 inline-block rounded-lg bg-white p-1.5">
+                                  <img src={entry.qrDataUrl} alt={`QR code for ${url}`} className="h-28 w-28" />
+                                </div>
+                              )}
+                              <button type="button" onClick={() => void handleCopyText(url, `ip-${entry.address}`)} className="mt-2 flex w-full items-center justify-between gap-2 rounded-md bg-surface px-2 py-1.5 text-left text-[11px] transition hover:bg-surface-elevated">
+                                <span className="min-w-0 truncate">{url}</span>
+                                <span className="shrink-0 text-[10px]">{localAccessCopied === `ip-${entry.address}` ? 'Copied' : t('common.copy')}</span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  )}
+                  {localAccess.onboardingUrl && (
+                    <button type="button" onClick={() => void handleCopyText(localAccess.onboardingUrl, 'setup')} className="flex w-full items-center justify-between gap-2 rounded-lg bg-surface px-2.5 py-2 text-left text-muted-foreground transition hover:bg-surface-elevated">
+                      <span className="min-w-0 truncate">{t('settings.onboardingUrl')}: {localAccess.onboardingUrl}</span>
+                      <span className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium">{localAccessCopied === 'setup' ? 'Copied' : t('common.copy')}</span>
+                    </button>
+                  )}
+                  <div className="text-muted-foreground">
+                    {localAccess.httpsEnabled ? t('settings.httpsActive') : t('settings.httpsInactive')}
+                    {!localAccess.caAvailable && ` · ${t('settings.caMissing')}`}
+                  </div>
+                  {localAccess.reason && <div className="text-amber-400">{localAccess.reason}</div>}
+                  {localAccessError && <div className="text-destructive">{localAccessError}</div>}
+                </div>
+              </details>
 
               {/* New session shortcut */}
               <div className="mt-3 grid grid-cols-2 gap-2">
@@ -1640,6 +1826,7 @@ function App() {
                       includeAlt: false,
                       rowLayout: [3, 3],
                       actions: [],
+                      showOnDesktop: false,
                     },
                   ]));
                   setSelectedToolbarPresetId(presetId);

@@ -9,6 +9,9 @@ import { promisify } from 'util';
 import { Writable } from 'stream';
 import { createRequire } from 'module';
 import { PORT, DEFAULT_HOST } from './config.js';
+import { isFirstRunCompleted, markFirstRunCompleted, normalizeLocalAccessName, setLocalAccessSetting, getLocalAccessSetting } from './utils/settings.js';
+import { getLanIPv4Addresses } from './utils/localAccess.js';
+import type { StartServerResult } from './entry.js';
 import {
   clearAuthFile,
   destroyAllSessions,
@@ -38,6 +41,10 @@ const TERMDOCK_PID = String(process.pid);
 const stateDir = path.join(os.homedir(), '.termdock');
 const stateFilePath = path.join(stateDir, 'server.json');
 const logFilePath = path.join(stateDir, 'server.log');
+const certDir = path.join(stateDir, 'certs');
+const defaultHttpsCertPath = path.join(certDir, 'termdock-local.pem');
+const defaultHttpsKeyPath = path.join(certDir, 'termdock-local-key.pem');
+const defaultHttpsCaPath = path.join(certDir, 'rootCA.pem');
 
 // ANSI color helpers. Disabled when stdout is not a TTY (e.g. piped, log file)
 // or when the user opts out via NO_COLOR / FORCE_COLOR=0.
@@ -71,6 +78,10 @@ const ICON = {
 interface CliOptions {
   host?: string;
   port?: number;
+  httpsCert?: string;
+  httpsKey?: string;
+  httpsCa?: string;
+  setupLocalHttps: boolean;
   foreground: boolean;
   status: boolean;
   stop: boolean;
@@ -89,6 +100,12 @@ interface ServerState {
   pid: number;
   host: string;
   port: number;
+  scheme?: 'http' | 'https';
+  localUrl?: string;
+  lanUrl?: string;
+  onboardingUrl?: string | null;
+  localAccessStatus?: string;
+  localAccessReason?: string | null;
   logFile: string;
   startedAt: string;
 }
@@ -99,6 +116,11 @@ function printHelp() {
 Options:
   --host <host>      Host to bind to (default: ${DEFAULT_HOST})
   --port <port>      Port to listen on (default: ${PORT.backend})
+  --https-cert <p>   HTTPS certificate path for local access
+  --https-key <p>    HTTPS private key path for local access
+  --https-ca <p>     CA certificate path exposed through a temporary mobile setup server
+  --setup-local-https
+                     Generate and trust local HTTPS certs with mkcert
   --foreground       Run in the foreground
   --status           Show background server status
   --stop             Stop the background server
@@ -177,6 +199,105 @@ function writeState(state: ServerState) {
   fs.writeFileSync(stateFilePath, JSON.stringify(state, null, 2));
 }
 
+function fileExists(filePath: string | undefined): filePath is string {
+  return typeof filePath === 'string' && filePath.length > 0 && fs.existsSync(filePath);
+}
+
+function resolveHttpsOptions(options: Pick<CliOptions, 'httpsCert' | 'httpsKey' | 'httpsCa'>): { cert?: string; key?: string; ca?: string; source: 'explicit' | 'default' | 'none' } {
+  if (options.httpsCert || options.httpsKey || options.httpsCa) {
+    return {
+      cert: options.httpsCert,
+      key: options.httpsKey,
+      ca: options.httpsCa,
+      source: options.httpsCert && options.httpsKey ? 'explicit' : 'none',
+    };
+  }
+  if (fileExists(defaultHttpsCertPath) && fileExists(defaultHttpsKeyPath)) {
+    return {
+      cert: defaultHttpsCertPath,
+      key: defaultHttpsKeyPath,
+      ca: fileExists(defaultHttpsCaPath) ? defaultHttpsCaPath : undefined,
+      source: 'default',
+    };
+  }
+  return { source: 'none' };
+}
+
+async function commandExists(command: string): Promise<boolean> {
+  try {
+    await execFileAsync(command, ['--version'], { timeout: 5000, maxBuffer: 128 * 1024 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureMkcertInstalled(): Promise<void> {
+  if (await commandExists('mkcert')) return;
+
+  if (!(await commandExists('brew'))) {
+    console.error(`${ICON.err} ${c.red('mkcert is required for local HTTPS setup, and Homebrew was not found.')}`);
+    console.error(`  ${c.dim('Install Homebrew first, or manually install:')} ${c.cyan('brew install mkcert')}`);
+    process.exit(1);
+  }
+
+  console.log(`${ICON.info} ${c.dim('mkcert is not installed. Installing with Homebrew...')}`);
+  try {
+    await execFileAsync('brew', ['install', 'mkcert'], { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 });
+  } catch (error) {
+    console.error(`${ICON.err} ${c.red('Failed to install mkcert with Homebrew.')}`);
+    const err = error as { stderr?: string; message?: string };
+    const detail = (err.stderr || err.message || '').toString().trim();
+    if (detail) console.error(detail);
+    process.exit(1);
+  }
+}
+
+async function runSetupLocalHttps(): Promise<void> {
+  await ensureMkcertInstalled();
+
+  ensureStateDir();
+  fs.mkdirSync(certDir, { recursive: true, mode: 0o700 });
+
+  console.log(`${ICON.info} ${c.dim('Installing local CA into this computer trust store...')}`);
+  await execFileAsync('mkcert', ['-install'], { timeout: 120000, maxBuffer: 1024 * 1024 });
+
+  console.log(`${ICON.info} ${c.dim('Generating local certificate for Termdock domains...')}`);
+  const localName = getLocalAccessSetting().name;
+  const lanAddresses = getLanIPv4Addresses();
+  await execFileAsync('mkcert', [
+    '-cert-file', defaultHttpsCertPath,
+    '-key-file', defaultHttpsKeyPath,
+    '*.termdock.local',
+    `${localName}.termdock.local`,
+    ...lanAddresses,
+    'localhost',
+    '127.0.0.1',
+    '::1',
+  ], { cwd: certDir, timeout: 120000, maxBuffer: 1024 * 1024 });
+
+  try {
+    const { stdout } = await execFileAsync('mkcert', ['-CAROOT'], { timeout: 5000, maxBuffer: 64 * 1024 });
+    const rootCA = path.join(stdout.trim(), 'rootCA.pem');
+    if (fs.existsSync(rootCA)) {
+      fs.copyFileSync(rootCA, defaultHttpsCaPath);
+      try { fs.chmodSync(defaultHttpsCaPath, 0o600); } catch { /* ignore */ }
+    }
+  } catch { /* CA download is optional but recommended */ }
+
+  try { fs.chmodSync(defaultHttpsCertPath, 0o600); } catch { /* ignore */ }
+  try { fs.chmodSync(defaultHttpsKeyPath, 0o600); } catch { /* ignore */ }
+
+  console.log(`${ICON.ok} ${c.green('Local HTTPS certificates are ready.')}`);
+  console.log(`  ${c.dim('Cert:')} ${c.cyan(defaultHttpsCertPath)}`);
+  console.log(`  ${c.dim('Key:')}  ${c.cyan(defaultHttpsKeyPath)}`);
+  if (fs.existsSync(defaultHttpsCaPath)) {
+    console.log(`  ${c.dim('CA:')}   ${c.cyan(defaultHttpsCaPath)} ${c.dim('(served on mobile setup page)')}`);
+  }
+  console.log('');
+  console.log(`${ICON.info} ${c.dim('Restart Termdock to use HTTPS:')} ${c.cyan('termdock --stop && termdock')}`);
+}
+
 function printRunningState(state: ServerState) {
   const displayHost = state.host === '0.0.0.0' ? 'localhost' : state.host;
   const authLine = isAuthEnabled()
@@ -184,7 +305,10 @@ function printRunningState(state: ServerState) {
     : `${c.red('disabled')} ${c.dim('(no password — anyone on the LAN can connect)')}`;
   console.log(`${ICON.ok} ${c.green('Termdock is running in background.')}`);
   console.log(`  ${c.dim('PID:')}  ${state.pid}`);
-  console.log(`  ${c.dim('URL:')}  ${c.cyan(`http://${displayHost}:${state.port}`)}`);
+  console.log(`  ${c.dim('URL:')}  ${c.cyan(state.localUrl ?? `http://${displayHost}:${state.port}`)}`);
+  if (state.lanUrl) console.log(`  ${c.dim('LAN:')}  ${c.cyan(state.lanUrl)} ${state.localAccessStatus ? c.dim(`(${state.localAccessStatus})`) : ''}`);
+  if (state.onboardingUrl) console.log(`  ${c.dim('Setup:')} ${c.cyan(state.onboardingUrl)} ${c.dim('(open this on your phone to download the CA certificate)')}`);
+  if (state.localAccessReason) console.log(`  ${c.dim('LAN note:')} ${state.localAccessReason}`);
   console.log(`  ${c.dim('Log:')}  ${state.logFile}`);
   console.log(`  ${c.dim('Auth:')} ${authLine}`);
 }
@@ -192,6 +316,10 @@ function printRunningState(state: ServerState) {
 function parseArgs(argv: string[]): CliOptions {
   let host: string | undefined;
   let port: number | undefined;
+  let httpsCert: string | undefined;
+  let httpsKey: string | undefined;
+  let httpsCa: string | undefined;
+  let setupLocalHttps = false;
   let foreground = false;
   let status = false;
   let stop = false;
@@ -236,6 +364,29 @@ function parseArgs(argv: string[]): CliOptions {
       }
       port = parsedPort;
       index += 1;
+      continue;
+    }
+
+    if (arg === '--https-cert') {
+      httpsCert = argv[index + 1];
+      index += 1;
+      continue;
+    }
+
+    if (arg === '--https-key') {
+      httpsKey = argv[index + 1];
+      index += 1;
+      continue;
+    }
+
+    if (arg === '--https-ca') {
+      httpsCa = argv[index + 1];
+      index += 1;
+      continue;
+    }
+
+    if (arg === '--setup-local-https') {
+      setupLocalHttps = true;
       continue;
     }
 
@@ -307,6 +458,10 @@ function parseArgs(argv: string[]): CliOptions {
   return {
     host,
     port,
+    httpsCert,
+    httpsKey,
+    httpsCa,
+    setupLocalHttps,
     foreground,
     status,
     stop,
@@ -842,7 +997,68 @@ async function runNewTmux(opts: { name?: string; attach?: boolean }): Promise<vo
 
 // ── end --attach-tmux / --new-tmux ──
 
+async function promptLine(prompt: string): Promise<string> {
+  if (!(process.stdin as NodeJS.ReadStream).isTTY) return '';
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(prompt, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+async function runFirstRunWizard(): Promise<void> {
+  if (!(process.stdin as NodeJS.ReadStream).isTTY || isFirstRunCompleted()) return;
+  console.log(`${ICON.info} ${c.bold('Termdock first-time local access setup')}`);
+  const prefix = await promptLine('  Choose your .termdock.local prefix (e.g. jovn): ');
+  const normalized = normalizeLocalAccessName(prefix);
+  if (normalized) {
+    setLocalAccessSetting({ name: normalized, source: 'manual' });
+    console.log(`  ${ICON.ok} ${c.dim('Local URL prefix:')} ${c.cyan(`${normalized}.termdock.local`)}`);
+  } else {
+    console.log(`  ${ICON.warn} ${c.yellow('No valid prefix entered; using generated default for now.')}`);
+  }
+
+  const enableHttps = (await promptLine('  Enable HTTPS automatically now? [Y/n] ')).toLowerCase();
+  if (enableHttps !== 'n' && enableHttps !== 'no') {
+    await runSetupLocalHttps();
+  } else {
+    console.log(`  ${ICON.info} ${c.dim('You can enable HTTPS later with:')} ${c.cyan('termdock --setup-local-https')}`);
+  }
+  markFirstRunCompleted();
+  console.log('');
+}
+
+async function waitForServerMetadata(result: StartServerResult, fallbackPort: number): Promise<{ lanUrl?: string; onboardingUrl?: string | null; status?: string; reason?: string | null }> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const state = result.getLocalAccessState();
+    const onboardingUrl = result.getOnboardingUrl() ?? state.onboardingUrl;
+    if (state.status !== 'disabled' || state.reason !== 'Local access has not started yet.') {
+      return {
+        lanUrl: state.url,
+        onboardingUrl,
+        status: state.status,
+        reason: state.reason,
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const state = result.getLocalAccessState();
+  return {
+    lanUrl: state.url || undefined,
+    onboardingUrl: result.getOnboardingUrl() ?? state.onboardingUrl,
+    status: state.status,
+    reason: state.reason ?? `Metadata still initializing on port ${fallbackPort}.`,
+  };
+}
+
 async function main(): Promise<void> {
+  if (options.setupLocalHttps) {
+    await runSetupLocalHttps();
+    process.exit(0);
+  }
+
   if (options.tls) {
     await runTls({ all: options.tlsAll, json: options.tlsJson });
     process.exit(0);
@@ -867,6 +1083,8 @@ async function main(): Promise<void> {
     runClearPassword();
     process.exit(0);
   }
+
+  const https = resolveHttpsOptions(options);
 
   if (options.status) {
     const runningState = getRunningState();
@@ -897,12 +1115,32 @@ async function main(): Promise<void> {
     // Dynamic import keeps terminal.ts side-effects (loadClientStatesFromDisk
     // etc.) out of fast paths like `termdock --tls` / `--status`.
     const { startServer } = await import('./entry.js');
-    const server = startServer({ host: options.host, port: options.port });
-    server.on('close', () => {
+    const result = startServer({
+      host: options.host,
+      port: options.port,
+      httpsCertPath: https.cert,
+      httpsKeyPath: https.key,
+      httpsCaPath: https.ca,
+    });
+    result.server.on('close', () => {
       const runningState = readState();
       if (runningState?.pid === process.pid) {
         removeStateFile();
       }
+    });
+    const metadata = await waitForServerMetadata(result, options.port ?? PORT.backend);
+    writeState({
+      pid: process.pid,
+      host: options.host ?? DEFAULT_HOST,
+      port: options.port ?? PORT.backend,
+      scheme: result.scheme,
+      localUrl: `${result.scheme}://${(options.host ?? DEFAULT_HOST) === '0.0.0.0' ? 'localhost' : (options.host ?? DEFAULT_HOST)}:${options.port ?? PORT.backend}`,
+      lanUrl: metadata.lanUrl,
+      onboardingUrl: metadata.onboardingUrl,
+      localAccessStatus: metadata.status,
+      localAccessReason: metadata.reason,
+      logFile: logFilePath,
+      startedAt: new Date().toISOString(),
     });
     return;
   }
@@ -912,6 +1150,11 @@ async function main(): Promise<void> {
     printRunningState(runningState);
     process.exit(0);
   }
+
+  await runFirstRunWizard();
+
+  const refreshedHttps = resolveHttpsOptions(options);
+  const activeHttps = refreshedHttps;
 
   ensureStateDir();
   const logFileFd = fs.openSync(logFilePath, 'a');
@@ -927,6 +1170,23 @@ async function main(): Promise<void> {
     childArgs.push('--port', String(options.port));
   }
 
+  if (activeHttps.cert) {
+    childArgs.push('--https-cert', activeHttps.cert);
+  }
+
+  if (activeHttps.key) {
+    childArgs.push('--https-key', activeHttps.key);
+  }
+
+  if (activeHttps.ca) {
+    childArgs.push('--https-ca', activeHttps.ca);
+  }
+
+  const scheme = activeHttps.cert && activeHttps.key ? 'https' : 'http';
+  const localAccessReason = activeHttps.source === 'default'
+    ? 'Using local HTTPS certificates from ~/.termdock/certs.'
+    : null;
+
   const child = spawn(process.execPath, childArgs, {
     detached: true,
     stdio: ['ignore', logFileFd, logFileFd],
@@ -939,12 +1199,20 @@ async function main(): Promise<void> {
     pid: child.pid!,
     host: childHost,
     port: childPort,
+    scheme,
+    localUrl: `${scheme}://${childHost === '0.0.0.0' ? 'localhost' : childHost}:${childPort}`,
+    localAccessReason,
     logFile: logFilePath,
     startedAt: new Date().toISOString(),
   });
 
   console.log(`${ICON.ok} ${c.green('Termdock started in background.')}`);
-  console.log(`  ${c.dim('URL:')} ${c.cyan(`http://${childHost === '0.0.0.0' ? 'localhost' : childHost}:${childPort}`)}`);
+  console.log(`  ${c.dim('URL:')} ${c.cyan(`${scheme}://${childHost === '0.0.0.0' ? 'localhost' : childHost}:${childPort}`)}`);
+  if (scheme === 'https') {
+    console.log(`  ${c.dim('HTTPS:')} ${activeHttps.source === 'default' ? c.green('auto') : c.green('enabled')}`);
+  } else {
+    console.log(`  ${c.dim('HTTPS:')} ${c.dim('not configured — run termdock --setup-local-https')}`);
+  }
   console.log(`  ${c.dim('PID:')} ${child.pid}`);
   console.log(`  ${c.dim('Log:')} ${logFilePath}`);
   warnIfAuthDisabled(childHost);

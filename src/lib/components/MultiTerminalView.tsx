@@ -43,6 +43,84 @@ interface CloseSessionEventDetail {
 
 const SWIPE_ANIMATION_SPEED_MS = 320;
 
+function summarizeDuplicateMappings(sessions: TerminalSession[]): Array<{ kind: 'frontend' | 'backend' | 'tmux'; key: string; sessionIds: string[] }> {
+  const buckets: Array<{ kind: 'frontend' | 'backend' | 'tmux'; key: string; sessionIds: string[] }> = [];
+  const frontend = new Map<string, string[]>();
+  const backend = new Map<string, string[]>();
+  const tmux = new Map<string, string[]>();
+
+  for (const session of sessions) {
+    const frontendIds = frontend.get(session.id) ?? [];
+    frontendIds.push(session.id);
+    frontend.set(session.id, frontendIds);
+
+    if (session.sessionId) {
+      const backendIds = backend.get(session.sessionId) ?? [];
+      backendIds.push(session.id);
+      backend.set(session.sessionId, backendIds);
+    }
+
+    if (session.mode === 'tmux' && session.tmuxSessionName) {
+      const tmuxIds = tmux.get(session.tmuxSessionName) ?? [];
+      tmuxIds.push(session.id);
+      tmux.set(session.tmuxSessionName, tmuxIds);
+    }
+  }
+
+  for (const [key, sessionIds] of frontend) {
+    if (sessionIds.length > 1) buckets.push({ kind: 'frontend', key, sessionIds });
+  }
+  for (const [key, sessionIds] of backend) {
+    if (sessionIds.length > 1) buckets.push({ kind: 'backend', key, sessionIds });
+  }
+  for (const [key, sessionIds] of tmux) {
+    if (sessionIds.length > 1) buckets.push({ kind: 'tmux', key, sessionIds });
+  }
+
+  return buckets;
+}
+
+function dedupeRuntimeSessions(sessions: TerminalSession[]): TerminalSession[] {
+  const byId = new Map<string, TerminalSession>();
+  for (const session of sessions) {
+    byId.set(session.id, session);
+  }
+  return Array.from(byId.values());
+}
+
+function toRuntimeSession(session: PersistedSession): TerminalSession {
+  return {
+    id: session.sessionId,
+    name: session.name,
+    customName: session.customName === true,
+    sessionId: session.backendSessionId,
+    mode: session.mode === 'tmux' || session.mode === 'shell' ? session.mode : 'shell',
+    tmuxSessionName: session.tmuxSessionName ?? null,
+  };
+}
+
+function upsertRuntimeSession(sessions: TerminalSession[], nextSession: TerminalSession): TerminalSession[] {
+  const next = dedupeRuntimeSessions(sessions);
+  const existingIndex = next.findIndex((session) => session.id === nextSession.id);
+  if (existingIndex >= 0) {
+    const updated = [...next];
+    updated[existingIndex] = nextSession;
+    return updated;
+  }
+  return [...next, nextSession];
+}
+
+function syncRuntimeSessionsFromPersisted(current: TerminalSession[], persisted: PersistedSession[]): TerminalSession[] {
+  const currentById = new Map(current.map((session) => [session.id, session]));
+  return persisted.map((session) => {
+    const existing = currentById.get(session.sessionId);
+    return {
+      ...toRuntimeSession(session),
+      history: existing?.history,
+    };
+  });
+}
+
 function getSwipeEventPointerType(event: unknown): string {
   if (!event || typeof event !== 'object') {
     return 'unknown';
@@ -109,6 +187,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const isTouchSwipeRef = useRef(false);
   const isMobileRef = useRef(false);
   const handleNewSessionRef = useRef<((options?: NewSessionEventDetail) => Promise<void>) | null>(null);
+  const lastDuplicateMappingSnapshotRef = useRef('');
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -291,6 +370,15 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   // Notify parent of session data changes
   useEffect(() => {
+    const duplicateMappings = summarizeDuplicateMappings(sessions);
+    const duplicateSnapshot = JSON.stringify(duplicateMappings);
+    if (duplicateMappings.length > 0 && duplicateSnapshot !== lastDuplicateMappingSnapshotRef.current) {
+      lastDuplicateMappingSnapshotRef.current = duplicateSnapshot;
+      console.warn('[session-invariant] duplicate mapping detected', duplicateMappings);
+    } else if (duplicateMappings.length === 0 && lastDuplicateMappingSnapshotRef.current) {
+      lastDuplicateMappingSnapshotRef.current = '';
+    }
+
     onSessionDataUpdate?.({
       sessions: sessions.map((s) => ({
         id: s.id,
@@ -365,11 +453,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
         sessionCount = restored.length;
         debugSession('[Session] Restored sessions:', restored.length);
-        setSessions(restored);
-        setActiveSessionId(persistedActiveId || restored[0]?.id || null);
+        const restoredSessions = dedupeRuntimeSessions(restored);
+        setSessions(restoredSessions);
+        setActiveSessionId(persistedActiveId || restoredSessions[0]?.id || null);
 
         const store = useTerminalStore.getState();
-        restored.forEach((session) => {
+        restoredSessions.forEach((session) => {
           if (session.sessionId) {
             void updateSessionBackendId(session.id, session.sessionId);
             store.setTerminalSession(session.id, {
@@ -390,14 +479,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         });
       } catch (error) {
         console.error('[Session] Failed to restore sessions:', error);
-        const fallbackSessions = persistedSessions.map((session) => ({
+        const fallbackSessions = dedupeRuntimeSessions(persistedSessions.map((session) => ({
           id: session.sessionId,
           name: session.name,
           customName: session.customName === true,
           sessionId: null as string | null,
           mode: session.mode === 'tmux' || session.mode === 'shell' ? session.mode : defaultSessionMode,
           tmuxSessionName: session.tmuxSessionName ?? null,
-        }));
+        })));
         setSessions(fallbackSessions);
         sessionCount = fallbackSessions.length;
         setActiveSessionId(persistedActiveId || fallbackSessions[0]?.id || null);
@@ -425,8 +514,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // 增量同步：轮询检测到 persistedSessions 变化时，处理新增/移除/重命名的 session
   const prevPersistedRef = useRef<PersistedSession[]>([]);
   const seededRef = useRef(false);
-  const sessionsRef = useRef<TerminalSession[]>(sessions);
-  sessionsRef.current = sessions;
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
   useEffect(() => {
@@ -437,6 +524,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     // Seed the ref on first non-restoring render (before any diff logic)
     if (!seededRef.current) {
+      setSessions((prevSessions) => syncRuntimeSessionsFromPersisted(prevSessions, curr));
       prevPersistedRef.current = curr;
       seededRef.current = true;
       return;
@@ -444,77 +532,45 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     const prevIds = new Set(prev.map(s => s.sessionId));
     const currIds = new Set(curr.map(s => s.sessionId));
-    // Local sessions already have backend connections — skip these
-    const localIds = new Set(sessionsRef.current.map(s => s.id));
-
-    // New sessions (appeared in persisted but not in prev, and not already local)
-    const newPersisted = curr.filter(ps => !prevIds.has(ps.sessionId) && !localIds.has(ps.sessionId));
-    // Removed sessions (disappeared from persisted)
-    const removedSessionIds = [...prevIds].filter(id => !currIds.has(id));
-    // Renamed sessions
     const prevNameMap = new Map(prev.map(s => [s.sessionId, s.name]));
+
+    prevPersistedRef.current = curr;
+
+    setSessions((prevSessions) => {
+      const synced = syncRuntimeSessionsFromPersisted(prevSessions, curr);
+      if (!activeSessionIdRef.current || !synced.some((session) => session.id === activeSessionIdRef.current)) {
+        setActiveSessionId(synced[0]?.id ?? null);
+      }
+      return synced;
+    });
+
+    const newPersisted = curr.filter(ps => !prevIds.has(ps.sessionId));
+    const removedSessionIds = [...prevIds].filter(id => !currIds.has(id));
     const renamedSessions = curr.filter(ps =>
       prevIds.has(ps.sessionId) && prevNameMap.get(ps.sessionId) !== ps.name
     );
 
-    prevPersistedRef.current = curr;
-
-    // Handle new sessions: attach to existing terminals
-    if (newPersisted.length > 0) {
-      (async () => {
-        const attached = await Promise.all(
-          newPersisted.map(async (ps) => {
-            try {
-              return await restoreOrCreateSession(ps);
-            } catch {
-              return null;
-            }
-          })
-        );
-        const validAttached = attached.filter((s): s is TerminalSession => s !== null);
-        if (validAttached.length > 0) {
-          setSessions(prev => [...prev, ...validAttached]);
-          validAttached.forEach(session => {
-            if (session.sessionId) {
-              void updateSessionBackendId(session.id, session.sessionId);
-              const store = useTerminalStore.getState();
-              store.setTerminalSession(session.id, {
-                sessionId: session.sessionId,
-                cols: 80, rows: 24,
-                mode: session.mode,
-                tmuxSessionName: session.tmuxSessionName,
-              });
-            }
-          });
-        }
-      })();
-    }
-
-    // Handle removed sessions: remove from local state (don't kill backend)
-    if (removedSessionIds.length > 0) {
-      const currentActiveId = activeSessionIdRef.current;
-      setSessions(prev => {
-        const remaining = prev.filter(s => !removedSessionIds.includes(s.id));
-        if (remaining.length !== prev.length) {
-          const wasActiveRemoved = !remaining.some(s => s.id === currentActiveId);
-          if (wasActiveRemoved && remaining.length > 0) {
-            setActiveSessionId(remaining[0].id);
-          } else if (remaining.length === 0) {
-            setActiveSessionId(null);
-          }
-        }
-        return remaining;
+    if (newPersisted.length > 0 || removedSessionIds.length > 0 || renamedSessions.length > 0) {
+      debugSession('[Session] Synced persisted sessions:', {
+        newSessionIds: newPersisted.map((session) => session.sessionId),
+        removedSessionIds,
+        renamedSessionIds: renamedSessions.map((session) => session.sessionId),
+        currentSessionIds: curr.map((session) => session.sessionId),
       });
     }
 
-    // Handle renamed sessions
-    if (renamedSessions.length > 0) {
-      const renameMap = new Map(renamedSessions.map(ps => [ps.sessionId, ps.name]));
-      setSessions(prev => prev.map(s =>
-        renameMap.has(s.id) ? { ...s, name: renameMap.get(s.id)!, customName: true } : s
-      ));
+    for (const session of curr) {
+      if (!session.backendSessionId) continue;
+      const store = useTerminalStore.getState();
+      store.setTerminalSession(session.sessionId, {
+        sessionId: session.backendSessionId,
+        cols: 80,
+        rows: 24,
+        mode: session.mode,
+        tmuxSessionName: session.tmuxSessionName,
+      });
     }
-  }, [persistedSessions, isRestoring, restoreOrCreateSession, updateSessionBackendId]);
+  }, [persistedSessions, isRestoring, debugSession]);
 
   // Handle new session creation from custom event
   const handleNewSession = useCallback(async (options?: NewSessionEventDetail) => {
@@ -553,23 +609,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         tmuxSessionName: terminalSession.tmuxSessionName ?? canonical.tmuxSessionName,
       };
 
-      setSessions((prev) => {
-        const existingIndex = prev.findIndex((session) => session.id === nextSession.id);
-        if (existingIndex >= 0) {
-          const updated = [...prev];
-          updated[existingIndex] = nextSession;
-          return updated;
-        }
-        if (nextSession.mode === 'tmux' && nextSession.tmuxSessionName) {
-          const tmuxIndex = prev.findIndex((session) => session.mode === 'tmux' && session.tmuxSessionName === nextSession.tmuxSessionName);
-          if (tmuxIndex >= 0) {
-            const updated = [...prev];
-            updated[tmuxIndex] = nextSession;
-            return updated;
-          }
-        }
-        return [...prev, nextSession];
-      });
+      setSessions((prev) => upsertRuntimeSession(prev, nextSession));
 
       setActiveSessionId(nextSession.id);
 
@@ -695,6 +735,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (!backendSessionId) return;
     const matched = sessions.filter((s) => s.sessionId === backendSessionId);
     if (matched.length === 0) return;
+    if (matched.length > 1) {
+      console.warn('[session-invariant] backend matched multiple frontend sessions during cleanup', {
+        backendSessionId,
+        frontendSessionIds: matched.map((session) => session.id),
+      });
+    }
 
     setSessions((prev) => {
       const remaining = prev.filter((s) => s.sessionId !== backendSessionId);
@@ -844,6 +890,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             <SwiperSlide key={session.id} className="h-full">
               <TerminalView
                 sessionId={session.id}
+                mode={session.mode}
+                tmuxSessionName={session.tmuxSessionName}
                 fontFamily={fontFamily}
                 fontSize={fontSize}
                 rendererMode={rendererMode}

@@ -690,28 +690,22 @@ body {
 }
 
 /*
- * Horizontal scroll on the diff rows:
- * The parent sidebar is `overflow-y-auto` on mobile so the file list +
- * diff stack scroll vertically as one column. Without this rule, that
+ * Horizontal + vertical scroll on the diff rows:
  * The diff body can overflow horizontally for long lines (when wrap
- * is off). We declare `touch-action: pan-x` so the browser routes
- * horizontal pans to *this* element's horizontal scrollbar, while
- * vertical pans fall through to the outer scroller (the file list).
+ * is off), while the surrounding sidebar owns vertical scrolling for
+ * long files. Keep the horizontal rubber-band local to the diff body,
+ * but do NOT contain the y axis: otherwise wheel/touch gestures that
+ * start over the diff table cannot chain to the sidebar scroller, so a
+ * long file looks stuck.
  *
- * Why not `pan-y` here? Because this element is INSIDE a vertically-
- * scrolling ancestor. If we said "I only handle vertical pan", the
- * browser would have no reason to chain the gesture up to the
- * ancestor — and the file list would stop scrolling. Conversely, if
- * we said "I only handle horizontal pan", the inner horizontal scroll
- * is what gets registered.
- *
- * `overscroll-behavior: contain` on the body keeps the horizontal
- * rubber-band from leaking sideways into the page when the user
- * scrolls past the start/end of a long diff line.
+ * `touch-action: pan-x pan-y` explicitly allows both axes. The browser
+ * will route horizontal pans to this element's x scrollbar and vertical
+ * pans to the nearest y-scrollable ancestor.
  */
 .termdock-diff-scroll {
-  touch-action: pan-x;
-  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
   -webkit-overflow-scrolling: touch;
 }
 
