@@ -152,6 +152,7 @@ export type TranslationDictionary = {
     title: string;
     font: string;
     render: string;
+    engine: string;
     newTab: string;
     debug: string;
     noSleep: string;
@@ -161,6 +162,7 @@ export type TranslationDictionary = {
     auto: string;
     webgl: string;
     canvas: string;
+    ghostty: string;
     tmuxServer: string;
     tmuxUnavailable: string;
     noTmuxSessions: string;

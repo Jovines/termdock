@@ -99,12 +99,9 @@ body {
   padding-top: max(0px, env(safe-area-inset-top, 0px) - 24px);
 }
 
-/* Use native dvh where supported — compositor-synchronized, no JS lag during keyboard animation */
-@supports (height: 100dvh) {
-  html, body, #root {
-    height: 100dvh;
-  }
-}
+/* Keep JS-driven --app-vh authoritative.
+   Native 100dvh is not reliable enough with iOS/PWA soft-keyboard animation
+   and can override the visualViewport-based shrink logic. */
 
 .terminal-viewport-container {
   cursor: text;
@@ -550,6 +547,15 @@ body {
   /* 强制所有 emoji-presentation-default 模糊的 Unicode 字符都走文本字形，
      避免 ⏺ (U+23FA) 等被浏览器回退成彩色 Apple Color Emoji。
      仅 Chrome 131+ / Safari 17.4+ 支持；老浏览器靠 fontFamily 末尾的字体链兜底。 */
+  font-variant-emoji: text;
+}
+
+/* Ghostty-web canvas overrides.
+   ghostty-web doesn't use .xterm CSS classes — it renders directly to a <canvas>. */
+.terminal-viewport-container canvas {
+  transition: none !important;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
   font-variant-emoji: text;
 }
 

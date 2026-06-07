@@ -9,7 +9,9 @@ import '@xterm/xterm/css/xterm.css';
 import { clientLog } from '../../utils/clientLog';
 import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
-import type { TerminalRendererMode } from '../../terminal/renderer';
+import type { TerminalRendererMode, TerminalEngine } from '../../terminal/renderer';
+import { getTerminalModes, getCellMetrics, ensureGhosttyWasmReady } from '../../terminal/backend';
+import type { TerminalBackendType } from '../../terminal/backend';
 import { useTouchScroll, type TouchScrollConfig } from '../../hooks/useTouchScroll';
 import { useGesture } from '../../hooks/useGesture';
 import { PRIORITY_LONG_PRESS, PRIORITY_TMUX_SCROLL } from '../../gesture/types';
@@ -50,9 +52,13 @@ const F_KEY_SEQ: Record<string, string> = {
   F9: '\x1b[20~', F10: '\x1b[21~', F11: '\x1b[23~', F12: '\x1b[24~',
 };
 
-function buildArrowSeq(terminal: Terminal, dir: 'A' | 'B' | 'C' | 'D'): string {
+function buildArrowSeq(terminal: Terminal, dir: 'A' | 'B' | 'C' | 'D', backend: TerminalBackendType): string {
   // application cursor mode (DECCKM)：vim/less 等会切到 \x1bO?,
   // shell 默认为 \x1b[?。xterm 在 modes 上暴露了这个状态。
+  if (backend === 'ghostty') {
+    const appCursor = (terminal as any).getMode(1, false); // DECCKM
+    return appCursor ? `\x1bO${dir}` : `\x1b[${dir}`;
+  }
   const applicationCursor = terminal.modes?.applicationCursorKeysMode === true;
   return applicationCursor ? `\x1bO${dir}` : `\x1b[${dir}`;
 }
@@ -61,12 +67,12 @@ function buildArrowSeq(terminal: Terminal, dir: 'A' | 'B' | 'C' | 'D'): string {
  * 把 React.KeyboardEvent 映射到终端转义序列。仅返回 PTY 应当收到的字节。
  * 不命中返回 null，调用方继续走默认逻辑（textarea 接管打印字符）。
  */
-function mapSpecialKey(event: React.KeyboardEvent, terminal: Terminal): string | null {
+function mapSpecialKey(event: React.KeyboardEvent, terminal: Terminal, backend: TerminalBackendType): string | null {
   switch (event.key) {
-    case 'ArrowUp':    return buildArrowSeq(terminal, 'A');
-    case 'ArrowDown':  return buildArrowSeq(terminal, 'B');
-    case 'ArrowRight': return buildArrowSeq(terminal, 'C');
-    case 'ArrowLeft':  return buildArrowSeq(terminal, 'D');
+    case 'ArrowUp':    return buildArrowSeq(terminal, 'A', backend);
+    case 'ArrowDown':  return buildArrowSeq(terminal, 'B', backend);
+    case 'ArrowRight': return buildArrowSeq(terminal, 'C', backend);
+    case 'ArrowLeft':  return buildArrowSeq(terminal, 'D', backend);
     case 'Home':       return '\x1b[H';
     case 'End':        return '\x1b[F';
     case 'PageUp':     return '\x1b[5~';
@@ -256,6 +262,7 @@ interface TerminalViewportProps {
   onDoubleTap?: () => void;
   onInputFocusChange?: (isFocused: boolean) => void;
   rendererMode?: TerminalRendererMode;
+  engine?: TerminalEngine;
   theme: TerminalTheme;
   fontFamily: string;
   fontSize: number;
@@ -271,6 +278,14 @@ const FLOW_CONTROL_LOW_WATERMARK = 100_000;  // bytes — resume PTY below this
 const INPUT_BLUR_GUARD_ACTIVE_MS = 260;
 const INPUT_BLUR_GUARD_RELEASE_MS = 140;
 const KEYBOARD_OPEN_THRESHOLD_PX = 80;
+
+function getTerminalConvertEol(hasTmuxScroll: boolean): boolean {
+  // tmux/TUI 程序依赖精确的 CR/LF、scroll region 与局部清空语义。
+  // `convertEol` 会把 LF 额外转换为 CRLF，对普通 shell 友好，但在 tmux
+  // 里等价于让 Web client 和原生 Terminal 的终端语义不一致，容易放大
+  // TUI 滚动时的空白区域残影。因此 tmux 模式保持原始字节语义。
+  return !hasTmuxScroll;
+}
 
 /**
  * 等待终端使用的自托管字体加载完成，再让 xterm.js 实例化。
@@ -370,6 +385,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       onDoubleTap,
       onInputFocusChange,
       rendererMode = 'auto',
+      engine = 'xterm',
       theme,
       fontFamily,
       fontSize,
@@ -380,6 +396,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     ref
   ) => {
     const containerRef = React.useRef<HTMLDivElement>(null);
+    const ghosttyHostRef = React.useRef<HTMLDivElement>(null);
+    const backendTypeRef = React.useRef<TerminalBackendType>(engine === 'ghostty' ? 'ghostty' : 'xterm');
     const viewportRef = React.useRef<HTMLElement | null>(null);
     const terminalRef = React.useRef<Terminal | null>(null);
     const fitAddonRef = React.useRef<FitAddon | null>(null);
@@ -457,6 +475,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     flowControlHandlerRef.current = onFlowControl;
     const autoFocusRef = React.useRef(autoFocus);
     autoFocusRef.current = autoFocus;
+    const enableTouchScrollRef = React.useRef(enableTouchScroll);
+    enableTouchScrollRef.current = enableTouchScroll;
+    const hasTmuxScroll = !!onTmuxScroll;
+    const terminalConvertEol = getTerminalConvertEol(hasTmuxScroll);
 
     // xterm's WebGL renderer is fast, but on mobile tmux scrollback it can
     // occasionally present stale row textures while tmux copy-mode is rapidly
@@ -502,8 +524,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (!terminal) return false;
 
       const lines = deltaPixels > 0 ? -1 : 1;
+      const modes = getTerminalModes(terminal, backendTypeRef.current);
 
-      if (terminal.modes.mouseTrackingMode !== 'none') {
+      if (modes.mouseTrackingMode !== 'none') {
         let charX: number;
         let charY: number;
         if (touchX !== undefined && touchY !== undefined) {
@@ -565,21 +588,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         remainderPxRef.current = 0;
       }
 
-      clientLog('debug', '[handleTmuxScrollInternal]', {
-        deltaPixels,
-        lineHeightPx,
-        effectiveLineHeight,
-        total,
-        scrollLines,
-        remainderAfter: remainderPxRef.current,
-        tmuxScrollSensitivity,
-      });
-
       if (scrollLines === 0) return false;
 
       const direction = scrollLines > 0 ? 'down' : 'up';
       const linesToSend = Math.max(1, Math.min(Math.abs(scrollLines), 10));
-      clientLog('debug', '[handleTmuxScrollInternal] -> onTmuxScroll', { direction, linesToSend });
       onTmuxScroll!(direction, linesToSend);
       return true;
     }, [fontSize, onTmuxScroll, tmuxScrollSensitivity]);
@@ -663,7 +675,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (!terminal) return;
 
       // 如果程序启用了鼠标报告，发送鼠标点击事件
-      if (terminal.modes.mouseTrackingMode !== 'none') {
+      if (getTerminalModes(terminal, backendTypeRef.current).mouseTrackingMode !== 'none') {
         // 将屏幕坐标转换为字符网格坐标
         const coords = pixelToCharCoords(clientX, clientY, terminal);
         const charX = coords.x;
@@ -784,14 +796,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       let cellW = 8;
       let cellH = 17;
       try {
-        const rowsEl = term.element.querySelector('.xterm-rows') as HTMLElement | null;
-        const firstRow = rowsEl?.firstElementChild as HTMLElement | null;
-        if (firstRow && firstRow.offsetHeight > 0) {
-          cellH = firstRow.offsetHeight;
-        }
-        if (rowsEl && rowsEl.offsetWidth > 0 && term.cols > 0) {
-          cellW = rowsEl.offsetWidth / term.cols;
-        }
+        const metrics = getCellMetrics(term, backendTypeRef.current);
+        cellW = metrics.cellWidth;
+        cellH = metrics.cellHeight;
       } catch { /* fall through to fallback */ }
 
       if (cellW <= 0 || cellH <= 0) {
@@ -905,6 +912,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
 
     const focusHiddenInput = React.useCallback((_clientX?: number, _clientY?: number) => {
+      const touchEnabled = enableTouchScrollRef.current;
+      // Desktop Ghostty should use ghostty-web's native contenteditable/key handler.
+      // Mobile Ghostty must keep using our full-screen overlay textarea so the
+      // soft keyboard has a real input target and text flows through diff-sync.
+      if (backendTypeRef.current === 'ghostty' && !touchEnabled) {
+        clientLog('debug', '[DEBUG_Ghostty] focus route: ghostty native', { sessionKey, touchEnabled });
+        try { terminalRef.current?.focus(); } catch { /* ignored */ }
+        return;
+      }
+      clientLog('debug', '[DEBUG_Ghostty] focus route: overlay textarea', {
+        sessionKey,
+        backend: backendTypeRef.current,
+        enableTouchScroll: touchEnabled,
+      });
       const input = hiddenInputRef.current;
       if (!input) {
         return;
@@ -1658,10 +1679,26 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const terminal = terminalRef.current;
       const container = containerRef.current;
       if (!fitAddon || !terminal || !container) {
+        clientLog('warn', '[DEBUG_Ghostty] fit skipped: missing refs', {
+          sessionKey,
+          reason,
+          backend: backendTypeRef.current,
+          hasFitAddon: !!fitAddon,
+          hasTerminal: !!terminal,
+          hasContainer: !!container,
+        });
         return;
       }
       // Check if terminal element is attached and has dimensions
       if (!terminal.element || !terminal.cols || !terminal.rows) {
+        clientLog('warn', '[DEBUG_Ghostty] fit skipped: terminal not ready', {
+          sessionKey,
+          reason,
+          backend: backendTypeRef.current,
+          hasElement: !!terminal.element,
+          cols: terminal.cols,
+          rows: terminal.rows,
+        });
         return;
       }
       const rect = container.getBoundingClientRect();
@@ -1675,12 +1712,35 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
       try {
         const before = { cols: terminal.cols, rows: terminal.rows };
-        fitAddon.fit();
+        if (backendTypeRef.current === 'ghostty') {
+          const metrics = (terminal as any).renderer?.getMetrics?.();
+          if (!metrics || metrics.width <= 0 || metrics.height <= 0) {
+            throw new Error('ghostty metrics unavailable');
+          }
+          const nextCols = Math.max(2, Math.floor(rect.width / metrics.width));
+          const nextRows = Math.max(1, Math.floor(rect.height / metrics.height));
+          if (nextCols !== terminal.cols || nextRows !== terminal.rows) {
+            terminal.resize(nextCols, nextRows);
+          }
+        } else {
+          fitAddon.fit();
+        }
         const next = { cols: terminal.cols, rows: terminal.rows };
         const previous = lastReportedSizeRef.current;
 
         debugTerminal('fit', {
           reason,
+          backend: backendTypeRef.current,
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+          before,
+          next,
+          changed: before.cols !== next.cols || before.rows !== next.rows,
+        });
+        clientLog('debug', '[DEBUG_Ghostty] fit', {
+          sessionKey,
+          reason,
+          backend: backendTypeRef.current,
           width: Math.round(rect.width),
           height: Math.round(rect.height),
           before,
@@ -1693,7 +1753,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           remainderPxRef.current = 0;
           resizeHandlerRef.current(next.cols, next.rows);
         }
-      } catch { /* ignored */ }
+      } catch (error) {
+        clientLog('error', '[DEBUG_Ghostty] fit failed', {
+          sessionKey,
+          reason,
+          backend: backendTypeRef.current,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }, [debugTerminal]);
 
     const clearTextureAtlasRefreshTimer = React.useCallback(() => {
@@ -1953,7 +2020,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         const needsRecreate = options.forceRendererRecreate === true || webglContextLostRef.current;
         if (needsRecreate) {
           webglContextLostRef.current = false;
-          if (shouldUseWebgl) {
+          if (backendTypeRef.current === 'ghostty') {
+            // ghostty-web has no xterm-style refresh(); fit/resize below will
+            // trigger its canvas renderer. Keep this branch non-throwing so
+            // keyboard/viewport resize can continue to fitTerminal().
+            (terminal as { refresh?: (start: number, end: number) => void }).refresh?.(0, terminal.rows - 1);
+          } else if (shouldUseWebgl) {
             disposeWebglRenderer(`refresh:${reason}`);
             enableWebglRenderer(terminal, `refresh:${reason}`);
           } else {
@@ -1961,7 +2033,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
         } else {
           // 上下文还活着或 canvas renderer：只清 atlas + 重绘
-          refreshTextureAtlasNow(`refresh:${reason}`);
+          if (backendTypeRef.current === 'ghostty') {
+            (terminal as { refresh?: (start: number, end: number) => void }).refresh?.(0, terminal.rows - 1);
+          } else {
+            refreshTextureAtlasNow(`refresh:${reason}`);
+          }
         }
 
         // 2) fit() —— 这一步会触发 xterm 的 onResize
@@ -2020,6 +2096,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     const requestRefresh = React.useCallback(
       (reason: RefreshReason, options: RefreshOptions = {}) => {
+        if (reason === 'resize' || reason === 'focus' || reason === 'blur') {
+          clientLog('debug', '[DEBUG_Ghostty] requestRefresh', {
+            sessionKey,
+            reason,
+            backend: backendTypeRef.current,
+            options,
+            hasTerminal: !!terminalRef.current,
+            rendererReady: rendererReadyRef.current,
+          });
+        }
         const terminal = terminalRef.current;
         if (!terminal) {
           // xterm 还没初始化，mount/connected/init-fit 这些 reason 在 init useEffect
@@ -2188,78 +2274,214 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (disposed) return;
 
         try {
-          // Create terminal with xterm.js
-          const terminal = new Terminal({
-            fontFamily: getTerminalFontFamily(fontFamily),
-            fontSize,
-            theme: convertTheme(theme),
-            cursorBlink: true,
-            cursorStyle: 'block',
-            cursorInactiveStyle: 'bar',
-            // tmux 模式下初始就 0 — 历史在 tmux 那一侧维护(Ctrl-b [),xterm
-            // 不需要再留一份本地 scrollback。留 1000 行的副作用:任何代码
-            // 路径(Shift+PageUp、xterm 默认 wheel 兜底、touchpad 惯性等)
-            // 一旦碰到本地 scrollback,就会把那段历史"漏"到 tmux 重绘下面,
-            // 视觉上表现为某一层画面冻死。下面还有 effect 会随 onTmuxScroll
-            // 动态切换 — 但构造时就把对的初始值给到,避免首帧出现 ghost。
-            scrollback: onTmuxScroll ? 0 : 1000,
-            allowTransparency: false,
-            allowProposedApi: true,
-            convertEol: true,
-            customGlyphs: true,
-            rescaleOverlappingGlyphs: true,
-            letterSpacing: 0,
-            lineHeight: 1,
-            overviewRuler: {
-              width: 0,
-            },
+          const isGhostty = engine === 'ghostty';
+          backendTypeRef.current = isGhostty ? 'ghostty' : 'xterm';
+          clientLog('info', '[DEBUG_Ghostty] terminal init start', {
+            sessionKey,
+            engine,
+            backend: backendTypeRef.current,
+            rendererMode,
+            shouldUseWebgl,
+            enableTouchScroll,
+            hasTmuxScroll,
+            convertEol: terminalConvertEol,
           });
 
-          const fitAddon = new FitAddon();
-          // Patch proposeDimensions to never subtract scrollbar width.
-          // FitAddon subtracts `overviewRuler?.width || 14` from available width,
-          // but we hide the native scrollbar and use a custom overlay scrollbar.
-          // Temporarily set scrollback=0 so FitAddon skips the offset entirely.
-          const originalPropose = fitAddon.proposeDimensions.bind(fitAddon);
-          fitAddon.proposeDimensions = () => {
-            const saved = terminal.options.scrollback;
-            terminal.options.scrollback = 0;
-            const dims = originalPropose();
-            terminal.options.scrollback = saved;
-            return dims;
-          };
-          terminal.loadAddon(fitAddon);
-          terminal.loadAddon(new Unicode11Addon());
-          // xterm 默认 Unicode 宽度表偏旧，部分 emoji 会按 1 列计算，
-          // 导致后续字符紧贴甚至覆盖 emoji。启用 unicode11 让 emoji
-          // 走双列宽度，terminal 内部渲染间距才和真实终端一致。
-          terminal.unicode.activeVersion = '11';
-          terminal.loadAddon(new SearchAddon());
-          terminal.loadAddon(new WebLinksAddon());
+          let terminal: any;
+          let fitAddon: any;
+
+          if (isGhostty) {
+            // ---- ghostty-web backend ----
+            clientLog('info', '[DEBUG_Ghostty] ghostty backend selected', { sessionKey });
+            const ghosttyMod = await ensureGhosttyWasmReady();
+            if (disposed) return;
+
+            const GhosttyTerminal = ghosttyMod.Terminal;
+            const GhosttyFitAddon = ghosttyMod.FitAddon;
+
+            terminal = new GhosttyTerminal({
+              fontFamily: getTerminalFontFamily(fontFamily),
+              fontSize,
+              theme: convertTheme(theme),
+              cursorBlink: true,
+              cursorStyle: 'block',
+              scrollback: onTmuxScroll ? 0 : 1000,
+              allowTransparency: false,
+              convertEol: terminalConvertEol,
+            });
+
+            fitAddon = new GhosttyFitAddon();
+            terminal.loadAddon(fitAddon);
+            clientLog('info', '[DEBUG_Ghostty] ghostty terminal created', {
+              sessionKey,
+              cols: terminal.cols,
+              rows: terminal.rows,
+              scrollback: terminal.options?.scrollback,
+              convertEol: terminalConvertEol,
+              hasTmuxScroll,
+            });
+          } else {
+            // ---- xterm.js backend ----
+            clientLog('info', '[DEBUG_Ghostty] xterm backend selected', { sessionKey, rendererMode });
+            terminal = new Terminal({
+              fontFamily: getTerminalFontFamily(fontFamily),
+              fontSize,
+              theme: convertTheme(theme),
+              cursorBlink: true,
+              cursorStyle: 'block',
+              cursorInactiveStyle: 'bar',
+              scrollback: onTmuxScroll ? 0 : 1000,
+              allowTransparency: false,
+              allowProposedApi: true,
+              convertEol: terminalConvertEol,
+              customGlyphs: true,
+              rescaleOverlappingGlyphs: true,
+              letterSpacing: 0,
+              lineHeight: 1,
+              overviewRuler: {
+                width: 0,
+              },
+            });
+
+            fitAddon = new FitAddon();
+            // Patch proposeDimensions to never subtract scrollbar width.
+            const originalPropose = fitAddon.proposeDimensions.bind(fitAddon);
+            fitAddon.proposeDimensions = () => {
+              const saved = terminal.options.scrollback;
+              terminal.options.scrollback = 0;
+              const dims = originalPropose();
+              terminal.options.scrollback = saved;
+              return dims;
+            };
+            terminal.loadAddon(fitAddon);
+            terminal.loadAddon(new Unicode11Addon());
+            terminal.unicode.activeVersion = '11';
+            terminal.loadAddon(new SearchAddon());
+            terminal.loadAddon(new WebLinksAddon());
+            clientLog('info', '[DEBUG_Ghostty] xterm terminal created', {
+              sessionKey,
+              cols: terminal.cols,
+              rows: terminal.rows,
+              scrollback: terminal.options?.scrollback,
+              rendererMode,
+              convertEol: terminalConvertEol,
+              hasTmuxScroll,
+            });
+          }
 
           localTerminal = terminal;
           terminalRef.current = terminal;
           fitAddonRef.current = fitAddon;
           lastDevicePixelRatioRef.current = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
 
-          terminal.open(container);
+          const terminalHost = isGhostty ? ghosttyHostRef.current : container;
+          if (!terminalHost) {
+            throw new Error('Terminal host is not ready');
+          }
+          terminal.open(terminalHost);
 
-          // 强制让 xterm 把光标视为"已初始化"——否则 WebglRenderer 在
-          // _updateModel 阶段会把 model.cursor 置为 undefined，导致光标
-          // 完全不绘制。xterm 默认要等 textarea 获焦 / 敲键 / 切 alt buffer
-          // 才会触发 _showCursor()，但移动端我们用上层 textarea 覆盖了
-          // xterm 自己的 textarea，xterm 内部 textarea 永远不获焦，
-          // 因此 isCursorInitialized 一直是 false，inactive 光标也画不出来。
-          // 通过私有 _core 把这个标志直接置位，并请求刷新一帧。
-          try {
-            const core = (terminal as unknown as { _core?: { coreService?: { isCursorInitialized: boolean } } })._core;
-            if (core?.coreService) {
-              core.coreService.isCursorInitialized = true;
-            }
-            terminal.refresh(0, terminal.rows - 1);
-          } catch { /* ignored */ }
+          if (isGhostty && enableTouchScroll) {
+            // Mobile Ghostty reuses Termdock's overlay textarea for soft-keyboard
+            // input. Disable ghostty-web's native contenteditable target after open;
+            // otherwise mobile browsers show their own large caret and input can bypass
+            // the overlay diff-sync path.
+            try {
+              terminalHost.removeAttribute('contenteditable');
+              terminalHost.setAttribute('role', 'presentation');
+              terminalHost.tabIndex = -1;
+              const nativeTextarea = terminal.textarea as HTMLTextAreaElement | undefined;
+              if (nativeTextarea) {
+                nativeTextarea.tabIndex = -1;
+                nativeTextarea.setAttribute('aria-hidden', 'true');
+              }
+              clientLog('debug', '[DEBUG_Ghostty] mobile native input disabled', { sessionKey });
+            } catch { /* ignored */ }
+          }
 
-          if (shouldUseWebgl) {
+          if (isGhostty && !enableTouchScroll && typeof terminal.attachCustomKeyEventHandler === 'function') {
+            terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+              if (event.isComposing || event.keyCode === 229) return false;
+
+              const cmd = event.metaKey;
+              const ctrl = event.ctrlKey;
+              const alt = event.altKey;
+              const shift = event.shiftKey;
+              const key = event.key;
+
+              // Let browser/ghostty handle paste and most Cmd shortcuts.
+              if ((cmd || ctrl) && !alt && !shift && (key === 'v' || key === 'V')) return false;
+
+              if (cmd && !ctrl && !alt && !shift && (key === 'c' || key === 'C')) {
+                const sel = terminal.hasSelection?.() ? terminal.getSelection?.() : '';
+                if (sel) navigator.clipboard?.writeText(sel).catch(() => { /* ignored */ });
+                return true;
+              }
+
+              if ((cmd || ctrl) && !alt && !shift && (key === 'k' || key === 'K')) {
+                terminal.reset();
+                resetWriteState();
+                requestRefresh('clear', { skipResizePush: true, skipScrollToBottom: true });
+                return true;
+              }
+
+              if (cmd) return false;
+
+              if (ctrl && !alt && !shift && key === ' ') {
+                sendTerminalSeq('\x00');
+                return true;
+              }
+
+              if (ctrl && !alt && !cmd && key.length === 1) {
+                const code = key.toLowerCase().charCodeAt(0);
+                if (code >= 0x40 && code <= 0x7f) {
+                  sendTerminalSeq(String.fromCharCode(code & 0x1f));
+                  return true;
+                }
+              }
+
+              if (alt && !ctrl && !cmd && key.length === 1) {
+                sendTerminalSeq(`\x1b${key}`);
+                return true;
+              }
+
+              const specialSeq = mapSpecialKey(event as unknown as React.KeyboardEvent, terminal, 'ghostty');
+              if (specialSeq !== null) {
+                sendTerminalSeq(specialSeq);
+                return true;
+              }
+
+              if (!ctrl && !alt && !cmd && key.length === 1) {
+                sendTerminalSeq(key);
+                return true;
+              }
+
+              return false;
+            });
+            clientLog('info', '[DEBUG_Ghostty] custom key handler installed', { sessionKey });
+          }
+
+          // xterm-only: 强制让 xterm 把光标视为"已初始化"（ghostty 不需要）
+          if (!isGhostty) {
+            try {
+              const core = (terminal as unknown as { _core?: { coreService?: { isCursorInitialized: boolean } } })._core;
+              if (core?.coreService) {
+                core.coreService.isCursorInitialized = true;
+              }
+              terminal.refresh(0, terminal.rows - 1);
+            } catch { /* ignored */ }
+          }
+
+          if (isGhostty) {
+            // ghostty-web 使用 Canvas 2D 渲染，无需 WebGL 管理
+            debugTerminal('renderer', { type: 'ghostty-canvas', reason: 'init' });
+            rendererReadyRef.current = true;
+            const runGhosttyFit = (reason: string) => {
+              if (!disposed) fitTerminal(reason);
+            };
+            requestAnimationFrame(() => runGhosttyFit('ghostty-init-raf'));
+            window.setTimeout(() => runGhosttyFit('ghostty-init-timeout-0'), 0);
+            window.setTimeout(() => runGhosttyFit('ghostty-init-timeout-120'), 120);
+          } else if (shouldUseWebgl) {
             enableWebglRenderer(terminal, 'init');
             // enableWebglRenderer 成功路径会自己把 rendererReadyRef 置 true；
             // 失败时它会 return false，下面兜底置 ready 避免后续 mount refresh 卡死。
@@ -2389,13 +2611,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             });
           }
 
-          const viewport = findScrollableViewport(container);
-          if (viewport) {
-            viewport.classList.add('overlay-scrollbar-target', 'overlay-scrollbar-container');
-            viewportRef.current = viewport;
-            forceRender();
-          } else {
-            viewportRef.current = null;
+          // ghostty-web renders scrollbar on canvas, no DOM viewport to attach overlay scrollbar to
+          if (!isGhostty) {
+            const viewport = findScrollableViewport(container);
+            if (viewport) {
+              viewport.classList.add('overlay-scrollbar-target', 'overlay-scrollbar-container');
+              viewportRef.current = viewport;
+              forceRender();
+            } else {
+              viewportRef.current = null;
+            }
           }
 
           requestRefresh('mount', { skipResizePush: true, skipScrollToBottom: true });
@@ -2404,9 +2629,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             // 一旦 xterm.textarea 拿到焦点，IME（尤其搜狗英文联想）会把候选词
             // 直接 set 进 xterm.textarea.value，xterm 通过 input 事件读取再
             // 调 onData 发给 PTY，完全绕开我们的 diff-sync 路径。
-            if (!enableTouchScroll) {
+            if (isGhostty && !enableTouchScroll) {
+              // Desktop ghostty-web has its own input handling; don't redirect focus
+              // to the xterm-specific overlay textarea.
+              clientLog('debug', '[DEBUG_Ghostty] init autofocus: ghostty native', { sessionKey });
+              terminal.focus();
+            } else if (!enableTouchScroll) {
+              clientLog('debug', '[DEBUG_Ghostty] init autofocus: xterm overlay', { sessionKey });
               hiddenInputRef.current?.focus({ preventScroll: true });
+            } else if (enableTouchScroll && isGhostty) {
+              // Mobile Ghostty: do not focus ghostty-web's contenteditable on init.
+              // User taps should focus our overlay textarea via focusHiddenInput(),
+              // otherwise the browser shows a native oversized caret and soft-keyboard
+              // text does not flow through Termdock's mobile input path.
+              clientLog('debug', '[DEBUG_Ghostty] init autofocus: mobile ghostty defer to overlay tap', { sessionKey });
             } else {
+              clientLog('debug', '[DEBUG_Ghostty] init autofocus: mobile xterm focus', { sessionKey });
               terminal.focus();
             }
           }
@@ -2419,7 +2657,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 桌面端：让覆盖层 textarea 始终拥有焦点，xterm 自身的 textarea 不再
           // 接收键盘输入。这样三方中文输入法（搜狗/微信）的 composition 不会
           // 拦截 keystroke 后吞掉某个字母。
-          if (!enableTouchScroll) {
+          if (!enableTouchScroll && !isGhostty) {
             try {
               const xtermTextarea = terminal.textarea;
               if (xtermTextarea) {
@@ -2472,7 +2710,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           try {
             localDisposables.push(
               terminal.buffer.onBufferChange(() => {
-                refreshTextureAtlasNow('buffer-change');
+                // ghostty-web 不需要 texture atlas 刷新，但仍然需要 buffer change 通知
+                if (!isGhostty) {
+                  refreshTextureAtlasNow('buffer-change');
+                }
               })
             );
           } catch { /* ignored */ }
@@ -2587,14 +2828,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       // （sessionKey 变化时 lastServerSizeRef 已被 useEffect 重置为 null，
       //   所以这里推 resize 走 first-fit immediate 路径）
       requestRefresh('session-reset', { skipScrollToBottom: true });
-            if (autoFocusRef.current) {
-              // 桌面：焦点必须落在覆盖层 textarea（理由见 init 处注释）
-              if (!enableTouchScroll) {
-                hiddenInputRef.current?.focus({ preventScroll: true });
-              } else {
-                terminal.focus();
-              }
-            }
+      if (autoFocusRef.current) {
+        const touchEnabled = enableTouchScrollRef.current;
+        if (backendTypeRef.current === 'ghostty' && !touchEnabled) {
+          terminal.focus();
+        } else if (backendTypeRef.current === 'ghostty' && touchEnabled) {
+          // Mobile Ghostty: keep focus on overlay textarea, not native contenteditable.
+          focusHiddenInput();
+        } else if (!touchEnabled) {
+          hiddenInputRef.current?.focus({ preventScroll: true });
+        } else {
+          terminal.focus();
+        }
+      }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionKey, terminalReadyVersion, requestRefresh, resetWriteState]);
 
@@ -2665,11 +2911,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       ref,
       (): TerminalController => ({
         focus: () => {
-          if (enableTouchScroll) {
+          const touchEnabled = enableTouchScrollRef.current;
+          if (backendTypeRef.current === 'ghostty' && !touchEnabled) {
+            terminalRef.current?.focus();
+            return;
+          }
+          if (backendTypeRef.current === 'ghostty' && touchEnabled) {
             focusHiddenInput();
             return;
           }
-          // 桌面：与 init / session-reset 一致，焦点统一交给覆盖层 textarea，
+          if (touchEnabled) {
+            focusHiddenInput();
+            return;
+          }
+          // 桌面 xterm：与 init / session-reset 一致，焦点统一交给覆盖层 textarea，
           // 否则 IME 会抢到 xterm.textarea 上绕开 diff-sync。
           hiddenInputRef.current?.focus({ preventScroll: true });
         },
@@ -2726,10 +2981,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           if (enableTouchScroll) return;
           if (event.button !== 0) return;
           requestAnimationFrame(() => {
-            try { hiddenInputRef.current?.focus({ preventScroll: true }); } catch { /* ignored */ }
+            try {
+              if (backendTypeRef.current === 'ghostty') {
+                terminalRef.current?.focus();
+              } else {
+                hiddenInputRef.current?.focus({ preventScroll: true });
+              }
+            } catch { /* ignored */ }
           });
         }}
       >
+        <div
+          ref={ghosttyHostRef}
+          aria-hidden={engine !== 'ghostty'}
+          className={`absolute inset-0 ${engine === 'ghostty' ? '' : 'hidden'}`}
+        />
+
         {/* Early initialization loading - shows before xterm.js loads */}
         {isInitializing && <TerminalInitializing />}
 
@@ -2919,6 +3186,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 if (isComposingRef.current) {
                   return;
                 }
+                clientLog('debug', '[DEBUG_Ghostty] overlay input', {
+                  sessionKey,
+                  backend: backendTypeRef.current,
+                  enableTouchScroll,
+                  valueLength: event.currentTarget.value.length,
+                });
                 syncTextareaToPty(event.currentTarget);
               }}
               onKeyDown={(event) => {
@@ -3001,7 +3274,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
                   // ---- 特殊键（方向 / Home / End / F1–F12 / Tab / Esc 等）----
                   if (term) {
-                    const seq = mapSpecialKey(event, term);
+                    const seq = mapSpecialKey(event, term, backendTypeRef.current);
                     if (seq !== null) {
                       event.preventDefault();
                       sendTerminalSeq(seq, event.currentTarget);

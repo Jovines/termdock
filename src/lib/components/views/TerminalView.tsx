@@ -13,7 +13,7 @@ import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
 import { clientLog } from '../../utils/clientLog';
-import type { TerminalRendererMode } from '../../terminal/renderer';
+import type { TerminalRendererMode, TerminalEngine } from '../../terminal/renderer';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 
 const TERMINAL_FONT_SIZE = 10;
@@ -37,6 +37,7 @@ interface TerminalViewProps {
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
+  engine?: TerminalEngine;
   toolbarPresets?: ToolbarPresetDefinition[];
   isActive?: boolean;
   focusRequestToken?: number;
@@ -50,6 +51,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   fontFamily = 'var(--font-mono)',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
   rendererMode = 'auto',
+  engine = 'xterm',
   toolbarPresets: configuredToolbarPresets = [],
   isActive = true,
   focusRequestToken = 0,
@@ -1239,6 +1241,31 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const normalizedLines = Math.max(1, Math.min(Math.floor(lines) || 1, 40));
     handleTmuxScroll(direction, normalizedLines);
   }, [handleTmuxScroll, quickKeysDisabled]);
+  React.useEffect(() => {
+    if (!isActive || !isMobile) return;
+    const controller = terminalControllerRef.current;
+    clientLog('debug', '[DEBUG_Ghostty] keyboard layout state', {
+      sessionId,
+      engine,
+      hasController: !!controller,
+      isActive,
+      isMobile,
+      isViewportKeyboardOpen,
+      viewportKeyboardHeight,
+      innerHeight: typeof window !== 'undefined' ? window.innerHeight : null,
+      visualViewportHeight: typeof window !== 'undefined' ? window.visualViewport?.height ?? null : null,
+      visualViewportOffsetTop: typeof window !== 'undefined' ? window.visualViewport?.offsetTop ?? null : null,
+      appVh: typeof document !== 'undefined' ? getComputedStyle(document.documentElement).getPropertyValue('--app-vh') : null,
+      kbMarginTop: typeof document !== 'undefined' ? getComputedStyle(document.documentElement).getPropertyValue('--kb-margin-top') : null,
+      kbTranslateY: typeof document !== 'undefined' ? getComputedStyle(document.documentElement).getPropertyValue('--kb-translate-y') : null,
+    });
+    controller?.requestRefresh('resize', {
+      resizeDebounceMs: 0,
+      skipScrollToBottom: !isViewportKeyboardOpen,
+      force: true,
+    });
+  }, [isActive, isMobile, isViewportKeyboardOpen, viewportKeyboardHeight, engine, sessionId]);
+
   const isKeyboardVisible = isActive && isMobile;
 
   // The translateY / margin-top formulas are always applied on mobile.
@@ -1311,6 +1338,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               } : undefined}
               onInputFocusChange={handleInputFocusChange}
               rendererMode={rendererMode}
+              engine={engine}
               theme={xtermTheme}
               fontFamily={fontFamily}
               fontSize={fontSize}

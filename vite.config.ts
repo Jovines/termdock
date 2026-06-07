@@ -116,6 +116,7 @@ export default defineConfig({
         manualChunks: {
           react: ['react', 'react-dom'],
           terminal: ['@xterm/xterm', '@xterm/addon-fit'],
+          ghostty: ['ghostty-web'],
           dnd: ['@dnd-kit/core', '@dnd-kit/sortable', '@dnd-kit/utilities'],
         },
       },

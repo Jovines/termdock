@@ -101,6 +101,7 @@ export interface CreateTerminalOptions {
   mode?: TerminalMode;
   tmuxSessionName?: string;
   cwd?: string;
+  termType?: string;
 }
 
 export interface TmuxActionPayload {

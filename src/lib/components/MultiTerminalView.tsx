@@ -7,7 +7,7 @@ import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
 import { createTerminalSession, closeTerminal, killTmuxSession } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
-import type { TerminalRendererMode } from '../terminal/renderer';
+import type { TerminalRendererMode, TerminalEngine } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { createDebugLogger } from '../utils/debug';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
@@ -67,6 +67,7 @@ interface MultiTerminalViewProps {
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
+  engine?: TerminalEngine;
   toolbarPresets?: ToolbarPresetDefinition[];
   showDebug?: boolean;
   defaultSessionMode?: TerminalMode;
@@ -95,6 +96,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   fontFamily = 'var(--font-mono)',
   fontSize = 13,
   rendererMode = 'auto',
+  engine = 'xterm',
   toolbarPresets = [],
   showDebug,
   defaultSessionMode = 'shell',
@@ -257,6 +259,65 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
   }, [sessions.length]);
 
+  const getSwiperInstance = useCallback((): SwiperInstance | null => {
+    if (swiperRef.current) return swiperRef.current;
+    if (typeof document === 'undefined') return null;
+    return ((document.querySelector('.swiper') as (HTMLElement & { swiper?: SwiperInstance }) | null)?.swiper) ?? null;
+  }, []);
+
+  const forceUpdateSwiperLayout = useCallback((reason: string) => {
+    const swiper = getSwiperInstance();
+    if (!swiper) return;
+    const el = swiper.el as HTMLElement | undefined;
+    if (el) el.scrollLeft = 0;
+    (swiper as unknown as { width?: number }).width = undefined;
+    (swiper as unknown as { size?: number }).size = undefined;
+    swiper.updateSize();
+    swiper.updateSlides();
+    swiper.updateProgress();
+    swiper.updateSlidesClasses();
+    if (activeSessionIndex >= 0) {
+      swiper.slideTo(activeSessionIndex, 0);
+    }
+    if (el) el.scrollLeft = 0;
+    debugSession('[Swiper] force layout update', {
+      reason,
+      width: swiper.width,
+      activeSessionIndex,
+      activeIndex: swiper.activeIndex,
+      scrollLeft: el?.scrollLeft ?? null,
+    });
+  }, [activeSessionIndex, debugSession, getSwiperInstance]);
+
+  useEffect(() => {
+    const updateSwiperSize = () => {
+      requestAnimationFrame(() => forceUpdateSwiperLayout('viewport-change'));
+    };
+
+    window.addEventListener('resize', updateSwiperSize);
+    window.visualViewport?.addEventListener('resize', updateSwiperSize);
+    window.visualViewport?.addEventListener('scroll', updateSwiperSize);
+
+    const swiperEl = swiperRef.current?.el as HTMLElement | undefined;
+    const resizeObserver = typeof ResizeObserver !== 'undefined' && swiperEl
+      ? new ResizeObserver(() => updateSwiperSize())
+      : null;
+    if (resizeObserver && swiperEl) {
+      resizeObserver.observe(swiperEl);
+    }
+
+    updateSwiperSize();
+    const intervalId = window.setInterval(() => forceUpdateSwiperLayout('interval'), 500);
+
+    return () => {
+      window.removeEventListener('resize', updateSwiperSize);
+      window.visualViewport?.removeEventListener('resize', updateSwiperSize);
+      window.visualViewport?.removeEventListener('scroll', updateSwiperSize);
+      resizeObserver?.disconnect();
+      window.clearInterval(intervalId);
+    };
+  }, [forceUpdateSwiperLayout]);
+
   // Notify parent of session data changes
   useEffect(() => {
     onSessionDataUpdate?.({
@@ -317,6 +378,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const newSession = await createTerminalSession({
       mode,
       tmuxSessionName: tmuxSessionName ?? undefined,
+      termType: engine === 'ghostty' ? 'xterm-ghostty' : 'xterm-256color',
     });
     debugSession('[Session] Created new session:', newSession.sessionId);
 
@@ -522,6 +584,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         mode,
         tmuxSessionName: tmuxSessionName ?? undefined,
         cwd: effectiveCwd,
+        termType: engine === 'ghostty' ? 'xterm-ghostty' : 'xterm-256color',
       });
       const sessionId = uuidv4();
       const effectiveTmuxSessionName = newTerminalSession.tmuxSessionName ?? tmuxSessionName;
@@ -774,6 +837,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           onSwiper={(instance) => {
             swiperRef.current = instance;
             instance.allowTouchMove = sessions.length > 1;
+            requestAnimationFrame(() => forceUpdateSwiperLayout('on-swiper'));
           }}
           onSlideChange={handleSwiperChange}
           onTouchStart={(_, event) => {
@@ -820,6 +884,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                 fontFamily={fontFamily}
                 fontSize={fontSize}
                 rendererMode={rendererMode}
+                engine={engine}
                 toolbarPresets={toolbarPresets}
                 isActive={index === activeSessionIndex}
                 focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}

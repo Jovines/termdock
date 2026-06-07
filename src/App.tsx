@@ -22,7 +22,7 @@ import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
-import type { TerminalRendererMode } from './lib/terminal/renderer';
+import type { TerminalRendererMode, TerminalEngine } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
 import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
@@ -199,7 +199,7 @@ function App() {
   const [networkAvailable, setNetworkAvailable] = React.useState(cachedSettings?.networkAvailable ?? true);
   const [debugInfo, setDebugInfo] = React.useState<Record<string, any>>({});
   const { fontSize, setFontSize } = useFontSize();
-  const { rendererMode, setRendererMode } = useTerminalRenderer();
+  const { rendererMode, setRendererMode, engine, setEngine } = useTerminalRenderer();
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
@@ -998,6 +998,7 @@ function App() {
               <MultiTerminalView
                 fontSize={fontSize}
                 rendererMode={rendererMode}
+                engine={engine}
                 toolbarPresets={toolbarPresets}
                 showDebug={showDebug}
                 defaultSessionMode={newSessionMode}
@@ -1072,26 +1073,52 @@ function App() {
                   <span className="w-8 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">{fontSize}px</span>
                 </div>
 
-                {/* Renderer + Debug + Prevent-sleep — single dense row */}
-                <div className="flex items-center gap-2 rounded-xl bg-surface-2 px-2.5 py-2">
-                  <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.render')}</span>
-                  <div className="flex flex-1 items-center gap-1 rounded-md bg-surface p-0.5">
-                    {(['auto', 'webgl', 'canvas'] as TerminalRendererMode[]).map((mode) => {
-                      const selected = rendererMode === mode;
-                      return (
-                        <button
-                          key={mode}
-                          type="button"
-                          onClick={() => setRendererMode(mode)}
-                          className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition ${
-                            selected ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:bg-surface-elevated'
-                          }`}
-                        >
-                          {mode === 'auto' ? t('settings.auto') : mode === 'webgl' ? t('settings.webgl') : t('settings.canvas')}
-                        </button>
-                      );
-                    })}
+                {/* Engine + Renderer — two-row group */}
+                <div className="space-y-1.5 rounded-xl bg-surface-2 px-2.5 py-2">
+                  {/* Engine selector */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.engine')}</span>
+                    <div className="flex flex-1 items-center gap-1 rounded-md bg-surface p-0.5">
+                      {(['xterm', 'ghostty'] as TerminalEngine[]).map((e) => {
+                        const selected = engine === e;
+                        return (
+                          <button
+                            key={e}
+                            type="button"
+                            onClick={() => setEngine(e)}
+                            className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition ${
+                              selected ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:bg-surface-elevated'
+                            }`}
+                          >
+                            {e === 'xterm' ? 'xterm.js' : t('settings.ghostty')}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
+                  {/* Renderer selector (xterm.js only) */}
+                  {engine === 'xterm' && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.render')}</span>
+                      <div className="flex flex-1 items-center gap-1 rounded-md bg-surface p-0.5">
+                        {(['auto', 'webgl', 'canvas'] as TerminalRendererMode[]).map((mode) => {
+                          const selected = rendererMode === mode;
+                          return (
+                            <button
+                              key={mode}
+                              type="button"
+                              onClick={() => setRendererMode(mode)}
+                              className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition ${
+                                selected ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:bg-surface-elevated'
+                              }`}
+                            >
+                              {mode === 'auto' ? t('settings.auto') : mode === 'webgl' ? t('settings.webgl') : t('settings.canvas')}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Default mode for the top-tab + button */}

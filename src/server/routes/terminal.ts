@@ -580,8 +580,12 @@ function normalizeTmuxSessionName(input: unknown): string {
   return normalized.length > 0 ? normalized : generateTmuxSessionName();
 }
 
+function getTmuxBinary(): string {
+  return process.env.TMUX_BIN || 'tmux';
+}
+
 async function runTmux(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('tmux', args, {
+  const { stdout } = await execFileAsync(getTmuxBinary(), args, {
     timeout: 5000,
     maxBuffer: 2 * 1024 * 1024,
   });
@@ -598,7 +602,7 @@ const TMUX_CONTROL_ENABLED = false;
 const TMUX_CONTROL_COMMAND_TIMEOUT_MS = 2000;
 
 function spawnTmuxControl(sessionName: string): TmuxControl {
-  const process = spawn('tmux', ['-C', 'attach', '-t', sessionName], {
+  const process = spawn(getTmuxBinary(), ['-C', 'attach', '-t', sessionName], {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -742,7 +746,7 @@ function sendTmuxCommandFireAndForget(
   }
 
   // Fallback: spawn a one-shot process (fire-and-forget)
-  const child = execFile('tmux', args, { timeout: 5000 });
+  const child = execFile(getTmuxBinary(), args, { timeout: 5000 });
   child.on('error', () => { /* ignore */ });
 }
 
@@ -2093,6 +2097,7 @@ async function spawnTerminalSession(req: express.Request, input: {
   rows?: number;
   mode?: TerminalMode;
   tmuxSessionName?: string;
+  termType?: string;
 }): Promise<{ sessionId: string; session: TerminalSession; cols: number; rows: number }> {
   const cwd = resolveWorkingDirectory(req, input.cwd);
   const cols = input.cols || 80;
@@ -2103,7 +2108,7 @@ async function spawnTerminalSession(req: express.Request, input: {
   const tmuxSessionName = mode === 'tmux' ? normalizeTmuxSessionName(input.tmuxSessionName) : null;
 
   const command = mode === 'tmux'
-    ? (process.env.TMUX_BIN || 'tmux')
+    ? getTmuxBinary()
     : (process.platform === 'win32' ? 'powershell.exe' : resolveShellCandidates()[0]);
   const args = mode === 'tmux' && tmuxSessionName
     ? ['new-session', '-A', '-s', tmuxSessionName]
@@ -2113,9 +2118,19 @@ async function spawnTerminalSession(req: express.Request, input: {
   const resolvedEnv = { ...process.env, PATH: envPath };
 
   const pty = await getPtyProvider();
-  const baseEnv = {
+  const termValue = input.termType === 'xterm-ghostty' ? 'xterm-ghostty' : 'xterm-256color';
+  console.log('[DEBUG_Ghostty] spawnTerminalSession', {
+    mode,
+    tmuxSessionName,
+    termType: input.termType,
+    termValue,
+    cwd,
+    cols,
+    rows,
+  });
+  const baseEnv: Record<string, string> = {
     ...resolvedEnv,
-    TERM: 'xterm-256color',
+    TERM: termValue,
     COLORTERM: 'truecolor',
   };
 
@@ -2131,7 +2146,7 @@ async function spawnTerminalSession(req: express.Request, input: {
           const env = injectShellTitleHooks(shellCandidate, baseEnv);
           console.log(`[osc-cwd] spawning shell=${shellCandidate} env.PROMPT_COMMAND=${env.PROMPT_COMMAND ? 'set' : 'unset'} env.ZDOTDIR=${env.ZDOTDIR ? 'set' : 'unset'}`);
           return pty.spawn(shellCandidate, [], {
-            name: 'xterm-256color',
+            name: termValue,
             cols,
             rows,
             cwd,
@@ -2149,7 +2164,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     })();
   } else {
     ptyProcess = pty.spawn(command, args, {
-      name: 'xterm-256color',
+      name: termValue,
       cols,
       rows,
       cwd,
@@ -2628,7 +2643,7 @@ router.delete('/program-detection', (_req, res) => {
 
 router.post('/create', async (req, res) => {
   try {
-    const { cwd: inputCwd, cols, rows, mode, tmuxSessionName } = req.body;
+    const { cwd: inputCwd, cols, rows, mode, tmuxSessionName, termType } = req.body;
     const normalizedMode = normalizeMode(mode);
     const normalizedTmuxName = normalizedMode === 'tmux' ? normalizeTmuxSessionName(tmuxSessionName) : null;
 
@@ -2664,6 +2679,7 @@ router.post('/create', async (req, res) => {
       rows,
       mode,
       tmuxSessionName,
+      termType,
     });
 
     console.log(`Created terminal session: ${spawned.sessionId} in ${spawned.session.cwd}`);
@@ -3493,7 +3509,6 @@ export function handleTerminalWebSocket(
         case 'input': {
           if (typeof msg.data === 'string' && msg.data.length > 0) {
             session.lastActivity = Date.now();
-            console.log('[WS input] sessionId=', sessionId, 'data=', JSON.stringify(msg.data), 'len=', msg.data.length, 'ts=', Date.now());
             session.ptyProcess.write(msg.data);
           }
           break;

@@ -190,6 +190,7 @@ export async function createTerminalSession(
       mode: options.mode || 'shell',
       tmuxSessionName: options.tmuxSessionName,
       cwd: options.cwd,
+      termType: options.termType,
     }),
   });
 
