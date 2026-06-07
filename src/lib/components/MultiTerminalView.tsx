@@ -234,7 +234,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
 
     if (swiper.activeIndex !== activeSessionIndex) {
-      swiper.slideTo(activeSessionIndex, SWIPE_ANIMATION_SPEED_MS);
+      swiper.slideTo(activeSessionIndex, SWIPE_ANIMATION_SPEED_MS, false);
     }
   }, [activeSessionIndex, sessions.length]);
 
@@ -259,64 +259,42 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
   }, [sessions.length]);
 
-  const getSwiperInstance = useCallback((): SwiperInstance | null => {
-    if (swiperRef.current) return swiperRef.current;
-    if (typeof document === 'undefined') return null;
-    return ((document.querySelector('.swiper') as (HTMLElement & { swiper?: SwiperInstance }) | null)?.swiper) ?? null;
-  }, []);
-
-  const forceUpdateSwiperLayout = useCallback((reason: string) => {
-    const swiper = getSwiperInstance();
+  const updateSwiperLayout = useCallback((reason: string) => {
+    const swiper = swiperRef.current;
     if (!swiper) return;
     const el = swiper.el as HTMLElement | undefined;
     if (el) el.scrollLeft = 0;
-    (swiper as unknown as { width?: number }).width = undefined;
-    (swiper as unknown as { size?: number }).size = undefined;
     swiper.updateSize();
     swiper.updateSlides();
     swiper.updateProgress();
     swiper.updateSlidesClasses();
-    if (activeSessionIndex >= 0) {
-      swiper.slideTo(activeSessionIndex, 0);
-    }
     if (el) el.scrollLeft = 0;
-    debugSession('[Swiper] force layout update', {
+    debugSession('[Swiper] layout update', {
       reason,
       width: swiper.width,
       activeSessionIndex,
       activeIndex: swiper.activeIndex,
       scrollLeft: el?.scrollLeft ?? null,
     });
-  }, [activeSessionIndex, debugSession, getSwiperInstance]);
+  }, [activeSessionIndex, debugSession]);
 
   useEffect(() => {
     const updateSwiperSize = () => {
-      requestAnimationFrame(() => forceUpdateSwiperLayout('viewport-change'));
+      requestAnimationFrame(() => updateSwiperLayout('viewport-change'));
     };
 
     window.addEventListener('resize', updateSwiperSize);
     window.visualViewport?.addEventListener('resize', updateSwiperSize);
     window.visualViewport?.addEventListener('scroll', updateSwiperSize);
 
-    const swiperEl = swiperRef.current?.el as HTMLElement | undefined;
-    const resizeObserver = typeof ResizeObserver !== 'undefined' && swiperEl
-      ? new ResizeObserver(() => updateSwiperSize())
-      : null;
-    if (resizeObserver && swiperEl) {
-      resizeObserver.observe(swiperEl);
-    }
-
     updateSwiperSize();
-    const intervalId = window.setInterval(() => forceUpdateSwiperLayout('interval'), 500);
 
     return () => {
       window.removeEventListener('resize', updateSwiperSize);
       window.visualViewport?.removeEventListener('resize', updateSwiperSize);
       window.visualViewport?.removeEventListener('scroll', updateSwiperSize);
-      resizeObserver?.disconnect();
-      window.clearInterval(intervalId);
     };
-  }, [forceUpdateSwiperLayout]);
+  }, [updateSwiperLayout]);
 
   // Notify parent of session data changes
   useEffect(() => {
@@ -837,7 +815,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           onSwiper={(instance) => {
             swiperRef.current = instance;
             instance.allowTouchMove = sessions.length > 1;
-            requestAnimationFrame(() => forceUpdateSwiperLayout('on-swiper'));
+            requestAnimationFrame(() => updateSwiperLayout('on-swiper'));
           }}
           onSlideChange={handleSwiperChange}
           onTouchStart={(_, event) => {
