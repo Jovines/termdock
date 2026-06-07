@@ -12,7 +12,6 @@ import { buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, 
 import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
-import { clientLog } from '../../utils/clientLog';
 import type { TerminalRendererMode, TerminalEngine } from '../../terminal/renderer';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 
@@ -931,7 +930,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
           await terminal.sendInput(terminalId, payload);
         } catch (error) {
-          clientLog('error', '[sendPayload] ERROR', { error });
           setConnectionError(error instanceof Error ? error.message : 'Failed to send input');
         }
       };
@@ -1244,21 +1242,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   React.useEffect(() => {
     if (!isActive || !isMobile) return;
     const controller = terminalControllerRef.current;
-    clientLog('debug', '[DEBUG_Ghostty] keyboard layout state', {
-      sessionId,
-      engine,
-      hasController: !!controller,
-      isActive,
-      isMobile,
-      isViewportKeyboardOpen,
-      viewportKeyboardHeight,
-      innerHeight: typeof window !== 'undefined' ? window.innerHeight : null,
-      visualViewportHeight: typeof window !== 'undefined' ? window.visualViewport?.height ?? null : null,
-      visualViewportOffsetTop: typeof window !== 'undefined' ? window.visualViewport?.offsetTop ?? null : null,
-      appVh: typeof document !== 'undefined' ? getComputedStyle(document.documentElement).getPropertyValue('--app-vh') : null,
-      kbMarginTop: typeof document !== 'undefined' ? getComputedStyle(document.documentElement).getPropertyValue('--kb-margin-top') : null,
-      kbTranslateY: typeof document !== 'undefined' ? getComputedStyle(document.documentElement).getPropertyValue('--kb-translate-y') : null,
-    });
     controller?.requestRefresh('resize', {
       resizeDebounceMs: 0,
       skipScrollToBottom: !isViewportKeyboardOpen,
