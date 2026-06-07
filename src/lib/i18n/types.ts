@@ -169,6 +169,7 @@ export type TranslationDictionary = {
     installTmuxHint: string;
     refresh: string;
     attached: string;
+    restorable: string;
     attach: string;
     destroy: string;
     sessions: (params: TranslatorParams) => string;

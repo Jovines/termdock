@@ -8,6 +8,9 @@ import type {
   TmuxLayout,
   TmuxSessionSummary,
   TmuxStatus,
+  SessionInventory,
+  OpenSessionInventoryOptions,
+  OpenSessionInventoryResult,
 } from './types';
 
 // ---- Global 401 interceptor ----
@@ -755,6 +758,86 @@ export interface TerminalClientState {
   sessions: PersistedTerminalClientSession[];
   activeSessionId?: string | null; // Deprecated: no longer returned by server, kept for backward compat
   updatedAt?: number;
+}
+
+export async function getSessionInventory(): Promise<SessionInventory> {
+  const response = await fetch('/api/terminal/session-inventory', { method: 'GET' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to load session inventory' }));
+    throw new Error(error.error || 'Failed to load session inventory');
+  }
+  return response.json() as Promise<SessionInventory>;
+}
+
+export async function openSessionInventoryEntry(
+  options: OpenSessionInventoryOptions,
+): Promise<OpenSessionInventoryResult> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/session-inventory/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(options),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to open session' }));
+    throw new Error(error.error || 'Failed to open session');
+  }
+  return response.json() as Promise<OpenSessionInventoryResult>;
+}
+
+export async function updateSessionInventoryEntry(
+  frontendSessionId: string,
+  patch: { name?: string; customName?: boolean; backendSessionId?: string | null; tmuxSessionName?: string | null },
+): Promise<SessionInventory> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/session-inventory/sessions/${encodeURIComponent(frontendSessionId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(patch),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update session' }));
+    throw new Error(error.error || 'Failed to update session');
+  }
+  return response.json() as Promise<SessionInventory>;
+}
+
+export async function reorderSessionInventoryEntries(sessionIds: string[]): Promise<SessionInventory> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/session-inventory/reorder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify({ sessionIds }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to reorder sessions' }));
+    throw new Error(error.error || 'Failed to reorder sessions');
+  }
+  return response.json() as Promise<SessionInventory>;
+}
+
+export async function removeSessionInventoryEntry(frontendSessionId: string): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/session-inventory/sessions/${encodeURIComponent(frontendSessionId)}`, {
+    method: 'DELETE',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to remove session' }));
+    throw new Error(error.error || 'Failed to remove session');
+  }
+}
+
+export async function clearSessionInventoryEntries(): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/session-inventory/sessions', {
+    method: 'DELETE',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to clear sessions' }));
+    throw new Error(error.error || 'Failed to clear sessions');
+  }
 }
 
 export async function getTerminalClientState(): Promise<TerminalClientState> {

@@ -22,6 +22,7 @@ import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
+import { getCwdLeafName, getSessionDisplayLines } from './lib/terminal/display';
 import type { TerminalRendererMode, TerminalEngine } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
 import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig } from './lib/terminal/api';
@@ -87,29 +88,6 @@ function isSettingsCacheDoc(v: unknown): v is SettingsCacheDoc {
 // with the actual config. Kept in sync with the backend DEFAULT_PROGRAM_DETECTION.shellNames.
 const DEFAULT_SHELL_NAMES = ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu'];
 let SHELL_NAMES = new Set(DEFAULT_SHELL_NAMES);
-
-function getCwdLeafName(cwd: string | null): string | null {
-  if (!cwd) return null;
-  if (cwd === '/') return '/';
-  const segments = cwd.replace(/\/+$/, '').split('/');
-  return segments[segments.length - 1] || cwd;
-}
-
-function getTabDisplayLines(
-  session: { name: string; customName?: boolean },
-  activeProgram: string | null,
-  cwd: string | null,
-): { primary: string; secondary: string | null } {
-  if (session.customName) return { primary: session.name, secondary: getCwdLeafName(cwd) };
-  // 打开了非 shell 程序时：第一行程序名，第二行当前目录名
-  if (activeProgram && !SHELL_NAMES.has(activeProgram)) {
-    return { primary: activeProgram, secondary: getCwdLeafName(cwd) };
-  }
-  // 否则回落到目录名 / session.name
-  const dir = getCwdLeafName(cwd);
-  if (dir) return { primary: dir, secondary: null };
-  return { primary: session.name, secondary: null };
-}
 
 type TabTerminalSessionState = Pick<
   TerminalSessionState,
@@ -620,11 +598,6 @@ function App() {
     }
     return { running, review };
   }, [sessions, terminalSessions]);
-  const connectedTmuxNames = React.useMemo(
-    () => new Set(sessions.filter((s) => s.mode === 'tmux' && s.tmuxSessionName).map((s) => s.tmuxSessionName)),
-    [sessions],
-  );
-
   useEffect(() => {
     activeSessionTabRef.current?.scrollIntoView({
       inline: 'center',
@@ -831,10 +804,11 @@ function App() {
                 const isActive = session.id === activeSessionId;
                 const isEditing = session.id === editingSessionId;
                 const ts = terminalSessions.get(session.id);
-                const { primary: displayName, secondary: displaySubName } = getTabDisplayLines(
+                const { primary: displayName, secondary: displaySubName } = getSessionDisplayLines(
                   session,
                   ts?.activeProgram ?? null,
                   ts?.cwd ?? null,
+                  SHELL_NAMES,
                 );
                 const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
                 const tabDirLabel = displaySubName ?? (cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null);
@@ -1264,7 +1238,11 @@ function App() {
                     ) : (
                       <div className="space-y-1">
                         {tmuxSessions.map((tmux) => {
-                          const connected = connectedTmuxNames.has(tmux.name);
+                          const boundFrontendSessionId = tmux.boundFrontendSessionId ?? null;
+                          const connected = Boolean(tmux.connected || boundFrontendSessionId);
+                          const existingSession = boundFrontendSessionId
+                            ? sessions.find((session) => session.id === boundFrontendSessionId) ?? null
+                            : null;
                           const confirming = tmuxConfirmKillName === tmux.name;
                           const killing = tmuxKillingName === tmux.name;
                           return (
@@ -1278,18 +1256,25 @@ function App() {
                               <div className="min-w-0 flex-1">
                                 <div className="truncate text-[12px] font-medium text-foreground">{tmux.name}</div>
                                 <div className="text-[10px] text-muted-foreground">
-                                  {t('settings.windows', { n: tmux.windows })}{connected && ` · ${t('settings.attached')}`}
+                                  {t('settings.windows', { n: tmux.windows })}
+                                  {tmux.attached > 0 && ` · tmux:${tmux.attached}`}
+                                  {connected && ` · ${tmux.restorable ? t('settings.restorable') : t('settings.attached')}`}
                                 </div>
                               </div>
                               {!confirming ? (
                                 <>
                                   <button
                                     type="button"
-                                    disabled={connected}
-                                    onClick={() => dispatchNewSession({ mode: 'tmux', tmuxSessionName: tmux.name })}
+                                    onClick={() => {
+                                      if (existingSession) {
+                                        handleTabClick(existingSession.id);
+                                      } else {
+                                        dispatchNewSession({ mode: 'tmux', tmuxSessionName: tmux.name });
+                                      }
+                                    }}
                                     className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition ${
                                       connected
-                                        ? 'bg-surface text-muted-foreground cursor-not-allowed'
+                                        ? 'bg-surface text-foreground hover:bg-surface-elevated'
                                         : 'bg-primary/15 text-primary hover:bg-primary/25'
                                     }`}
                                   >
@@ -1505,10 +1490,11 @@ function App() {
         const menuSession = sessions.find((s) => s.id === tabMenuSessionId);
         if (!menuSession) return null;
         const ts = terminalSessions.get(menuSession.id);
-        const { primary: menuName } = getTabDisplayLines(
+        const { primary: menuName } = getSessionDisplayLines(
           menuSession,
           ts?.activeProgram ?? null,
           ts?.cwd ?? null,
+          SHELL_NAMES,
         );
         return (
           <>

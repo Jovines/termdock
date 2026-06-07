@@ -5,7 +5,7 @@ import type { TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../t
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
 import { FLEXOKI_DARK } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
-import { probeTerminalConnection } from '../../terminal/api';
+import { probeTerminalConnection, updateSessionInventoryEntry } from '../../terminal/api';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
 import { buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, splitToolbarSequenceSegments, TOOLBAR_SEGMENT_DELAY_MS, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
@@ -770,6 +770,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             }
 
             store.setTerminalSession(sessionId, session);
+            void updateSessionInventoryEntry(sessionId, {
+              backendSessionId: session.sessionId,
+              tmuxSessionName: session.tmuxSessionName ?? null,
+            }).catch((error) => {
+              console.warn('[Terminal] failed to update inventory after auto recreate', error);
+            });
             debugSession(`[ensureSession] Updated store with new session ${session.sessionId}`);
             terminalId = session.sessionId;
           } catch (error) {
@@ -839,10 +845,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         mode: sessionMode,
         tmuxSessionName: sessionMode === 'tmux' ? preferredTmuxSessionName : undefined,
       });
-      setTerminalSession(sessionId, {
-        ...session,
-        mode: session.mode ?? sessionMode,
+      setTerminalSession(sessionId, session);
+      void updateSessionInventoryEntry(sessionId, {
+        backendSessionId: session.sessionId,
         tmuxSessionName: session.tmuxSessionName ?? (sessionMode === 'tmux' ? preferredTmuxSessionName : null),
+      }).catch((error) => {
+        console.warn('[Terminal] failed to update inventory after hard restart', error);
       });
       terminalIdRef.current = session.sessionId;
       startStream(session.sessionId);
@@ -1011,6 +1019,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             rows: 24,
             mode: 'tmux',
             tmuxSessionName: result.layout.sessionName,
+          });
+          void updateSessionInventoryEntry(sessionId, { tmuxSessionName: result.layout.sessionName }).catch((error) => {
+            console.warn('[Terminal] failed to update inventory after tmux switch', error);
           });
         }
       }

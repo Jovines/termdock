@@ -152,6 +152,7 @@ export const zh: TranslationDictionary = {
     installTmuxHint: '请在服务端安装 tmux 后启用。',
     refresh: '刷新',
     attached: '已连接',
+    restorable: '可恢复',
     attach: '连接',
     destroy: '销毁',
     sessions: ({ n }) => `${n} 个会话`,

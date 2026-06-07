@@ -1,11 +1,10 @@
 import React, { useEffect, useCallback, useState, useRef, useMemo } from 'react';
-import { v4 as uuidv4 } from 'uuid';
 import { Swiper, SwiperSlide } from 'swiper/react';
 import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
-import { createTerminalSession, closeTerminal, killTmuxSession } from '../terminal/api';
+import { closeTerminal, killTmuxSession } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode, TerminalEngine } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
@@ -76,12 +75,6 @@ interface MultiTerminalViewProps {
   onSessionDataUpdate?: (data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => void;
 }
 
-let sessionCounter = 1;
-
-function generateSessionName(): string {
-  return `terminal-${sessionCounter++}`;
-}
-
 function generateTmuxSessionName(seed?: string): string {
   const normalizedSeed = (seed || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 12);
   if (normalizedSeed) {
@@ -147,7 +140,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     sessions: persistedSessions,
     activeSessionId: persistedActiveId,
     isLoading,
-    saveSession,
+    openSession,
     setActiveSession,
     updateSessionBackendId,
     removeSession: removePersistedSession,
@@ -310,23 +303,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     });
   }, [sessions, activeSessionId, onSessionDataUpdate]);
 
-  // 尝试为单个 session 恢复或创建 session
-  //
-  // 重要：有 backendSessionId 时**立即**返回 placeholder，不 await attach。
-  // 之前会卡在 attach 的 HTTP RTT（蜂窝网络下 1-3 秒）→ MultiTerminalView 持续显示
-  // 全屏 "Restoring sessions..."。手机 PWA 长时间后台后 OS 会把页面踢出内存，
-  // 回来时就是冷启动跑这段，于是用户每次都看到 loading。
-  //
-  // 现在的链路：
-  //  1. 这里立刻返回 placeholder（backend ID 用持久化的）→ UI 秒渲染
-  //  2. TerminalView 的 ensureSession 自己跑 checkHealth(backendId)
-  //     - 健康 → startStream，WS 'connected' 事件里 server 现在会直接补 restore history
-  //     - 不健康（server 重启 / idle 清理）→ 创建新 session，复用 Fix 2 的 auto-recreate 路径
-  //  3. scrollback 由 WS 'connected' 的 replayChunks 携带，不再需要单独 HTTP /attach
+  // 通过服务端 Session Inventory 恢复或打开单个 session。
+  // create / attach / restore 统一走同一个原子 open 接口，避免前端先本地
+  // append 一条，再让持久化层去重造成闪烁或重复创建。
   const restoreOrCreateSession = useCallback(async (
     session: typeof persistedSessions[0],
   ): Promise<TerminalSession> => {
-    const { sessionId, name, backendSessionId } = session;
+    const { sessionId, name } = session;
     const mode: TerminalMode = session.mode === 'tmux' || session.mode === 'shell'
       ? session.mode
       : defaultSessionMode;
@@ -336,39 +319,34 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       ? (persistedTmuxName || configuredDefaultTmuxName || generateTmuxSessionName(sessionId))
       : null;
 
-    // 快路径：有 backend ID 时直接返回，不阻塞 UI
-    if (backendSessionId) {
-      debugSession('[Session] Fast restore (no attach):', {
-        backendSessionId,
-        frontendSessionId: sessionId,
-      });
-      return {
-        id: sessionId,
-        name,
-        customName: session.customName === true,
-        sessionId: backendSessionId,
-        mode,
-        tmuxSessionName,
-      };
-    }
-
-    // 没有 backend ID（首次使用 / 之前 session 被彻底删了）：必须 await 创建
-    const newSession = await createTerminalSession({
-      mode,
-      tmuxSessionName: tmuxSessionName ?? undefined,
-      termType: engine === 'ghostty' ? 'xterm-ghostty' : 'xterm-256color',
-    });
-    debugSession('[Session] Created new session:', newSession.sessionId);
-
-    return {
-      id: sessionId,
+    const result = await openSession({
+      preferredFrontendSessionId: sessionId,
       name,
       customName: session.customName === true,
-      sessionId: newSession.sessionId,
-      mode: newSession.mode ?? mode,
-      tmuxSessionName: newSession.tmuxSessionName ?? tmuxSessionName,
+      mode,
+      tmuxSessionName,
+      termType: engine === 'ghostty' ? 'xterm-ghostty' : 'xterm-256color',
+    });
+    const canonical = result.session;
+    const terminalSession = result.terminalSession;
+    debugSession('[Session] Inventory restore/open:', {
+      requestedFrontendSessionId: sessionId,
+      frontendSessionId: canonical.sessionId,
+      backendSessionId: terminalSession.sessionId,
+      reused: result.reused,
+      mode: canonical.mode,
+      tmuxSessionName: canonical.tmuxSessionName,
+    });
+
+    return {
+      id: canonical.sessionId,
+      name: canonical.name,
+      customName: canonical.customName === true,
+      sessionId: terminalSession.sessionId,
+      mode: terminalSession.mode ?? canonical.mode,
+      tmuxSessionName: terminalSession.tmuxSessionName ?? canonical.tmuxSessionName,
     };
-  }, [defaultSessionMode, defaultTmuxSessionName, debugSession]);
+  }, [defaultSessionMode, defaultTmuxSessionName, debugSession, engine, openSession]);
 
   // 恢复会话（尝试复用现有 session）- 只执行一次
   useEffect(() => {
@@ -393,7 +371,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         const store = useTerminalStore.getState();
         restored.forEach((session) => {
           if (session.sessionId) {
-            updateSessionBackendId(session.id, session.sessionId);
+            void updateSessionBackendId(session.id, session.sessionId);
             store.setTerminalSession(session.id, {
               sessionId: session.sessionId,
               cols: 80,
@@ -498,7 +476,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           setSessions(prev => [...prev, ...validAttached]);
           validAttached.forEach(session => {
             if (session.sessionId) {
-              updateSessionBackendId(session.id, session.sessionId);
+              void updateSessionBackendId(session.id, session.sessionId);
               const store = useTerminalStore.getState();
               store.setTerminalSession(session.id, {
                 sessionId: session.sessionId,
@@ -558,60 +536,67 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         ? requestedCwd
         : (typeof activeCwd === 'string' && activeCwd.trim().length > 0 ? activeCwd : undefined);
 
-      const newTerminalSession = await createTerminalSession({
+      const result = await openSession({
         mode,
-        tmuxSessionName: tmuxSessionName ?? undefined,
+        tmuxSessionName,
         cwd: effectiveCwd,
         termType: engine === 'ghostty' ? 'xterm-ghostty' : 'xterm-256color',
       });
-      const sessionId = uuidv4();
-      const effectiveTmuxSessionName = newTerminalSession.tmuxSessionName ?? tmuxSessionName;
-      const name = effectiveTmuxSessionName
-        ? `tmux:${effectiveTmuxSessionName}`
-        : generateSessionName();
-
-      const newSession: TerminalSession = {
-        id: sessionId,
-        name,
-        customName: false,
-        sessionId: newTerminalSession.sessionId,
-        mode: newTerminalSession.mode ?? mode,
-        tmuxSessionName: effectiveTmuxSessionName,
+      const canonical = result.session;
+      const terminalSession = result.terminalSession;
+      const nextSession: TerminalSession = {
+        id: canonical.sessionId,
+        name: canonical.name,
+        customName: canonical.customName === true,
+        sessionId: terminalSession.sessionId,
+        mode: terminalSession.mode ?? canonical.mode,
+        tmuxSessionName: terminalSession.tmuxSessionName ?? canonical.tmuxSessionName,
       };
 
       setSessions((prev) => {
-        const updated = [...prev, newSession];
-        return updated;
+        const existingIndex = prev.findIndex((session) => session.id === nextSession.id);
+        if (existingIndex >= 0) {
+          const updated = [...prev];
+          updated[existingIndex] = nextSession;
+          return updated;
+        }
+        if (nextSession.mode === 'tmux' && nextSession.tmuxSessionName) {
+          const tmuxIndex = prev.findIndex((session) => session.mode === 'tmux' && session.tmuxSessionName === nextSession.tmuxSessionName);
+          if (tmuxIndex >= 0) {
+            const updated = [...prev];
+            updated[tmuxIndex] = nextSession;
+            return updated;
+          }
+        }
+        return [...prev, nextSession];
       });
 
-      setActiveSessionId(sessionId);
+      setActiveSessionId(nextSession.id);
 
-      // Persist the new session
-      saveSession({
-        sessionId,
-        name,
-        customName: false,
-        mode: newSession.mode,
-        tmuxSessionName: newSession.tmuxSessionName,
-      }, newTerminalSession.sessionId);
-
-      // Update useTerminalStore with the new backend session
       const store = useTerminalStore.getState();
-      if (newTerminalSession.sessionId) {
-        store.setTerminalSession(sessionId, {
-          sessionId: newTerminalSession.sessionId,
-          cols: 80,
-          rows: 24,
-          mode: newSession.mode,
-          tmuxSessionName: newSession.tmuxSessionName,
-        });
-      }
+      store.setTerminalSession(nextSession.id, {
+        sessionId: terminalSession.sessionId,
+        cols: 80,
+        rows: 24,
+        mode: nextSession.mode,
+        tmuxSessionName: nextSession.tmuxSessionName,
+        activeProgram: terminalSession.activeProgram,
+        activeProgramRaw: terminalSession.activeProgramRaw,
+        activeProgramSource: terminalSession.activeProgramSource,
+        cwd: terminalSession.cwd,
+      });
 
-      debugSession('[Session] Created new session:', sessionId, newTerminalSession.sessionId);
+      debugSession('[Session] Inventory opened session:', {
+        frontendSessionId: nextSession.id,
+        backendSessionId: terminalSession.sessionId,
+        reused: result.reused,
+        mode: nextSession.mode,
+        tmuxSessionName: nextSession.tmuxSessionName,
+      });
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);
     }
-  }, [defaultSessionMode, defaultTmuxSessionName, activeSessionId, saveSession, debugSession]);
+  }, [defaultSessionMode, defaultTmuxSessionName, activeSessionId, openSession, debugSession, engine]);
   handleNewSessionRef.current = handleNewSession;
 
   // Handle session switching from custom event
@@ -629,7 +614,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     setSessions((prev) =>
       prev.map((s) => (s.id === sessionId ? { ...s, name: newName.trim(), customName: true } : s))
     );
-    renameSession(sessionId, newName.trim());
+      void renameSession(sessionId, newName.trim());
   }, [renameSession]);
 
   // Reset session name → 清掉 customName,后续渲染回退到「程序名/目录名」默认显示
@@ -637,7 +622,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     setSessions((prev) =>
       prev.map((s) => (s.id === sessionId ? { ...s, customName: false } : s))
     );
-    resetSessionCustomName(sessionId);
+    void resetSessionCustomName(sessionId);
   }, [resetSessionCustomName]);
 
   // Handle session reorder
@@ -651,7 +636,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       const remaining = prev.filter(s => !covered.has(s.id));
       return [...reordered, ...remaining];
     });
-    reorderSessions(orderedIds);
+    void reorderSessions(orderedIds);
     debugSession('[Session] Reordered sessions:', orderedIds);
     requestAnimationFrame(() => {
       swiperRef.current?.update();
@@ -698,7 +683,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     });
 
     // Remove from persistence
-    removePersistedSession(sessionId);
+    void removePersistedSession(sessionId);
     delete keyboardOpenBySessionRef.current[sessionId];
 
     debugSession('[Session] Closed session:', { sessionId, closeMode });
@@ -723,7 +708,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     });
 
     for (const s of matched) {
-      removePersistedSession(s.id);
+      void removePersistedSession(s.id);
       delete keyboardOpenBySessionRef.current[s.id];
     }
     debugSession('[Session] Backend gone, dropped local session(s):', matched.map((s) => s.id));

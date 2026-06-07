@@ -1,12 +1,24 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { clearTerminalClientState, getTerminalClientState, replaceTerminalClientState, type PersistedTerminalClientSession } from '../terminal/api';
+import {
+  clearSessionInventoryEntries,
+  getSessionInventory,
+  openSessionInventoryEntry,
+  removeSessionInventoryEntry,
+  reorderSessionInventoryEntries,
+  updateSessionInventoryEntry,
+  type OpenSessionInventoryOptions,
+  type OpenSessionInventoryResult,
+  type PersistedTerminalClientSession,
+  type SessionInventory,
+  type SessionInventoryClientSession,
+} from '../terminal';
 import { subscribeClientState } from '../utils/clientStateSync';
 
 const LEGACY_STORAGE_KEY = 'termdock-sessions';
 const ACTIVE_SESSION_STORAGE_KEY = 'termdock-active-session';
 // 本地 session 列表缓存：用来让"返回 PWA / 冷启动"瞬间渲染 UI，避免卡在
-// HTTP GET /api/terminal/client-state 的蜂窝 RTT（500ms-3s）期间显示全屏 loading。
-// 数据源仍以服务端为准：缓存命中后照常发起后台请求 reconcile，只有差异才更新 state。
+// HTTP GET 的蜂窝 RTT（500ms-3s）期间显示全屏 loading。数据源仍以服务端
+// inventory 为准：缓存命中后照常发起后台请求 reconcile，只有差异才更新 state。
 const SESSIONS_CACHE_STORAGE_KEY = 'termdock-sessions-cache';
 
 function readActiveSessionId(): string | null {
@@ -71,18 +83,47 @@ export interface PersistedSession {
 
 interface UseSessionPersistenceReturn {
   sessions: PersistedSession[];
+  inventory: SessionInventory | null;
   activeSessionId: string | null;
   isLoading: boolean;
-  saveSession: (session: Omit<PersistedSession, 'createdAt' | 'lastActivity' | 'backendSessionId'>, backendSessionId: string | null) => void;
-  removeSession: (sessionId: string) => void;
+  openSession: (options: OpenSessionInventoryOptions) => Promise<OpenSessionInventoryResult>;
+  removeSession: (sessionId: string) => Promise<void>;
   updateSessionActivity: (sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
-  updateSessionBackendId: (sessionId: string, backendSessionId: string) => void;
-  renameSession: (sessionId: string, newName: string) => void;
-  resetSessionCustomName: (sessionId: string) => void;
-  reorderSessions: (orderedIds: string[]) => void;
-  clearAllSessions: () => void;
+  updateSessionBackendId: (sessionId: string, backendSessionId: string) => Promise<void>;
+  renameSession: (sessionId: string, newName: string) => Promise<void>;
+  resetSessionCustomName: (sessionId: string) => Promise<void>;
+  reorderSessions: (orderedIds: string[]) => Promise<void>;
+  clearAllSessions: () => Promise<void>;
   restoreSessions: () => Promise<PersistedSession[]>;
+}
+
+function normalizeSessionList(sessionList: PersistedTerminalClientSession[]): PersistedSession[] {
+  return sessionList.map((session) => ({
+    ...session,
+    mode: session.mode === 'tmux' ? 'tmux' : 'shell',
+    tmuxSessionName: session.tmuxSessionName ?? null,
+    customName: session.customName === true,
+  }));
+}
+
+function normalizeInventorySessionList(sessionList: SessionInventoryClientSession[]): PersistedSession[] {
+  return normalizeSessionList(sessionList.map((session) => ({
+    sessionId: session.sessionId,
+    name: session.name,
+    customName: session.customName === true,
+    backendSessionId: session.backendSessionId,
+    mode: session.mode,
+    tmuxSessionName: session.tmuxSessionName,
+    createdAt: session.createdAt,
+    lastActivity: session.lastActivity,
+  })));
+}
+
+function sessionListKey(sessionList: PersistedSession[]): string {
+  return sessionList
+    .map((s) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}:${s.lastActivity}`)
+    .join('|');
 }
 
 export function useSessionPersistence(): UseSessionPersistenceReturn {
@@ -91,17 +132,13 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const initialCached = useRef<PersistedSession[] | null>(readSessionsCache()).current;
   const initialActiveId = useRef<string | null>(readActiveSessionId()).current;
   const [sessions, setSessions] = useState<PersistedSession[]>(initialCached ?? []);
+  const [inventory, setInventory] = useState<SessionInventory | null>(null);
   const [activeSessionId, setActiveSessionIdState] = useState<string | null>(
     initialCached && initialCached.length > 0 ? initialActiveId : null
   );
   const [isLoading, setIsLoading] = useState<boolean>(initialCached === null);
   const initialized = useRef(false);
-  const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const persistGenerationRef = useRef(0);
-  const completedPersistGenerationRef = useRef(0);
   const activeSessionIdRef = useRef<string | null>(null);
-  // Mirror of `isLoading` for use inside the WS subscribe effect, whose
-  // body cannot read the React state value at subscribe time.
   const isLoadingRef = useRef<boolean>(initialCached === null);
   useEffect(() => { isLoadingRef.current = isLoading; }, [isLoading]);
 
@@ -109,40 +146,15 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
-  const normalizeSessionList = useCallback((sessionList: PersistedTerminalClientSession[]): PersistedSession[] => {
-    return sessionList.map((session) => ({
-      ...session,
-      mode: session.mode === 'tmux' ? 'tmux' : 'shell',
-      tmuxSessionName: session.tmuxSessionName ?? null,
-      customName: session.customName === true,
-    }));
-  }, []);
-
-  const queuePersist = useCallback((sessionList: PersistedSession[]) => {
-    const generation = ++persistGenerationRef.current;
-    // 同步写本地缓存，让下次冷启动可以 hydrate 出最新列表
+  const applySessionList = useCallback((sessionList: PersistedSession[]) => {
+    setSessions((prev) => (sessionListKey(prev) === sessionListKey(sessionList) ? prev : sessionList));
     writeSessionsCache(sessionList);
-
-    persistQueueRef.current = persistQueueRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        try {
-          if (sessionList.length === 0) {
-            await clearTerminalClientState();
-            return;
-          }
-          // Only send sessions, not activeSessionId (that's localStorage-only now)
-          await replaceTerminalClientState({ sessions: sessionList });
-        } catch (error) {
-          console.error('Failed to persist sessions to server:', error);
-        } finally {
-          completedPersistGenerationRef.current = Math.max(
-            completedPersistGenerationRef.current,
-            generation,
-          );
-        }
-      });
   }, []);
+
+  const applyInventory = useCallback((nextInventory: SessionInventory) => {
+    setInventory(nextInventory);
+    applySessionList(normalizeInventorySessionList(nextInventory.clientSessions));
+  }, [applySessionList]);
 
   const migrateLegacyLocalState = useCallback(async (): Promise<PersistedSession[]> => {
     if (typeof window === 'undefined') {
@@ -166,46 +178,41 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
       writeActiveSessionId(storedActiveSessionId);
     }
 
-    if (sessionList.length > 0) {
-      await replaceTerminalClientState({ sessions: sessionList });
-    } else {
-      await clearTerminalClientState();
+    for (const session of sessionList) {
+      try {
+        const result = await openSessionInventoryEntry({
+          preferredFrontendSessionId: session.sessionId,
+          name: session.name,
+          customName: session.customName,
+          mode: session.mode,
+          tmuxSessionName: session.tmuxSessionName,
+        });
+        applyInventory(result.inventory);
+      } catch (error) {
+        console.error('Failed to migrate legacy session:', error);
+      }
     }
 
     localStorage.removeItem(LEGACY_STORAGE_KEY);
     return sessionList;
-  }, [normalizeSessionList]);
+  }, [applyInventory]);
 
-  // 从服务端读取会话；首次访问时迁移旧版 localStorage 数据。
-  // activeSessionId 从 localStorage 读取（不再从服务器）。
-  //
-  // 如果本地缓存已经 hydrate 出 sessions，这里只是在背景 reconcile，发现一致就 no-op，
-  // 避免 setSessions 触发无意义的 re-render（会让 Swiper 闪一下）。
+  // 从服务端 inventory 读取会话；activeSessionId 从 localStorage 读取（不再从服务器）。
   const restoreSessions = useCallback(async (): Promise<PersistedSession[]> => {
     if (typeof window === 'undefined') return [];
 
     try {
-      const data = await getTerminalClientState();
-      const sessionList = normalizeSessionList(data.sessions || []);
-      // Read activeSessionId from localStorage, not server
+      const nextInventory = await getSessionInventory();
+      applyInventory(nextInventory);
+      const sessionList = normalizeInventorySessionList(nextInventory.clientSessions);
       const restoredActiveSessionId = readActiveSessionId();
 
       if (sessionList.length > 0) {
-        // Diff: 服务端列表与现有 state 一致就跳过 setSessions
-        setSessions((prev) => {
-          const key = (s: PersistedSession) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}`;
-          const prevKey = prev.map(key).join('|');
-          const nextKey = sessionList.map(key).join('|');
-          if (prevKey === nextKey) return prev;
-          return sessionList;
-        });
-        // Only set activeSessionId if it still exists in the session list
         const validActiveId = sessionList.some(s => s.sessionId === restoredActiveSessionId)
           ? restoredActiveSessionId
           : (sessionList[0]?.sessionId ?? null);
         setActiveSessionIdState((prev) => (prev === validActiveId ? prev : validActiveId));
         writeActiveSessionId(validActiveId);
-        writeSessionsCache(sessionList);
         return sessionList;
       }
 
@@ -223,55 +230,17 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     }
 
     return [];
-  }, [migrateLegacyLocalState, normalizeSessionList]);
+  }, [applyInventory, migrateLegacyLocalState]);
 
-  // 保存新会话（带去重：同 sessionId 或同 tmuxSessionName 更新已有条目）
-  const saveSession = useCallback((session: Omit<PersistedSession, 'createdAt' | 'lastActivity' | 'backendSessionId'>, backendSessionId: string | null) => {
-    const now = Date.now();
-    const newSession: PersistedSession = {
-      ...session,
-      backendSessionId,
-      mode: session.mode === 'tmux' ? 'tmux' : 'shell',
-      tmuxSessionName: session.tmuxSessionName ?? null,
-      customName: session.customName ?? false,
-      createdAt: now,
-      lastActivity: now,
-    };
+  const openSession = useCallback(async (options: OpenSessionInventoryOptions): Promise<OpenSessionInventoryResult> => {
+    const result = await openSessionInventoryEntry(options);
+    applyInventory(result.inventory);
+    setActiveSessionIdState(result.session.sessionId);
+    writeActiveSessionId(result.session.sessionId);
+    return result;
+  }, [applyInventory]);
 
-    setSessions(prev => {
-      // 去重：相同 sessionId 直接更新
-      const exactIdx = prev.findIndex(s => s.sessionId === session.sessionId);
-      if (exactIdx >= 0) {
-        const updated = [...prev];
-        updated[exactIdx] = newSession;
-        queuePersist(updated);
-        return updated;
-      }
-
-      // 去重：tmux 模式同名 session 视为同一个，替换已有条目
-      if (newSession.mode === 'tmux' && newSession.tmuxSessionName) {
-        const tmuxIdx = prev.findIndex(
-          s => s.mode === 'tmux' && s.tmuxSessionName === newSession.tmuxSessionName
-        );
-        if (tmuxIdx >= 0) {
-          const updated = [...prev];
-          updated[tmuxIdx] = newSession;
-          queuePersist(updated);
-          return updated;
-        }
-      }
-
-      const updated = [...prev, newSession];
-      queuePersist(updated);
-      return updated;
-    });
-
-    setActiveSessionIdState(session.sessionId);
-    writeActiveSessionId(session.sessionId);
-  }, [queuePersist]);
-
-  // 移除会话
-  const removeSession = useCallback((sessionId: string) => {
+  const removeSession = useCallback(async (sessionId: string) => {
     setSessions(prev => {
       const updated = prev.filter(s => s.sessionId !== sessionId);
       const nextActiveSessionId = activeSessionIdRef.current === sessionId
@@ -279,22 +248,28 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
         : activeSessionIdRef.current;
       setActiveSessionIdState(nextActiveSessionId);
       writeActiveSessionId(nextActiveSessionId);
-      queuePersist(updated);
+      writeSessionsCache(updated);
       return updated;
     });
-  }, [queuePersist]);
 
-  // 更新会话活跃时间
+    try {
+      await removeSessionInventoryEntry(sessionId);
+    } catch (error) {
+      console.error('Failed to remove session from inventory:', error);
+    }
+  }, []);
+
+  // 更新会话活跃时间：当前只做本地缓存，服务端在 open / WS connect 时会更新 authority。
   const updateSessionActivity = useCallback((sessionId: string) => {
     const now = Date.now();
     setSessions(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, lastActivity: now } : s
       );
-      queuePersist(updated);
+      writeSessionsCache(updated);
       return updated;
     });
-  }, [queuePersist]);
+  }, []);
 
   // 设置活跃会话（仅本地，不触发服务器持久化）
   const setActiveSession = useCallback((sessionId: string | null) => {
@@ -303,7 +278,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   }, []);
 
   // 重命名会话
-  const renameSession = useCallback((sessionId: string, newName: string) => {
+  const renameSession = useCallback(async (sessionId: string, newName: string) => {
     const trimmed = newName.trim();
     if (!trimmed) return;
 
@@ -311,24 +286,38 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, name: trimmed, customName: true } : s
       );
-      queuePersist(updated);
+      writeSessionsCache(updated);
       return updated;
     });
-  }, [queuePersist]);
+
+    try {
+      const nextInventory = await updateSessionInventoryEntry(sessionId, { name: trimmed, customName: true });
+      applyInventory(nextInventory);
+    } catch (error) {
+      console.error('Failed to rename session in inventory:', error);
+    }
+  }, [applyInventory]);
 
   // 取消自定义名称,回退到默认显示规则
-  const resetSessionCustomName = useCallback((sessionId: string) => {
+  const resetSessionCustomName = useCallback(async (sessionId: string) => {
     setSessions(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, customName: false } : s
       );
-      queuePersist(updated);
+      writeSessionsCache(updated);
       return updated;
     });
-  }, [queuePersist]);
+
+    try {
+      const nextInventory = await updateSessionInventoryEntry(sessionId, { customName: false });
+      applyInventory(nextInventory);
+    } catch (error) {
+      console.error('Failed to reset session name in inventory:', error);
+    }
+  }, [applyInventory]);
 
   // 重排会话顺序
-  const reorderSessions = useCallback((orderedIds: string[]) => {
+  const reorderSessions = useCallback(async (orderedIds: string[]) => {
     setSessions(prev => {
       const idToSession = new Map(prev.map(s => [s.sessionId, s]));
       const reordered = orderedIds
@@ -337,79 +326,83 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
       const covered = new Set(orderedIds);
       const remaining = prev.filter(s => !covered.has(s.sessionId));
       const updated = [...reordered, ...remaining];
-      queuePersist(updated);
+      writeSessionsCache(updated);
       return updated;
     });
-  }, [queuePersist]);
+
+    try {
+      const nextInventory = await reorderSessionInventoryEntries(orderedIds);
+      applyInventory(nextInventory);
+    } catch (error) {
+      console.error('Failed to reorder sessions in inventory:', error);
+    }
+  }, [applyInventory]);
 
   // 清除所有会话
-  const clearAllSessions = useCallback(() => {
+  const clearAllSessions = useCallback(async () => {
     setSessions([]);
+    setInventory(null);
     setActiveSessionIdState(null);
     writeActiveSessionId(null);
     clearSessionsCache();
-    queuePersist([]);
     if (typeof window !== 'undefined') {
       localStorage.removeItem(LEGACY_STORAGE_KEY);
     }
-  }, [queuePersist]);
+
+    try {
+      await clearSessionInventoryEntries();
+    } catch (error) {
+      console.error('Failed to clear session inventory:', error);
+    }
+  }, []);
 
   // 更新会话的 backendSessionId
-  const updateSessionBackendId = useCallback((sessionId: string, backendSessionId: string) => {
+  const updateSessionBackendId = useCallback(async (sessionId: string, backendSessionId: string) => {
     setSessions(prev => {
       const updated = prev.map(s =>
         s.sessionId === sessionId ? { ...s, backendSessionId } : s
       );
-      queuePersist(updated);
+      writeSessionsCache(updated);
       return updated;
     });
-  }, [queuePersist]);
+
+    try {
+      const nextInventory = await updateSessionInventoryEntry(sessionId, { backendSessionId });
+      applyInventory(nextInventory);
+    } catch (error) {
+      console.error('Failed to update session backend in inventory:', error);
+    }
+  }, [applyInventory]);
 
   // 初始化时恢复会话
   useEffect(() => {
     if (!initialized.current) {
       initialized.current = true;
-      restoreSessions();
+      void restoreSessions();
     }
   }, [restoreSessions]);
 
-  // 服务器推送的 client-state 同步：通过 control WebSocket 实时接收。
-  // 取代了之前 5s 一次的 HTTP 轮询——多设备 / 多 tab 之间的修改现在
-  // 走的是"谁先 PUT 到服务器就立刻广播给所有订阅者"，延迟从秒级降到
-  // 单个 WS RTT。
-  //
-  // 同样通过 persistGenerationRef 防止一次本地 close/create/rename
-  // 的乐观更新被服务器的旧快照覆盖（旧快照 vs 本地最新状态：本地赢）。
+  // 服务器推送的 session inventory 同步：通过 control WebSocket 实时接收。
   useEffect(() => {
     const unsubscribe = subscribeClientState((snapshot) => {
       if (isLoadingRef.current) return;
-      // Skip applying server snapshots while a local mutation is in flight.
-      // The PUT will land and the next snapshot will reflect the change.
-      if (completedPersistGenerationRef.current < persistGenerationRef.current) {
+      if (snapshot.inventory) {
+        applyInventory(snapshot.inventory);
         return;
       }
 
-      const serverSessions = normalizeSessionList(snapshot.sessions || []);
-
-      setSessions(prev => {
-        const key = (s: PersistedSession) => `${s.sessionId}:${s.name}:${s.customName}:${s.backendSessionId}:${s.mode}:${s.tmuxSessionName}`;
-        const prevKey = prev.map(key).join('|');
-        const nextKey = serverSessions.map(key).join('|');
-        if (prevKey === nextKey) return prev;
-        return serverSessions;
-      });
-
-      // 同步本地缓存：下次冷启动直接 hydrate 出最新列表。
-      writeSessionsCache(serverSessions);
+      const serverSessions = normalizeSessionList(snapshot.clientState.sessions || []);
+      applySessionList(serverSessions);
     });
     return unsubscribe;
-  }, [normalizeSessionList]);
+  }, [applyInventory, applySessionList]);
 
   return {
     sessions,
+    inventory,
     activeSessionId,
     isLoading,
-    saveSession,
+    openSession,
     removeSession,
     updateSessionActivity,
     setActiveSession,

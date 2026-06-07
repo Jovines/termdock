@@ -152,6 +152,7 @@ export const en: TranslationDictionary = {
     installTmuxHint: 'Install tmux on the server to enable.',
     refresh: 'Refresh',
     attached: 'Attached',
+    restorable: 'Restorable',
     attach: 'Attach',
     destroy: 'Destroy',
     sessions: ({ n }) => `${n} session${n === 1 ? '' : 's'}`,

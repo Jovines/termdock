@@ -39,6 +39,72 @@ export interface TmuxSessionSummary {
   windows: number;
   attached: number;
   createdAt?: number | null;
+  boundFrontendSessionId?: string | null;
+  connected?: boolean;
+  live?: boolean;
+  restorable?: boolean;
+  friendlyName?: string | null;
+  label?: string | null;
+  program?: string | null;
+  cwd?: string | null;
+  clientCount?: number | null;
+  lastActiveAt?: number | null;
+}
+
+export interface SessionInventoryClientSession {
+  frontendSessionId: string;
+  sessionId: string;
+  name: string;
+  customName: boolean;
+  backendSessionId: string | null;
+  mode: TerminalMode;
+  tmuxSessionName: string | null;
+  createdAt: number;
+  lastActivity: number;
+  connected: boolean;
+  live: boolean;
+  restorable: boolean;
+}
+
+export interface SessionInventoryTmuxSession extends TmuxSessionSummary {
+  attachedCount: number;
+  boundFrontendSessionId: string | null;
+  connected: boolean;
+  live: boolean;
+  restorable: boolean;
+  friendlyName: string | null;
+  label: string | null;
+  program: string | null;
+  cwd: string | null;
+  clientCount: number | null;
+  createdAt: number | null;
+  lastActiveAt: number | null;
+}
+
+export interface SessionInventory {
+  clientSessions: SessionInventoryClientSession[];
+  tmuxSessions: SessionInventoryTmuxSession[];
+  tmuxStatus: TmuxStatus;
+  updatedAt: number;
+}
+
+export interface OpenSessionInventoryOptions {
+  preferredFrontendSessionId?: string;
+  name?: string;
+  customName?: boolean;
+  mode?: TerminalMode;
+  tmuxSessionName?: string | null;
+  cwd?: string;
+  cols?: number;
+  rows?: number;
+  termType?: string;
+}
+
+export interface OpenSessionInventoryResult {
+  session: SessionInventoryClientSession;
+  terminalSession: TerminalSession;
+  inventory: SessionInventory;
+  reused: boolean;
 }
 
 export interface TmuxStatus {

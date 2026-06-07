@@ -11,14 +11,19 @@
 // `subscribe()`; all receive the same snapshot. The connection is opened
 // lazily on first subscribe so SSR / non-browser contexts are safe.
 
-import type { PersistedTerminalClientSession } from '../terminal/api';
+import type { PersistedTerminalClientSession, SessionInventory } from '../terminal';
 
 export interface ClientStateSnapshot {
   sessions: PersistedTerminalClientSession[];
   updatedAt: number;
 }
 
-type Listener = (state: ClientStateSnapshot) => void;
+export interface ControlSnapshot {
+  clientState: ClientStateSnapshot;
+  inventory?: SessionInventory;
+}
+
+type Listener = (state: ControlSnapshot) => void;
 
 interface SyncState {
   ws: WebSocket | null;
@@ -139,16 +144,19 @@ function connect(): void {
 
   ws.onmessage = (event) => {
     lastServerPingAt = Date.now();
-    let msg: { type?: string; state?: ClientStateSnapshot } | null = null;
+    let msg: { type?: string; state?: ClientStateSnapshot; inventory?: SessionInventory } | null = null;
     try {
       msg = JSON.parse(event.data as string);
     } catch {
       return;
     }
     if (!msg || msg.type !== 'client-state' || !msg.state) return;
-    const snapshot: ClientStateSnapshot = {
-      sessions: Array.isArray(msg.state.sessions) ? msg.state.sessions : [],
-      updatedAt: typeof msg.state.updatedAt === 'number' ? msg.state.updatedAt : Date.now(),
+    const snapshot: ControlSnapshot = {
+      clientState: {
+        sessions: Array.isArray(msg.state.sessions) ? msg.state.sessions : [],
+        updatedAt: typeof msg.state.updatedAt === 'number' ? msg.state.updatedAt : Date.now(),
+      },
+      inventory: msg.inventory,
     };
     for (const listener of sync.listeners) {
       try { listener(snapshot); } catch (error) {

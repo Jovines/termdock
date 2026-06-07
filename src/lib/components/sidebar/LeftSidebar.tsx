@@ -10,6 +10,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus } from '../../terminal/types';
+import { getCwdLeafName, getSessionDisplayName } from '../../terminal/display';
 import { AgentSessionDot, AgentCountBadge } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 
@@ -38,25 +39,6 @@ interface LeftSidebarProps {
   onOpenSettings: () => void;
   tmuxAvailable?: boolean;
   push?: boolean;
-}
-
-const SHELL_NAMES = new Set(['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu']);
-
-function getCwdLeafName(cwd: string | null): string | null {
-  if (!cwd) return null;
-  if (cwd === '/') return '/';
-  const segments = cwd.replace(/\/+$/, '').split('/');
-  return segments[segments.length - 1] || cwd;
-}
-
-function getDisplayName(
-  session: { name: string; customName?: boolean },
-  activeProgram: string | null,
-  cwd: string | null,
-): string {
-  if (session.customName) return session.name;
-  if (activeProgram && !SHELL_NAMES.has(activeProgram)) return activeProgram;
-  return getCwdLeafName(cwd) ?? session.name;
 }
 
 function matchesSession(
@@ -237,7 +219,7 @@ export function LeftSidebar(
               const isActive = session.id === activeSessionId;
               const ts = sessionStates.get(session.id);
               const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
-              const displayName = getDisplayName(session, ts?.activeProgram ?? null, ts?.cwd ?? null);
+              const displayName = getSessionDisplayName(session, ts?.activeProgram ?? null, ts?.cwd ?? null);
               const cwdSecondary = cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null;
               const accentClass = ts?.agentStatus === 'running'
                 ? 'bg-green-400'
