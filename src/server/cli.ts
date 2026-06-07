@@ -253,7 +253,55 @@ async function ensureMkcertInstalled(): Promise<void> {
   }
 }
 
-async function runSetupLocalHttps(): Promise<void> {
+function getRequiredLocalHttpsNames(): string[] {
+  const localName = getLocalAccessSetting().name;
+  return [
+    '*.termdock.local',
+    `${localName}.termdock.local`,
+    ...getLanIPv4Addresses(),
+    'localhost',
+    '127.0.0.1',
+    '::1',
+  ];
+}
+
+async function readCertificateSans(certPath: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync('openssl', ['x509', '-in', certPath, '-noout', '-ext', 'subjectAltName'], {
+      timeout: 5000,
+      maxBuffer: 256 * 1024,
+    });
+    return stdout
+      .split(/[\n,]/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function sanMatches(required: string, sans: string[]): boolean {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(required) || required.includes(':')) {
+    return sans.some((san) => san === `IP Address:${required}` || san === `IP:${required}`);
+  }
+  return sans.some((san) => san === `DNS:${required}`);
+}
+
+async function defaultCertificateNeedsRefresh(): Promise<boolean> {
+  if (!fileExists(defaultHttpsCertPath) || !fileExists(defaultHttpsKeyPath)) return false;
+  const sans = await readCertificateSans(defaultHttpsCertPath);
+  if (sans.length === 0) return true;
+  return getRequiredLocalHttpsNames().some((name) => !sanMatches(name, sans));
+}
+
+async function ensureDefaultHttpsCertificateFresh(): Promise<boolean> {
+  if (!(await defaultCertificateNeedsRefresh())) return false;
+  console.log(`${ICON.info} ${c.dim('Local HTTPS certificate is missing current domain/IP SANs; regenerating...')}`);
+  await runSetupLocalHttps({ quietRestartHint: true });
+  return true;
+}
+
+async function runSetupLocalHttps(options: { quietRestartHint?: boolean } = {}): Promise<void> {
   await ensureMkcertInstalled();
 
   ensureStateDir();
@@ -263,17 +311,10 @@ async function runSetupLocalHttps(): Promise<void> {
   await execFileAsync('mkcert', ['-install'], { timeout: 120000, maxBuffer: 1024 * 1024 });
 
   console.log(`${ICON.info} ${c.dim('Generating local certificate for Termdock domains...')}`);
-  const localName = getLocalAccessSetting().name;
-  const lanAddresses = getLanIPv4Addresses();
   await execFileAsync('mkcert', [
     '-cert-file', defaultHttpsCertPath,
     '-key-file', defaultHttpsKeyPath,
-    '*.termdock.local',
-    `${localName}.termdock.local`,
-    ...lanAddresses,
-    'localhost',
-    '127.0.0.1',
-    '::1',
+    ...getRequiredLocalHttpsNames(),
   ], { cwd: certDir, timeout: 120000, maxBuffer: 1024 * 1024 });
 
   try {
@@ -295,7 +336,9 @@ async function runSetupLocalHttps(): Promise<void> {
     console.log(`  ${c.dim('CA:')}   ${c.cyan(defaultHttpsCaPath)} ${c.dim('(served on mobile setup page)')}`);
   }
   console.log('');
-  console.log(`${ICON.info} ${c.dim('Restart Termdock to use HTTPS:')} ${c.cyan('termdock --stop && termdock')}`);
+  if (!options.quietRestartHint) {
+    console.log(`${ICON.info} ${c.dim('Restart Termdock to use HTTPS:')} ${c.cyan('termdock --stop && termdock')}`);
+  }
 }
 
 function printRunningState(state: ServerState) {
@@ -676,6 +719,29 @@ async function setTmuxOption(sessionName: string, key: string, value: string): P
   });
 }
 
+async function ensureTmuxFocusEvents(): Promise<void> {
+  const { stdout } = await execFileAsync('tmux', ['show-options', '-gqv', 'focus-events'], {
+    timeout: 5000,
+    maxBuffer: 64 * 1024,
+  });
+  if (stdout.trim() === 'on') return;
+  await execFileAsync('tmux', ['set-option', '-g', 'focus-events', 'on'], {
+    timeout: 5000,
+    maxBuffer: 64 * 1024,
+  });
+}
+
+async function ensureTmuxCliSessionOptions(sessionName: string): Promise<void> {
+  await execFileAsync('tmux', ['set-option', '-t', sessionName, 'status', 'off'], {
+    timeout: 5000,
+    maxBuffer: 64 * 1024,
+  });
+  await execFileAsync('tmux', ['set-option', '-t', sessionName, 'mouse', 'on'], {
+    timeout: 5000,
+    maxBuffer: 64 * 1024,
+  });
+}
+
 async function getTmuxOption(sessionName: string, key: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync('tmux', ['show-option', '-vqt', sessionName, key], {
@@ -698,6 +764,8 @@ async function ensureStampedTmuxSession(sessionName: string): Promise<{ sessionN
     });
   }
 
+  await ensureTmuxFocusEvents();
+  await ensureTmuxCliSessionOptions(sessionName);
   await setTmuxOption(sessionName, '@termdock-version', TERMDOCK_VERSION);
   await setTmuxOption(sessionName, '@termdock-host', TERMDOCK_HOST);
   await setTmuxOption(sessionName, '@termdock-pid', TERMDOCK_PID);
@@ -953,6 +1021,7 @@ async function pickTmuxSession(rows: TlsRow[]): Promise<string | null> {
 async function runAttachTmux(opts: { name?: string }): Promise<void> {
   // Direct attach when caller already knows the name.
   if (opts.name) {
+    await ensureTmuxFocusEvents();
     execTmuxAttach(opts.name);
     return;
   }
@@ -979,6 +1048,7 @@ async function runAttachTmux(opts: { name?: string }): Promise<void> {
     process.exit(0);
   }
 
+  await ensureTmuxFocusEvents();
   execTmuxAttach(picked);
 }
 
@@ -1153,6 +1223,7 @@ async function main(): Promise<void> {
 
   await runFirstRunWizard();
 
+  await ensureDefaultHttpsCertificateFresh();
   const refreshedHttps = resolveHttpsOptions(options);
   const activeHttps = refreshedHttps;
 
@@ -1192,8 +1263,32 @@ async function main(): Promise<void> {
     stdio: ['ignore', logFileFd, logFileFd],
   });
 
-  child.unref();
   fs.closeSync(logFileFd);
+
+  const handleExit = async (code: number | null) => {
+    if (code === 75 && activeHttps.source === 'default') {
+      console.log(`${ICON.info} ${c.dim('Termdock detected network/certificate changes; regenerating certificate and restarting...')}`);
+      await ensureDefaultHttpsCertificateFresh();
+      const restart = spawn(process.execPath, childArgs, {
+        detached: true,
+        stdio: ['ignore', fs.openSync(logFilePath, 'a'), fs.openSync(logFilePath, 'a')],
+      });
+      restart.unref();
+      writeState({
+        pid: restart.pid!,
+        host: childHost,
+        port: childPort,
+        scheme,
+        localUrl: `${scheme}://${childHost === '0.0.0.0' ? 'localhost' : childHost}:${childPort}`,
+        localAccessReason: 'Restarted after local network/certificate change.',
+        logFile: logFilePath,
+        startedAt: new Date().toISOString(),
+      });
+      return;
+    }
+  };
+  child.on('exit', (code) => { void handleExit(code); });
+  child.unref();
 
   writeState({
     pid: child.pid!,

@@ -5,7 +5,8 @@ import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout }
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
 import { FLEXOKI_DARK } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
-import { probeTerminalConnection, updateSessionInventoryEntry } from '../../terminal/api';
+import { probeTerminalConnection, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
+import { computeTerminalLogicalFocus } from '../../terminal/focus';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
 import { buildDesktopToolbarPresetOptions, buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, splitToolbarSequenceSegments, TOOLBAR_SEGMENT_DELAY_MS, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
@@ -77,6 +78,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isMobile, setIsMobile] = React.useState(false);
   const [isIOS, setIsIOS] = React.useState(false);
   const [isInputFocused, setIsInputFocused] = React.useState(false);
+  const [isViewportFocused, setIsViewportFocused] = React.useState(false);
+  const [isDocumentVisible, setIsDocumentVisible] = React.useState(() => typeof document === 'undefined' ? true : !document.hidden);
+  const [isWindowFocused, setIsWindowFocused] = React.useState(() => typeof document === 'undefined' ? true : document.hasFocus());
+  const [isStreamReady, setIsStreamReady] = React.useState(false);
   const {
     isOpen: isViewportKeyboardOpen,
     keyboardHeight: viewportKeyboardHeight,
@@ -158,6 +163,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const tmuxScrollFlushTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const modifierTapRef = React.useRef<{ modifier: Modifier; timestamp: number } | null>(null);
   const lastFocusRequestTokenRef = React.useRef(0);
+  const lastSentLogicalFocusRef = React.useRef<boolean | null>(null);
   const streamVersionRef = React.useRef(0);
   const isActiveRef = React.useRef(isActive);
   const isMobileRef = React.useRef(isMobile);
@@ -202,6 +208,27 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     terminalControllerRef.current?.focus();
   }, []);
 
+  const reportLogicalFocus = React.useCallback((focused: boolean, reason: string) => {
+    const backendSessionId = terminalIdRef.current;
+    if (!backendSessionId) return;
+    if (lastSentLogicalFocusRef.current === focused) return;
+    lastSentLogicalFocusRef.current = focused;
+    sendTerminalFocusState(backendSessionId, focused, reason);
+    debugSession('[Terminal] focus state sent', { backendSessionId, focused, reason });
+  }, [debugSession]);
+
+  const logicalFocus = computeTerminalLogicalFocus({
+    isActive,
+    viewportFocused: isViewportFocused,
+    documentVisible: isDocumentVisible,
+    windowFocused: isWindowFocused,
+    streamReady: isStreamReady,
+  });
+
+  React.useEffect(() => {
+    reportLogicalFocus(logicalFocus, 'logical-focus-change');
+  }, [logicalFocus, reportLogicalFocus, terminalSessionId]);
+
   // Listen for font size changes from TerminalViewport (pinch-to-zoom)
   React.useEffect(() => {
     const handleFontChange = (event: Event) => {
@@ -223,7 +250,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // rAF 句柄、throttle 时间戳、tmux sessionId 等任何同步状态。
   React.useEffect(() => {
     const handleVisibility = () => {
-      if (!document.hidden && isActive) {
+      const visible = !document.hidden;
+      setIsDocumentVisible(visible);
+      if (visible && isActive) {
         terminalControllerRef.current?.requestRefresh('visibility');
         // 唤醒后立刻探测 WS 是否还活着（iOS PWA 后台返回常出现"半开连接"）。
         // probe 内部会发 ping，500ms 没回应就主动 close 触发重连补帧。
@@ -243,13 +272,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const tid = terminalIdRef.current;
       if (tid) probeTerminalConnection(tid);
     };
+    const handleWindowFocus = () => setIsWindowFocused(true);
+    const handleWindowBlur = () => setIsWindowFocused(false);
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('pageshow', handlePageShow);
     window.addEventListener('online', handleOnline);
+    window.addEventListener('focus', handleWindowFocus);
+    window.addEventListener('blur', handleWindowBlur);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('pageshow', handlePageShow);
       window.removeEventListener('online', handleOnline);
+      window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('blur', handleWindowBlur);
     };
   }, [isActive]);
 
@@ -268,10 +303,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (!isActive || !isMobile) {
       setIsInputFocused(false);
     }
+    if (!isActive) {
+      setIsViewportFocused(false);
+    }
   }, [isActive, isMobile]);
 
   React.useEffect(() => {
     terminalIdRef.current = terminalSessionId;
+    lastSentLogicalFocusRef.current = null;
   }, [terminalSessionId]);
 
   React.useEffect(() => {
@@ -389,6 +428,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     streamCleanupRef.current = null;
     activeTerminalIdRef.current = null;
     // 断开后立即把 sessionReady 复位：后续 resize push 会被编排器 gate 住，
+    setIsStreamReady(false);
     // 直到下次 connected 事件再 setSessionReady(true)。
     // 这样避免把新 resize 用旧 terminalId 发出去。
     terminalControllerRef.current?.setSessionReady(false);
@@ -430,6 +470,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setIsFatalError(false);
 
                 // 标记 WS 已就绪：编排器从这一刻起才允许 push resize 给服务端。
+                setIsStreamReady(true);
                 // 之前没有这个 gate，reload 时 ResizeObserver 在 ensureSession
                 // 跑完前就拿 OLD terminalId POST 出去，server 直接 404 + WS 4001
                 // 触发 auto-recreate，必须完全重连才能用。
@@ -565,6 +606,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 );
                 break;
               }
+              case 'focus-mode': {
+                debugSession('[Terminal] focus tracking mode', {
+                  backendSessionId: terminalIdRef.current,
+                  requested: event.focusTrackingRequested === true,
+                });
+                break;
+              }
               case 'exit': {
                 const exitCode =
                   typeof event.exitCode === 'number' ? event.exitCode : null;
@@ -578,6 +626,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 clearTerminalSession(storeSessionId);
                 setConnecting(storeSessionId, false);
                 setConnectionError('Terminal session ended');
+                setIsStreamReady(false);
                 setIsFatalError(false);
                 setTmuxLayout(null);
                 setSessionCopyMode(storeSessionId, false);
@@ -1171,6 +1220,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   );
 
   const handleInputFocusChange = React.useCallback((focused: boolean) => {
+    setIsViewportFocused(focused && isActiveRef.current);
     debugKeyboard('input focus changed', {
       focused,
       isActive: isActiveRef.current,
@@ -1316,7 +1366,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     });
   }, [isActive, isMobile, isViewportKeyboardOpen, viewportKeyboardHeight, engine, sessionId]);
 
-  const isKeyboardVisible = isActive && (isMobile || toolbarPreset.showOnDesktop === true);
+  const isKeyboardVisible = isMobile || (isActive && toolbarPreset.showOnDesktop === true);
+  const isKeyboardInteractive = isActive;
 
   // The translateY / margin-top formulas are always applied on mobile.
   // They naturally evaluate to 0 when the keyboard is closed (appVh ===
@@ -1410,6 +1461,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       <MobileKeyboard
         visible={isKeyboardVisible}
+        interactive={isKeyboardInteractive}
         presentation={isMobile ? 'mobile' : 'desktop-actions'}
         activeModifier={activeModifier}
         lockedModifier={lockedModifier}

@@ -370,6 +370,15 @@ export function connectTerminalStream(
           return;
         }
 
+        // Handle focus tracking mode updates
+        if (msg.type === 'focus-mode') {
+          onEvent({
+            type: 'focus-mode',
+            focusTrackingRequested: msg.focusTrackingRequested === true,
+          });
+          return;
+        }
+
         // Handle resize ack
         if (msg.type === 'resize-ack') {
           onEvent({
@@ -541,6 +550,22 @@ export function probeTerminalConnection(sessionId: string): void {
       try { conn.ws.close(); } catch { /* ignore */ }
     }
   }, WAKEUP_PROBE_TIMEOUT_MS);
+}
+
+// ---- Terminal focus state (WebSocket)
+
+export function sendTerminalFocusState(
+  sessionId: string,
+  focused: boolean,
+  reason?: string,
+): void {
+  const conn = wsConnections.get(sessionId);
+  if (!conn || conn.ws.readyState !== WebSocket.OPEN) return;
+  try {
+    conn.ws.send(JSON.stringify({ type: 'focus', focused, reason }));
+  } catch {
+    // Focus state is advisory; the heartbeat/reconnect path will repair stale sockets.
+  }
 }
 
 // ---- Resize (WebSocket replaces HTTP POST) ----

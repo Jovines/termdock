@@ -136,19 +136,27 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       }
     };
 
-    const scheduleSync = () => {
+    const scheduleSync = (source = 'event') => {
+      if (source.includes('visibilitychange') || source.includes('pageshow')) {
+        debugViewport('schedule', { source });
+      }
       if (rafId !== null) {
         return;
       }
       rafId = window.requestAnimationFrame(syncViewportHeight);
     };
 
-    scheduleSync();
+    scheduleSync('mount');
 
-    window.addEventListener('resize', scheduleSync);
-    window.addEventListener('orientationchange', scheduleSync);
-    window.visualViewport?.addEventListener('resize', scheduleSync);
-    window.visualViewport?.addEventListener('scroll', scheduleSync);
+    const handleResize = () => scheduleSync('resize');
+    const handleOrientationChange = () => scheduleSync('orientationchange');
+    const handleVisualViewportResize = () => scheduleSync('visualViewport.resize');
+    const handleVisualViewportScroll = () => scheduleSync('visualViewport.scroll');
+
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('orientationchange', handleOrientationChange);
+    window.visualViewport?.addEventListener('resize', handleVisualViewportResize);
+    window.visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
 
     // 从后台返回时，visualViewport.height 可能还是"软键盘打开"时的旧值，
     // 而 resize 事件不会 fire（值未变），导致 --app-vh 维持半高，xterm fit
@@ -157,29 +165,43 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     //   - pageshow：从 BFCache 恢复（persisted=true 时更明显）
     // 多次 scheduleSync（立即 + 50ms + 200ms）覆盖 iOS 上 visualViewport
     // 异步 settle 的窗口。
-    const handleResume = () => {
-      scheduleSync();
-      window.setTimeout(scheduleSync, 50);
-      window.setTimeout(scheduleSync, 200);
+    const handleResume = (source: string) => {
+      debugViewport('resume', {
+        source,
+        innerHeight: Math.round(window.innerHeight),
+        visualViewport: window.visualViewport
+          ? {
+              width: Math.round(window.visualViewport.width),
+              height: Math.round(window.visualViewport.height),
+              offsetTop: Math.round(window.visualViewport.offsetTop),
+            }
+          : null,
+        hidden: document.hidden,
+      });
+      scheduleSync(`${source}:now`);
+      window.setTimeout(() => scheduleSync(`${source}:50ms`), 50);
+      window.setTimeout(() => scheduleSync(`${source}:200ms`), 200);
     };
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) handleResume();
-    });
-    window.addEventListener('pageshow', handleResume);
+    const handleVisibilityChange = () => {
+      if (!document.hidden) handleResume('visibilitychange');
+    };
+    const handlePageShow = () => handleResume('pageshow');
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pageshow', handlePageShow);
 
     return () => {
-      window.removeEventListener('resize', scheduleSync);
-      window.removeEventListener('orientationchange', scheduleSync);
-      window.visualViewport?.removeEventListener('resize', scheduleSync);
-      window.visualViewport?.removeEventListener('scroll', scheduleSync);
-      document.removeEventListener('visibilitychange', handleResume);
-      window.removeEventListener('pageshow', handleResume);
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('orientationchange', handleOrientationChange);
+      window.visualViewport?.removeEventListener('resize', handleVisualViewportResize);
+      window.visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pageshow', handlePageShow);
 
       if (rafId !== null) {
         window.cancelAnimationFrame(rafId);
       }
     };
-  }, [cssVarName, getViewportHeight]);
+  }, [cssVarName, debugViewport, getViewportHeight]);
 
   return viewportHeight;
 }

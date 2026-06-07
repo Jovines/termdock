@@ -128,7 +128,7 @@ export interface TerminalSession {
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -146,6 +146,7 @@ export interface TerminalStreamEvent {
   agentStatus?: AgentStatus | null;
   agentColor?: string | null;
   agentIndicator?: AgentIndicator | null;
+  focusTrackingRequested?: boolean;
   // 短线重连补帧（仅 connected 事件携带）：
   // replayChunks 是断线期间产生的输出，前端要追加到 buffer。
   // replayLastSeq 是新的客户端基线（保存为下一次重连的 since）。

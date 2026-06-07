@@ -61,7 +61,7 @@ export function validateOriginMiddleware(req: Request, res: Response, next: Next
   next();
 }
 
-export function isUpgradeOriginAllowed(originHeader: string | undefined, hostHeader: string | undefined): boolean {
+export function isUpgradeOriginAllowed(originHeader: string | undefined, _hostHeader: string | undefined): boolean {
   // WS 升级请求：Origin 头是浏览器实际发出的（不可伪造），而 Host 头可能被前置代理改写。
   // 在 dev 模式下 Vite proxy (9833 → 9835) 用 changeOrigin: true 会把 Host 改写成
   // `localhost:9835`，但 Origin 仍是 `http://192.168.x.x:9833`。这种 mismatch

@@ -42,6 +42,29 @@ interface CloseSessionEventDetail {
 }
 
 const SWIPE_ANIMATION_SPEED_MS = 320;
+const SWIPER_TRANSLATE_EPSILON_PX = 1;
+
+function getSwiperTranslate(swiper: SwiperInstance): number | null {
+  try {
+    const translate = typeof swiper.getTranslate === 'function'
+      ? swiper.getTranslate()
+      : swiper.translate;
+    return typeof translate === 'number' && Number.isFinite(translate) ? translate : null;
+  } catch {
+    return typeof swiper.translate === 'number' && Number.isFinite(swiper.translate)
+      ? swiper.translate
+      : null;
+  }
+}
+
+function getSwiperTargetTranslate(swiper: SwiperInstance, targetIndex: number): number | null {
+  const snapGrid = swiper.snapGrid;
+  const targetSnap = Array.isArray(snapGrid) ? snapGrid[targetIndex] : undefined;
+  if (typeof targetSnap !== 'number' || !Number.isFinite(targetSnap)) {
+    return null;
+  }
+  return -targetSnap;
+}
 
 function summarizeDuplicateMappings(sessions: TerminalSession[]): Array<{ kind: 'frontend' | 'backend' | 'tmux'; key: string; sessionIds: string[] }> {
   const buckets: Array<{ kind: 'frontend' | 'backend' | 'tmux'; key: string; sessionIds: string[] }> = [];
@@ -186,6 +209,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [focusTransferRequest, setFocusTransferRequest] = useState<{ sessionId: string; token: number } | null>(null);
   const isTouchSwipeRef = useRef(false);
   const isMobileRef = useRef(false);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const sessionsRef = useRef<TerminalSession[]>([]);
+  const activeSessionIndexRef = useRef(0);
+  const persistedActiveIdRef = useRef<string | null>(null);
+  const isLoadingRef = useRef(false);
+  const isRestoringRef = useRef(true);
   const handleNewSessionRef = useRef<((options?: NewSessionEventDetail) => Promise<void>) | null>(null);
   const lastDuplicateMappingSnapshotRef = useRef('');
 
@@ -200,21 +229,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     window.addEventListener('resize', check);
     return () => window.removeEventListener('resize', check);
   }, []);
-  // Listen for gesture-lock events from TerminalViewport to disable Swiper.
-  // Directly mutates the Swiper instance so allowTouchMove takes effect
-  // synchronously — React state (via prop) is too slow for touch sequences
-  // already in flight.
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const ce = e as CustomEvent<{ locked: boolean }>;
-      if (swiperRef.current) {
-        swiperRef.current.allowTouchMove = !ce.detail.locked;
-      }
-    };
-    document.addEventListener('termdock:gesture-lock', handler);
-    return () => document.removeEventListener('termdock:gesture-lock', handler);
-  }, []);
-
   const {
     sessions: persistedSessions,
     activeSessionId: persistedActiveId,
@@ -227,6 +241,49 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     resetSessionCustomName,
     reorderSessions,
   } = useSessionPersistence();
+
+  activeSessionIdRef.current = activeSessionId;
+  sessionsRef.current = sessions;
+  persistedActiveIdRef.current = persistedActiveId;
+  isLoadingRef.current = isLoading;
+  isRestoringRef.current = isRestoring;
+
+  const getSwiperDebugState = useCallback((swiper: SwiperInstance | null = swiperRef.current) => {
+    const targetIndex = activeSessionIndexRef.current;
+    const visualViewport = typeof window !== 'undefined' ? window.visualViewport : null;
+    const translate = swiper ? getSwiperTranslate(swiper) : null;
+    const targetTranslate = swiper ? getSwiperTargetTranslate(swiper, targetIndex) : null;
+    return {
+      sessionsLength: sessionsRef.current.length,
+      sessionIds: sessionsRef.current.map((session) => session.id),
+      activeSessionId: activeSessionIdRef.current,
+      activeSessionIndex: targetIndex,
+      persistedActiveId: persistedActiveIdRef.current,
+      isLoading: isLoadingRef.current,
+      isRestoring: isRestoringRef.current,
+      activeIndex: swiper?.activeIndex ?? null,
+      previousIndex: swiper?.previousIndex ?? null,
+      animating: swiper?.animating ?? null,
+      allowTouchMove: swiper?.allowTouchMove ?? null,
+      width: swiper?.width ?? null,
+      translate,
+      targetTranslate,
+      translateDelta: translate !== null && targetTranslate !== null ? translate - targetTranslate : null,
+      snapGridLength: swiper?.snapGrid?.length ?? null,
+      targetSnap: swiper?.snapGrid?.[targetIndex] ?? null,
+      visualViewport: visualViewport
+        ? {
+            width: Math.round(visualViewport.width),
+            height: Math.round(visualViewport.height),
+            offsetTop: Math.round(visualViewport.offsetTop),
+          }
+        : null,
+    };
+  }, []);
+
+  const logSwiperState = useCallback((event: string, extra?: Record<string, unknown>) => {
+    debugSession(event, { ...getSwiperDebugState(), ...extra });
+  }, [debugSession, getSwiperDebugState]);
 
   useEffect(() => {
     if (isLoading || isRestoring) {
@@ -249,6 +306,74 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const foundIndex = sessions.findIndex((s) => s.id === activeSessionId);
     return foundIndex >= 0 ? foundIndex : 0;
   }, [sessions, activeSessionId]);
+
+  activeSessionIndexRef.current = activeSessionIndex;
+
+  const syncSwiperToActiveIndex = useCallback((reason: string, options: { immediate?: boolean; allowWhileAnimating?: boolean } = {}) => {
+    const swiper = swiperRef.current;
+    const targetIndex = activeSessionIndexRef.current;
+    const currentSessions = sessionsRef.current;
+    if (!swiper || currentSessions.length === 0) {
+      return;
+    }
+    if (targetIndex < 0 || targetIndex >= currentSessions.length) {
+      return;
+    }
+    if (isTouchSwipeRef.current) {
+      logSwiperState('[swiper:sync-skip-touch]', { reason });
+      return;
+    }
+    if (swiper.animating && !options.allowWhileAnimating) {
+      logSwiperState('[swiper:sync-skip-animating]', { reason });
+      return;
+    }
+
+    const translate = getSwiperTranslate(swiper);
+    const targetTranslate = getSwiperTargetTranslate(swiper, targetIndex);
+    const translateAligned = translate !== null && targetTranslate !== null &&
+      Math.abs(translate - targetTranslate) <= SWIPER_TRANSLATE_EPSILON_PX;
+    const activeIndexAligned = swiper.activeIndex === targetIndex;
+
+    logSwiperState('[swiper:sync-check]', {
+      reason,
+      activeIndexAligned,
+      translateAligned,
+      immediate: options.immediate === true,
+    });
+
+    if (activeIndexAligned && translateAligned) {
+      return;
+    }
+
+    swiper.slideTo(
+      targetIndex,
+      options.immediate ? 0 : SWIPE_ANIMATION_SPEED_MS,
+      false
+    );
+
+    logSwiperState('[swiper:sync-applied]', {
+      reason,
+      activeIndexAligned,
+      translateAligned,
+      immediate: options.immediate === true,
+    });
+  }, [logSwiperState]);
+
+  // Listen for gesture-lock events from TerminalViewport to disable Swiper.
+  // Directly mutates the Swiper instance so allowTouchMove takes effect
+  // synchronously — React state (via prop) is too slow for touch sequences
+  // already in flight.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent<{ locked: boolean }>;
+      if (swiperRef.current) {
+        swiperRef.current.allowTouchMove = !ce.detail.locked;
+      }
+      logSwiperState('[swiper:gesture-lock]', { locked: ce.detail.locked });
+    };
+    document.addEventListener('termdock:gesture-lock', handler);
+    return () => document.removeEventListener('termdock:gesture-lock', handler);
+  }, [logSwiperState]);
 
   useEffect(() => {
     if (sessions.length === 0) {
@@ -275,6 +400,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   const handleSwiperChange = useCallback((instance: SwiperInstance) => {
     const nextSessionId = sessions[instance.activeIndex]?.id;
+    logSwiperState('[swiper:slide-change]', {
+      nextSessionId: nextSessionId ?? null,
+      instanceActiveIndex: instance.activeIndex,
+    });
     if (!nextSessionId || nextSessionId === activeSessionId) {
       return;
     }
@@ -293,22 +422,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       return;
     }
     setFocusTransferRequest(null);
-  }, [sessions, activeSessionId]);
+  }, [sessions, activeSessionId, logSwiperState]);
 
   useEffect(() => {
-    const swiper = swiperRef.current;
-    if (!swiper) {
-      return;
-    }
-
-    if (activeSessionIndex < 0 || activeSessionIndex >= sessions.length) {
-      return;
-    }
-
-    if (swiper.activeIndex !== activeSessionIndex) {
-      swiper.slideTo(activeSessionIndex, SWIPE_ANIMATION_SPEED_MS, false);
-    }
-  }, [activeSessionIndex, sessions.length]);
+    syncSwiperToActiveIndex('active-session-index', { immediate: isRestoring });
+  }, [activeSessionIndex, sessions.length, isRestoring, syncSwiperToActiveIndex]);
 
   // 同步 Swiper.allowTouchMove。
   //
@@ -328,27 +446,24 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const nextAllow = sessions.length > 1;
     if (swiper.allowTouchMove !== nextAllow) {
       swiper.allowTouchMove = nextAllow;
+      logSwiperState('[swiper:allow-touch-sync]', { nextAllow });
     }
-  }, [sessions.length]);
+  }, [sessions.length, logSwiperState]);
 
   const updateSwiperLayout = useCallback((reason: string) => {
     const swiper = swiperRef.current;
     if (!swiper) return;
     const el = swiper.el as HTMLElement | undefined;
+    logSwiperState('[swiper:layout-before]', { reason, scrollLeft: el?.scrollLeft ?? null });
     if (el) el.scrollLeft = 0;
     swiper.updateSize();
     swiper.updateSlides();
     swiper.updateProgress();
     swiper.updateSlidesClasses();
     if (el) el.scrollLeft = 0;
-    debugSession('[Swiper] layout update', {
-      reason,
-      width: swiper.width,
-      activeSessionIndex,
-      activeIndex: swiper.activeIndex,
-      scrollLeft: el?.scrollLeft ?? null,
-    });
-  }, [activeSessionIndex, debugSession]);
+    logSwiperState('[swiper:layout-after]', { reason, scrollLeft: el?.scrollLeft ?? null });
+    syncSwiperToActiveIndex(`layout:${reason}`, { immediate: true });
+  }, [logSwiperState, syncSwiperToActiveIndex]);
 
   useEffect(() => {
     const updateSwiperSize = () => {
@@ -443,6 +558,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     restoredRef.current = true;
 
     debugSession('[Session] Restoring', persistedSessions.length, 'persisted sessions');
+    logSwiperState('[swiper:restore-start]', {
+      persistedSessionIds: persistedSessions.map((session) => session.sessionId),
+    });
 
     const restore = async () => {
       let sessionCount = 0;
@@ -454,6 +572,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         sessionCount = restored.length;
         debugSession('[Session] Restored sessions:', restored.length);
         const restoredSessions = dedupeRuntimeSessions(restored);
+        logSwiperState('[swiper:restore-complete]', {
+          restoredSessionIds: restoredSessions.map((session) => session.id),
+          nextActiveSessionId: persistedActiveId || restoredSessions[0]?.id || null,
+        });
         setSessions(restoredSessions);
         setActiveSessionId(persistedActiveId || restoredSessions[0]?.id || null);
 
@@ -489,6 +611,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         })));
         setSessions(fallbackSessions);
         sessionCount = fallbackSessions.length;
+        logSwiperState('[swiper:restore-fallback]', {
+          fallbackSessionIds: fallbackSessions.map((session) => session.id),
+          nextActiveSessionId: persistedActiveId || fallbackSessions[0]?.id || null,
+        });
         setActiveSessionId(persistedActiveId || fallbackSessions[0]?.id || null);
       } finally {
         // 恢复后若没有任何 session，在设置 isRestoring=false 之前
@@ -497,6 +623,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           await handleNewSessionRef.current?.();
         }
         setIsRestoring(false);
+        requestAnimationFrame(() => syncSwiperToActiveIndex('restore-finished', { immediate: true }));
       }
     };
 
@@ -509,12 +636,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     updateSessionBackendId,
     defaultSessionMode,
     debugSession,
+    logSwiperState,
+    syncSwiperToActiveIndex,
   ]);
 
   // 增量同步：轮询检测到 persistedSessions 变化时，处理新增/移除/重命名的 session
   const prevPersistedRef = useRef<PersistedSession[]>([]);
   const seededRef = useRef(false);
-  const activeSessionIdRef = useRef<string | null>(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
   useEffect(() => {
     if (isRestoring) return;
@@ -846,6 +974,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           onSwiper={(instance) => {
             swiperRef.current = instance;
             instance.allowTouchMove = sessions.length > 1;
+            logSwiperState('[swiper:on-swiper]', { allowTouchMove: instance.allowTouchMove });
             requestAnimationFrame(() => updateSwiperLayout('on-swiper'));
           }}
           onSlideChange={handleSwiperChange}
@@ -853,6 +982,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             const pointerType = getSwipeEventPointerType(event);
             const allowed = pointerType === 'touch' || pointerType === 'pen' || pointerType === 'unknown';
             debugTerminal('[swipe:touch-start]', { pointerType, allowed });
+            logSwiperState('[swiper:touch-start]', { pointerType, allowed });
             if (!allowed) {
               return;
             }
@@ -862,6 +992,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             const pointerType = getSwipeEventPointerType(event);
             const allowed = pointerType === 'touch' || pointerType === 'pen' || pointerType === 'unknown';
             debugTerminal('[swipe:touch-end]', { pointerType, allowed });
+            logSwiperState('[swiper:touch-end]', { pointerType, allowed });
             if (!allowed) {
               return;
             }
@@ -872,6 +1003,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           }}
           onTransitionEnd={() => {
             isTouchSwipeRef.current = false;
+            logSwiperState('[swiper:transition-end]');
           }}
           initialSlide={Math.max(0, activeSessionIndex)}
           speed={SWIPE_ANIMATION_SPEED_MS}

@@ -12,6 +12,13 @@ import { caffeinateManager } from '../utils/caffeinate.js';
 import { localAccessManager } from '../utils/localAccess.js';
 import { normalizeLocalAccessName } from '../utils/settings.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
+import {
+  getFocusSequence,
+  removeClientFocusState,
+  scanFocusTrackingMode,
+  setClientFocusState,
+  type FocusAggregationState,
+} from '../utils/tmuxFocus.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -139,6 +146,9 @@ interface TerminalSession {
   agentStatusBuf: string;      // 去除 ANSI 后的纯文本滚动缓冲区
   agentStatusTimer: ReturnType<typeof setTimeout> | null;
   agentStatusClearDelayMs: number;
+  focusTrackingRequested: boolean;
+  focusModeSniffBuf: string;
+  focusAggregation: FocusAggregationState;
 }
 
 interface PersistedClientSession {
@@ -792,6 +802,7 @@ async function ensureBackendSessionForRecord(
     const existingTmuxBackend = findBackendSessionForTmux(record.tmuxSessionName);
     if (existingTmuxBackend) {
       const [backendSessionId, session] = existingTmuxBackend;
+      await prepareManagedTmuxSession(record.tmuxSessionName, options.cwd);
       record.backendSessionId = backendSessionId;
       record.lastActivity = Date.now();
       return {
@@ -2195,7 +2206,7 @@ async function resolveTmuxClientTty(sessionName: string, preferredClientPid: num
   return rows[0][1] || null;
 }
 
-async function ensureTmuxSessionExists(sessionName: string): Promise<void> {
+async function ensureTmuxSessionExists(sessionName: string, cwd?: string): Promise<void> {
   try {
     await runTmux(['has-session', '-t', sessionName]);
     return;
@@ -2206,7 +2217,58 @@ async function ensureTmuxSessionExists(sessionName: string): Promise<void> {
     }
   }
 
-  await runTmux(['new-session', '-d', '-s', sessionName]);
+  const args = ['new-session', '-d', '-s', sessionName];
+  if (cwd) {
+    args.push('-c', cwd);
+  }
+  await runTmux(args);
+}
+
+async function enableTmuxFocusEvents(): Promise<void> {
+  const current = (await runTmux(['show-options', '-gqv', 'focus-events'])).trim();
+  if (current === 'on') return;
+  await runTmux(['set-option', '-g', 'focus-events', 'on']);
+  console.log('[tmux-focus] enabled global focus-events');
+}
+
+async function ensureSharedTmuxServerReady(): Promise<void> {
+  await enableTmuxFocusEvents();
+  await configureTmuxWheelBindings();
+}
+
+async function stampTmuxMetadata(sessionName: string): Promise<void> {
+  const baseOptions: Record<string, string> = {
+    '@termdock-version': TERMDOCK_VERSION,
+    '@termdock-host': TERMDOCK_HOST,
+    '@termdock-pid': TERMDOCK_PID,
+  };
+  const existingCreatedAt = await getTmuxOption(sessionName, '@termdock-created-at');
+  if (!existingCreatedAt) {
+    baseOptions['@termdock-created-at'] = String(Date.now());
+  }
+  await setTmuxOptions(sessionName, baseOptions);
+}
+
+async function ensureManagedTmuxSessionReady(sessionName: string): Promise<void> {
+  try {
+    await disableTmuxStatus(sessionName);
+  } catch (error) {
+    console.warn(`Failed to disable tmux status for ${sessionName}: ${getErrorMessage(error)}`);
+  }
+
+  try {
+    await enableTmuxMouse(sessionName);
+  } catch (error) {
+    console.warn(`Failed to enable tmux mouse for ${sessionName}: ${getErrorMessage(error)}`);
+  }
+
+  await stampTmuxMetadata(sessionName);
+}
+
+async function prepareManagedTmuxSession(sessionName: string, cwd?: string): Promise<void> {
+  await ensureTmuxSessionExists(sessionName, cwd);
+  await ensureSharedTmuxServerReady();
+  await ensureManagedTmuxSessionReady(sessionName);
 }
 
 async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
@@ -2412,6 +2474,7 @@ function closeClient(session: TerminalSession, sessionId: string, clientId: stri
   }
 
   session.clients.delete(clientId);
+  removeClientFocus(sessionId, session, clientId);
   syncClientCountToTmux(sessionId);
 
   try {
@@ -2517,6 +2580,50 @@ function broadcastJsonWs(sessionId: string, payload: unknown): void {
   broadcastToWs(sessionId, JSON.stringify(payload));
 }
 
+function emitFocusSequenceIfNeeded(sessionId: string, session: TerminalSession, focused: boolean, reason: string): void {
+  if (session.mode !== 'tmux' || !session.focusTrackingRequested) return;
+  try {
+    session.ptyProcess.write(getFocusSequence(focused));
+    console.log(`[tmux-focus] emitted ${focused ? 'focus-in' : 'focus-out'} session=${sessionId} reason=${reason}`);
+  } catch (error) {
+    console.warn(`[tmux-focus] failed to emit focus sequence session=${sessionId}: ${getErrorMessage(error)}`);
+  }
+}
+
+function updateClientFocusState(sessionId: string, session: TerminalSession, clientId: string, focused: boolean, reason: string): void {
+  const result = setClientFocusState(session.focusAggregation, clientId, focused);
+  if (result.changed) {
+    emitFocusSequenceIfNeeded(sessionId, session, result.effectiveFocused, reason);
+  }
+}
+
+function removeClientFocus(sessionId: string, session: TerminalSession, clientId: string): void {
+  const result = removeClientFocusState(session.focusAggregation, clientId);
+  if (result.changed) {
+    emitFocusSequenceIfNeeded(sessionId, session, result.effectiveFocused, 'client-disconnect');
+  }
+}
+
+function updateFocusTrackingFromOutput(sessionId: string, session: TerminalSession, data: string): void {
+  const result = scanFocusTrackingMode(data, {
+    buffer: session.focusModeSniffBuf,
+    requested: session.focusTrackingRequested,
+  });
+  session.focusModeSniffBuf = result.buffer;
+  if (!result.changed) return;
+
+  session.focusTrackingRequested = result.requested;
+  broadcastJsonWs(sessionId, {
+    type: 'focus-mode',
+    focusTrackingRequested: result.requested,
+  });
+  console.log(`[tmux-focus] mode ${result.requested ? 'enabled' : 'disabled'} session=${sessionId}`);
+
+  if (result.requested && session.focusAggregation.effectiveFocused) {
+    emitFocusSequenceIfNeeded(sessionId, session, true, 'focus-mode-enabled');
+  }
+}
+
 function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
   const home = (process.env.HOME || '/root').replace(/\/+$/, '') || '/';
 
@@ -2525,6 +2632,9 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
     session.hasWrittenData = true;
     if (session.mode === 'shell') {
       addToHistory(sessionId, data);
+    }
+    if (session.mode === 'tmux') {
+      updateFocusTrackingFromOutput(sessionId, session, data);
     }
 
     // Sniff OSC 0/2 sequences for CWD tracking
@@ -2596,11 +2706,15 @@ async function spawnTerminalSession(req: express.Request, input: {
   const mode = normalizeMode(input.mode);
   const tmuxSessionName = mode === 'tmux' ? normalizeTmuxSessionName(input.tmuxSessionName) : null;
 
+  if (mode === 'tmux' && tmuxSessionName) {
+    await prepareManagedTmuxSession(tmuxSessionName, cwd);
+  }
+
   const command = mode === 'tmux'
     ? getTmuxBinary()
     : (process.platform === 'win32' ? 'powershell.exe' : resolveShellCandidates()[0]);
   const args = mode === 'tmux' && tmuxSessionName
-    ? ['new-session', '-A', '-s', tmuxSessionName]
+    ? ['attach-session', '-t', tmuxSessionName]
     : [];
 
   const envPath = buildAugmentedPath();
@@ -2680,47 +2794,20 @@ async function spawnTerminalSession(req: express.Request, input: {
     agentStatusBuf: '',
     agentStatusTimer: null,
     agentStatusClearDelayMs: DEFAULT_AGENT_CLEAR_DELAY_MS,
+    focusTrackingRequested: false,
+    focusModeSniffBuf: '',
+    focusAggregation: {
+      focusedClients: new Map(),
+      effectiveFocused: false,
+    },
   };
 
   terminalSessions.set(sessionId, session);
   setupPtyHandlers(sessionId, session);
 
   if (mode === 'tmux' && tmuxSessionName) {
-    try {
-      await disableTmuxStatus(tmuxSessionName);
-    } catch (error) {
-      console.warn(`Failed to disable tmux status for ${tmuxSessionName}: ${getErrorMessage(error)}`);
-    }
-
-    try {
-      await enableTmuxMouse(tmuxSessionName);
-    } catch (error) {
-      console.warn(`Failed to enable tmux mouse for ${tmuxSessionName}: ${getErrorMessage(error)}`);
-    }
-
-    try {
-      await configureTmuxWheelBindings();
-    } catch (error) {
-      console.warn(`Failed to configure tmux wheel bindings: ${getErrorMessage(error)}`);
-    }
-
-    // Stamp termdock metadata as tmux user options so external tools (e.g.
-    // `termdock --tls`) can identify and describe this session.
-    void (async () => {
-      const baseOptions: Record<string, string> = {
-        '@termdock-version': TERMDOCK_VERSION,
-        '@termdock-host': TERMDOCK_HOST,
-        '@termdock-pid': TERMDOCK_PID,
-      };
-      // Preserve `@termdock-created-at` if a previous termdock instance
-      // already stamped it on this tmux session.
-      const existingCreatedAt = await getTmuxOption(tmuxSessionName, '@termdock-created-at');
-      if (!existingCreatedAt) {
-        baseOptions['@termdock-created-at'] = String(Date.now());
-      }
-      await setTmuxOptions(tmuxSessionName, baseOptions);
-    })();
-
+    // Session was prepared before attach so the first tmux client sees the
+    // right server/session options immediately.
     // Spawn a persistent control-mode connection so scroll commands
     // don't pay execFile process-spawn overhead on every frame.
     if (TMUX_CONTROL_ENABLED) {
@@ -3290,13 +3377,9 @@ router.post('/create', async (req, res) => {
       for (const [id, s] of terminalSessions.entries()) {
         if (s.mode === 'tmux' && s.tmuxSessionName === normalizedTmuxName) {
           console.log(`Reusing existing terminal session ${id} for tmux:${normalizedTmuxName}`);
-          // Refresh host/pid/version on reuse so a restarted server claims the
-          // session in tmux user options; created-at is left untouched.
-          void setTmuxOptions(normalizedTmuxName, {
-            '@termdock-version': TERMDOCK_VERSION,
-            '@termdock-host': TERMDOCK_HOST,
-            '@termdock-pid': TERMDOCK_PID,
-          });
+          // Heal shared tmux server/session options on reuse so long-lived
+          // wrappers pick up capabilities added after they were created.
+          await prepareManagedTmuxSession(normalizedTmuxName, typeof inputCwd === 'string' ? inputCwd : undefined);
           return res.json({
             sessionId: id,
             cols: cols || 80,
@@ -3671,7 +3754,7 @@ router.post('/:sessionId/tmux', async (req, res) => {
         return res.status(500).json({ error: 'No tmux client available for current session' });
       }
 
-      await ensureTmuxSessionExists(targetSessionName);
+      await prepareManagedTmuxSession(targetSessionName, session.cwd);
       await sendTmuxCommand(tmuxTarget, session.tmuxControl, ['switch-client', '-c', clientTty, '-t', targetSessionName]);
       session.tmuxSessionName = targetSessionName;
       session.lastActivity = Date.now();
@@ -3944,6 +4027,7 @@ async function executeTmuxAction(
       if (!targetSessionName) {
         return { shouldBroadcastLayout: false, error: 'tmuxSessionName is required' };
       }
+      await prepareManagedTmuxSession(targetSessionName);
       await sendTmuxCommand(tmuxTarget, control, ['switch-client', '-t', targetSessionName]);
       break;
     }
@@ -4040,6 +4124,7 @@ export function handleTerminalWebSocket(
       agentStatus: session.agentStatus,
       agentColor: session.agentColor,
       agentIndicator: session.agentIndicator,
+      focusTrackingRequested: session.focusTrackingRequested,
       // 短线重连补帧：
       // replayChunks 为补发数据；replayLastSeq 是客户端应记录的新基线；
       // replayOutOfWindow 表示客户端基线已被服务端淘汰，前端可以选择清屏后再回放。
@@ -4201,6 +4286,12 @@ export function handleTerminalWebSocket(
           }
           break;
         }
+        case 'focus': {
+          const focused = msg.focused === true;
+          const reason = typeof msg.reason === 'string' ? msg.reason : 'client-focus';
+          updateClientFocusState(sessionId, session, clientId, focused, reason);
+          break;
+        }
         case 'ping': {
           // 心跳算活动：客户端每 20s 发一次 ping，没有这一行就会出现
           // "用户开着页面看 agent 跑、自己不动键盘"被 idle-cleanup 误杀的情况。
@@ -4228,6 +4319,7 @@ export function handleTerminalWebSocket(
         wsClients.delete(sessionId);
       }
     }
+    removeClientFocus(sessionId, session, clientId);
     syncClientCountToTmux(sessionId);
     broadcastClientState();
   });
@@ -4237,9 +4329,9 @@ export function handleTerminalWebSocket(
   });
 }
 
-// Refresh global WheelUpPane/WheelDownPane bindings on every server start
-// so existing tmux sessions pick up the latest copy-mode flags.
-configureTmuxWheelBindings().catch(() => {});
+// Refresh global tmux server options on every server start so existing tmux
+// sessions pick up focus tracking and the latest copy-mode wheel bindings.
+ensureSharedTmuxServerReady().catch(() => {});
 
 // ── Control WebSocket handler ──
 //

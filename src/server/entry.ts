@@ -24,6 +24,7 @@ import {
 } from './utils/requestSecurity.js';
 import { getCookieSecurityOptions, setSecureCookieMode } from './utils/cookieSecurity.js';
 import { startOnboardingServer, stopOnboardingServer } from './onboardingServer.js';
+import { CertificateWatcher } from './certificateWatcher.js';
 
 import { PORT, DEFAULT_HOST } from './config.js';
 
@@ -172,6 +173,19 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const app = createApp({ port: options.onboardingPort ?? port, httpsCaPath: options.httpsCaPath });
   const { server, scheme } = createServerForApp(app, options);
   setSecureCookieMode(scheme === 'https');
+  const certWatcher = new CertificateWatcher({
+    enabled: scheme === 'https' && Boolean(options.httpsCertPath && options.httpsKeyPath),
+    certPath: options.httpsCertPath,
+    keyPath: options.httpsKeyPath,
+    caPath: options.httpsCaPath,
+  });
+  certWatcher.on('refresh-needed', () => {
+    // A running HTTPS server cannot swap certificates safely for existing
+    // clients. Let the CLI supervisor restart us; it will regenerate certs
+    // before spawning the replacement process.
+    server.close(() => process.exit(75));
+  });
+  certWatcher.start();
 
   let latestLocalAccessState = localAccessManager.getState();
   let latestOnboardingUrl: string | null = null;
@@ -272,6 +286,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   });
 
   server.on('close', () => {
+    certWatcher.stop();
     stopOnboardingServer();
     void localAccessManager.stop();
   });

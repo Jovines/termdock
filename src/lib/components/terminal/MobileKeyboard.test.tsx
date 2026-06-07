@@ -12,7 +12,10 @@ const baseProps = {
   presetLabel: 'Claude',
   presetModeLabel: 'Auto preset · Claude',
   presetMode: 'auto',
-  presetOptions: [{ id: 'auto', label: 'Auto' }],
+  presetOptions: [
+    { id: 'auto', label: 'Auto' },
+    { id: 'claude', label: 'Claude' },
+  ],
   includeAlt: true,
   presetRowLayout: [4],
   extraActions: [{ id: 'undo', label: '/undo', sequence: '/undo' }],
@@ -21,6 +24,39 @@ const baseProps = {
   onModifierToggle: vi.fn(),
   onPresetSelect: vi.fn(),
 };
+
+describe('MobileKeyboard interaction state', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('keeps the toolbar visible without firing actions when non-interactive', () => {
+    const onKeyPress = vi.fn();
+    const onTextPress = vi.fn();
+    render(<MobileKeyboard {...baseProps} interactive={false} onKeyPress={onKeyPress} onTextPress={onTextPress} />);
+
+    const toolbar = screen.getByText('Esc').closest('[data-mobile-keyboard="true"]');
+    expect(toolbar?.className).toContain('opacity-100');
+    expect(toolbar?.className).toContain('[&_button]:pointer-events-none');
+
+    fireEvent.pointerDown(screen.getByText('Esc'));
+    fireEvent.pointerDown(screen.getByText('/undo'));
+
+    expect(onKeyPress).not.toHaveBeenCalled();
+    expect(onTextPress).not.toHaveBeenCalled();
+  });
+
+  it('closes the preset menu when it becomes non-interactive', () => {
+    const { rerender } = render(<MobileKeyboard {...baseProps} />);
+
+    fireEvent.pointerDown(screen.getByTitle('Auto preset · Claude'));
+    expect(screen.getByText('Claude')).toBeTruthy();
+
+    rerender(<MobileKeyboard {...baseProps} interactive={false} />);
+
+    expect(screen.queryByText('Claude')).toBeNull();
+  });
+});
 
 describe('MobileKeyboard desktop actions presentation', () => {
   afterEach(() => {

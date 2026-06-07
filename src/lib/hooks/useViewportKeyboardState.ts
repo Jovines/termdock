@@ -1,4 +1,5 @@
 import React from 'react';
+import { createDebugLogger } from '../utils/debug';
 
 interface UseViewportKeyboardStateOptions {
   enabled: boolean;
@@ -37,6 +38,7 @@ export function useViewportKeyboardState(
     closeThresholdPx = DEFAULT_CLOSE_THRESHOLD_PX,
     settleDelayMs = DEFAULT_SETTLE_DELAY_MS,
   } = options;
+  const debugKeyboard = React.useMemo(() => createDebugLogger('keyboard'), []);
 
   const isOpenRef = React.useRef(false);
   const settleTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -99,44 +101,71 @@ export function useViewportKeyboardState(
         if (current.isOpen === nextOpen && current.keyboardHeight === keyboardHeight && current.isSettled === nextSettled) {
           return current;
         }
+        debugKeyboard('sync', {
+          keyboardHeight,
+          isOpen: nextOpen,
+          isSettled: nextSettled,
+          visualViewport: window.visualViewport
+            ? {
+                width: Math.round(window.visualViewport.width),
+                height: Math.round(window.visualViewport.height),
+                offsetTop: Math.round(window.visualViewport.offsetTop),
+              }
+            : null,
+        });
         return { isOpen: nextOpen, isSettled: nextSettled, keyboardHeight };
       });
     };
 
-    const schedule = () => {
+    const schedule = (source = 'event') => {
+      if (source.includes('visibilitychange') || source.includes('pageshow')) {
+        debugKeyboard('schedule', { source });
+      }
       if (rafId !== null) {
         return;
       }
       rafId = window.requestAnimationFrame(sync);
     };
 
-    schedule();
+    schedule('mount');
 
-    window.addEventListener('resize', schedule);
-    window.addEventListener('orientationchange', schedule);
-    window.visualViewport?.addEventListener('resize', schedule);
-    window.visualViewport?.addEventListener('scroll', schedule);
+    const handleResize = () => schedule('resize');
+    const handleOrientationChange = () => schedule('orientationchange');
+    const handleVisualViewportResize = () => schedule('visualViewport.resize');
+    const handleVisualViewportScroll = () => schedule('visualViewport.scroll');
+
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('orientationchange', handleOrientationChange);
+    window.visualViewport?.addEventListener('resize', handleVisualViewportResize);
+    window.visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
 
     // 从后台返回 / BFCache 恢复时强制重读 visualViewport，避免 isOpen 卡在
     // "软键盘打开"状态。和 useViewportHeight 一样要多次 schedule 覆盖 iOS
     // 异步 settle。
-    const handleResume = () => {
-      schedule();
-      window.setTimeout(schedule, 50);
-      window.setTimeout(schedule, 200);
+    const handleResume = (source: string) => {
+      debugKeyboard('resume', {
+        source,
+        keyboardHeight: getKeyboardHeightPx(),
+        hidden: document.hidden,
+      });
+      schedule(`${source}:now`);
+      window.setTimeout(() => schedule(`${source}:50ms`), 50);
+      window.setTimeout(() => schedule(`${source}:200ms`), 200);
     };
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) handleResume();
-    });
-    window.addEventListener('pageshow', handleResume);
+    const handleVisibilityChange = () => {
+      if (!document.hidden) handleResume('visibilitychange');
+    };
+    const handlePageShow = () => handleResume('pageshow');
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pageshow', handlePageShow);
 
     return () => {
-      window.removeEventListener('resize', schedule);
-      window.removeEventListener('orientationchange', schedule);
-      window.visualViewport?.removeEventListener('resize', schedule);
-      window.visualViewport?.removeEventListener('scroll', schedule);
-      document.removeEventListener('visibilitychange', handleResume);
-      window.removeEventListener('pageshow', handleResume);
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('orientationchange', handleOrientationChange);
+      window.visualViewport?.removeEventListener('resize', handleVisualViewportResize);
+      window.visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pageshow', handlePageShow);
 
       if (rafId !== null) window.cancelAnimationFrame(rafId);
       if (settleTimerRef.current !== null) {
@@ -144,7 +173,7 @@ export function useViewportKeyboardState(
         settleTimerRef.current = null;
       }
     };
-  }, [enabled, openThresholdPx, closeThresholdPx, settleDelayMs]);
+  }, [debugKeyboard, enabled, openThresholdPx, closeThresholdPx, settleDelayMs]);
 
   return state;
 }

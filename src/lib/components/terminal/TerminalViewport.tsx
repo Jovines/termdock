@@ -2303,6 +2303,27 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
           terminal.open(terminalHost);
 
+          if (isGhostty && !enableTouchScroll) {
+            const handleGhosttyFocus = () => {
+              debugTerminal('ghostty focus');
+              requestRefresh('focus', { skipResizePush: true, skipScrollToBottom: true });
+              inputFocusHandlerRef.current?.(true);
+            };
+            const handleGhosttyBlur = () => {
+              debugTerminal('ghostty blur');
+              requestRefresh('blur', { skipResizePush: true, skipScrollToBottom: true });
+              inputFocusHandlerRef.current?.(false);
+            };
+            terminalHost.addEventListener('focusin', handleGhosttyFocus);
+            terminalHost.addEventListener('focusout', handleGhosttyBlur);
+            localDisposables.push({
+              dispose: () => {
+                terminalHost.removeEventListener('focusin', handleGhosttyFocus);
+                terminalHost.removeEventListener('focusout', handleGhosttyBlur);
+              },
+            });
+          }
+
           if (isGhostty && enableTouchScroll) {
             // Mobile Ghostty reuses Termdock's overlay textarea for soft-keyboard
             // input. Disable ghostty-web's native contenteditable target after open;

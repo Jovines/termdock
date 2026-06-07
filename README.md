@@ -226,6 +226,14 @@ npm start
 - **macOS**：需安装 Xcode Command Line Tools 以便 `node-pty` 编译 `spawn-helper`
 - **Linux**：通常需要 `build-essential`、`python3` 才能编译 `node-pty`
 
+### tmux 焦点跟踪
+
+Termdock 复用系统默认 tmux server。每次创建、复用、切换或通过 CLI attach tmux 会话时，Termdock 会自动确保 shared tmux server 的 `focus-events` 为 `on`，并在浏览器焦点变化时把 focus in/out 事件按需转发给 tmux 内部请求了 focus tracking 的程序（例如 Claude Code、Vim、fzf 等）。这是单向增强项：Termdock 不会在会话关闭后把 `focus-events` 自动恢复为 `off`。如果你手动维护 `~/.tmux.conf`，也可以显式加入：
+
+```tmux
+set -g focus-events on
+```
+
 ## 项目结构
 
 ```

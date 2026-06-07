@@ -41,6 +41,7 @@ export function getSequenceForKey(key: MobileKey, _modifier: Modifier | null): s
 
 interface MobileKeyboardProps {
   visible: boolean;
+  interactive?: boolean;
   presentation?: 'mobile' | 'desktop-actions';
   activeModifier: Modifier | null;
   lockedModifier: Modifier | null;
@@ -62,6 +63,7 @@ interface MobileKeyboardProps {
 
 export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   visible,
+  interactive = true,
   presentation = 'mobile',
   activeModifier,
   lockedModifier,
@@ -85,7 +87,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   const isExpandedVisible = isDesktopActions || showExtended;
   const [showPresetMenu, setShowPresetMenu] = React.useState(false);
   const [presetMenuPosition, setPresetMenuPosition] = React.useState<{ top: number; left: number } | null>(null);
-  const toolbarDisabled = disabled || !visible;
+  const toolbarDisabled = disabled || !visible || !interactive;
+  const buttonDisabled = disabled || !visible;
   const presetButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const pendingTapRef = React.useRef<{
     actionId: string;
@@ -143,6 +146,10 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
 
   React.useEffect(() => {
     if (toolbarDisabled) {
+      if (pendingTapRef.current !== null) {
+        window.clearTimeout(pendingTapRef.current.timer);
+        pendingTapRef.current = null;
+      }
       setShowPresetMenu(false);
       setPresetMenuPosition(null);
     }
@@ -325,7 +332,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
               type="button"
               onPointerDown={(event) => handlePresetOptionPointerDown(event, option.id)}
               tabIndex={-1}
-              disabled={toolbarDisabled}
+              disabled={buttonDisabled}
               className={`h-7 rounded-full px-3 text-left text-xs font-medium transition-colors disabled:opacity-50 ${
                 option.id === presetMode
                   ? 'bg-primary text-primary-foreground'
@@ -352,6 +359,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           visible
             ? 'opacity-100 pointer-events-auto'
             : 'opacity-0 pointer-events-none'
+        } ${
+          interactive ? '' : '[&_button]:pointer-events-none'
         }`}
         onMouseDownCapture={preventToolbarButtonFocus}
         onPointerDownCapture={preventToolbarButtonFocus}
@@ -365,7 +374,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'esc')}
           tabIndex={-1}
-          disabled={toolbarDisabled}
+          disabled={buttonDisabled}
           className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
           Esc
@@ -374,7 +383,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'enter')}
           tabIndex={-1}
-          disabled={toolbarDisabled}
+          disabled={buttonDisabled}
           className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <RiArrowGoBackLine size={16} />
@@ -383,7 +392,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={(event) => handleModifierPointerDown(event, 'ctrl')}
           tabIndex={-1}
-          disabled={toolbarDisabled}
+          disabled={buttonDisabled}
           className={`h-7 w-full rounded-full shadow-sm text-xs disabled:opacity-50 flex items-center justify-center transition-all ${
             activeModifier === 'ctrl'
               ? 'bg-primary text-primary-foreground scale-105 shadow-md shadow-primary/40'
@@ -398,7 +407,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-c')}
           tabIndex={-1}
-          disabled={toolbarDisabled}
+          disabled={buttonDisabled}
           className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
           C-C
@@ -407,7 +416,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-w')}
           tabIndex={-1}
-          disabled={toolbarDisabled}
+          disabled={buttonDisabled}
           className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
           C-W
@@ -416,7 +425,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-u')}
           tabIndex={-1}
-          disabled={toolbarDisabled}
+          disabled={buttonDisabled}
           className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
           C-U
@@ -425,7 +434,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={() => onTextPress('/')}
           tabIndex={-1}
-          disabled={toolbarDisabled}
+          disabled={buttonDisabled}
           className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
           /
@@ -434,7 +443,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           type="button"
           onPointerDown={handleToggleExtendedPointerDown}
           tabIndex={-1}
-          disabled={toolbarDisabled}
+          disabled={buttonDisabled}
           className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           {showExtended ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
@@ -465,7 +474,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
                       mode={presetMode}
                       presetLabel={presetLabel}
                       title={presetModeLabel}
-                      disabled={toolbarDisabled}
+                      disabled={buttonDisabled}
                       onPointerDown={handlePresetCyclePointerDown}
                     />
                   );
@@ -478,7 +487,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
                       type="button"
                       onPointerDown={(event) => handleModifierPointerDown(event, 'alt')}
                       tabIndex={-1}
-                      disabled={toolbarDisabled}
+                      disabled={buttonDisabled}
                       className={`h-7 w-full rounded-full shadow-sm text-xs disabled:opacity-50 flex items-center justify-center transition-all ${
                         activeModifier === 'alt'
                           ? 'bg-primary text-primary-foreground scale-105 shadow-md shadow-primary/40'
@@ -497,7 +506,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
                       type="button"
                       onPointerDown={(event) => handleTextPointerDown(event, item.action)}
                       tabIndex={-1}
-                      disabled={toolbarDisabled}
+                      disabled={buttonDisabled}
                       className="h-7 w-full rounded-full bg-surface-2 shadow-sm px-1 text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 relative"
                     >
                       {item.action.label}
@@ -514,7 +523,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
                     type="button"
                     onPointerDown={(event) => handleSinglePointerDown(event, item.keyName)}
                     tabIndex={-1}
-                    disabled={toolbarDisabled}
+                    disabled={buttonDisabled}
                     className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
                   >
                     {item.keyName === 'ctrl-d' ? 'Ctrl-D' : item.keyName === 'home' ? 'Home' : 'End'}

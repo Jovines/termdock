@@ -1311,15 +1311,9 @@ function App() {
                 </div>
                 <div className="mt-3 space-y-1.5 text-[11px]">
                   {localAccess.url && (
-                    <button type="button" onClick={() => void handleCopyText(localAccess.url, 'lan')} className="flex w-full items-center justify-between gap-2 rounded-lg bg-surface px-2.5 py-2 text-left text-primary transition hover:bg-surface-elevated">
-                      <span className="min-w-0 truncate">{localAccess.url}</span>
+                    <button type="button" onClick={() => void handleCopyText(localAccess.url, 'lan')} className="flex w-full items-center justify-between gap-2 rounded-lg bg-surface px-2.5 py-2 text-left text-muted-foreground transition hover:bg-surface-elevated">
+                      <span className="min-w-0 truncate">Branded: {localAccess.url}</span>
                       <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium">{localAccessCopied === 'lan' ? 'Copied' : t('common.copy')}</span>
-                    </button>
-                  )}
-                  {localAccess.fallbackUrl && localAccess.fallbackUrl !== localAccess.url && (
-                    <button type="button" onClick={() => void handleCopyText(localAccess.fallbackUrl, 'fallback')} className="flex w-full items-center justify-between gap-2 rounded-lg bg-surface px-2.5 py-2 text-left text-amber-300 transition hover:bg-surface-elevated">
-                      <span className="min-w-0 truncate">Fallback: {localAccess.fallbackUrl}</span>
-                      <span className="shrink-0 rounded-full bg-amber-400/10 px-2 py-0.5 text-[10px] font-medium">{localAccessCopied === 'fallback' ? 'Copied' : t('common.copy')}</span>
                     </button>
                   )}
                   {localAccess.interfaces.length > 0 && (
