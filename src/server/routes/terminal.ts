@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { createRequire } from 'module';
 import QRCode from 'qrcode';
-import { execFile, spawn, type ChildProcess } from 'child_process';
+import { execFile, execFileSync, spawn, type ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
 import { promisify } from 'util';
 import type { WebSocket } from 'ws';
@@ -2753,7 +2753,12 @@ async function spawnTerminalSession(req: express.Request, input: {
   const resolvedEnv = { ...process.env, PATH: envPath };
 
   const pty = await getPtyProvider();
-  const termValue = input.termType === 'xterm-ghostty' ? 'xterm-ghostty' : 'xterm-256color';
+  // xterm-ghostty 是 ghostty-web 0.4.0+ 期望的 TERM 值（让 tmux/terminfo 知道对端
+  // 是真 Ghostty，能用上 XTPUSHSGR 等扩展）。但 'xterm-ghostty' terminfo 直到
+  // 2024-2025 才进 ncurses 上游，老系统 / 精简镜像里可能缺失；缺失时 tmux 会打
+  // 'unknown terminal' 警告并悄悄退回 default-terminal，体感是颜色和键位异常。
+  // 在这里用 infocmp 做一次 cheap probe（结果缓存），缺失就回落到 xterm-256color。
+  const termValue = resolveTerminalTermType(input.termType);
   console.log('[DEBUG_Ghostty] spawnTerminalSession', {
     mode,
     tmuxSessionName,
@@ -2907,6 +2912,41 @@ function buildAugmentedPath(): string {
 }
 
 let ptyProviderPromise: Promise<PtyProvider> | null = null;
+
+/**
+ * 探测 'xterm-ghostty' terminfo 是否在系统上可用。结果按 term name 缓存——
+ * terminfo 不会在运行时变化，没必要每次 spawn 都跑一次 infocmp。
+ * 探测用 `infocmp -L <term>`：纯查询，零输出、零副作用。
+ */
+const terminfoAvailabilityCache = new Map<string, boolean>();
+function isTerminfoAvailable(term: string): boolean {
+  const cached = terminfoAvailabilityCache.get(term);
+  if (cached !== undefined) return cached;
+  try {
+    execFileSync('infocmp', ['-L', term], { stdio: 'ignore' });
+    terminfoAvailabilityCache.set(term, true);
+    return true;
+  } catch {
+    terminfoAvailabilityCache.set(term, false);
+    return false;
+  }
+}
+
+/**
+ * 把前端传来的 termType 解析成最终给 PTY 的 TERM 环境变量值。
+ * 规则：
+ *   - 前端声明 'xterm-ghostty' 时，本机有对应 terminfo 就直接用；
+ *     没有就回落到 'xterm-256color'（几乎所有现代系统都有，且 ghostty-web
+ *     在 wasm 层不依赖 TERM 协商，色彩/SGR 表现一致）。
+ *   - 其它 termType（理论上前端只会传 'xterm-256color'）原样透传。
+ *   - 缺省 → 'xterm-256color'。
+ */
+function resolveTerminalTermType(requested: string | undefined): string {
+  if (requested === 'xterm-ghostty') {
+    return isTerminfoAvailable('xterm-ghostty') ? 'xterm-ghostty' : 'xterm-256color';
+  }
+  return requested || 'xterm-256color';
+}
 
 async function getPtyProvider(): Promise<PtyProvider> {
   if (ptyProviderPromise) {
