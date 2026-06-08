@@ -10,8 +10,8 @@ import { Writable } from 'stream';
 import { createRequire } from 'module';
 import { PORT, DEFAULT_HOST } from './config.js';
 import { isFirstRunCompleted, markFirstRunCompleted, normalizeLocalAccessName, setLocalAccessSetting, getLocalAccessSetting } from './utils/settings.js';
-import { getLanIPv4Addresses } from './utils/localAccess.js';
-import type { StartServerResult } from './entry.js';
+import { localAccessManager, getLanIPv4Addresses } from './utils/localAccess.js';
+import type { CertificateRefreshResult, StartServerResult } from './entry.js';
 import {
   clearAuthFile,
   destroyAllSessions,
@@ -197,6 +197,25 @@ function getRunningState(): ServerState | null {
 function writeState(state: ServerState) {
   ensureStateDir();
   fs.writeFileSync(stateFilePath, JSON.stringify(state, null, 2));
+}
+
+function buildServerState(params: {
+  pid: number;
+  host: string;
+  port: number;
+  scheme: 'http' | 'https';
+  localAccessReason?: string | null;
+}): ServerState {
+  return {
+    pid: params.pid,
+    host: params.host,
+    port: params.port,
+    scheme: params.scheme,
+    localUrl: `${params.scheme}://${params.host === '0.0.0.0' ? 'localhost' : params.host}:${params.port}`,
+    localAccessReason: params.localAccessReason,
+    logFile: logFilePath,
+    startedAt: new Date().toISOString(),
+  };
 }
 
 function fileExists(filePath: string | undefined): filePath is string {
@@ -1155,6 +1174,7 @@ async function main(): Promise<void> {
   }
 
   const https = resolveHttpsOptions(options);
+  const isManagedDefaultHttps = Boolean(https.cert === defaultHttpsCertPath && https.key === defaultHttpsKeyPath);
 
   if (options.status) {
     const runningState = getRunningState();
@@ -1191,6 +1211,37 @@ async function main(): Promise<void> {
       httpsCertPath: https.cert,
       httpsKeyPath: https.key,
       httpsCaPath: https.ca,
+      onCertificateRefreshNeeded: isManagedDefaultHttps
+        ? async (): Promise<CertificateRefreshResult> => {
+            console.log(`${ICON.info} ${c.dim('Termdock detected network/certificate changes; regenerating certificate and reloading TLS context...')}`);
+            const refreshed = await ensureDefaultHttpsCertificateFresh();
+            if (!refreshed) return { reloaded: false };
+            const state = await localAccessManager.start({
+              host: options.host ?? DEFAULT_HOST,
+              port: options.port ?? PORT.backend,
+              scheme: result.scheme,
+              caCertPath: https.ca,
+              onboardingPort: options.port ?? PORT.backend,
+            });
+            writeState({
+              pid: process.pid,
+              host: options.host ?? DEFAULT_HOST,
+              port: options.port ?? PORT.backend,
+              scheme: result.scheme,
+              localUrl: `${result.scheme}://${(options.host ?? DEFAULT_HOST) === '0.0.0.0' ? 'localhost' : (options.host ?? DEFAULT_HOST)}:${options.port ?? PORT.backend}`,
+              lanUrl: state.url,
+              onboardingUrl: result.getOnboardingUrl(),
+              localAccessStatus: state.status,
+              localAccessReason: state.reason,
+              logFile: logFilePath,
+              startedAt: new Date().toISOString(),
+            });
+            return { reloaded: false, localAccessState: state };
+          }
+        : () => {
+            console.warn('[cert-watch] certificate is missing current domain/IP SANs; restart Termdock with an updated certificate.');
+            return { reloaded: false };
+          },
     });
     result.server.on('close', () => {
       const runningState = readState();
@@ -1228,7 +1279,6 @@ async function main(): Promise<void> {
   const activeHttps = refreshedHttps;
 
   ensureStateDir();
-  const logFileFd = fs.openSync(logFilePath, 'a');
   const childArgs = [path.resolve(process.argv[1]), '--foreground'];
   const childHost = options.host ?? DEFAULT_HOST;
   const childPort = options.port ?? PORT.backend;
@@ -1258,48 +1308,21 @@ async function main(): Promise<void> {
     ? 'Using local HTTPS certificates from ~/.termdock/certs.'
     : null;
 
+  const logFileFd = fs.openSync(logFilePath, 'a');
   const child = spawn(process.execPath, childArgs, {
     detached: true,
     stdio: ['ignore', logFileFd, logFileFd],
   });
-
   fs.closeSync(logFileFd);
-
-  const handleExit = async (code: number | null) => {
-    if (code === 75 && activeHttps.source === 'default') {
-      console.log(`${ICON.info} ${c.dim('Termdock detected network/certificate changes; regenerating certificate and restarting...')}`);
-      await ensureDefaultHttpsCertificateFresh();
-      const restart = spawn(process.execPath, childArgs, {
-        detached: true,
-        stdio: ['ignore', fs.openSync(logFilePath, 'a'), fs.openSync(logFilePath, 'a')],
-      });
-      restart.unref();
-      writeState({
-        pid: restart.pid!,
-        host: childHost,
-        port: childPort,
-        scheme,
-        localUrl: `${scheme}://${childHost === '0.0.0.0' ? 'localhost' : childHost}:${childPort}`,
-        localAccessReason: 'Restarted after local network/certificate change.',
-        logFile: logFilePath,
-        startedAt: new Date().toISOString(),
-      });
-      return;
-    }
-  };
-  child.on('exit', (code) => { void handleExit(code); });
   child.unref();
 
-  writeState({
+  writeState(buildServerState({
     pid: child.pid!,
     host: childHost,
     port: childPort,
     scheme,
-    localUrl: `${scheme}://${childHost === '0.0.0.0' ? 'localhost' : childHost}:${childPort}`,
     localAccessReason,
-    logFile: logFilePath,
-    startedAt: new Date().toISOString(),
-  });
+  }));
 
   console.log(`${ICON.ok} ${c.green('Termdock started in background.')}`);
   console.log(`  ${c.dim('URL:')} ${c.cyan(`${scheme}://${childHost === '0.0.0.0' ? 'localhost' : childHost}:${childPort}`)}`);

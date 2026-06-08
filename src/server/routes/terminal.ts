@@ -19,6 +19,14 @@ import {
   setClientFocusState,
   type FocusAggregationState,
 } from '../utils/tmuxFocus.js';
+import {
+  extractProgramLabelFromArgs,
+  normalizeProgramName,
+  normalizeTmuxMetadataProgram,
+  selectTmuxForegroundProgram,
+  tmuxMetadataChanged,
+  type TmuxProcessRow,
+} from '../utils/tmuxProgramDetection.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -63,6 +71,7 @@ interface TmuxPane {
   left: number;
   command: string;
   pid: number;
+  tty: string;
   title: string;
   currentPath: string;
 }
@@ -688,6 +697,63 @@ function parseNumberOption(raw: string | null | undefined): number | null {
   if (!raw) return null;
   const value = Number(raw);
   return Number.isFinite(value) ? value : null;
+}
+
+interface TmuxRuntimeMetadata {
+  program: string | null;
+  cwd: string | null;
+  label: string;
+}
+
+function isTermdockManagedTmuxSession(session: TmuxInventoryMeta): boolean {
+  return !!(session.version || session.host || session.pid || session.createdAt || session.lastActiveAt || session.label || session.program || session.cwd);
+}
+
+function normalizeMetadataProgram(program: string | null | undefined): string | null {
+  return normalizeTmuxMetadataProgram(program, { shellNames: shellNamesBackend });
+}
+
+function getActivePaneFromLayout(layout: TmuxLayout): TmuxPane | null {
+  const activeWindow = layout.windows.find((window) => window.id === layout.activeWindowId);
+  return activeWindow?.panes.find((pane) => pane.id === layout.activePaneId) ?? null;
+}
+
+function buildRuntimeTmuxMetadata(input: {
+  tmuxSessionName: string;
+  program: string | null;
+  cwd: string | null;
+}): TmuxRuntimeMetadata {
+  const program = normalizeMetadataProgram(input.program);
+  const cwd = input.cwd ?? null;
+  const friendlyName = findFriendlyNameForTmuxSession(input.tmuxSessionName);
+  const label = buildTermdockLabel({
+    friendlyName,
+    program,
+    cwd,
+    sessionName: input.tmuxSessionName,
+  });
+  return { program, cwd, label };
+}
+
+function maybeRepairTmuxOptions(sessionName: string, current: {
+  program: string | null;
+  cwd: string | null;
+  label: string | null;
+}, next: TmuxRuntimeMetadata): void {
+  const currentSnapshot = {
+    program: current.program ?? null,
+    cwd: current.cwd ?? null,
+    label: current.label ?? '',
+  };
+  if (!tmuxMetadataChanged(currentSnapshot, next)) {
+    return;
+  }
+  void setTmuxOptions(sessionName, {
+    '@termdock-label': next.label,
+    '@termdock-program': next.program ?? '',
+    '@termdock-cwd': next.cwd ?? '',
+    '@termdock-last-active-at': String(Date.now()),
+  });
 }
 
 function makeTerminalSessionPayload(
@@ -1360,7 +1426,30 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     }
   }
 
-  const liveTmuxByName = new Map(liveTmuxSessions.map((session) => [session.name, session]));
+  const refreshedTmuxSessions = await Promise.all(liveTmuxSessions.map(async (tmux): Promise<TmuxInventoryMeta> => {
+    if (!isTermdockManagedTmuxSession(tmux)) {
+      return tmux;
+    }
+
+    try {
+      const metadata = await resolveLiveTmuxMetadata(tmux.name);
+      if (!metadata) {
+        return tmux;
+      }
+      maybeRepairTmuxOptions(tmux.name, tmux, metadata);
+      return {
+        ...tmux,
+        program: metadata.program,
+        cwd: metadata.cwd,
+        label: metadata.label,
+        lastActiveAt: Date.now(),
+      };
+    } catch {
+      return tmux;
+    }
+  }));
+
+  const liveTmuxByName = new Map(refreshedTmuxSessions.map((session) => [session.name, session]));
   const clientSessions = globalSessionState.sessions.map((session): SessionInventoryClientSession => {
     const backendLive = !!session.backendSessionId && terminalSessions.has(session.backendSessionId);
     const tmuxLive = session.mode === 'tmux' && !!session.tmuxSessionName && liveTmuxByName.has(session.tmuxSessionName);
@@ -1382,7 +1471,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     }
   }
 
-  const tmuxSessions = liveTmuxSessions.map((tmux): SessionInventoryTmuxSession => {
+  const tmuxSessions = refreshedTmuxSessions.map((tmux): SessionInventoryTmuxSession => {
     const bound = clientByTmux.get(tmux.name) ?? null;
     return {
       name: tmux.name,
@@ -1494,20 +1583,6 @@ function getPtyProcessPid(ptyProcess: PtyProcess): number | null {
     return ptyProcess.pid;
   }
   return null;
-}
-
-function normalizeProgramName(command: string | null | undefined): string | null {
-  if (typeof command !== 'string') {
-    return null;
-  }
-
-  const normalized = command.trim();
-  if (!normalized) {
-    return null;
-  }
-
-  const lastSegment = normalized.split(/[\\/]/).pop()?.trim();
-  return lastSegment && lastSegment.length > 0 ? lastSegment : normalized;
 }
 
 // ── OSC 0/2 title sniffing for CWD tracking ──
@@ -1846,75 +1921,64 @@ async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
   rawArgs: string | null;
 } | null> {
   // If pane command is a known shell, try to find a child foreground process
-  const isShell = pane.command && shellNamesBackend.has(pane.command);
+  const command = normalizeProgramName(pane.command);
+  const commandKey = command?.toLowerCase() ?? null;
+  const isShell = commandKey ? shellNamesBackend.has(commandKey) : false;
   // If pane command is NOT a shell but also too generic (e.g. "node"), also try
-  const isGeneric = pane.command && genericProgramNames.has(pane.command);
+  const isGeneric = commandKey ? genericProgramNames.has(commandKey) : false;
 
   if (!isShell && !isGeneric) {
     // Non-shell, non-generic command — pane_current_command is good enough
-    return { command: normalizeProgramName(pane.command), source: 'tmux-pane', rawArgs: null };
+    return { command, source: 'tmux-pane', rawArgs: null };
   }
 
   if (!pane.pid) {
-    return { command: normalizeProgramName(pane.command), source: 'tmux-pane', rawArgs: null };
+    return { command, source: 'tmux-pane', rawArgs: null };
   }
 
   try {
-    // Use ps to find the foreground process group on this TTY
-    const { stdout } = await execFileAsync('ps', [
-      '-o', 'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args=',
-    ], { timeout: 3000, maxBuffer: 512 * 1024 });
+    const psArgs = pane.tty
+      ? ['-t', pane.tty.replace(/^\/dev\//, ''), '-o', 'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args=']
+      : ['-o', 'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args='];
+    const { stdout } = await execFileAsync('ps', psArgs, { timeout: 3000, maxBuffer: 512 * 1024 });
 
     const rows = stdout
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
-      .map((line) => {
+      .map((line): TmuxProcessRow | null => {
         // ps -o format: PID PPID PGID TPGID STAT COMM ARGS
         // COMM is a single token; ARGS is the rest of the line
         const match = line.match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
         if (!match) return null;
         return {
-          pid: parseInt(match[1], 10),
-          ppid: parseInt(match[2], 10),
-          pgid: parseInt(match[3], 10),
-          tpgid: parseInt(match[4], 10),
-          stat: match[5],
-          comm: match[6],
-          args: match[7].trim(),
+          pid: Number.parseInt(match[1] || '0', 10),
+          ppid: Number.parseInt(match[2] || '0', 10),
+          pgid: Number.parseInt(match[3] || '0', 10),
+          tpgid: Number.parseInt(match[4] || '0', 10),
+          stat: match[5] || '',
+          comm: match[6] || '',
+          args: match[7]?.trim() || '',
         };
       })
-      .filter((row): row is NonNullable<typeof row> => row !== null);
+      .filter((row): row is TmuxProcessRow => row !== null);
 
-    // Find processes that are children of the pane's shell (pane.pid)
-    // and are in the foreground process group
-    const foregroundChildren = rows.filter(
-      (row) => row.pid !== pane.pid && row.tpgid > 0 && row.pgid === row.tpgid && !row.stat.startsWith('Z'),
-    );
-
-    // Prefer children of the shell PID
-    const shellChildren = foregroundChildren.filter((row) => {
-      // Walk up parent chain — is pane.pid an ancestor?
-      let current = row;
-      for (let depth = 0; depth < 10; depth++) {
-        if (current.ppid === pane.pid) return true;
-        const parent = rows.find((r) => r.pid === current.ppid);
-        if (!parent) break;
-        current = parent;
-      }
-      return false;
+    const selected = selectTmuxForegroundProgram({
+      panePid: pane.pid,
+      rows,
+      shellNames: shellNamesBackend,
+      genericProgramNames,
+      extractProgramLabel,
     });
 
-    const target = shellChildren[0] ?? foregroundChildren[0];
-    if (target?.args) {
-      const resolved = extractProgramLabel(target.args);
-      return { command: resolved, source: 'tmux-tty', rawArgs: target.args };
+    if (selected) {
+      return { command: selected.command, source: 'tmux-tty', rawArgs: selected.rawArgs };
     }
-  } catch (err) {
+  } catch {
     // Fall through to pane_current_command fallback
   }
 
-  return { command: normalizeProgramName(pane.command), source: 'tmux-pane', rawArgs: null };
+  return { command, source: 'tmux-pane', rawArgs: null };
 }
 
 /**
@@ -1929,47 +1993,7 @@ async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
  *      "/usr/bin/git status" → "git"
  */
 function extractProgramLabel(args: string): string | null {
-  if (!args) return null;
-
-  const parts = args.split(/\s+/);
-  const exe = parts[0]; // e.g. "/usr/bin/node" or "node"
-  const exeName = exe.split(/[\\/]/).pop() || exe; // basename
-
-  // For generic interpreters/runtimes, try to derive label from the script
-  if (genericProgramNames.has(exeName) && parts.length > 1) {
-    const script = parts[1];
-    const scriptName = script.split(/[\\/]/).pop() || script;
-
-    // Remove common extensions
-    const withoutExt = scriptName.replace(/\.(js|ts|mjs|cjs|py|sh|rb|pl|lua)$/, '');
-
-    if (withoutExt && withoutExt.length > 0) {
-      // If the script is a known wrapper, try to find the real program inside
-      if (wrapperScriptNames.has(withoutExt)) {
-        const remaining = parts.slice(2);
-        // Known CLI wrapper patterns: <script> <subcommand> <real-program>
-        // "x" is a common subcommand in CLI wrappers (e.g. "aiden x claude")
-        const skipTokens = new Set(['x', 'run', 'exec', 'use']);
-        let idx = 0;
-        if (remaining.length > 0 && skipTokens.has(remaining[0])) {
-          idx = 1;
-        }
-        // The next non-flag token is likely the real program name
-        for (let i = idx; i < remaining.length; i++) {
-          const token = remaining[i];
-          if (token.startsWith('-')) continue;
-          return token;
-        }
-        // Fallback: couldn't find a sub-program, use the wrapper name
-        return withoutExt;
-      }
-
-      // For other scripts (npm, pip, etc.), just use the script name directly
-      return withoutExt;
-    }
-  }
-
-  return exeName;
+  return extractProgramLabelFromArgs(args, { genericProgramNames, wrapperScriptNames });
 }
 
 function getActiveProgramFromTmuxLayout(layout: TmuxLayout): { command: string | null; source: 'tmux-pane' | 'tmux-tty'; updatedAt: number; rawArgs: string | null } | null {
@@ -2001,6 +2025,19 @@ function getCwdFromTmuxLayout(layout: TmuxLayout): string | null {
   return activePane?.currentPath || null;
 }
 
+async function resolveLiveTmuxMetadata(tmuxSessionName: string): Promise<TmuxRuntimeMetadata | null> {
+  const layout = await getTmuxLayout(tmuxSessionName);
+  const activePane = getActivePaneFromLayout(layout);
+  if (!activePane) {
+    return null;
+  }
+  const resolved = await resolveTmuxPaneProgram(activePane);
+  const fallback = getActiveProgramFromTmuxLayout(layout);
+  const program = resolved?.command ?? fallback?.command ?? null;
+  const cwd = getCwdFromTmuxLayout(layout);
+  return buildRuntimeTmuxMetadata({ tmuxSessionName, program, cwd });
+}
+
 // ── label builder (mirrors the frontend `getSessionDisplayLines` semantics) ──
 //
 // Used to populate the `@termdock-label` tmux user option so external tools
@@ -2028,7 +2065,7 @@ function buildTermdockLabel(input: {
   const friendly = input.friendlyName?.trim();
   if (friendly) return friendly;
 
-  const program = input.program?.trim();
+  const program = normalizeMetadataProgram(input.program);
   const dir = getCwdLeafBackend(input.cwd);
 
   if (program && !shellNamesBackend.has(program)) {
@@ -2056,45 +2093,39 @@ function findFriendlyNameForTmuxSession(tmuxSessionName: string): string | null 
 }
 
 // Push the latest dynamic metadata (program / cwd / label / last-active-at)
-// onto the tmux session as user options. Caller passes the previous label
-// and last-active-write timestamp so repeated polls with no change skip the
-// tmux write entirely. Returns the new (label, last-active-write) pair.
+// onto the tmux session as user options. Caller passes the previous metadata
+// snapshot and last-active-write timestamp so repeated polls with no change
+// skip the tmux write entirely. Returns the new snapshot + write timestamp.
 const TERMDOCK_LAST_ACTIVE_REFRESH_MS = 30_000;
 
 function syncDynamicTmuxMetadata(input: {
   tmuxSessionName: string;
   program: string | null;
   cwd: string | null;
-  previousLabel: string | null;
+  previousMetadata: TmuxRuntimeMetadata | null;
   lastActiveWriteAt: number;
-}): { label: string; lastActiveWriteAt: number } {
-  const { tmuxSessionName, program, cwd, previousLabel, lastActiveWriteAt } = input;
-  const friendlyName = findFriendlyNameForTmuxSession(tmuxSessionName);
-  const label = buildTermdockLabel({
-    friendlyName,
-    program,
-    cwd,
-    sessionName: tmuxSessionName,
-  });
+}): TmuxRuntimeMetadata & { lastActiveWriteAt: number } {
+  const { tmuxSessionName, program, cwd, previousMetadata, lastActiveWriteAt } = input;
+  const metadata = buildRuntimeTmuxMetadata({ tmuxSessionName, program, cwd });
   const now = Date.now();
 
-  if (label === previousLabel) {
+  if (!tmuxMetadataChanged(previousMetadata, metadata)) {
     // Cheap path: refresh last-active-at at most every 30 s so external
     // tools see the session as alive without flooding tmux every 500 ms.
     if (now - lastActiveWriteAt >= TERMDOCK_LAST_ACTIVE_REFRESH_MS) {
       void setTmuxOption(tmuxSessionName, '@termdock-last-active-at', String(now));
-      return { label, lastActiveWriteAt: now };
+      return { ...metadata, lastActiveWriteAt: now };
     }
-    return { label, lastActiveWriteAt };
+    return { ...metadata, lastActiveWriteAt };
   }
 
   void setTmuxOptions(tmuxSessionName, {
-    '@termdock-label': label,
-    '@termdock-program': program ?? '',
-    '@termdock-cwd': cwd ?? '',
+    '@termdock-label': metadata.label,
+    '@termdock-program': metadata.program ?? '',
+    '@termdock-cwd': metadata.cwd ?? '',
     '@termdock-last-active-at': String(now),
   });
-  return { label, lastActiveWriteAt: now };
+  return { ...metadata, lastActiveWriteAt: now };
 }
 
 async function detectShellActiveProgram(session: TerminalSession): Promise<{
@@ -2313,16 +2344,16 @@ async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
       '-t',
       windowId,
       '-F',
-      `#{pane_id}${TMUX_DELIMITER}#{pane_index}${TMUX_DELIMITER}#{pane_active}${TMUX_DELIMITER}#{pane_width}${TMUX_DELIMITER}#{pane_height}${TMUX_DELIMITER}#{pane_top}${TMUX_DELIMITER}#{pane_left}${TMUX_DELIMITER}#{pane_current_command}${TMUX_DELIMITER}#{pane_pid}${TMUX_DELIMITER}#{pane_title}${TMUX_DELIMITER}#{pane_current_path}`,
+      `#{pane_id}${TMUX_DELIMITER}#{pane_index}${TMUX_DELIMITER}#{pane_active}${TMUX_DELIMITER}#{pane_width}${TMUX_DELIMITER}#{pane_height}${TMUX_DELIMITER}#{pane_top}${TMUX_DELIMITER}#{pane_left}${TMUX_DELIMITER}#{pane_current_command}${TMUX_DELIMITER}#{pane_pid}${TMUX_DELIMITER}#{pane_tty}${TMUX_DELIMITER}#{pane_title}${TMUX_DELIMITER}#{pane_current_path}`,
     ]);
 
     const panes: TmuxPane[] = panesRaw.trim().split('\n').filter(Boolean).map((paneLine) => {
-      const paneRow = parseDelimitedRow(paneLine, 11);
+      const paneRow = parseDelimitedRow(paneLine, 12);
       if (!paneRow) {
         return null;
       }
 
-      const [paneId, paneIndexRaw, paneActiveRaw, widthRaw, heightRaw, topRaw, leftRaw, command, pidRaw, title, currentPath] = paneRow;
+      const [paneId, paneIndexRaw, paneActiveRaw, widthRaw, heightRaw, topRaw, leftRaw, command, pidRaw, tty, title, currentPath] = paneRow;
       return {
         id: paneId,
         index: parseInt(paneIndexRaw || '0', 10),
@@ -2333,6 +2364,7 @@ async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
         left: parseInt(leftRaw || '0', 10),
         command: command || '',
         pid: parseInt(pidRaw || '0', 10) || 0,
+        tty: tty || '',
         title: title || '',
         currentPath: currentPath || '',
       } as TmuxPane;
@@ -3436,8 +3468,11 @@ router.get('/:sessionId/stream', async (req, res) => {
       if (ap) session.activeProgram = ap;
     } else if (session.mode === 'tmux' && session.tmuxSessionName) {
       const layout = await getTmuxLayout(session.tmuxSessionName);
-      const ap = getActiveProgramFromTmuxLayout(layout);
-      if (ap) session.activeProgram = ap;
+      const activePane = getActivePaneFromLayout(layout);
+      const ap = activePane
+        ? await resolveTmuxPaneProgram(activePane)
+        : getActiveProgramFromTmuxLayout(layout);
+      if (ap) session.activeProgram = { ...ap, updatedAt: Date.now() };
     }
   } catch { /* ignore */ }
 
@@ -3476,7 +3511,7 @@ router.get('/:sessionId/stream', async (req, res) => {
   let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
   let lastTmuxLayoutSnapshot = '';
   let lastActiveProgramSnapshot = JSON.stringify(session.activeProgram ?? null);
-  let lastTmuxMetaLabel: string | null = null;
+  let lastTmuxMetadata: TmuxRuntimeMetadata | null = null;
   let lastTmuxMetaWriteAt = 0;
 
   const maybeWriteActiveProgram = (activeProgram: TerminalSession['activeProgram']) => {
@@ -3511,8 +3546,7 @@ router.get('/:sessionId/stream', async (req, res) => {
       const layout = await getTmuxLayout(session.tmuxSessionName);
 
       // Resolve the active program — try ps-based detection for generic commands
-      const activeWindow = layout.windows.find((window) => window.id === layout.activeWindowId);
-      const activePane = activeWindow?.panes.find((pane) => pane.id === layout.activePaneId);
+      const activePane = getActivePaneFromLayout(layout);
       if (activePane) {
         const resolved = await resolveTmuxPaneProgram(activePane);
         if (resolved) {
@@ -3536,15 +3570,15 @@ router.get('/:sessionId/stream', async (req, res) => {
         writeSse(res, { type: 'cwd', cwd: newCwd });
       }
       // Mirror dynamic metadata onto tmux user options (cheap when nothing
-      // changed thanks to the label cache).
+      // changed thanks to the full metadata snapshot cache).
       const meta = syncDynamicTmuxMetadata({
         tmuxSessionName: session.tmuxSessionName,
         program: session.activeProgram?.command ?? null,
         cwd: session.cwd ?? null,
-        previousLabel: lastTmuxMetaLabel,
+        previousMetadata: lastTmuxMetadata,
         lastActiveWriteAt: lastTmuxMetaWriteAt,
       });
-      lastTmuxMetaLabel = meta.label;
+      lastTmuxMetadata = { program: meta.program, cwd: meta.cwd, label: meta.label };
       lastTmuxMetaWriteAt = meta.lastActiveWriteAt;
 
       const snapshot = JSON.stringify(layout);
@@ -4141,7 +4175,7 @@ export function handleTerminalWebSocket(
   if (session.mode === 'tmux' && session.tmuxSessionName) {
     let lastTmuxLayoutSnapshot = '';
     let lastActiveProgramSnapshot = JSON.stringify(session.activeProgram ?? null);
-    let lastTmuxMetaLabel: string | null = null;
+    let lastTmuxMetadata: TmuxRuntimeMetadata | null = null;
     let lastTmuxMetaWriteAt = 0;
 
     const sendTmuxLayout = async () => {
@@ -4149,8 +4183,7 @@ export function handleTerminalWebSocket(
       try {
         const layout = await getTmuxLayout(session.tmuxSessionName!);
         // Update active program — try ps-based detection for generic commands
-        const activeWindow = layout.windows.find((window) => window.id === layout.activeWindowId);
-        const activePane = activeWindow?.panes.find((pane) => pane.id === layout.activePaneId);
+        const activePane = getActivePaneFromLayout(layout);
         let ap: TerminalSession['activeProgram'] = null;
         if (activePane) {
           const resolved = await resolveTmuxPaneProgram(activePane);
@@ -4192,10 +4225,10 @@ export function handleTerminalWebSocket(
           tmuxSessionName: session.tmuxSessionName!,
           program: session.activeProgram?.command ?? null,
           cwd: session.cwd ?? null,
-          previousLabel: lastTmuxMetaLabel,
+          previousMetadata: lastTmuxMetadata,
           lastActiveWriteAt: lastTmuxMetaWriteAt,
         });
-        lastTmuxMetaLabel = meta.label;
+        lastTmuxMetadata = { program: meta.program, cwd: meta.cwd, label: meta.label };
         lastTmuxMetaWriteAt = meta.lastActiveWriteAt;
 
         const snapshot = JSON.stringify(layout);

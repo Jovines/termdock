@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { homedir } from 'os';
 import cookieParser from 'cookie-parser';
+import { type SecureContextOptions } from 'tls';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import terminalRoutes, { handleTerminalWebSocket, handleControlWebSocket } from './routes/terminal.js';
@@ -23,7 +24,7 @@ import {
   validateHostMiddleware,
 } from './utils/requestSecurity.js';
 import { getCookieSecurityOptions, setSecureCookieMode } from './utils/cookieSecurity.js';
-import { startOnboardingServer, stopOnboardingServer } from './onboardingServer.js';
+import { startOnboardingServer, stopOnboardingServer, getOnboardingServerUrl } from './onboardingServer.js';
 import { CertificateWatcher } from './certificateWatcher.js';
 
 import { PORT, DEFAULT_HOST } from './config.js';
@@ -36,6 +37,11 @@ const currentDirPath = path.dirname(currentFilePath);
 const clientDistPath = path.resolve(currentDirPath, '../client');
 const clientIndexPath = path.join(clientDistPath, 'index.html');
 
+export interface CertificateRefreshResult {
+  reloaded: boolean;
+  localAccessState?: LocalAccessState;
+}
+
 export interface ServerOptions {
   host?: string;
   port?: number;
@@ -43,6 +49,7 @@ export interface ServerOptions {
   httpsKeyPath?: string;
   httpsCaPath?: string;
   onboardingPort?: number;
+  onCertificateRefreshNeeded?: (missingNames: string[]) => CertificateRefreshResult | Promise<CertificateRefreshResult>;
 }
 
 export interface StartServerResult {
@@ -167,6 +174,16 @@ function createServerForApp(app: express.Express, options: ServerOptions): { ser
   return { server: createHttpServer(app), scheme: 'http' };
 }
 
+function reloadHttpsCertificate(server: HttpServer, options: ServerOptions): boolean {
+  if (!options.httpsCertPath || !options.httpsKeyPath || typeof (server as { setSecureContext?: unknown }).setSecureContext !== 'function') {
+    return false;
+  }
+  const cert = fs.readFileSync(options.httpsCertPath);
+  const key = fs.readFileSync(options.httpsKeyPath);
+  (server as unknown as { setSecureContext: (options: SecureContextOptions) => void }).setSecureContext({ cert, key });
+  return true;
+}
+
 export function startServer(options: ServerOptions = {}): StartServerResult {
   const port = options.port ?? Number(process.env.PORT || DEFAULT_PORT);
   const host = options.host ?? (process.env.HOST || DEFAULT_HOST);
@@ -179,11 +196,21 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
     keyPath: options.httpsKeyPath,
     caPath: options.httpsCaPath,
   });
-  certWatcher.on('refresh-needed', () => {
-    // A running HTTPS server cannot swap certificates safely for existing
-    // clients. Let the CLI supervisor restart us; it will regenerate certs
-    // before spawning the replacement process.
-    server.close(() => process.exit(75));
+  certWatcher.on('refresh-needed', (missingNames: string[]) => {
+    void (async () => {
+      const result = await options.onCertificateRefreshNeeded?.(missingNames);
+      if (!result?.reloaded && !reloadHttpsCertificate(server, options)) {
+        console.warn('[cert-watch] certificate refresh requested but HTTPS context could not be reloaded');
+        return;
+      }
+      if (result?.localAccessState) {
+        latestLocalAccessState = result.localAccessState;
+        latestOnboardingUrl = getOnboardingServerUrl();
+      }
+      console.log('[cert-watch] HTTPS certificate context reloaded');
+    })().catch((error) => {
+      console.error('[cert-watch] failed to handle certificate refresh:', error);
+    });
   });
   certWatcher.start();
 
