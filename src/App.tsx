@@ -24,6 +24,7 @@ import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import { getCwdLeafName, getSessionDisplayLines } from './lib/terminal/display';
 import type { TerminalRendererMode, TerminalEngine } from './lib/terminal/renderer';
+import { ensureGhosttyWasmReady } from './lib/terminal/backend';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
 import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
@@ -185,6 +186,17 @@ function App() {
   const safeBottomInset = 'env(safe-area-inset-bottom, 0px)';
 
   useViewportHeight();
+
+  // 预热 ghostty-web WASM：app 挂载时立即 fire-and-forget 触发 WASM 解析与编译。
+  // 打开第一个 terminal 时 ensureGhosttyWasmReady() 直接命中 module 级缓存，
+  // 不再等 ~200-500ms（4G 下 404KB wasm parse + compile）。仅在用户选了 ghostty
+  // 引擎时才有意义，但触发成本极低（动态 import + 调一次 init()），开给所有人。
+  useEffect(() => {
+    ensureGhosttyWasmReady().catch(() => {
+      // 失败会被每个 TerminalViewport 自己的 ensureGhosttyWasmReady 错误流捕获，
+      // 这里静默吞掉，避免污染 app 启动日志。
+    });
+  }, []);
 
   const [showDebug, setShowDebug] = React.useState(false);
   // Hydrate settings from cache so the toggles show user's real choice on cold

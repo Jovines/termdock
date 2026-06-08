@@ -54,6 +54,11 @@ const F_KEY_SEQ: Record<string, string> = {
 function buildArrowSeq(terminal: Terminal, dir: 'A' | 'B' | 'C' | 'D', backend: TerminalBackendType): string {
   // application cursor mode (DECCKM)：vim/less 等会切到 \x1bO?,
   // shell 默认为 \x1b[?。xterm 在 modes 上暴露了这个状态。
+  //
+  // 注：ghostty 桌面端不再走这条路径——attachCustomKeyEventHandler 已改为只拦截
+  // 系统级快捷键，方向键由 ghostty-web 自家 KeyEncoder（lib/input_handler.ts）
+  // 通过 getModeCallback(1) 查 DECCKM 后输出正确字节。这里保留 ghostty 分支只是
+  // 为了让函数签名在跨 backend 调用时不会爆编译错；实际不会被命中。
   if (backend === 'ghostty') {
     const appCursor = (terminal as any).getMode(1, false); // DECCKM
     return appCursor ? `\x1bO${dir}` : `\x1b[${dir}`;
@@ -340,7 +345,13 @@ const getTerminalFontFamily = (userFontFamily: string): string => {
   return userFontFamily;
 };
 
-// Convert TerminalTheme to xterm.js theme format
+// Convert TerminalTheme to a backend-agnostic theme object.
+//
+// Both xterm.js and ghostty-web 0.4.0+ accept the same xterm.js ITheme field set
+// (background/foreground/cursor/cursorAccent/selectionBackground/selectionForeground
+// + 16 ANSI colors). Note: ghostty-web's scrollbar is rendered on canvas via its
+// own SelectionManager, so the xterm.js-specific scrollbar slider fields are dead
+// code and intentionally omitted.
 function convertTheme(theme: TerminalTheme): Record<string, string> {
   return {
     background: theme.background,
@@ -365,9 +376,6 @@ function convertTheme(theme: TerminalTheme): Record<string, string> {
     brightMagenta: theme.brightMagenta || '#CE5D97',
     brightCyan: theme.brightCyan || '#3AA99F',
     brightWhite: theme.brightWhite || '#FFFCF0',
-    scrollbarSliderBackground: 'transparent',
-    scrollbarSliderHoverBackground: 'transparent',
-    scrollbarSliderActiveBackground: 'transparent',
   };
 }
 
@@ -2246,9 +2254,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               theme: convertTheme(theme),
               cursorBlink: true,
               cursorStyle: 'block',
-              scrollback: onTmuxScroll ? 0 : 1000,
+              scrollback: onTmuxScroll ? 2000 : 5000,
               allowTransparency: false,
               convertEol: terminalConvertEol,
+              // 关闭默认 100ms smooth scroll：项目自己有 requestRefresh /
+              // scrollToBottom 编排器，再叠 100ms 平滑滚动会出现双驱动 + 残影。
+              smoothScrollDuration: 0,
+              // 显式锁定：未来 ghostty-web 默认值变化时也不会影响 read path。
+              disableStdin: false,
             });
 
             fitAddon = new GhosttyFitAddon();
@@ -2262,7 +2275,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               cursorBlink: true,
               cursorStyle: 'block',
               cursorInactiveStyle: 'bar',
-              scrollback: onTmuxScroll ? 0 : 1000,
+              scrollback: onTmuxScroll ? 2000 : 5000,
               allowTransparency: false,
               allowProposedApi: true,
               convertEol: terminalConvertEol,
@@ -2303,6 +2316,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
           terminal.open(terminalHost);
 
+          // 防御性：让 ghostty-web 在 open 之后立刻重测一次字体度量。当前架构下
+          // init useEffect 在 fontSize 变化时会整体重建 terminal，所以这里其实等价
+          // 于 no-op；但万一以后改成走 setFontSize 路径，这条能挡住 IME 锚点错位。
+          if (isGhostty && terminal.renderer && typeof terminal.renderer.remeasureFont === 'function') {
+            terminal.renderer.remeasureFont();
+          }
+
           if (isGhostty && !enableTouchScroll) {
             const handleGhosttyFocus = () => {
               debugTerminal('ghostty focus');
@@ -2342,6 +2362,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
 
           if (isGhostty && !enableTouchScroll && typeof terminal.attachCustomKeyEventHandler === 'function') {
+            // 桌面 ghostty 模式：让 ghostty-web 的 InputHandler + KeyEncoder 负责
+            // 全部键盘事件 → 终端字节流（Kitty keyboard protocol、DECCKM 应用光标
+            // 模式、IME composition 全部走原生路径，见 ghostty-web 0.4.0 PR #76/#81/#90）。
+            // 我们只通过 attachCustomKeyEventHandler 拦截「系统级快捷键」，其它所有
+            // 键 return false 让 KeyEncoder 处理；onData 收到编码好的字节后转发给 PTY。
             terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
               if (event.isComposing || event.keyCode === 229) return false;
 
@@ -2351,15 +2376,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               const shift = event.shiftKey;
               const key = event.key;
 
-              // Let browser/ghostty handle paste and most Cmd shortcuts.
-              if ((cmd || ctrl) && !alt && !shift && (key === 'v' || key === 'V')) return false;
-
+              // Cmd+C（Mac 风格）：有选区时复制；不要回落到 SIGINT（C-c）。
               if (cmd && !ctrl && !alt && !shift && (key === 'c' || key === 'C')) {
                 const sel = terminal.hasSelection?.() ? terminal.getSelection?.() : '';
-                if (sel) navigator.clipboard?.writeText(sel).catch(() => { /* ignored */ });
+                if (sel) {
+                  navigator.clipboard?.writeText(sel).catch(() => { /* ignored */ });
+                }
                 return true;
               }
 
+              // Cmd/Ctrl+K：清空可视屏幕。
               if ((cmd || ctrl) && !alt && !shift && (key === 'k' || key === 'K')) {
                 terminal.reset();
                 resetWriteState();
@@ -2367,39 +2393,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 return true;
               }
 
-              if (cmd) return false;
-
-              if (ctrl && !alt && !shift && key === ' ') {
-                sendTerminalSeq('\x00');
-                return true;
-              }
-
-              if (ctrl && !alt && !cmd && key.length === 1) {
-                const code = key.toLowerCase().charCodeAt(0);
-                if (code >= 0x40 && code <= 0x7f) {
-                  sendTerminalSeq(String.fromCharCode(code & 0x1f));
-                  return true;
-                }
-              }
-
-              if (alt && !ctrl && !cmd && key.length === 1) {
-                sendTerminalSeq(`\x1b${key}`);
-                return true;
-              }
-
-              const specialSeq = mapSpecialKey(event as unknown as React.KeyboardEvent, terminal, 'ghostty');
-              if (specialSeq !== null) {
-                sendTerminalSeq(specialSeq);
-                return true;
-              }
-
-              if (!ctrl && !alt && !cmd && key.length === 1) {
-                sendTerminalSeq(key);
-                return true;
-              }
-
+              // 其它所有键（含粘贴、方向键、修饰键组合、IME 输入）放给 KeyEncoder。
               return false;
             });
+
+            // 订阅 KeyEncoder 编码后的字节流，转发给 PTY。
+            // skipModifierTransform: true —— onData 出来的就是终端协议字节流，
+            // 不再让 TerminalView 叠加移动端修饰符工具栏的状态。
+            const dataDisposable = terminal.onData((data: string) => {
+              inputHandlerRef.current(data, { skipModifierTransform: true });
+            });
+            localDisposables.push({ dispose: () => dataDisposable.dispose() });
           }
 
           // xterm-only: 强制让 xterm 把光标视为"已初始化"（ghostty 不需要）
@@ -2420,9 +2424,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             const runGhosttyFit = (reason: string) => {
               if (!disposed) fitTerminal(reason);
             };
+            // rAF + 0ms 覆盖同步 layout（容器还没稳定，rAF 之后立刻第二次）。
+            // 120ms 那一拍换成 FitAddon.observeResize()：官方自带 100ms 防抖的
+            // ResizeObserver，监听容器尺寸变化自动 fit——更稳，不再依赖 1 次性
+            // setTimeout 撞运气。
             requestAnimationFrame(() => runGhosttyFit('ghostty-init-raf'));
             window.setTimeout(() => runGhosttyFit('ghostty-init-timeout-0'), 0);
-            window.setTimeout(() => runGhosttyFit('ghostty-init-timeout-120'), 120);
+            if (typeof fitAddon.observeResize === 'function') {
+              fitAddon.observeResize();
+            }
           } else if (shouldUseWebgl) {
             enableWebglRenderer(terminal, 'init');
             // enableWebglRenderer 成功路径会自己把 rendererReadyRef 置 true；
