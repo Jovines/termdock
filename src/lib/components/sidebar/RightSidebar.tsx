@@ -291,11 +291,13 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
         </div>
       )}
       {/* Sticky bottom action bar — only shows when a line range is selected.
-          Always present in the DOM so toggling doesn't reflow the scroller; we
-          just hide it with visibility to keep the line gutter position stable. */}
+          Collapsed out of the layout (instead of opacity-0) when no range is
+          selected so the scroller can fill the full available height — this
+          matters most on mobile where the wasted 53px is a noticeable chunk
+          of the viewport. */}
       <div
-        className={`shrink-0 border-t border-border/15 bg-surface px-3 py-2 transition-all duration-150 ${
-          lineRange ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-2 opacity-0'
+        className={`shrink-0 overflow-hidden border-t border-border/15 bg-surface transition-all duration-150 ${
+          lineRange ? 'max-h-24 opacity-100' : 'pointer-events-none max-h-0 opacity-0 border-t-transparent'
         }`}
         aria-hidden={!lineRange}
       >
