@@ -20,6 +20,7 @@ export interface CertificatePaths {
 }
 
 const CHECK_INTERVAL_MS = 15_000;
+const RETRY_INTERVAL_MS = 60_000;
 
 function fileExists(filePath: string | undefined): filePath is string {
   return typeof filePath === 'string' && filePath.length > 0;
@@ -65,6 +66,9 @@ function requiredNames(): string[] {
 export class CertificateWatcher extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private checking = false;
+  private refreshInFlight = false;
+  private pendingKey: string | null = null;
+  private nextRetryAt = 0;
 
   constructor(private readonly options: CertificateWatcherOptions) {
     super();
@@ -83,14 +87,39 @@ export class CertificateWatcher extends EventEmitter {
     }
   }
 
+  markRefreshComplete(missing: string[], ok: boolean): void {
+    const key = missing.join('\0');
+    if (this.pendingKey !== key) return;
+    this.refreshInFlight = false;
+    if (ok) {
+      this.pendingKey = null;
+      this.nextRetryAt = 0;
+    } else {
+      this.nextRetryAt = Date.now() + RETRY_INTERVAL_MS;
+    }
+  }
+
   async check(): Promise<void> {
     if (this.checking || !this.options.enabled || !fileExists(this.options.certPath) || !fileExists(this.options.keyPath)) return;
     this.checking = true;
     try {
       const sans = await readCertificateSans(this.options.certPath);
       const missing = requiredNames().filter((name) => !sanMatches(name, sans));
-      if (missing.length === 0) return;
-      console.log(`[cert-watch] certificate missing SANs (${missing.join(', ')}); regenerating and requesting restart`);
+      if (missing.length === 0) {
+        this.refreshInFlight = false;
+        this.pendingKey = null;
+        this.nextRetryAt = 0;
+        return;
+      }
+
+      const key = missing.join('\0');
+      const now = Date.now();
+      if (this.refreshInFlight && this.pendingKey === key) return;
+      if (this.pendingKey === key && this.nextRetryAt > now) return;
+
+      this.refreshInFlight = true;
+      this.pendingKey = key;
+      console.log(`[cert-watch] certificate missing SANs (${missing.join(', ')}); regenerating and reloading TLS context`);
       this.emit('refresh-needed', missing);
     } finally {
       this.checking = false;

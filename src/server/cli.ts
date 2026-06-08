@@ -242,34 +242,54 @@ function resolveHttpsOptions(options: Pick<CliOptions, 'httpsCert' | 'httpsKey' 
   return { source: 'none' };
 }
 
-async function commandExists(command: string): Promise<boolean> {
-  try {
-    await execFileAsync(command, ['--version'], { timeout: 5000, maxBuffer: 128 * 1024 });
-    return true;
-  } catch {
-    return false;
-  }
+const EXTRA_EXECUTABLE_DIRS = ['/opt/homebrew/bin', '/usr/local/bin'];
+
+function executableCandidates(command: string): string[] {
+  if (command.includes(path.sep)) return [command];
+  const dirs = [...(process.env.PATH ?? '').split(path.delimiter), ...EXTRA_EXECUTABLE_DIRS].filter(Boolean);
+  const seen = new Set<string>();
+  return dirs
+    .map((dir) => path.join(dir, command))
+    .filter((candidate) => {
+      if (seen.has(candidate)) return false;
+      seen.add(candidate);
+      return true;
+    });
 }
 
-async function ensureMkcertInstalled(): Promise<void> {
-  if (await commandExists('mkcert')) return;
+async function findExecutable(command: string): Promise<string | null> {
+  for (const candidate of executableCandidates(command)) {
+    try {
+      await execFileAsync(candidate, ['--version'], { timeout: 5000, maxBuffer: 128 * 1024 });
+      return candidate;
+    } catch { /* try next candidate */ }
+  }
+  return null;
+}
 
-  if (!(await commandExists('brew'))) {
-    console.error(`${ICON.err} ${c.red('mkcert is required for local HTTPS setup, and Homebrew was not found.')}`);
-    console.error(`  ${c.dim('Install Homebrew first, or manually install:')} ${c.cyan('brew install mkcert')}`);
-    process.exit(1);
+async function ensureMkcertInstalled(): Promise<string> {
+  const existing = await findExecutable('mkcert');
+  if (existing) return existing;
+
+  const brew = await findExecutable('brew');
+  if (!brew) {
+    throw new Error(`${ICON.err} ${c.red('mkcert is required for local HTTPS setup, and Homebrew was not found.')}\n  ${c.dim('Install Homebrew first, or manually install:')} ${c.cyan('brew install mkcert')}`);
   }
 
   console.log(`${ICON.info} ${c.dim('mkcert is not installed. Installing with Homebrew...')}`);
   try {
-    await execFileAsync('brew', ['install', 'mkcert'], { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 });
+    await execFileAsync(brew, ['install', 'mkcert'], { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 });
   } catch (error) {
-    console.error(`${ICON.err} ${c.red('Failed to install mkcert with Homebrew.')}`);
     const err = error as { stderr?: string; message?: string };
     const detail = (err.stderr || err.message || '').toString().trim();
-    if (detail) console.error(detail);
-    process.exit(1);
+    throw new Error(`${ICON.err} ${c.red('Failed to install mkcert with Homebrew.')}${detail ? `\n${detail}` : ''}`);
   }
+
+  const installed = await findExecutable('mkcert');
+  if (!installed) {
+    throw new Error(`${ICON.err} ${c.red('mkcert installation completed, but mkcert was not found on PATH.')}`);
+  }
+  return installed;
 }
 
 function getRequiredLocalHttpsNames(): string[] {
@@ -321,23 +341,23 @@ async function ensureDefaultHttpsCertificateFresh(): Promise<boolean> {
 }
 
 async function runSetupLocalHttps(options: { quietRestartHint?: boolean } = {}): Promise<void> {
-  await ensureMkcertInstalled();
+  const mkcert = await ensureMkcertInstalled();
 
   ensureStateDir();
   fs.mkdirSync(certDir, { recursive: true, mode: 0o700 });
 
   console.log(`${ICON.info} ${c.dim('Installing local CA into this computer trust store...')}`);
-  await execFileAsync('mkcert', ['-install'], { timeout: 120000, maxBuffer: 1024 * 1024 });
+  await execFileAsync(mkcert, ['-install'], { timeout: 120000, maxBuffer: 1024 * 1024 });
 
   console.log(`${ICON.info} ${c.dim('Generating local certificate for Termdock domains...')}`);
-  await execFileAsync('mkcert', [
+  await execFileAsync(mkcert, [
     '-cert-file', defaultHttpsCertPath,
     '-key-file', defaultHttpsKeyPath,
     ...getRequiredLocalHttpsNames(),
   ], { cwd: certDir, timeout: 120000, maxBuffer: 1024 * 1024 });
 
   try {
-    const { stdout } = await execFileAsync('mkcert', ['-CAROOT'], { timeout: 5000, maxBuffer: 64 * 1024 });
+    const { stdout } = await execFileAsync(mkcert, ['-CAROOT'], { timeout: 5000, maxBuffer: 64 * 1024 });
     const rootCA = path.join(stdout.trim(), 'rootCA.pem');
     if (fs.existsSync(rootCA)) {
       fs.copyFileSync(rootCA, defaultHttpsCaPath);
@@ -1109,9 +1129,14 @@ async function runFirstRunWizard(): Promise<void> {
     console.log(`  ${ICON.warn} ${c.yellow('No valid prefix entered; using generated default for now.')}`);
   }
 
-  const enableHttps = (await promptLine('  Enable HTTPS automatically now? [Y/n] ')).toLowerCase();
+    const enableHttps = (await promptLine('  Enable HTTPS automatically now? [Y/n] ')).toLowerCase();
   if (enableHttps !== 'n' && enableHttps !== 'no') {
-    await runSetupLocalHttps();
+    try {
+      await runSetupLocalHttps();
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      console.log(`  ${ICON.info} ${c.dim('You can enable HTTPS later with:')} ${c.cyan('termdock --setup-local-https')}`);
+    }
   } else {
     console.log(`  ${ICON.info} ${c.dim('You can enable HTTPS later with:')} ${c.cyan('termdock --setup-local-https')}`);
   }
@@ -1142,10 +1167,24 @@ async function waitForServerMetadata(result: StartServerResult, fallbackPort: nu
   };
 }
 
+async function refreshDefaultHttpsCertificateSafely(): Promise<boolean> {
+  try {
+    return await ensureDefaultHttpsCertificateFresh();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    return false;
+  }
+}
+
 async function main(): Promise<void> {
   if (options.setupLocalHttps) {
-    await runSetupLocalHttps();
-    process.exit(0);
+    try {
+      await runSetupLocalHttps();
+      process.exit(0);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
   }
 
   if (options.tls) {
@@ -1214,7 +1253,7 @@ async function main(): Promise<void> {
       onCertificateRefreshNeeded: isManagedDefaultHttps
         ? async (): Promise<CertificateRefreshResult> => {
             console.log(`${ICON.info} ${c.dim('Termdock detected network/certificate changes; regenerating certificate and reloading TLS context...')}`);
-            const refreshed = await ensureDefaultHttpsCertificateFresh();
+            const refreshed = await refreshDefaultHttpsCertificateSafely();
             if (!refreshed) return { reloaded: false };
             const state = await localAccessManager.start({
               host: options.host ?? DEFAULT_HOST,
@@ -1274,7 +1313,7 @@ async function main(): Promise<void> {
 
   await runFirstRunWizard();
 
-  await ensureDefaultHttpsCertificateFresh();
+  await refreshDefaultHttpsCertificateSafely();
   const refreshedHttps = resolveHttpsOptions(options);
   const activeHttps = refreshedHttps;
 

@@ -201,14 +201,17 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
       const result = await options.onCertificateRefreshNeeded?.(missingNames);
       if (!result?.reloaded && !reloadHttpsCertificate(server, options)) {
         console.warn('[cert-watch] certificate refresh requested but HTTPS context could not be reloaded');
+        certWatcher.markRefreshComplete(missingNames, false);
         return;
       }
       if (result?.localAccessState) {
         latestLocalAccessState = result.localAccessState;
         latestOnboardingUrl = getOnboardingServerUrl();
       }
+      certWatcher.markRefreshComplete(missingNames, true);
       console.log('[cert-watch] HTTPS certificate context reloaded');
     })().catch((error) => {
+      certWatcher.markRefreshComplete(missingNames, false);
       console.error('[cert-watch] failed to handle certificate refresh:', error);
     });
   });

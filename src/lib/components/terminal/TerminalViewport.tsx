@@ -2513,13 +2513,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }
             };
 
+            const wheelHandlerReturnValue = (processDefault: boolean) => {
+              // xterm and ghostty-web use opposite return contracts here:
+              // xterm: true = let xterm process the wheel event.
+              // ghostty-web: true = stop ghostty's default wheel handling.
+              return isGhostty ? !processDefault : processDefault;
+            };
+
             terminal.attachCustomWheelEventHandler((ev: WheelEvent) => {
               // 通用早返:修饰键留给上一层(pinch-zoom 等),0 delta 直接吃掉。
-              if (ev.ctrlKey || ev.metaKey || ev.shiftKey) return true;
-              if (ev.deltaY === 0) return false;
+              if (ev.ctrlKey || ev.metaKey || ev.shiftKey) return wheelHandlerReturnValue(true);
+              if (ev.deltaY === 0) return wheelHandlerReturnValue(false);
 
               const term = terminalRef.current;
-              if (!term) return true;
+              if (!term) return wheelHandlerReturnValue(true);
 
               // 非 tmux session 模式:交还给 xterm 默认处理。
               //   - mouseTracking on → xterm 自带 SGR mouse wheel 上报(完整且无副作用)
@@ -2530,7 +2537,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               //     真要修需要服务端把 activeProgram=tmux 透出来做检测,
               //     不属于本次 "tmux session 模式最佳实践" 的范围。)
               if (!onTmuxScrollRef.current) {
-                return true;
+                return wheelHandlerReturnValue(true);
               }
 
               const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
@@ -2549,7 +2556,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }
 
               ev.preventDefault();
-              return false;
+              return wheelHandlerReturnValue(false);
             });
           }
 
