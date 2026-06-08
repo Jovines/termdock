@@ -27,6 +27,7 @@ const CHANGE_STYLES: Record<string, { label: string; className: string; title: s
   modified: { label: 'M', className: 'text-[color:var(--diff-hunk-accent)]', title: 'Modified' },
   deleted: { label: 'D', className: 'text-[color:var(--diff-delete-strong)]', title: 'Deleted' },
   renamed: { label: 'R', className: 'text-muted-foreground', title: 'Renamed' },
+  untracked: { label: 'U', className: 'text-[color:var(--diff-insert-strong)]', title: 'Untracked (new file)' },
 };
 
 function getFileIcon(name: string, type: 'file' | 'directory' | 'symlink') {

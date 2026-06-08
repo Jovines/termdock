@@ -63,6 +63,30 @@ function execGit(args: string[], cwd: string): Promise<string> {
   });
 }
 
+/**
+ * Like execGit, but tolerant of exit code 1.
+ * `git diff --no-index` exits 1 when there are differences (which is the
+ * normal case for showing an untracked file's content).  We still want the
+ * stdout in that case; only treat exit codes >= 2 as real errors.
+ */
+function execGitNoIndex(args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      proc.kill();
+      reject(new Error('git command timed out'));
+    }, GIT_TIMEOUT_MS);
+
+    const proc = execFile('git', args, { cwd, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      clearTimeout(timer);
+      if (err && typeof err.code === 'number' && err.code >= 2) {
+        reject(err);
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
+}
+
 // In-memory cache for `git rev-parse --show-toplevel` results.
 // Key = requested cwd, Value = { root, expiresAt }. Invalidated quickly so
 // directory changes still propagate, but reused within the same UI burst
@@ -194,7 +218,28 @@ router.get('/diff', async (req: Request, res: Response) => {
     if (cached) args.push('--cached');
     if (requestedPath) args.push('--', toGitPathspec(gitCwd, requestedPath));
 
-    const diff = await execGit(args, gitCwd);
+    let diff = await execGit(args, gitCwd).catch(() => '');
+
+    // If git diff produced no output for a specific file, it might be an
+    // untracked (new) file.  Use `git diff --no-index /dev/null <path>` to
+    // show the entire file contents as additions.
+    // Note: git diff --no-index exits with code 1 when there are differences,
+    // but stdout still contains the valid diff text.
+    if (!diff && requestedPath && !cached) {
+      const relPath = toGitPathspec(gitCwd, requestedPath);
+      diff = await execGitNoIndex(['diff', '--no-index', '--', '/dev/null', relPath], gitCwd).catch(() => '');
+    }
+
+    // When viewing the full repo diff (no specific file), also append diffs
+    // for untracked files — `git diff` silently skips them.
+    if (!requestedPath && !cached) {
+      const untracked = await execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitCwd).catch(() => '');
+      for (const p of untracked.split('\0').filter(Boolean)) {
+        const partial = await execGitNoIndex(['diff', '--no-index', '--', '/dev/null', p], gitCwd).catch(() => '');
+        if (partial) diff += '\n' + partial;
+      }
+    }
+
     res.json({ path: requestedPath ?? null, diff });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -218,7 +263,10 @@ router.get('/diff-files', async (req: Request, res: Response) => {
       return;
     }
 
-    const output = await execGit(['diff', '--name-status', '-z'], gitCwd);
+    const [output, untrackedOutput] = await Promise.all([
+      execGit(['diff', '--name-status', '-z'], gitCwd),
+      execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitCwd).catch(() => ''),
+    ]);
 
     const tokens = output.split('\0').filter(Boolean);
     const files: Array<{ path: string; absolutePath: string; status: string; oldPath?: string }> = [];
@@ -243,6 +291,14 @@ router.get('/diff-files', async (req: Request, res: Response) => {
         status: status.startsWith('A') ? 'added' :
                 status.startsWith('D') ? 'deleted' : 'modified',
       });
+    }
+
+    // Merge untracked files (new files not yet staged)
+    const existingPaths = new Set(files.map((f) => f.path));
+    for (const p of untrackedOutput.split('\0').filter(Boolean)) {
+      if (!existingPaths.has(p)) {
+        files.push({ path: p, absolutePath: path.join(gitCwd, p), status: 'untracked' });
+      }
     }
 
     res.json({ files });
@@ -327,8 +383,12 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
       return;
     }
 
-    const [diffNameStatus, branchOutput, statusOutput, logOutput] = await Promise.all([
+    // git diff --name-status only covers tracked changes (modified, staged,
+    // deleted, renamed).  Untracked (new) files are invisible to it, so we
+    // also ask git ls-files for untracked paths and merge them in.
+    const [diffNameStatus, untrackedOutput, branchOutput, statusOutput, logOutput] = await Promise.all([
       execGit(['diff', '--name-status', '-z'], gitRoot).catch(() => ''),
+      execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot).catch(() => ''),
       execGit(['branch', '--show-current'], gitRoot).catch(() => ''),
       execGit(['status', '--short', '--branch'], gitRoot).catch(() => ''),
       execGit(['log', '--oneline', '-8'], gitRoot).catch(() => ''),
@@ -355,6 +415,16 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
         absolutePath: path.join(gitRoot, filePath),
         status: status.startsWith('A') ? 'added' : status.startsWith('D') ? 'deleted' : 'modified',
       });
+    }
+
+    // Merge untracked files (from git ls-files --others) into the file list.
+    // These are brand-new files that have never been staged, so they only
+    // appear here — not in `git diff --name-status`.
+    const existingPaths = new Set(files.map((f) => f.path));
+    for (const p of untrackedOutput.split('\0').filter(Boolean)) {
+      if (!existingPaths.has(p)) {
+        files.push({ path: p, absolutePath: path.join(gitRoot, p), status: 'untracked' });
+      }
     }
 
     // Parse status --short --branch for context
