@@ -318,6 +318,7 @@ export type RefreshReason =
   | 'clear'                  // 用户主动 clear（cmd-k）
   | 'focus'                  // 输入框获焦
   | 'blur'                   // 输入框失焦
+  | 'scroll'                 // 用户 wheel/touch 翻看本地 scrollback
   | 'webgl-context-loss';    // onContextLoss 回调
 
 export type RefreshOptions = {
@@ -717,6 +718,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       if (scrollLines !== 0) {
         terminal.scrollLines(scrollLines);
+        // 'scroll' reason 走 requestRefresh 编排器(经 ref 间接调,避免
+        // useCallback TDZ —— requestRefresh 在本组件下方声明,hook 顺序
+        // 要求 dep list 必须包含,这里用 ref 模式让 closure 拿最新值)。
+        // WebGL 路径下 scheduleTextureAtlasRefresh(120ms 防抖) 让 atlas
+        // 在滑动期间自愈 stale row;DOM 路径直接 refresh(0, rows-1)。
+        // 依据:xterm.js + addon-webgl 0.19 在 scrollback 边界有漏画行
+        // / stale row 的已知问题 (#4480/#4534 sister)。
+        // runRefreshSequence 内 'scroll' 分支只刷 atlas,不动 fit /
+        // resize push / scrollToBottom,不会有额外重排成本。
+        requestRefreshRef.current?.('scroll', { skipFit: true, skipResizePush: true, skipScrollToBottom: true });
         return true;
       }
       return false;
@@ -2167,6 +2178,25 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           return;
         }
 
+        // 'scroll' reason 走一条精简路径：只刷 atlas（WebGL 路径下避免滑动
+        // 时的 stale row），不 fit、不推 resize、不滚底、不重建 renderer。
+        // 用户已经在滚动了,fit/重建会引入额外的重排成本 + 一帧错位。
+        if (reason === 'scroll') {
+          if (backendTypeRef.current === 'ghostty') {
+            (terminal as { refresh?: (start: number, end: number) => void }).refresh?.(0, terminal.rows - 1);
+          } else if (shouldUseWebgl) {
+            // scheduleTextureAtlasRefresh 走 120ms 防抖:滑动期间反复 fire 也
+            // 只真正清 atlas 一次,避免 atlas 清空期间密集输出卡顿。
+            scheduleTextureAtlasRefresh(`refresh:scroll`);
+          } else {
+            // DOM renderer 路径,直接 refresh 即可,不需要 atlas
+            try {
+              terminal.refresh(0, Math.max(0, terminal.rows - 1));
+            } catch { /* ignored */ }
+          }
+          return;
+        }
+
         // 0.5) dedupeKey：相同 reason + 相同 key 直接跳过，避免 tmux 服务端
         //      重复 layout 推送造成 fit/refresh 风暴。
         if (options.dedupeKey !== undefined) {
@@ -2256,6 +2286,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       ]
     );
 
+    // 间接 ref 模式:让 handleNormalScroll(更早声明)能调用 requestRefresh
+    // 而不报 useCallback TDZ。useEffect 内同步 ref。
+    const requestRefreshRef = React.useRef<
+      ((reason: RefreshReason, options?: RefreshOptions) => void) | null
+    >(null);
+
     const requestRefresh = React.useCallback(
       (reason: RefreshReason, options: RefreshOptions = {}) => {
         const terminal = terminalRef.current;
@@ -2305,6 +2341,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         runRefreshSequence,
       ]
     );
+
+    // 同步 ref 给 handleNormalScroll 等早期声明的 hook 用。
+    // useEffect 内每次 render 同步(因为 requestRefresh 引用稳定时也更新 ref,
+    // 但 requestRefresh 实际上每次 render 都返回新 useCallback —— 这里成本
+    // 是 1 个 ref 赋值,无副作用)。
+    React.useEffect(() => {
+      requestRefreshRef.current = requestRefresh;
+      return () => {
+        requestRefreshRef.current = null;
+      };
+    }, [requestRefresh]);
 
     // 组件 unmount / sessionKey 变化时清理所有 pending raf 和 timer
     React.useEffect(() => {
