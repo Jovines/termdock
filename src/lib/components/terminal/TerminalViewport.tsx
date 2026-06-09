@@ -2152,7 +2152,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       pendingWriteRef.current = '';
 
       isWritingRef.current = true;
-      term.write(chunk, () => {
+      // 抽成 finishWrite 让 try/catch 两条路径用同一份 bookkeeping：成功路径
+      // 由 term.write 的 ack callback 调；失败路径（term.write 同步抛）由
+      // catch 立刻调，否则 isWritingRef / pendingBytes / flow-control 都会
+      // 永久泄漏。ghostty-web 0.4.0 在罕见情况下会抛 "memory access out of
+      // bounds"（WASM 堆 race），不能让一个 chunk 烧穿整个 terminal。
+      const finishWrite = () => {
         isWritingRef.current = false;
         pendingBytesRef.current -= chunkBytes;
         if (pendingBytesRef.current < 0) pendingBytesRef.current = 0;
@@ -2173,7 +2178,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             flushWrites();
           }
         }
-      });
+      };
+      try {
+        term.write(chunk, finishWrite);
+      } catch (err) {
+        if (typeof console !== 'undefined') {
+          console.warn('[web-terminal] terminal.write threw; dropping chunk', err);
+        }
+        finishWrite();
+      }
     }, [resetWriteState]);
 
     const scheduleFlushWrites = React.useCallback(() => {
@@ -2265,6 +2278,35 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             });
 
             fitAddon = new GhosttyFitAddon();
+            // ghostty-web 0.4.0 的 FitAddon.proposeDimensions 在 clientWidth
+            // 上硬扣 ~15px 给"假想的滚动条"留宽，但 ghostty 的滚动条画在
+            // canvas 上不占布局，结果是右侧固定丢 1~2 列。重写一下 cols 的
+            // 计算，从 clientWidth - paddingX 直接除以 cellWidth，rows 仍
+            // 沿用上游算法（高度方向没扣保留）。
+            {
+              const origPropose = (fitAddon as any).proposeDimensions.bind(fitAddon);
+              (fitAddon as any).proposeDimensions = () => {
+                const dims = origPropose();
+                if (!dims) return dims;
+                try {
+                  const renderer: any = (terminal as any).renderer;
+                  const el: HTMLElement | undefined = (terminal as any).element;
+                  const metrics = renderer?.getMetrics?.();
+                  if (!renderer || !el || !metrics?.width) return dims;
+                  const style = window.getComputedStyle(el);
+                  const padLeft = parseInt(style.paddingLeft || '0', 10) || 0;
+                  const padRight = parseInt(style.paddingRight || '0', 10) || 0;
+                  const usableW = el.clientWidth - padLeft - padRight;
+                  if (usableW <= 0) return dims;
+                  const cols = Math.max(2, Math.floor(usableW / metrics.width));
+                  // 不让 patch 后的结果反而比 ghostty 自己算的更小（极端布局
+                  // 比如 padding 异常时退回原值，宁少勿乱）。
+                  return { cols: Math.max(cols, dims.cols), rows: dims.rows };
+                } catch {
+                  return dims;
+                }
+              };
+            }
             terminal.loadAddon(fitAddon);
           } else {
             // ---- xterm.js backend ----
@@ -2314,6 +2356,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           if (!terminalHost) {
             throw new Error('Terminal host is not ready');
           }
+          // 防御性 replaceChildren：React 18 StrictMode 在 dev 下会跑两次
+          // effect（setup→cleanup→setup）。若上一轮 init 已经把 ghostty 的
+          // canvas/textarea 追加进了 terminalHost，新一轮 terminal.open 还会
+          // 再追加，肉眼可见"双光标 / 双输入"。这里清场一次保险。xterm 用
+          // container 直接挂 DOM tree 不需要这步。
+          if (isGhostty) {
+            try { terminalHost.replaceChildren(); } catch { /* ignored */ }
+          }
           terminal.open(terminalHost);
 
           // 防御性：让 ghostty-web 在 open 之后立刻重测一次字体度量。当前架构下
@@ -2321,6 +2371,64 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 于 no-op；但万一以后改成走 setFontSize 路径，这条能挡住 IME 锚点错位。
           if (isGhostty && terminal.renderer && typeof terminal.renderer.remeasureFont === 'function') {
             terminal.renderer.remeasureFont();
+          }
+
+          // ghostty-web 0.4.0 bug 兜底：Terminal.resize() 和 options Proxy
+          // setter（fontSize / fontFamily / theme）在内部调 renderer.render() 时
+          // 漏传 scrollbarOpacity，render 的默认参数是 1（见 dist/ghostty-web.js
+          // 行 1396, 2259, 2427）。每次 resize / 字号切换都会在画布右侧画一道
+          // 全不透明的滚动条；render loop 后续帧用 opacity=0 跑，但条件
+          // `E && C > 0` 短路掉 renderScrollbar 不再画也不擦，结果留在画布上。
+          // 软键盘弹/收必然走 fit→Terminal.resize→bug。Wrap renderer.render，
+          // 未传 opacity 时回退到 this.scrollbarOpacity（默认 0）。
+          if (isGhostty && terminal.renderer && typeof terminal.renderer.render === 'function') {
+            const r: any = terminal.renderer;
+            if (!r.__webTerminalScrollbarWrap) {
+              const origRender = r.render.bind(r);
+              r.render = (buf: any, forceAll: boolean, viewportY: number, provider: any, opacity?: number) => {
+                return origRender(
+                  buf,
+                  forceAll,
+                  viewportY,
+                  provider,
+                  opacity ?? (terminal as any).scrollbarOpacity ?? 0,
+                );
+              };
+              r.__webTerminalScrollbarWrap = true;
+            }
+          }
+
+          // Ghostty image paste：Cmd/Ctrl+V 触发的 paste 事件里，如果剪贴板
+          // 含图（DataTransferItem.kind === 'file' && type startsWith image/），
+          // 不传 base64 走 WS（一张图几 MB 直接打爆主线程），而是发 \x16
+          // （SYN，对应 Ctrl+V 控制字符）让 PTY 内的程序自己用 OS API 读
+          // 剪贴板（Claude Code / cursor-agent / nvim+img.nvim 都支持）。
+          // 没图就放给浏览器走默认 text paste，ghostty bracketed-paste 接力。
+          // capture-phase 拦在 ghostty 自家 paste handler 之前。
+          if (isGhostty) {
+            const handleGhosttyPaste = (event: ClipboardEvent) => {
+              const items = event.clipboardData?.items;
+              if (!items) return;
+              let hasImage = false;
+              for (let i = 0; i < items.length; i += 1) {
+                const it = items[i];
+                if (it && it.kind === 'file' && it.type.startsWith('image/')) {
+                  hasImage = true;
+                  break;
+                }
+              }
+              if (hasImage) {
+                event.preventDefault();
+                event.stopPropagation();
+                inputHandlerRef.current('\x16', { skipModifierTransform: true });
+              }
+            };
+            terminalHost.addEventListener('paste', handleGhosttyPaste, { capture: true });
+            localDisposables.push({
+              dispose: () => {
+                terminalHost.removeEventListener('paste', handleGhosttyPaste, true);
+              },
+            });
           }
 
           if (isGhostty && !enableTouchScroll) {
@@ -2744,6 +2852,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
         disposeWebglRenderer('component-unmount');
         localTerminal?.dispose();
+        // 配合 init 端的 replaceChildren：localTerminal.dispose() 内部会摘
+        // canvas/textarea，但 ghostty-web 0.4.0 cleanupComponents 只在 element
+        // 还活着且组件还在时摘，dispose 之后若节点已被 React 重挂可能漏摘。
+        // 这里给 ghostty host 兜一次底，下一轮 init 的 replaceChildren 就不会
+        // 看到任何旧节点。
+        try { ghosttyHostRef.current?.replaceChildren(); } catch { /* ignored */ }
         clearTextureAtlasRefreshTimer();
         terminalRef.current = null;
         fitAddonRef.current = null;
