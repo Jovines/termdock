@@ -275,7 +275,9 @@ export interface TerminalSessionState {
   agentColor: string | null;
   agentIndicator: AgentIndicator | null;
   agentNeedsReview: boolean;  // 前端状态：AI 从运行变为停止时，用户未查看 → 黄点提醒
-  buffer: string;
+  // 已删: 之前维护 `buffer: string` 派生字段,每次 setState 都 map+join 整个
+  // chunks 数组(1MB 字符串 copy)。view 端自己用 useMemo 从 bufferChunks
+  // 派生,节省 store setState 时的字符串复制。
   bufferChunks: TerminalChunk[];
   bufferLength: number;
   updatedAt: number;

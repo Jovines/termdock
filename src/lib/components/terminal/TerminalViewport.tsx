@@ -2232,21 +2232,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
         }
 
-        // 4) ScrollToBottom：等 viewport 切到新 rows 后再滚
+        // 4) ScrollToBottom：fit() 已经先把 rows 切完了,这里同步 scroll 即可,
+        // 不用再开一个 rAF。外层 requestRefresh 已经在 rAF 内调 runRefreshSequence,
+        // 再嵌套 rAF 多走一帧 + 多一个 pendingReasonRafRef 维护成本。
+        // (历史上有"等 viewport 切到新 rows"的考虑,实测 fit 之后 cols/rows
+        // 已稳定,scrollToBottom 同步跑不会错位。)
         if (!options.skipScrollToBottom) {
-          const raf = requestAnimationFrame(() => {
-            const t = terminalRef.current;
-            if (!t) return;
-            if (t.buffer.active.type === 'alternate') return;
+          if (terminal.buffer.active.type !== 'alternate') {
             try {
-              t.scrollToBottom();
+              terminal.scrollToBottom();
             } catch { /* ignore */ }
-          });
-          // 存进 pendingReasonRafRef 以便 unmount 时一起取消
-          const map = pendingReasonRafRef.current;
-          const prev = map.get(reason);
-          if (prev !== undefined) cancelAnimationFrame(prev);
-          map.set(reason, raf);
+          }
         }
       },
       [
@@ -2293,7 +2289,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // 2) Dedupe：同 reason 的 pending rAF 取消，只保留最后一次
         cancelPendingReasonRaf(reason);
 
-        // 3) 调度：rAF 内跑序列；runRefreshSequence 内部还会再开 rAF 做 scrollToBottom
+        // 3) 调度：rAF 内跑序列（runRefreshSequence 内的 scrollToBottom
+        // 已经合并到同一 rAF,不再嵌套)
         const raf = requestAnimationFrame(() => {
           pendingReasonRafRef.current.delete(reason);
           runRefreshSequence(reason, options);
@@ -2793,22 +2790,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             localDisposables.push({ dispose: () => dataDisposable.dispose() });
           }
 
-          // xterm-only: 强制让 xterm 把光标视为"已初始化"（ghostty 不需要）
+          // xterm-only: 之前这里有个 isCursorInitialized = true 的 monkey-patch,
+          // 用来修 xterm 老版本"光标位置显示"问题。xterm 6.x 已经把这条修进
+          // 正式代码,monkey-patch 反而破坏封装(读 _core.coreService 是
+          // 私有 API),删掉。
+          // ghostty 不需要这块。
           if (!isGhostty) {
-            try {
-              const core = (terminal as unknown as { _core?: { coreService?: { isCursorInitialized: boolean } } })._core;
-              if (core?.coreService) {
-                core.coreService.isCursorInitialized = true;
-              }
-              // 不再立即调 terminal.refresh(0, rows-1)：
-              // 此刻 terminal.open 刚跑完,xterm 内部 RenderService 还在
-              // setup render layer 状态。refresh 在这个窗口里调用会立即
-              // 跑一次 renderRows,但底层 _activeBuffer 等还没就绪,实际
-              // 上是空 render。然后下面 setIsInitializing(false) 之后
-              // fit 路径再触发真正的 refresh —— 那一次就够了。
-              // 删了这条省一次空 render + 避免某些 xterm 版本里抛
-              // "Cannot read properties of undefined" 的早期 race。
-            } catch { /* ignored */ }
+            // 占位,留个 if 分支方便以后 xterm 又出 cursor 问题时加兜底
           }
 
           if (isGhostty) {
