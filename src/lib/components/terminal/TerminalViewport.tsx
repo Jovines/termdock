@@ -27,6 +27,82 @@ import { createDebugLogger } from '../../utils/debug';
  * 2. Unicode 空格变体转换为普通空格
  * 3. 移除零宽字符
  */
+/**
+ * 探测当前环境是否支持 WebGL2,用于 auto 模式下的 renderer 降级。
+ * 命中下述任一情况返回 false:
+ *   - iOS / iPadOS:WebGL 在 mobile Safari 上选词 / long-press 全坏,
+ *     长按选词根本不出 selection handle。强制走 DOM。
+ *     依据:xterm.js #5377、#3727、#4894
+ *   - WebGL2 context 创建失败:macOS 26.5 beta Safari WebGL 全屏绿
+ *     条(#5816)、Linux Wayland 上某些驱动 / Firefox 严格模式等。
+ *     依据:xterm.js #5816、#4728
+ *   - 已知坏掉的 driver/mark:黑名单 UA 子串。
+ *
+ * 显式 `webgl` 模式不走这个探测(用户强制)——探测失败时由 enableWebglRenderer
+ * 内部 try/catch fallback 到 canvas。
+ *
+ * 缓存到 module 级别:WebGL2 context 创建(canvas + getContext)成本不低;
+ * rendererMode 切换会重跑 init useEffect,届时拿到缓存值即可。
+ */
+let _webglCapabilityCache: { result: boolean; iOS: boolean } | null = null;
+function detectWebglCapability(): { supported: boolean; iOS: boolean } {
+  if (_webglCapabilityCache) {
+    return { supported: _webglCapabilityCache.result, iOS: _webglCapabilityCache.iOS };
+  }
+  let supported = true;
+  let iOS = false;
+  if (typeof navigator !== 'undefined') {
+    const ua = navigator.userAgent;
+    iOS = /iPad|iPhone|iPod/.test(ua) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (iOS) {
+      supported = false;
+    } else if (typeof document !== 'undefined') {
+      // 探测 WebGL2 context 能否创建
+      try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl2');
+        if (!gl) {
+          supported = false;
+        } else {
+          // 清理 probe canvas
+          const loseExt = gl.getExtension('WEBGL_lose_context');
+          loseExt?.loseContext();
+        }
+      } catch {
+        supported = false;
+      }
+    }
+  } else {
+    supported = false;
+  }
+  _webglCapabilityCache = { result: supported, iOS };
+  return { supported, iOS };
+}
+
+/**
+ * 二分查找 chunks 数组中 id 等于 target 的位置。
+ * store 端 chunkId 单调递增,数组本身也是单调追加,所以可以二分。
+ * 替代原来的 O(n) findIndex,在密集输出(1k+ chunks)场景下提 100x。
+ * 未找到返回 -1。
+ */
+function findChunkIndexById(chunks: TerminalChunk[], target: number): number {
+  let lo = 0;
+  let hi = chunks.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const midId = chunks[mid].id;
+    if (midId < target) {
+      lo = mid + 1;
+    } else if (midId > target) {
+      hi = mid - 1;
+    } else {
+      return mid;
+    }
+  }
+  return -1;
+}
+
 function sanitizeTerminalInput(input: string): string {
   if (!input) {
     return '';
@@ -100,6 +176,38 @@ function decodeBase64Utf8(base64Data: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * 过滤 xterm 启动时会主动询问的设备属性回包,避免它们"穿过" PTY
+ * 被打印成可见字符。
+ *
+ * xterm 在 `new Terminal()` 之后会通过 terminal.write 发一组设备探针:
+ *   - DA1: \x1b[c                  → 期望回 \x1b[?<attrs>c
+ *   - DA2: \x1b[>c                 → 期望回 \x1b[><version>c
+ *   - DA3: \x1b[=c                 → 期望回 \x1b[!<unit>c (unit ID report)
+ *   - DECRPM: \x1b[?...$p          → 期望回 \x1b[?...;$<mode>$y
+ *   - DECRQM: \x1b[?$<mode>$p      → 期望回 \x1b[?<mode>;$<value>$y
+ *
+ * PTY 服务端在没回包前 xterm 会反复 fire 这些序列(尤其连接刚建立时);
+ * shell 实现 (bash/zsh) 会回包,但回包可能与 xterm 自己的 echo 重叠,
+ * 用户看到的就是一行行 "[?1;2c" / "[>0;276;0c"。
+ *
+ * 依据:eclipse-theia/theia terminal-widget-impl.ts:925, 948。
+ * 维护一个 deviceStatusCodes 集合,只在 onData 入口过滤;不阻断用户正常输出。
+ */
+function processDeviceStatusResponses(data: string): { cleaned: string } {
+  // 只过滤已知的设备响应序列(上面列出的几种),不阻断任何其他 SGR/CUP/etc。
+  // 保守做法:只过滤明确以 \x1b[? 或 \x1b[> 开头且结尾是 c/$y 的小段。
+  // 普通 cursor 移动 / SGR 颜色不受影响(不以 ?/>/! 开头或不以 c 结尾)。
+  const filtered = data.replace(/\x1b\[\?[\d;]*[a-zA-Z]/g, (match) => {
+    // 留下 SGR like \x1b[?...m,因为是颜色指令;但设备响应结尾是 c
+    if (/[a-zA-Z]$/.test(match) && match.endsWith('c')) {
+      return '';
+    }
+    return match;
+  }).replace(/\x1b\[>[\d;]*c/g, '').replace(/\x1b\[=[\d;]*c/g, '').replace(/\x1b\[![\d;]*c/g, '');
+  return { cleaned: filtered };
 }
 
 function processOsc52Clipboard(data: string): { cleaned: string; remainder: string } {
@@ -517,7 +625,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // rendered rows appear to "jump".  Keep explicit WebGL available for users
     // who opt in, but make Auto prefer the built-in renderer for mobile tmux
     // sessions (identified by onTmuxScroll) where correctness matters more.
-    const shouldUseWebgl = rendererMode === 'webgl' || (rendererMode === 'auto' && !(enableTouchScroll && onTmuxScroll));
+    //
+    // 额外:auto 模式下,如果环境探测出不支持 WebGL(iOS / WebGL2 创建失败),
+    // 强制走 canvas renderer,避免 init 时 WebglAddon 抛错再 fallback 多花
+    // 一个 rAF 的时间 + 一帧空白。显式 webgl 模式不探测(用户强制)——
+    // 探测失败由 enableWebglRenderer 内部 try/catch 兜底。
+    //
+    // 已知风险(xterm.js #5986):当前 @xterm/addon-webgl@0.19.0 仍带
+    // gl.generateMipmap bug,Linux/Wayland + Intel Arc 上 WebGL 字形 atlas
+    // 会出现黑方块/斜条纹。0.20.0-beta 已修复(删 mipmap),但 beta.284 peer
+    // 依赖 @xterm/xterm@^6.1.0-beta.285(也是 beta)。保守决策:保持 0.19.0
+    // stable,等 0.20.0 stable 后再统一升级 xterm + addon。升级时再跑一遍
+    // htop/nvim 滚动 smoke test 验证黑方块消失。
+    const webglCapability = rendererMode === 'auto' ? detectWebglCapability() : null;
+    const webglSupported = webglCapability?.supported ?? true;
+    const shouldUseWebgl = (rendererMode === 'webgl' || (rendererMode === 'auto' && !(enableTouchScroll && onTmuxScroll))) && webglSupported;
 
     React.useEffect(() => {
       if (enableTouchScroll) {
@@ -2410,9 +2532,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             // canvas 上不占布局，结果是右侧固定丢 1~2 列。重写一下 cols 的
             // 计算，从 clientWidth - paddingX 直接除以 cellWidth，rows 仍
             // 沿用上游算法（高度方向没扣保留）。
+            //
+            // HMR guard：React StrictMode / Vite HMR 在 dev 下会让这个 useEffect
+            // 跑多轮（上一轮 cleanup 跑过 dispose，但模块级状态没清），同一个
+            // fitAddon 实例被 patch 多次,补丁链会越包越深。没有 HMR guard 的话
+            // 调 proposeDimensions 时会按"原函数 → 第一次 patch → 第二次 patch
+            // → ..." 链式递归,直到 stack overflow。
             {
-              const origPropose = (fitAddon as any).proposeDimensions.bind(fitAddon);
-              (fitAddon as any).proposeDimensions = () => {
+              const anyFit = fitAddon as any;
+              if (!anyFit.__webTerminalProposePatch) {
+                const origPropose = anyFit.proposeDimensions.bind(fitAddon);
+                anyFit.proposeDimensions = () => {
                 const dims = origPropose();
                 if (!dims) return dims;
                 try {
@@ -2433,6 +2563,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   return dims;
                 }
               };
+                anyFit.__webTerminalProposePatch = true;
+              }
             }
             terminal.loadAddon(fitAddon);
           } else {
@@ -2668,7 +2800,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               if (core?.coreService) {
                 core.coreService.isCursorInitialized = true;
               }
-              terminal.refresh(0, terminal.rows - 1);
+              // 不再立即调 terminal.refresh(0, rows-1)：
+              // 此刻 terminal.open 刚跑完,xterm 内部 RenderService 还在
+              // setup render layer 状态。refresh 在这个窗口里调用会立即
+              // 跑一次 renderRows,但底层 _activeBuffer 等还没就绪,实际
+              // 上是空 render。然后下面 setIsInitializing(false) 之后
+              // fit 路径再触发真正的 refresh —— 那一次就够了。
+              // 删了这条省一次空 render + 避免某些 xterm 版本里抛
+              // "Cannot read properties of undefined" 的早期 race。
             } catch { /* ignored */ }
           }
 
@@ -2894,11 +3033,44 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }
             } catch { /* ignored */ }
 
-            // IME 候选窗锚点跟随光标
+            // IME 候选窗锚点跟随光标。onCursorMove 在光标 blink 切换
+            // 时也会 fire (cursorX/Y 没变但 cursor state 变了),onRender 在
+            // xterm RenderDebouncer 每帧 render 后 fire 一次。两者合起来
+            // 1 帧内可能 fire 多次。updateImeAnchor 内部虽然有 0.5px dedupe
+            // 跳过 setState,但函数本身仍要读 getCellMetrics + term.buffer,
+            // 浪费 CPU。包一层 rAF throttle,1 帧最多跑一次。
             try {
-              localDisposables.push(terminal.onCursorMove(() => updateImeAnchorRef.current()));
-              localDisposables.push(terminal.onRender(() => updateImeAnchorRef.current()));
-              localDisposables.push(terminal.onResize(() => updateImeAnchorRef.current()));
+              let imeAnchorRafRef: number | null = null;
+              const scheduleImeAnchorUpdate = () => {
+                if (imeAnchorRafRef !== null) return;
+                imeAnchorRafRef = window.requestAnimationFrame(() => {
+                  imeAnchorRafRef = null;
+                  updateImeAnchorRef.current();
+                });
+              };
+              localDisposables.push(terminal.onCursorMove(scheduleImeAnchorUpdate));
+              localDisposables.push(terminal.onRender(scheduleImeAnchorUpdate));
+              localDisposables.push(terminal.onResize(() => {
+                // onResize 是真物理变化 (cols/rows 改了),不节流,立刻同步
+                if (imeAnchorRafRef !== null) {
+                  window.cancelAnimationFrame(imeAnchorRafRef);
+                  imeAnchorRafRef = null;
+                }
+                updateImeAnchorRef.current();
+              }));
+              // cleanup:组件 unmount 时取消 pending rAF,避免回调跑空
+              const prevDispose = localDisposables[localDisposables.length - 1]?.dispose;
+              // 简单做:在 dispose 里 cleanup raf
+              const wrappedDispose = () => {
+                if (imeAnchorRafRef !== null) {
+                  window.cancelAnimationFrame(imeAnchorRafRef);
+                  imeAnchorRafRef = null;
+                }
+                prevDispose?.();
+              };
+              if (localDisposables.length > 0) {
+                localDisposables[localDisposables.length - 1] = { dispose: wrappedDispose };
+              }
             } catch { /* ignored */ }
           }
 
@@ -3100,6 +3272,28 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       } catch { /* ignored */ }
     }, [onTmuxScroll, terminalReadyVersion]);
 
+    // 监听浏览器 zoom（ctrl+/- 或 cmd+/-）和系统 DPR 变化。
+    // ResizeObserver 在窗口尺寸没变时不会 fire,但 DPR 变会导致 xterm
+    // 内部 `_updateDimensions` 算出的 cell 像素错位 → 字符模糊/偏大/偏小
+    // （xterm.js #4728: Firefox/Brave Responsive Design Mode 下 DPR>1 时
+    // 字符溢出 cell）。
+    // 依据：VS Code `DevicePixelObserver.ts`。
+    React.useEffect(() => {
+      if (typeof window === 'undefined' || !window.matchMedia) return;
+      const mql = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      const handleDprChange = () => {
+        debugTerminal('dpr changed via mql', {
+          oldDpr: lastDevicePixelRatioRef.current,
+          newDpr: window.devicePixelRatio,
+        });
+        // ResizeObserver 内已有 dpr 比较逻辑,这里只需要触发一次 fit + atlas 刷新
+        // + 推 resize。dpr-change 走 0ms debounce 立即推。
+        requestRefresh('dpr-change', { resizeDebounceMs: 0 });
+      };
+      mql.addEventListener('change', handleDprChange);
+      return () => mql.removeEventListener('change', handleDprChange);
+    }, []);
+
     React.useEffect(() => {
       const terminal = terminalRef.current;
       if (!terminal) {
@@ -3121,17 +3315,25 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (lastProcessedId === null) {
         pending = chunks;
       } else {
-        const lastProcessedIndex = chunks.findIndex((chunk) => chunk.id === lastProcessedId);
+        // store 端 chunkId 单调递增,新 chunks 数组的 id 序列也单调。
+        // 用二分查找替代 O(n) findIndex:密集输出场景(如 npm install / git
+        // clone)chunks 累积到 1k+ 时,O(n) 每次 data 都扫整个数组。
+        // 改动后 O(log n),1k chunks 从 ~1000 步降到 ~10 步。
+        const lastProcessedIndex = findChunkIndexById(chunks, lastProcessedId);
         pending = lastProcessedIndex >= 0 ? chunks.slice(lastProcessedIndex + 1) : chunks;
       }
 
       if (pending.length > 0) {
         const rawChunk = pending.map((chunk) => chunk.data).join('');
         const merged = osc52RemainderRef.current + rawChunk;
-        const { cleaned, remainder } = processOsc52Clipboard(merged);
-        osc52RemainderRef.current = remainder;
-        if (cleaned) {
-          enqueueWrite(cleaned);
+        const oscResult = processOsc52Clipboard(merged);
+        osc52RemainderRef.current = oscResult.remainder;
+        // 设备探针过滤:在 OSC 52 之后、term.write 之前再过一道,过滤掉
+        // xterm 启动时 DA1/DA2/DA3 设备的回包(参见 processDeviceStatusResponses
+        // 顶部注释)。只在 onData 入口过滤,不阻断用户正常输出。
+        const { cleaned: deviceCleaned } = processDeviceStatusResponses(oscResult.cleaned);
+        if (deviceCleaned) {
+          enqueueWrite(deviceCleaned);
         }
       }
 

@@ -30,6 +30,13 @@ export interface TerminalStore {
 }
 
 const TERMINAL_BUFFER_LIMIT = 1_000_000;
+// 单个 chunk 上限：超过这个字节数会在 store 端按 \n 切分成多块。
+// 256KB 是经验值：远大于 OSC 序列长度（最长几百字节 base64）所以不会
+// 切到 OSC/ST 序列中间；又小于 view 端 500KB high watermark,view
+// 端可以稳定分批 enqueueWrite,避免一次性吃 5MB 拖死主线程。
+// 现象：cat huge.log / git clone 输出密集时,单 WS 帧可能带几 MB,
+// 不切分会导致整页花屏（长时间不响应）。
+const MAX_CHUNK_SIZE = 256 * 1024;
 
 function createEmptySessionState(sessionId: string): TerminalSessionState {
   return {
@@ -225,11 +232,39 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
 
-      const chunkId = state.nextChunkId;
-      const chunkEntry: TerminalChunk = { id: chunkId, data: chunk };
+      let chunkId = state.nextChunkId;
+      // 拆大 chunk：单个 WS 帧可能带几 MB（cat huge.log、git clone 输出）。
+      // store 端 while trim 用的是 `chunks.length > 1` 保护至少留一块,
+      // 这导致单 chunk > 1MB 时永远 trim 不到,view 端一次性 enqueueWrite
+      // 几 MB 字符串,拖死主线程,密集输出时肉眼可见的"花屏"（长时间不响应）。
+      // 拆成 ≤ 256KB 的块,按行（\n）切分,不会切到 OSC 序列中间
+      // (OSC 序列最长几百字节,且自带 ST/BEL terminator,与行无关)。
+      const bufferChunks: TerminalChunk[] = [...existing.bufferChunks];
+      let bufferLength = existing.bufferLength;
 
-      const bufferChunks = [...existing.bufferChunks, chunkEntry];
-      let bufferLength = existing.bufferLength + chunk.length;
+      const pushSlice = (slice: string) => {
+        if (!slice) return;
+        bufferChunks.push({ id: chunkId++, data: slice });
+        bufferLength += slice.length;
+      };
+
+      if (chunk.length <= MAX_CHUNK_SIZE) {
+        pushSlice(chunk);
+      } else {
+        let offset = 0;
+        while (offset < chunk.length) {
+          let end = Math.min(offset + MAX_CHUNK_SIZE, chunk.length);
+          // 找最近一个 \n,避免切到 SGR 序列或 UTF-8 多字节字符中间
+          if (end < chunk.length) {
+            const lastNewline = chunk.lastIndexOf('\n', end);
+            if (lastNewline > offset) {
+              end = lastNewline + 1;
+            }
+          }
+          pushSlice(chunk.slice(offset, end));
+          offset = end;
+        }
+      }
 
       while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
         const removed = bufferChunks.shift();
@@ -278,10 +313,26 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
 
       for (const chunk of chunks) {
         if (!chunk) continue;
-        const chunkEntry: TerminalChunk = { id: nextChunkId, data: chunk };
-        nextChunkId += 1;
-        bufferChunks.push(chunkEntry);
-        bufferLength += chunk.length;
+        // 拆大 chunk:同 appendToBuffer 注释
+        if (chunk.length <= MAX_CHUNK_SIZE) {
+          bufferChunks.push({ id: nextChunkId++, data: chunk });
+          bufferLength += chunk.length;
+        } else {
+          let offset = 0;
+          while (offset < chunk.length) {
+            let end = Math.min(offset + MAX_CHUNK_SIZE, chunk.length);
+            if (end < chunk.length) {
+              const lastNewline = chunk.lastIndexOf('\n', end);
+              if (lastNewline > offset) {
+                end = lastNewline + 1;
+              }
+            }
+            const slice = chunk.slice(offset, end);
+            bufferChunks.push({ id: nextChunkId++, data: slice });
+            bufferLength += slice.length;
+            offset = end;
+          }
+        }
       }
 
       while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
