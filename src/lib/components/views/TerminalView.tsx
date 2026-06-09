@@ -172,28 +172,57 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     isActiveRef.current = isActive;
   }, [isActive]);
 
-  // Swiper 翻到本页（isActive 从 false→true）：请求编排器重画一次。
-  // swiper 用 CSS transform 翻页，xterm canvas 在翻页过程中可能留有 stale frame，
-  // 翻完后容器是当前可视的，fit + atlas 刷新能把画面拉正。
-  // 编排器内部会做 throttle / dedupe，无需在外层再加。
+  // Swiper 翻到本页（isActive 从 false→true）：让编排器走一遍刷新。
+  //
+  // 历史背景：这条 effect 最初是为 xterm.js + WebGL 写的——WebGL canvas 在
+  // 隐藏期间可能丢 context 或留 stale frame，翻完后需要 atlas 重建 + fit +
+  // scrollToBottom 把画面拉正。
+  //
+  // ghostty 不一样：canvas 2D + 自己的 rAF render loop 一直在跑（slide 用
+  // CSS transform 平移而不是 display:none，render loop 不被 throttle），
+  // 翻页 transform 不影响子元素尺寸，所以容器宽高也没真变。
+  // 强行走完整 refresh sequence 会因为：
+  //   1) fitTerminal 用 floor(rect.width / metrics.width)，亚像素抖动跨整数
+  //      边界时 cols 跳 1 → terminal.resize → 整页 wasm 重 wrap，肉眼可见
+  //      文字"抖一下"；
+  //   2) 非 alt-screen 时无条件 scrollToBottom 把用户从 scrollback 历史拽走；
+  //   3) 360ms 兜底再跑一次，把 1) 2) 又抖一次。
+  // ghostty 路径下：skipFit + skipResizePush + skipScrollToBottom 让 page-flip
+  // 变成实质 noop（renderer step 是 noop，剩下都跳过），只保留 360ms 不要
+  // （多余）。fitTerminal 内部还有 hysteresis 兜底，即使有别的 reason 误调
+  // 也不会 ±1 抖动。
   React.useEffect(() => {
     if (!isActive) return;
+    const controller = terminalControllerRef.current;
+    const isGhostty = controller?.getBackendType?.() === 'ghostty';
     // 双 rAF 等 swiper 的 transform 收尾，容器尺寸稳定后再 fit
     let raf1 = 0;
     let raf2 = 0;
     raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
-        terminalControllerRef.current?.requestRefresh('page-flip');
+        if (isGhostty) {
+          terminalControllerRef.current?.requestRefresh('page-flip', {
+            skipFit: true,
+            skipResizePush: true,
+            skipScrollToBottom: true,
+          });
+        } else {
+          terminalControllerRef.current?.requestRefresh('page-flip');
+        }
       });
     });
-    // 320ms transition 收尾后再做一次（保险：处理 WebGL canvas 残留）
-    const postTransitionTimer = window.setTimeout(() => {
-      terminalControllerRef.current?.requestRefresh('page-flip');
-    }, 360);
+    // xterm 的 320ms transition 收尾兜底；ghostty 不需要（render loop 一直
+    // 在跑，没有 stale frame 概念），省掉这一拍避免双触发。
+    let postTransitionTimer: number | null = null;
+    if (!isGhostty) {
+      postTransitionTimer = window.setTimeout(() => {
+        terminalControllerRef.current?.requestRefresh('page-flip');
+      }, 360);
+    }
     return () => {
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
-      window.clearTimeout(postTransitionTimer);
+      if (postTransitionTimer !== null) window.clearTimeout(postTransitionTimer);
     };
   }, [isActive, terminalSessionId]);
 

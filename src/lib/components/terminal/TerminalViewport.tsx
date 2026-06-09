@@ -10,12 +10,13 @@ import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
 import type { TerminalRendererMode, TerminalEngine } from '../../terminal/renderer';
 import { getTerminalModes, getCellMetrics, ensureGhosttyWasmReady } from '../../terminal/backend';
+import { decideFitHysteresis } from '../../terminal/fitHysteresis';
 import type { TerminalBackendType } from '../../terminal/backend';
 import { useTouchScroll, type TouchScrollConfig } from '../../hooks/useTouchScroll';
 import { useGesture } from '../../hooks/useGesture';
 import { PRIORITY_LONG_PRESS, PRIORITY_TMUX_SCROLL } from '../../gesture/types';
 import type { GestureAction } from '../../gesture/types';
-import { light as hapticLight } from 'browser-haptic';
+import { light as hapticLight, medium as hapticMedium, success as hapticSuccess } from 'browser-haptic';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
 import { createDebugLogger } from '../../utils/debug';
@@ -218,6 +219,14 @@ export type RefreshOptions = {
   skipResizePush?: boolean;
   /** 不滚到底（alternate buffer / tmux copy-mode）。 */
   skipScrollToBottom?: boolean;
+  /**
+   * 不跑 fit。用于纯"显示状态变化"场景（page-flip / visibility / focus blur）：
+   * 容器尺寸理论上没变，强行 fit 会因为 getBoundingClientRect 亚像素抖动 +
+   * Math.floor 边界跨越导致 cols 跳 1，触发整页文字 reflow。
+   * 即使没 skipFit，fitTerminal 内部对非"真实 resize" reason 也有 hysteresis
+   * 兜底（cols/rows 差 < 2 时不接受）。
+   */
+  skipFit?: boolean;
   /** 服务端报上来的尺寸；如果比当前 xterm 小则忽略（防 shrink）。 */
   candidateSize?: { cols: number; rows: number };
   /** resize 推送的去抖窗口，默认 0（first-fit immediate）。 */
@@ -237,6 +246,8 @@ export type TerminalController = {
   clear: () => void;
   /** 当前 xterm 的 cols/rows；xterm 未初始化时返回 null */
   getDimensions: () => { cols: number; rows: number } | null;
+  /** 当前 backend 类型；用于上层根据 ghostty/xterm 区分 page-flip 之类行为。 */
+  getBackendType: () => TerminalBackendType;
   /**
    * 唯一刷新入口。所有"我想让终端重画一下"的需求都走这里。
    * 多次连续调用会按 reason 合并，最后一次调用生效（last-call-wins per reason）。
@@ -1431,7 +1442,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           now - s.lastTapTime <= 150 &&
           Math.hypot(x - s.lastTapX, y - s.lastTapY) <= 25
         ) {
-          hapticLight();
+          // 双击模式 (success preset: [20,50,20]) — 语义上契合"双击成功"
+          hapticSuccess();
           onDoubleTapRef.current?.();
           setTabIndicator(true);
           if (tabIndicatorTimerRef.current) clearTimeout(tabIndicatorTimerRef.current);
@@ -1462,7 +1474,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         s.holdTimer = null;
         if (s.mode === 'holding') {
           s.mode = 'arrow';
-          hapticLight();
+          // 模式切换(进入方向键模式)— medium 比 light 更明确地告诉用户"切了"
+          hapticMedium();
           notifyGestureLock(true);
           requestAnimationFrame(() => {
             setArrowIndicator({ visible: true, activeDir: '' });
@@ -1568,11 +1581,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             const isInitialActivation = s.joystickDir === '';
             s.joystickDir = newDir;
             lp_inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
-            const now = performance.now();
-            if (now - s.lastHapticTime > 120) {
+            // 初次激活用 medium(模式刚启动,需要明确反馈),方向切换用 light
+            if (isInitialActivation) {
+              hapticMedium();
+            } else {
               hapticLight();
-              s.lastHapticTime = now;
             }
+            s.lastHapticTime = performance.now();
             // First activation: longer delay (user likely wants single step)
             // Direction switch: shorter delay (already in motion, wants responsive change)
             const initialDelay = isInitialActivation ? 400 : 300;
@@ -1695,6 +1710,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         });
         return;
       }
+      // Hysteresis：
+      // 翻页 / visibility / focus 等"非真实尺寸变化"的 reason，容器宽高理论
+      // 上没变。但 getBoundingClientRect 在亚像素 layout 上有微小抖动（swiper
+      // transform 合成层、字号微调、DPR 非整数都会触发），rect.width 哪怕只动
+      // 0.05px，只要跨过 metrics.width * N 的边界，floor 结果就跳 1 列。
+      // 一旦 cols 跳了，terminal.resize 会让 ghostty wasm 全文本重 wrap → 整页
+      // 文字"抖一下"。
+      //
+      // 决策表抽到 ../../terminal/fitHysteresis.ts（带单测）。这里只调用。
       try {
         const before = { cols: terminal.cols, rows: terminal.rows };
         if (backendTypeRef.current === 'ghostty') {
@@ -1704,11 +1728,46 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
           const nextCols = Math.max(2, Math.floor(rect.width / metrics.width));
           const nextRows = Math.max(1, Math.floor(rect.height / metrics.height));
-          if (nextCols !== terminal.cols || nextRows !== terminal.rows) {
+          const decision = decideFitHysteresis({
+            reason,
+            currentCols: terminal.cols,
+            currentRows: terminal.rows,
+            proposedCols: nextCols,
+            proposedRows: nextRows,
+          });
+          if (decision.accept) {
             terminal.resize(nextCols, nextRows);
+          } else if (decision.colsDelta > 0 || decision.rowsDelta > 0) {
+            debugTerminal('fit suppressed by hysteresis', {
+              reason, before, proposed: { cols: nextCols, rows: nextRows },
+              colsDelta: decision.colsDelta, rowsDelta: decision.rowsDelta,
+            });
           }
         } else {
-          fitAddon.fit();
+          // xterm 路径：FitAddon.fit() 内部也是 floor，同样会亚像素抖动。
+          // 先 proposeDimensions 看看要不要真 fit；不满足 hysteresis 就放弃。
+          const proposed: { cols: number; rows: number } | undefined =
+            (fitAddon as { proposeDimensions?: () => { cols: number; rows: number } | undefined }).proposeDimensions?.();
+          if (proposed && proposed.cols > 0 && proposed.rows > 0) {
+            const decision = decideFitHysteresis({
+              reason,
+              currentCols: terminal.cols,
+              currentRows: terminal.rows,
+              proposedCols: proposed.cols,
+              proposedRows: proposed.rows,
+            });
+            if (decision.accept) {
+              fitAddon.fit();
+            } else if (decision.colsDelta > 0 || decision.rowsDelta > 0) {
+              debugTerminal('fit suppressed by hysteresis', {
+                reason, before, proposed,
+                colsDelta: decision.colsDelta, rowsDelta: decision.rowsDelta,
+              });
+            }
+          } else {
+            // proposeDimensions 拿不到，退回到 fit()（首次 fit / FitAddon 实现差异）
+            fitAddon.fit();
+          }
         }
         const next = { cols: terminal.cols, rows: terminal.rows };
         const previous = lastReportedSizeRef.current;
@@ -2012,7 +2071,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
         // 2) fit() —— 这一步会触发 xterm 的 onResize
         const before = { cols: terminal.cols, rows: terminal.rows };
-        fitTerminal(`refresh:${reason}`);
+        if (!options.skipFit) {
+          fitTerminal(`refresh:${reason}`);
+        }
         const after = { cols: terminal.cols, rows: terminal.rows };
         lastFittedDimsRef.current = after;
 
@@ -3012,6 +3073,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           if (!terminal || !terminal.cols || !terminal.rows) return null;
           return { cols: terminal.cols, rows: terminal.rows };
         },
+        getBackendType: () => backendTypeRef.current,
         requestRefresh,
         setSessionReady: (ready: boolean) => {
           sessionReadyRef.current = ready;
