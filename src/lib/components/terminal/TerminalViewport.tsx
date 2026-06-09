@@ -441,6 +441,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // 只在确认死了时才走 dispose+recreate，避免盲拆活上下文导致一帧空白。
     const webglContextLostRef = React.useRef(false);
     const textureAtlasRefreshTimerRef = React.useRef<number | null>(null);
+    // rAF 句柄：把 ResizeObserver 同一帧内的多次 fire 合并成一次 requestRefresh。
+    // 防止 sidebar 折叠 / swiper 翻页瞬间 clientHeight=0 → fitAddon 算错 cols/rows
+    // → WebGL renderer 在"mid texture-atlas rebuild"状态被连续两次 resize 打断。
+    // 依据：NousResearch/hermes-agent use-terminal-session.ts:350-377
+    const resizeRafRef = React.useRef<number | null>(null);
+    // 记录 init useEffect 上次跑过的 fontSize / fontFamily / theme 值。
+    // 当 effect 再次被触发时,先比对这三个值:如果只是它们变了而 xterm 后端已
+    // 就绪,走 setOption 路径(live update),不整体 destroy+rebuild。
+    // ghostty 模式不享受这个优化(Canvas 2D 重建视觉很轻,直接走原路径)。
+    // 依据：huashengdun/webssh main.js:152-167, VS Code setOption 路径。
+    const lastInitFontSizeRef = React.useRef<number | null>(null);
+    const lastInitFontFamilyRef = React.useRef<string | null>(null);
+    const lastInitThemeRef = React.useRef<typeof theme | null>(null);
     const lastDevicePixelRatioRef = React.useRef(
       typeof window !== 'undefined' ? window.devicePixelRatio : 1
     );
@@ -2294,6 +2307,59 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         return;
       }
 
+      // 早 bail:仅 fontSize / fontFamily / theme 变了 && xterm 后端 && 已有 terminal
+      // 走 setOption 路径,不整体 dispose + 重建。
+      // ghostty 后端不走这个 bail:Canvas 2D 重建视觉上很轻,而且 ghostty-web
+      // 0.4.0 的 options proxy 行为脆弱(参见 2378-2386 的 scrollbarOpacity
+      // 修绕过),保守让 ghostty 走整体重建。
+      const existing = terminalRef.current;
+      const fontSizeChanged = lastInitFontSizeRef.current !== null && lastInitFontSizeRef.current !== fontSize;
+      const fontFamilyChanged = lastInitFontFamilyRef.current !== null && lastInitFontFamilyRef.current !== fontFamily;
+      const themeChanged = lastInitThemeRef.current !== null && lastInitThemeRef.current !== theme;
+      if (
+        existing &&
+        backendTypeRef.current === 'xterm' &&
+        (fontSizeChanged || fontFamilyChanged || themeChanged)
+      ) {
+        // 记录新值(让下次 effect 跑能正确判断"是不是又变了")
+        lastInitFontSizeRef.current = fontSize;
+        lastInitFontFamilyRef.current = fontFamily;
+        lastInitThemeRef.current = theme;
+
+        // ghostty 模式的 terminal 变量在 if 分支里是 const,这里需要重新拿
+        const term = existing as Terminal;
+        let liveUpdateSucceeded = true;
+        try {
+          if (fontSizeChanged) term.options.fontSize = fontSize;
+          if (fontFamilyChanged) term.options.fontFamily = getTerminalFontFamily(fontFamily);
+          if (themeChanged) term.options.theme = convertTheme(theme);
+        } catch (error) {
+          // setOption 失败(极少见,某些 addon 会 lock 住 options)→ 退到完整重建
+          debugTerminal('live option update failed, falling back to rebuild', { error });
+          liveUpdateSucceeded = false;
+        }
+        if (liveUpdateSucceeded) {
+          // setOption 成功:等 web font 加载完再 fit,避免 webssh 注释里说的
+          // "字体切换瞬间 cell 测量走 fallback,事后字体加载好也不会重测"
+          // 依据:huashengdun/webssh main.js:152-167
+          if (fontFamilyChanged) {
+            void ensureTerminalFontsReady().then(() => {
+              if (disposed) return;
+              fitTerminal('live-option-font');
+              refreshTextureAtlasNow('live-option-font');
+              requestRefresh('resize', { resizeDebounceMs: 0 });
+            });
+          } else {
+            // 字号/主题切换不需要等 font:同步 fit + atlas 刷新 + resize 推送
+            fitTerminal('live-option-style');
+            refreshTextureAtlasNow('live-option-style');
+            requestRefresh('resize', { resizeDebounceMs: 0 });
+          }
+          // 早 bail:返回的 cleanup 啥也不做(terminal 还在,observer/IME 都没变)
+          return () => { /* no-op: live update only, terminal not torn down */ };
+        }
+      }
+
       container.tabIndex = enableTouchScroll ? -1 : 0;
 
       const initialize = async () => {
@@ -2386,6 +2452,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               rescaleOverlappingGlyphs: true,
               letterSpacing: 0,
               lineHeight: 1,
+              // VS Code 显式开启（xterm.js 默认 false）。`clear` / `Ctrl-L` / ED2
+              // 时光标必须滚到底，否则屏幕顶部留一片旧输出。
+              // 依据：xterm.js OptionsService.ts:75 + microsoft/vscode xtermTerminal.ts:215
+              scrollOnEraseInDisplay: true,
+              // VS Code 显式开启（xterm.js 6.0 新增，默认 false）。末行 resize 后
+              // 字符必须 reflow,否则缩小列数时最右一列会"消失"。
+              // 依据：xterm.js #5213 + Buffer._isReflowEnabled
+              reflowCursorLine: true,
+              // tmux / iTerm 必需：让 xterm 正确响应 CSI 16/18 cell-size 查询。
+              // 依据：microsoft/vscode xtermTerminal.ts:228-232
+              windowOptions: {
+                getCellSizePixels: true,
+                getWinSizePixels: true,
+                getWinSizeChars: true,
+              },
               overviewRuler: {
                 width: 0,
               },
@@ -2411,6 +2492,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           localTerminal = terminal;
           terminalRef.current = terminal;
           fitAddonRef.current = fitAddon;
+          // 记录本次 init 的 fontSize/fontFamily/theme,让下次 effect 跑能
+          // 比对"是不是仅这三者变了"(命中则走 setOption 路径,不重建)
+          lastInitFontSizeRef.current = fontSize;
+          lastInitFontFamilyRef.current = fontFamily;
+          lastInitThemeRef.current = theme;
           lastDevicePixelRatioRef.current = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
 
           const terminalHost = isGhostty ? ghosttyHostRef.current : container;
@@ -2858,13 +2944,25 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               debugTerminal('device pixel ratio changed', { value: nextDevicePixelRatio });
             }
 
-            // ResizeObserver 触发：所有刷新都走编排器。
-            //   - 普通 resize：reason='resize'，default debounce 90ms 推给服务端
-            //   - DPR 变化：reason='dpr-change'，debounce 0 立即刷 atlas + 立即推
-            if (dprChanged) {
-              requestRefresh('dpr-change', { resizeDebounceMs: 0 });
-            } else {
-              requestRefresh('resize');
+            // rAF 合并：sidebar 折叠 / swiper 翻页 / IME 弹起等场景下,
+            // ResizeObserver 会在同一帧内连续 fire 多次(中间还会夹
+            // 一次 clientHeight=0)。直接同步调 requestRefresh 会:
+            //   1) 在 0 高度上跑 fitAddon.fit() 算错 cols/rows
+            //   2) 让 WebGL renderer 在"mid texture-atlas rebuild"状态被
+            //      第二次 resize 打断,出现 #2816 / Hermes 注释里描述的
+            //      "sibling panes mid-transition crashes the WebGL renderer"
+            //
+            // 一帧合并一次,dprChanged 路径走 0ms debounce 立即推,普通
+            // resize 走 90ms debounce(default)。
+            if (!resizeRafRef.current) {
+              resizeRafRef.current = window.requestAnimationFrame(() => {
+                resizeRafRef.current = null;
+                if (dprChanged) {
+                  requestRefresh('dpr-change', { resizeDebounceMs: 0 });
+                } else {
+                  requestRefresh('resize');
+                }
+              });
             }
           });
           localResizeObserver.observe(container);
@@ -2905,6 +3003,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           disposable.dispose();
         }
         localResizeObserver?.disconnect();
+        if (resizeRafRef.current !== null) {
+          window.cancelAnimationFrame(resizeRafRef.current);
+          resizeRafRef.current = null;
+        }
 
         if (wheelHandlerRef.current) {
           container.removeEventListener('wheel', wheelHandlerRef.current);
