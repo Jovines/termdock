@@ -319,6 +319,7 @@ export type RefreshReason =
   | 'focus'                  // 输入框获焦
   | 'blur'                   // 输入框失焦
   | 'scroll'                 // 用户 wheel/touch 翻看本地 scrollback
+  | 'resume'                 // 后台 → 前台(visibility/bfcache/online 共用)
   | 'webgl-context-loss';    // onContextLoss 回调
 
 export type RefreshOptions = {
@@ -2197,6 +2198,39 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           return;
         }
 
+        // 'resume' reason(visibility / bfcache / online 已归一):后台 → 前台
+        // 切换时,治两类典型花屏:
+        //   1) iOS PWA 后台时 GPU 进程被回收,WebGL context 丢了但
+        //      webglAddon.onContextLoss 不一定 fire —— 强 rebuild 一次
+        //      renderer 兜底。
+        //   2) xterm 内部 RenderDebouncer 在 document.hidden=true 期间
+        //      暂停渲染,后台累积的 data 在切回前台时不会自动重画。
+        //      强制 refresh(0, rows-1) 唤醒 RenderDebouncer + 重画。
+        //
+        // 修法:先 forceRendererRecreate=true 走重建路径(需要时),再强制
+        // terminal.refresh 唤醒 RenderDebouncer 画出已 queue 的 data。
+        if (reason === 'resume') {
+          // WebGL 路径主动 dispose + recreate 一次。ghostty 不需要(canvas 2D)。
+          // 风险:重建 renderer 期间会有一帧空白,但用户已经从后台回来,
+          // 屏幕上本来就是"过期画面",换一帧正确画面优于显示坏掉的旧画面。
+          if (backendTypeRef.current !== 'ghostty' && shouldUseWebgl) {
+            try {
+              disposeWebglRenderer('resume');
+              enableWebglRenderer(terminal, 'resume');
+            } catch { /* ignored */ }
+          }
+          // 强制刷,让 xterm 把后台累积的 write queue 一次性画出来。
+          try {
+            terminal.refresh(0, Math.max(0, terminal.rows - 1));
+          } catch { /* ignored */ }
+          if (backendTypeRef.current === 'ghostty') {
+            (terminal as { refresh?: (start: number, end: number) => void }).refresh?.(0, terminal.rows - 1);
+          }
+          // 不 return —— 继续走 fit + atlas + resize + 滚底,确保
+          // 容器尺寸(可能浏览器在 hidden 期间重排了) + 推服务端 resize
+          // + 滚到当前内容底部都做完。
+        }
+
         // 0.5) dedupeKey：相同 reason + 相同 key 直接跳过，避免 tmux 服务端
         //      重复 layout 推送造成 fit/refresh 风暴。
         if (options.dedupeKey !== undefined) {
@@ -2310,7 +2344,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           cancelAllPendingReasonRafs();
         }
 
-        // 1) Throttle：visibility / bfcache / online 互斥，200ms 内只跑一次
+        // 1) Throttle：visibility / bfcache / online 都用 'resume' 桶,
+        //    200ms 内只跑一次(三个事件通常同时 fire,但最后一个才是真信号)
         if (!options.force) {
           if (reason === 'visibility' || reason === 'bfcache' || reason === 'online') {
             const now = Date.now();
@@ -2319,6 +2354,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               return;
             }
             lastResumeAtRef.current = now;
+            // 归一为 'resume' 让 runRefreshSequence 走专门路径(强制刷 atlas +
+            // 强制 refresh,治后台 → 前台返回的 stale row 花屏)。
+            reason = 'resume';
+            options = { ...options, resizeDebounceMs: 0 };
           }
         }
 
