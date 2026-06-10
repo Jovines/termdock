@@ -28,15 +28,36 @@ import { createDebugLogger } from '../../utils/debug';
  * 3. 移除零宽字符
  */
 /**
+ * 判断当前 UA 是否是 macOS 上的 Safari(WebKit 内核,非 Chrome/Edge/FF/Brave 等 Chromium 套壳)。
+ *
+ * macOS 26.5+ 的 Safari 有 xterm.js #5816 的 WebGL 全屏绿条 bug,但 Apple
+ * 一直把 Safari UA 锁在 "Mac OS X 10_15_7" 兼容旧站,无法从 UA 直接读到
+ * 真实 macOS 版本。`navigator.userAgentData` 在 Safari 17.4+ 才提供
+ * `platformVersion` 字段,做异步探测成本太高;为了在 sync 的
+ * `detectWebglCapability` 里用,保守做法是直接对所有 macOS Safari 降级。
+ * 想用 WebGL 的用户可在 UI 里显式选 rendererMode='webgl' 绕过。
+ */
+function isSafariOnMacOS(ua: string): boolean {
+  if (!/Macintosh|Mac OS X/.test(ua)) return false;
+  if (!/Version\/[\d.]+/.test(ua)) return false;
+  if (!/Safari\//.test(ua)) return false;
+  // 排除 Chromium 套壳:Chrome / Edge / Brave / Opera / Vivaldi / Arc / Yandex 都打 Chrome
+  if (/Chrome|Chromium|Edg\/|OPR\/|Brave\/|Vivaldi|YaBrowser|Arc\//.test(ua)) return false;
+  // Firefox on macOS 走 Gecko,不打 Safari/
+  if (/Firefox\//.test(ua)) return false;
+  return true;
+}
+
+/**
  * 探测当前环境是否支持 WebGL2,用于 auto 模式下的 renderer 降级。
  * 命中下述任一情况返回 false:
  *   - iOS / iPadOS:WebGL 在 mobile Safari 上选词 / long-press 全坏,
  *     长按选词根本不出 selection handle。强制走 DOM。
  *     依据:xterm.js #5377、#3727、#4894
- *   - WebGL2 context 创建失败:macOS 26.5 beta Safari WebGL 全屏绿
- *     条(#5816)、Linux Wayland 上某些驱动 / Firefox 严格模式等。
+ *   - macOS Safari:xterm.js #5816 全屏绿条(26.5+ 必坏,15.7+ 偶发)。
+ *     保守对所有 macOS Safari 降级,需要 WebGL 显式选 rendererMode='webgl'。
+ *   - WebGL2 context 创建失败:Linux Wayland 某些驱动 / Firefox 严格模式等。
  *     依据:xterm.js #5816、#4728
- *   - 已知坏掉的 driver/mark:黑名单 UA 子串。
  *
  * 显式 `webgl` 模式不走这个探测(用户强制)——探测失败时由 enableWebglRenderer
  * 内部 try/catch fallback 到 canvas。
@@ -56,6 +77,11 @@ function detectWebglCapability(): { supported: boolean; iOS: boolean } {
     iOS = /iPad|iPhone|iPod/.test(ua) ||
       (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     if (iOS) {
+      supported = false;
+    } else if (isSafariOnMacOS(ua)) {
+      // xterm.js #5816:macOS Safari WebGL 全屏绿条。
+      // getContext('webgl2') 在坏版本上能成功(context 创建 OK),所以
+      // 下面的 context probe 抓不到,必须 UA 显式拦截。
       supported = false;
     } else if (typeof document !== 'undefined') {
       // 探测 WebGL2 context 能否创建
@@ -179,6 +205,35 @@ function decodeBase64Utf8(base64Data: string): string | null {
 }
 
 /**
+ * 已知设备响应(DA1/DA2/DA3/Unit ID/DECRPM/DECRQM)整段字符串集合。
+ * 用于 processDeviceStatusResponses 的 fast path —— 整段数据恰好是一条
+ * 设备响应时直接整段丢弃,零误伤。
+ *
+ * 依据: eclipse-theia/theia terminal-widget-impl.ts:430
+ * (`deviceStatusCodes` Set 的原版实现)。
+ */
+const DEVICE_STATUS_CODES: ReadonlySet<string> = new Set<string>([
+  // DA1 响应: \x1b[?<attrs>c
+  '\x1b[?1;2c',
+  '\x1b[?1;0c',
+  '\x1b[?6c',
+  '\x1b[?6;4c',
+  '\x1b[?1;0;0c',
+  '\x1b[?62;1;2;6;7;8;9c',
+  // DA2 响应: \x1b[><version>c
+  '\x1b[>0;276;0c',
+  '\x1b[>85;95;0c',
+  '\x1b[>83;40003;0c',
+  '\x1b[>0;40003;0c',
+  '\x1b[>1;0;0c',
+  // DA3 / Unit ID 响应: \x1b[=<unit>c
+  '\x1b[=0;276;0c',
+  // DECRPM/DECRQM 响应: \x1b[?...;$<mode>$y
+  '\x1b[?1;2$y',
+  '\x1b[?6;4$y',
+]);
+
+/**
  * 过滤 xterm 启动时会主动询问的设备属性回包,避免它们"穿过" PTY
  * 被打印成可见字符。
  *
@@ -193,20 +248,29 @@ function decodeBase64Utf8(base64Data: string): string | null {
  * shell 实现 (bash/zsh) 会回包,但回包可能与 xterm 自己的 echo 重叠,
  * 用户看到的就是一行行 "[?1;2c" / "[>0;276;0c"。
  *
- * 依据:eclipse-theia/theia terminal-widget-impl.ts:925, 948。
- * 维护一个 deviceStatusCodes 集合,只在 onData 入口过滤;不阻断用户正常输出。
+ * 两道过滤:
+ *   1) Fast path: 整段数据恰好是已知设备响应 → 整段丢弃
+ *   2) Fallback: 数据流中嵌入设备响应的子片段 → 严格 regex 切掉
+ *      regex 把终止字符限定在 c (DA) 或 $y (DECRPM),绝不动 SGR (m) /
+ *      DEC private mode (h/l) / cursor pos (H/f) 等其它 CSI 序列。
+ *      前瞻 (?![a-zA-Z0-9]) 保证整段匹配完成,不会把后续字符错绑。
+ *
+ * 依据: eclipse-theia/theia terminal-widget-impl.ts:430, 925, 948
+ * 之前用 /[\d;]*[a-zA-Z]/g + 内部 endsWith('c') 判定的方案,会把
+ * \x1b[?1049h (alt screen) 这类 DEC private mode 也匹配成候选,虽然
+ * 内部有 endsWith('c') 兜底不出错,但 regex 本身不精确。
  */
 function processDeviceStatusResponses(data: string): { cleaned: string } {
-  // 只过滤已知的设备响应序列(上面列出的几种),不阻断任何其他 SGR/CUP/etc。
-  // 保守做法:只过滤明确以 \x1b[? 或 \x1b[> 开头且结尾是 c/$y 的小段。
-  // 普通 cursor 移动 / SGR 颜色不受影响(不以 ?/>/! 开头或不以 c 结尾)。
-  const filtered = data.replace(/\x1b\[\?[\d;]*[a-zA-Z]/g, (match) => {
-    // 留下 SGR like \x1b[?...m,因为是颜色指令;但设备响应结尾是 c
-    if (/[a-zA-Z]$/.test(match) && match.endsWith('c')) {
-      return '';
-    }
-    return match;
-  }).replace(/\x1b\[>[\d;]*c/g, '').replace(/\x1b\[=[\d;]*c/g, '').replace(/\x1b\[![\d;]*c/g, '');
+  // 1) Fast path: 整段是已知设备响应,整段丢弃
+  if (DEVICE_STATUS_CODES.has(data)) {
+    return { cleaned: '' };
+  }
+  // 2) Fallback: 切掉数据流中嵌入的 DA1/DA2/DA3/Unit ID 子序列
+  //    (?![a-zA-Z0-9]) 前瞻避免把后续字符误绑进 c
+  const filtered = data
+    .replace(/\x1b\[[?>=!][\d;]*c(?![a-zA-Z0-9])/g, '')
+    // DECRPM/DECRQM 响应: 中间有 $ (intermediate byte), 终止字符是 y
+    .replace(/\x1b\[[?>=!][\d;]*\$y/g, '');
   return { cleaned: filtered };
 }
 
@@ -262,6 +326,37 @@ function processOsc52Clipboard(data: string): { cleaned: string; remainder: stri
   }
 
   return { cleaned, remainder: '' };
+}
+
+/**
+ * Termdock 终端里"链接"的兜底打开器,带 scheme 白名单。
+ *
+ * WebLinksAddon 默认 linkHandler 是浏览器原生的 confirm() 弹窗,体验差;
+ * 而且它对 scheme 不做限制,`javascript:alert(1)` 也会被打开,造成 XSS。
+ *
+ * 这里只放行 http(s)://,其它一切(包含 javascript: / data: / file: /
+ * vbscript: / 协议相对 //host 等)直接 swallow,不做 confirm 也不打开。
+ *
+ * 依据: xterm.js 6.0 ILinkHandler typings,WebLinksAddon 内部走
+ * `term.options.linkHandler.activate(event, text, range)`,所以这里
+ * 覆盖 activate 就能劫持所有链接点击。
+ */
+function createSafeLinkHandler() {
+  return {
+    activate(_event: MouseEvent, text: string) {
+      const trimmed = text.trim();
+      if (/^https?:\/\//i.test(trimmed)) {
+        try {
+          const target = window.open(trimmed, '_blank', 'noopener,noreferrer');
+          // 弹窗被浏览器挡(用户没手势 / popup blocker)时静默放弃
+          if (!target) { /* no-op */ }
+        } catch {
+          /* no-op */
+        }
+      }
+      // 其它 scheme 一律不打开,也不弹窗
+    },
+  };
 }
 
 function findScrollableViewport(container: HTMLElement): HTMLElement | null {
@@ -2682,6 +2777,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 getWinSizePixels: true,
                 getWinSizeChars: true,
               },
+              // Mac:option+click 默认是 Meta 键修饰,会向 PTY 发送转义序列;
+              // tmux + TUI (htop/vim) 场景下希望 option+click 用来选词而不是
+              // 触发 mousedown 序列。`macOptionClickForcesSelection: true` 让
+              // macOS Safari/Chrome 上 option+click 走本地选词,不穿透到 PTY。
+              // 依据: xterm.js 6.0 typings:195。
+              macOptionClickForcesSelection: true,
+              // WebLinksAddon 默认行为:对每个链接弹浏览器 confirm() 让用户
+              // 二次确认。Termdock 没必要弹——我们自己把链接打开。但必须白名单
+              // http(s)://,挡 javascript: / data: / file: / vbscript: 等可执行
+              // scheme,避免终端里出现 `javascript:alert(1)` 被误点造成 XSS。
+              // 实现:通过 term.options.linkHandler 拦截,白名单外直接 swallow。
+              // 依据: xterm.js 6.0 ILinkHandler typings + xterm #5522 讨论。
+              linkHandler: createSafeLinkHandler(),
               overviewRuler: {
                 width: 0,
               },
@@ -2727,6 +2835,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             try { terminalHost.replaceChildren(); } catch { /* ignored */ }
           }
           terminal.open(terminalHost);
+
+          // xterm 内部 helper textarea (CoreBrowserTerminal.ts) 默认会设置
+          // autocorrect / autocapitalize / spellcheck = off,但漏了 autocomplete。
+          // iOS PWA 长按时会触发系统的"自动填充"候选,体验差。补一刀。
+          if (!isGhostty && terminal.textarea) {
+            try { terminal.textarea.setAttribute('autocomplete', 'off'); } catch { /* ignored */ }
+          }
 
           // 防御性：让 ghostty-web 在 open 之后立刻重测一次字体度量。当前架构下
           // init useEffect 在 fontSize 变化时会整体重建 terminal，所以这里其实等价
