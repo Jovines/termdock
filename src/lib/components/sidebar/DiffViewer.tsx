@@ -3,7 +3,7 @@ import { GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMo
 import { parseDiff, Diff, Hunk, Decoration } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
-import { getFileDiff } from '../../terminal/api';
+import { getFileDiff, isPreviewableImagePath, readImagePreviewBlob } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 
 interface DiffViewerProps {
@@ -20,6 +20,13 @@ interface DiffViewerProps {
    * `wrap` is off — the hint would lie otherwise.
    */
   showScrollHint?: boolean;
+  /** Re-fetch the current diff even when the file path did not change. */
+  reloadKey?: number;
+  /**
+   * Render only the diff body, without the outer summary/file chrome.
+   * Used by the mobile accordion where the list row is the file header.
+   */
+  embedded?: boolean;
 }
 
 function getPathParts(path: string | null, fallback: { name: string; dir: string }): { name: string; dir: string } {
@@ -57,39 +64,75 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, showScrollHint = false }: DiffViewerProps) {
+export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false }: DiffViewerProps) {
   const { t } = useI18n();
-  // 精确订阅 — 只关心 diff 相关字段
-  const diffContent = useSidebarStore((s) => s.diffContent);
-  const diffLoading = useSidebarStore((s) => s.diffLoading);
-  const diffError = useSidebarStore((s) => s.diffError);
+  // Each viewer owns its request state. This is important for the mobile
+  // accordion: multiple files can stay expanded without fighting over one
+  // global diff slot in the sidebar store.
+  const [diffContent, setDiffContent] = useState<string | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [imagePreview, setImagePreview] = useState<{
+    objectUrl: string;
+    size: number | null;
+    mimeType: string;
+    dimensions?: { width: number; height: number };
+  } | null>(null);
   const rootPath = useSidebarStore((s) => s.rootPath);
-  const setDiff = useSidebarStore((s) => s.setDiff);
 
   useEffect(() => {
     let cancelled = false;
+    let objectUrl: string | null = null;
+    const controller = new AbortController();
     const path = filePath;
 
     const requestPath = path && rootPath && path.startsWith(`${rootPath}/`)
       ? path.slice(rootPath.length + 1)
       : path;
+    const readablePath = path && rootPath && !path.startsWith('/') ? `${rootPath}/${path}` : path;
 
-    setDiff(path, null, true, null);
+    setDiffContent(null);
+    setDiffLoading(true);
+    setDiffError(null);
+    setImagePreview(null);
 
-    getFileDiff(requestPath ?? undefined, undefined, rootPath ?? undefined)
-      .then((result) => {
-        if (cancelled) return;
-        setDiff(path, result.diff, false, result.error ?? null);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setDiff(path, null, false, err instanceof Error ? err.message : 'Failed to load diff');
-      });
+    if (readablePath && isPreviewableImagePath(readablePath)) {
+      readImagePreviewBlob(readablePath, controller.signal)
+        .then((result) => {
+          if (cancelled) return;
+          objectUrl = URL.createObjectURL(result.blob);
+          setImagePreview({ objectUrl, size: result.size, mimeType: result.mimeType });
+        })
+        .catch((err) => {
+          if (cancelled || controller.signal.aborted) return;
+          setDiffError(err instanceof Error ? err.message : t('rightSidebar.imageLoadFailed'));
+        })
+        .finally(() => {
+          if (!cancelled) setDiffLoading(false);
+        });
+    } else {
+      getFileDiff(requestPath ?? undefined, undefined, rootPath ?? undefined)
+        .then((result) => {
+          if (cancelled) return;
+          setDiffContent(result.diff);
+          setDiffError(result.error ?? null);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setDiffContent(null);
+          setDiffError(err instanceof Error ? err.message : 'Failed to load diff');
+        })
+        .finally(() => {
+          if (!cancelled) setDiffLoading(false);
+        });
+    }
 
     return () => {
       cancelled = true;
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [filePath, rootPath, setDiff]);
+  }, [filePath, reloadKey, rootPath, t]);
 
   const files = useMemo(() => {
     if (!diffContent || diffContent.trim() === '') return [];
@@ -133,99 +176,52 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
     onInsertDiffReference(filePath ? `${titleParts.name} diff` : t('diffViewer.allDiffLabel'), formatDiffReference(diffContent));
   };
 
-  if (diffLoading) {
-    return (
-      <div className="mx-3 mt-3 flex items-center justify-center border border-border/15 bg-background-subtle py-8">
-        <RiLoader size={20} className="animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  if (diffError) {
-    return (
-      <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">
-        {diffError}
-      </div>
-    );
-  }
-
-  if (files.length === 0) {
-    return (
-      <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
-        <RiGitCompare size={24} className="mx-auto mb-2 text-muted-foreground/80" />
-        {filePath ? t('diffViewer.noFileChanges') : t('diffViewer.noUnstagedChanges')}
-      </div>
-    );
-  }
-
-  return (
-    <div className="termdock-diff px-3 py-2">
-      <div className="border-b border-border/15 px-1 pb-2">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <div className="truncate text-sm font-medium text-foreground" title={filePath ?? undefined}>
-              {titleParts.name}
-            </div>
-            <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
-              {titleParts.dir && <span className="min-w-0 truncate">{titleParts.dir}</span>}
-              <span>{files.length} file{files.length > 1 ? 's' : ''}</span>
-              <span className="text-[color:var(--diff-insert-strong)]">+{totalChanges.additions}</span>
-              <span className="text-[color:var(--diff-delete-strong)]">-{totalChanges.deletions}</span>
-            </div>
-          </div>
-          {onInsertDiffReference && (
-            <button
-              type="button"
-              onClick={insertWholeDiff}
-              className="inline-flex h-8 shrink-0 items-center rounded-full bg-primary/15 px-3 text-[11px] font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
-              title={t('diffViewer.insertAllDiff')}
-            >
-              引用diff
-            </button>
-          )}
-        </div>
-      </div>
+  const renderFileDiffs = (hideSingleFileHeader: boolean) => (
+    <>
       {files.map((file) => {
         const key = `${file.oldRevision}-${file.newRevision}-${file.newPath}`;
         const stats = fileStats.get(key) ?? { additions: 0, deletions: 0 };
         const pathParts = getPathParts(file.newPath || file.oldPath, { name: 'unknown file', dir: '' });
         const displayPath = file.newPath || file.oldPath || 'unknown file';
+        const showFileHeader = !hideSingleFileHeader || files.length > 1;
         const fileDiffText = [
           `diff --git a/${file.oldPath || displayPath} b/${file.newPath || displayPath}`,
           ...file.hunks.flatMap((hunk) => [hunk.content, ...hunk.changes.map((change) => change.content)]),
         ].join('\n');
         return (
-        // `data-diff-file-anchor` is the contract RightSidebar uses to
-        // scrollIntoView a specific file from the jump-list. We always set
-        // it on the file's relative path; the list sends the same string.
+        // Keep a stable file anchor on each parsed diff block. It is useful for
+        // deep links/debugging and preserves the previous DOM contract even when
+        // the mobile UI renders each file inline as an accordion body.
         <div
           key={key}
           data-diff-file-anchor={displayPath}
-          className="mt-3 overflow-hidden border border-border/20 bg-surface"
+          className={embedded ? 'overflow-hidden bg-surface' : 'mt-3 overflow-hidden border border-border/20 bg-surface'}
         >
-          <div className="flex items-center justify-between gap-3 border-b border-border/15 bg-background-subtle px-2 py-1.5">
-            <div className="min-w-0" title={file.newPath || file.oldPath}>
-              <div className="truncate font-mono text-[11px] text-foreground">{pathParts.name}</div>
-              {pathParts.dir && <div className="truncate font-mono text-[10px] text-muted-foreground/70">{pathParts.dir}</div>}
+          {showFileHeader && (
+            <div className="flex items-center justify-between gap-3 border-b border-border/15 bg-background-subtle px-2 py-1.5">
+              <div className="min-w-0" title={file.newPath || file.oldPath}>
+                <div className="truncate font-mono text-[11px] text-foreground">{pathParts.name}</div>
+                {pathParts.dir && <div className="truncate font-mono text-[10px] text-muted-foreground/70">{pathParts.dir}</div>}
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <span className="text-[10px] font-medium text-[color:var(--diff-insert-strong)]">+{stats.additions}</span>
+                <span className="text-[10px] font-medium text-[color:var(--diff-delete-strong)]">-{stats.deletions}</span>
+                {onInsertDiffReference && files.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => onInsertDiffReference(`${pathParts.name} diff`, formatDiffReference(fileDiffText))}
+                    className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/20 active:scale-95"
+                    title={t('diffViewer.insertFileDiff')}
+                  >
+                    引用
+                  </button>
+                )}
+                <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+                  {file.type}
+                </span>
+              </div>
             </div>
-            <div className="flex shrink-0 items-center gap-1.5">
-              <span className="text-[10px] font-medium text-[color:var(--diff-insert-strong)]">+{stats.additions}</span>
-              <span className="text-[10px] font-medium text-[color:var(--diff-delete-strong)]">-{stats.deletions}</span>
-              {onInsertDiffReference && files.length > 1 && (
-                <button
-                  type="button"
-                  onClick={() => onInsertDiffReference(`${pathParts.name} diff`, formatDiffReference(fileDiffText))}
-                  className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/20 active:scale-95"
-                  title={t('diffViewer.insertFileDiff')}
-                >
-                  引用
-                </button>
-              )}
-              <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
-                {file.type}
-              </span>
-            </div>
-          </div>
+          )}
           {/* Scroll hint: only shown when wrap is off (otherwise it would
               lie) and only once per file per visit, dismissed by tap. The
               user still gets the visual cue without it nagging on every
@@ -275,6 +271,126 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
         </div>
         );
       })}
+    </>
+  );
+
+  if (diffLoading) {
+    return embedded ? (
+      <div className="flex items-center justify-center bg-background-subtle py-6">
+        <RiLoader size={18} className="animate-spin text-muted-foreground" />
+      </div>
+    ) : (
+      <div className="mx-3 mt-3 flex items-center justify-center border border-border/15 bg-background-subtle py-8">
+        <RiLoader size={20} className="animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (diffError) {
+    return embedded ? (
+      <div className="bg-destructive/5 px-3 py-3 text-xs text-destructive">
+        {diffError}
+      </div>
+    ) : (
+      <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">
+        {diffError}
+      </div>
+    );
+  }
+
+  if (imagePreview) {
+    const body = (
+      <div className="bg-background-subtle p-3">
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
+          <span>{t('rightSidebar.imagePreviewHint')}</span>
+          {imagePreview.size !== null && <span>{imagePreview.size.toLocaleString()} bytes</span>}
+          <span>{imagePreview.mimeType}</span>
+          {imagePreview.dimensions && <span>{imagePreview.dimensions.width} × {imagePreview.dimensions.height}</span>}
+        </div>
+        <div className="flex min-h-64 items-center justify-center">
+          <img
+            src={imagePreview.objectUrl}
+            alt={titleParts.name}
+            className="max-h-[70vh] max-w-full rounded border border-border/15 bg-surface object-contain shadow-sm"
+            onLoad={(event) => {
+              const img = event.currentTarget;
+              setImagePreview((current) => current
+                ? { ...current, dimensions: { width: img.naturalWidth, height: img.naturalHeight } }
+                : current);
+            }}
+            onError={() => setDiffError(t('rightSidebar.imageLoadFailed'))}
+          />
+        </div>
+      </div>
+    );
+
+    if (embedded) {
+      return <div className="overflow-hidden bg-surface">{body}</div>;
+    }
+
+    return (
+      <div className="termdock-diff px-3 py-2">
+        <div className="border-b border-border/15 px-1 pb-2">
+          <div className="truncate text-sm font-medium text-foreground" title={filePath ?? undefined}>{titleParts.name}</div>
+          <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+            {titleParts.dir && <span className="min-w-0 truncate">{titleParts.dir}</span>}
+          </div>
+        </div>
+        <div className="mt-3 overflow-hidden border border-border/20 bg-surface">{body}</div>
+      </div>
+    );
+  }
+
+  if (files.length === 0) {
+    return embedded ? (
+      <div className="bg-background-subtle px-3 py-5 text-center text-xs text-muted-foreground">
+        <RiGitCompare size={20} className="mx-auto mb-2 text-muted-foreground/80" />
+        {filePath ? t('diffViewer.noFileChanges') : t('diffViewer.noUnstagedChanges')}
+      </div>
+    ) : (
+      <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
+        <RiGitCompare size={24} className="mx-auto mb-2 text-muted-foreground/80" />
+        {filePath ? t('diffViewer.noFileChanges') : t('diffViewer.noUnstagedChanges')}
+      </div>
+    );
+  }
+
+  if (embedded) {
+    return (
+      <div className="termdock-diff termdock-diff-card-mobile">
+        {renderFileDiffs(true)}
+      </div>
+    );
+  }
+
+  return (
+    <div className="termdock-diff px-3 py-2">
+      <div className="border-b border-border/15 px-1 pb-2">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-foreground" title={filePath ?? undefined}>
+              {titleParts.name}
+            </div>
+            <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+              {titleParts.dir && <span className="min-w-0 truncate">{titleParts.dir}</span>}
+              <span>{files.length} file{files.length > 1 ? 's' : ''}</span>
+              <span className="text-[color:var(--diff-insert-strong)]">+{totalChanges.additions}</span>
+              <span className="text-[color:var(--diff-delete-strong)]">-{totalChanges.deletions}</span>
+            </div>
+          </div>
+          {onInsertDiffReference && (
+            <button
+              type="button"
+              onClick={insertWholeDiff}
+              className="inline-flex h-8 shrink-0 items-center rounded-full bg-primary/15 px-3 text-[11px] font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
+              title={t('diffViewer.insertAllDiff')}
+            >
+              引用diff
+            </button>
+          )}
+        </div>
+      </div>
+      {renderFileDiffs(false)}
     </div>
   );
 }

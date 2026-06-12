@@ -7,9 +7,68 @@ import { pathValidator } from '../utils/pathValidator.js';
 const router = Router();
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
+const MAX_IMAGE_PREVIEW_SIZE = 20 * 1024 * 1024; // 20MB
 const GIT_TIMEOUT_MS = 5000;
 const MAX_DIRECTORY_ENTRIES = 1000;
 const MAX_GIT_CONTEXT_CHANGED_FILES = 200;
+const RESTORE_CONFIRM_PHRASES = new Set(['丢弃改动', 'discard changes']);
+
+type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked' | 'conflicted' | 'unknown';
+
+type GitAction = 'stage-file' | 'stage-all' | 'unstage-file' | 'stash-file' | 'stash-all' | 'restore-worktree-file';
+
+interface GitChangedFile {
+  path: string;
+  absolutePath: string;
+  status: GitChangeStatus;
+  oldPath?: string;
+  indexStatus?: string;
+  worktreeStatus?: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  tracked: boolean;
+  canStage: boolean;
+  canUnstage: boolean;
+  canStash: boolean;
+  canRestoreWorktree: boolean;
+}
+
+interface GitBundlePayload {
+  available: boolean;
+  files: GitChangedFile[];
+  context: {
+    available: boolean;
+    cwd?: string;
+    root?: string;
+    branch?: string | null;
+    status?: string;
+    recentCommits?: string[];
+    changedFiles?: Array<{ path: string; absolutePath: string; status: string }>;
+    truncated?: boolean;
+    error?: string;
+  } | null;
+  error?: string;
+}
+
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+};
+
+function getImageMimeType(filePath: string): string | null {
+  return IMAGE_MIME_BY_EXT[path.extname(filePath).toLowerCase()] ?? null;
+}
+
+function toInlineFilename(name: string): string {
+  return name.replace(/["\\\r\n]/g, '_');
+}
 
 function isPathInside(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
@@ -30,6 +89,147 @@ function toGitPathspec(gitRoot: string, requestedPath: string): string {
   }
 
   return path.relative(gitRoot, candidate).split(path.sep).join('/');
+}
+
+function normalizeNameStatus(status: string): GitChangeStatus {
+  if (status.startsWith('R')) return 'renamed';
+  if (status.startsWith('A')) return 'added';
+  if (status.startsWith('D')) return 'deleted';
+  if (status.startsWith('U')) return 'conflicted';
+  if (status.includes('U')) return 'conflicted';
+  if (status.startsWith('?')) return 'untracked';
+  if (status.startsWith('M') || status.startsWith('T')) return 'modified';
+  return 'modified';
+}
+
+function emptyChangedFile(gitRoot: string, filePath: string): GitChangedFile {
+  return {
+    path: filePath,
+    absolutePath: path.join(gitRoot, filePath),
+    status: 'unknown',
+    staged: false,
+    unstaged: false,
+    untracked: false,
+    tracked: true,
+    canStage: false,
+    canUnstage: false,
+    canStash: false,
+    canRestoreWorktree: false,
+  };
+}
+
+function mergeNameStatus(
+  files: Map<string, GitChangedFile>,
+  gitRoot: string,
+  output: string,
+  source: 'staged' | 'unstaged',
+) {
+  const tokens = output.split('\0').filter(Boolean);
+  for (let i = 0; i < tokens.length;) {
+    const rawStatus = tokens[i++];
+    if (!rawStatus) break;
+
+    let oldPath: string | undefined;
+    let filePath: string | undefined;
+    if (rawStatus.startsWith('R')) {
+      oldPath = tokens[i++];
+      filePath = tokens[i++];
+    } else {
+      filePath = tokens[i++];
+    }
+    if (!filePath) continue;
+
+    const current = files.get(filePath) ?? emptyChangedFile(gitRoot, filePath);
+    current.status = normalizeNameStatus(rawStatus);
+    if (oldPath) current.oldPath = oldPath;
+    if (source === 'staged') {
+      current.staged = true;
+      current.indexStatus = rawStatus;
+    } else {
+      current.unstaged = true;
+      current.worktreeStatus = rawStatus;
+    }
+    current.tracked = true;
+    files.set(filePath, current);
+  }
+}
+
+function finalizeChangedFiles(files: Map<string, GitChangedFile>): GitChangedFile[] {
+  return Array.from(files.values())
+    .map((file) => ({
+      ...file,
+      status: file.untracked ? 'untracked' : file.status === 'unknown' ? 'modified' : file.status,
+      canStage: file.unstaged || file.untracked,
+      canUnstage: file.staged,
+      canStash: file.unstaged || file.untracked,
+      canRestoreWorktree: file.tracked && file.unstaged && !file.untracked,
+    }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+async function getChangedFiles(gitRoot: string): Promise<GitChangedFile[]> {
+  const [stagedOutput, unstagedOutput, untrackedOutput] = await Promise.all([
+    execGit(['diff', '--cached', '--name-status', '-z'], gitRoot).catch(() => ''),
+    execGit(['diff', '--name-status', '-z'], gitRoot).catch(() => ''),
+    execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot).catch(() => ''),
+  ]);
+
+  const files = new Map<string, GitChangedFile>();
+  mergeNameStatus(files, gitRoot, stagedOutput, 'staged');
+  mergeNameStatus(files, gitRoot, unstagedOutput, 'unstaged');
+
+  for (const p of untrackedOutput.split('\0').filter(Boolean)) {
+    const current = files.get(p) ?? emptyChangedFile(gitRoot, p);
+    current.status = 'untracked';
+    current.untracked = true;
+    current.unstaged = true;
+    current.tracked = false;
+    files.set(p, current);
+  }
+
+  return finalizeChangedFiles(files);
+}
+
+function toContextFiles(files: GitChangedFile[]) {
+  return files
+    .slice(0, MAX_GIT_CONTEXT_CHANGED_FILES)
+    .map((file) => ({ path: file.path, absolutePath: file.absolutePath, status: file.status }));
+}
+
+async function buildGitBundle(resolvedCwd: string, gitRoot: string): Promise<GitBundlePayload> {
+  const [files, branchOutput, statusOutput, logOutput] = await Promise.all([
+    getChangedFiles(gitRoot),
+    execGit(['branch', '--show-current'], gitRoot).catch(() => ''),
+    execGit(['status', '--short', '--branch'], gitRoot).catch(() => ''),
+    execGit(['log', '--oneline', '-8'], gitRoot).catch(() => ''),
+  ]);
+  const changedFiles = toContextFiles(files);
+
+  return {
+    available: true,
+    files,
+    context: {
+      available: true,
+      cwd: resolvedCwd,
+      root: gitRoot,
+      branch: branchOutput.trim() || null,
+      status: statusOutput.trim(),
+      recentCommits: logOutput.split('\n').map((line) => line.trim()).filter(Boolean),
+      changedFiles,
+      truncated: changedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES,
+    },
+  };
+}
+
+function getSinglePath(paths: unknown): string {
+  if (!Array.isArray(paths) || paths.length !== 1 || typeof paths[0] !== 'string' || !paths[0]) {
+    throw new Error('Expected exactly one path');
+  }
+  return paths[0];
+}
+
+function getStashMessage(message: unknown, fallback: string): string {
+  return typeof message === 'string' && message.trim() ? message.trim().slice(0, 160) : fallback;
 }
 
 function readFilePrefix(filePath: string, bytesToRead: number): string {
@@ -189,6 +389,62 @@ router.get('/read', async (req: Request, res: Response) => {
   }
 });
 
+// Stream supported image files for the right sidebar preview.
+router.get('/blob', async (req: Request, res: Response) => {
+  try {
+    const requestedPath = req.query.path as string;
+    if (!requestedPath) {
+      res.status(400).json({ error: 'Missing path parameter' });
+      return;
+    }
+
+    const resolvedPath = pathValidator.validatePath(requestedPath);
+    const stat = fs.statSync(resolvedPath);
+
+    if (!stat.isFile()) {
+      res.status(400).json({ error: 'Path is not a file' });
+      return;
+    }
+
+    const mimeType = getImageMimeType(resolvedPath);
+    if (!mimeType) {
+      res.status(415).json({ error: 'Unsupported image type' });
+      return;
+    }
+
+    if (stat.size > MAX_IMAGE_PREVIEW_SIZE) {
+      res.status(413).json({
+        error: 'Image is too large to preview',
+        code: 'IMAGE_TOO_LARGE',
+        size: stat.size,
+        maxSize: MAX_IMAGE_PREVIEW_SIZE,
+      });
+      return;
+    }
+
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Length', stat.size.toString());
+    res.setHeader('Last-Modified', stat.mtime.toUTCString());
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', `inline; filename="${toInlineFilename(path.basename(resolvedPath))}"`);
+
+    const stream = fs.createReadStream(resolvedPath);
+    stream.on('error', (error) => {
+      if (!res.headersSent) {
+        const message = error instanceof Error ? error.message : 'Failed to read image';
+        res.status(500).json({ error: message });
+        return;
+      }
+      res.destroy(error instanceof Error ? error : undefined);
+    });
+    stream.pipe(res);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(403).json({ error: message });
+  }
+});
+
 // Git diff for a file or the entire repo
 router.get('/diff', async (req: Request, res: Response) => {
   try {
@@ -247,7 +503,7 @@ router.get('/diff', async (req: Request, res: Response) => {
   }
 });
 
-// List changed files (git diff --name-status)
+// List changed files across staged, unstaged, and untracked state.
 router.get('/diff-files', async (req: Request, res: Response) => {
   try {
     const cwd = req.query.cwd as string | undefined;
@@ -263,45 +519,7 @@ router.get('/diff-files', async (req: Request, res: Response) => {
       return;
     }
 
-    const [output, untrackedOutput] = await Promise.all([
-      execGit(['diff', '--name-status', '-z'], gitCwd),
-      execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitCwd).catch(() => ''),
-    ]);
-
-    const tokens = output.split('\0').filter(Boolean);
-    const files: Array<{ path: string; absolutePath: string; status: string; oldPath?: string }> = [];
-    for (let i = 0; i < tokens.length;) {
-      const status = tokens[i++];
-      if (!status) break;
-
-      if (status.startsWith('R')) {
-        const oldPath = tokens[i++];
-        const newPath = tokens[i++];
-        if (newPath) {
-          files.push({ path: newPath, absolutePath: path.join(gitCwd, newPath), status: 'renamed', ...(oldPath ? { oldPath } : {}) });
-        }
-        continue;
-      }
-
-      const filePath = tokens[i++];
-      if (!filePath) continue;
-      files.push({
-        path: filePath,
-        absolutePath: path.join(gitCwd, filePath),
-        status: status.startsWith('A') ? 'added' :
-                status.startsWith('D') ? 'deleted' : 'modified',
-      });
-    }
-
-    // Merge untracked files (new files not yet staged)
-    const existingPaths = new Set(files.map((f) => f.path));
-    for (const p of untrackedOutput.split('\0').filter(Boolean)) {
-      if (!existingPaths.has(p)) {
-        files.push({ path: p, absolutePath: path.join(gitCwd, p), status: 'untracked' });
-      }
-    }
-
-    res.json({ files });
+    res.json({ files: await getChangedFiles(gitCwd) });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     res.json({ files: [], error: message });
@@ -330,19 +548,8 @@ router.get('/git-context', async (req: Request, res: Response) => {
       execGit(['log', '--oneline', '-8'], gitRoot).catch(() => ''),
     ]);
 
-    const changedFiles = statusOutput
-      .split('\n')
-      .slice(1)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(0, MAX_GIT_CONTEXT_CHANGED_FILES)
-      .map((line) => {
-        const status = line.slice(0, 2).trim() || line.slice(0, 1).trim();
-        const file = line.slice(2).trim().replace(/^"|"$/g, '');
-        const renameParts = file.split(' -> ');
-        const filePath = renameParts[renameParts.length - 1] || file;
-        return { path: filePath, absolutePath: path.join(gitRoot, filePath), status };
-      });
+    const files = await getChangedFiles(gitRoot);
+    const changedFiles = toContextFiles(files);
 
     res.json({
       available: true,
@@ -383,82 +590,83 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
       return;
     }
 
-    // git diff --name-status only covers tracked changes (modified, staged,
-    // deleted, renamed).  Untracked (new) files are invisible to it, so we
-    // also ask git ls-files for untracked paths and merge them in.
-    const [diffNameStatus, untrackedOutput, branchOutput, statusOutput, logOutput] = await Promise.all([
-      execGit(['diff', '--name-status', '-z'], gitRoot).catch(() => ''),
-      execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot).catch(() => ''),
-      execGit(['branch', '--show-current'], gitRoot).catch(() => ''),
-      execGit(['status', '--short', '--branch'], gitRoot).catch(() => ''),
-      execGit(['log', '--oneline', '-8'], gitRoot).catch(() => ''),
-    ]);
-
-    // Parse diff --name-status -z
-    const tokens = diffNameStatus.split('\0').filter(Boolean);
-    const files: Array<{ path: string; absolutePath: string; status: string; oldPath?: string }> = [];
-    for (let i = 0; i < tokens.length;) {
-      const status = tokens[i++];
-      if (!status) break;
-      if (status.startsWith('R')) {
-        const oldPath = tokens[i++];
-        const newPath = tokens[i++];
-        if (newPath) {
-          files.push({ path: newPath, absolutePath: path.join(gitRoot, newPath), status: 'renamed', ...(oldPath ? { oldPath } : {}) });
-        }
-        continue;
-      }
-      const filePath = tokens[i++];
-      if (!filePath) continue;
-      files.push({
-        path: filePath,
-        absolutePath: path.join(gitRoot, filePath),
-        status: status.startsWith('A') ? 'added' : status.startsWith('D') ? 'deleted' : 'modified',
-      });
-    }
-
-    // Merge untracked files (from git ls-files --others) into the file list.
-    // These are brand-new files that have never been staged, so they only
-    // appear here — not in `git diff --name-status`.
-    const existingPaths = new Set(files.map((f) => f.path));
-    for (const p of untrackedOutput.split('\0').filter(Boolean)) {
-      if (!existingPaths.has(p)) {
-        files.push({ path: p, absolutePath: path.join(gitRoot, p), status: 'untracked' });
-      }
-    }
-
-    // Parse status --short --branch for context
-    const changedFiles = statusOutput
-      .split('\n')
-      .slice(1)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(0, MAX_GIT_CONTEXT_CHANGED_FILES)
-      .map((line) => {
-        const status = line.slice(0, 2).trim() || line.slice(0, 1).trim();
-        const file = line.slice(2).trim().replace(/^"|"$/g, '');
-        const renameParts = file.split(' -> ');
-        const filePath = renameParts[renameParts.length - 1] || file;
-        return { path: filePath, absolutePath: path.join(gitRoot, filePath), status };
-      });
-
-    res.json({
-      available: true,
-      files,
-      context: {
-        available: true,
-        cwd: resolvedCwd,
-        root: gitRoot,
-        branch: branchOutput.trim() || null,
-        status: statusOutput.trim(),
-        recentCommits: logOutput.split('\n').map((line) => line.trim()).filter(Boolean),
-        changedFiles,
-        truncated: changedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES,
-      },
-    });
+    res.json(await buildGitBundle(resolvedCwd, gitRoot));
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     res.json({ available: false, files: [], context: null, error: message });
+  }
+});
+
+// Mutating Git actions for the right sidebar diff list. Keep this API as a
+// strict allowlist — never accept arbitrary git arguments from the browser.
+router.post('/git-action', async (req: Request, res: Response) => {
+  try {
+    const { action, cwd, paths, message, confirm } = req.body as {
+      action?: GitAction;
+      cwd?: string;
+      paths?: unknown;
+      message?: unknown;
+      confirm?: { acknowledged?: boolean; phrase?: string };
+    };
+
+    if (!cwd) {
+      res.status(400).json({ error: 'Missing cwd', code: 'MISSING_CWD' });
+      return;
+    }
+    if (!action || !['stage-file', 'stage-all', 'unstage-file', 'stash-file', 'stash-all', 'restore-worktree-file'].includes(action)) {
+      res.status(400).json({ error: 'Unsupported git action', code: 'UNSUPPORTED_ACTION' });
+      return;
+    }
+
+    const resolvedCwd = pathValidator.validatePath(cwd);
+    const gitRoot = await findGitRoot(resolvedCwd);
+    if (!gitRoot) {
+      res.status(404).json({ error: 'Not a git repository', code: 'NOT_GIT_REPOSITORY' });
+      return;
+    }
+
+    const now = new Date().toISOString().replace(/[:.]/g, '-');
+    let output = '';
+
+    if (action === 'stage-all') {
+      output = await execGit(['add', '-A'], gitRoot);
+    } else if (action === 'stash-all') {
+      const stashMessage = getStashMessage(message, `Termdock stash all ${now}`);
+      output = await execGit(['stash', 'push', '--include-untracked', '-m', stashMessage], gitRoot);
+    } else {
+      const requestedPath = getSinglePath(paths);
+      const pathspec = toGitPathspec(gitRoot, requestedPath);
+
+      if (action === 'stage-file') {
+        output = await execGit(['--literal-pathspecs', 'add', '--', pathspec], gitRoot);
+      } else if (action === 'unstage-file') {
+        output = await execGit(['--literal-pathspecs', 'restore', '--staged', '--', pathspec], gitRoot);
+      } else if (action === 'stash-file') {
+        const stashMessage = getStashMessage(message, `Termdock stash ${pathspec} ${now}`);
+        output = await execGit(['--literal-pathspecs', 'stash', 'push', '--include-untracked', '-m', stashMessage, '--', pathspec], gitRoot);
+      } else if (action === 'restore-worktree-file') {
+        if (!confirm?.acknowledged || !RESTORE_CONFIRM_PHRASES.has((confirm.phrase ?? '').trim())) {
+          res.status(428).json({
+            error: 'Confirmation required before discarding changes',
+            code: 'CONFIRMATION_REQUIRED',
+            confirmationPhrase: '丢弃改动',
+          });
+          return;
+        }
+        output = await execGit(['--literal-pathspecs', 'restore', '--worktree', '--', pathspec], gitRoot);
+      }
+    }
+
+    res.json({
+      ok: true,
+      action,
+      message: output.trim() || 'Git action completed',
+      output,
+      bundle: await buildGitBundle(resolvedCwd, gitRoot),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Git action failed';
+    res.status(500).json({ error: message, code: 'GIT_ACTION_FAILED' });
   }
 });
 

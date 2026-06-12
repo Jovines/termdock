@@ -1,7 +1,9 @@
-import { useEffect, useCallback, useMemo, useRef, useState, useDeferredValue, type Dispatch, type SetStateAction } from 'react';
+import { useEffect, useCallback, useMemo, useState, useDeferredValue, type Dispatch, type SetStateAction } from 'react';
 import {
   X as RiCloseLine,
   ArrowLeft as RiArrowLeft,
+  ChevronRight as RiChevronRight,
+  ChevronDown as RiChevronDown,
   Folder as RiFolder,
   GitCompare as RiGitCompare,
   Search as RiSearch,
@@ -14,7 +16,7 @@ import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { DiffViewer } from './DiffViewer';
 import { useSidebarStore } from '../../stores/useSidebarStore';
-import { getGitBundle, readFileContent, type GitContext } from '../../terminal/api';
+import { getGitBundle, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 
 interface RightSidebarProps {
@@ -43,6 +45,20 @@ const MOBILE_WIDTH_THRESHOLD_PX = 600;
 // Wide mode keeps the dual-pane workspace; below this width the panel falls
 // back to stacked tabs even on desktop.
 const WIDE_WIDTH_THRESHOLD_PX = 720;
+
+type GitActionKey = GitActionRequest['action'];
+
+type ConfirmGitAction =
+  | { kind: 'restore'; file: GitChangedFile; phrase: string }
+  | { kind: 'stash-all' };
+
+interface GitActionButton {
+  key: GitActionKey;
+  label: string;
+  disabled?: boolean;
+  destructive?: boolean;
+  onClick: () => void;
+}
 
 interface RecentReference {
   path: string;
@@ -113,6 +129,43 @@ function buildLineReference(path: string, rootPath: string | null, lineRange: { 
   return `${buildPromptReference(path, rootPath)}:${suffix}`;
 }
 
+function toChangedFileMap(files: GitChangedFile[]): Map<string, GitChangedFile> {
+  const map = new Map<string, GitChangedFile>();
+  for (const file of files) {
+    map.set(file.absolutePath || file.path, file);
+  }
+  return map;
+}
+
+function GitActionChips({ actions, running }: { actions: GitActionButton[]; running: { action: GitActionKey; path?: string } | null }) {
+  if (actions.length === 0) return null;
+  return (
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+      {actions.map((action) => {
+        const isRunning = running?.action === action.key;
+        return (
+          <button
+            key={action.key}
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              action.onClick();
+            }}
+            disabled={action.disabled || Boolean(running)}
+            className={`inline-flex h-6 items-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 disabled:opacity-50 ${
+              action.destructive
+                ? 'bg-destructive/10 text-destructive hover:bg-destructive/15'
+                : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+            }`}
+          >
+            {isRunning ? '…' : action.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 interface FilePreviewProps {
   filePath: string | null;
   onInsertReference: (path: string) => void;
@@ -122,38 +175,62 @@ interface FilePreviewProps {
   onLineRangeChange: Dispatch<SetStateAction<{ start: number; end: number } | null>>;
 }
 
+type FilePreviewState =
+  | { kind: 'idle' }
+  | { kind: 'loading'; mode: 'text' | 'image' }
+  | { kind: 'text'; content: string; meta: { size: number; truncated?: boolean } }
+  | { kind: 'image'; objectUrl: string; meta: { size: number | null; mimeType: string; modified: string | null }; dimensions?: { width: number; height: number } }
+  | { kind: 'error'; message: string };
+
 function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange, onLineRangeChange }: FilePreviewProps) {
   const { t } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
-  const [content, setContent] = useState<string>('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [meta, setMeta] = useState<{ size: number; truncated?: boolean } | null>(null);
+  const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
 
   useEffect(() => {
-    if (!filePath) return;
+    if (!filePath) {
+      setPreviewState({ kind: 'idle' });
+      return;
+    }
+
     const readablePath = rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setContent('');
-    setMeta(null);
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    const isImage = isPreviewableImagePath(readablePath);
+
+    setPreviewState({ kind: 'loading', mode: isImage ? 'image' : 'text' });
     onLineRangeChange(null);
-    readFileContent(readablePath)
-      .then((result) => {
-        if (cancelled) return;
-        setContent(result.content);
-        setMeta({ size: result.size, truncated: result.truncated });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : 'Failed to read file');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [filePath, rootPath, onLineRangeChange]);
+
+    if (isImage) {
+      readImagePreviewBlob(readablePath, controller.signal)
+        .then((result) => {
+          objectUrl = URL.createObjectURL(result.blob);
+          setPreviewState({
+            kind: 'image',
+            objectUrl,
+            meta: { size: result.size, mimeType: result.mimeType, modified: result.modified },
+          });
+        })
+        .catch((err) => {
+          if (controller.signal.aborted) return;
+          setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : t('rightSidebar.imageLoadFailed') });
+        });
+    } else {
+      readFileContent(readablePath, controller.signal)
+        .then((result) => {
+          setPreviewState({ kind: 'text', content: result.content, meta: { size: result.size, truncated: result.truncated } });
+        })
+        .catch((err) => {
+          if (controller.signal.aborted) return;
+          setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : 'Failed to read file' });
+        });
+    }
+
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [filePath, rootPath, onLineRangeChange, t]);
 
   if (!filePath) {
     return <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
@@ -162,7 +239,9 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   const readablePath = rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
   const display = getRelativeDisplayPath(readablePath, rootPath);
   const reference = buildFileReference(readablePath, rootPath);
-  const lines = content ? content.split('\n') : [];
+  const lines = previewState.kind === 'text' && previewState.content ? previewState.content.split('\n') : [];
+  const meta = previewState.kind === 'text' || previewState.kind === 'image' ? previewState.meta : null;
+  const isImagePreview = previewState.kind === 'image' || (previewState.kind === 'loading' && previewState.mode === 'image');
   const lineReference = buildLineReference(readablePath, rootPath, lineRange);
   const selectedLineLabel = lineRange
     ? (lineRange.start === lineRange.end ? `L${lineRange.start}` : `L${lineRange.start}-${lineRange.end}`)
@@ -211,7 +290,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {!isMobile && lineRange && (
+            {!isMobile && lineRange && !isImagePreview && (
               <button
                 type="button"
                 onClick={insertRangeReference}
@@ -244,27 +323,52 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
         </div>
         {meta && (
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-            <span>{meta.size.toLocaleString()} bytes</span>
-            {meta.truncated && <span className="text-yellow-400">preview truncated to 1MB</span>}
+            {meta.size !== null && <span>{meta.size.toLocaleString()} bytes</span>}
+            {'truncated' in meta && meta.truncated && <span className="text-yellow-400">preview truncated to 1MB</span>}
+            {'mimeType' in meta && <span>{meta.mimeType}</span>}
+            {'dimensions' in previewState && previewState.dimensions && <span>{previewState.dimensions.width} × {previewState.dimensions.height}</span>}
           </div>
         )}
         {/* Hint row — fixed height so toggling line range doesn't shift the
             file content below. */}
         <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
           <span className="truncate">
-            {lineRange
-              ? t('rightSidebar.selectedLineHint', { lineLabel: selectedLineLabel ?? '' })
-              : t('rightSidebar.multiLineHint')}
+            {isImagePreview
+              ? t('rightSidebar.imagePreviewHint')
+              : lineRange
+                ? t('rightSidebar.selectedLineHint', { lineLabel: selectedLineLabel ?? '' })
+                : t('rightSidebar.multiLineHint')}
           </span>
         </div>
       </div>
-      {loading ? (
-        <div className="min-h-0 flex-1 overflow-auto px-3 py-8 text-center text-sm text-muted-foreground">Loading file…</div>
-      ) : error ? (
-        <div className="min-h-0 flex-1 overflow-auto">
-          <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">{error}</div>
+      {previewState.kind === 'loading' ? (
+        <div className="min-h-0 flex-1 overflow-auto px-3 py-8 text-center text-sm text-muted-foreground">
+          {previewState.mode === 'image' ? t('rightSidebar.loadingImage') : 'Loading file…'}
         </div>
-      ) : (
+      ) : previewState.kind === 'error' ? (
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">{previewState.message}</div>
+        </div>
+      ) : previewState.kind === 'image' ? (
+        <div className="min-h-0 flex-1 overflow-auto bg-background-subtle p-3">
+          <div className="flex min-h-full items-center justify-center">
+            <img
+              src={previewState.objectUrl}
+              alt={display.name}
+              className="max-h-full max-w-full rounded border border-border/15 bg-surface object-contain shadow-sm"
+              onLoad={(event) => {
+                const img = event.currentTarget;
+                setPreviewState((current) => (
+                  current.kind === 'image'
+                    ? { ...current, dimensions: { width: img.naturalWidth, height: img.naturalHeight } }
+                    : current
+                ));
+              }}
+              onError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.imageLoadFailed') })}
+            />
+          </div>
+        </div>
+      ) : previewState.kind === 'text' ? (
         <div className="min-h-0 flex-1 overflow-auto rounded-none bg-background-subtle p-2 font-mono text-[11px] leading-relaxed text-foreground">
           {lines.length > 0 ? (
             <div className="min-w-full">
@@ -290,7 +394,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
             </div>
           ) : 'Empty file.'}
         </div>
-      )}
+      ) : null}
       {/* Sticky bottom action bar — only shows when a line range is selected.
           Collapsed out of the layout (instead of opacity-0) when no range is
           selected so the scroller can fill the full available height — this
@@ -298,9 +402,9 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           of the viewport. */}
       <div
         className={`shrink-0 overflow-hidden border-t border-border/15 bg-surface transition-all duration-150 ${
-          lineRange ? 'max-h-24 opacity-100' : 'pointer-events-none max-h-0 opacity-0 border-t-transparent'
+          lineRange && !isImagePreview ? 'max-h-24 opacity-100' : 'pointer-events-none max-h-0 opacity-0 border-t-transparent'
         }`}
-        aria-hidden={!lineRange}
+        aria-hidden={!lineRange || isImagePreview}
       >
         <div className="flex items-center gap-2">
           <div className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">
@@ -341,16 +445,16 @@ export function RightSidebar(
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
   const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
-  // Narrow-screen changes view: 'all' shows every file's diff inline (the
-  // phone-friendly default — no per-file navigation needed); 'single' shows
-  // only the file the user picked from the list.
-  const [diffViewMode, setDiffViewMode] = useState<'all' | 'single'>('all');
+  // On phone-sized panels the diff tab is intentionally a plain grouped list:
+  // one file row, tap to expand/collapse its inline diff, no mode switcher.
+  const [expandedDiffFiles, setExpandedDiffFiles] = useState<Set<string>>(() => new Set());
   // When on, long diff lines wrap instead of overflowing horizontally. The
   // user can opt in per-session without leaving the panel.
-  const [diffWrap, setDiffWrap] = useState(false);
-  // Ref to the diff scroll container so the file list can scrollIntoView a
-  // specific file's diff card when the user taps a file in 'all' mode.
-  const diffScrollerRef = useRef<HTMLDivElement | null>(null);
+  const [diffWrap, setDiffWrap] = useState(true);
+  const [diffRefreshKey, setDiffRefreshKey] = useState(0);
+  const [runningGitAction, setRunningGitAction] = useState<{ action: GitActionKey; path?: string } | null>(null);
+  const [confirmGitAction, setConfirmGitAction] = useState<ConfirmGitAction | null>(null);
+  const [gitActionError, setGitActionError] = useState<string | null>(null);
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
   const isWide = !isMobile && drawerWidthPx >= WIDE_WIDTH_THRESHOLD_PX;
   const rightTab = useSidebarStore((s) => s.rightTab);
@@ -366,12 +470,9 @@ export function RightSidebar(
     setGitRefreshing(true);
     try {
       const bundle = await getGitBundle(rootPath);
-      const map = new Map<string, string>();
-      for (const f of bundle.files) {
-        map.set(f.absolutePath || f.path, f.status);
-      }
-      setChangedFiles(map);
+      setChangedFiles(toChangedFileMap(bundle.files));
       setGitContext(bundle.context);
+      setDiffRefreshKey((key) => key + 1);
       if (bundle.files.length > 0 && useSidebarStore.getState().selectedFilePath === null) {
         setRightTab('diff');
       }
@@ -395,11 +496,7 @@ export function RightSidebar(
       getGitBundle(rootPath ?? undefined)
         .then((bundle) => {
           if (cancelled) return;
-          const map = new Map<string, string>();
-          for (const f of bundle.files) {
-            map.set(f.absolutePath || f.path, f.status);
-          }
-          setChangedFiles(map);
+          setChangedFiles(toChangedFileMap(bundle.files));
           setGitContext(bundle.context);
           if (bundle.files.length > 0 && useSidebarStore.getState().selectedFilePath === null) {
             setRightTab('diff');
@@ -476,13 +573,14 @@ export function RightSidebar(
   }, [rootPath, t]);
 
   const changedSummary = useMemo(() => {
-    const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, other: 0 };
-    for (const status of changedFiles.values()) {
-      if (status === 'added') counts.added += 1;
-      else if (status === 'modified') counts.modified += 1;
-      else if (status === 'deleted') counts.deleted += 1;
-      else if (status === 'renamed') counts.renamed += 1;
+    const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, staged: 0, other: 0 };
+    for (const file of changedFiles.values()) {
+      if (file.status === 'added') counts.added += 1;
+      else if (file.status === 'modified') counts.modified += 1;
+      else if (file.status === 'deleted') counts.deleted += 1;
+      else if (file.status === 'renamed') counts.renamed += 1;
       else counts.other += 1;
+      if (file.staged) counts.staged += 1;
     }
     return counts;
   }, [changedFiles]);
@@ -491,7 +589,7 @@ export function RightSidebar(
     const query = deferredFileQuery.trim().toLowerCase();
     const entries = Array.from(changedFiles.entries()).sort(([a], [b]) => a.localeCompare(b));
     if (!query) return entries;
-    return entries.filter(([path, status]) => `${path} ${status}`.toLowerCase().includes(query));
+    return entries.filter(([path, file]) => `${path} ${file.path} ${file.status}`.toLowerCase().includes(query));
   }, [changedFiles, deferredFileQuery]);
 
   const gitContextText = useMemo(() => {
@@ -521,7 +619,7 @@ export function RightSidebar(
   }, [gitContext, rootPath]);
 
   const changedFileContextLines = useMemo(() => {
-    const files = gitContext?.changedFiles?.length ? gitContext.changedFiles : Array.from(changedFiles.entries()).map(([path, status]) => ({ path, absolutePath: path, status }));
+    const files = gitContext?.changedFiles?.length ? gitContext.changedFiles : Array.from(changedFiles.values());
     return files
       .slice(0, MAX_CONTEXT_PACK_FILES)
       .map((file) => `- ${file.status} ${buildPromptReference(file.absolutePath || file.path, rootPath)}`);
@@ -548,7 +646,7 @@ export function RightSidebar(
     if (!deferredFileQuery.trim()) return '';
     const results = filteredChangedFiles
       .slice(0, MAX_CONTEXT_PACK_FILES)
-      .map(([path, status]) => `- ${status} ${buildPromptReference(path, rootPath)}`);
+      .map(([path, file]) => `- ${file.status} ${buildPromptReference(path, rootPath)}`);
     return results.length > 0 ? `${results.join('\n')}\n` : '';
   }, [deferredFileQuery, filteredChangedFiles, rootPath]);
 
@@ -571,34 +669,92 @@ export function RightSidebar(
     setRightTab('diff');
   }, [selectFile, setRightTab]);
 
+  const toggleDiffFile = useCallback((path: string) => {
+    setExpandedDiffFiles((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    selectFile(path);
+    setRightTab('diff');
+  }, [selectFile, setRightTab]);
+
+  const applyGitBundle = useCallback((bundle: GitBundleResponse) => {
+    setChangedFiles(toChangedFileMap(bundle.files));
+    setGitContext(bundle.context);
+    setDiffRefreshKey((key) => key + 1);
+    const current = useSidebarStore.getState().selectedFilePath;
+    if (current && !bundle.files.some((file) => file.path === current || file.absolutePath === current)) {
+      selectFile(null);
+    }
+    setExpandedDiffFiles((expanded) => {
+      const valid = new Set(bundle.files.map((file) => file.path));
+      const next = new Set<string>();
+      for (const path of expanded) {
+        if (valid.has(path)) next.add(path);
+      }
+      return next;
+    });
+  }, [selectFile, setChangedFiles]);
+
+  const runSidebarGitAction = useCallback(async (request: GitActionRequest, label: string, pathForBusy?: string) => {
+    setGitActionError(null);
+    setRunningGitAction({ action: request.action, path: pathForBusy });
+    try {
+      const result = await runGitAction(request);
+      applyGitBundle(result.bundle);
+      setLastInsertedReference(t('rightSidebar.gitActionSucceeded', { label }));
+      window.setTimeout(() => setLastInsertedReference((current) => (
+        current === t('rightSidebar.gitActionSucceeded', { label }) ? null : current
+      )), 1400);
+      setConfirmGitAction(null);
+    } catch (err) {
+      setGitActionError(t('rightSidebar.gitActionFailed', { message: err instanceof Error ? err.message : 'Unknown error' }));
+    } finally {
+      setRunningGitAction(null);
+    }
+  }, [applyGitBundle, t]);
+
+  const buildGitActionButtons = useCallback((file: GitChangedFile): GitActionButton[] => {
+    if (!rootPath) return [];
+    const buttons: GitActionButton[] = [];
+    if (file.canStage) {
+      buttons.push({
+        key: 'stage-file',
+        label: t('rightSidebar.stageFile'),
+        onClick: () => void runSidebarGitAction({ action: 'stage-file', cwd: rootPath, paths: [file.path] }, t('rightSidebar.stageFile'), file.path),
+      });
+    }
+    if (file.canUnstage) {
+      buttons.push({
+        key: 'unstage-file',
+        label: t('rightSidebar.unstageFile'),
+        onClick: () => void runSidebarGitAction({ action: 'unstage-file', cwd: rootPath, paths: [file.path] }, t('rightSidebar.unstageFile'), file.path),
+      });
+    }
+    if (file.canStash) {
+      buttons.push({
+        key: 'stash-file',
+        label: t('rightSidebar.stashFile'),
+        onClick: () => void runSidebarGitAction({ action: 'stash-file', cwd: rootPath, paths: [file.path] }, t('rightSidebar.stashFile'), file.path),
+      });
+    }
+    if (file.canRestoreWorktree) {
+      buttons.push({
+        key: 'restore-worktree-file',
+        label: t('rightSidebar.restoreFile'),
+        destructive: true,
+        onClick: () => setConfirmGitAction({ kind: 'restore', file, phrase: '' }),
+      });
+    }
+    return buttons;
+  }, [rootPath, runSidebarGitAction, t]);
+
   const closeFilePreview = useCallback(() => {
     selectFile(null);
     setLineRange(null);
   }, [selectFile]);
-
-  const closeDiffView = useCallback(() => {
-    selectFile(null);
-    setLineRange(null);
-  }, [selectFile]);
-
-  // In 'all' mode, tapping a file in the list scrolls the diff scroller to
-  // that file's card. DiffViewer tags each file with `data-diff-file-anchor`
-  // (its newPath or oldPath). Falls back to oldPath when a file is new.
-  const scrollToDiffFile = useCallback((path: string) => {
-    const container = diffScrollerRef.current;
-    if (!container) return;
-    const target = container.querySelector<HTMLElement>(
-      `[data-diff-file-anchor="${CSS.escape(path)}"]`,
-    );
-    if (!target) return;
-    // Compute the scroll position manually so we land the file card just
-    // below the sticky toggle bar instead of at the very top of the
-    // container (where the file header would be clipped by the bar).
-    const containerRect = container.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    const top = container.scrollTop + (targetRect.top - containerRect.top);
-    container.scrollTo({ top, behavior: 'smooth' });
-  }, []);
 
   return (
     <Sidebar
@@ -715,6 +871,31 @@ export function RightSidebar(
             )}
             {changedSummary.renamed > 0 && (
               <span className="rounded bg-background-subtle px-1.5 py-0.5 text-muted-foreground">{changedSummary.renamed}R</span>
+            )}
+            {changedSummary.staged > 0 && (
+              <span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">已暂存 {changedSummary.staged}</span>
+            )}
+            {gitContext?.available && rootPath && changedFiles.size > 0 && (
+              <button
+                type="button"
+                onClick={() => void runSidebarGitAction({ action: 'stage-all', cwd: rootPath }, t('rightSidebar.stageAll'))}
+                disabled={Boolean(runningGitAction)}
+                className="rounded-full bg-accent/10 px-2 py-0.5 font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+                title={t('rightSidebar.stageAll')}
+              >
+                {t('rightSidebar.stageAll')}
+              </button>
+            )}
+            {gitContext?.available && rootPath && changedFiles.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setConfirmGitAction({ kind: 'stash-all' })}
+                disabled={Boolean(runningGitAction)}
+                className="rounded-full bg-background-subtle px-2 py-0.5 font-medium text-foreground hover:bg-surface-2 disabled:opacity-50"
+                title={t('rightSidebar.stashAll')}
+              >
+                {t('rightSidebar.stashAll')}
+              </button>
             )}
             {gitContext?.available && (
               <>
@@ -869,6 +1050,11 @@ export function RightSidebar(
             {t('rightSidebar.insertedToast', { label: lastInsertedReference })}
           </div>
         )}
+        {gitActionError && (
+          <div className="mx-1 mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
+            {gitActionError}
+          </div>
+        )}
       </div>
 
       {/* Content */}
@@ -963,38 +1149,44 @@ export function RightSidebar(
                   </div>
                 ) : (
                   <div className="space-y-px">
-                    {filteredChangedFiles.map(([absolutePath, status]) => {
+                    {filteredChangedFiles.map(([absolutePath, file]) => {
                       const display = getRelativeDisplayPath(absolutePath, rootPath);
-                      const relativePath = rootPath && absolutePath.startsWith(`${rootPath}/`) ? absolutePath.slice(rootPath.length + 1) : absolutePath;
+                      const relativePath = file.path;
                       const isSelected = selectedFilePath === relativePath || selectedFilePath === absolutePath;
+                      const actions = buildGitActionButtons(file);
                       return (
-                        <button
+                        <div
                           key={absolutePath}
-                          type="button"
-                          onClick={() => selectDiffFile(relativePath)}
-                          className={`group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition active:scale-[0.99] ${
+                          className={`group rounded-lg px-2 py-1.5 transition ${
                             isSelected
                               ? 'bg-surface-elevated text-foreground'
                               : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
                           }`}
                           title={absolutePath}
                         >
-                          <ChangeBadge status={status} />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[12px] font-medium">{display.name}</span>
-                            {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
-                          </span>
-                          <span
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              insertPathReference(absolutePath);
-                            }}
-                            className="inline-flex h-6 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100"
-                            title={t('rightSidebar.insertThisFile')}
+                          <button
+                            type="button"
+                            onClick={() => selectDiffFile(relativePath)}
+                            className="flex w-full items-center gap-2 text-left active:scale-[0.99]"
                           >
-                            {t('rightSidebar.insertFileRef')}
-                          </span>
-                        </button>
+                            <ChangeBadge status={file.status} />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[12px] font-medium">{display.name}</span>
+                              {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
+                            </span>
+                          </button>
+                          <div className="mt-1 flex items-center justify-between gap-1 pl-6">
+                            <GitActionChips actions={actions} running={runningGitAction} />
+                            <button
+                              type="button"
+                              onClick={() => insertPathReference(absolutePath)}
+                              className="ml-auto inline-flex h-6 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100"
+                              title={t('rightSidebar.insertThisFile')}
+                            >
+                              {t('rightSidebar.insertFileRef')}
+                            </button>
+                          </div>
+                        </div>
                       );
                     })}
                   </div>
@@ -1002,55 +1194,23 @@ export function RightSidebar(
               </div>
             </div>
             <div className="min-w-0 flex-1 overflow-y-auto overscroll-contain">
-              <DiffViewer filePath={selectedFilePath} onInsertDiffReference={insertContextText} />
+              <DiffViewer filePath={selectedFilePath} reloadKey={diffRefreshKey} onInsertDiffReference={insertContextText} />
             </div>
           </div>
         ) : (
-          // Narrow changes view: stacked. The view-mode + wrap toggles at
-          // the top let the user switch between seeing all file diffs at
-          // once (default, phone-friendly) and the old single-file flow.
+          // Narrow changes view: a single QQ-style grouped list. Each changed
+          // file is the group row; tapping it expands/collapses the inline diff.
           <div className="flex h-full min-h-0 flex-col overflow-hidden">
             {changedFiles.size > 0 && (
-              <>
-                {/* View mode + wrap toggle bar — sticky at the top of the
-                    content so it stays reachable as the diff scroller moves. */}
-                <div className="shrink-0 flex items-center justify-between gap-2 border-b border-border/15 px-3 py-2">
-                  <div
-                    role="tablist"
-                    aria-label={t('rightSidebar.viewModeAll')}
-                    className="flex items-center gap-0.5 rounded-full bg-background-subtle p-0.5"
-                  >
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={diffViewMode === 'all'}
-                      onClick={() => {
-                        setDiffViewMode('all');
-                        // Switching to 'all' should not leave a stale file
-                        // selected from the previous 'single' session.
-                        if (selectedFilePath) selectDiffFile(null);
-                      }}
-                      className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:scale-[0.98] ${
-                        diffViewMode === 'all'
-                          ? 'bg-surface-elevated text-foreground shadow-sm'
-                          : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      {t('rightSidebar.viewModeAll')}
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={diffViewMode === 'single'}
-                      onClick={() => setDiffViewMode('single')}
-                      className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:scale-[0.98] ${
-                        diffViewMode === 'single'
-                          ? 'bg-surface-elevated text-foreground shadow-sm'
-                          : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      {t('rightSidebar.viewModeSingle')}
-                    </button>
+              <div className="shrink-0 border-b border-border/15 px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                      {t('rightSidebar.allChanges')}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-muted-foreground">
+                      {filteredChangedFiles.length}/{changedFiles.size}
+                    </div>
                   </div>
                   <button
                     type="button"
@@ -1067,113 +1227,152 @@ export function RightSidebar(
                     <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
                   </button>
                 </div>
-
-                {/* File list — behavior depends on view mode:
-                      • 'all'   → click scrolls the diff scroller to that file
-                      • 'single' → click makes it the only file shown
-                    The list stays visible in both modes so the user can
-                    switch/jump at any time without going through a "back" hop. */}
-                {diffViewMode === 'single' && selectedFilePath ? (
-                  <div className="shrink-0 flex items-center gap-2 border-b border-border/15 px-3 py-2">
-                    <button
-                      type="button"
-                      onClick={closeDiffView}
-                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-                      aria-label={t('rightSidebar.backToChangeList')}
-                      title={t('common.back')}
-                    >
-                      <RiArrowLeft size={14} />
-                    </button>
-                    <span className="truncate text-[12px] font-medium text-foreground">
-                      {t('rightSidebar.viewDiff')}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="shrink-0 border-b border-border/15 px-3 py-2">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                        {t('rightSidebar.allChanges')}
-                      </span>
-                      <span className="text-[10px] text-muted-foreground">
-                        {filteredChangedFiles.length}/{changedFiles.size}
-                      </span>
-                    </div>
-                    <div className="space-y-px">
-                      {filteredChangedFiles.length === 0 ? (
-                        <div className="bg-background-subtle px-3 py-4 text-center text-xs text-muted-foreground">
-                          {t('rightSidebar.noMatchingChanges')}
-                        </div>
-                      ) : filteredChangedFiles.map(([absolutePath, status]) => {
-                        const display = getRelativeDisplayPath(absolutePath, rootPath);
-                        const relativePath = rootPath && absolutePath.startsWith(`${rootPath}/`) ? absolutePath.slice(rootPath.length + 1) : absolutePath;
-                        const isSelected = diffViewMode === 'single' && (
-                          selectedFilePath === relativePath || selectedFilePath === absolutePath
-                        );
-                        return (
-                          <button
-                            key={absolutePath}
-                            type="button"
-                            onClick={() => {
-                              if (diffViewMode === 'all') {
-                                scrollToDiffFile(relativePath);
-                              } else {
-                                selectDiffFile(relativePath);
-                              }
-                            }}
-                            className={`group flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition active:scale-[0.99] ${
-                              isSelected
-                                ? 'bg-surface-elevated text-foreground'
-                                : 'hover:bg-surface-2'
-                            }`}
-                            title={absolutePath}
-                          >
-                            <ChangeBadge status={status} />
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-xs font-medium">{display.name}</span>
-                              {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
-                            </span>
-                            <span
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                insertPathReference(absolutePath);
-                              }}
-                              className="inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary transition active:scale-95 sm:h-6 sm:min-w-8 md:opacity-0 md:group-hover:opacity-100"
-                              title={t('rightSidebar.insertThisFile')}
-                            >
-                              {t('rightSidebar.insertFileRef')}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </>
+              </div>
             )}
-            <div
-              ref={diffScrollerRef}
-              className="min-h-0 flex-1 overflow-y-auto"
-            >
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-2">
               {changedFiles.size === 0 ? (
                 <div className="px-3 py-6 text-center text-xs text-muted-foreground">
                   {t('rightSidebar.noChanges')}
                 </div>
-              ) : diffViewMode === 'single' && !selectedFilePath ? (
-                <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-                  {t('rightSidebar.selectFileForDiff')}
+              ) : filteredChangedFiles.length === 0 ? (
+                <div className="bg-background-subtle px-3 py-4 text-center text-xs text-muted-foreground">
+                  {t('rightSidebar.noMatchingChanges')}
                 </div>
               ) : (
-                <DiffViewer
-                  filePath={diffViewMode === 'all' ? null : selectedFilePath}
-                  wrap={diffWrap}
-                  showScrollHint
-                  onInsertDiffReference={insertContextText}
-                />
+                <div className="space-y-1.5 pt-2">
+                  {filteredChangedFiles.map(([absolutePath, file]) => {
+                    const display = getRelativeDisplayPath(absolutePath, rootPath);
+                    const relativePath = file.path;
+                    const isExpanded = expandedDiffFiles.has(relativePath);
+                    const isSelected = selectedFilePath === relativePath || selectedFilePath === absolutePath;
+                    const actions = buildGitActionButtons(file);
+                    return (
+                      <section
+                        key={absolutePath}
+                        className={`relative scroll-mt-2 rounded-xl border transition ${
+                          isExpanded
+                            ? 'border-primary/25 bg-surface-elevated shadow-sm'
+                            : 'overflow-hidden border-border/15 bg-surface hover:border-border/30'
+                        }`}
+                      >
+                        <div
+                          className={`sticky -top-px z-20 flex w-full items-center gap-1 rounded-t-xl ${
+                            isExpanded ? 'border-b border-border/15 bg-surface-elevated shadow-sm' : ''
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => toggleDiffFile(relativePath)}
+                            aria-expanded={isExpanded}
+                            className="group flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2.5 text-left transition active:scale-[0.99]"
+                            title={absolutePath}
+                          >
+                            <span className={`shrink-0 text-muted-foreground transition-transform ${isExpanded ? 'rotate-0' : ''}`}>
+                              {isExpanded ? <RiChevronDown size={15} /> : <RiChevronRight size={15} />}
+                            </span>
+                            <ChangeBadge status={file.status} />
+                            <span className="min-w-0 flex-1">
+                              <span className={`block truncate text-[13px] ${isSelected || isExpanded ? 'font-semibold text-foreground' : 'font-medium text-foreground'}`}>{display.name}</span>
+                              {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              insertPathReference(absolutePath);
+                            }}
+                            className="mr-2 inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary transition active:scale-95 sm:h-6 sm:min-w-8 md:opacity-0 md:group-hover:opacity-100"
+                            title={t('rightSidebar.insertThisFile')}
+                          >
+                            {t('rightSidebar.insertFileRef')}
+                          </button>
+                        </div>
+                        {actions.length > 0 && (
+                          <div className="flex border-t border-border/10 px-2 py-1.5">
+                            <GitActionChips actions={actions} running={runningGitAction} />
+                          </div>
+                        )}
+                        {isExpanded && (
+                          <div>
+                            <DiffViewer
+                              filePath={relativePath}
+                              wrap={diffWrap}
+                              showScrollHint={!diffWrap}
+                              reloadKey={diffRefreshKey}
+                              embedded
+                              onInsertDiffReference={insertContextText}
+                            />
+                          </div>
+                        )}
+                      </section>
+                    );
+                  })}
+                </div>
               )}
             </div>
           </div>
         )}
       </div>
+        {confirmGitAction && (
+          <div className="fixed inset-0 z-[70] bg-[rgba(0,0,0,0.42)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>
+            <div
+              className="fixed inset-x-3 bottom-6 mx-auto max-w-md rounded-2xl border border-border/20 bg-surface-elevated p-4 shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="text-sm font-semibold text-foreground">
+                {confirmGitAction.kind === 'restore' ? t('rightSidebar.confirmRestoreTitle') : t('rightSidebar.confirmStashAllTitle')}
+              </div>
+              <div className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                {confirmGitAction.kind === 'restore'
+                  ? t('rightSidebar.confirmRestoreDescription', { path: buildFileReference(confirmGitAction.file.absolutePath, rootPath) })
+                  : t('rightSidebar.confirmStashAllDescription')}
+              </div>
+              {confirmGitAction.kind === 'restore' && (
+                <input
+                  value={confirmGitAction.phrase}
+                  onChange={(event) => setConfirmGitAction({ ...confirmGitAction, phrase: event.target.value })}
+                  placeholder={t('rightSidebar.confirmRestorePlaceholder')}
+                  className="mt-3 w-full rounded-xl border border-border/20 bg-background-subtle px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
+                  autoFocus
+                />
+              )}
+              <div className="mt-4 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmGitAction(null)}
+                  className="rounded-full bg-background-subtle px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(runningGitAction) || (confirmGitAction.kind === 'restore' && confirmGitAction.phrase.trim() !== t('rightSidebar.confirmRestorePhrase'))}
+                  onClick={() => {
+                    if (!rootPath) return;
+                    if (confirmGitAction.kind === 'restore') {
+                      void runSidebarGitAction({
+                        action: 'restore-worktree-file',
+                        cwd: rootPath,
+                        paths: [confirmGitAction.file.path],
+                        confirm: { acknowledged: true, phrase: confirmGitAction.phrase },
+                      }, t('rightSidebar.restoreFile'), confirmGitAction.file.path);
+                    } else {
+                      void runSidebarGitAction({ action: 'stash-all', cwd: rootPath }, t('rightSidebar.stashAll'));
+                    }
+                  }}
+                  className={`rounded-full px-3 py-1.5 text-xs font-semibold disabled:opacity-50 ${
+                    confirmGitAction.kind === 'restore'
+                      ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
+                      : 'bg-primary text-primary-foreground hover:bg-primary/90'
+                  }`}
+                >
+                  {runningGitAction ? t('rightSidebar.gitActionRunning') : t('rightSidebar.confirmAction')}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
     </Sidebar>
   );
 }

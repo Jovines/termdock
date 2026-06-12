@@ -1171,6 +1171,35 @@ export async function resetProgramDetection(): Promise<ProgramDetectionConfig> {
 
 // ---- Filesystem API ----
 
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+};
+
+export function getImageMimeTypeForPath(filePath: string): string | null {
+  const dotIndex = filePath.lastIndexOf('.');
+  if (dotIndex < 0) return null;
+  return IMAGE_MIME_BY_EXT[filePath.slice(dotIndex).toLowerCase()] ?? null;
+}
+
+export function isPreviewableImagePath(filePath: string): boolean {
+  return getImageMimeTypeForPath(filePath) !== null;
+}
+
+export interface ImagePreviewBlob {
+  blob: Blob;
+  path: string;
+  size: number | null;
+  modified: string | null;
+  mimeType: string;
+}
+
 export interface FileEntry {
   name: string;
   path: string;
@@ -1188,15 +1217,33 @@ export async function listDirectory(dirPath: string): Promise<{ path: string; en
   return response.json();
 }
 
-export async function readFileContent(filePath: string): Promise<{
+export async function readFileContent(filePath: string, signal?: AbortSignal): Promise<{
   path: string; content: string; size: number; modified: string; truncated?: boolean;
 }> {
-  const response = await fetch(`/api/terminal/fs/read?path=${encodeURIComponent(filePath)}`);
+  const response = await fetch(`/api/terminal/fs/read?path=${encodeURIComponent(filePath)}`, { signal });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to read file' }));
     throw new Error(error.error || 'Failed to read file');
   }
   return response.json();
+}
+
+export async function readImagePreviewBlob(filePath: string, signal?: AbortSignal): Promise<ImagePreviewBlob> {
+  const response = await fetch(`/api/terminal/fs/blob?path=${encodeURIComponent(filePath)}`, { signal });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to load image preview' }));
+    throw new Error(error.error || 'Failed to load image preview');
+  }
+
+  const blob = await response.blob();
+  const sizeHeader = response.headers.get('Content-Length');
+  return {
+    blob,
+    path: filePath,
+    size: sizeHeader ? Number(sizeHeader) : null,
+    modified: response.headers.get('Last-Modified'),
+    mimeType: response.headers.get('Content-Type') || blob.type || getImageMimeTypeForPath(filePath) || 'application/octet-stream',
+  };
 }
 
 export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: string): Promise<{
@@ -1215,7 +1262,7 @@ export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: str
 }
 
 export async function getDiffFileList(cwd?: string): Promise<{
-  files: Array<{ path: string; absolutePath: string; status: string; oldPath?: string }>;
+  files: GitChangedFile[];
   error?: string;
 }> {
   const params = new URLSearchParams();
@@ -1227,6 +1274,25 @@ export async function getDiffFileList(cwd?: string): Promise<{
     throw new Error(error.error || 'Failed to get diff file list');
   }
   return response.json();
+}
+
+export type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked' | 'conflicted' | 'unknown';
+
+export interface GitChangedFile {
+  path: string;
+  absolutePath: string;
+  status: GitChangeStatus;
+  oldPath?: string;
+  indexStatus?: string;
+  worktreeStatus?: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  tracked: boolean;
+  canStage: boolean;
+  canUnstage: boolean;
+  canStash: boolean;
+  canRestoreWorktree: boolean;
 }
 
 export interface GitContextFile {
@@ -1260,12 +1326,30 @@ export async function getGitContext(cwd?: string): Promise<GitContext> {
 }
 
 // Combined payload for sidebar open — saves a round-trip and a git rev-parse.
-export async function getGitBundle(cwd?: string, signal?: AbortSignal): Promise<{
+export interface GitBundleResponse {
   available: boolean;
-  files: Array<{ path: string; absolutePath: string; status: string; oldPath?: string }>;
+  files: GitChangedFile[];
   context: GitContext | null;
   error?: string;
-}> {
+}
+
+export type GitActionRequest =
+  | { action: 'stage-file'; cwd: string; paths: [string] }
+  | { action: 'stage-all'; cwd: string }
+  | { action: 'unstage-file'; cwd: string; paths: [string] }
+  | { action: 'stash-file'; cwd: string; paths: [string]; message?: string }
+  | { action: 'stash-all'; cwd: string; message?: string }
+  | { action: 'restore-worktree-file'; cwd: string; paths: [string]; confirm: { acknowledged: true; phrase: string } };
+
+export interface GitActionResponse {
+  ok: true;
+  action: GitActionRequest['action'];
+  message: string;
+  output?: string;
+  bundle: GitBundleResponse;
+}
+
+export async function getGitBundle(cwd?: string, signal?: AbortSignal): Promise<GitBundleResponse> {
   const params = new URLSearchParams();
   if (cwd) params.set('cwd', cwd);
   const qs = params.toString();
@@ -1273,6 +1357,23 @@ export async function getGitBundle(cwd?: string, signal?: AbortSignal): Promise<
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get git bundle' }));
     throw new Error(error.error || 'Failed to get git bundle');
+  }
+  return response.json();
+}
+
+export async function runGitAction(request: GitActionRequest): Promise<GitActionResponse> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/fs/git-action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Git action failed' }));
+    const message = error.confirmationPhrase
+      ? `${error.error || 'Git action failed'} (${error.confirmationPhrase})`
+      : error.error || 'Git action failed';
+    throw new Error(message);
   }
   return response.json();
 }

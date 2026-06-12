@@ -314,10 +314,7 @@ function App() {
           const state = useSidebarStore.getState();
           if (state.rootPath !== cwd) return;
           if (state.changedFiles.size > 0) return;
-          const map = new Map<string, string>();
-          for (const f of bundle.files) {
-            map.set(f.absolutePath || f.path, f.status);
-          }
+          const map = new Map(bundle.files.map((f) => [f.absolutePath || f.path, f]));
           state.setChangedFiles(map);
         }).catch(() => { /* ignore — not a git repo */ });
       });

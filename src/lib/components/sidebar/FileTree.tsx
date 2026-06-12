@@ -39,7 +39,8 @@ function getFileIcon(name: string, type: 'file' | 'directory' | 'symlink') {
 function ChangeBadge({ path }: { path: string }) {
   // 精确订阅：只关心这一条 path 的状态字符串。
   // 其他 path 变化不会触发本组件 re-render。
-  const status = useSidebarStore((s) => s.changedFiles.get(path));
+  const file = useSidebarStore((s) => s.changedFiles.get(path));
+  const status = file?.status;
   if (!status) return null;
   const style = CHANGE_STYLES[status] ?? { label: '?', className: 'text-muted-foreground', title: status };
   return (

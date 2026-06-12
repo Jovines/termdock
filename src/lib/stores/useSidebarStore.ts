@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { GitChangedFile } from '../terminal/api';
 
 export interface FileTreeNode {
   name: string;
@@ -23,14 +24,8 @@ interface SidebarState {
   selectedFilePath: string | null;
   directoryCache: Map<string, FileTreeNode[]>;
 
-  // Diff state
-  diffFilePath: string | null;
-  diffContent: string | null;
-  diffLoading: boolean;
-  diffError: string | null;
-
-  // Changed files (from git diff --name-status)
-  changedFiles: Map<string, string>;
+  // Changed files (from git status/diff)
+  changedFiles: Map<string, GitChangedFile>;
 
   // Git bundle loading state (for right sidebar UX)
   gitBundleLoading: boolean;
@@ -51,8 +46,7 @@ interface SidebarState {
   toggleExpanded: (path: string) => void;
   selectFile: (path: string | null) => void;
   setDirectoryCache: (path: string, entries: FileTreeNode[]) => void;
-  setDiff: (filePath: string | null, content: string | null, loading: boolean, error: string | null) => void;
-  setChangedFiles: (files: Map<string, string>) => void;
+  setChangedFiles: (files: Map<string, GitChangedFile>) => void;
   setGitBundleLoading: (loading: boolean) => void;
   setGitBundleSlow: (slow: boolean) => void;
   setGitBundleError: (error: string | null) => void;
@@ -67,10 +61,6 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   expandedPaths: new Set(),
   selectedFilePath: null,
   directoryCache: new Map(),
-  diffFilePath: null,
-  diffContent: null,
-  diffLoading: false,
-  diffError: null,
   changedFiles: new Map(),
   gitBundleLoading: false,
   gitBundleSlow: false,
@@ -93,10 +83,6 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       expandedPaths: new Set(),
       selectedFilePath: null,
       directoryCache: new Map(),
-      diffFilePath: null,
-      diffContent: null,
-      diffLoading: false,
-      diffError: null,
       changedFiles: new Map(),
       gitBundleLoading: false,
       gitBundleSlow: false,
@@ -121,9 +107,6 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       next.set(path, entries);
       return { directoryCache: next };
     }),
-
-  setDiff: (filePath, content, loading, error) =>
-    set({ diffFilePath: filePath, diffContent: content, diffLoading: loading, diffError: error }),
 
   setChangedFiles: (files) => set({ changedFiles: files }),
   setGitBundleLoading: (loading) => set({ gitBundleLoading: loading }),
