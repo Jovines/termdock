@@ -2,8 +2,6 @@ import React from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
-import { Unicode11Addon } from '@xterm/addon-unicode11';
-import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalTheme } from '../../terminal';
@@ -192,7 +190,7 @@ export type RefreshReason =
   | 'resize'                 // ResizeObserver / 视口高度变化
   | 'dpr-change'             // devicePixelRatio 变化
   | 'tmux-layout'            // tmux 服务端报上来的布局
-  | 'session-key-change'     // sessionKey 变化（切到别的 session）
+  | 'session-key-change'     // 后端 terminalSessionId 变化（auto-recreate / restart）
   | 'session-reset'          // 新 chunks 到达（replay / history restore）
   | 'buffer-reset'           // terminal.reset() 之后
   | 'clear'                  // 用户主动 clear（cmd-k）
@@ -234,7 +232,7 @@ export type TerminalController = {
   /**
    * 标记 WS 已收到 connected 事件，之后的 resize push 才会真正发出去。
    * 必须在 TerminalView 的 `connected` 事件回调里调一次。
-   * 切 session（session-key-change reason）会自动重置。
+   * 后端 session id 变化由 `session-key-change` refresh reason 额外处理。
    */
   setSessionReady: (ready: boolean) => void;
 };
@@ -264,7 +262,6 @@ interface TerminalViewportProps {
 }
 
 type LoadingState = 'loading' | 'ready' | 'error';
-const TEXTURE_ATLAS_REFRESH_DELAY_MS = 120;
 const FLOW_CONTROL_HIGH_WATERMARK = 500_000; // bytes — pause PTY above this
 const FLOW_CONTROL_LOW_WATERMARK = 100_000;  // bytes — resume PTY below this
 const INPUT_BLUR_GUARD_ACTIVE_MS = 260;
@@ -408,10 +405,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // 每次新建 renderer 时由 enableWebglRenderer 置回 false。recoverRenderer
     // 只在确认死了时才走 dispose+recreate，避免盲拆活上下文导致一帧空白。
     const webglContextLostRef = React.useRef(false);
-    const textureAtlasRefreshTimerRef = React.useRef<number | null>(null);
     const lastDevicePixelRatioRef = React.useRef(
       typeof window !== 'undefined' ? window.devicePixelRatio : 1
     );
+    const lastBufferTypeRef = React.useRef<string | null>(null);
     const isComposingRef = React.useRef(false);
     // composition 刚结束的时间戳：IME 选词紧随 compositionend 之后会补发一记
     // keydown(Enter) / beforeinput(insertLineBreak)，我们用时间窗口吞掉。
@@ -1695,21 +1692,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
     }, [debugTerminal]);
 
-    const clearTextureAtlasRefreshTimer = React.useCallback(() => {
-      if (textureAtlasRefreshTimerRef.current === null) {
-        return;
-      }
-      window.clearTimeout(textureAtlasRefreshTimerRef.current);
-      textureAtlasRefreshTimerRef.current = null;
-    }, []);
-
     /**
-     * 立即同步清纹理图集 + 重绘所有行。
+     * 立即同步重绘所有行；如果当前是 WebGL renderer，则额外清理纹理图集。
      * 用于"必须刷"的关键时刻：从后台返回、切换 session、重建 renderer 后。
      * 不走 setTimeout 防抖，避免被后续高频事件无限推迟。
      */
     const refreshTextureAtlasNow = React.useCallback((reason: string) => {
-      clearTextureAtlasRefreshTimer();
       const addon = webglAddonRef.current;
       const terminal = terminalRef.current;
       if (!terminal) {
@@ -1729,24 +1717,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       } catch (error) {
         debugTerminal('texture atlas refresh (sync) failed', { reason, error });
       }
-    }, [clearTextureAtlasRefreshTimer, debugTerminal, sessionKey]);
-
-    const scheduleTextureAtlasRefresh = React.useCallback((reason: string) => {
-      if (typeof window === 'undefined') {
-        return;
-      }
-
-      clearTextureAtlasRefreshTimer();
-
-      textureAtlasRefreshTimerRef.current = window.setTimeout(() => {
-        textureAtlasRefreshTimerRef.current = null;
-        refreshTextureAtlasNow(reason);
-      }, TEXTURE_ATLAS_REFRESH_DELAY_MS);
-    }, [clearTextureAtlasRefreshTimer, refreshTextureAtlasNow, sessionKey]);
+    }, [debugTerminal]);
 
     const disposeWebglRenderer = React.useCallback((reason: string): boolean => {
-      clearTextureAtlasRefreshTimer();
-
       const contextLossDisposable = webglContextLossDisposableRef.current;
       if (contextLossDisposable) {
         try {
@@ -1767,7 +1740,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       webglAddonRef.current = null;
       debugTerminal('renderer disposed', { type: 'webgl', reason });
       return true;
-    }, [clearTextureAtlasRefreshTimer, debugTerminal]);
+    }, [debugTerminal]);
 
     const enableWebglRenderer = React.useCallback((terminal: Terminal, reason: string): boolean => {
       if (webglAddonRef.current) {
@@ -1806,13 +1779,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         rendererReadyRef.current = true;
         return true;
       } catch (error) {
-        debugTerminal('webgl load failed, fallback to canvas', {
+        debugTerminal('webgl load failed, fallback to dom renderer', {
           reason,
           error,
           mobile: enableTouchScroll,
           mode: rendererMode,
         });
-        // WebGL 失败后会落到 canvas renderer（init useEffect 会跑下面的
+        // WebGL 失败后会落到内置 DOM renderer（init useEffect 会跑下面的
         // 兜底分支并显式 setReady）。这里保持 false 即可。
         return false;
       }
@@ -1852,11 +1825,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pendingResizeTimerRef = React.useRef<number | null>(null);
     // last sent to server，first-fit immediate 路径用它做"和上次一样就不发"判定
     const lastServerSizeRef = React.useRef<{ cols: number; rows: number } | null>(null);
-    // 上次 fit 后 xterm 实际尺寸（用于 tmux candidateSize 防 shrink 等比较）
-    const lastFittedDimsRef = React.useRef<{ cols: number; rows: number } | null>(null);
     // 每个 reason 上一次处理的 dedupeKey（用于 tmux-layout 之类的服务端重复推送）
     const lastDedupeKeyRef = React.useRef<Map<RefreshReason, string>>(new Map());
-    // renderer 是否已就绪（enableWebglRenderer / canvas fallback 完成）
+    // renderer 是否已就绪（enableWebglRenderer / DOM fallback 完成）
     const rendererReadyRef = React.useRef(false);
     // session（WS）是否已 ready：必须等 WS connected 事件到达，pushResizeToServer
     // 才会真正发出去。否则 reload 后 ResizeObserver 在 ensureSession 跑完之前
@@ -1927,7 +1898,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }
 
         // 0) renderer 必须就绪（init useEffect 已经调过 enableWebglRenderer
-        //    或 canvas fallback）。否则这次 requestRefresh 是 useImperativeHandle
+        //    或 DOM fallback）。否则这次 requestRefresh 是 useImperativeHandle
         //    ref attach 早于 init useEffect 时跑出来的早期调用——直接 bail，
         //    后续的 mount/connected/tmux-layout 会再触发一次。
         if (!rendererReadyRef.current) {
@@ -1959,7 +1930,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             refreshTextureAtlasNow(`refresh:${reason}`);
           }
         } else {
-          // 上下文还活着或 canvas renderer：只清 atlas + 重绘
+          // 上下文还活着：直接全量重绘；WebGL 路径会顺带清 atlas
           refreshTextureAtlasNow(`refresh:${reason}`);
         }
 
@@ -1967,7 +1938,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         const before = { cols: terminal.cols, rows: terminal.rows };
         fitTerminal(`refresh:${reason}`);
         const after = { cols: terminal.cols, rows: terminal.rows };
-        lastFittedDimsRef.current = after;
 
         // 3) Resize push
         if (!options.skipResizePush) {
@@ -2025,11 +1995,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 里调也没问题，编排器会等下一帧再跑。
         }
 
-        // 0) session-key-change 强制重置所有跟踪状态（lastServerSize、lastFittedDims、
-        //    dedupe keys、pending rAF、pending timer），让下一个 session 的 first-fit 走 immediate 路径
+        // 0) session-key-change 只做状态复位，不额外触发 resize push 以外的副作用。
+        //    用于后端 terminalSessionId 变化（auto-recreate / restart）后，让下一次
+        //    first-fit 重新走 immediate 路径，把当前真实尺寸告诉新的 session。
         if (reason === 'session-key-change') {
           lastServerSizeRef.current = null;
-          lastFittedDimsRef.current = null;
           lastDedupeKeyRef.current.clear();
           cancelPendingResizeTimer();
           cancelAllPendingReasonRafs();
@@ -2074,11 +2044,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       };
     }, [sessionKey, cancelAllPendingReasonRafs, cancelPendingResizeTimer]);
 
-    // sessionKey 变化 = 切到别的 session = 重置 lastServerSize / lastFittedDims /
+    // sessionKey 变化 = 切到别的 session = 重置 lastServerSize /
     // dedupe keys / renderer-ready，让下一个 session 的 first-fit 走 immediate 路径
     React.useEffect(() => {
       lastServerSizeRef.current = null;
-      lastFittedDimsRef.current = null;
       lastDedupeKeyRef.current.clear();
       cancelPendingResizeTimer();
       // renderer 状态不在这里重置：disposeWebglRenderer 在 cleanup 跑，
@@ -2196,7 +2165,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             cursorInactiveStyle: 'bar',
             scrollback: onTmuxScroll ? 2000 : 5000,
             allowTransparency: false,
-            allowProposedApi: true,
             convertEol: terminalConvertEol,
             customGlyphs: true,
             rescaleOverlappingGlyphs: true,
@@ -2218,15 +2186,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             return dims;
           };
           terminal.loadAddon(fitAddon);
-          terminal.loadAddon(new Unicode11Addon());
-          terminal.unicode.activeVersion = '11';
-          terminal.loadAddon(new SearchAddon());
           terminal.loadAddon(new WebLinksAddon());
 
           localTerminal = terminal;
           terminalRef.current = terminal;
           fitAddonRef.current = fitAddon;
           lastDevicePixelRatioRef.current = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
+          lastBufferTypeRef.current = terminal.buffer.active.type;
 
           terminal.open(container);
 
@@ -2247,11 +2213,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           } else {
             debugTerminal('renderer', {
               type: 'dom',
-              reason: 'renderer-mode-canvas',
+              reason: 'renderer-mode-dom-fallback',
               mobile: enableTouchScroll,
               mode: rendererMode,
             });
-            // canvas 路径：xterm 自带 DOM renderer，没有"挂载"事件，terminal.open
+            // fallback 路径：xterm 当前走内置 DOM renderer，没有"挂载"事件，terminal.open
             // 已经渲染完一帧了，标记 ready 让 runRefreshSequence 放行。
             rendererReadyRef.current = true;
           }
@@ -2399,6 +2365,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 桌面端：让覆盖层 textarea 始终拥有焦点，xterm 自身的 textarea 不再
           // 接收键盘输入。这样三方中文输入法（搜狗/微信）的 composition 不会
           // 拦截 keystroke 后吞掉某个字母。
+          localDisposables.push(terminal.onRender(() => {
+            const nextBufferType = terminal.buffer.active.type;
+            if (lastBufferTypeRef.current !== nextBufferType) {
+              lastBufferTypeRef.current = nextBufferType;
+              refreshTextureAtlasNow(`buffer-type-change:${nextBufferType}`);
+            }
+            if (!enableTouchScroll) {
+              updateImeAnchorRef.current();
+            }
+          }));
+
           if (!enableTouchScroll) {
             try {
               const xtermTextarea = terminal.textarea;
@@ -2429,7 +2406,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             // IME 候选窗锚点跟随光标
             try {
               localDisposables.push(terminal.onCursorMove(() => updateImeAnchorRef.current()));
-              localDisposables.push(terminal.onRender(() => updateImeAnchorRef.current()));
               localDisposables.push(terminal.onResize(() => updateImeAnchorRef.current()));
             } catch { /* ignored */ }
           }
@@ -2443,19 +2419,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             })
           );
 
-          // buffer 切换(进出 alt-screen)立即同步刷一次 atlas。
-          // 触发场景:tmux 里打开/退出 vim/less/htop、进出 copy-mode、
-          // 切 pane 到一个跑 TUI 的 pane 等。WebGL renderer 在两个 buffer 之间
-          // 切换时 dirty rect 计算偶尔会漏一两行,残留旧字形,正好命中用户描述
-          // 的"某一部分像被冻死"。这里用 onBufferChange 兜一道,代价只是切
-          // buffer 时多刷一次,远低于 alt-screen 内任意一帧的代价。
-          try {
-            localDisposables.push(
-              terminal.buffer.onBufferChange(() => {
-                refreshTextureAtlasNow('buffer-change');
-              })
-            );
-          } catch { /* ignored */ }
+          const detectDevicePixelRatioChange = (source: 'resize-observer' | 'window-resize' | 'visual-viewport-resize') => {
+            const nextDevicePixelRatio = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
+            const dprChanged = Math.abs(nextDevicePixelRatio - lastDevicePixelRatioRef.current) > 0.001;
+            if (dprChanged) {
+              lastDevicePixelRatioRef.current = nextDevicePixelRatio;
+              debugTerminal('device pixel ratio changed', {
+                value: nextDevicePixelRatio,
+                source,
+              });
+            }
+            return dprChanged;
+          };
 
           localResizeObserver = new ResizeObserver((entries) => {
             const firstEntry = entries[0];
@@ -2466,12 +2441,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               });
             }
 
-            const nextDevicePixelRatio = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
-            const dprChanged = Math.abs(nextDevicePixelRatio - lastDevicePixelRatioRef.current) > 0.001;
-            if (dprChanged) {
-              lastDevicePixelRatioRef.current = nextDevicePixelRatio;
-              debugTerminal('device pixel ratio changed', { value: nextDevicePixelRatio });
-            }
+            const dprChanged = detectDevicePixelRatioChange('resize-observer');
 
             // ResizeObserver 触发：所有刷新都走编排器。
             //   - 普通 resize：reason='resize'，default debounce 90ms 推给服务端
@@ -2483,6 +2453,31 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             }
           });
           localResizeObserver.observe(container);
+
+          if (typeof window !== 'undefined') {
+            const handleWindowResize = () => {
+              if (detectDevicePixelRatioChange('window-resize')) {
+                requestRefresh('dpr-change', { resizeDebounceMs: 0 });
+              }
+            };
+            window.addEventListener('resize', handleWindowResize);
+            localDisposables.push({
+              dispose: () => window.removeEventListener('resize', handleWindowResize),
+            });
+
+            const visualViewport = window.visualViewport;
+            if (visualViewport) {
+              const handleVisualViewportResize = () => {
+                if (detectDevicePixelRatioChange('visual-viewport-resize')) {
+                  requestRefresh('dpr-change', { resizeDebounceMs: 0 });
+                }
+              };
+              visualViewport.addEventListener('resize', handleVisualViewportResize);
+              localDisposables.push({
+                dispose: () => visualViewport.removeEventListener('resize', handleVisualViewportResize),
+              });
+            }
+          }
 
           if (typeof window !== 'undefined') {
             // post-init 二次 fit：等一帧让 layout 真正稳定再算 cols/rows
@@ -2528,10 +2523,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
         disposeWebglRenderer('component-unmount');
         localTerminal?.dispose();
-        clearTextureAtlasRefreshTimer();
         terminalRef.current = null;
         fitAddonRef.current = null;
         viewportRef.current = null;
+        lastBufferTypeRef.current = null;
         lastReportedSizeRef.current = null;
         resetWriteState();
       };
@@ -2545,9 +2540,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       shouldUseWebgl,
       rendererMode,
       enableWebglRenderer,
-      scheduleTextureAtlasRefresh,
       disposeWebglRenderer,
-      clearTextureAtlasRefreshTimer,
       debugTerminal,
     ]);
 
