@@ -6,7 +6,7 @@ import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
 import { closeTerminal, killTmuxSession } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
-import type { TerminalRendererMode, TerminalEngine } from '../terminal/renderer';
+import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { createDebugLogger } from '../utils/debug';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
@@ -167,7 +167,6 @@ interface MultiTerminalViewProps {
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
-  engine?: TerminalEngine;
   toolbarPresets?: ToolbarPresetDefinition[];
   showDebug?: boolean;
   defaultSessionMode?: TerminalMode;
@@ -190,7 +189,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   fontFamily = 'var(--font-mono)',
   fontSize = 13,
   rendererMode = 'auto',
-  engine = 'xterm',
   toolbarPresets = [],
   showDebug,
   defaultSessionMode = 'shell',
@@ -528,7 +526,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       customName: session.customName === true,
       mode,
       tmuxSessionName,
-      termType: engine === 'ghostty' ? 'xterm-ghostty' : 'xterm-256color',
+      termType: 'xterm-256color',
     });
     const canonical = result.session;
     const terminalSession = result.terminalSession;
@@ -549,7 +547,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       mode: terminalSession.mode ?? canonical.mode,
       tmuxSessionName: terminalSession.tmuxSessionName ?? canonical.tmuxSessionName,
     };
-  }, [defaultSessionMode, defaultTmuxSessionName, debugSession, engine, openSession]);
+  }, [defaultSessionMode, defaultTmuxSessionName, debugSession, openSession]);
 
   // 恢复会话（尝试复用现有 session）- 只执行一次
   useEffect(() => {
@@ -724,7 +722,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         mode,
         tmuxSessionName,
         cwd: effectiveCwd,
-        termType: engine === 'ghostty' ? 'xterm-ghostty' : 'xterm-256color',
+        termType: 'xterm-256color',
       });
       const canonical = result.session;
       const terminalSession = result.terminalSession;
@@ -764,7 +762,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);
     }
-  }, [defaultSessionMode, defaultTmuxSessionName, activeSessionId, openSession, debugSession, engine]);
+  }, [defaultSessionMode, defaultTmuxSessionName, activeSessionId, openSession, debugSession]);
   handleNewSessionRef.current = handleNewSession;
 
   // Handle session switching from custom event
@@ -1027,7 +1025,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                 fontFamily={fontFamily}
                 fontSize={fontSize}
                 rendererMode={rendererMode}
-                engine={engine}
                 toolbarPresets={toolbarPresets}
                 isActive={index === activeSessionIndex}
                 focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}

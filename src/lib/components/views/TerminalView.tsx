@@ -13,7 +13,7 @@ import { buildDesktopToolbarPresetOptions, buildToolbarPresetOptions, decodeTool
 import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
-import type { TerminalRendererMode, TerminalEngine } from '../../terminal/renderer';
+import type { TerminalRendererMode } from '../../terminal/renderer';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 
 const TERMINAL_FONT_SIZE = 10;
@@ -39,7 +39,6 @@ interface TerminalViewProps {
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
-  engine?: TerminalEngine;
   toolbarPresets?: ToolbarPresetDefinition[];
   isActive?: boolean;
   focusRequestToken?: number;
@@ -55,7 +54,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   fontFamily = 'var(--font-mono)',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
   rendererMode = 'auto',
-  engine = 'xterm',
   toolbarPresets: configuredToolbarPresets = [],
   isActive = true,
   focusRequestToken = 0,
@@ -852,6 +850,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             const session = await terminal.createSession({
               mode: modeForNewSession,
               tmuxSessionName: modeForNewSession === 'tmux' ? tmuxSessionNameForNewSession : undefined,
+              termType: 'xterm-256color',
             });
             debugSession(`[ensureSession] Created new session ${session.sessionId}`);
 
@@ -942,6 +941,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const session = await terminal.createSession({
         mode: sessionMode,
         tmuxSessionName: sessionMode === 'tmux' ? preferredTmuxSessionName : undefined,
+        termType: 'xterm-256color',
       });
       setTerminalSession(sessionId, session);
       void updateSessionInventoryEntry(sessionId, {
@@ -1364,7 +1364,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       skipScrollToBottom: !isViewportKeyboardOpen,
       force: true,
     });
-  }, [isActive, isMobile, isViewportKeyboardOpen, viewportKeyboardHeight, engine, sessionId]);
+  }, [isActive, isMobile, isViewportKeyboardOpen, viewportKeyboardHeight, sessionId]);
 
   const isKeyboardVisible = isMobile || (isActive && toolbarPreset.showOnDesktop === true);
   const isKeyboardInteractive = isActive;
@@ -1439,7 +1439,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               } : undefined}
               onInputFocusChange={handleInputFocusChange}
               rendererMode={rendererMode}
-              engine={engine}
               theme={xtermTheme}
               fontFamily={fontFamily}
               fontSize={fontSize}

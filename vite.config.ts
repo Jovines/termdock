@@ -79,20 +79,6 @@ export default defineConfig({
               networkTimeoutSeconds: 10,
             },
           },
-          // ghostty-web chunk + 内嵌 wasm：404KB，发布后基本不变。
-          // CacheFirst 让重复访问秒开；不依赖 precache（manualChunks 是动态入口）。
-          {
-            urlPattern: /\/assets\/ghostty[-.].*\.(js|wasm)$/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'ghostty-bundle',
-              expiration: {
-                maxEntries: 8,
-                maxAgeSeconds: 30 * 24 * 60 * 60, // 30 天
-              },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
         ],
       },
     }),
@@ -130,20 +116,8 @@ export default defineConfig({
         manualChunks: {
           react: ['react', 'react-dom'],
           terminal: ['@xterm/xterm', '@xterm/addon-fit'],
-          ghostty: ['ghostty-web'],
           dnd: ['@dnd-kit/core', '@dnd-kit/sortable', '@dnd-kit/utilities'],
         },
-      },
-    },
-    // ghostty-web 是动态 import（ensureGhosttyWasmReady），默认不在 entry 的静态
-    // 依赖图里 → Vite 不自动注入 <link rel="modulepreload">。把 ghostty 命名空间下
-    // 的 chunk 也加入 modulepreload 列表，让浏览器在解析 entry 时就并行抓 ghostty
-    // chunk JS（含内嵌 base64 wasm），首屏 open 第一个 terminal 时 WASM 已就绪。
-    modulePreload: {
-      polyfill: false,
-      resolveDependencies: (filename, deps, { hostId, hostType }) => {
-        // filename 形如 '/assets/ghostty-XXXX.js'。把 ghostty 包的 chunk 显式加入。
-        return deps.filter((d) => /\/ghostty[-.]/i.test(d) || !/^node_modules\//.test(d) || /\/xterm\//.test(d) || d === filename);
       },
     },
   },
