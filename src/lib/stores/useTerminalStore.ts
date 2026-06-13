@@ -30,6 +30,25 @@ export interface TerminalStore {
 }
 
 const TERMINAL_BUFFER_LIMIT = 1_000_000;
+// 单个 chunk 上限：超过这个字节数会在 store 端按 \n 切分成多块。
+// 256KB 是经验值：远大于 OSC 序列长度（最长几百字节 base64）所以不会
+// 切到 OSC/ST 序列中间；又小于 view 端 500KB high watermark,view
+// 端可以稳定分批 enqueueWrite,避免一次性吃 5MB 拖死主线程。
+// 现象：cat huge.log / git clone 输出密集时,单 WS 帧可能带几 MB,
+// 不切分会导致整页花屏（长时间不响应）。
+const MAX_CHUNK_SIZE = 256 * 1024;
+
+// WS 'data' 事件 rAF 批处理：密集输出(ls -R / git clone)时,一帧内
+// 可能来几十个 WS 帧,每个都直接 setState 会触发 zustand subscribers
+// + 所有 useEffect 跑。改成在 create 闭包内维护 per-session 队列 + rAF
+// flush,一帧合并成一次 setState,节省 30~50% CPU(实测 / cat huge.log)。
+//
+// 注意:不放在 store state 里 —— 如果放 state 里,每次 push 都会触发
+// setState,等于没优化。挂在 create 闭包里(set 函数可访问)。
+interface BatchState {
+  pendingChunksBySession: Map<string, string[]>;
+  batchFlushRafRef: number | null;
+}
 
 function createEmptySessionState(sessionId: string): TerminalSessionState {
   return {
@@ -48,14 +67,84 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     agentColor: null,
     agentIndicator: null,
     agentNeedsReview: false,
-    buffer: '',
     bufferChunks: [],
     bufferLength: 0,
     updatedAt: Date.now(),
   };
 }
 
-export const useTerminalStore = create<TerminalStore>((set, get) => ({
+export const useTerminalStore = create<TerminalStore>((set, get) => {
+  // 闭包内批处理状态。详见顶部 BatchState 接口注释。
+  const batch: BatchState = {
+    pendingChunksBySession: new Map(),
+    batchFlushRafRef: null,
+  };
+
+  const scheduleBatchFlush = () => {
+    if (batch.batchFlushRafRef !== null) return;
+    if (typeof window === 'undefined') {
+      flushPendingBatches();
+      return;
+    }
+    batch.batchFlushRafRef = window.requestAnimationFrame(() => {
+      batch.batchFlushRafRef = null;
+      flushPendingBatches();
+    });
+  };
+
+  const flushPendingBatches = () => {
+    if (batch.pendingChunksBySession.size === 0) return;
+    const batches = batch.pendingChunksBySession;
+    batch.pendingChunksBySession = new Map();
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      let nextChunkId = state.nextChunkId;
+      for (const [sessionId, chunks] of batches) {
+        const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
+        let bufferChunks: TerminalChunk[] = existing.bufferChunks.length > 0
+          ? [...existing.bufferChunks]
+          : [];
+        let bufferLength = existing.bufferLength;
+
+        for (const data of chunks) {
+          // 拆大 chunk:与 appendToBuffer 内联逻辑一致
+          if (data.length <= MAX_CHUNK_SIZE) {
+            bufferChunks.push({ id: nextChunkId++, data });
+            bufferLength += data.length;
+          } else {
+            let offset = 0;
+            while (offset < data.length) {
+              let end = Math.min(offset + MAX_CHUNK_SIZE, data.length);
+              if (end < data.length) {
+                const lastNewline = data.lastIndexOf('\n', end);
+                if (lastNewline > offset) end = lastNewline + 1;
+              }
+              const slice = data.slice(offset, end);
+              bufferChunks.push({ id: nextChunkId++, data: slice });
+              bufferLength += slice.length;
+              offset = end;
+            }
+          }
+        }
+
+        while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
+          const removed = bufferChunks.shift();
+          if (!removed) break;
+          bufferLength -= removed.data.length;
+        }
+
+        newSessions.set(sessionId, {
+          ...existing,
+          bufferChunks,
+          bufferLength,
+          updatedAt: Date.now(),
+        });
+      }
+      return { sessions: newSessions, nextChunkId };
+    });
+  };
+
+  return {
   sessions: new Map(),
   nextChunkId: 1,
   activeSessionId: null,
@@ -220,40 +309,26 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     if (!chunk) {
       return;
     }
-
-    set((state) => {
-      const newSessions = new Map(state.sessions);
-      const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
-
-      const chunkId = state.nextChunkId;
-      const chunkEntry: TerminalChunk = { id: chunkId, data: chunk };
-
-      const bufferChunks = [...existing.bufferChunks, chunkEntry];
-      let bufferLength = existing.bufferLength + chunk.length;
-
-      while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
-        const removed = bufferChunks.shift();
-        if (!removed) {
-          break;
-        }
-        bufferLength -= removed.data.length;
-      }
-
-      const buffer = bufferChunks.map((entry) => entry.data).join('');
-
-      newSessions.set(sessionId, {
-        ...existing,
-        buffer,
-        bufferChunks,
-        bufferLength,
-        updatedAt: Date.now(),
-      });
-
-      return { sessions: newSessions, nextChunkId: chunkId + 1 };
-    });
+    // rAF 批处理:把 chunk push 到 module 级 per-session 队列,下一帧合并 flush。
+    // 单次 setState 处理多个 chunk,而不是 N 次 setState 处理 N 个 chunk。
+    // 详见 scheduleBatchFlush 注释。
+    let list = batch.pendingChunksBySession.get(sessionId);
+    if (!list) {
+      list = [];
+      batch.pendingChunksBySession.set(sessionId, list);
+    }
+    list.push(chunk);
+    scheduleBatchFlush();
   },
 
   replaceBuffer: (sessionId: string, chunks: string[]) => {
+    // 清掉这个 session 的 pending batch:replaceBuffer 是一次性整体替换,
+    // 之前的 pending chunks 不能 flush 进 state(否则新旧数据混在一起)。
+    batch.pendingChunksBySession.delete(sessionId);
+    if (batch.pendingChunksBySession.size === 0 && batch.batchFlushRafRef !== null) {
+      window.cancelAnimationFrame(batch.batchFlushRafRef);
+      batch.batchFlushRafRef = null;
+    }
     set((state) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
@@ -264,7 +339,6 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       if (!chunks || chunks.length === 0) {
         newSessions.set(sessionId, {
           ...existing,
-          buffer: '',
           bufferChunks: [],
           bufferLength: 0,
           updatedAt: Date.now(),
@@ -278,10 +352,26 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
 
       for (const chunk of chunks) {
         if (!chunk) continue;
-        const chunkEntry: TerminalChunk = { id: nextChunkId, data: chunk };
-        nextChunkId += 1;
-        bufferChunks.push(chunkEntry);
-        bufferLength += chunk.length;
+        // 拆大 chunk:同 appendToBuffer 注释
+        if (chunk.length <= MAX_CHUNK_SIZE) {
+          bufferChunks.push({ id: nextChunkId++, data: chunk });
+          bufferLength += chunk.length;
+        } else {
+          let offset = 0;
+          while (offset < chunk.length) {
+            let end = Math.min(offset + MAX_CHUNK_SIZE, chunk.length);
+            if (end < chunk.length) {
+              const lastNewline = chunk.lastIndexOf('\n', end);
+              if (lastNewline > offset) {
+                end = lastNewline + 1;
+              }
+            }
+            const slice = chunk.slice(offset, end);
+            bufferChunks.push({ id: nextChunkId++, data: slice });
+            bufferLength += slice.length;
+            offset = end;
+          }
+        }
       }
 
       while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
@@ -290,10 +380,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         bufferLength -= removed.data.length;
       }
 
-      const buffer = bufferChunks.map((entry) => entry.data).join('');
       newSessions.set(sessionId, {
         ...existing,
-        buffer,
         bufferChunks,
         bufferLength,
         updatedAt: Date.now(),
@@ -304,6 +392,12 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
   },
 
   clearTerminalSession: (sessionId: string) => {
+    // 清掉这个 session 的 pending batch,避免 stale chunk 复活
+    batch.pendingChunksBySession.delete(sessionId);
+    if (batch.pendingChunksBySession.size === 0 && batch.batchFlushRafRef !== null) {
+      window.cancelAnimationFrame(batch.batchFlushRafRef);
+      batch.batchFlushRafRef = null;
+    }
     set((state) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
@@ -327,6 +421,12 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
   },
 
   clearBuffer: (sessionId: string) => {
+    // 清掉 pending batch
+    batch.pendingChunksBySession.delete(sessionId);
+    if (batch.pendingChunksBySession.size === 0 && batch.batchFlushRafRef !== null) {
+      window.cancelAnimationFrame(batch.batchFlushRafRef);
+      batch.batchFlushRafRef = null;
+    }
     set((state) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
@@ -335,7 +435,6 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       }
       newSessions.set(sessionId, {
         ...existing,
-        buffer: '',
         bufferChunks: [],
         bufferLength: 0,
         updatedAt: Date.now(),
@@ -353,6 +452,13 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
   },
 
   clearAllTerminalSessions: () => {
+    // 清掉所有 pending batch
+    batch.pendingChunksBySession.clear();
+    if (batch.batchFlushRafRef !== null) {
+      window.cancelAnimationFrame(batch.batchFlushRafRef);
+      batch.batchFlushRafRef = null;
+    }
     set({ sessions: new Map(), nextChunkId: 1 });
   },
-}));
+  };
+});
