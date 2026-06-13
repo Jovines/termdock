@@ -267,6 +267,13 @@ const FLOW_CONTROL_LOW_WATERMARK = 100_000;  // bytes — resume PTY below this
 const INPUT_BLUR_GUARD_ACTIVE_MS = 260;
 const INPUT_BLUR_GUARD_RELEASE_MS = 140;
 const KEYBOARD_OPEN_THRESHOLD_PX = 80;
+const WEBGL_POST_WRITE_REFRESH_MIN_BYTES = 16 * 1024;
+const WEBGL_POST_WRITE_REFRESH_MAX_INTERVAL_MS = 2500;
+const WEBGL_POST_WRITE_REFRESH_MIN_INTERVAL_MS = 750;
+
+const getMonotonicNow = (): number => (
+  typeof performance !== 'undefined' ? performance.now() : Date.now()
+);
 
 function getTerminalConvertEol(hasTmuxScroll: boolean): boolean {
   // tmux/TUI 程序依赖精确的 CR/LF、scroll region 与局部清空语义。
@@ -405,6 +412,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // 每次新建 renderer 时由 enableWebglRenderer 置回 false。recoverRenderer
     // 只在确认死了时才走 dispose+recreate，避免盲拆活上下文导致一帧空白。
     const webglContextLostRef = React.useRef(false);
+    const webglPostWriteRefreshRafRef = React.useRef<number | null>(null);
+    const webglBytesSinceLastPostWriteRefreshRef = React.useRef(0);
+    const webglLastPostWriteRefreshAtRef = React.useRef(0);
     const lastDevicePixelRatioRef = React.useRef(
       typeof window !== 'undefined' ? window.devicePixelRatio : 1
     );
@@ -1719,6 +1729,52 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
     }, [debugTerminal]);
 
+    /**
+     * WebGL 花屏多数不是 xterm buffer 错，而是 Chromium/GPU 侧纹理图集或
+     * renderer model 偶发脏了。官方给 WebGL renderer 暴露 clearTextureAtlas
+     * 就是给 VS Code/Slack 这类 embedder 规避纹理腐坏用的。普通 resize/
+     * visibility 已经会全量清 atlas，但持续输出（tail/log/tmux repaint）期间
+     * 可能长时间没有这些事件，所以这里在写入 burst 后做低频 hygiene refresh：
+     * 既不每帧清 atlas 影响性能，又能把偶发脏纹理窗口压到 0.75~2.5s 内。
+     */
+    const scheduleWebglPostWriteRefresh = React.useCallback((chunkBytes: number) => {
+      if (!shouldUseWebgl || !webglAddonRef.current || typeof window === 'undefined') {
+        return;
+      }
+
+      webglBytesSinceLastPostWriteRefreshRef.current += chunkBytes;
+      const now = getMonotonicNow();
+      const elapsed = now - webglLastPostWriteRefreshAtRef.current;
+      const bytesSinceLastRefresh = webglBytesSinceLastPostWriteRefreshRef.current;
+
+      if (
+        bytesSinceLastRefresh < WEBGL_POST_WRITE_REFRESH_MIN_BYTES &&
+        elapsed < WEBGL_POST_WRITE_REFRESH_MAX_INTERVAL_MS
+      ) {
+        return;
+      }
+
+      if (elapsed < WEBGL_POST_WRITE_REFRESH_MIN_INTERVAL_MS || webglPostWriteRefreshRafRef.current !== null) {
+        return;
+      }
+
+      webglPostWriteRefreshRafRef.current = window.requestAnimationFrame(() => {
+        webglPostWriteRefreshRafRef.current = null;
+        webglLastPostWriteRefreshAtRef.current = getMonotonicNow();
+        const flushedBytes = webglBytesSinceLastPostWriteRefreshRef.current;
+        webglBytesSinceLastPostWriteRefreshRef.current = 0;
+        refreshTextureAtlasNow(`webgl-post-write:${flushedBytes}`);
+      });
+    }, [refreshTextureAtlasNow, shouldUseWebgl]);
+
+    const cancelWebglPostWriteRefresh = React.useCallback(() => {
+      if (webglPostWriteRefreshRafRef.current !== null) {
+        cancelAnimationFrame(webglPostWriteRefreshRafRef.current);
+        webglPostWriteRefreshRafRef.current = null;
+      }
+      webglBytesSinceLastPostWriteRefreshRef.current = 0;
+    }, []);
+
     const disposeWebglRenderer = React.useCallback((reason: string): boolean => {
       const contextLossDisposable = webglContextLossDisposableRef.current;
       if (contextLossDisposable) {
@@ -1920,12 +1976,24 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         debugTerminal('refresh', { reason, options });
 
         // 1) Renderer 决策
-        const needsRecreate = options.forceRendererRecreate === true || webglContextLostRef.current;
+        const shouldRecreateForResilience = !!webglAddonRef.current && shouldUseWebgl && (
+          reason === 'visibility' ||
+          reason === 'bfcache' ||
+          reason === 'online' ||
+          reason === 'dpr-change'
+        );
+        const needsRecreate =
+          options.forceRendererRecreate === true ||
+          webglContextLostRef.current ||
+          shouldRecreateForResilience;
         if (needsRecreate) {
           webglContextLostRef.current = false;
           if (shouldUseWebgl) {
             disposeWebglRenderer(`refresh:${reason}`);
-            enableWebglRenderer(terminal, `refresh:${reason}`);
+            const enabled = enableWebglRenderer(terminal, `refresh:${reason}`);
+            if (!enabled) {
+              refreshTextureAtlasNow(`refresh:${reason}:webgl-fallback`);
+            }
           } else {
             refreshTextureAtlasNow(`refresh:${reason}`);
           }
@@ -2041,8 +2109,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       return () => {
         cancelAllPendingReasonRafs();
         cancelPendingResizeTimer();
+        cancelWebglPostWriteRefresh();
       };
-    }, [sessionKey, cancelAllPendingReasonRafs, cancelPendingResizeTimer]);
+    }, [sessionKey, cancelAllPendingReasonRafs, cancelPendingResizeTimer, cancelWebglPostWriteRefresh]);
 
     // sessionKey 变化 = 切到别的 session = 重置 lastServerSize /
     // dedupe keys / renderer-ready，让下一个 session 的 first-fit 走 immediate 路径
@@ -2050,9 +2119,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       lastServerSizeRef.current = null;
       lastDedupeKeyRef.current.clear();
       cancelPendingResizeTimer();
+      cancelWebglPostWriteRefresh();
       // renderer 状态不在这里重置：disposeWebglRenderer 在 cleanup 跑，
       // 下一次 init useEffect 会再 enableWebglRenderer 并把 ready 置 true。
-    }, [sessionKey, cancelPendingResizeTimer]);
+    }, [sessionKey, cancelPendingResizeTimer, cancelWebglPostWriteRefresh]);
 
     const flushWrites = React.useCallback(() => {
       if (isWritingRef.current) {
@@ -2095,8 +2165,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             flushWrites();
           }
         }
+        scheduleWebglPostWriteRefresh(chunkBytes);
       });
-    }, [resetWriteState]);
+    }, [resetWriteState, scheduleWebglPostWriteRefresh]);
 
     const scheduleFlushWrites = React.useCallback(() => {
       if (writeScheduledRef.current !== null) {
