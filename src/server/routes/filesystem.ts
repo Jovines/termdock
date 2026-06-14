@@ -13,9 +13,9 @@ const MAX_DIRECTORY_ENTRIES = 1000;
 const MAX_GIT_CONTEXT_CHANGED_FILES = 200;
 const RESTORE_CONFIRM_PHRASES = new Set(['丢弃改动', 'discard changes']);
 
-type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked' | 'conflicted' | 'unknown';
+type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted' | 'unknown';
 
-type GitAction = 'stage-file' | 'stage-all' | 'unstage-file' | 'stash-file' | 'stash-all' | 'restore-worktree-file';
+type GitAction = 'stage-file' | 'stage-all' | 'unstage-file' | 'stash-file' | 'stash-all' | 'restore-worktree-file' | 'commit' | 'push';
 
 interface GitChangedFile {
   path: string;
@@ -93,6 +93,7 @@ function toGitPathspec(gitRoot: string, requestedPath: string): string {
 
 function normalizeNameStatus(status: string): GitChangeStatus {
   if (status.startsWith('R')) return 'renamed';
+  if (status.startsWith('C')) return 'copied';
   if (status.startsWith('A')) return 'added';
   if (status.startsWith('D')) return 'deleted';
   if (status.startsWith('U')) return 'conflicted';
@@ -131,7 +132,7 @@ function mergeNameStatus(
 
     let oldPath: string | undefined;
     let filePath: string | undefined;
-    if (rawStatus.startsWith('R')) {
+    if (rawStatus.startsWith('R') || rawStatus.startsWith('C')) {
       oldPath = tokens[i++];
       filePath = tokens[i++];
     } else {
@@ -230,6 +231,31 @@ function getSinglePath(paths: unknown): string {
 
 function getStashMessage(message: unknown, fallback: string): string {
   return typeof message === 'string' && message.trim() ? message.trim().slice(0, 160) : fallback;
+}
+
+function getCommitMessage(message: unknown): string {
+  if (typeof message !== 'string' || !message.trim()) {
+    throw new Error('Commit message is required');
+  }
+  return message.trim().slice(0, 300);
+}
+
+function getRemoteName(remote: unknown): string | undefined {
+  if (typeof remote !== 'string' || !remote.trim()) return undefined;
+  const normalized = remote.trim();
+  if (!/^[A-Za-z0-9._/-]+$/.test(normalized)) {
+    throw new Error('Invalid remote name');
+  }
+  return normalized;
+}
+
+function getBranchName(branch: unknown): string | undefined {
+  if (typeof branch !== 'string' || !branch.trim()) return undefined;
+  const normalized = branch.trim();
+  if (normalized.startsWith('-') || normalized.includes('..') || /[\s~^:?*\[\\]/.test(normalized)) {
+    throw new Error('Invalid branch name');
+  }
+  return normalized;
 }
 
 function readFilePrefix(filePath: string, bytesToRead: number): string {
@@ -470,11 +496,24 @@ router.get('/diff', async (req: Request, res: Response) => {
       return;
     }
 
-    const args = ['diff'];
-    if (cached) args.push('--cached');
-    if (requestedPath) args.push('--', toGitPathspec(gitCwd, requestedPath));
+    const pathspec = requestedPath ? toGitPathspec(gitCwd, requestedPath) : null;
+    const buildDiffArgs = (includeCached: boolean) => {
+      const args = ['diff'];
+      if (includeCached) args.push('--cached');
+      if (pathspec) args.push('--', pathspec);
+      return args;
+    };
 
-    let diff = await execGit(args, gitCwd).catch(() => '');
+    // Default sidebar diffs should represent every changed file from the list:
+    // staged-only changes, unstaged changes, and untracked files. Plain
+    // `git diff` only shows unstaged tracked edits, which made staged-only
+    // additions/deletions/renames look empty in the UI.
+    let diff = cached
+      ? await execGit(buildDiffArgs(true), gitCwd).catch(() => '')
+      : [
+          await execGit(buildDiffArgs(true), gitCwd).catch(() => ''),
+          await execGit(buildDiffArgs(false), gitCwd).catch(() => ''),
+        ].filter(Boolean).join('\n');
 
     // If git diff produced no output for a specific file, it might be an
     // untracked (new) file.  Use `git diff --no-index /dev/null <path>` to
@@ -482,8 +521,7 @@ router.get('/diff', async (req: Request, res: Response) => {
     // Note: git diff --no-index exits with code 1 when there are differences,
     // but stdout still contains the valid diff text.
     if (!diff && requestedPath && !cached) {
-      const relPath = toGitPathspec(gitCwd, requestedPath);
-      diff = await execGitNoIndex(['diff', '--no-index', '--', '/dev/null', relPath], gitCwd).catch(() => '');
+      diff = await execGitNoIndex(['diff', '--no-index', '--', '/dev/null', pathspec ?? requestedPath], gitCwd).catch(() => '');
     }
 
     // When viewing the full repo diff (no specific file), also append diffs
@@ -613,7 +651,7 @@ router.post('/git-action', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'Missing cwd', code: 'MISSING_CWD' });
       return;
     }
-    if (!action || !['stage-file', 'stage-all', 'unstage-file', 'stash-file', 'stash-all', 'restore-worktree-file'].includes(action)) {
+    if (!action || !['stage-file', 'stage-all', 'unstage-file', 'stash-file', 'stash-all', 'restore-worktree-file', 'commit', 'push'].includes(action)) {
       res.status(400).json({ error: 'Unsupported git action', code: 'UNSUPPORTED_ACTION' });
       return;
     }
@@ -633,6 +671,13 @@ router.post('/git-action', async (req: Request, res: Response) => {
     } else if (action === 'stash-all') {
       const stashMessage = getStashMessage(message, `Termdock stash all ${now}`);
       output = await execGit(['stash', 'push', '--include-untracked', '-m', stashMessage], gitRoot);
+    } else if (action === 'commit') {
+      output = await execGit(['commit', '-m', getCommitMessage(message)], gitRoot);
+    } else if (action === 'push') {
+      const remote = getRemoteName((req.body as { remote?: unknown }).remote);
+      const branch = getBranchName((req.body as { branch?: unknown }).branch);
+      const pushArgs = remote && branch ? ['push', '-u', remote, branch] : remote ? ['push', remote] : ['push'];
+      output = await execGit(pushArgs, gitRoot);
     } else {
       const requestedPath = getSinglePath(paths);
       const pathspec = toGitPathspec(gitRoot, requestedPath);

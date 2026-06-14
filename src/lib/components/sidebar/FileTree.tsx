@@ -27,7 +27,10 @@ const CHANGE_STYLES: Record<string, { label: string; className: string; title: s
   modified: { label: 'M', className: 'text-[color:var(--diff-hunk-accent)]', title: 'Modified' },
   deleted: { label: 'D', className: 'text-[color:var(--diff-delete-strong)]', title: 'Deleted' },
   renamed: { label: 'R', className: 'text-muted-foreground', title: 'Renamed' },
+  copied: { label: 'C', className: 'text-[color:var(--diff-insert-strong)]', title: 'Copied' },
   untracked: { label: 'U', className: 'text-[color:var(--diff-insert-strong)]', title: 'Untracked (new file)' },
+  conflicted: { label: '!', className: 'text-destructive', title: 'Conflicted' },
+  unknown: { label: '?', className: 'text-muted-foreground', title: 'Unknown' },
 };
 
 function getFileIcon(name: string, type: 'file' | 'directory' | 'symlink') {

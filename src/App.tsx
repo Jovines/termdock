@@ -276,46 +276,6 @@ function App() {
     useSidebarStore.getState().setRootPath(ts?.cwd ?? null);
   }, [activeSessionId, terminalSessions]);
 
-  // Silently prewarm the git bundle when active cwd changes — populates
-  // the server-side findGitRoot cache and the front-end sidebar store so
-  // opening the right sidebar shows changes instantly. Throttled to avoid
-  // hammering during bursty cwd updates (cd; cd; cd…).
-  const prewarmTimerRef = React.useRef<number | null>(null);
-  useEffect(() => {
-    const ts = activeSessionId ? terminalSessions.get(activeSessionId) : null;
-    const cwd = ts?.cwd ?? null;
-    if (!cwd) return;
-    if (prewarmTimerRef.current !== null) {
-      window.clearTimeout(prewarmTimerRef.current);
-    }
-    let cancelled = false;
-    prewarmTimerRef.current = window.setTimeout(() => {
-      prewarmTimerRef.current = null;
-      // Lazy import via existing API. Fire-and-forget; failure is fine.
-      void import('./lib/terminal/api').then(({ getGitBundle }) => {
-        if (cancelled) return;
-        return getGitBundle(cwd).then((bundle) => {
-          if (cancelled) return;
-          // Only seed the store if user hasn't opened the sidebar yet OR
-          // the rootPath still matches — avoid clobbering an in-flight
-          // refresh from RightSidebar itself.
-          const state = useSidebarStore.getState();
-          if (state.rootPath !== cwd) return;
-          if (state.changedFiles.size > 0) return;
-          const map = new Map(bundle.files.map((f) => [f.absolutePath || f.path, f]));
-          state.setChangedFiles(map);
-        }).catch(() => { /* ignore — not a git repo */ });
-      });
-    }, 600);
-    return () => {
-      cancelled = true;
-      if (prewarmTimerRef.current !== null) {
-        window.clearTimeout(prewarmTimerRef.current);
-        prewarmTimerRef.current = null;
-      }
-    };
-  }, [activeSessionId, terminalSessions]);
-
   // Sidebar drawer dimensions — overlays on both mobile & desktop, so we
   // never cause the terminal column to resize when toggling the sidebar.
   // Left and right have different ergonomic widths:

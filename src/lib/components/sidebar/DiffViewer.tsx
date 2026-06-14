@@ -1,10 +1,72 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMoveHorizontal } from 'lucide-react';
 import { parseDiff, Diff, Hunk, Decoration } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { getFileDiff, isPreviewableImagePath, readImagePreviewBlob } from '../../terminal/api';
 import { useI18n } from '../../i18n';
+
+const MAX_DIFF_CACHE_ENTRIES = 24;
+
+type DiffLoadResult = { path: string | null; diff: string; error?: string };
+
+const diffResultCache = new Map<string, DiffLoadResult>();
+const diffPromiseCache = new Map<string, Promise<DiffLoadResult>>();
+const diffCacheVersions = new Map<string, number>();
+
+function buildDiffCacheKey(filePath: string | undefined, cwd: string | undefined): string {
+  return `${cwd ?? ''}\u0000${filePath ?? ''}`;
+}
+
+function rememberDiffResult(key: string, result: DiffLoadResult): DiffLoadResult {
+  if (diffResultCache.has(key)) diffResultCache.delete(key);
+  diffResultCache.set(key, result);
+  while (diffResultCache.size > MAX_DIFF_CACHE_ENTRIES) {
+    const oldest = diffResultCache.keys().next().value;
+    if (oldest === undefined) break;
+    diffResultCache.delete(oldest);
+  }
+  return result;
+}
+
+function loadFileDiffCached(filePath: string | undefined, cwd: string | undefined, force = false): Promise<DiffLoadResult> {
+  const key = buildDiffCacheKey(filePath, cwd);
+  if (force) {
+    diffResultCache.delete(key);
+    diffPromiseCache.delete(key);
+    diffCacheVersions.set(key, (diffCacheVersions.get(key) ?? 0) + 1);
+  }
+  const version = diffCacheVersions.get(key) ?? 0;
+
+  const cached = diffResultCache.get(key);
+  if (cached) return Promise.resolve(cached);
+
+  const pending = diffPromiseCache.get(key);
+  if (pending) return pending;
+
+  const promise = getFileDiff(filePath, undefined, cwd)
+    .then((result) => (diffCacheVersions.get(key) ?? 0) === version ? rememberDiffResult(key, result) : result)
+    .finally(() => {
+      if (diffPromiseCache.get(key) === promise) diffPromiseCache.delete(key);
+    });
+  diffPromiseCache.set(key, promise);
+  return promise;
+}
+
+function toDiffRequestPath(path: string | null, rootPath: string | null): string | undefined {
+  if (!path) return undefined;
+  return rootPath && path.startsWith(`${rootPath}/`)
+    ? path.slice(rootPath.length + 1)
+    : path;
+}
+
+export function preloadSidebarDiff(rootPath: string | null | undefined, filePath: string | null, options: { force?: boolean } = {}): void {
+  if (!rootPath) return;
+  const requestPath = toDiffRequestPath(filePath, rootPath);
+  void loadFileDiffCached(requestPath, rootPath, options.force).catch(() => {
+    // Preload is best-effort; DiffViewer will surface errors when it becomes visible.
+  });
+}
 
 interface DiffViewerProps {
   filePath: string | null;
@@ -27,6 +89,8 @@ interface DiffViewerProps {
    * Used by the mobile accordion where the list row is the file header.
    */
   embedded?: boolean;
+  /** Keep mounted panes from issuing background diff requests while hidden. */
+  active?: boolean;
 }
 
 function getPathParts(path: string | null, fallback: { name: string; dir: string }): { name: string; dir: string } {
@@ -64,7 +128,7 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false }: DiffViewerProps) {
+export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true }: DiffViewerProps) {
   const { t } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
@@ -79,17 +143,20 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
     dimensions?: { width: number; height: number };
   } | null>(null);
   const rootPath = useSidebarStore((s) => s.rootPath);
+  const previousReloadKeyRef = useRef(reloadKey);
 
   useEffect(() => {
+    if (!active) return;
+
     let cancelled = false;
     let objectUrl: string | null = null;
     const controller = new AbortController();
     const path = filePath;
 
-    const requestPath = path && rootPath && path.startsWith(`${rootPath}/`)
-      ? path.slice(rootPath.length + 1)
-      : path;
+    const requestPath = toDiffRequestPath(path, rootPath);
     const readablePath = path && rootPath && !path.startsWith('/') ? `${rootPath}/${path}` : path;
+    const forceReload = previousReloadKeyRef.current !== reloadKey;
+    previousReloadKeyRef.current = reloadKey;
 
     setDiffContent(null);
     setDiffLoading(true);
@@ -111,7 +178,7 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
           if (!cancelled) setDiffLoading(false);
         });
     } else {
-      getFileDiff(requestPath ?? undefined, undefined, rootPath ?? undefined)
+      loadFileDiffCached(requestPath, rootPath ?? undefined, forceReload)
         .then((result) => {
           if (cancelled) return;
           setDiffContent(result.diff);
@@ -132,7 +199,7 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [filePath, reloadKey, rootPath, t]);
+  }, [active, filePath, reloadKey, rootPath, t]);
 
   const files = useMemo(() => {
     if (!diffContent || diffContent.trim() === '') return [];
@@ -276,12 +343,14 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
 
   if (diffLoading) {
     return embedded ? (
-      <div className="flex items-center justify-center bg-background-subtle py-6">
-        <RiLoader size={18} className="animate-spin text-muted-foreground" />
+      <div className="flex items-center justify-center gap-2 bg-background-subtle py-6 text-xs text-muted-foreground">
+        <RiLoader size={18} className="animate-spin" />
+        <span>{t('diffViewer.loading')}</span>
       </div>
     ) : (
-      <div className="mx-3 mt-3 flex items-center justify-center border border-border/15 bg-background-subtle py-8">
-        <RiLoader size={20} className="animate-spin text-muted-foreground" />
+      <div className="mx-3 mt-3 flex items-center justify-center gap-2 border border-border/15 bg-background-subtle py-8 text-sm text-muted-foreground">
+        <RiLoader size={20} className="animate-spin" />
+        <span>{t('diffViewer.loading')}</span>
       </div>
     );
   }

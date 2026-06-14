@@ -94,6 +94,11 @@ export type TranslationDictionary = {
     allChanges: string;
     noChanges: string;
     noMatchingChanges: string;
+    loadingGitChanges: string;
+    loadingGitChangesSlow: string;
+    refreshingGitChanges: string;
+    gitChangesLoadFailed: string;
+    retryGitChanges: string;
     insertThisFile: string;
     viewDiff: string;
     gitInfo: string;
@@ -107,6 +112,16 @@ export type TranslationDictionary = {
     stashFile: string;
     stashAll: string;
     restoreFile: string;
+    gitQuickActions: string;
+    collapsedByDefault: string;
+    stagedCount: (params: TranslatorParams) => string;
+    commitMessagePlaceholder: string;
+    commitChanges: string;
+    commitNeedsStaged: string;
+    pushRemotePlaceholder: string;
+    pushBranchPlaceholder: (params: TranslatorParams) => string;
+    pushChanges: string;
+    gitQuickActionsHint: string;
     gitActionRunning: string;
     gitActionSucceeded: (params: TranslatorParams) => string;
     gitActionFailed: (params: TranslatorParams) => string;

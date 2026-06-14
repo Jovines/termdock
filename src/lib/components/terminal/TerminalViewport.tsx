@@ -267,13 +267,6 @@ const FLOW_CONTROL_LOW_WATERMARK = 100_000;  // bytes — resume PTY below this
 const INPUT_BLUR_GUARD_ACTIVE_MS = 260;
 const INPUT_BLUR_GUARD_RELEASE_MS = 140;
 const KEYBOARD_OPEN_THRESHOLD_PX = 80;
-const WEBGL_POST_WRITE_REFRESH_MIN_BYTES = 16 * 1024;
-const WEBGL_POST_WRITE_REFRESH_MAX_INTERVAL_MS = 2500;
-const WEBGL_POST_WRITE_REFRESH_MIN_INTERVAL_MS = 750;
-
-const getMonotonicNow = (): number => (
-  typeof performance !== 'undefined' ? performance.now() : Date.now()
-);
 
 function getTerminalConvertEol(hasTmuxScroll: boolean): boolean {
   // tmux/TUI 程序依赖精确的 CR/LF、scroll region 与局部清空语义。
@@ -412,9 +405,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // 每次新建 renderer 时由 enableWebglRenderer 置回 false。recoverRenderer
     // 只在确认死了时才走 dispose+recreate，避免盲拆活上下文导致一帧空白。
     const webglContextLostRef = React.useRef(false);
-    const webglPostWriteRefreshRafRef = React.useRef<number | null>(null);
-    const webglBytesSinceLastPostWriteRefreshRef = React.useRef(0);
-    const webglLastPostWriteRefreshAtRef = React.useRef(0);
     const lastDevicePixelRatioRef = React.useRef(
       typeof window !== 'undefined' ? window.devicePixelRatio : 1
     );
@@ -473,13 +463,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const hasTmuxScroll = !!onTmuxScroll;
     const terminalConvertEol = getTerminalConvertEol(hasTmuxScroll);
 
-    // xterm's WebGL renderer is fast, but on mobile tmux scrollback it can
-    // occasionally present stale row textures while tmux copy-mode is rapidly
-    // repainting the viewport.  The terminal buffer itself is correct, but the
-    // rendered rows appear to "jump".  Keep explicit WebGL available for users
-    // who opt in, but make Auto prefer the built-in renderer for mobile tmux
-    // sessions (identified by onTmuxScroll) where correctness matters more.
-    const shouldUseWebgl = rendererMode === 'webgl' || (rendererMode === 'auto' && !(enableTouchScroll && onTmuxScroll));
+    // WebGL renderer is fast, but xterm.js / browser GPU pipelines still have
+    // known environment-specific rendering artifacts. Best practice for a
+    // product-facing terminal is stability-first: keep WebGL available as an
+    // explicit opt-in, while Auto uses xterm's built-in renderer.
+    const shouldUseWebgl = rendererMode === 'webgl';
 
     React.useEffect(() => {
       if (enableTouchScroll) {
@@ -1703,77 +1691,33 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [debugTerminal]);
 
     /**
-     * 立即同步重绘所有行；如果当前是 WebGL renderer，则额外清理纹理图集。
+     * 立即同步重绘所有行。
+     *
+     * 之前这里会在 WebGL renderer 下主动 clearTextureAtlas()，但线上现象是
+     * “完全 idle 也会花屏”。结合 xterm.js WebGL 的已知 issue，WebGL atlas/
+     * renderer 状态主动重置本身也可能触发 GPU 侧脏纹理，因此这里改成只让
+     * xterm 重绘 buffer，不再主动清 atlas。
+     *
      * 用于"必须刷"的关键时刻：从后台返回、切换 session、重建 renderer 后。
      * 不走 setTimeout 防抖，避免被后续高频事件无限推迟。
      */
     const refreshTextureAtlasNow = React.useCallback((reason: string) => {
-      const addon = webglAddonRef.current;
       const terminal = terminalRef.current;
       if (!terminal) {
         return;
       }
       try {
-        if (addon) {
-          addon.clearTextureAtlas();
-        }
         terminal.refresh(0, Math.max(0, terminal.rows - 1));
-        debugTerminal('texture atlas refreshed (sync)', {
+        debugTerminal('terminal refreshed (sync)', {
           reason,
           cols: terminal.cols,
           rows: terminal.rows,
-          hasWebgl: !!addon,
+          hasWebgl: !!webglAddonRef.current,
         });
       } catch (error) {
-        debugTerminal('texture atlas refresh (sync) failed', { reason, error });
+        debugTerminal('terminal refresh (sync) failed', { reason, error });
       }
     }, [debugTerminal]);
-
-    /**
-     * WebGL 花屏多数不是 xterm buffer 错，而是 Chromium/GPU 侧纹理图集或
-     * renderer model 偶发脏了。官方给 WebGL renderer 暴露 clearTextureAtlas
-     * 就是给 VS Code/Slack 这类 embedder 规避纹理腐坏用的。普通 resize/
-     * visibility 已经会全量清 atlas，但持续输出（tail/log/tmux repaint）期间
-     * 可能长时间没有这些事件，所以这里在写入 burst 后做低频 hygiene refresh：
-     * 既不每帧清 atlas 影响性能，又能把偶发脏纹理窗口压到 0.75~2.5s 内。
-     */
-    const scheduleWebglPostWriteRefresh = React.useCallback((chunkBytes: number) => {
-      if (!shouldUseWebgl || !webglAddonRef.current || typeof window === 'undefined') {
-        return;
-      }
-
-      webglBytesSinceLastPostWriteRefreshRef.current += chunkBytes;
-      const now = getMonotonicNow();
-      const elapsed = now - webglLastPostWriteRefreshAtRef.current;
-      const bytesSinceLastRefresh = webglBytesSinceLastPostWriteRefreshRef.current;
-
-      if (
-        bytesSinceLastRefresh < WEBGL_POST_WRITE_REFRESH_MIN_BYTES &&
-        elapsed < WEBGL_POST_WRITE_REFRESH_MAX_INTERVAL_MS
-      ) {
-        return;
-      }
-
-      if (elapsed < WEBGL_POST_WRITE_REFRESH_MIN_INTERVAL_MS || webglPostWriteRefreshRafRef.current !== null) {
-        return;
-      }
-
-      webglPostWriteRefreshRafRef.current = window.requestAnimationFrame(() => {
-        webglPostWriteRefreshRafRef.current = null;
-        webglLastPostWriteRefreshAtRef.current = getMonotonicNow();
-        const flushedBytes = webglBytesSinceLastPostWriteRefreshRef.current;
-        webglBytesSinceLastPostWriteRefreshRef.current = 0;
-        refreshTextureAtlasNow(`webgl-post-write:${flushedBytes}`);
-      });
-    }, [refreshTextureAtlasNow, shouldUseWebgl]);
-
-    const cancelWebglPostWriteRefresh = React.useCallback(() => {
-      if (webglPostWriteRefreshRafRef.current !== null) {
-        cancelAnimationFrame(webglPostWriteRefreshRafRef.current);
-        webglPostWriteRefreshRafRef.current = null;
-      }
-      webglBytesSinceLastPostWriteRefreshRef.current = 0;
-    }, []);
 
     const disposeWebglRenderer = React.useCallback((reason: string): boolean => {
       const contextLossDisposable = webglContextLossDisposableRef.current;
@@ -1862,8 +1806,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // 每次调用按 reason 走同一条确定性序列：
     //   1) throttle：visibility/bfcache/online 在 200ms 内只跑一次
     //   2) dedupe：同 reason 的连续调用合并，最后一次生效
-    //   3) renderer：context 已知死或 forceRendererRecreate → 重建
-    //                否则 → refreshTextureAtlasNow（清 atlas + 重绘）
+    //   3) renderer：仅 context 已知死或 forceRendererRecreate → 重建
+    //                否则 → terminal.refresh（不主动清 WebGL atlas）
     //   4) fit() → 拿到新 cols/rows
     //   5) resize push：first-fit immediate / 90ms debounce / skip-if-same /
     //                   candidateSize 防 shrink
@@ -1976,16 +1920,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         debugTerminal('refresh', { reason, options });
 
         // 1) Renderer 决策
-        const shouldRecreateForResilience = !!webglAddonRef.current && shouldUseWebgl && (
-          reason === 'visibility' ||
-          reason === 'bfcache' ||
-          reason === 'online' ||
-          reason === 'dpr-change'
-        );
+        // 不再因为 visibility/bfcache/online/dpr-change 主动 dispose+recreate
+        // WebGL renderer。xterm.js WebGL 文档明确要求处理 context loss；而历史
+        // issue 中 dispose/recreate 曾出现 GPU resource 泄漏，频繁重建不应作为
+        // 常规恢复手段。
+        //
+        // 同理，WebGL renderer 活着时也不再因普通 refresh reason 主动
+        // terminal.refresh()：idle 花屏说明“无输出时的 repaint”本身可疑，普通
+        // 输出交给 xterm.write/render pipeline，普通事件只做 fit/resize。
         const needsRecreate =
           options.forceRendererRecreate === true ||
-          webglContextLostRef.current ||
-          shouldRecreateForResilience;
+          webglContextLostRef.current;
         if (needsRecreate) {
           webglContextLostRef.current = false;
           if (shouldUseWebgl) {
@@ -1998,8 +1943,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             refreshTextureAtlasNow(`refresh:${reason}`);
           }
         } else {
-          // 上下文还活着：直接全量重绘；WebGL 路径会顺带清 atlas
-          refreshTextureAtlasNow(`refresh:${reason}`);
+          if (webglAddonRef.current && shouldUseWebgl) {
+            debugTerminal('webgl refresh skipped: renderer alive', { reason });
+          } else {
+            refreshTextureAtlasNow(`refresh:${reason}`);
+          }
         }
 
         // 2) fit() —— 这一步会触发 xterm 的 onResize
@@ -2109,9 +2057,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       return () => {
         cancelAllPendingReasonRafs();
         cancelPendingResizeTimer();
-        cancelWebglPostWriteRefresh();
       };
-    }, [sessionKey, cancelAllPendingReasonRafs, cancelPendingResizeTimer, cancelWebglPostWriteRefresh]);
+    }, [sessionKey, cancelAllPendingReasonRafs, cancelPendingResizeTimer]);
 
     // sessionKey 变化 = 切到别的 session = 重置 lastServerSize /
     // dedupe keys / renderer-ready，让下一个 session 的 first-fit 走 immediate 路径
@@ -2119,10 +2066,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       lastServerSizeRef.current = null;
       lastDedupeKeyRef.current.clear();
       cancelPendingResizeTimer();
-      cancelWebglPostWriteRefresh();
       // renderer 状态不在这里重置：disposeWebglRenderer 在 cleanup 跑，
       // 下一次 init useEffect 会再 enableWebglRenderer 并把 ready 置 true。
-    }, [sessionKey, cancelPendingResizeTimer, cancelWebglPostWriteRefresh]);
+    }, [sessionKey, cancelPendingResizeTimer]);
 
     const flushWrites = React.useCallback(() => {
       if (isWritingRef.current) {
@@ -2165,9 +2111,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             flushWrites();
           }
         }
-        scheduleWebglPostWriteRefresh(chunkBytes);
       });
-    }, [resetWriteState, scheduleWebglPostWriteRefresh]);
+    }, [resetWriteState]);
 
     const scheduleFlushWrites = React.useCallback(() => {
       if (writeScheduledRef.current !== null) {
@@ -2231,7 +2176,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             fontFamily: getTerminalFontFamily(fontFamily),
             fontSize,
             theme: convertTheme(theme),
-            cursorBlink: true,
+            // WebGL renderer 在 idle 状态下也会因为 cursor blink 周期重绘；
+            // 某些 Chromium/GPU 组合会在这种空闲重绘中触发 atlas 花屏。
+            // WebGL 下禁用闪烁，避免“什么都不干”时仍持续 repaint；DOM 路径保持原行为。
+            cursorBlink: !shouldUseWebgl,
             cursorStyle: 'block',
             cursorInactiveStyle: 'bar',
             scrollback: onTmuxScroll ? 2000 : 5000,

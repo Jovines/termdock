@@ -1276,7 +1276,7 @@ export async function getDiffFileList(cwd?: string): Promise<{
   return response.json();
 }
 
-export type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked' | 'conflicted' | 'unknown';
+export type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted' | 'unknown';
 
 export interface GitChangedFile {
   path: string;
@@ -1339,6 +1339,8 @@ export type GitActionRequest =
   | { action: 'unstage-file'; cwd: string; paths: [string] }
   | { action: 'stash-file'; cwd: string; paths: [string]; message?: string }
   | { action: 'stash-all'; cwd: string; message?: string }
+  | { action: 'commit'; cwd: string; message: string }
+  | { action: 'push'; cwd: string; remote?: string; branch?: string }
   | { action: 'restore-worktree-file'; cwd: string; paths: [string]; confirm: { acknowledged: true; phrase: string } };
 
 export interface GitActionResponse {

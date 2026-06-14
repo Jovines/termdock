@@ -1,5 +1,18 @@
 import { create } from 'zustand';
 import type { GitChangedFile } from '../terminal/api';
+import { readCache, writeCache } from '../utils/localStorageCache';
+
+export type RightSidebarTab = 'files' | 'diff' | 'file';
+
+const RIGHT_SIDEBAR_TAB_CACHE_KEY = 'termdock:right-sidebar:tab:v1';
+
+function isRightSidebarTab(value: unknown): value is RightSidebarTab {
+  return value === 'files' || value === 'diff' || value === 'file';
+}
+
+function getInitialRightTab(): RightSidebarTab {
+  return readCache(RIGHT_SIDEBAR_TAB_CACHE_KEY, isRightSidebarTab) ?? 'files';
+}
 
 export interface FileTreeNode {
   name: string;
@@ -16,7 +29,7 @@ interface SidebarState {
   rightOpen: boolean;
 
   // Right sidebar tab
-  rightTab: 'files' | 'diff' | 'file';
+  rightTab: RightSidebarTab;
 
   // File tree state
   rootPath: string | null;
@@ -41,7 +54,7 @@ interface SidebarState {
   closeRight: () => void;
   toggleRight: () => void;
   closeAll: () => void;
-  setRightTab: (tab: 'files' | 'diff' | 'file') => void;
+  setRightTab: (tab: RightSidebarTab) => void;
   setRootPath: (path: string | null) => void;
   toggleExpanded: (path: string) => void;
   selectFile: (path: string | null) => void;
@@ -56,7 +69,7 @@ interface SidebarState {
 export const useSidebarStore = create<SidebarState>((set) => ({
   leftOpen: false,
   rightOpen: false,
-  rightTab: 'files',
+  rightTab: getInitialRightTab(),
   rootPath: null,
   expandedPaths: new Set(),
   selectedFilePath: null,
@@ -75,7 +88,10 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   toggleRight: () => set((s) => ({ rightOpen: !s.rightOpen, leftOpen: s.rightOpen ? s.leftOpen : false })),
   closeAll: () => set({ leftOpen: false, rightOpen: false }),
 
-  setRightTab: (tab) => set({ rightTab: tab }),
+  setRightTab: (tab) => {
+    writeCache(RIGHT_SIDEBAR_TAB_CACHE_KEY, tab);
+    set({ rightTab: tab });
+  },
   setRootPath: (path) => set((s) => {
     if (s.rootPath === path) return s;
     return {
@@ -112,5 +128,5 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   setGitBundleLoading: (loading) => set({ gitBundleLoading: loading }),
   setGitBundleSlow: (slow) => set({ gitBundleSlow: slow }),
   setGitBundleError: (error) => set({ gitBundleError: error }),
-  markGitBundleLoaded: () => set({ gitBundleLastLoadedAt: Date.now(), gitBundleLoading: false, gitBundleSlow: false, gitBundleError: null }),
+  markGitBundleLoaded: () => set({ gitBundleLastLoadedAt: Date.now(), gitBundleLoading: false, gitBundleSlow: false }),
 }));
