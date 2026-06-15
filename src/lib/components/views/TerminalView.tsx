@@ -1386,6 +1386,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     });
   }, [isActive, isMobile, isViewportKeyboardOpen, viewportKeyboardHeight, sessionId]);
 
+  React.useEffect(() => {
+    if (!isActive || !isMobile) return;
+    const handleViewportKeyboardChange = (event: Event) => {
+      const detail = (event as CustomEvent<{ isOpen?: boolean }>).detail;
+      terminalControllerRef.current?.requestRefresh('resize', {
+        resizeDebounceMs: 0,
+        skipScrollToBottom: detail?.isOpen !== true,
+        force: true,
+      });
+    };
+    document.addEventListener('termdock:viewport-keyboard-change', handleViewportKeyboardChange);
+    return () => {
+      document.removeEventListener('termdock:viewport-keyboard-change', handleViewportKeyboardChange);
+    };
+  }, [isActive, isMobile, sessionId]);
+
   const isKeyboardVisible = isMobile || (isActive && toolbarPreset.showOnDesktop === true);
   const isKeyboardInteractive = isActive;
 

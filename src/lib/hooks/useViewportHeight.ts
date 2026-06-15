@@ -5,6 +5,26 @@ interface UseViewportHeightOptions {
   cssVarName?: string;
 }
 
+const KEYBOARD_OPEN_THRESHOLD_PX = 80;
+const BASE_WIDTH_CHANGE_THRESHOLD_PX = 60;
+const KEYBOARD_CHANGE_EVENT = 'termdock:viewport-keyboard-change';
+
+declare global {
+  interface DocumentEventMap {
+    [KEYBOARD_CHANGE_EVENT]: CustomEvent<ViewportKeyboardChangeDetail>;
+  }
+}
+
+export interface ViewportKeyboardChangeDetail {
+  baseHeight: number;
+  visibleHeight: number;
+  visualViewportHeight: number;
+  offsetTop: number;
+  keyboardHeight: number;
+  isOpen: boolean;
+  source: string;
+}
+
 export function useViewportHeight(options: UseViewportHeightOptions = {}): number {
   const { cssVarName = '--app-vh' } = options;
   const debugViewport = React.useMemo(() => createDebugLogger('viewport'), []);
@@ -42,6 +62,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
   const heightBufRef = React.useRef<number[]>([]);
   const baseHeightRef = React.useRef(0);
   const lastWidthRef = React.useRef(0);
+  const lastKeyboardHeightRef = React.useRef(0);
+  const lastKeyboardOpenRef = React.useRef(false);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') {
@@ -53,31 +75,49 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     const medianOf3 = (a: number, b: number, c: number) =>
       [a, b, c].sort((x, y) => x - y)[1];
 
-    const updateBaseHeight = (currentWidth: number, currentInnerHeight: number) => {
+    const readSafeBottom = () => {
+      try {
+        const root = document.getElementById('root');
+        if (root) return parseFloat(getComputedStyle(root).paddingBottom) || 0;
+      } catch { /* ignore */ }
+      return 0;
+    };
+
+    const updateBaseHeight = (
+      currentWidth: number,
+      currentInnerHeight: number,
+      currentVisualBottom: number,
+      previousKeyboardHeight: number,
+    ) => {
+      const candidateBaseHeight = Math.max(currentInnerHeight, currentVisualBottom);
       if (baseHeightRef.current === 0) {
-        baseHeightRef.current = currentInnerHeight;
+        baseHeightRef.current = candidateBaseHeight;
         lastWidthRef.current = currentWidth;
-        document.documentElement.style.setProperty('--app-base-vh', `${currentInnerHeight}px`);
+        document.documentElement.style.setProperty('--app-base-vh', `${candidateBaseHeight}px`);
         return;
       }
 
       const widthDelta = Math.abs(currentWidth - lastWidthRef.current);
-      if (widthDelta > 60) {
-        baseHeightRef.current = currentInnerHeight;
+      const keyboardLikelyClosed = previousKeyboardHeight <= KEYBOARD_OPEN_THRESHOLD_PX;
+      if (widthDelta > BASE_WIDTH_CHANGE_THRESHOLD_PX || keyboardLikelyClosed) {
+        baseHeightRef.current = candidateBaseHeight;
         lastWidthRef.current = currentWidth;
-        document.documentElement.style.setProperty('--app-base-vh', `${currentInnerHeight}px`);
+        document.documentElement.style.setProperty('--app-base-vh', `${candidateBaseHeight}px`);
       }
     };
 
-    const syncViewportHeight = () => {
+    const syncViewportHeight = (source = 'event') => {
       rafId = null;
       const nextHeight = getViewportHeight();
       const nextOffsetTop = Math.round(window.visualViewport?.offsetTop ?? 0);
       const rawViewportHeight = Math.round(window.visualViewport?.height ?? window.innerHeight);
       const innerHeight = Math.round(window.innerHeight);
       const currentWidth = Math.round(window.innerWidth);
+      const visualBottom = Math.max(0, rawViewportHeight + nextOffsetTop);
+      const safeBottom = readSafeBottom();
+      const previousKeyboardHeight = Math.max(0, baseHeightRef.current - visualBottom - safeBottom);
 
-      updateBaseHeight(currentWidth, innerHeight);
+      updateBaseHeight(currentWidth, innerHeight, visualBottom, previousKeyboardHeight);
 
       // Median-of-3 filter only during decreases (keyboard opening).
       // Single-frame outlier lows are discarded.  Increases (keyboard
@@ -104,34 +144,55 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       // plain px values (avoids Safari bugs with min()/calc()/env() nested
       // inside transform).
       const baseVh = baseHeightRef.current;
-      let safeBottom = 0;
-      try {
-        const root = document.getElementById('root');
-        if (root) safeBottom = parseFloat(getComputedStyle(root).paddingBottom) || 0;
-      } catch { /* ignore */ }
       // Keyboard movement must be based on the actual visual viewport height.
       // `filteredHeight` may include a small offsetTop compensation for Safari
       // browser-chrome jitter; using that compensated value here makes the
       // terminal under-translate by exactly that intermittent offsetTop.
-      const keyboardViewportHeight = nextOffsetTop > 0
-        ? Math.min(filteredHeight, rawViewportHeight)
-        : filteredHeight;
-      const ty = Math.min(0, keyboardViewportHeight - baseVh + safeBottom);
-      const mt = Math.max(0, baseVh - keyboardViewportHeight - safeBottom);
+      const keyboardViewportHeight = Math.min(filteredHeight, rawViewportHeight);
+      const visibleHeight = Math.max(0, Math.min(baseVh, visualBottom));
+      const keyboardHeight = Math.max(0, Math.round(baseVh - visibleHeight - safeBottom));
+      const isKeyboardOpen = keyboardHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
+      const ty = -keyboardHeight;
+      const mt = keyboardHeight;
       document.documentElement.style.setProperty('--kb-translate-y', `${ty}px`);
       document.documentElement.style.setProperty('--kb-margin-top', `${mt}px`);
+      document.documentElement.style.setProperty('--kb-height', `${keyboardHeight}px`);
+      document.documentElement.style.setProperty('--app-visible-vh', `${visibleHeight}px`);
+
+      const keyboardHeightChanged = Math.abs(keyboardHeight - lastKeyboardHeightRef.current) > 1;
+      const keyboardOpenChanged = isKeyboardOpen !== lastKeyboardOpenRef.current;
+      if (keyboardHeightChanged || keyboardOpenChanged) {
+        lastKeyboardHeightRef.current = keyboardHeight;
+        lastKeyboardOpenRef.current = isKeyboardOpen;
+        document.dispatchEvent(new CustomEvent<ViewportKeyboardChangeDetail>(KEYBOARD_CHANGE_EVENT, {
+          detail: {
+            baseHeight: baseVh,
+            visibleHeight,
+            visualViewportHeight: rawViewportHeight,
+            offsetTop: nextOffsetTop,
+            keyboardHeight,
+            isOpen: isKeyboardOpen,
+            source,
+          },
+        }));
+      }
 
       const previousHeight = prevApplied;
-      if (previousHeight !== filteredHeight || nextOffsetTop > 0) {
+      if (previousHeight !== filteredHeight || nextOffsetTop > 0 || keyboardHeightChanged || keyboardOpenChanged) {
         debugViewport('sync', {
           cssVarName,
           innerHeight,
+          baseHeight: baseVh,
           rawViewportHeight,
           offsetTop: nextOffsetTop,
+          visibleHeight,
           rawHeight: nextHeight,
           appliedHeight: filteredHeight,
-          keyboardHeight: keyboardViewportHeight,
+          keyboardViewportHeight,
+          keyboardHeight,
+          isKeyboardOpen,
           filtered: filteredHeight !== nextHeight,
+          source,
         });
       }
     };
@@ -143,7 +204,14 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       if (rafId !== null) {
         return;
       }
-      rafId = window.requestAnimationFrame(syncViewportHeight);
+      rafId = window.requestAnimationFrame(() => syncViewportHeight(source));
+    };
+
+    const scheduleSettledSync = (source: string) => {
+      scheduleSync(`${source}:now`);
+      window.setTimeout(() => scheduleSync(`${source}:50ms`), 50);
+      window.setTimeout(() => scheduleSync(`${source}:150ms`), 150);
+      window.setTimeout(() => scheduleSync(`${source}:300ms`), 300);
     };
 
     scheduleSync('mount');
@@ -152,11 +220,13 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     const handleOrientationChange = () => scheduleSync('orientationchange');
     const handleVisualViewportResize = () => scheduleSync('visualViewport.resize');
     const handleVisualViewportScroll = () => scheduleSync('visualViewport.scroll');
+    const handleFocusIn = () => scheduleSettledSync('focusin');
 
     window.addEventListener('resize', handleResize);
     window.addEventListener('orientationchange', handleOrientationChange);
     window.visualViewport?.addEventListener('resize', handleVisualViewportResize);
     window.visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
+    document.addEventListener('focusin', handleFocusIn);
 
     // 从后台返回时，visualViewport.height 可能还是"软键盘打开"时的旧值，
     // 而 resize 事件不会 fire（值未变），导致 --app-vh 维持半高，xterm fit
@@ -178,9 +248,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
           : null,
         hidden: document.hidden,
       });
-      scheduleSync(`${source}:now`);
-      window.setTimeout(() => scheduleSync(`${source}:50ms`), 50);
-      window.setTimeout(() => scheduleSync(`${source}:200ms`), 200);
+      scheduleSettledSync(source);
     };
     const handleVisibilityChange = () => {
       if (!document.hidden) handleResume('visibilitychange');
@@ -194,6 +262,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       window.removeEventListener('orientationchange', handleOrientationChange);
       window.visualViewport?.removeEventListener('resize', handleVisualViewportResize);
       window.visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);
+      document.removeEventListener('focusin', handleFocusIn);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('pageshow', handlePageShow);
 

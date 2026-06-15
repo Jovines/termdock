@@ -719,13 +719,40 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, []);
 
     const isViewportKeyboardLikelyOpen = React.useCallback(() => {
-      if (typeof window === 'undefined' || !window.visualViewport) {
+      if (typeof window === 'undefined') {
         return false;
       }
 
+      const readCssPx = (name: string): number => {
+        if (typeof document === 'undefined') return 0;
+        const value = Number.parseFloat(
+          document.documentElement.style.getPropertyValue(name) || '0'
+        );
+        return Number.isFinite(value) ? value : 0;
+      };
+
+      // Android Chrome often resizes window.innerHeight together with
+      // visualViewport.height while the IME is open, so the naive
+      // `innerHeight - visualViewport.height` delta can stay near 0.  Reuse the
+      // normalized keyboard height produced by useViewportHeight first; it is
+      // based on the stable --app-base-vh and works for both iOS overlay mode
+      // and Android resize mode.
+      const cssKeyboardHeight = readCssPx('--kb-height');
+      if (cssKeyboardHeight > 0) {
+        return cssKeyboardHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
+      }
+
+      const visualViewport = window.visualViewport;
+      if (!visualViewport) {
+        return false;
+      }
+
+      const baseHeight = readCssPx('--app-base-vh') || window.innerHeight;
+      const safeBottom = readCssPx('--safe-bottom-inset');
+      const visibleBottom = visualViewport.height + visualViewport.offsetTop;
       const keyboardApproxHeight = Math.max(
         0,
-        Math.round(window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop)
+        Math.round(baseHeight - visibleBottom - safeBottom)
       );
 
       return keyboardApproxHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
@@ -1108,8 +1135,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       };
 
       window.visualViewport?.addEventListener('resize', handleViewportChange);
+      window.visualViewport?.addEventListener('scroll', handleViewportChange);
+      document.addEventListener('termdock:viewport-keyboard-change', handleViewportChange);
       return () => {
         window.visualViewport?.removeEventListener('resize', handleViewportChange);
+        window.visualViewport?.removeEventListener('scroll', handleViewportChange);
+        document.removeEventListener('termdock:viewport-keyboard-change', handleViewportChange);
       };
     }, [enableTouchScroll, isViewportKeyboardLikelyOpen]);
 

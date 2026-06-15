@@ -19,14 +19,28 @@ const DEFAULT_CLOSE_THRESHOLD_PX = 80;
 const DEFAULT_SETTLE_DELAY_MS = 400;
 
 function getKeyboardHeightPx(): number {
-  if (typeof window === 'undefined' || !window.visualViewport) {
+  if (typeof window === 'undefined') {
     return 0;
   }
 
-  return Math.max(
-    0,
-    Math.round(window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop)
+  const fromCssVar = Number.parseFloat(
+    document.documentElement.style.getPropertyValue('--kb-height') || '0'
   );
+  if (Number.isFinite(fromCssVar) && fromCssVar > 0) {
+    return Math.round(fromCssVar);
+  }
+
+  const visualViewport = window.visualViewport;
+  if (!visualViewport) return 0;
+
+  const baseHeight = Number.parseFloat(
+    document.documentElement.style.getPropertyValue('--app-base-vh') || '0'
+  ) || window.innerHeight;
+  const safeBottom = Number.parseFloat(
+    document.documentElement.style.getPropertyValue('--safe-bottom-inset') || '0'
+  ) || 0;
+  const visibleBottom = visualViewport.height + visualViewport.offsetTop;
+  return Math.max(0, Math.round(baseHeight - visibleBottom - safeBottom));
 }
 
 export function useViewportKeyboardState(
@@ -133,11 +147,13 @@ export function useViewportKeyboardState(
     const handleOrientationChange = () => schedule('orientationchange');
     const handleVisualViewportResize = () => schedule('visualViewport.resize');
     const handleVisualViewportScroll = () => schedule('visualViewport.scroll');
+    const handleViewportKeyboardChange = () => schedule('viewport-keyboard-change');
 
     window.addEventListener('resize', handleResize);
     window.addEventListener('orientationchange', handleOrientationChange);
     window.visualViewport?.addEventListener('resize', handleVisualViewportResize);
     window.visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
+    document.addEventListener('termdock:viewport-keyboard-change', handleViewportKeyboardChange);
 
     // 从后台返回 / BFCache 恢复时强制重读 visualViewport，避免 isOpen 卡在
     // "软键盘打开"状态。和 useViewportHeight 一样要多次 schedule 覆盖 iOS
@@ -164,6 +180,7 @@ export function useViewportKeyboardState(
       window.removeEventListener('orientationchange', handleOrientationChange);
       window.visualViewport?.removeEventListener('resize', handleVisualViewportResize);
       window.visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);
+      document.removeEventListener('termdock:viewport-keyboard-change', handleViewportKeyboardChange);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('pageshow', handlePageShow);
 
