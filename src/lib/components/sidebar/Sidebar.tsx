@@ -20,6 +20,7 @@ const SNAP_PROGRESS_THRESHOLD = 0.5;
 // @use-gesture reports velocity in px/ms.
 const SNAP_VELOCITY_THRESHOLD = 0.5;
 const SNAP_DURATION_MS = 250;
+const PANEL_GESTURE_IGNORE_SELECTOR = '[data-sidebar-gesture-ignore]';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -36,6 +37,15 @@ function isTouchLikePointer(event: unknown): boolean {
   }
 
   return typeof maybePointer.type === 'string' && maybePointer.type.startsWith('touch');
+}
+
+function shouldIgnorePanelDrag(event: unknown): boolean {
+  if (!event || typeof event !== 'object') {
+    return false;
+  }
+
+  const target = (event as { target?: EventTarget | null }).target;
+  return target instanceof Element && Boolean(target.closest(PANEL_GESTURE_IGNORE_SELECTOR));
 }
 
 export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Sidebar(
@@ -154,8 +164,12 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   }, [drawerWidthPx, isLeft, onClose, onOpen, animateToState]);
 
   const bindPanel = useDrag(
-    ({ active, first, movement: [mx], velocity: [vx], direction: [dx], event }) => {
+    ({ active, cancel, first, movement: [mx], velocity: [vx], direction: [dx], event }) => {
       if (!isTouchLikePointer(event)) {
+        return;
+      }
+      if (shouldIgnorePanelDrag(event)) {
+        cancel();
         return;
       }
       if (first) {

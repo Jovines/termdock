@@ -403,8 +403,10 @@ function App() {
   const {
     newSessionMode,
     newSessionTmuxName,
+    userSelectedNewSessionMode,
     setNewSessionMode,
   } = useNewSessionDefaults();
+  const [newSessionShortcutConfirmMode, setNewSessionShortcutConfirmMode] = useState<'shell' | 'tmux' | null>(null);
 
   const [isToolbarPresetsOpen, setIsToolbarPresetsOpen] = React.useState(false);
   // Toolbar presets are owned by the server (~/.termdock/toolbar-presets.json)
@@ -598,9 +600,17 @@ function App() {
 
   useEffect(() => {
     if (!tmuxStatus.available && newSessionMode === 'tmux') {
-      setNewSessionMode('shell');
+      setNewSessionMode('shell', { userInitiated: false });
+      return;
     }
-  }, [newSessionMode, tmuxStatus.available, setNewSessionMode]);
+    if (tmuxStatus.available && userSelectedNewSessionMode !== 'shell' && newSessionMode !== 'tmux') {
+      setNewSessionMode('tmux', { userInitiated: false });
+    }
+  }, [newSessionMode, tmuxStatus.available, userSelectedNewSessionMode, setNewSessionMode]);
+
+  useEffect(() => {
+    setNewSessionShortcutConfirmMode(null);
+  }, [isDrawerOpen, newSessionMode, tmuxStatus.available]);
 
   useEffect(() => {
     const info: Record<string, any> = {};
@@ -823,6 +833,10 @@ function App() {
       clearInterval(interval);
     };
   }, [isDrawerOpen]);
+
+  const highlightedNewSessionMode = newSessionShortcutConfirmMode ?? newSessionMode;
+  const shellShortcutHighlighted = highlightedNewSessionMode === 'shell';
+  const tmuxShortcutHighlighted = highlightedNewSessionMode === 'tmux' && tmuxStatus.available;
 
   return (
     <div
@@ -1132,7 +1146,7 @@ function App() {
                           key={mode}
                           type="button"
                           disabled={disabled}
-                          onClick={() => setNewSessionMode(mode)}
+                          onClick={() => setNewSessionMode(mode, { userInitiated: true })}
                           className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition ${
                             selected
                               ? 'bg-primary/20 text-primary'
@@ -1289,29 +1303,58 @@ function App() {
               </details>
 
               {/* New session shortcut */}
-              <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="mt-3 flex gap-2">
                 <button
                   type="button"
-                  onClick={() => { dispatchNewSession({ mode: 'shell' }); setIsDrawerOpen(false); }}
-                  className="flex items-center justify-center gap-1.5 rounded-xl bg-primary/15 px-3 py-2.5 text-[13px] font-medium text-primary transition hover:bg-primary/25 active:scale-[0.98]"
+                  onClick={() => {
+                    if (newSessionMode !== 'shell' && newSessionShortcutConfirmMode !== 'shell') {
+                      setNewSessionShortcutConfirmMode('shell');
+                      return;
+                    }
+                    setNewSessionShortcutConfirmMode(null);
+                    dispatchNewSession({ mode: 'shell' });
+                    setIsDrawerOpen(false);
+                  }}
+                  className={`flex min-w-0 items-center justify-center gap-1.5 rounded-xl text-[13px] font-semibold transition active:scale-[0.98] ${
+                    shellShortcutHighlighted
+                      ? 'flex-[2.7] bg-primary px-3 py-2.5 text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25 hover:bg-primary/90'
+                      : 'flex-[0.78] bg-surface-2 px-2 py-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+                  }`}
+                  title={newSessionShortcutConfirmMode === 'shell' ? t('sidebar.confirmNewShell') : t('settings.shell')}
                 >
-                  <RiAddLine size={14} />
+                  <RiAddLine size={14} className={shellShortcutHighlighted ? 'shrink-0' : 'hidden'} />
                   <RiTerminalLine size={12} />
-                  {t('settings.shell')}
+                  <span className={shellShortcutHighlighted ? 'whitespace-nowrap' : 'hidden'}>
+                    {newSessionShortcutConfirmMode === 'shell' ? t('sidebar.confirmNewShell') : t('settings.shell')}
+                  </span>
                 </button>
                 <button
                   type="button"
                   disabled={!tmuxStatus.available}
-                  onClick={() => { dispatchNewSession({ mode: 'tmux' }); setIsDrawerOpen(false); }}
-                  className={`flex items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-[13px] font-medium transition active:scale-[0.98] ${
+                  onClick={() => {
+                    if (!tmuxStatus.available) return;
+                    if (newSessionMode !== 'tmux' && newSessionShortcutConfirmMode !== 'tmux') {
+                      setNewSessionShortcutConfirmMode('tmux');
+                      return;
+                    }
+                    setNewSessionShortcutConfirmMode(null);
+                    dispatchNewSession({ mode: 'tmux' });
+                    setIsDrawerOpen(false);
+                  }}
+                  className={`flex min-w-0 items-center justify-center gap-1.5 rounded-xl text-[13px] font-semibold transition active:scale-[0.98] ${
                     tmuxStatus.available
-                      ? 'bg-surface-2 text-foreground hover:bg-surface-elevated'
-                      : 'bg-surface-2/50 text-muted-foreground/50 cursor-not-allowed'
+                      ? tmuxShortcutHighlighted
+                        ? 'flex-[2.7] bg-primary px-3 py-2.5 text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25 hover:bg-primary/90'
+                        : 'flex-[0.78] bg-surface-2 px-2 py-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+                      : 'flex-1 bg-surface-2/50 text-muted-foreground/50 cursor-not-allowed'
                   }`}
+                  title={tmuxStatus.available ? (newSessionShortcutConfirmMode === 'tmux' ? t('sidebar.confirmNewTmux') : t('settings.tmux')) : (tmuxStatus.reason || t('settings.installTmuxHint'))}
                 >
-                  <RiAddLine size={14} />
+                  <RiAddLine size={14} className={tmuxShortcutHighlighted ? 'shrink-0' : 'hidden'} />
                   <RiLayoutGridLine size={12} />
-                  {t('settings.tmux')}
+                  <span className={tmuxShortcutHighlighted ? 'whitespace-nowrap' : 'hidden'}>
+                    {newSessionShortcutConfirmMode === 'tmux' ? t('sidebar.confirmNewTmux') : t('settings.tmux')}
+                  </span>
                 </button>
               </div>
 
@@ -2068,6 +2111,7 @@ function App() {
         onCloseSession={handleSidebarCloseSession}
         onOpenSettings={() => setIsDrawerOpen(true)}
         tmuxAvailable={tmuxStatus.available}
+        defaultSessionMode={newSessionMode}
       />
       <RightSidebar
         isOpen={sidebarRightOpen}

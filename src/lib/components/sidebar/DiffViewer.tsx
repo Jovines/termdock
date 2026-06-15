@@ -3,12 +3,12 @@ import { GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMo
 import { parseDiff, Diff, Hunk, Decoration } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
-import { getFileDiff, isPreviewableImagePath, readImagePreviewBlob } from '../../terminal/api';
+import { getFileDiff, isPreviewableImagePath, readImagePreviewBlob, type FileDiffResponse, type GitChangedFile } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 
 const MAX_DIFF_CACHE_ENTRIES = 24;
 
-type DiffLoadResult = { path: string | null; diff: string; error?: string };
+type DiffLoadResult = FileDiffResponse;
 
 const diffResultCache = new Map<string, DiffLoadResult>();
 const diffPromiseCache = new Map<string, Promise<DiffLoadResult>>();
@@ -29,6 +29,23 @@ function rememberDiffResult(key: string, result: DiffLoadResult): DiffLoadResult
   return result;
 }
 
+function requestFileDiffCached(key: string, filePath: string | undefined, cwd: string | undefined, version: number): Promise<DiffLoadResult> {
+  const pending = diffPromiseCache.get(key);
+  if (pending) return pending;
+
+  const promise = getFileDiff(filePath, undefined, cwd)
+    .then((result) => (diffCacheVersions.get(key) ?? 0) === version ? rememberDiffResult(key, result) : result)
+    .finally(() => {
+      if (diffPromiseCache.get(key) === promise) diffPromiseCache.delete(key);
+    });
+  diffPromiseCache.set(key, promise);
+  return promise;
+}
+
+function getCachedDiffResult(filePath: string | undefined, cwd: string | undefined): DiffLoadResult | undefined {
+  return diffResultCache.get(buildDiffCacheKey(filePath, cwd));
+}
+
 function loadFileDiffCached(filePath: string | undefined, cwd: string | undefined, force = false): Promise<DiffLoadResult> {
   const key = buildDiffCacheKey(filePath, cwd);
   if (force) {
@@ -41,16 +58,28 @@ function loadFileDiffCached(filePath: string | undefined, cwd: string | undefine
   const cached = diffResultCache.get(key);
   if (cached) return Promise.resolve(cached);
 
-  const pending = diffPromiseCache.get(key);
-  if (pending) return pending;
+  return requestFileDiffCached(key, filePath, cwd, version);
+}
 
-  const promise = getFileDiff(filePath, undefined, cwd)
-    .then((result) => (diffCacheVersions.get(key) ?? 0) === version ? rememberDiffResult(key, result) : result)
-    .finally(() => {
-      if (diffPromiseCache.get(key) === promise) diffPromiseCache.delete(key);
-    });
-  diffPromiseCache.set(key, promise);
-  return promise;
+function loadVisibleFileDiff(filePath: string | undefined, cwd: string | undefined, signal: AbortSignal, force = false): Promise<DiffLoadResult> {
+  const key = buildDiffCacheKey(filePath, cwd);
+  if (force) {
+    diffResultCache.delete(key);
+    diffPromiseCache.delete(key);
+    diffCacheVersions.set(key, (diffCacheVersions.get(key) ?? 0) + 1);
+  }
+  const cached = diffResultCache.get(key);
+  if (cached && !force) return Promise.resolve(cached);
+  const version = diffCacheVersions.get(key) ?? 0;
+  return getFileDiff(filePath, undefined, cwd, signal)
+    .then((result) => (diffCacheVersions.get(key) ?? 0) === version ? rememberDiffResult(key, result) : result);
+}
+
+function revalidateVisibleFileDiff(filePath: string | undefined, cwd: string | undefined, signal: AbortSignal): Promise<DiffLoadResult> {
+  const key = buildDiffCacheKey(filePath, cwd);
+  const version = diffCacheVersions.get(key) ?? 0;
+  return getFileDiff(filePath, undefined, cwd, signal)
+    .then((result) => (diffCacheVersions.get(key) ?? 0) === version ? rememberDiffResult(key, result) : result);
 }
 
 function toDiffRequestPath(path: string | null, rootPath: string | null): string | undefined {
@@ -70,6 +99,7 @@ export function preloadSidebarDiff(rootPath: string | null | undefined, filePath
 
 interface DiffViewerProps {
   filePath: string | null;
+  changedFile?: GitChangedFile | null;
   onInsertDiffReference?: (label: string, text: string) => void;
   /**
    * When true, long diff lines wrap inside each cell instead of forcing a
@@ -93,6 +123,14 @@ interface DiffViewerProps {
   active?: boolean;
 }
 
+function shouldPreferImagePreview(readablePath: string | null, changedFile: GitChangedFile | null | undefined): boolean {
+  if (!readablePath || !isPreviewableImagePath(readablePath)) return false;
+  // Deleted files no longer exist on disk, so blob preview would 404 and hide
+  // the useful Git deletion diff. Renames/copies are also better represented as
+  // Git metadata first; otherwise the image preview loses the old -> new path.
+  return changedFile?.status !== 'deleted' && changedFile?.status !== 'renamed' && changedFile?.status !== 'copied';
+}
+
 function getPathParts(path: string | null, fallback: { name: string; dir: string }): { name: string; dir: string } {
   if (!path) return fallback;
   const parts = path.split('/').filter(Boolean);
@@ -104,6 +142,32 @@ function getPathParts(path: string | null, fallback: { name: string; dir: string
 
 function formatDiffReference(diffText: string): string {
   return `${diffText.trimEnd()}\n`;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function formatBytes(bytes: number | null | undefined): string | null {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return null;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${bytes} bytes`;
+}
+
+function formatDiffLimitMessage(result: DiffLoadResult): string | null {
+  if (result.tooLarge) {
+    const size = formatBytes(result.size);
+    const max = formatBytes(result.maxBytes);
+    return `Diff is too large${size ? ` (${size}` : ''}${max ? `${size ? ', ' : ' ('}limit ${max}` : ''}${size || max ? ')' : ''}.`;
+  }
+  if (result.skippedFiles && result.skippedFiles.length > 0) {
+    const first = result.skippedFiles[0];
+    const size = formatBytes(first.size);
+    const suffix = result.skippedFiles.length > 1 ? ` and ${result.skippedFiles.length - 1} more file(s)` : '';
+    return `Skipped large untracked file ${first.path}${size ? ` (${size})` : ''}${suffix}.`;
+  }
+  return null;
 }
 
 /**
@@ -128,12 +192,13 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true }: DiffViewerProps) {
+export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true }: DiffViewerProps) {
   const { t } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
   // global diff slot in the sidebar store.
   const [diffContent, setDiffContent] = useState<string | null>(null);
+  const [diffNotice, setDiffNotice] = useState<string | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<{
@@ -158,40 +223,54 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
     const forceReload = previousReloadKeyRef.current !== reloadKey;
     previousReloadKeyRef.current = reloadKey;
 
-    setDiffContent(null);
-    setDiffLoading(true);
-    setDiffError(null);
+    const cachedDiff = !forceReload ? getCachedDiffResult(requestPath, rootPath ?? undefined) : undefined;
+    setDiffContent(cachedDiff?.diff ?? null);
+    setDiffNotice(cachedDiff ? formatDiffLimitMessage(cachedDiff) : null);
+    setDiffLoading(!cachedDiff);
+    setDiffError(cachedDiff?.error ?? null);
     setImagePreview(null);
 
-    if (readablePath && isPreviewableImagePath(readablePath)) {
-      readImagePreviewBlob(readablePath, controller.signal)
+    const loadTextDiff = () => (
+      (cachedDiff && !forceReload
+        ? revalidateVisibleFileDiff(requestPath, rootPath ?? undefined, controller.signal)
+        : loadVisibleFileDiff(requestPath, rootPath ?? undefined, controller.signal, forceReload))
+        .then((result) => {
+          if (cancelled) return;
+          const notice = formatDiffLimitMessage(result);
+          setDiffNotice(notice);
+          setDiffContent(result.tooLarge ? '' : result.diff);
+          setDiffError(result.error ?? null);
+        })
+        .catch((err) => {
+          if (cancelled || isAbortError(err)) return;
+          setDiffContent(null);
+          setDiffNotice(null);
+          setDiffError(err instanceof Error ? err.message : 'Failed to load diff');
+        })
+        .finally(() => {
+          if (!cancelled) setDiffLoading(false);
+        })
+    );
+
+    if (shouldPreferImagePreview(readablePath, changedFile)) {
+      readImagePreviewBlob(readablePath as string, controller.signal)
         .then((result) => {
           if (cancelled) return;
           objectUrl = URL.createObjectURL(result.blob);
           setImagePreview({ objectUrl, size: result.size, mimeType: result.mimeType });
         })
-        .catch((err) => {
+        .catch(() => {
           if (cancelled || controller.signal.aborted) return;
-          setDiffError(err instanceof Error ? err.message : t('rightSidebar.imageLoadFailed'));
+          // A changed image may have been removed or moved after the file list
+          // was loaded. Fall back to Git diff instead of surfacing a preview
+          // error, so deleted/renamed binary files still explain what changed.
+          return loadTextDiff();
         })
         .finally(() => {
           if (!cancelled) setDiffLoading(false);
         });
     } else {
-      loadFileDiffCached(requestPath, rootPath ?? undefined, forceReload)
-        .then((result) => {
-          if (cancelled) return;
-          setDiffContent(result.diff);
-          setDiffError(result.error ?? null);
-        })
-        .catch((err) => {
-          if (cancelled) return;
-          setDiffContent(null);
-          setDiffError(err instanceof Error ? err.message : 'Failed to load diff');
-        })
-        .finally(() => {
-          if (!cancelled) setDiffLoading(false);
-        });
+      loadTextDiff();
     }
 
     return () => {
@@ -199,7 +278,7 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [active, filePath, reloadKey, rootPath, t]);
+  }, [active, changedFile, filePath, reloadKey, rootPath]);
 
   const files = useMemo(() => {
     if (!diffContent || diffContent.trim() === '') return [];
@@ -293,7 +372,7 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
               lie) and only once per file per visit, dismissed by tap. The
               user still gets the visual cue without it nagging on every
               open. */}
-          {showScrollHint && !wrap && <DiffScrollHint />}
+          {showScrollHint && !wrap && file.hunks.length > 0 && <DiffScrollHint />}
           {/*
             `termdock-diff-scroll` opts this card into a CSS rule that
             sets `touch-action: pan-x` on the inner overflow element. That
@@ -302,39 +381,46 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
             scroller's overscroll/pan-y chain.
             `termdock-diff-wrap` flips long lines to wrap mode instead.
           */}
-          <div className={`overflow-x-auto termdock-diff-scroll ${wrap ? 'termdock-diff-wrap' : ''}`}>
-            <Diff
-              viewType="unified"
-              diffType={file.type}
-              hunks={file.hunks}
-            >
-              {(hunks) =>
-                hunks.map((hunk, index) => {
-                  const hunkDiffText = [hunk.content, ...hunk.changes.map((change) => change.content)].join('\n');
-                  return (
-                  <Fragment key={hunk.content}>
-                    <Decoration>
-                      <span className="diff-hunk-header flex min-w-0 items-center justify-between gap-3">
-                        <span className="min-w-0 truncate">{hunk.content}</span>
-                        {onInsertDiffReference && (
-                          <button
-                            type="button"
-                            onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, formatDiffReference(hunkDiffText))}
-                            className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/25 active:scale-95"
-                            title={t('diffViewer.insertHunkDiff')}
-                          >
-                            引用hunk
-                          </button>
-                        )}
-                      </span>
-                    </Decoration>
-                    <Hunk hunk={hunk} />
-                  </Fragment>
-                  );
-                })
-              }
-            </Diff>
-          </div>
+          {file.hunks.length === 0 ? (
+            <div className="bg-background-subtle px-3 py-5 text-center text-xs text-muted-foreground">
+              <RiGitCompare size={18} className="mx-auto mb-2 text-muted-foreground/80" />
+              {t('diffViewer.binaryOrEmpty')}
+            </div>
+          ) : (
+            <div className={`overflow-x-auto termdock-diff-scroll ${wrap ? 'termdock-diff-wrap' : ''}`}>
+              <Diff
+                viewType="unified"
+                diffType={file.type}
+                hunks={file.hunks}
+              >
+                {(hunks) =>
+                  hunks.map((hunk, index) => {
+                    const hunkDiffText = [hunk.content, ...hunk.changes.map((change) => change.content)].join('\n');
+                    return (
+                    <Fragment key={hunk.content}>
+                      <Decoration>
+                        <span className="diff-hunk-header flex min-w-0 items-center justify-between gap-3">
+                          <span className="min-w-0 truncate">{hunk.content}</span>
+                          {onInsertDiffReference && (
+                            <button
+                              type="button"
+                              onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, formatDiffReference(hunkDiffText))}
+                              className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/25 active:scale-95"
+                              title={t('diffViewer.insertHunkDiff')}
+                            >
+                              引用hunk
+                            </button>
+                          )}
+                        </span>
+                      </Decoration>
+                      <Hunk hunk={hunk} />
+                    </Fragment>
+                    );
+                  })
+                }
+              </Diff>
+            </div>
+          )}
         </div>
         );
       })}
@@ -363,6 +449,18 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
     ) : (
       <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">
         {diffError}
+      </div>
+    );
+  }
+
+  if (diffNotice && !diffContent) {
+    return embedded ? (
+      <div className="bg-yellow-400/10 px-3 py-3 text-xs text-yellow-300">
+        {diffNotice}
+      </div>
+    ) : (
+      <div className="mx-3 mt-3 border border-yellow-400/20 bg-yellow-400/10 px-4 py-4 text-sm text-yellow-300">
+        {diffNotice}
       </div>
     );
   }
@@ -410,6 +508,12 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
     );
   }
 
+  const diffNoticeBanner = diffNotice ? (
+    <div className="mb-2 border border-yellow-400/20 bg-yellow-400/10 px-3 py-2 text-xs text-yellow-300">
+      {diffNotice}
+    </div>
+  ) : null;
+
   if (files.length === 0) {
     return embedded ? (
       <div className="bg-background-subtle px-3 py-5 text-center text-xs text-muted-foreground">
@@ -427,6 +531,7 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
   if (embedded) {
     return (
       <div className="termdock-diff termdock-diff-card-mobile">
+        {diffNoticeBanner}
         {renderFileDiffs(true)}
       </div>
     );
@@ -459,6 +564,7 @@ export function DiffViewer({ filePath, onInsertDiffReference, wrap = false, show
           )}
         </div>
       </div>
+      {diffNoticeBanner}
       {renderFileDiffs(false)}
     </div>
   );

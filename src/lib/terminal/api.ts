@@ -84,8 +84,8 @@ interface WsConnection {
     connectionTimeoutId: ReturnType<typeof setTimeout> | null;
     isClosed: boolean;
   };
-  // 重连补帧基线：每次收到 data 时不递增（服务端补帧靠 replayLastSeq 同步），
-  // 仅在 connected.replayLastSeq 到来时刷新；下一次重连用它作为 since 参数。
+  // 重连补帧基线：connected.replayLastSeq 到来时记录服务端 replay 后的基线，
+  // live data 携带 seq 时再随已处理输出单调推进；下一次重连用它作为 since 参数。
   lastSeq: number;
   // 输入端缓冲：WS 没开时把用户输入暂存，连上后批量 flush，避免短线期间丢字。
   pendingInputs: string[];
@@ -412,6 +412,10 @@ export function connectTerminalStream(
         }
 
         onEvent(event_);
+        if (event_.type === 'data' && typeof event_.seq === 'number' && Number.isFinite(event_.seq) && event_.seq > lastSeq) {
+          lastSeq = event_.seq;
+          newConn.lastSeq = lastSeq;
+        }
       } catch (error) {
         onError?.(error as Error, false);
       }
@@ -552,7 +556,7 @@ export function probeTerminalConnection(sessionId: string): void {
   }, WAKEUP_PROBE_TIMEOUT_MS);
 }
 
-// ---- Terminal focus state (WebSocket)
+// ---- Terminal focus / flow-control state (WebSocket)
 
 export function sendTerminalFocusState(
   sessionId: string,
@@ -565,6 +569,20 @@ export function sendTerminalFocusState(
     conn.ws.send(JSON.stringify({ type: 'focus', focused, reason }));
   } catch {
     // Focus state is advisory; the heartbeat/reconnect path will repair stale sockets.
+  }
+}
+
+export function sendTerminalFlowControlState(
+  sessionId: string,
+  paused: boolean,
+  reason?: string,
+): void {
+  const conn = wsConnections.get(sessionId);
+  if (!conn || conn.ws.readyState !== WebSocket.OPEN) return;
+  try {
+    conn.ws.send(JSON.stringify({ type: 'flow-control', paused, reason }));
+  } catch {
+    // Flow-control is advisory; viewport watermarks will emit the next state change.
   }
 }
 
@@ -1208,8 +1226,8 @@ export interface FileEntry {
   modified?: string;
 }
 
-export async function listDirectory(dirPath: string): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
-  const response = await fetch(`/api/terminal/fs/list?path=${encodeURIComponent(dirPath)}`);
+export async function listDirectory(dirPath: string, signal?: AbortSignal): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
+  const response = await fetch(`/api/terminal/fs/list?path=${encodeURIComponent(dirPath)}`, { signal });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list directory' }));
     throw new Error(error.error || 'Failed to list directory');
@@ -1246,14 +1264,30 @@ export async function readImagePreviewBlob(filePath: string, signal?: AbortSigna
   };
 }
 
-export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: string): Promise<{
-  path: string | null; diff: string; error?: string;
-}> {
+export interface FileDiffSkippedFile {
+  path: string;
+  reason: string;
+  size?: number;
+  maxBytes?: number;
+}
+
+export interface FileDiffResponse {
+  path: string | null;
+  diff: string;
+  error?: string;
+  truncated?: boolean;
+  tooLarge?: boolean;
+  size?: number;
+  maxBytes?: number;
+  skippedFiles?: FileDiffSkippedFile[];
+}
+
+export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: string, signal?: AbortSignal): Promise<FileDiffResponse> {
   const params = new URLSearchParams();
   if (filePath) params.set('path', filePath);
   if (cached) params.set('cached', 'true');
   if (cwd) params.set('cwd', cwd);
-  const response = await fetch(`/api/terminal/fs/diff?${params}`);
+  const response = await fetch(`/api/terminal/fs/diff?${params}`, { signal });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get diff' }));
     throw new Error(error.error || 'Failed to get diff');
@@ -1306,6 +1340,13 @@ export interface GitContext {
   cwd?: string;
   root?: string;
   branch?: string | null;
+  remotes?: string[];
+  branches?: string[];
+  upstream?: string | null;
+  upstreamRemote?: string | null;
+  upstreamBranch?: string | null;
+  ahead?: number | null;
+  behind?: number | null;
   status?: string;
   recentCommits?: string[];
   changedFiles?: GitContextFile[];
@@ -1340,7 +1381,9 @@ export type GitActionRequest =
   | { action: 'stash-file'; cwd: string; paths: [string]; message?: string }
   | { action: 'stash-all'; cwd: string; message?: string }
   | { action: 'commit'; cwd: string; message: string }
+  | { action: 'switch-branch'; cwd: string; branch: string }
   | { action: 'push'; cwd: string; remote?: string; branch?: string }
+  | { action: 'pull'; cwd: string; remote?: string; branch?: string }
   | { action: 'restore-worktree-file'; cwd: string; paths: [string]; confirm: { acknowledged: true; phrase: string } };
 
 export interface GitActionResponse {

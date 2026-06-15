@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronRight as RiChevronRight,
   ChevronDown as RiChevronDown,
@@ -56,6 +56,10 @@ function ChangeBadge({ path }: { path: string }) {
   );
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
 function nodeMatchesQuery(node: FileTreeNode, queryLower: string): boolean {
   if (!queryLower) return true;
   return `${node.name} ${node.path}`.toLowerCase().includes(queryLower);
@@ -93,6 +97,7 @@ const FileTreeItem = memo(function FileTreeItem({
   const toggleExpanded = useSidebarStore((s) => s.toggleExpanded);
   const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
   const [loading, setLoading] = useState(false);
+  const loadAbortRef = useRef<AbortController | null>(null);
   const isSelected = node.path === selectedFilePath;
   const showChildren = node.type === 'directory' && (isExpanded || Boolean(queryLower));
 
@@ -116,9 +121,12 @@ const FileTreeItem = memo(function FileTreeItem({
     // Lazy load children if not cached
     const cached = useSidebarStore.getState().directoryCache.has(node.path);
     if (!cached && !loading) {
+      loadAbortRef.current?.abort();
+      const controller = new AbortController();
+      loadAbortRef.current = controller;
       setLoading(true);
       try {
-        const result = await listDirectory(node.path);
+        const result = await listDirectory(node.path, controller.signal);
         const treeNodes: FileTreeNode[] = result.entries.map((e: FileEntry) => ({
           name: e.name,
           path: e.path,
@@ -128,9 +136,12 @@ const FileTreeItem = memo(function FileTreeItem({
           children: e.type === 'directory' ? [] : undefined,
         }));
         setDirectoryCache(node.path, treeNodes);
-      } catch {
-        // Silently fail — user can retry by collapsing and re-expanding
+      } catch (error) {
+        if (!isAbortError(error)) {
+          // Silently fail — user can retry by collapsing and re-expanding
+        }
       } finally {
+        if (loadAbortRef.current === controller) loadAbortRef.current = null;
         setLoading(false);
       }
     }
@@ -140,6 +151,10 @@ const FileTreeItem = memo(function FileTreeItem({
     event.stopPropagation();
     onPathReference?.(node.path);
   }, [onPathReference, node.path]);
+
+  useEffect(() => () => {
+    loadAbortRef.current?.abort();
+  }, []);
 
   return (
     <div>
@@ -216,10 +231,11 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
     if (useSidebarStore.getState().directoryCache.has(rootPath)) return;
 
     let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
 
-    listDirectory(rootPath)
+    listDirectory(rootPath, controller.signal)
       .then((result) => {
         if (cancelled) return;
         const treeNodes: FileTreeNode[] = result.entries.map((e: FileEntry) => ({
@@ -234,14 +250,17 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
         setDirectoryCache(rootPath, treeNodes);
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (cancelled || isAbortError(err)) return;
         setError(err instanceof Error ? err.message : 'Failed to load directory');
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [rootPath, setDirectoryCache]);
 
   const visibleRootEntries = useMemo(() => {

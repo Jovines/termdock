@@ -38,6 +38,7 @@ interface LeftSidebarProps {
   onCloseSession: (sessionId: string) => void;
   onOpenSettings: () => void;
   tmuxAvailable?: boolean;
+  defaultSessionMode?: 'shell' | 'tmux';
   push?: boolean;
 }
 
@@ -71,12 +72,14 @@ export function LeftSidebar(
     sessions, activeSessionId, sessionStates,
     onNewSession, onCloseSession, onOpenSettings,
     tmuxAvailable = true,
+    defaultSessionMode = 'shell',
     push,
   }: LeftSidebarProps,
 ) {
   const { t } = useI18n();
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
+  const [confirmNewMode, setConfirmNewMode] = useState<'shell' | 'tmux' | null>(null);
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
 
   const visibleSessions = useMemo(() => (
@@ -103,11 +106,34 @@ export function LeftSidebar(
     if (!isOpen) {
       setQuery('');
       setSearchOpen(false);
+      setConfirmNewMode(null);
     }
   }, [isOpen]);
 
+  useEffect(() => {
+    setConfirmNewMode(null);
+  }, [defaultSessionMode, tmuxAvailable]);
+
   const closeIfOverlay = () => {
     if (!push) onClose();
+  };
+  const shellConfirming = confirmNewMode === 'shell';
+  const tmuxConfirming = confirmNewMode === 'tmux';
+  const highlightedNewMode = confirmNewMode ?? defaultSessionMode;
+  const shellHighlighted = highlightedNewMode === 'shell';
+  const tmuxHighlighted = highlightedNewMode === 'tmux' && tmuxAvailable;
+  const handleNewSessionClick = (mode: 'shell' | 'tmux') => {
+    if (mode === 'tmux' && !tmuxAvailable) return;
+
+    const isDefaultMode = mode === defaultSessionMode;
+    if (!isDefaultMode && confirmNewMode !== mode) {
+      setConfirmNewMode(mode);
+      return;
+    }
+
+    setConfirmNewMode(null);
+    onNewSession({ mode });
+    closeIfOverlay();
   };
 
   return (
@@ -310,27 +336,40 @@ export function LeftSidebar(
         <div className="flex items-stretch gap-1.5">
           <button
             type="button"
-            onClick={() => { onNewSession({ mode: 'shell' }); closeIfOverlay(); }}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-primary/15 px-3 py-2 text-[13px] font-medium text-primary transition hover:bg-primary/25 active:scale-[0.98]"
+            onClick={() => handleNewSessionClick('shell')}
+            className={`flex min-w-0 items-center justify-center gap-1.5 rounded-lg text-[13px] font-semibold transition active:scale-[0.98] ${
+              shellHighlighted
+                ? 'flex-[2.7] bg-primary px-3 py-2.5 text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25 hover:bg-primary/90'
+                : 'flex-[0.78] bg-surface-2 px-2 py-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+            }`}
+            title={shellConfirming ? t('sidebar.confirmNewShell') : t('sidebar.newShell')}
+            aria-label={shellConfirming ? t('sidebar.confirmNewShell') : t('sidebar.newShell')}
           >
-            <RiAddLine size={14} />
+            <RiAddLine size={14} className={shellHighlighted ? 'shrink-0' : 'hidden'} />
             <RiTerminalLine size={12} />
-            <span>{t('sidebar.newShell')}</span>
+            <span className={shellHighlighted ? 'whitespace-nowrap' : 'hidden'}>
+              {shellConfirming ? t('sidebar.confirmNewShell') : t('sidebar.newShell')}
+            </span>
           </button>
           <button
             type="button"
             disabled={!tmuxAvailable}
-            onClick={() => { onNewSession({ mode: 'tmux' }); closeIfOverlay(); }}
-            className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-medium transition active:scale-[0.98] ${
+            onClick={() => handleNewSessionClick('tmux')}
+            className={`flex min-w-0 items-center justify-center gap-1.5 rounded-lg text-[13px] font-semibold transition active:scale-[0.98] ${
               tmuxAvailable
-                ? 'bg-surface-2 text-foreground hover:bg-surface-elevated'
-                : 'bg-surface-2/50 text-muted-foreground/50 cursor-not-allowed'
+                ? tmuxHighlighted
+                  ? 'flex-[2.7] bg-primary px-3 py-2.5 text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25 hover:bg-primary/90'
+                  : 'flex-[0.78] bg-surface-2 px-2 py-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+                : 'flex-1 bg-surface-2/50 text-muted-foreground/50 cursor-not-allowed'
             }`}
-            title={tmuxAvailable ? t('sidebar.newTmux') : t('sidebar.newTmuxDisabled')}
+            title={tmuxAvailable ? (tmuxConfirming ? t('sidebar.confirmNewTmux') : t('sidebar.newTmux')) : t('sidebar.newTmuxDisabled')}
+            aria-label={tmuxConfirming ? t('sidebar.confirmNewTmux') : t('sidebar.newTmux')}
           >
-            <RiAddLine size={14} />
+            <RiAddLine size={14} className={tmuxHighlighted ? 'shrink-0' : 'hidden'} />
             <RiLayoutGridLine size={12} />
-            <span>{t('sidebar.newTmux')}</span>
+            <span className={tmuxHighlighted ? 'whitespace-nowrap' : 'hidden'}>
+              {tmuxConfirming ? t('sidebar.confirmNewTmux') : t('sidebar.newTmux')}
+            </span>
           </button>
         </div>
       </div>

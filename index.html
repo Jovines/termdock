@@ -77,9 +77,11 @@
     <link rel="stylesheet" href="/src/index.css" />
     <title>Termdock</title>
     
-    <!-- Preload terminal main font only — Bold / Nerd / CJK / Symbols 都按
-         unicode-range 懒加载，避免首屏阻塞带宽。 -->
+    <!-- Preload terminal fonts used by the first tmux prompt.
+         Symbols Nerd Font 提前拉取，避免新开 tmux session 时 devicons / powerline
+         先显示 tofu 方块，字体懒加载完成后才跳成图标。 -->
     <link rel="preload" href="/fonts/JetBrainsMonoNL-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="/fonts/SymbolsNerdFontMono-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
     <!-- Self-hosted terminal fonts.
          统一原则：每个 @font-face 都用 unicode-range 限定字符集，浏览器只在

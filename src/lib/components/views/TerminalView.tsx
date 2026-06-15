@@ -5,7 +5,7 @@ import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout }
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
 import { FLEXOKI_DARK } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
-import { probeTerminalConnection, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
+import { probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
 import { computeTerminalLogicalFocus } from '../../terminal/focus';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
@@ -154,6 +154,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const sessionIdRef = React.useRef<string | null>(null);
   const terminalControllerRef = React.useRef<TerminalController | null>(null);
   const flowPausedRef = React.useRef(false);
+  const lastSentFlowPausedRef = React.useRef<boolean | null>(null);
   const flowPausedBufferRef = React.useRef<string[]>([]);
   const suppressInputUntilRef = React.useRef(0);
   const shouldExitTmuxCopyModeOnInputRef = React.useRef(false);
@@ -201,6 +202,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
     terminalControllerRef.current?.focus();
   }, []);
+
+  const reportFlowControl = React.useCallback((paused: boolean, reason: string) => {
+    const backendSessionId = terminalIdRef.current;
+    if (!backendSessionId) return;
+    if (lastSentFlowPausedRef.current === paused) return;
+    lastSentFlowPausedRef.current = paused;
+    sendTerminalFlowControlState(backendSessionId, paused, reason);
+    debugSession('[Terminal] flow-control state sent', { backendSessionId, paused, reason });
+  }, [debugSession]);
 
   const reportLogicalFocus = React.useCallback((focused: boolean, reason: string) => {
     const backendSessionId = terminalIdRef.current;
@@ -305,6 +315,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   React.useEffect(() => {
     terminalIdRef.current = terminalSessionId;
     lastSentLogicalFocusRef.current = null;
+    lastSentFlowPausedRef.current = null;
   }, [terminalSessionId]);
 
   React.useEffect(() => {
@@ -426,6 +437,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // 直到下次 connected 事件再 setSessionReady(true)。
     // 这样避免把新 resize 用旧 terminalId 发出去。
     terminalControllerRef.current?.setSessionReady(false);
+    const currentBackendSessionId = terminalIdRef.current;
+    if (currentBackendSessionId) {
+      sendTerminalFlowControlState(currentBackendSessionId, false, 'stream-disconnect');
+    }
+    flowPausedRef.current = false;
+    lastSentFlowPausedRef.current = null;
+    flowPausedBufferRef.current = [];
     cleanup?.();
   }, []);
 
@@ -469,6 +487,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 // 跑完前就拿 OLD terminalId POST 出去，server 直接 404 + WS 4001
                 // 触发 auto-recreate，必须完全重连才能用。
                 terminalControllerRef.current?.setSessionReady(true);
+
+                // WS 重连后服务端的 per-client flow 状态是新的，补发当前水位状态，
+                // 避免前端仍处于 paused 而服务端继续灌输出。
+                lastSentFlowPausedRef.current = null;
+                reportFlowControl(flowPausedRef.current, 'stream-connected');
 
                 // Sync agent status from server on connect
                 if (event.agentStatus !== undefined) {
@@ -697,7 +720,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearTerminalSession, debugSession, disconnectStream, setConnecting, setSessionActiveProgram, terminal, sessionId]
+    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, reportFlowControl, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, terminal, sessionId]
   );
 
   const hasInitializedRef = React.useRef(false);
@@ -1231,6 +1254,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const handleFlowControl = React.useCallback((paused: boolean) => {
     flowPausedRef.current = paused;
+    reportFlowControl(paused, 'viewport-watermark');
     if (!paused && flowPausedBufferRef.current.length > 0) {
       const storeSessionId = sessionId;
       if (storeSessionId) {
@@ -1241,7 +1265,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         }
       }
     }
-  }, [appendToBuffer, sessionId]);
+  }, [appendToBuffer, reportFlowControl, sessionId]);
 
   const handleTerminalControllerRef = React.useCallback((controller: TerminalController | null) => {
     terminalControllerRef.current = controller;

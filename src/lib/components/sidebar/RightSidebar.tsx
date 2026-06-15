@@ -55,6 +55,8 @@ const MOBILE_WIDTH_THRESHOLD_PX = 600;
 // back to stacked tabs even on desktop.
 const WIDE_WIDTH_THRESHOLD_PX = 720;
 
+const gitContextCache = new Map<string, GitContext | null>();
+
 type GitActionKey = GitActionRequest['action'];
 
 type ConfirmGitAction =
@@ -69,14 +71,316 @@ interface GitActionButton {
   onClick: () => void;
 }
 
+const MARKDOWN_EXTS = new Set(['.md', '.markdown', '.mdown', '.mkdn', '.mkd']);
+
+function getFileExtension(filePath: string): string {
+  const basename = filePath.split(/[\\/]/).pop() ?? filePath;
+  const dotIndex = basename.lastIndexOf('.');
+  return dotIndex >= 0 ? basename.slice(dotIndex).toLowerCase() : '';
+}
+
+function isMarkdownPath(filePath: string): boolean {
+  return MARKDOWN_EXTS.has(getFileExtension(filePath));
+}
+
+function isMarkdownBlockStart(line: string): boolean {
+  const trimmed = line.trim();
+  return /^#{1,6}\s+/.test(trimmed)
+    || /^([-*_])(?:\s*\1){2,}\s*$/.test(trimmed)
+    || /^>\s?/.test(trimmed)
+    || /^```/.test(trimmed)
+    || /^(?:[-+*]|\d+\.)\s+/.test(trimmed);
+}
+
+function getSafeMarkdownHref(href: string): string | null {
+  const trimmed = href.trim();
+  if (/^(https?:|mailto:|#|\/|\.\/|\.\.\/)/i.test(trimmed)) return trimmed;
+  return null;
+}
+
+function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|_[^_\s][^_]*_|\[[^\]]+\]\([^\s)]+(?:\s+"[^"]*")?\))/g;
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
+    const token = match[0];
+    const key = `${keyPrefix}-${match.index}`;
+
+    if (token.startsWith('`')) {
+      nodes.push(<code key={key} className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.92em] text-foreground">{token.slice(1, -1)}</code>);
+    } else if (token.startsWith('**') || token.startsWith('__')) {
+      nodes.push(<strong key={key} className="font-semibold text-foreground">{renderMarkdownInline(token.slice(2, -2), `${key}-strong`)}</strong>);
+    } else if (token.startsWith('*') || token.startsWith('_')) {
+      nodes.push(<em key={key} className="italic">{renderMarkdownInline(token.slice(1, -1), `${key}-em`)}</em>);
+    } else {
+      const linkMatch = token.match(/^\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)$/);
+      const safeHref = linkMatch ? getSafeMarkdownHref(linkMatch[2]) : null;
+      nodes.push(safeHref ? (
+        <a key={key} href={safeHref} target="_blank" rel="noreferrer" className="text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary">
+          {renderMarkdownInline(linkMatch?.[1] ?? '', `${key}-link`)}
+        </a>
+      ) : token);
+    }
+
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes.length > 0 ? nodes : [text];
+}
+
+function splitMarkdownTableRow(line: string): string[] {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+}
+
+function isMarkdownTableSeparator(line: string): boolean {
+  return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line.trim());
+}
+
+function MarkdownPreview({ content }: { content: string }) {
+  const blocks = useMemo(() => {
+    const lines = content.split('\n');
+    const rendered: ReactNode[] = [];
+    let index = 0;
+
+    while (index < lines.length) {
+      const line = lines[index];
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        index += 1;
+        continue;
+      }
+
+      const fenceMatch = trimmed.match(/^```\s*(.*)$/);
+      if (fenceMatch) {
+        const codeLines: string[] = [];
+        const lang = fenceMatch[1]?.trim();
+        index += 1;
+        while (index < lines.length && !lines[index].trim().startsWith('```')) {
+          codeLines.push(lines[index]);
+          index += 1;
+        }
+        if (index < lines.length) index += 1;
+        rendered.push(
+          <div key={`code-${index}`} className="overflow-hidden rounded-lg border border-border/20 bg-surface shadow-sm">
+            {lang && <div className="border-b border-border/15 bg-background-subtle px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">{lang}</div>}
+            <pre className="overflow-auto p-3 text-[11px] leading-relaxed text-foreground"><code>{codeLines.join('\n') || ' '}</code></pre>
+          </div>,
+        );
+        continue;
+      }
+
+      const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+      if (headingMatch) {
+        const level = headingMatch[1].length;
+        const headingClasses: Record<number, string> = {
+          1: 'mt-1 border-b border-border/20 pb-2 text-xl',
+          2: 'mt-1 border-b border-border/15 pb-1.5 text-lg',
+          3: 'text-base',
+          4: 'text-sm',
+          5: 'text-xs uppercase tracking-wide',
+          6: 'text-[11px] uppercase tracking-wide text-muted-foreground',
+        };
+        const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+        rendered.push(<Tag key={`heading-${index}`} className={`font-semibold text-foreground ${headingClasses[level]}`}>{renderMarkdownInline(headingMatch[2], `heading-${index}`)}</Tag>);
+        index += 1;
+        continue;
+      }
+
+      if (/^([-*_])(?:\s*\1){2,}\s*$/.test(trimmed)) {
+        rendered.push(<hr key={`hr-${index}`} className="border-border/20" />);
+        index += 1;
+        continue;
+      }
+
+      if (trimmed.startsWith('>')) {
+        const quoteLines: string[] = [];
+        while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+          quoteLines.push(lines[index].trim().replace(/^>\s?/, ''));
+          index += 1;
+        }
+        rendered.push(<blockquote key={`quote-${index}`} className="border-l-2 border-primary/50 bg-primary/5 py-2 pl-3 pr-2 text-muted-foreground">{renderMarkdownInline(quoteLines.join(' '), `quote-${index}`)}</blockquote>);
+        continue;
+      }
+
+      if (index + 1 < lines.length && line.includes('|') && isMarkdownTableSeparator(lines[index + 1])) {
+        const header = splitMarkdownTableRow(line);
+        const rows: string[][] = [];
+        index += 2;
+        while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+          rows.push(splitMarkdownTableRow(lines[index]));
+          index += 1;
+        }
+        rendered.push(
+          <div key={`table-${index}`} className="overflow-auto rounded-lg border border-border/20 bg-surface">
+            <table className="min-w-full border-collapse text-left text-xs">
+              <thead className="bg-background-subtle text-foreground">
+                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className="border-b border-border/15 px-3 py-2 font-semibold">{renderMarkdownInline(cell, `th-${index}-${cellIndex}`)}</th>)}</tr>
+              </thead>
+              <tbody>
+                {rows.map((row, rowIndex) => (
+                  <tr key={`r-${rowIndex}`} className="border-t border-border/10">
+                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className="px-3 py-2 align-top text-muted-foreground">{renderMarkdownInline(row[cellIndex] ?? '', `td-${index}-${rowIndex}-${cellIndex}`)}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>,
+        );
+        continue;
+      }
+
+      const listMatch = trimmed.match(/^([-+*]|\d+\.)\s+(.+)$/);
+      if (listMatch) {
+        const ordered = /^\d+\.$/.test(listMatch[1]);
+        const items: string[] = [];
+        while (index < lines.length) {
+          const itemMatch = lines[index].trim().match(/^([-+*]|\d+\.)\s+(.+)$/);
+          if (!itemMatch || /^\d+\.$/.test(itemMatch[1]) !== ordered) break;
+          items.push(itemMatch[2]);
+          index += 1;
+        }
+        const ListTag = ordered ? 'ol' : 'ul';
+        rendered.push(
+          <ListTag key={`list-${index}`} className={`${ordered ? 'list-decimal' : 'list-disc'} space-y-1 pl-5 text-muted-foreground marker:text-muted-foreground/70`}>
+            {items.map((item, itemIndex) => {
+              const taskMatch = item.match(/^\[([ xX])\]\s+(.+)$/);
+              return (
+                <li key={`item-${itemIndex}`} className={taskMatch ? 'list-none' : undefined}>
+                  {taskMatch ? <input type="checkbox" checked={taskMatch[1].toLowerCase() === 'x'} readOnly className="mr-2 align-[-2px] accent-primary" /> : null}
+                  {renderMarkdownInline(taskMatch?.[2] ?? item, `li-${index}-${itemIndex}`)}
+                </li>
+              );
+            })}
+          </ListTag>,
+        );
+        continue;
+      }
+
+      const paragraphLines: string[] = [trimmed];
+      index += 1;
+      while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
+        if (index + 1 < lines.length && lines[index].includes('|') && isMarkdownTableSeparator(lines[index + 1])) break;
+        paragraphLines.push(lines[index].trim());
+        index += 1;
+      }
+      rendered.push(<p key={`p-${index}`} className="text-muted-foreground">{renderMarkdownInline(paragraphLines.join(' '), `p-${index}`)}</p>);
+    }
+
+    return rendered;
+  }, [content]);
+
+  return <div className="space-y-3 px-4 py-4 text-sm leading-6 text-foreground">{blocks.length > 0 ? blocks : <p className="text-muted-foreground">Empty file.</p>}</div>;
+}
+
 interface RecentReference {
   path: string;
   label: string;
 }
 
+type RecentReferenceCache = Record<string, RecentReference[]>;
+
+interface GitPickerOption {
+  value: string;
+  label: string;
+  meta?: string;
+}
+
+interface GitTargetPickerProps {
+  label: string;
+  value: string;
+  options: GitPickerOption[];
+  placeholder: string;
+  searchPlaceholder: string;
+  emptyText: string;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+}
+
 interface FileTreeScrollEntry {
   top: number;
   updatedAt: number;
+}
+
+function GitTargetPicker({ label, value, options, placeholder, searchPlaceholder, emptyText, disabled, onChange }: GitTargetPickerProps) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredOptions = useMemo(() => {
+    if (!normalizedQuery) return options;
+    return options.filter((option) => `${option.label} ${option.meta ?? ''}`.toLowerCase().includes(normalizedQuery));
+  }, [normalizedQuery, options]);
+
+  const current = options.find((option) => option.value === value);
+
+  return (
+    <div className="relative min-w-0">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => {
+          if (disabled) return;
+          setOpen((currentOpen) => !currentOpen);
+          setQuery('');
+        }}
+        className="group flex w-full items-center justify-between gap-2 rounded-md border border-border/15 bg-surface-2 px-2.5 py-1.5 text-left transition hover:bg-surface-elevated disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <span className="min-w-0">
+          <span className="block text-[9px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
+          <span className={`block truncate text-[12px] ${value ? 'text-foreground' : 'text-muted-foreground/70'}`}>
+            {current?.label ?? (value || placeholder)}
+          </span>
+        </span>
+        <RiChevronDown size={13} className={`shrink-0 text-muted-foreground transition group-hover:text-foreground ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && !disabled && (
+        <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-30 overflow-hidden rounded-lg border border-border/15 bg-surface shadow-lg">
+          <div className="border-b border-border/10 p-1.5">
+            <div className="flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5">
+              <RiSearch size={12} className="shrink-0 text-muted-foreground" />
+              <input
+                autoFocus
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setOpen(false);
+                  }
+                }}
+                placeholder={searchPlaceholder}
+                className="min-w-0 flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted-foreground/70"
+              />
+            </div>
+          </div>
+          <div className="max-h-40 overflow-y-auto p-1">
+            {filteredOptions.length > 0 ? filteredOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                  setQuery('');
+                }}
+                className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition hover:bg-surface-2 ${option.value === value ? 'bg-accent/10 text-accent' : 'text-foreground'}`}
+              >
+                <span className="min-w-0 truncate font-medium">{option.label}</span>
+                {option.meta && <span className="shrink-0 text-[10px] text-muted-foreground">{option.meta}</span>}
+              </button>
+            )) : (
+              <div className="px-2 py-2 text-[11px] text-muted-foreground">{emptyText}</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 type FileTreeScrollCache = Record<string, FileTreeScrollEntry>;
@@ -153,23 +457,56 @@ function GitChangesRefreshingBanner() {
   );
 }
 
-function loadRecentReferences(): RecentReference[] {
+function isRecentReference(value: unknown): value is RecentReference {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    typeof (value as RecentReference).path === 'string' &&
+    typeof (value as RecentReference).label === 'string'
+  );
+}
+
+function sanitizeRecentReferences(value: unknown): RecentReference[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecentReference).slice(0, MAX_RECENT_REFERENCES);
+}
+
+function getRecentReferencesProjectKey(rootPath: string | null): string | null {
+  return rootPath || null;
+}
+
+function loadRecentReferences(rootPath: string | null): RecentReference[] {
   if (typeof window === 'undefined') return [];
   try {
+    const projectKey = getRecentReferencesProjectKey(rootPath);
+    if (!projectKey) return [];
     const raw = window.localStorage.getItem(RECENT_REFERENCES_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((item): item is RecentReference => (
-        item !== null &&
-        typeof item === 'object' &&
-        typeof (item as RecentReference).path === 'string' &&
-        typeof (item as RecentReference).label === 'string'
-      ))
-      .slice(0, MAX_RECENT_REFERENCES);
+    // v1 stored one shared array. Keep it visible for the current project once,
+    // then subsequent writes will migrate the key to a project-scoped object.
+    if (Array.isArray(parsed)) return sanitizeRecentReferences(parsed);
+    if (!parsed || typeof parsed !== 'object') return [];
+    return sanitizeRecentReferences((parsed as RecentReferenceCache)[projectKey]);
   } catch {
     return [];
+  }
+}
+
+function writeRecentReferences(rootPath: string | null, recentReferences: RecentReference[]): void {
+  if (typeof window === 'undefined') return;
+  const projectKey = getRecentReferencesProjectKey(rootPath);
+  if (!projectKey) return;
+  try {
+    const raw = window.localStorage.getItem(RECENT_REFERENCES_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as unknown : null;
+    const cache: RecentReferenceCache = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? { ...(parsed as RecentReferenceCache) }
+      : {};
+    cache[projectKey] = recentReferences.slice(0, MAX_RECENT_REFERENCES);
+    window.localStorage.setItem(RECENT_REFERENCES_STORAGE_KEY, JSON.stringify(cache));
+  } catch {
+    // localStorage may be full/disabled; references are a convenience cache.
   }
 }
 
@@ -225,12 +562,21 @@ function toChangedFileMap(files: GitChangedFile[]): Map<string, GitChangedFile> 
   return map;
 }
 
-function GitActionChips({ actions, running }: { actions: GitActionButton[]; running: { action: GitActionKey; path?: string } | null }) {
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function GitActionChips({ actions, running, completed }: {
+  actions: GitActionButton[];
+  running: { action: GitActionKey; path?: string } | null;
+  completed: { action: GitActionKey; path?: string } | null;
+}) {
   if (actions.length === 0) return null;
   return (
     <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
       {actions.map((action) => {
         const isRunning = running?.action === action.key;
+        const isCompleted = completed?.action === action.key;
         return (
           <button
             key={action.key}
@@ -240,13 +586,17 @@ function GitActionChips({ actions, running }: { actions: GitActionButton[]; runn
               action.onClick();
             }}
             disabled={action.disabled || Boolean(running)}
-            className={`inline-flex h-6 items-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 disabled:opacity-50 ${
-              action.destructive
+            className={`relative inline-flex h-6 items-center justify-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 disabled:opacity-50 ${
+              isCompleted
+                ? 'bg-accent/10 text-accent'
+                : action.destructive
                 ? 'bg-destructive/10 text-destructive hover:bg-destructive/15'
                 : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
             }`}
           >
-            {isRunning ? '…' : action.label}
+            <span className={isRunning || isCompleted ? 'opacity-0' : ''}>{action.label}</span>
+            {isRunning && <RiLoader size={11} className="absolute animate-spin" />}
+            {isCompleted && !isRunning && <span className="absolute">✓</span>}
           </button>
         );
       })}
@@ -274,6 +624,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   const { t } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
+  const [markdownViewMode, setMarkdownViewMode] = useState<'preview' | 'source'>('preview');
 
   useEffect(() => {
     if (!filePath) {
@@ -285,9 +636,11 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
     const controller = new AbortController();
     let objectUrl: string | null = null;
     const isImage = isPreviewableImagePath(readablePath);
+    const isMarkdown = isMarkdownPath(readablePath);
 
     setPreviewState({ kind: 'loading', mode: isImage ? 'image' : 'text' });
     onLineRangeChange(null);
+    setMarkdownViewMode(isMarkdown ? 'preview' : 'source');
 
     if (isImage) {
       readImagePreviewBlob(readablePath, controller.signal)
@@ -329,6 +682,8 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   const reference = buildFileReference(readablePath, rootPath);
   const lines = previewState.kind === 'text' && previewState.content ? previewState.content.split('\n') : [];
   const meta = previewState.kind === 'text' || previewState.kind === 'image' ? previewState.meta : null;
+  const isMarkdown = isMarkdownPath(readablePath);
+  const showMarkdownPreview = previewState.kind === 'text' && isMarkdown && markdownViewMode === 'preview';
   const isImagePreview = previewState.kind === 'image' || (previewState.kind === 'loading' && previewState.mode === 'image');
   const lineReference = buildLineReference(readablePath, rootPath, lineRange);
   const selectedLineLabel = lineRange
@@ -378,7 +733,20 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {!isMobile && lineRange && !isImagePreview && (
+            {isMarkdown && previewState.kind === 'text' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMarkdownViewMode((mode) => mode === 'preview' ? 'source' : 'preview');
+                  onLineRangeChange(null);
+                }}
+                className="inline-flex h-9 items-center gap-1 rounded-full bg-background-subtle px-3 text-xs font-semibold text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95"
+                title={markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
+              >
+                {markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
+              </button>
+            )}
+            {!isMobile && lineRange && !isImagePreview && !showMarkdownPreview && (
               <button
                 type="button"
                 onClick={insertRangeReference}
@@ -423,6 +791,8 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           <span className="truncate">
             {isImagePreview
               ? t('rightSidebar.imagePreviewHint')
+              : showMarkdownPreview
+                ? t('rightSidebar.markdownPreviewHint')
               : lineRange
                 ? t('rightSidebar.selectedLineHint', { lineLabel: selectedLineLabel ?? '' })
                 : t('rightSidebar.multiLineHint')}
@@ -455,6 +825,14 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
               onError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.imageLoadFailed') })}
             />
           </div>
+        </div>
+      ) : showMarkdownPreview ? (
+        <div
+          className="min-h-0 flex-1 overflow-auto bg-background-subtle"
+          data-sidebar-gesture-ignore
+          style={{ touchAction: 'pan-x pan-y' }}
+        >
+          <MarkdownPreview content={previewState.content} />
         </div>
       ) : previewState.kind === 'text' ? (
         <div className="min-h-0 flex-1 overflow-auto rounded-none bg-background-subtle p-2 font-mono text-[11px] leading-relaxed text-foreground">
@@ -490,9 +868,9 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           of the viewport. */}
       <div
         className={`shrink-0 overflow-hidden border-t border-border/15 bg-surface transition-all duration-150 ${
-          lineRange && !isImagePreview ? 'max-h-24 opacity-100' : 'pointer-events-none max-h-0 opacity-0 border-t-transparent'
+          lineRange && !isImagePreview && !showMarkdownPreview ? 'max-h-24 opacity-100' : 'pointer-events-none max-h-0 opacity-0 border-t-transparent'
         }`}
-        aria-hidden={!lineRange || isImagePreview}
+        aria-hidden={!lineRange || isImagePreview || showMarkdownPreview}
       >
         <div className="flex items-center gap-2">
           <div className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">
@@ -528,7 +906,7 @@ export function RightSidebar(
   const deferredFileQuery = useDeferredValue(fileQuery);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [lastInsertedReference, setLastInsertedReference] = useState<string | null>(null);
-  const [recentReferences, setRecentReferences] = useState<RecentReference[]>(() => loadRecentReferences());
+  const [recentReferences, setRecentReferences] = useState<RecentReference[]>([]);
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
   const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
@@ -543,10 +921,12 @@ export function RightSidebar(
   const [hasMountedDiffPane, setHasMountedDiffPane] = useState(false);
   const [hasMountedPreviewPane, setHasMountedPreviewPane] = useState(false);
   const [runningGitAction, setRunningGitAction] = useState<{ action: GitActionKey; path?: string } | null>(null);
+  const [completedGitAction, setCompletedGitAction] = useState<{ action: GitActionKey; path?: string; label: string } | null>(null);
   const [confirmGitAction, setConfirmGitAction] = useState<ConfirmGitAction | null>(null);
   const [gitActionError, setGitActionError] = useState<string | null>(null);
   const [gitQuickActionsOpen, setGitQuickActionsOpen] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
+  const [switchBranch, setSwitchBranch] = useState('');
   const [pushRemote, setPushRemote] = useState('');
   const [pushBranch, setPushBranch] = useState('');
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
@@ -569,10 +949,15 @@ export function RightSidebar(
   const rootEntriesLoaded = useSidebarStore((s) => Boolean(rootPath && s.directoryCache.has(rootPath)));
   const fileTreeScrollRef = useRef<HTMLDivElement | null>(null);
   const gitBundleRequestIdRef = useRef(0);
+  const gitBundleAbortRef = useRef<AbortController | null>(null);
+  const recentReferencesRootRef = useRef<string | null>(null);
+  const lastAutoRefreshRootRef = useRef<string | null>(null);
 
   const applyGitBundle = useCallback((bundle: GitBundleResponse, options: { reloadDiff?: boolean } = {}) => {
     setChangedFiles(toChangedFileMap(bundle.files));
     setGitContext(bundle.context);
+    const contextRoot = bundle.context?.root ?? rootPath;
+    if (contextRoot) gitContextCache.set(contextRoot, bundle.context);
     if (options.reloadDiff) setDiffRefreshKey((key) => key + 1);
     const current = useSidebarStore.getState().selectedFilePath;
     if (current && !bundle.files.some((file) => file.path === current || file.absolutePath === current)) {
@@ -586,17 +971,21 @@ export function RightSidebar(
       }
       return next;
     });
-  }, [selectFile, setChangedFiles]);
+  }, [rootPath, selectFile, setChangedFiles]);
 
   useEffect(() => {
     gitBundleRequestIdRef.current += 1;
-    if (rootPath !== null) return;
-    setGitContext(null);
+    gitBundleAbortRef.current?.abort();
+    gitBundleAbortRef.current = null;
+    setGitContext(rootPath ? (gitContextCache.get(rootPath) ?? null) : null);
   }, [rootPath]);
 
   const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; preloadDiff?: boolean } = {}) => {
     const requestId = gitBundleRequestIdRef.current + 1;
     gitBundleRequestIdRef.current = requestId;
+    gitBundleAbortRef.current?.abort();
+    const controller = new AbortController();
+    gitBundleAbortRef.current = controller;
     let slowTimer: number | null = null;
     setGitBundleLoading(true);
     setGitBundleSlow(false);
@@ -608,7 +997,7 @@ export function RightSidebar(
     }
 
     try {
-      const bundle = await getGitBundle(cwd);
+      const bundle = await getGitBundle(cwd, controller.signal);
       if (gitBundleRequestIdRef.current !== requestId) return null;
       applyGitBundle(bundle, { reloadDiff: options.reloadDiff ?? false });
       if (options.preloadDiff) {
@@ -618,12 +1007,13 @@ export function RightSidebar(
       }
       return bundle;
     } catch (err) {
-      if (gitBundleRequestIdRef.current !== requestId) return null;
+      if (gitBundleRequestIdRef.current !== requestId || isAbortError(err)) return null;
       setGitContext(null);
       setGitBundleError(err instanceof Error ? err.message : 'Failed to load Git changes');
       return null;
     } finally {
       if (slowTimer !== null) window.clearTimeout(slowTimer);
+      if (gitBundleAbortRef.current === controller) gitBundleAbortRef.current = null;
       if (gitBundleRequestIdRef.current === requestId) markGitBundleLoaded();
     }
   }, [applyGitBundle, markGitBundleLoaded, rootPath, setGitBundleError, setGitBundleLoading, setGitBundleSlow]);
@@ -647,25 +1037,33 @@ export function RightSidebar(
     if (!isMobile) setMobileFilePreviewOpen(false);
   }, [isMobile]);
 
-  const effectiveRightTab: RightSidebarTab = (isMobile || isWide) && rightTab === 'file' ? 'files' : rightTab;
+  const gitKnownUnavailable = Boolean(rootPath && gitBundleLastLoadedAt !== null && gitContext?.available === false);
+  const effectiveRightTab: RightSidebarTab = gitKnownUnavailable
+    ? 'files'
+    : (isMobile || isWide) && rightTab === 'file' ? 'files' : rightTab;
+  const gitPaneActive = effectiveRightTab === 'git';
   const filesPaneActive = effectiveRightTab === 'files';
   const diffPaneActive = effectiveRightTab === 'diff';
   const previewPaneActive = effectiveRightTab === 'file' && !isMobile && !isWide;
   const mobilePreviewActive = isMobile && mobileFilePreviewOpen && Boolean(selectedFilePath);
 
-  // Warm Git state for the Changes tab. When the active terminal cwd changes
-  // while the sidebar is closed, preloading here lets reopening the sidebar
-  // reuse ready git metadata/diff instead of waiting on the first visible paint.
+  // Warm Git state when the sidebar is visible so non-Git workspaces can collapse
+  // to a files-only UI without waiting for the user to touch Git/Changes tabs.
+  // Git/Changes still request diff preloading because those panes need it.
   useEffect(() => {
-    const shouldPreloadChanges = diffPaneActive || rightTab === 'diff';
-    if (!shouldPreloadChanges || !rootPath || gitBundleLastLoadedAt !== null || gitBundleLoading) return;
+    const shouldPreloadDiff = gitPaneActive || diffPaneActive || rightTab === 'git' || rightTab === 'diff';
+    const shouldProbeRepository = isOpen && gitBundleLastLoadedAt === null;
+    if ((!shouldPreloadDiff && !shouldProbeRepository) || !rootPath || gitBundleLoading) return;
+    const hasCachedGitBundle = gitBundleLastLoadedAt !== null;
+    if (hasCachedGitBundle && lastAutoRefreshRootRef.current === rootPath) return;
+    lastAutoRefreshRootRef.current = rootPath;
     const handle = window.setTimeout(() => {
-      void loadGitBundle(rootPath, { preloadDiff: true });
-    }, isOpen ? 80 : 180);
+      void loadGitBundle(rootPath, { preloadDiff: shouldPreloadDiff });
+    }, hasCachedGitBundle ? 0 : (isOpen ? 80 : 180));
     return () => {
       window.clearTimeout(handle);
     };
-  }, [diffPaneActive, gitBundleLastLoadedAt, gitBundleLoading, isOpen, loadGitBundle, rightTab, rootPath]);
+  }, [diffPaneActive, gitBundleLastLoadedAt, gitBundleLoading, gitPaneActive, isOpen, loadGitBundle, rightTab, rootPath]);
 
   useEffect(() => {
     if (diffPaneActive) setHasMountedDiffPane(true);
@@ -682,6 +1080,7 @@ export function RightSidebar(
 
   useEffect(() => {
     return () => {
+      gitBundleAbortRef.current?.abort();
       flushCacheThrottled(FILE_TREE_SCROLL_STORAGE_KEY);
     };
   }, []);
@@ -713,8 +1112,16 @@ export function RightSidebar(
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.localStorage.setItem(RECENT_REFERENCES_STORAGE_KEY, JSON.stringify(recentReferences));
-  }, [recentReferences]);
+    const projectKey = getRecentReferencesProjectKey(rootPath);
+    if (!projectKey || recentReferencesRootRef.current !== projectKey) return;
+    writeRecentReferences(rootPath, recentReferences);
+  }, [recentReferences, rootPath]);
+
+  useEffect(() => {
+    const projectKey = getRecentReferencesProjectKey(rootPath);
+    recentReferencesRootRef.current = projectKey;
+    setRecentReferences(loadRecentReferences(rootPath));
+  }, [rootPath]);
 
   const rememberReference = useCallback((absolutePath: string) => {
     const label = buildFileReference(absolutePath, rootPath);
@@ -766,12 +1173,84 @@ export function RightSidebar(
     return counts;
   }, [changedFiles]);
 
+  const switchBranchOptions = useMemo<GitPickerOption[]>(() => {
+    const values = new Set<string>();
+    if (gitContext?.branch) values.add(gitContext.branch);
+    for (const branch of gitContext?.branches ?? []) values.add(branch);
+    return Array.from(values).map((branch) => ({
+      value: branch,
+      label: branch,
+      meta: branch === gitContext?.branch ? t('rightSidebar.pushCurrentBranchBadge') : undefined,
+    }));
+  }, [gitContext?.branch, gitContext?.branches, t]);
+
+  const pushRemoteOptions = useMemo<GitPickerOption[]>(() => {
+    const values = new Set<string>();
+    if (gitContext?.upstreamRemote) values.add(gitContext.upstreamRemote);
+    for (const remote of gitContext?.remotes ?? []) values.add(remote);
+    return Array.from(values).map((remote) => ({
+      value: remote,
+      label: remote,
+      meta: remote === gitContext?.upstreamRemote ? t('rightSidebar.pushUpstreamBadge') : undefined,
+    }));
+  }, [gitContext?.remotes, gitContext?.upstreamRemote, t]);
+
+  const pushBranchOptions = useMemo<GitPickerOption[]>(() => {
+    const values = new Set<string>();
+    if (gitContext?.upstreamBranch) values.add(gitContext.upstreamBranch);
+    if (gitContext?.branch) values.add(gitContext.branch);
+    for (const branch of gitContext?.branches ?? []) values.add(branch);
+    return Array.from(values).map((branch) => ({
+      value: branch,
+      label: branch,
+      meta: branch === gitContext?.upstreamBranch
+        ? t('rightSidebar.pushUpstreamBadge')
+        : branch === gitContext?.branch ? t('rightSidebar.pushCurrentBranchBadge') : undefined,
+    }));
+  }, [gitContext?.branch, gitContext?.branches, gitContext?.upstreamBranch, t]);
+
+  useEffect(() => {
+    if (!gitContext?.available) return;
+    setSwitchBranch(gitContext.branch || (gitContext.branches?.[0] ?? ''));
+    setPushRemote((current) => current || gitContext.upstreamRemote || (gitContext.remotes?.includes('origin') ? 'origin' : gitContext.remotes?.[0] ?? ''));
+    setPushBranch((current) => current || gitContext.upstreamBranch || gitContext.branch || (gitContext.branches?.[0] ?? ''));
+  }, [gitContext]);
+
+  const pushSyncInfo = useMemo(() => {
+    if (!gitContext?.upstream) {
+      return { text: t('rightSidebar.pushNoUpstream'), className: 'bg-surface-2 text-muted-foreground' };
+    }
+    const ahead = gitContext.ahead ?? 0;
+    const behind = gitContext.behind ?? 0;
+    if (ahead > 0 && behind > 0) {
+      return { text: t('rightSidebar.pushDivergedCount', { ahead, behind }), className: 'bg-destructive/10 text-destructive' };
+    }
+    if (ahead > 0) {
+      return { text: t('rightSidebar.pushAheadCount', { count: ahead }), className: 'bg-accent/10 text-accent' };
+    }
+    if (behind > 0) {
+      return { text: t('rightSidebar.pushBehindCount', { count: behind }), className: 'bg-background-subtle text-[color:var(--diff-hunk-accent)]' };
+    }
+    return { text: t('rightSidebar.pushUpToDate'), className: 'bg-surface-2 text-muted-foreground' };
+  }, [gitContext?.ahead, gitContext?.behind, gitContext?.upstream, t]);
+
+  const canPull = Boolean(!runningGitAction && (gitContext?.upstream || (pushRemote.trim() && pushBranch.trim())));
+  const canPush = Boolean(!runningGitAction && (gitContext?.upstream || (pushRemote.trim() && pushBranch.trim())));
+  const canSwitchBranch = Boolean(!runningGitAction && switchBranch.trim() && switchBranch.trim() !== gitContext?.branch);
+
   const filteredChangedFiles = useMemo(() => {
     const query = deferredFileQuery.trim().toLowerCase();
     const entries = Array.from(changedFiles.entries()).sort(([a], [b]) => a.localeCompare(b));
     if (!query) return entries;
     return entries.filter(([path, file]) => `${path} ${file.path} ${file.status}`.toLowerCase().includes(query));
   }, [changedFiles, deferredFileQuery]);
+
+  const selectedChangedFile = useMemo(() => {
+    if (!selectedFilePath) return null;
+    return Array.from(changedFiles.values()).find((file) => (
+      file.path === selectedFilePath || file.absolutePath === selectedFilePath
+    )) ?? null;
+  }, [changedFiles, selectedFilePath]);
 
   const gitContextText = useMemo(() => {
     if (!gitContext?.available) return '';
@@ -863,23 +1342,33 @@ export function RightSidebar(
 
   const runSidebarGitAction = useCallback(async (request: GitActionRequest, label: string, pathForBusy?: string): Promise<boolean> => {
     setGitActionError(null);
+    setCompletedGitAction(null);
     setRunningGitAction({ action: request.action, path: pathForBusy });
     try {
       const result = await runGitAction(request);
       applyGitBundle(result.bundle, { reloadDiff: true });
-      setLastInsertedReference(t('rightSidebar.gitActionSucceeded', { label }));
-      window.setTimeout(() => setLastInsertedReference((current) => (
-        current === t('rightSidebar.gitActionSucceeded', { label }) ? null : current
+      const completedAction = { action: request.action, path: pathForBusy, label };
+      setCompletedGitAction(completedAction);
+      window.setTimeout(() => setCompletedGitAction((current) => (
+        current?.action === completedAction.action && current.path === completedAction.path ? null : current
       )), 1400);
       setConfirmGitAction(null);
       return true;
     } catch (err) {
+      setCompletedGitAction(null);
       setGitActionError(t('rightSidebar.gitActionFailed', { message: err instanceof Error ? err.message : 'Unknown error' }));
       return false;
     } finally {
       setRunningGitAction(null);
     }
   }, [applyGitBundle, t]);
+
+  const handleSwitchBranch = useCallback(async () => {
+    if (!rootPath) return;
+    const branch = switchBranch.trim();
+    if (!branch || branch === gitContext?.branch) return;
+    await runSidebarGitAction({ action: 'switch-branch', cwd: rootPath, branch }, t('rightSidebar.switchBranch'));
+  }, [gitContext?.branch, rootPath, runSidebarGitAction, switchBranch, t]);
 
   const handleQuickCommit = useCallback(async () => {
     if (!rootPath) return;
@@ -900,6 +1389,180 @@ export function RightSidebar(
       ...(branch ? { branch } : {}),
     }, t('rightSidebar.pushChanges'));
   }, [pushBranch, pushRemote, rootPath, runSidebarGitAction, t]);
+
+  const handleQuickPull = useCallback(async () => {
+    if (!rootPath) return;
+    const remote = pushRemote.trim();
+    const branch = pushBranch.trim();
+    await runSidebarGitAction({
+      action: 'pull',
+      cwd: rootPath,
+      ...(remote ? { remote } : {}),
+      ...(branch ? { branch } : {}),
+    }, t('rightSidebar.pullChanges'));
+  }, [pushBranch, pushRemote, rootPath, runSidebarGitAction, t]);
+
+  const commitActionCompleted = completedGitAction?.action === 'commit';
+  const switchBranchActionCompleted = completedGitAction?.action === 'switch-branch';
+  const pullActionCompleted = completedGitAction?.action === 'pull';
+  const pushActionCompleted = completedGitAction?.action === 'push';
+  const effectiveGitQuickActionsOpen = gitPaneActive || gitQuickActionsOpen;
+
+  const gitQuickActionsPanel = gitContext?.available && rootPath ? (
+    <div className={effectiveGitQuickActionsOpen ? 'overflow-visible' : 'overflow-hidden'}>
+      <button
+        type="button"
+        onClick={() => {
+          if (!gitPaneActive) setGitQuickActionsOpen((open) => !open);
+        }}
+        aria-expanded={effectiveGitQuickActionsOpen}
+        className={`group flex w-full items-center gap-2 px-1 py-1.5 text-left transition ${gitPaneActive ? 'cursor-default' : 'rounded-lg hover:bg-surface-2 active:scale-[0.99]'}`}
+      >
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground group-hover:text-foreground">
+          <RiGitBranch size={14} />
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-foreground">
+          {t('rightSidebar.gitQuickActions')}
+        </span>
+        <span className="flex shrink-0 items-center gap-1">
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${changedSummary.staged > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>
+            {changedSummary.staged > 0 ? t('rightSidebar.stagedCount', { count: changedSummary.staged }) : t('rightSidebar.noStagedChangesShort')}
+          </span>
+          {!gitPaneActive && (
+            <span className={`flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition group-hover:bg-surface-elevated group-hover:text-foreground ${effectiveGitQuickActionsOpen ? 'rotate-90' : ''}`}>
+              <RiChevronRight size={13} />
+            </span>
+          )}
+        </span>
+      </button>
+      {effectiveGitQuickActionsOpen && (
+        <div className="space-y-0">
+          <div className="border-b border-border/10 px-1 py-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.branchSectionTitle')}</div>
+                <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{gitContext.branch ?? 'HEAD'}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleSwitchBranch()}
+                disabled={!canSwitchBranch}
+                className={`relative inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${switchBranchActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
+                title={t('rightSidebar.switchBranch')}
+              >
+                <span className={runningGitAction?.action === 'switch-branch' || switchBranchActionCompleted ? 'opacity-0' : ''}>{t('rightSidebar.switchBranch')}</span>
+                {runningGitAction?.action === 'switch-branch' && <RiLoader size={12} className="absolute animate-spin" />}
+                {switchBranchActionCompleted && runningGitAction?.action !== 'switch-branch' && <span className="absolute">✓</span>}
+              </button>
+            </div>
+            <GitTargetPicker
+              label={t('rightSidebar.currentBranchLabel')}
+              value={switchBranch}
+              options={switchBranchOptions}
+              placeholder={t('rightSidebar.switchBranchPlaceholder')}
+              searchPlaceholder={t('rightSidebar.switchBranchSearchPlaceholder')}
+              emptyText={t('rightSidebar.switchNoBranches')}
+              disabled={Boolean(runningGitAction)}
+              onChange={setSwitchBranch}
+            />
+          </div>
+          <div className="border-b border-border/10 px-1 py-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.commitSectionTitle')}</div>
+                <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+                  {changedSummary.staged > 0 ? t('rightSidebar.commitReadyHint', { count: changedSummary.staged }) : t('rightSidebar.commitNeedsStaged')}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleQuickCommit()}
+                disabled={Boolean(runningGitAction) || changedSummary.staged === 0 || !commitMessage.trim()}
+                className={`relative inline-flex h-7 shrink-0 items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition active:scale-95 ${commitActionCompleted ? 'bg-accent/10 text-accent disabled:bg-accent/10 disabled:text-accent' : 'bg-primary text-primary-foreground hover:bg-primary/90 disabled:bg-surface-2 disabled:text-muted-foreground'} disabled:cursor-not-allowed`}
+                title={changedSummary.staged === 0 ? t('rightSidebar.commitNeedsStaged') : t('rightSidebar.commitChanges')}
+              >
+                <span className={runningGitAction?.action === 'commit' || commitActionCompleted ? 'opacity-0' : ''}>{t('rightSidebar.commitChanges')}</span>
+                {runningGitAction?.action === 'commit' && <RiLoader size={12} className="absolute animate-spin" />}
+                {commitActionCompleted && runningGitAction?.action !== 'commit' && <span className="absolute">✓</span>}
+              </button>
+            </div>
+            <input
+              value={commitMessage}
+              onChange={(event) => setCommitMessage(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                  event.preventDefault();
+                  void handleQuickCommit();
+                }
+              }}
+              placeholder={t('rightSidebar.commitMessagePlaceholder')}
+              disabled={Boolean(runningGitAction)}
+              className="w-full rounded-md border border-border/15 bg-surface-2 px-2.5 py-1.5 text-[12px] text-foreground outline-none transition placeholder:text-muted-foreground/70 focus:border-primary/35 focus:ring-1 focus:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-60"
+              maxLength={300}
+            />
+          </div>
+          <div className="px-1 py-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.pushSectionTitle')}</div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void handleQuickPull()}
+                  disabled={!canPull}
+                  className={`relative inline-flex h-7 items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${pullActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
+                  title={t('rightSidebar.pullChanges')}
+                >
+                  <span className={runningGitAction?.action === 'pull' || pullActionCompleted ? 'opacity-0' : ''}>{t('rightSidebar.pullChanges')}</span>
+                  {runningGitAction?.action === 'pull' && <RiLoader size={12} className="absolute animate-spin" />}
+                  {pullActionCompleted && runningGitAction?.action !== 'pull' && <span className="absolute">✓</span>}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleQuickPush()}
+                  disabled={!canPush}
+                  className={`relative inline-flex h-7 items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${pushActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
+                  title={t('rightSidebar.pushChanges')}
+                >
+                  <span className={runningGitAction?.action === 'push' || pushActionCompleted ? 'opacity-0' : ''}>{t('rightSidebar.pushChanges')}</span>
+                  {runningGitAction?.action === 'push' && <RiLoader size={12} className="absolute animate-spin" />}
+                  {pushActionCompleted && runningGitAction?.action !== 'push' && <span className="absolute">✓</span>}
+                </button>
+              </div>
+            </div>
+            <div
+              className={`mb-2 flex min-w-0 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[11px] ${pushSyncInfo.className}`}
+              title={gitContext.upstream ?? undefined}
+            >
+              <span className="truncate font-medium">{pushSyncInfo.text}</span>
+              {gitContext.upstream && <span className="shrink-0 truncate text-[10px] opacity-75">{gitContext.upstream}</span>}
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              <GitTargetPicker
+                label={t('rightSidebar.pushRemoteLabel')}
+                value={pushRemote}
+                options={pushRemoteOptions}
+                placeholder={t('rightSidebar.pushRemotePlaceholder')}
+                searchPlaceholder={t('rightSidebar.pushRemoteSearchPlaceholder')}
+                emptyText={t('rightSidebar.pushNoRemotes')}
+                disabled={Boolean(runningGitAction)}
+                onChange={setPushRemote}
+              />
+              <GitTargetPicker
+                label={t('rightSidebar.pushBranchLabel')}
+                value={pushBranch}
+                options={pushBranchOptions}
+                placeholder={t('rightSidebar.pushBranchPlaceholder', { branch: gitContext.branch ?? 'HEAD' })}
+                searchPlaceholder={t('rightSidebar.pushBranchSearchPlaceholder')}
+                emptyText={t('rightSidebar.pushNoBranches')}
+                disabled={Boolean(runningGitAction)}
+                onChange={setPushBranch}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null;
 
   const buildGitActionButtons = useCallback((file: GitChangedFile): GitActionButton[] => {
     if (!rootPath) return [];
@@ -1117,85 +1780,6 @@ export function RightSidebar(
           </div>
         )}
 
-        {gitContext?.available && rootPath && (
-          <div className="mt-2 overflow-hidden rounded-xl border border-border/15 bg-background-subtle/60">
-            <button
-              type="button"
-              onClick={() => setGitQuickActionsOpen((open) => !open)}
-              aria-expanded={gitQuickActionsOpen}
-              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-semibold text-foreground transition hover:bg-surface-2/60 active:scale-[0.99]"
-            >
-              <span className={`text-muted-foreground transition-transform ${gitQuickActionsOpen ? 'rotate-90' : ''}`}>
-                <RiChevronRight size={13} />
-              </span>
-              <span className="min-w-0 flex-1 truncate">{t('rightSidebar.gitQuickActions')}</span>
-              <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
-                {changedSummary.staged > 0 ? t('rightSidebar.stagedCount', { count: changedSummary.staged }) : t('rightSidebar.collapsedByDefault')}
-              </span>
-            </button>
-            {gitQuickActionsOpen && (
-              <div className="space-y-2 border-t border-border/10 px-3 py-2">
-                <div className="flex gap-1.5">
-                  <input
-                    value={commitMessage}
-                    onChange={(event) => setCommitMessage(event.target.value)}
-                    onKeyDown={(event) => {
-                      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-                        event.preventDefault();
-                        void handleQuickCommit();
-                      }
-                    }}
-                    placeholder={t('rightSidebar.commitMessagePlaceholder')}
-                    className="min-w-0 flex-1 rounded-lg border border-border/15 bg-surface px-2.5 py-1.5 text-[12px] text-foreground placeholder:text-muted-foreground"
-                    maxLength={300}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void handleQuickCommit()}
-                    disabled={Boolean(runningGitAction) || changedSummary.staged === 0 || !commitMessage.trim()}
-                    className="shrink-0 rounded-lg bg-primary px-3 py-1.5 text-[11px] font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:opacity-50 active:scale-95"
-                    title={changedSummary.staged === 0 ? t('rightSidebar.commitNeedsStaged') : t('rightSidebar.commitChanges')}
-                  >
-                    {runningGitAction?.action === 'commit' ? t('rightSidebar.gitActionRunning') : t('rightSidebar.commitChanges')}
-                  </button>
-                </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <input
-                    value={pushRemote}
-                    onChange={(event) => setPushRemote(event.target.value)}
-                    placeholder={t('rightSidebar.pushRemotePlaceholder')}
-                    className="min-w-[5rem] flex-1 rounded-lg border border-border/15 bg-surface px-2.5 py-1.5 text-[12px] text-foreground placeholder:text-muted-foreground"
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                    spellCheck={false}
-                  />
-                  <input
-                    value={pushBranch}
-                    onChange={(event) => setPushBranch(event.target.value)}
-                    placeholder={t('rightSidebar.pushBranchPlaceholder', { branch: gitContext.branch ?? 'HEAD' })}
-                    className="min-w-[6rem] flex-1 rounded-lg border border-border/15 bg-surface px-2.5 py-1.5 text-[12px] text-foreground placeholder:text-muted-foreground"
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                    spellCheck={false}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void handleQuickPush()}
-                    disabled={Boolean(runningGitAction)}
-                    className="shrink-0 rounded-lg bg-accent/15 px-3 py-1.5 text-[11px] font-semibold text-accent transition hover:bg-accent/25 disabled:opacity-50 active:scale-95"
-                    title={t('rightSidebar.pushChanges')}
-                  >
-                    {runningGitAction?.action === 'push' ? t('rightSidebar.gitActionRunning') : t('rightSidebar.pushChanges')}
-                  </button>
-                </div>
-                <div className="text-[10px] leading-relaxed text-muted-foreground">
-                  {t('rightSidebar.gitQuickActionsHint')}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
         {/* "Insert X" preset chips — always render so toggling visibility
             never reflows the header. The list of presets is a stable order
             and each chip occupies its own slot; we just hide unused ones. */}
@@ -1270,55 +1854,74 @@ export function RightSidebar(
           )}
         </div>
 
-        {/* Tab bar — mobile collapses the third "File" tab because file
-            preview is reachable via the Files tab. Wide desktop shows just
-            Changes + Files since the file preview is rendered side-by-side
-            inside Files. */}
-        <div className={`mt-2 grid gap-0.5 rounded-md bg-background-subtle p-0.5 ${isMobile ? 'grid-cols-2' : isWide ? 'grid-cols-2' : 'grid-cols-3'}`}>
-          <button
-            type="button"
-            onClick={() => setRightTab('diff')}
-            className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-              effectiveRightTab === 'diff'
-                ? 'bg-surface-elevated text-foreground'
-                : 'text-muted-foreground hover:bg-surface-2'
-            }`}
-          >
-            <RiGitCompare size={12} />
-            {t('rightSidebar.tabChanges')}
-            {gitBundleLoading ? (
-              <RiLoader size={12} className="animate-spin text-muted-foreground" />
-            ) : changedFiles.size > 0 ? (
-              <span className="text-[10px] text-accent">{changedFiles.size}</span>
-            ) : null}
-          </button>
-          <button
-            type="button"
-            onClick={() => setRightTab('files')}
-            className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-              effectiveRightTab === 'files'
-                ? 'bg-surface-elevated text-foreground'
-                : 'text-muted-foreground hover:bg-surface-2'
-            }`}
-          >
-            <RiFolder size={12} />
+        {/* Tab bar — non-Git workspaces reduce to Files only. Mobile collapses
+            the third "File" tab because file preview is reachable via Files.
+            Wide desktop also hides it because preview is side-by-side there. */}
+        {gitKnownUnavailable ? (
+          <div className="mt-2 flex items-center justify-center rounded-md bg-background-subtle p-2 text-[11px] font-medium text-foreground">
+            <RiFolder size={12} className="mr-1" />
             {t('rightSidebar.tabFiles')}
-          </button>
-          {!isMobile && !isWide && (
+          </div>
+        ) : (
+          <div className={`mt-2 grid gap-0.5 rounded-md bg-background-subtle p-0.5 ${isMobile ? 'grid-cols-3' : isWide ? 'grid-cols-3' : 'grid-cols-4'}`}>
             <button
               type="button"
-              onClick={() => setRightTab('file')}
+              onClick={() => setRightTab('git')}
               className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-                effectiveRightTab === 'file'
+                effectiveRightTab === 'git'
                   ? 'bg-surface-elevated text-foreground'
                   : 'text-muted-foreground hover:bg-surface-2'
               }`}
             >
-              <RiFileText size={12} />
-              {t('rightSidebar.tabPreview')}
+              <RiGitBranch size={12} />
+              {t('rightSidebar.tabGit')}
+              {gitBundleLoading && effectiveRightTab === 'git' ? <RiLoader size={12} className="animate-spin text-muted-foreground" /> : null}
             </button>
-          )}
-        </div>
+            <button
+              type="button"
+              onClick={() => setRightTab('diff')}
+              className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+                effectiveRightTab === 'diff'
+                  ? 'bg-surface-elevated text-foreground'
+                  : 'text-muted-foreground hover:bg-surface-2'
+              }`}
+            >
+              <RiGitCompare size={12} />
+              {t('rightSidebar.tabChanges')}
+              {gitBundleLoading ? (
+                <RiLoader size={12} className="animate-spin text-muted-foreground" />
+              ) : changedFiles.size > 0 ? (
+                <span className="text-[10px] text-accent">{changedFiles.size}</span>
+              ) : null}
+            </button>
+            <button
+              type="button"
+              onClick={() => setRightTab('files')}
+              className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+                effectiveRightTab === 'files'
+                  ? 'bg-surface-elevated text-foreground'
+                  : 'text-muted-foreground hover:bg-surface-2'
+              }`}
+            >
+              <RiFolder size={12} />
+              {t('rightSidebar.tabFiles')}
+            </button>
+            {!isMobile && !isWide && (
+              <button
+                type="button"
+                onClick={() => setRightTab('file')}
+                className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+                  effectiveRightTab === 'file'
+                    ? 'bg-surface-elevated text-foreground'
+                    : 'text-muted-foreground hover:bg-surface-2'
+                }`}
+              >
+                <RiFileText size={12} />
+                {t('rightSidebar.tabPreview')}
+              </button>
+            )}
+          </div>
+        )}
         <div className="h-2" />
 
         {/* Toast — absolutely positioned so its 1.4 s lifetime doesn't push
@@ -1329,7 +1932,7 @@ export function RightSidebar(
           </div>
         )}
         {gitActionError && (
-          <div className="mx-1 mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
+          <div className="pointer-events-none absolute right-3 top-10 z-20 max-w-[72%] rounded-lg bg-destructive/95 px-3 py-2 text-[11px] font-medium text-destructive-foreground shadow-md animate-fade-in">
             {gitActionError}
           </div>
         )}
@@ -1337,6 +1940,22 @@ export function RightSidebar(
 
       {/* Content */}
       <div className="min-h-0 flex-1 overflow-hidden">
+        <Pane active={gitPaneActive}>
+          <div className="h-full overflow-y-auto overscroll-contain px-2 py-2">
+            {gitQuickActionsPanel ? (
+              gitQuickActionsPanel
+            ) : gitBundleLoading ? (
+              <GitChangesLoadingState slow={gitBundleSlow} />
+            ) : gitBundleError ? (
+              <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
+            ) : (
+              <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                {rootPath ? t('rightSidebar.gitUnavailable') : t('fileTree.noWorkingDir')}
+              </div>
+            )}
+          </div>
+        </Pane>
+
         <Pane active={filesPaneActive}>
           {isWide ? (
             <div className="flex h-full min-h-0">
@@ -1479,10 +2098,11 @@ export function RightSidebar(
                               <span className="min-w-0 flex-1">
                                 <span className="block truncate text-[12px] font-medium">{display.name}</span>
                                 {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
+                                {file.oldPath && <span className="block truncate text-[10px] text-muted-foreground/60">{t('rightSidebar.changedFromPath', { path: file.oldPath })}</span>}
                               </span>
                             </button>
                             <div className="mt-1 flex items-center justify-between gap-1 pl-6">
-                              <GitActionChips actions={actions} running={runningGitAction} />
+                              <GitActionChips actions={actions} running={runningGitAction} completed={completedGitAction?.path === file.path ? completedGitAction : null} />
                               <button
                                 type="button"
                                 onClick={() => insertPathReference(absolutePath)}
@@ -1500,7 +2120,7 @@ export function RightSidebar(
                 </div>
               </div>
               <div className="min-w-0 flex-1 overflow-y-auto overscroll-contain">
-                <DiffViewer active={diffPaneActive} filePath={selectedFilePath} reloadKey={diffRefreshKey} onInsertDiffReference={insertContextText} />
+                <DiffViewer active={diffPaneActive} filePath={selectedFilePath} changedFile={selectedChangedFile} reloadKey={diffRefreshKey} onInsertDiffReference={insertContextText} />
               </div>
             </div>
           ) : (
@@ -1583,6 +2203,7 @@ export function RightSidebar(
                               <span className="min-w-0 flex-1">
                                 <span className={`block truncate text-[13px] ${isSelected || isExpanded ? 'font-semibold text-foreground' : 'font-medium text-foreground'}`}>{display.name}</span>
                                 {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
+                                {file.oldPath && <span className="block truncate text-[10px] text-muted-foreground/60">{t('rightSidebar.changedFromPath', { path: file.oldPath })}</span>}
                               </span>
                             </button>
                             <button
@@ -1599,7 +2220,7 @@ export function RightSidebar(
                           </div>
                           {actions.length > 0 && (
                             <div className="flex border-t border-border/10 px-2 py-1.5">
-                              <GitActionChips actions={actions} running={runningGitAction} />
+                              <GitActionChips actions={actions} running={runningGitAction} completed={completedGitAction?.path === file.path ? completedGitAction : null} />
                             </div>
                           )}
                           {isExpanded && (
@@ -1607,6 +2228,7 @@ export function RightSidebar(
                               <DiffViewer
                                 active={diffPaneActive}
                                 filePath={relativePath}
+                                changedFile={file}
                                 wrap={diffWrap}
                                 showScrollHint={!diffWrap}
                                 reloadKey={diffRefreshKey}

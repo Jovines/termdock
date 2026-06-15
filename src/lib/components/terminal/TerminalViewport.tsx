@@ -36,6 +36,14 @@ function sanitizeTerminalInput(input: string): string {
     .replace(/[\u200B-\u200D\uFEFF]/g, '');
 }
 
+// Mobile IMEs (notably voice input) may briefly rewrite a whole textarea value:
+// delete the current draft, then insert the normalized final transcript.  If we
+// mirror every intermediate deletion to the PTY, a long sentence turns into many
+// websocket writes / backspaces.  Hold destructive bulk edits for one short
+// frame so the final textarea value can settle, then diff once.
+const MOBILE_BULK_INPUT_DEBOUNCE_MS = 80;
+const MOBILE_BULK_DELETE_THRESHOLD = 8;
+
 /**
  * 桌面端特殊键 → ANSI 转义序列映射
  * 所有这些序列都不应再被 TerminalView.handleViewportInput 二次叠加修饰符，
@@ -294,6 +302,32 @@ function getTerminalConvertEol(hasTmuxScroll: boolean): boolean {
  *   - 任何加载失败都吞掉，让终端继续以 fallback 启动，不阻塞用户。
  */
 let terminalFontsReadyPromise: Promise<void> | null = null;
+const TERMINAL_FONT_PRELOADS = [
+  {
+    font: '400 13px "JetBrains Mono NL"',
+    text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
+  },
+  {
+    font: '700 13px "JetBrains Mono NL"',
+    text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
+  },
+  {
+    font: '400 13px "Symbols Nerd Font Mono"',
+    // CSS Font Loading API 的 text 参数必须命中 @font-face unicode-range。
+    // 不传 text 时默认只检查空格，Nerd Font 的 PUA 图标不会被真正下载，
+    // tmux prompt 首帧仍可能先画成 tofu 方块，再在字体懒加载后跳成图标。
+    text: '\ue0b0\ue0b1\uf07b\uf120\uf489\udb80\ude00',
+  },
+  {
+    font: '400 13px "Noto Sans Symbols 2"',
+    text: '⏺⏸⏹✓✗',
+  },
+  {
+    font: '400 13px "Noto Sans Mono CJK SC"',
+    text: '终端中文路径',
+  },
+] as const;
+
 const ensureTerminalFontsReady = (): Promise<void> => {
   if (terminalFontsReadyPromise) return terminalFontsReadyPromise;
   if (typeof document === 'undefined' || !('fonts' in document)) {
@@ -301,12 +335,10 @@ const ensureTerminalFontsReady = (): Promise<void> => {
     return terminalFontsReadyPromise;
   }
   const fonts = document.fonts;
-  // 主字体显式预加载，触发 unicode-range 限定的 @font-face 真正下载。
-  const preload = Promise.allSettled([
-    fonts.load('400 13px "JetBrains Mono NL"'),
-    fonts.load('700 13px "JetBrains Mono NL"'),
-    fonts.load('400 13px "Symbols Nerd Font Mono"'),
-  ]);
+  // 显式传入能命中各 @font-face unicode-range 的文本，触发字体真正下载。
+  const preload = Promise.allSettled(
+    TERMINAL_FONT_PRELOADS.map(({ font, text }) => fonts.load(font, text)),
+  );
   terminalFontsReadyPromise = preload
     .then(() => fonts.ready)
     .then(() => undefined)
@@ -414,6 +446,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // keydown(Enter) / beforeinput(insertLineBreak)，我们用时间窗口吞掉。
     const lastCompositionEndAtRef = React.useRef(0);
     const sentValueRef = React.useRef('');
+    const pendingTextareaSyncTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingTextareaSyncTargetRef = React.useRef<HTMLTextAreaElement | null>(null);
     const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
     // 桌面 tmux wheel：累积像素余数，凑满 1 行立即发
     const desktopWheelRemainderRef = React.useRef(0);
@@ -697,7 +731,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       return keyboardApproxHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
     }, []);
 
-    const syncTextareaToPty = React.useCallback(
+    const clearPendingTextareaSync = React.useCallback(() => {
+      if (pendingTextareaSyncTimerRef.current !== null) {
+        clearTimeout(pendingTextareaSyncTimerRef.current);
+        pendingTextareaSyncTimerRef.current = null;
+      }
+      pendingTextareaSyncTargetRef.current = null;
+    }, []);
+
+    const performTextareaSyncToPty = React.useCallback(
       (textarea: HTMLTextAreaElement) => {
         const raw = textarea.value;
         const sanitized = sanitizeTerminalInput(raw);
@@ -714,9 +756,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // (user deletion via keyboard or voice autocorrect both flow through here)
         const toDelete = sent.length - commonLen;
         if (toDelete > 0) {
-          for (let i = 0; i < toDelete; i++) {
-            inputHandlerRef.current('\x7f');
-          }
+          // Send the whole delete run as one payload.  This preserves terminal
+          // semantics while avoiding N websocket sends for one long deletion.
+          inputHandlerRef.current('\x7f'.repeat(toDelete));
         }
 
         // Send new content
@@ -732,9 +774,53 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       []
     );
 
+    const syncTextareaToPty = React.useCallback(
+      (textarea: HTMLTextAreaElement, options?: { immediate?: boolean }) => {
+        const raw = textarea.value;
+        const sanitized = sanitizeTerminalInput(raw);
+        const sent = sentValueRef.current;
+
+        if (sanitized === sent) {
+          clearPendingTextareaSync();
+          return;
+        }
+
+        let commonLen = 0;
+        while (commonLen < sent.length && commonLen < sanitized.length && sent[commonLen] === sanitized[commonLen]) {
+          commonLen++;
+        }
+
+        const toDelete = sent.length - commonLen;
+        const shouldDebounceBulkRewrite =
+          enableTouchScroll &&
+          !options?.immediate &&
+          toDelete >= MOBILE_BULK_DELETE_THRESHOLD;
+
+        if (shouldDebounceBulkRewrite) {
+          pendingTextareaSyncTargetRef.current = textarea;
+          if (pendingTextareaSyncTimerRef.current !== null) {
+            clearTimeout(pendingTextareaSyncTimerRef.current);
+          }
+          pendingTextareaSyncTimerRef.current = setTimeout(() => {
+            pendingTextareaSyncTimerRef.current = null;
+            const target = pendingTextareaSyncTargetRef.current;
+            pendingTextareaSyncTargetRef.current = null;
+            if (target) {
+              performTextareaSyncToPty(target);
+            }
+          }, MOBILE_BULK_INPUT_DEBOUNCE_MS);
+          return;
+        }
+
+        clearPendingTextareaSync();
+        performTextareaSyncToPty(textarea);
+      },
+      [clearPendingTextareaSync, enableTouchScroll, performTextareaSyncToPty]
+    );
+
     const flushAndSendEnter = React.useCallback(
       (textarea: HTMLTextAreaElement) => {
-        syncTextareaToPty(textarea);
+        syncTextareaToPty(textarea, { immediate: true });
         inputHandlerRef.current('\r');
         textarea.value = '';
         sentValueRef.current = '';
@@ -750,6 +836,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
      */
     const sendTerminalSeq = React.useCallback((seq: string, textarea?: HTMLTextAreaElement | null) => {
       if (!seq) return;
+      clearPendingTextareaSync();
       const target = textarea ?? hiddenInputRef.current;
       if (target) {
         target.value = '';
@@ -757,7 +844,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       sentValueRef.current = '';
       try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
       inputHandlerRef.current(seq, { skipModifierTransform: true });
-    }, []);
+    }, [clearPendingTextareaSync]);
 
     /**
      * 桌面端：根据 xterm 当前光标位置计算 IME 候选窗锚点。
@@ -1631,10 +1718,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       onPointerCancel: enableTouchScroll ? lp_onPointerCancel : undefined,
     });
 
-    const resetWriteState = React.useCallback(() => {
+    const resetWriteState = React.useCallback((options: { notifyFlowResume?: boolean } = {}) => {
       pendingWriteRef.current = '';
       pendingBytesRef.current = 0;
-      flowPausedRef.current = false;
+      if (flowPausedRef.current) {
+        flowPausedRef.current = false;
+        if (options.notifyFlowResume === true) {
+          flowControlHandlerRef.current?.(false);
+        }
+      }
       if (writeScheduledRef.current !== null && typeof window !== 'undefined') {
         window.cancelAnimationFrame(writeScheduledRef.current);
       }
@@ -2528,6 +2620,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // gate 掉。同时把 IME overlay 状态归零。
         isComposingRef.current = false;
         imeFrozenAnchorRef.current = null;
+        clearPendingTextareaSync();
         setImeComposition({ active: false, text: '' });
 
         for (const disposable of localDisposables) {
@@ -2547,7 +2640,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         viewportRef.current = null;
         lastBufferTypeRef.current = null;
         lastReportedSizeRef.current = null;
-        resetWriteState();
+        resetWriteState({ notifyFlowResume: true });
       };
     }, [
       fitTerminal,
@@ -2555,6 +2648,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       fontSize,
       theme,
       resetWriteState,
+      clearPendingTextareaSync,
       enableTouchScroll,
       shouldUseWebgl,
       rendererMode,

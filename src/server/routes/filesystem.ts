@@ -11,11 +11,13 @@ const MAX_IMAGE_PREVIEW_SIZE = 20 * 1024 * 1024; // 20MB
 const GIT_TIMEOUT_MS = 5000;
 const MAX_DIRECTORY_ENTRIES = 1000;
 const MAX_GIT_CONTEXT_CHANGED_FILES = 200;
+const MAX_DIFF_BYTES = 2 * 1024 * 1024; // 2MB
+const MAX_UNTRACKED_DIFF_FILE_BYTES = 1024 * 1024; // 1MB
 const RESTORE_CONFIRM_PHRASES = new Set(['丢弃改动', 'discard changes']);
 
 type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted' | 'unknown';
 
-type GitAction = 'stage-file' | 'stage-all' | 'unstage-file' | 'stash-file' | 'stash-all' | 'restore-worktree-file' | 'commit' | 'push';
+type GitAction = 'stage-file' | 'stage-all' | 'unstage-file' | 'stash-file' | 'stash-all' | 'restore-worktree-file' | 'commit' | 'push' | 'pull' | 'switch-branch';
 
 interface GitChangedFile {
   path: string;
@@ -42,6 +44,13 @@ interface GitBundlePayload {
     cwd?: string;
     root?: string;
     branch?: string | null;
+    remotes?: string[];
+    branches?: string[];
+    upstream?: string | null;
+    upstreamRemote?: string | null;
+    upstreamBranch?: string | null;
+    ahead?: number | null;
+    behind?: number | null;
     status?: string;
     recentCommits?: string[];
     changedFiles?: Array<{ path: string; absolutePath: string; status: string }>;
@@ -49,6 +58,24 @@ interface GitBundlePayload {
     error?: string;
   } | null;
   error?: string;
+}
+
+interface DiffSkippedFile {
+  path: string;
+  reason: string;
+  size?: number;
+  maxBytes?: number;
+}
+
+interface DiffResponsePayload {
+  path: string | null;
+  diff: string;
+  error?: string;
+  truncated?: boolean;
+  tooLarge?: boolean;
+  size?: number;
+  maxBytes?: number;
+  skippedFiles?: DiffSkippedFile[];
 }
 
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
@@ -91,6 +118,45 @@ function toGitPathspec(gitRoot: string, requestedPath: string): string {
   return path.relative(gitRoot, candidate).split(path.sep).join('/');
 }
 
+function getDiffByteLength(diff: string): number {
+  return Buffer.byteLength(diff, 'utf8');
+}
+
+function truncateDiffIfNeeded(payload: DiffResponsePayload): DiffResponsePayload {
+  const size = getDiffByteLength(payload.diff);
+  if (size <= MAX_DIFF_BYTES) {
+    return { ...payload, size };
+  }
+  return {
+    ...payload,
+    diff: '',
+    size,
+    maxBytes: MAX_DIFF_BYTES,
+    truncated: true,
+    tooLarge: true,
+  };
+}
+
+function getRelativeFileSize(gitRoot: string, filePath: string): number | null {
+  try {
+    const absolutePath = path.resolve(gitRoot, filePath);
+    if (!isPathInside(gitRoot, absolutePath)) return null;
+    const stat = fs.statSync(absolutePath);
+    return stat.isFile() ? stat.size : null;
+  } catch {
+    return null;
+  }
+}
+
+function makeSkippedUntracked(pathspec: string, size: number | null): DiffSkippedFile {
+  return {
+    path: pathspec,
+    reason: 'untracked-file-too-large',
+    size: size ?? undefined,
+    maxBytes: MAX_UNTRACKED_DIFF_FILE_BYTES,
+  };
+}
+
 function normalizeNameStatus(status: string): GitChangeStatus {
   if (status.startsWith('R')) return 'renamed';
   if (status.startsWith('C')) return 'copied';
@@ -101,6 +167,18 @@ function normalizeNameStatus(status: string): GitChangeStatus {
   if (status.startsWith('?')) return 'untracked';
   if (status.startsWith('M') || status.startsWith('T')) return 'modified';
   return 'modified';
+}
+
+function combineChangeStatus(file: GitChangedFile): GitChangeStatus {
+  const statuses = [file.indexStatus, file.worktreeStatus].filter(Boolean) as string[];
+  if (statuses.some((status) => normalizeNameStatus(status) === 'conflicted')) return 'conflicted';
+  if (file.untracked) return 'untracked';
+  if (statuses.some((status) => status.startsWith('R'))) return 'renamed';
+  if (statuses.some((status) => status.startsWith('C'))) return 'copied';
+  if (statuses.some((status) => status.startsWith('D'))) return 'deleted';
+  if (statuses.some((status) => status.startsWith('A'))) return 'added';
+  if (statuses.some((status) => status.startsWith('M') || status.startsWith('T'))) return 'modified';
+  return file.status === 'unknown' ? 'modified' : file.status;
 }
 
 function emptyChangedFile(gitRoot: string, filePath: string): GitChangedFile {
@@ -159,7 +237,7 @@ function finalizeChangedFiles(files: Map<string, GitChangedFile>): GitChangedFil
   return Array.from(files.values())
     .map((file) => ({
       ...file,
-      status: file.untracked ? 'untracked' : file.status === 'unknown' ? 'modified' : file.status,
+      status: combineChangeStatus(file),
       canStage: file.unstaged || file.untracked,
       canUnstage: file.staged,
       canStash: file.unstaged || file.untracked,
@@ -170,8 +248,8 @@ function finalizeChangedFiles(files: Map<string, GitChangedFile>): GitChangedFil
 
 async function getChangedFiles(gitRoot: string): Promise<GitChangedFile[]> {
   const [stagedOutput, unstagedOutput, untrackedOutput] = await Promise.all([
-    execGit(['diff', '--cached', '--name-status', '-z'], gitRoot).catch(() => ''),
-    execGit(['diff', '--name-status', '-z'], gitRoot).catch(() => ''),
+    execGit(['diff', '--cached', '--name-status', '-M', '-C', '--find-copies-harder', '-z'], gitRoot).catch(() => ''),
+    execGit(['diff', '--name-status', '-M', '-C', '--find-copies-harder', '-z'], gitRoot).catch(() => ''),
     execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot).catch(() => ''),
   ]);
 
@@ -197,12 +275,57 @@ function toContextFiles(files: GitChangedFile[]) {
     .map((file) => ({ path: file.path, absolutePath: file.absolutePath, status: file.status }));
 }
 
+function uniqueSortedLines(output: string): string[] {
+  return Array.from(new Set(
+    output
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean),
+  )).sort((a, b) => a.localeCompare(b));
+}
+
+function splitUpstream(upstream: string | null, remotes: string[]): { remote: string | null; branch: string | null } {
+  if (!upstream) return { remote: null, branch: null };
+  const remote = remotes
+    .filter((candidate) => upstream === candidate || upstream.startsWith(`${candidate}/`))
+    .sort((a, b) => b.length - a.length)[0];
+  if (!remote || upstream === remote) return { remote: null, branch: null };
+  return { remote, branch: upstream.slice(remote.length + 1) || null };
+}
+
+function parseAheadBehind(output: string, hasUpstream: boolean): { ahead: number | null; behind: number | null } {
+  if (!hasUpstream) return { ahead: null, behind: null };
+  const [behindRaw, aheadRaw] = output.trim().split(/\s+/);
+  const behind = Number.parseInt(behindRaw ?? '', 10);
+  const ahead = Number.parseInt(aheadRaw ?? '', 10);
+  return {
+    ahead: Number.isFinite(ahead) ? ahead : 0,
+    behind: Number.isFinite(behind) ? behind : 0,
+  };
+}
+
+async function getGitPushTargets(gitRoot: string) {
+  const [remotesOutput, branchesOutput, upstreamOutput, aheadBehindOutput] = await Promise.all([
+    execGit(['remote'], gitRoot).catch(() => ''),
+    execGit(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], gitRoot).catch(() => ''),
+    execGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], gitRoot).catch(() => ''),
+    execGit(['rev-list', '--left-right', '--count', '@{u}...HEAD'], gitRoot).catch(() => ''),
+  ]);
+  const remotes = uniqueSortedLines(remotesOutput);
+  const branches = uniqueSortedLines(branchesOutput);
+  const upstream = upstreamOutput.trim() || null;
+  const { remote: upstreamRemote, branch: upstreamBranch } = splitUpstream(upstream, remotes);
+  const { ahead, behind } = parseAheadBehind(aheadBehindOutput, Boolean(upstream));
+  return { remotes, branches, upstream, upstreamRemote, upstreamBranch, ahead, behind };
+}
+
 async function buildGitBundle(resolvedCwd: string, gitRoot: string): Promise<GitBundlePayload> {
-  const [files, branchOutput, statusOutput, logOutput] = await Promise.all([
+  const [files, branchOutput, statusOutput, logOutput, pushTargets] = await Promise.all([
     getChangedFiles(gitRoot),
     execGit(['branch', '--show-current'], gitRoot).catch(() => ''),
     execGit(['status', '--short', '--branch'], gitRoot).catch(() => ''),
     execGit(['log', '--oneline', '-8'], gitRoot).catch(() => ''),
+    getGitPushTargets(gitRoot),
   ]);
   const changedFiles = toContextFiles(files);
 
@@ -214,6 +337,7 @@ async function buildGitBundle(resolvedCwd: string, gitRoot: string): Promise<Git
       cwd: resolvedCwd,
       root: gitRoot,
       branch: branchOutput.trim() || null,
+      ...pushTargets,
       status: statusOutput.trim(),
       recentCommits: logOutput.split('\n').map((line) => line.trim()).filter(Boolean),
       changedFiles,
@@ -497,8 +621,9 @@ router.get('/diff', async (req: Request, res: Response) => {
     }
 
     const pathspec = requestedPath ? toGitPathspec(gitCwd, requestedPath) : null;
+    const skippedFiles: DiffSkippedFile[] = [];
     const buildDiffArgs = (includeCached: boolean) => {
-      const args = ['diff'];
+      const args = ['diff', '-M', '-C', '--find-copies-harder'];
       if (includeCached) args.push('--cached');
       if (pathspec) args.push('--', pathspec);
       return args;
@@ -515,26 +640,55 @@ router.get('/diff', async (req: Request, res: Response) => {
           await execGit(buildDiffArgs(false), gitCwd).catch(() => ''),
         ].filter(Boolean).join('\n');
 
+    let totalBytes = getDiffByteLength(diff);
+
     // If git diff produced no output for a specific file, it might be an
     // untracked (new) file.  Use `git diff --no-index /dev/null <path>` to
-    // show the entire file contents as additions.
+    // show the entire file contents as additions, but never for very large
+    // files — that would turn a preview request into a full-file transfer.
     // Note: git diff --no-index exits with code 1 when there are differences,
     // but stdout still contains the valid diff text.
-    if (!diff && requestedPath && !cached) {
-      diff = await execGitNoIndex(['diff', '--no-index', '--', '/dev/null', pathspec ?? requestedPath], gitCwd).catch(() => '');
-    }
-
-    // When viewing the full repo diff (no specific file), also append diffs
-    // for untracked files — `git diff` silently skips them.
-    if (!requestedPath && !cached) {
-      const untracked = await execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitCwd).catch(() => '');
-      for (const p of untracked.split('\0').filter(Boolean)) {
-        const partial = await execGitNoIndex(['diff', '--no-index', '--', '/dev/null', p], gitCwd).catch(() => '');
-        if (partial) diff += '\n' + partial;
+    if (!diff && requestedPath && !cached && pathspec) {
+      const size = getRelativeFileSize(gitCwd, pathspec);
+      if (size !== null && size > MAX_UNTRACKED_DIFF_FILE_BYTES) {
+        skippedFiles.push(makeSkippedUntracked(pathspec, size));
+      } else {
+        diff = await execGitNoIndex(['diff', '--no-index', '--', '/dev/null', pathspec], gitCwd).catch(() => '');
+        totalBytes = getDiffByteLength(diff);
       }
     }
 
-    res.json({ path: requestedPath ?? null, diff });
+    // When viewing the full repo diff (no specific file), also append diffs
+    // for untracked files — `git diff` silently skips them. Keep both per-file
+    // and aggregate byte caps so an accidental large generated file doesn't
+    // dominate the network response or freeze react-diff-view parsing.
+    if (!requestedPath && !cached && totalBytes <= MAX_DIFF_BYTES) {
+      const untracked = await execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitCwd).catch(() => '');
+      for (const p of untracked.split('\0').filter(Boolean)) {
+        const size = getRelativeFileSize(gitCwd, p);
+        if (size !== null && size > MAX_UNTRACKED_DIFF_FILE_BYTES) {
+          skippedFiles.push(makeSkippedUntracked(p, size));
+          continue;
+        }
+        const partial = await execGitNoIndex(['diff', '--no-index', '--', '/dev/null', p], gitCwd).catch(() => '');
+        if (!partial) continue;
+        const nextDiff = diff ? `${diff}\n${partial}` : partial;
+        const nextBytes = getDiffByteLength(nextDiff);
+        if (nextBytes > MAX_DIFF_BYTES) {
+          skippedFiles.push({ path: p, reason: 'diff-byte-limit-exceeded', size: getDiffByteLength(partial), maxBytes: MAX_DIFF_BYTES });
+          break;
+        }
+        diff = nextDiff;
+        totalBytes = nextBytes;
+      }
+    }
+
+    res.json(truncateDiffIfNeeded({
+      path: requestedPath ?? null,
+      diff,
+      skippedFiles: skippedFiles.length > 0 ? skippedFiles : undefined,
+      truncated: skippedFiles.length > 0 ? true : undefined,
+    }));
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     res.json({ path: req.query.path ?? null, diff: '', error: message });
@@ -580,10 +734,11 @@ router.get('/git-context', async (req: Request, res: Response) => {
       return;
     }
 
-    const [branchOutput, statusOutput, logOutput] = await Promise.all([
+    const [branchOutput, statusOutput, logOutput, pushTargets] = await Promise.all([
       execGit(['branch', '--show-current'], gitRoot).catch(() => ''),
       execGit(['status', '--short', '--branch'], gitRoot).catch(() => ''),
       execGit(['log', '--oneline', '-8'], gitRoot).catch(() => ''),
+      getGitPushTargets(gitRoot),
     ]);
 
     const files = await getChangedFiles(gitRoot);
@@ -594,6 +749,7 @@ router.get('/git-context', async (req: Request, res: Response) => {
       cwd: resolvedCwd,
       root: gitRoot,
       branch: branchOutput.trim() || null,
+      ...pushTargets,
       status: statusOutput.trim(),
       recentCommits: logOutput.split('\n').map((line) => line.trim()).filter(Boolean),
       changedFiles,
@@ -651,7 +807,7 @@ router.post('/git-action', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'Missing cwd', code: 'MISSING_CWD' });
       return;
     }
-    if (!action || !['stage-file', 'stage-all', 'unstage-file', 'stash-file', 'stash-all', 'restore-worktree-file', 'commit', 'push'].includes(action)) {
+    if (!action || !['stage-file', 'stage-all', 'unstage-file', 'stash-file', 'stash-all', 'restore-worktree-file', 'commit', 'push', 'pull', 'switch-branch'].includes(action)) {
       res.status(400).json({ error: 'Unsupported git action', code: 'UNSUPPORTED_ACTION' });
       return;
     }
@@ -678,6 +834,15 @@ router.post('/git-action', async (req: Request, res: Response) => {
       const branch = getBranchName((req.body as { branch?: unknown }).branch);
       const pushArgs = remote && branch ? ['push', '-u', remote, branch] : remote ? ['push', remote] : ['push'];
       output = await execGit(pushArgs, gitRoot);
+    } else if (action === 'pull') {
+      const remote = getRemoteName((req.body as { remote?: unknown }).remote);
+      const branch = getBranchName((req.body as { branch?: unknown }).branch);
+      const pullArgs = remote && branch ? ['pull', '--ff-only', remote, branch] : remote ? ['pull', '--ff-only', remote] : ['pull', '--ff-only'];
+      output = await execGit(pullArgs, gitRoot);
+    } else if (action === 'switch-branch') {
+      const branch = getBranchName((req.body as { branch?: unknown }).branch);
+      if (!branch) throw new Error('Branch is required');
+      output = await execGit(['switch', branch], gitRoot);
     } else {
       const requestedPath = getSinglePath(paths);
       const pathspec = toGitPathspec(gitRoot, requestedPath);

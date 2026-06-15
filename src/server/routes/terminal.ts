@@ -158,6 +158,9 @@ interface TerminalSession {
   focusTrackingRequested: boolean;
   focusModeSniffBuf: string;
   focusAggregation: FocusAggregationState;
+  flowPausedClients: Set<string>;
+  flowPausedClientTimers: Map<string, ReturnType<typeof setTimeout>>;
+  ptyPausedForFlowControl: boolean;
 }
 
 interface PersistedClientSession {
@@ -257,41 +260,124 @@ const controlClients = new Map<string, WebSocket>();
 
 let latestSessionInventory: SessionInventory | null = null;
 let broadcastInventorySeq = 0;
+let broadcastClientStateTimer: ReturnType<typeof setTimeout> | null = null;
+let broadcastClientStateInFlight = false;
+let broadcastClientStateNeedsRerun = false;
+let lastBroadcastClientStateSignature: string | null = null;
 
-function broadcastClientState(): void {
-  const seq = ++broadcastInventorySeq;
-  void (async () => {
+const CONTROL_BROADCAST_COALESCE_MS = 50;
+
+function getClientStateSemanticSignature(state: GlobalSessionState, inventory: SessionInventory | null | undefined): string {
+  return JSON.stringify({
+    sessions: state.sessions.map((session) => ({
+      sessionId: session.sessionId,
+      name: session.name,
+      customName: session.customName === true,
+      backendSessionId: session.backendSessionId,
+      mode: session.mode,
+      tmuxSessionName: session.tmuxSessionName,
+      createdAt: session.createdAt,
+      lastActivity: session.lastActivity,
+    })),
+    inventory: inventory ? {
+      clientSessions: inventory.clientSessions.map((session) => ({
+        sessionId: session.sessionId,
+        frontendSessionId: session.frontendSessionId,
+        name: session.name,
+        customName: session.customName === true,
+        backendSessionId: session.backendSessionId,
+        mode: session.mode,
+        tmuxSessionName: session.tmuxSessionName,
+        createdAt: session.createdAt,
+        lastActivity: session.lastActivity,
+        connected: session.connected,
+        live: session.live,
+        restorable: session.restorable,
+      })),
+      tmuxSessions: inventory.tmuxSessions.map((session) => ({
+        name: session.name,
+        windows: session.windows,
+        attached: session.attached,
+        attachedCount: session.attachedCount,
+        createdAt: session.createdAt,
+        boundFrontendSessionId: session.boundFrontendSessionId,
+        connected: session.connected,
+        live: session.live,
+        restorable: session.restorable,
+        friendlyName: session.friendlyName,
+        label: session.label,
+        program: session.program,
+        cwd: session.cwd,
+        clientCount: session.clientCount,
+      })),
+      tmuxStatus: inventory.tmuxStatus,
+    } : null,
+  });
+}
+
+function sendClientStatePayload(payload: string): void {
+  for (const [clientId, ws] of controlClients) {
+    if (ws.readyState !== ws.OPEN) {
+      controlClients.delete(clientId);
+      continue;
+    }
+    try {
+      ws.send(payload);
+    } catch {
+      controlClients.delete(clientId);
+    }
+  }
+}
+
+async function flushClientStateBroadcast(): Promise<void> {
+  if (broadcastClientStateInFlight) {
+    broadcastClientStateNeedsRerun = true;
+    return;
+  }
+
+  broadcastClientStateInFlight = true;
+  try {
     const inventory = await buildSessionInventory().catch((error) => {
       console.warn('[session-inventory] failed to build snapshot for broadcast:', getErrorMessage(error));
       return latestSessionInventory;
     });
 
-    if (seq !== broadcastInventorySeq) {
-      console.log(`[session-inventory] dropped stale broadcast seq=${seq} current=${broadcastInventorySeq}`);
-      return;
-    }
-
     if (inventory) {
       latestSessionInventory = inventory;
     }
-    const payload = JSON.stringify({
+
+    const effectiveInventory = inventory ?? latestSessionInventory;
+    const signature = getClientStateSemanticSignature(globalSessionState, effectiveInventory);
+    if (signature === lastBroadcastClientStateSignature) {
+      return;
+    }
+
+    lastBroadcastClientStateSignature = signature;
+    const seq = ++broadcastInventorySeq;
+    sendClientStatePayload(JSON.stringify({
       type: 'client-state',
       seq,
       state: globalSessionState,
-      inventory: inventory ?? latestSessionInventory,
-    });
-    for (const [clientId, ws] of controlClients) {
-      if (ws.readyState !== ws.OPEN) {
-        controlClients.delete(clientId);
-        continue;
-      }
-      try {
-        ws.send(payload);
-      } catch {
-        controlClients.delete(clientId);
-      }
+      inventory: effectiveInventory,
+    }));
+  } finally {
+    broadcastClientStateInFlight = false;
+    if (broadcastClientStateNeedsRerun) {
+      broadcastClientStateNeedsRerun = false;
+      broadcastClientState();
     }
-  })();
+  }
+}
+
+function broadcastClientState(): void {
+  if (broadcastClientStateTimer) {
+    return;
+  }
+  broadcastClientStateTimer = setTimeout(() => {
+    broadcastClientStateTimer = null;
+    void flushClientStateBroadcast();
+  }, CONTROL_BROADCAST_COALESCE_MS);
+  broadcastClientStateTimer.unref?.();
 }
 
 function deduplicateGlobalSessions(sessions: PersistedClientSession[]): PersistedClientSession[] {
@@ -541,6 +627,7 @@ const CLEANUP_INTERVAL = isDevelopment ? 60 * 1000 : 5 * 60 * 1000;
 const RECONNECT_SCROLLBACK = parseInt(process.env.TERMINAL_RECONNECT_SCROLLBACK || '200', 10);
 const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10);
 const ACTIVE_PROGRAM_POLL_INTERVAL = parseInt(process.env.TERMINAL_ACTIVE_PROGRAM_POLL_INTERVAL || '1200', 10);
+const FLOW_CONTROL_PAUSE_LEASE_MS = parseInt(process.env.TERMINAL_FLOW_CONTROL_PAUSE_LEASE_MS || '15000', 10);
 const TMUX_DELIMITER = '\x1f';
 // 输出历史缓冲区（限制大小）
 const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
@@ -2547,6 +2634,14 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   session.exitDisposable?.dispose();
   destroyTmuxControl(session.tmuxControl);
   session.tmuxControl = undefined;
+  for (const timer of session.flowPausedClientTimers.values()) {
+    clearTimeout(timer);
+  }
+  session.flowPausedClientTimers.clear();
+  session.flowPausedClients.clear();
+  if (session.ptyPausedForFlowControl) {
+    applyPtyFlowControl(sessionId, session, false, 'session-cleanup');
+  }
 
   if (session.tmuxSessionName) {
     exitedAtBottom.delete(session.tmuxSessionName);
@@ -2595,21 +2690,95 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
 
 function broadcastToWs(sessionId: string, data: string): void {
   const clients = wsClients.get(sessionId);
+  const session = terminalSessions.get(sessionId);
   if (!clients) return;
-  for (const ws of clients.values()) {
-    try { ws.send(data); } catch { clients.delete(getWsClientKey(ws, clients)); }
+  for (const [clientId, ws] of clients.entries()) {
+    try {
+      ws.send(data);
+    } catch {
+      clients.delete(clientId);
+      if (session) removeClientFlowPaused(sessionId, session, clientId, 'ws-send-failed');
+    }
   }
-}
-
-function getWsClientKey(ws: WebSocket, map: Map<string, WebSocket>): string {
-  for (const [key, value] of map.entries()) {
-    if (value === ws) return key;
-  }
-  return '';
 }
 
 function broadcastJsonWs(sessionId: string, payload: unknown): void {
   broadcastToWs(sessionId, JSON.stringify(payload));
+}
+
+function getFlowPausedClients(session: TerminalSession): Set<string> {
+  if (!session.flowPausedClients) {
+    session.flowPausedClients = new Set();
+  }
+  return session.flowPausedClients;
+}
+
+function getFlowPausedClientTimers(session: TerminalSession): Map<string, ReturnType<typeof setTimeout>> {
+  if (!session.flowPausedClientTimers) {
+    session.flowPausedClientTimers = new Map();
+  }
+  return session.flowPausedClientTimers;
+}
+
+function clearFlowPauseLease(session: TerminalSession, clientId: string): void {
+  const timers = getFlowPausedClientTimers(session);
+  const timer = timers.get(clientId);
+  if (timer) {
+    clearTimeout(timer);
+    timers.delete(clientId);
+  }
+}
+
+function refreshFlowPauseLease(sessionId: string, session: TerminalSession, clientId: string): void {
+  clearFlowPauseLease(session, clientId);
+  const timer = setTimeout(() => {
+    const currentSession = terminalSessions.get(sessionId);
+    if (!currentSession) return;
+    console.warn(`[flow-control] pause lease expired session=${sessionId} client=${clientId}`);
+    removeClientFlowPaused(sessionId, currentSession, clientId, 'pause-lease-expired');
+  }, FLOW_CONTROL_PAUSE_LEASE_MS);
+  timer.unref?.();
+  getFlowPausedClientTimers(session).set(clientId, timer);
+}
+
+function applyPtyFlowControl(sessionId: string, session: TerminalSession, paused: boolean, reason: string): void {
+  if (session.ptyPausedForFlowControl === paused) return;
+  session.ptyPausedForFlowControl = paused;
+
+  const method = paused ? session.ptyProcess.pause : session.ptyProcess.resume;
+  if (typeof method !== 'function') {
+    console.warn(`[flow-control] PTY backend has no ${paused ? 'pause' : 'resume'} method session=${sessionId} reason=${reason}`);
+    return;
+  }
+
+  try {
+    method.call(session.ptyProcess);
+  } catch (error) {
+    console.warn(`[flow-control] failed to ${paused ? 'pause' : 'resume'} PTY session=${sessionId} reason=${reason}: ${getErrorMessage(error)}`);
+  }
+}
+
+function setClientFlowPaused(sessionId: string, session: TerminalSession, clientId: string, paused: boolean, reason: string): void {
+  const clients = getFlowPausedClients(session);
+  const wasPaused = clients.has(clientId);
+  if (paused) {
+    clients.add(clientId);
+    refreshFlowPauseLease(sessionId, session, clientId);
+  } else {
+    clients.delete(clientId);
+    clearFlowPauseLease(session, clientId);
+  }
+  if (wasPaused === paused) {
+    return;
+  }
+  applyPtyFlowControl(sessionId, session, clients.size > 0, reason);
+}
+
+function removeClientFlowPaused(sessionId: string, session: TerminalSession, clientId: string, reason: string): void {
+  clearFlowPauseLease(session, clientId);
+  const clients = getFlowPausedClients(session);
+  if (!clients.delete(clientId)) return;
+  applyPtyFlowControl(sessionId, session, clients.size > 0, reason);
 }
 
 function emitFocusSequenceIfNeeded(sessionId: string, session: TerminalSession, focused: boolean, reason: string): void {
@@ -2662,8 +2831,9 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
   session.dataDisposable = session.ptyProcess.onData((data: string) => {
     session.lastActivity = Date.now();
     session.hasWrittenData = true;
+    let seq: number | undefined;
     if (session.mode === 'shell') {
-      addToHistory(sessionId, data);
+      seq = addToHistory(sessionId, data);
     }
     if (session.mode === 'tmux') {
       updateFocusTrackingFromOutput(sessionId, session, data);
@@ -2712,7 +2882,7 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
       }
     } catch { /* agent status detection failure should never block data */ }
 
-    broadcastEvent(sessionId, { type: 'data', data });
+    broadcastEvent(sessionId, seq !== undefined ? { type: 'data', data, seq } : { type: 'data', data });
   });
 
   session.exitDisposable = session.ptyProcess.onExit(({ exitCode, signal }) => {
@@ -2823,6 +2993,9 @@ async function spawnTerminalSession(req: express.Request, input: {
       focusedClients: new Map(),
       effectiveFocused: false,
     },
+    flowPausedClients: new Set(),
+    flowPausedClientTimers: new Map(),
+    ptyPausedForFlowControl: false,
   };
 
   terminalSessions.set(sessionId, session);
@@ -4326,6 +4499,13 @@ export function handleTerminalWebSocket(
           updateClientFocusState(sessionId, session, clientId, focused, reason);
           break;
         }
+        case 'flow-control': {
+          if (typeof msg.paused === 'boolean') {
+            const reason = typeof msg.reason === 'string' ? msg.reason : 'client-flow-control';
+            setClientFlowPaused(sessionId, session, clientId, msg.paused, reason);
+          }
+          break;
+        }
         case 'ping': {
           // 心跳算活动：客户端每 20s 发一次 ping，没有这一行就会出现
           // "用户开着页面看 agent 跑、自己不动键盘"被 idle-cleanup 误杀的情况。
@@ -4354,6 +4534,7 @@ export function handleTerminalWebSocket(
       }
     }
     removeClientFocus(sessionId, session, clientId);
+    removeClientFlowPaused(sessionId, session, clientId, 'client-disconnect');
     syncClientCountToTmux(sessionId);
     broadcastClientState();
   });
@@ -4380,18 +4561,21 @@ export function handleControlWebSocket(ws: WebSocket, clientId: string): void {
   // Initial snapshot — same shape the HTTP GET returns, with an inventory
   // projection when tmux/backend state can be queried immediately.
   void (async () => {
-    const seq = broadcastInventorySeq;
+    const initialSeq = broadcastInventorySeq;
     const inventory = await buildSessionInventory().catch((error) => {
       console.warn('[session-inventory] failed to build initial control snapshot:', getErrorMessage(error));
       return latestSessionInventory;
     });
-    if (seq !== broadcastInventorySeq) {
-      console.log(`[session-inventory] dropped stale initial control snapshot seq=${seq} current=${broadcastInventorySeq}`);
+    if (initialSeq !== broadcastInventorySeq) {
+      // A fresher broadcast was sent while this inventory was being built.
+      // Dropping this initial snapshot avoids replaying stale inventory with
+      // the latest seq; the next reconnect/control broadcast will provide a
+      // fresh baseline.
       return;
     }
     if (inventory) latestSessionInventory = inventory;
     try {
-      ws.send(JSON.stringify({ type: 'client-state', seq, state: globalSessionState, inventory: inventory ?? latestSessionInventory }));
+      ws.send(JSON.stringify({ type: 'client-state', seq: initialSeq, state: globalSessionState, inventory: inventory ?? latestSessionInventory }));
     } catch {
       controlClients.delete(clientId);
       return;

@@ -2,12 +2,21 @@ import { create } from 'zustand';
 import type { GitChangedFile } from '../terminal/api';
 import { readCache, writeCache } from '../utils/localStorageCache';
 
-export type RightSidebarTab = 'files' | 'diff' | 'file';
+export type RightSidebarTab = 'git' | 'files' | 'diff' | 'file';
 
 const RIGHT_SIDEBAR_TAB_CACHE_KEY = 'termdock:right-sidebar:tab:v1';
 
+interface ProjectSidebarState {
+  expandedPaths: Set<string>;
+  selectedFilePath: string | null;
+  directoryCache: Map<string, FileTreeNode[]>;
+  changedFiles: Map<string, GitChangedFile>;
+  gitBundleError: string | null;
+  gitBundleLastLoadedAt: number | null;
+}
+
 function isRightSidebarTab(value: unknown): value is RightSidebarTab {
-  return value === 'files' || value === 'diff' || value === 'file';
+  return value === 'git' || value === 'files' || value === 'diff' || value === 'file';
 }
 
 function getInitialRightTab(): RightSidebarTab {
@@ -45,6 +54,7 @@ interface SidebarState {
   gitBundleSlow: boolean;
   gitBundleError: string | null;
   gitBundleLastLoadedAt: number | null;
+  projectStateCache: Map<string, ProjectSidebarState>;
 
   // Actions
   openLeft: () => void;
@@ -79,6 +89,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   gitBundleSlow: false,
   gitBundleError: null,
   gitBundleLastLoadedAt: null,
+  projectStateCache: new Map(),
 
   openLeft: () => set({ leftOpen: true }),
   closeLeft: () => set({ leftOpen: false }),
@@ -94,16 +105,30 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   },
   setRootPath: (path) => set((s) => {
     if (s.rootPath === path) return s;
+    const projectStateCache = new Map(s.projectStateCache);
+    if (s.rootPath) {
+      projectStateCache.set(s.rootPath, {
+        expandedPaths: new Set(s.expandedPaths),
+        selectedFilePath: s.selectedFilePath,
+        directoryCache: new Map(s.directoryCache),
+        changedFiles: new Map(s.changedFiles),
+        gitBundleError: s.gitBundleError,
+        gitBundleLastLoadedAt: s.gitBundleLastLoadedAt,
+      });
+    }
+
+    const cached = path ? projectStateCache.get(path) : undefined;
     return {
       rootPath: path,
-      expandedPaths: new Set(),
-      selectedFilePath: null,
-      directoryCache: new Map(),
-      changedFiles: new Map(),
+      expandedPaths: cached ? new Set(cached.expandedPaths) : new Set(),
+      selectedFilePath: cached?.selectedFilePath ?? null,
+      directoryCache: cached ? new Map(cached.directoryCache) : new Map(),
+      changedFiles: cached ? new Map(cached.changedFiles) : new Map(),
       gitBundleLoading: false,
       gitBundleSlow: false,
-      gitBundleError: null,
-      gitBundleLastLoadedAt: null,
+      gitBundleError: cached?.gitBundleError ?? null,
+      gitBundleLastLoadedAt: cached?.gitBundleLastLoadedAt ?? null,
+      projectStateCache,
     };
   }),
 
