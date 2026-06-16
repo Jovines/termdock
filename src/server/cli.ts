@@ -41,6 +41,7 @@ const TERMDOCK_PID = String(process.pid);
 const stateDir = path.join(os.homedir(), '.termdock');
 const stateFilePath = path.join(stateDir, 'server.json');
 const logFilePath = path.join(stateDir, 'server.log');
+const globalSessionStateFilePath = path.join(stateDir, 'global-session-state.json');
 const certDir = path.join(stateDir, 'certs');
 const defaultHttpsCertPath = path.join(certDir, 'termdock-local.pem');
 const defaultHttpsKeyPath = path.join(certDir, 'termdock-local-key.pem');
@@ -870,6 +871,36 @@ function compareTmuxRowsByCreation(a: TlsRow, b: TlsRow): number {
   return a.name.localeCompare(b.name);
 }
 
+function readPersistedTmuxOrder(): Map<string, number> {
+  try {
+    const raw = fs.readFileSync(globalSessionStateFilePath, 'utf8');
+    const parsed = JSON.parse(raw) as { sessions?: unknown[] };
+    const order = new Map<string, number>();
+    const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
+    sessions.forEach((entry, index) => {
+      if (!entry || typeof entry !== 'object') return;
+      const session = entry as { mode?: unknown; tmuxSessionName?: unknown };
+      if (session.mode !== 'tmux') return;
+      if (typeof session.tmuxSessionName !== 'string' || session.tmuxSessionName.trim().length === 0) return;
+      if (!order.has(session.tmuxSessionName)) {
+        order.set(session.tmuxSessionName, index);
+      }
+    });
+    return order;
+  } catch {
+    return new Map();
+  }
+}
+
+function compareTmuxRowsByPersistedOrder(order: Map<string, number>): (a: TlsRow, b: TlsRow) => number {
+  return (a, b) => {
+    const aRank = order.get(a.name) ?? Number.POSITIVE_INFINITY;
+    const bRank = order.get(b.name) ?? Number.POSITIVE_INFINITY;
+    if (aRank !== bRank) return aRank - bRank;
+    return compareTmuxRowsByCreation(a, b);
+  };
+}
+
 function renderBlocks(rows: TlsRow[]): string {
   const blocks: string[] = [];
   for (const row of rows) {
@@ -946,9 +977,10 @@ async function runTls(opts: { all: boolean; json: boolean }): Promise<void> {
     return;
   }
 
+  const tmuxOrder = readPersistedTmuxOrder();
   const rows = (opts.all ? allRows : allRows.filter((row) => row.version.length > 0))
     .slice()
-    .sort(compareTmuxRowsByCreation);
+    .sort(compareTmuxRowsByPersistedOrder(tmuxOrder));
 
   if (opts.json) {
     const json = rows.map((row) => ({
@@ -1074,7 +1106,10 @@ async function runAttachTmux(opts: { name?: string }): Promise<void> {
   // Prefer termdock-managed sessions; fall back to all tmux sessions if
   // none are stamped (better than refusing to attach).
   const managed = allRows.filter((row) => row.version.length > 0);
-  const candidates = managed.length > 0 ? managed : allRows;
+  const tmuxOrder = readPersistedTmuxOrder();
+  const candidates = (managed.length > 0 ? managed : allRows)
+    .slice()
+    .sort(compareTmuxRowsByPersistedOrder(tmuxOrder));
 
   if (candidates.length === 0) {
     console.log(`${ICON.info} ${c.dim('No tmux sessions on this host.')}`);

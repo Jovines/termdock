@@ -1,7 +1,9 @@
 import { Router, type Request, type Response } from 'express';
 import fs from 'fs';
+import type { Dirent } from 'fs';
 import path from 'path';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
+import watcher from '@parcel/watcher';
 import { pathValidator } from '../utils/pathValidator.js';
 
 const router = Router();
@@ -10,6 +12,7 @@ const MAX_FILE_SIZE = 1024 * 1024; // 1MB
 const MAX_IMAGE_PREVIEW_SIZE = 20 * 1024 * 1024; // 20MB
 const GIT_TIMEOUT_MS = 5000;
 const MAX_DIRECTORY_ENTRIES = 1000;
+const MAX_FALLBACK_SEARCH_VISITED = 30_000;
 const MAX_GIT_CONTEXT_CHANGED_FILES = 200;
 const MAX_DIFF_BYTES = 2 * 1024 * 1024; // 2MB
 const MAX_UNTRACKED_DIFF_FILE_BYTES = 1024 * 1024; // 1MB
@@ -77,6 +80,35 @@ interface DiffResponsePayload {
   maxBytes?: number;
   skippedFiles?: DiffSkippedFile[];
 }
+
+interface FileSearchEntry {
+  name: string;
+  path: string;
+  type: 'file' | 'directory' | 'symlink';
+}
+
+interface FileSearchPayload {
+  path: string;
+  query: string;
+  entries: FileSearchEntry[];
+  truncated: boolean;
+  total: number;
+  engine: 'rg' | 'fallback';
+  limited?: boolean;
+}
+
+interface FileWatchEvent {
+  type: 'created' | 'deleted' | 'updated' | 'rescan-required';
+  path: string;
+  entry?: FileSearchEntry;
+  reason?: string;
+}
+
+const WATCH_IGNORED_NAMES = new Set([
+  '.git', 'node_modules', 'dist', 'build', '.next', '.nuxt', '.turbo', 'coverage', 'target', '.gradle', '.idea', '.DS_Store',
+]);
+const WATCH_BATCH_MS = 120;
+const WATCH_EVENT_STORM_LIMIT = 1200;
 
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
@@ -395,6 +427,296 @@ function readFilePrefix(filePath: string, bytesToRead: number): string {
   }
 }
 
+function normalizeSearchQuery(query: unknown): string {
+  return typeof query === 'string' ? query.trim().slice(0, 200) : '';
+}
+
+function toSearchPath(filePath: string): string {
+  return filePath.split(path.sep).join('/').toLowerCase();
+}
+
+function searchEntryMatches(rootPath: string, candidatePath: string, queryLower: string): boolean {
+  if (!queryLower) return false;
+  const name = path.basename(candidatePath).toLowerCase();
+  const relative = path.relative(rootPath, candidatePath) || name;
+  return name.includes(queryLower) || toSearchPath(relative).includes(queryLower) || toSearchPath(candidatePath).includes(queryLower);
+}
+
+function addSearchEntry(entries: Map<string, FileSearchEntry>, entryPath: string, type: FileSearchEntry['type']): void {
+  if (entries.has(entryPath)) return;
+  entries.set(entryPath, {
+    name: path.basename(entryPath) || entryPath,
+    path: entryPath,
+    type,
+  });
+}
+
+function toFileEntry(entryPath: string, stat: fs.Stats): FileSearchEntry {
+  return {
+    name: path.basename(entryPath) || entryPath,
+    path: entryPath,
+    type: stat.isDirectory() ? 'directory' : stat.isSymbolicLink() ? 'symlink' : 'file',
+  };
+}
+
+function isIgnoredWatchPath(rootPath: string, candidatePath: string): boolean {
+  const relative = path.relative(rootPath, candidatePath);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
+  return relative.split(path.sep).some((part) => WATCH_IGNORED_NAMES.has(part));
+}
+
+function sortSearchEntries(entries: FileSearchEntry[]): FileSearchEntry[] {
+  return entries.sort((a, b) => {
+    if (a.type === 'directory' && b.type !== 'directory') return -1;
+    if (a.type !== 'directory' && b.type === 'directory') return 1;
+    return a.path.localeCompare(b.path);
+  });
+}
+
+function addMatchingParentDirectories(rootPath: string, absoluteFilePath: string, queryLower: string, entries: Map<string, FileSearchEntry>): void {
+  let current = path.dirname(absoluteFilePath);
+  while (current && current !== rootPath && isPathInside(rootPath, current)) {
+    if (searchEntryMatches(rootPath, current, queryLower)) {
+      addSearchEntry(entries, current, 'directory');
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+}
+
+function searchWithRipgrep(rootPath: string, queryLower: string, showHidden: boolean, signal: AbortSignal): Promise<FileSearchPayload> {
+  return new Promise((resolve, reject) => {
+    const args = ['--files', '--color', 'never', '--no-messages', '--null'];
+    if (showHidden) args.push('--hidden', '-g', '!.git/');
+
+    const proc = spawn('rg', args, { cwd: rootPath, stdio: ['ignore', 'pipe', 'pipe'] });
+    const entries = new Map<string, FileSearchEntry>();
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abortHandler);
+      fn();
+    };
+
+    const abortHandler = () => {
+      proc.kill('SIGTERM');
+      finish(() => reject(new Error('Search aborted')));
+    };
+    signal.addEventListener('abort', abortHandler);
+
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      let boundary = stdout.lastIndexOf('\0');
+      if (boundary < 0) return;
+      const complete = stdout.slice(0, boundary);
+      stdout = stdout.slice(boundary + 1);
+      for (const relativePath of complete.split('\0')) {
+        if (!relativePath) continue;
+        const absolutePath = path.join(rootPath, relativePath);
+        if (!searchEntryMatches(rootPath, absolutePath, queryLower)) {
+          addMatchingParentDirectories(rootPath, absolutePath, queryLower, entries);
+          continue;
+        }
+        addSearchEntry(entries, absolutePath, 'file');
+        addMatchingParentDirectories(rootPath, absolutePath, queryLower, entries);
+      }
+    });
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (chunk: string) => { stderr += chunk; });
+    proc.on('error', (error) => finish(() => reject(error)));
+    proc.on('close', (code) => {
+      if (settled) return;
+      if (code !== 0 && code !== 1) {
+        finish(() => reject(new Error(stderr.trim() || `rg exited with code ${code}`)));
+        return;
+      }
+      finish(() => resolve({
+        path: rootPath,
+        query: queryLower,
+        entries: sortSearchEntries(Array.from(entries.values())),
+        truncated: false,
+        total: entries.size,
+        engine: 'rg',
+      }));
+    });
+  });
+}
+
+async function searchWithFallback(rootPath: string, queryLower: string, showHidden: boolean, signal: AbortSignal): Promise<FileSearchPayload> {
+  const entries = new Map<string, FileSearchEntry>();
+  const queue = [rootPath];
+  let visited = 0;
+
+  while (queue.length > 0 && visited < MAX_FALLBACK_SEARCH_VISITED) {
+    if (signal.aborted) throw new Error('Search aborted');
+    const dirPath = queue.shift();
+    if (!dirPath) continue;
+    visited += 1;
+    let dirents: Dirent[];
+    try {
+      dirents = await fs.promises.readdir(dirPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const dirent of dirents) {
+      if (!showHidden && dirent.name.startsWith('.')) continue;
+      if (dirent.name === '.git') continue;
+      const fullPath = path.join(dirPath, dirent.name);
+      const type: FileSearchEntry['type'] = dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : 'file';
+      if (searchEntryMatches(rootPath, fullPath, queryLower)) {
+        addSearchEntry(entries, fullPath, type);
+      }
+      if (dirent.isDirectory()) queue.push(fullPath);
+    }
+  }
+
+  return {
+    path: rootPath,
+    query: queryLower,
+    entries: sortSearchEntries(Array.from(entries.values())),
+    truncated: visited >= MAX_FALLBACK_SEARCH_VISITED,
+    total: entries.size,
+    engine: 'fallback',
+    limited: visited >= MAX_FALLBACK_SEARCH_VISITED,
+  };
+}
+
+function writeSearchEvent(res: Response, type: string, payload: Record<string, unknown>): void {
+  res.write(`${JSON.stringify({ type, ...payload })}\n`);
+}
+
+function createSearchBatchEmitter(res: Response) {
+  let batch: FileSearchEntry[] = [];
+  const flush = () => {
+    if (batch.length === 0 || res.destroyed) return;
+    writeSearchEvent(res, 'batch', { entries: batch });
+    batch = [];
+  };
+  return {
+    push(entry: FileSearchEntry) {
+      batch.push(entry);
+      if (batch.length >= 60) flush();
+    },
+    flush,
+  };
+}
+
+function streamSearchWithRipgrep(rootPath: string, queryLower: string, showHidden: boolean, signal: AbortSignal, res: Response): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const args = ['--files', '--color', 'never', '--no-messages', '--null'];
+    if (showHidden) args.push('--hidden', '-g', '!.git/');
+
+    const proc = spawn('rg', args, { cwd: rootPath, stdio: ['ignore', 'pipe', 'pipe'] });
+    const emitted = new Map<string, FileSearchEntry>();
+    const batch = createSearchBatchEmitter(res);
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+
+    const emitEntry = (entryPath: string, type: FileSearchEntry['type']) => {
+      if (emitted.has(entryPath)) return;
+      const entry = { name: path.basename(entryPath) || entryPath, path: entryPath, type };
+      emitted.set(entryPath, entry);
+      batch.push(entry);
+    };
+    const emitMatchingParents = (absoluteFilePath: string) => {
+      let current = path.dirname(absoluteFilePath);
+      while (current && current !== rootPath && isPathInside(rootPath, current)) {
+        if (searchEntryMatches(rootPath, current, queryLower)) emitEntry(current, 'directory');
+        const parent = path.dirname(current);
+        if (parent === current) break;
+        current = parent;
+      }
+    };
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abortHandler);
+      batch.flush();
+      fn();
+    };
+    const abortHandler = () => {
+      proc.kill('SIGTERM');
+      finish(() => reject(new Error('Search aborted')));
+    };
+    signal.addEventListener('abort', abortHandler);
+
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      const boundary = stdout.lastIndexOf('\0');
+      if (boundary < 0) return;
+      const complete = stdout.slice(0, boundary);
+      stdout = stdout.slice(boundary + 1);
+      for (const relativePath of complete.split('\0')) {
+        if (!relativePath) continue;
+        const absolutePath = path.join(rootPath, relativePath);
+        if (!searchEntryMatches(rootPath, absolutePath, queryLower)) {
+          emitMatchingParents(absolutePath);
+          continue;
+        }
+        emitEntry(absolutePath, 'file');
+        emitMatchingParents(absolutePath);
+      }
+    });
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (chunk: string) => { stderr += chunk; });
+    proc.on('error', (error) => finish(() => reject(error)));
+    proc.on('close', (code) => {
+      if (settled) return;
+      if (code !== 0 && code !== 1) {
+        finish(() => reject(new Error(stderr.trim() || `rg exited with code ${code}`)));
+        return;
+      }
+      finish(() => resolve(emitted.size));
+    });
+  });
+}
+
+async function streamSearchWithFallback(rootPath: string, queryLower: string, showHidden: boolean, signal: AbortSignal, res: Response): Promise<{ total: number; limited: boolean }> {
+  const emitted = new Set<string>();
+  const batch = createSearchBatchEmitter(res);
+  const queue = [rootPath];
+  let visited = 0;
+  const emitEntry = (entryPath: string, type: FileSearchEntry['type']) => {
+    if (emitted.has(entryPath)) return;
+    emitted.add(entryPath);
+    batch.push({ name: path.basename(entryPath) || entryPath, path: entryPath, type });
+  };
+
+  while (queue.length > 0 && visited < MAX_FALLBACK_SEARCH_VISITED) {
+    if (signal.aborted || res.destroyed) throw new Error('Search aborted');
+    const dirPath = queue.shift();
+    if (!dirPath) continue;
+    visited += 1;
+    let dirents: Dirent[];
+    try {
+      dirents = await fs.promises.readdir(dirPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const dirent of dirents) {
+      if (!showHidden && dirent.name.startsWith('.')) continue;
+      if (dirent.name === '.git') continue;
+      const fullPath = path.join(dirPath, dirent.name);
+      const type: FileSearchEntry['type'] = dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : 'file';
+      if (searchEntryMatches(rootPath, fullPath, queryLower)) {
+        emitEntry(fullPath, type);
+      }
+      if (dirent.isDirectory()) queue.push(fullPath);
+    }
+  }
+
+  batch.flush();
+  return { total: emitted.size, limited: visited >= MAX_FALLBACK_SEARCH_VISITED };
+}
+
 function execGit(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -500,6 +822,172 @@ router.get('/list', async (req: Request, res: Response) => {
 
     res.json({ path: resolvedPath, entries, truncated: visibleDirents.length > entries.length, total: visibleDirents.length });
   } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(403).json({ error: message });
+  }
+});
+
+// Stream file-system changes for the active file explorer roots. This is not a
+// deep directory listing; it uses the OS watcher and sends small batched events
+// so the client can patch only directories it has already loaded.
+router.get('/watch', async (req: Request, res: Response) => {
+  const rootsParam = req.query.roots;
+  const rawRoots = (Array.isArray(rootsParam) ? rootsParam : typeof rootsParam === 'string' ? rootsParam.split('|') : [])
+    .filter((root): root is string => typeof root === 'string');
+  const roots: string[] = [];
+  for (const rawRoot of rawRoots) {
+    if (!rawRoot) continue;
+    try {
+      const resolved = pathValidator.validatePath(rawRoot);
+      const stat = fs.statSync(resolved);
+      if (stat.isDirectory() && !roots.includes(resolved)) roots.push(resolved);
+    } catch {
+      // Ignore invalid watch roots; the visible tree will still work via manual list requests.
+    }
+  }
+
+  if (roots.length === 0) {
+    res.status(400).json({ error: 'No valid roots to watch' });
+    return;
+  }
+
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  let closed = false;
+  let pending: FileWatchEvent[] = [];
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const subscriptions: watcher.AsyncSubscription[] = [];
+
+  const writeEvent = (type: string, payload: Record<string, unknown>) => {
+    if (closed || res.destroyed) return;
+    res.write(`${JSON.stringify({ type, ...payload })}\n`);
+  };
+  const flush = () => {
+    flushTimer = null;
+    if (pending.length === 0) return;
+    const events = pending;
+    pending = [];
+    writeEvent('events', { events });
+  };
+  const enqueue = (event: FileWatchEvent) => {
+    if (closed) return;
+    if (pending.length >= WATCH_EVENT_STORM_LIMIT) {
+      pending = roots.map((rootPath) => ({ type: 'rescan-required', path: rootPath, reason: 'event-storm' }));
+    } else {
+      pending.push(event);
+    }
+    if (!flushTimer) {
+      flushTimer = setTimeout(flush, WATCH_BATCH_MS);
+      flushTimer.unref?.();
+    }
+  };
+
+  writeEvent('ready', { roots });
+
+  for (const rootPath of roots) {
+    try {
+      const subscription = await watcher.subscribe(rootPath, (error, events) => {
+        if (closed) return;
+        if (error) {
+          enqueue({ type: 'rescan-required', path: rootPath, reason: error.message || 'watch-error' });
+          return;
+        }
+        for (const event of events) {
+          const changedPath = path.resolve(event.path);
+          if (!isPathInside(rootPath, changedPath) || isIgnoredWatchPath(rootPath, changedPath)) continue;
+          if (event.type === 'delete') {
+            enqueue({ type: 'deleted', path: changedPath });
+            continue;
+          }
+          fs.promises.lstat(changedPath)
+            .then((stat) => {
+              enqueue({ type: event.type === 'create' ? 'created' : 'updated', path: changedPath, entry: toFileEntry(changedPath, stat) });
+            })
+            .catch(() => {
+              enqueue({ type: 'deleted', path: changedPath });
+            });
+        }
+      }, {
+        ignore: Array.from(WATCH_IGNORED_NAMES).map((name) => `**/${name}/**`),
+      });
+      subscriptions.push(subscription);
+    } catch (error) {
+      enqueue({ type: 'rescan-required', path: rootPath, reason: error instanceof Error ? error.message : 'watch-unavailable' });
+    }
+  }
+
+  req.on('close', () => {
+    closed = true;
+    if (flushTimer) clearTimeout(flushTimer);
+    for (const subscription of subscriptions) {
+      void subscription.unsubscribe().catch(() => undefined);
+    }
+  });
+});
+
+// Fast recursive file search for the right sidebar.
+// Prefer ripgrep because it respects .gitignore, skips ignored/build folders,
+// and is dramatically faster than recursively calling readdir from the browser.
+router.get('/search', async (req: Request, res: Response) => {
+  const controller = new AbortController();
+  req.on('close', () => controller.abort());
+  try {
+    const requestedPath = req.query.path as string;
+    if (!requestedPath) {
+      res.status(400).json({ error: 'Missing path parameter' });
+      return;
+    }
+
+    const query = normalizeSearchQuery(req.query.query);
+    if (!query) {
+      res.json({ path: requestedPath, query: '', entries: [], truncated: false, total: 0, engine: 'rg' });
+      return;
+    }
+
+    const resolvedPath = pathValidator.validatePath(requestedPath);
+    const stat = await fs.promises.stat(resolvedPath);
+    if (!stat.isDirectory()) {
+      res.status(400).json({ error: 'Path is not a directory' });
+      return;
+    }
+
+    const showHidden = req.query.showHidden === 'true';
+    const queryLower = query.toLowerCase();
+    if (req.query.stream === 'true') {
+      res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Accel-Buffering', 'no');
+      writeSearchEvent(res, 'meta', { path: resolvedPath, query, engine: 'rg', limited: false });
+      try {
+        const total = await streamSearchWithRipgrep(resolvedPath, queryLower, showHidden, controller.signal, res);
+        if (!controller.signal.aborted && !res.destroyed) {
+          writeSearchEvent(res, 'done', { total, truncated: false, limited: false, engine: 'rg' });
+          res.end();
+        }
+      } catch (error) {
+        if (controller.signal.aborted || res.destroyed) return;
+        writeSearchEvent(res, 'meta', { path: resolvedPath, query, engine: 'fallback', limited: false });
+        const result = await streamSearchWithFallback(resolvedPath, queryLower, showHidden, controller.signal, res);
+        if (!controller.signal.aborted && !res.destroyed) {
+          writeSearchEvent(res, 'done', { total: result.total, truncated: result.limited, limited: result.limited, engine: 'fallback' });
+          res.end();
+        }
+      }
+      return;
+    }
+
+    try {
+      res.json(await searchWithRipgrep(resolvedPath, queryLower, showHidden, controller.signal));
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      // Graceful fallback for machines without `rg` installed. It is bounded so
+      // searching an enormous home directory cannot monopolize the server.
+      res.json(await searchWithFallback(resolvedPath, queryLower, showHidden, controller.signal));
+    }
+  } catch (error) {
+    if (controller.signal.aborted) return;
     const message = error instanceof Error ? error.message : 'Unknown error';
     res.status(403).json({ error: message });
   }

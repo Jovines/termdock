@@ -25,9 +25,12 @@ type Modifier = 'ctrl' | 'alt';
 
 const STREAM_OPTIONS = {
   retry: {
-    maxRetries: 5,
+    // PWA 退后台时 JS timer 可能被系统冻结/合并，短重试窗口会在后台被耗尽，
+    // 回前台时已经 cleanup，visibility probe 也找不到连接可修复。
+    // 拉长到 15 分钟以上，覆盖锁屏/切后台/弱网恢复；回前台还会立刻 probe。
+    maxRetries: 60,
     initialDelayMs: 1000,
-    maxDelayMs: 15000,
+    maxDelayMs: 20000,
   },
   connectionTimeoutMs: 15_000,
 };
@@ -42,6 +45,7 @@ interface TerminalViewProps {
   toolbarPresets?: ToolbarPresetDefinition[];
   isActive?: boolean;
   focusRequestToken?: number;
+  resumeRequestToken?: number;
   onKeyboardVisibilityChange?: (sessionId: string, isOpen: boolean) => void;
   showDebug?: boolean;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
@@ -57,6 +61,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   toolbarPresets: configuredToolbarPresets = [],
   isActive = true,
   focusRequestToken = 0,
+  resumeRequestToken = 0,
   onKeyboardVisibilityChange,
   showDebug: externalShowDebug,
   onStatusChange,
@@ -203,6 +208,25 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     terminalControllerRef.current?.focus();
   }, []);
 
+  const restartEnsureSession = React.useCallback(() => {
+    hasInitializedRef.current = false;
+    setRestartTrigger((token) => token + 1);
+  }, []);
+
+  const probeOrRestartSession = React.useCallback((reason: string) => {
+    const tid = terminalIdRef.current;
+    if (tid && probeTerminalConnection(tid)) {
+      debugSession('[Terminal] resume probe sent', { reason, backendSessionId: tid, active: isActiveRef.current });
+      return;
+    }
+    debugSession('[Terminal] resume probe missing connection, restarting ensureSession', {
+      reason,
+      backendSessionId: tid,
+      active: isActiveRef.current,
+    });
+    restartEnsureSession();
+  }, [debugSession, restartEnsureSession]);
+
   const reportFlowControl = React.useCallback((paused: boolean, reason: string) => {
     const backendSessionId = terminalIdRef.current;
     if (!backendSessionId) return;
@@ -259,22 +283,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (visible && isActive) {
         terminalControllerRef.current?.requestRefresh('visibility');
         // 唤醒后立刻探测 WS 是否还活着（iOS PWA 后台返回常出现"半开连接"）。
-        // probe 内部会发 ping，500ms 没回应就主动 close 触发重连补帧。
-        const tid = terminalIdRef.current;
-        if (tid) probeTerminalConnection(tid);
+        // probe 内部会发 ping，超时没回应就主动替换连接并重连补帧。
+        probeOrRestartSession('visibility-active');
       }
     };
     const handlePageShow = (event: PageTransitionEvent) => {
       if (!isActive) return;
       terminalControllerRef.current?.requestRefresh(event.persisted ? 'bfcache' : 'visibility');
-      const tid = terminalIdRef.current;
-      if (tid) probeTerminalConnection(tid);
+      probeOrRestartSession(event.persisted ? 'bfcache-active' : 'pageshow-active');
     };
     const handleOnline = () => {
       if (!isActive) return;
       terminalControllerRef.current?.requestRefresh('online');
-      const tid = terminalIdRef.current;
-      if (tid) probeTerminalConnection(tid);
+      probeOrRestartSession('online-active');
     };
     const handleWindowFocus = () => setIsWindowFocused(true);
     const handleWindowBlur = () => setIsWindowFocused(false);
@@ -290,7 +311,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       window.removeEventListener('focus', handleWindowFocus);
       window.removeEventListener('blur', handleWindowBlur);
     };
-  }, [isActive]);
+  }, [isActive, probeOrRestartSession]);
+
+  // MultiTerminalView 在 visibility/pageshow/online 时会给所有 TerminalView
+  // 广播这个 token。注意这里不能受 isActive 限制：非活跃 SwiperSlide 的 WS
+  // 也可能在 PWA 后台期间断掉，必须一起 probe / 重建，否则切过去才发现坏了。
+  React.useEffect(() => {
+    if (!resumeRequestToken) return;
+    probeOrRestartSession('global-resume');
+    if (isActiveRef.current) {
+      terminalControllerRef.current?.requestRefresh('visibility', { force: true, resizeDebounceMs: 0 });
+    }
+  }, [resumeRequestToken, probeOrRestartSession]);
 
   // iOS detection
   React.useEffect(() => {
@@ -519,9 +551,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 // 编排器内部默认会推 first-fit immediate resize 告诉服务端真实尺寸。
                 requestAnimationFrame(() => {
                   requestAnimationFrame(() => {
-                    terminalControllerRef.current?.requestRefresh('connected');
+                    terminalControllerRef.current?.requestRefresh('connected', { force: true, resizeDebounceMs: 0 });
                   });
                 });
+                if (typeof window !== 'undefined' && isActiveRef.current) {
+                  window.setTimeout(() => {
+                    terminalControllerRef.current?.requestRefresh('connected', { force: true, resizeDebounceMs: 0 });
+                  }, 120);
+                  window.setTimeout(() => {
+                    terminalControllerRef.current?.requestRefresh('connected', { force: true, resizeDebounceMs: 0 });
+                  }, 360);
+                }
 
                 if (event.mode !== 'tmux') {
                   setTmuxLayout(null);

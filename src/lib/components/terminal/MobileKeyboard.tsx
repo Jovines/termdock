@@ -1,7 +1,7 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronUp, CornerDownLeft as RiArrowGoBackLine } from 'lucide-react';
-import { light as hapticLight } from 'browser-haptic';
+import { vibrate as hapticVibrate } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from './PresetModeButton';
 
@@ -34,6 +34,8 @@ const BASE_KEY_SEQUENCES: Record<MobileKey, string> = {
   'ctrl-w': '\u0017',
   'ctrl-u': '\u0015',
 };
+
+const TOOLBAR_HAPTIC_PATTERN_MS = 8;
 
 export function getSequenceForKey(key: MobileKey, _modifier: Modifier | null): string | null {
   return BASE_KEY_SEQUENCES[key] ?? null;
@@ -106,7 +108,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       }
       if (target.closest('button')) {
         event.preventDefault();
-        hapticLight();
+        hapticVibrate(TOOLBAR_HAPTIC_PATTERN_MS);
       }
     },
     [toolbarDisabled]
@@ -381,15 +383,6 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         </button>
         <button
           type="button"
-          onPointerDown={(event) => handleSinglePointerDown(event, 'enter')}
-          tabIndex={-1}
-          disabled={buttonDisabled}
-          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
-        >
-          <RiArrowGoBackLine size={16} />
-        </button>
-        <button
-          type="button"
           onPointerDown={(event) => handleModifierPointerDown(event, 'ctrl')}
           tabIndex={-1}
           disabled={buttonDisabled}
@@ -438,6 +431,15 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
           /
+        </button>
+        <button
+          type="button"
+          onPointerDown={(event) => handleSinglePointerDown(event, 'enter')}
+          tabIndex={-1}
+          disabled={buttonDisabled}
+          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
+        >
+          <RiArrowGoBackLine size={16} />
         </button>
         <button
           type="button"

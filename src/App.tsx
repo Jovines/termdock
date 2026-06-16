@@ -179,6 +179,16 @@ interface CloseSessionEventDetail {
   closeMode?: 'auto' | 'detach' | 'destroy';
 }
 
+function reorderSessionsByIds<T extends { id: string }>(items: T[], orderedIds: string[]): T[] {
+  const idToItem = new Map(items.map((item) => [item.id, item]));
+  const reordered = orderedIds
+    .map((id) => idToItem.get(id))
+    .filter((item): item is T => item !== undefined);
+  const covered = new Set(orderedIds);
+  const remaining = items.filter((item) => !covered.has(item.id));
+  return [...reordered, ...remaining];
+}
+
 function App() {
   const { t, locale, setLocale } = useI18n();
   const safeTopInset = 'env(safe-area-inset-top, 0px)';
@@ -248,9 +258,7 @@ function App() {
   const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
   const [sidebarCloseChoiceSessionId, setSidebarCloseChoiceSessionId] = useState<string | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
-  const activeSessionTabRef = React.useRef<HTMLButtonElement | null>(null);
-  const tabLongPressTimerRef = React.useRef<number | null>(null);
-  const tabLongPressedRef = React.useRef(false);
+  const activeSessionTabRef = React.useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -377,17 +385,25 @@ function App() {
     }
   }, []);
 
-  const handleDragEnd = useCallback((result: DropResult) => {
-    if (!result.destination || result.source.index === result.destination.index) return;
-    const newOrder = [...sessions];
-    const [moved] = newOrder.splice(result.source.index, 1);
-    newOrder.splice(result.destination.index, 0, moved);
+  const applySessionOrder = useCallback((orderedIds: string[]) => {
+    const newOrder = reorderSessionsByIds(sessions, orderedIds);
+    if (newOrder.map((session) => session.id).join('\u0000') === sessions.map((session) => session.id).join('\u0000')) {
+      return;
+    }
     // 乐观更新本地顺序,避免 MultiTerminalView 异步回传期间发生一帧布局回弹
     setSessions(newOrder);
     window.dispatchEvent(new CustomEvent('reorder-terminal-session', {
       detail: { sessionIds: newOrder.map(s => s.id) },
     }));
   }, [sessions]);
+
+  const handleDragEnd = useCallback((result: DropResult) => {
+    if (!result.destination || result.source.index === result.destination.index) return;
+    const newOrder = [...sessions];
+    const [moved] = newOrder.splice(result.source.index, 1);
+    newOrder.splice(result.destination.index, 0, moved);
+    applySessionOrder(newOrder.map((session) => session.id));
+  }, [applySessionOrder, sessions]);
 
   const renameSession = useCallback((sessionId: string, newName: string) => {
     const trimmed = newName.trim();
@@ -676,35 +692,6 @@ function App() {
     window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
   }, []);
 
-  const handleTabPointerDown = useCallback((sessionId: string) => {
-    tabLongPressedRef.current = false;
-    if (tabLongPressTimerRef.current !== null) {
-      window.clearTimeout(tabLongPressTimerRef.current);
-    }
-    tabLongPressTimerRef.current = window.setTimeout(() => {
-      tabLongPressedRef.current = true;
-      tabLongPressTimerRef.current = null;
-      setTabMenuSessionId(sessionId);
-      // 触觉反馈
-      try { window.navigator.vibrate?.(15); } catch { /* ignore */ }
-    }, 480);
-  }, []);
-
-  const cancelTabLongPress = useCallback(() => {
-    if (tabLongPressTimerRef.current !== null) {
-      window.clearTimeout(tabLongPressTimerRef.current);
-      tabLongPressTimerRef.current = null;
-    }
-  }, []);
-
-  const handleTabClickGuarded = useCallback((sessionId: string) => {
-    if (tabLongPressedRef.current) {
-      tabLongPressedRef.current = false;
-      return;
-    }
-    handleTabClick(sessionId);
-  }, [handleTabClick]);
-
   const copyCwdToClipboard = useCallback(async (sessionId: string) => {
     const ts = useTerminalStore.getState().sessions.get(sessionId);
     const cwd = ts?.cwd;
@@ -862,7 +849,8 @@ function App() {
             <div
               ref={provided.innerRef}
               {...provided.droppableProps}
-              className="scrollbar-thin flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap"
+              className="scrollbar-hidden flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap"
+              style={{ touchAction: 'pan-x' }}
             >
               {sessions.map((session, index) => {
                 const isActive = session.id === activeSessionId;
@@ -900,12 +888,11 @@ function App() {
 
                 return (
                   <React.Fragment key={session.id}>
-                    <Draggable draggableId={session.id} index={index}>
+                    <Draggable draggableId={session.id} index={index} isDragDisabled>
                       {(provided) => (
                     <div
                       ref={provided.innerRef}
                       {...provided.draggableProps}
-                      {...provided.dragHandleProps}
                       className="flex h-full items-center"
                     >
                     <input
@@ -935,7 +922,7 @@ function App() {
 
                 return (
                   <React.Fragment key={session.id}>
-                  <Draggable draggableId={session.id} index={index}>
+                  <Draggable draggableId={session.id} index={index} disableInteractiveElementBlocking>
                     {(provided, snapshot) => (
                     <div
                       ref={provided.innerRef}
@@ -943,20 +930,13 @@ function App() {
                       {...provided.dragHandleProps}
                       className={`flex h-full shrink-0 items-center ${snapshot.isDragging ? 'opacity-70' : ''}`}
                     >
-                  <button
+                  <div
                     ref={isActive ? activeSessionTabRef : null}
-                    type="button"
-                    onClick={() => handleTabClickGuarded(session.id)}
-                    onPointerDown={() => handleTabPointerDown(session.id)}
-                    onPointerUp={cancelTabLongPress}
-                    onPointerLeave={cancelTabLongPress}
-                    onPointerCancel={cancelTabLongPress}
                     onContextMenu={(e) => {
                       e.preventDefault();
-                      cancelTabLongPress();
                       setTabMenuSessionId(session.id);
                     }}
-                    className={`group relative inline-flex h-8 shrink-0 items-center overflow-hidden rounded-md pl-1 pr-1.5 text-[12px] leading-none transition max-w-[6.25rem] sm:h-8 sm:max-w-[12rem] sm:pl-1.5 sm:pr-2 ${
+                    className={`group relative inline-flex h-8 shrink-0 items-center overflow-hidden rounded-md text-[12px] leading-none transition max-w-[6.25rem] sm:h-8 sm:max-w-[12rem] ${
                       isActive
                         ? 'bg-surface-elevated text-foreground shadow-sm'
                         : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
@@ -968,7 +948,13 @@ function App() {
                         : undefined}
                     title={tooltip}
                   >
-                    <span className="inline-flex min-w-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleTabClick(session.id)}
+                    className="inline-flex min-w-0 flex-1 cursor-grab items-center gap-1.5 overflow-hidden py-1 pl-1 pr-1.5 text-left active:cursor-grabbing sm:pl-1.5 sm:pr-2"
+                    title={tooltip}
+                  >
+                    <span className="inline-flex min-w-0 items-center gap-1.5 overflow-hidden">
                       <span className="inline-flex shrink-0 items-center">
                         {renderTabIcon(session.mode, ts)}
                       </span>
@@ -984,6 +970,7 @@ function App() {
                       )}
                     </span>
                   </button>
+                  </div>
                     </div>
                     )}
                   </Draggable>
@@ -1640,7 +1627,7 @@ function App() {
         </>
       )}
 
-      {/* Tab long-press menu */}
+      {/* Tab actions menu */}
       {tabMenuSessionId && (() => {
         const menuSession = sessions.find((s) => s.id === tabMenuSessionId);
         if (!menuSession) return null;
@@ -2109,6 +2096,7 @@ function App() {
         sessionStates={terminalSessions}
         onNewSession={(opts) => dispatchNewSession(opts)}
         onCloseSession={handleSidebarCloseSession}
+        onReorderSessions={applySessionOrder}
         onOpenSettings={() => setIsDrawerOpen(true)}
         tmuxAvailable={tmuxStatus.available}
         defaultSessionMode={newSessionMode}

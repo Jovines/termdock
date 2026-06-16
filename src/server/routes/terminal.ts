@@ -1558,7 +1558,25 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     }
   }
 
-  const tmuxSessions = refreshedTmuxSessions.map((tmux): SessionInventoryTmuxSession => {
+  const tmuxOrder = new Map<string, number>();
+  globalSessionState.sessions.forEach((session, index) => {
+    if (session.mode === 'tmux' && session.tmuxSessionName && !tmuxOrder.has(session.tmuxSessionName)) {
+      tmuxOrder.set(session.tmuxSessionName, index);
+    }
+  });
+
+  const tmuxSessions = refreshedTmuxSessions
+    .slice()
+    .sort((a, b) => {
+      const aRank = tmuxOrder.get(a.name) ?? Number.POSITIVE_INFINITY;
+      const bRank = tmuxOrder.get(b.name) ?? Number.POSITIVE_INFINITY;
+      if (aRank !== bRank) return aRank - bRank;
+      const aCreated = a.createdAt ?? Number.POSITIVE_INFINITY;
+      const bCreated = b.createdAt ?? Number.POSITIVE_INFINITY;
+      if (aCreated !== bCreated) return aCreated - bCreated;
+      return a.name.localeCompare(b.name);
+    })
+    .map((tmux): SessionInventoryTmuxSession => {
     const bound = clientByTmux.get(tmux.name) ?? null;
     return {
       name: tmux.name,

@@ -218,6 +218,18 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     },
   );
 
+  const handleEdgeClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    // Android's system back gesture can steal horizontal edge swipes before the
+    // page receives enough movement to open the drawer. A plain tap/click on
+    // the same invisible edge affordance gives users a non-conflicting way to
+    // reveal the sidebar while preserving swipe-to-open where it works.
+    event.preventDefault();
+    event.stopPropagation();
+    if (!isOpenRef.current) {
+      onOpen?.();
+    }
+  }, [onOpen]);
+
   // ── Overlay mode (used on both desktop & mobile) — fixed, draggable ──
   return (
     <>
@@ -233,6 +245,8 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
           touchAction: 'none',
           pointerEvents: isOpen ? 'none' : 'auto',
         }}
+        onClick={handleEdgeClick}
+        aria-label={`Open ${side} sidebar`}
       />
 
       <div

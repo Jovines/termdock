@@ -63,6 +63,14 @@ export type TranslationDictionary = {
   };
   rightSidebar: {
     workspace: string;
+    currentProject: string;
+    browsingLocation: string;
+    parentFolder: string;
+    backToProjectRoot: string;
+    refreshFiles: string;
+    fileWatchUnavailable: (params: TranslatorParams) => string;
+    browsingOutsideProject: string;
+    browsingOutsideProjectHint: string;
     toggleSearch: string;
     refreshGit: string;
     close: string;
@@ -168,6 +176,13 @@ export type TranslationDictionary = {
     noWorkingDir: string;
     emptyDir: string;
     noMatchingFiles: string;
+    searching: string;
+    searchingWithCount: (params: TranslatorParams) => string;
+    searchResults: (params: TranslatorParams) => string;
+    searchTruncatedHint: (params: TranslatorParams) => string;
+    searchStillRunning: string;
+    showingSearchResults: (params: TranslatorParams) => string;
+    loadMoreSearchResults: (params: TranslatorParams) => string;
     truncatedHint: string;
   };
   diffViewer: {

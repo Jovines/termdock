@@ -2,9 +2,11 @@ import { useEffect, useCallback, useMemo, useState, useDeferredValue, useRef, ty
 import {
   X as RiCloseLine,
   ArrowLeft as RiArrowLeft,
+  ArrowUp as RiArrowUp,
   ChevronRight as RiChevronRight,
   ChevronDown as RiChevronDown,
   Folder as RiFolder,
+  Home as RiHome,
   GitCompare as RiGitCompare,
   Search as RiSearch,
   FileText as RiFileText,
@@ -17,7 +19,7 @@ import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { DiffViewer, preloadSidebarDiff } from './DiffViewer';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { getGitBundle, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext } from '../../terminal/api';
+import { getGitBundle, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCacheThrottled } from '../../utils/localStorageCache';
 
@@ -519,6 +521,20 @@ function getRelativeDisplayPath(path: string, rootPath: string | null): { name: 
   };
 }
 
+function getPathBasename(path: string | null): string {
+  if (!path) return '';
+  const normalized = path.replace(/\/+$/, '');
+  return normalized.split('/').pop() || normalized || '/';
+}
+
+function getParentPath(path: string | null): string | null {
+  if (!path) return null;
+  const normalized = path.replace(/\/+$/, '') || '/';
+  if (normalized === '/') return null;
+  const parent = normalized.slice(0, normalized.lastIndexOf('/')) || '/';
+  return parent === normalized ? null : parent;
+}
+
 function ChangeBadge({ status }: { status: string }) {
   const style = CHANGE_BADGE_STYLES[status] ?? { label: '?', className: 'text-muted-foreground', title: status };
   return (
@@ -929,15 +945,21 @@ export function RightSidebar(
   const [switchBranch, setSwitchBranch] = useState('');
   const [pushRemote, setPushRemote] = useState('');
   const [pushBranch, setPushBranch] = useState('');
+  const [fileWatchError, setFileWatchError] = useState<string | null>(null);
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
   const isWide = !isMobile && drawerWidthPx >= WIDE_WIDTH_THRESHOLD_PX;
   const rightTab = useSidebarStore((s) => s.rightTab);
   const setRightTab = useSidebarStore((s) => s.setRightTab);
   const rootPath = useSidebarStore((s) => s.rootPath);
+  const explorerRoot = useSidebarStore((s) => s.explorerRoot);
+  const setExplorerRoot = useSidebarStore((s) => s.setExplorerRoot);
+  const resetExplorerToProject = useSidebarStore((s) => s.resetExplorerToProject);
   const selectedFilePath = useSidebarStore((s) => s.selectedFilePath);
   const selectFile = useSidebarStore((s) => s.selectFile);
   const changedFiles = useSidebarStore((s) => s.changedFiles);
   const setChangedFiles = useSidebarStore((s) => s.setChangedFiles);
+  const invalidateDirectoryCache = useSidebarStore((s) => s.invalidateDirectoryCache);
+  const applyFileWatchEvents = useSidebarStore((s) => s.applyFileWatchEvents);
   const gitBundleLoading = useSidebarStore((s) => s.gitBundleLoading);
   const gitBundleSlow = useSidebarStore((s) => s.gitBundleSlow);
   const gitBundleError = useSidebarStore((s) => s.gitBundleError);
@@ -946,7 +968,8 @@ export function RightSidebar(
   const setGitBundleSlow = useSidebarStore((s) => s.setGitBundleSlow);
   const setGitBundleError = useSidebarStore((s) => s.setGitBundleError);
   const markGitBundleLoaded = useSidebarStore((s) => s.markGitBundleLoaded);
-  const rootEntriesLoaded = useSidebarStore((s) => Boolean(rootPath && s.directoryCache.has(rootPath)));
+  const fileTreeRoot = explorerRoot ?? rootPath;
+  const rootEntriesLoaded = useSidebarStore((s) => Boolean(fileTreeRoot && s.directoryCache.has(fileTreeRoot)));
   const fileTreeScrollRef = useRef<HTMLDivElement | null>(null);
   const gitBundleRequestIdRef = useRef(0);
   const gitBundleAbortRef = useRef<AbortController | null>(null);
@@ -960,7 +983,7 @@ export function RightSidebar(
     if (contextRoot) gitContextCache.set(contextRoot, bundle.context);
     if (options.reloadDiff) setDiffRefreshKey((key) => key + 1);
     const current = useSidebarStore.getState().selectedFilePath;
-    if (current && !bundle.files.some((file) => file.path === current || file.absolutePath === current)) {
+    if (current && !current.startsWith('/') && !bundle.files.some((file) => file.path === current || file.absolutePath === current)) {
       selectFile(null);
     }
     setExpandedDiffFiles((expanded) => {
@@ -1074,9 +1097,9 @@ export function RightSidebar(
   }, [previewPaneActive]);
 
   const handleFileTreeScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    if (!rootPath) return;
-    writeFileTreeScrollPosition(rootPath, event.currentTarget.scrollTop);
-  }, [rootPath]);
+    if (!fileTreeRoot) return;
+    writeFileTreeScrollPosition(fileTreeRoot, event.currentTarget.scrollTop);
+  }, [fileTreeRoot]);
 
   useEffect(() => {
     return () => {
@@ -1086,8 +1109,8 @@ export function RightSidebar(
   }, []);
 
   useEffect(() => {
-    if (!rootPath || !rootEntriesLoaded) return;
-    const savedTop = readFileTreeScrollCache()[rootPath]?.top;
+    if (!fileTreeRoot || !rootEntriesLoaded) return;
+    const savedTop = readFileTreeScrollCache()[fileTreeRoot]?.top;
     if (typeof savedTop !== 'number') return;
     let frame = window.requestAnimationFrame(() => {
       if (fileTreeScrollRef.current) fileTreeScrollRef.current.scrollTop = savedTop;
@@ -1096,7 +1119,7 @@ export function RightSidebar(
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [rootEntriesLoaded, rootPath]);
+  }, [fileTreeRoot, rootEntriesLoaded]);
 
   const handleFileSelect = useCallback((path: string) => {
     selectFile(path);
@@ -1153,9 +1176,42 @@ export function RightSidebar(
 
   const rootName = useMemo(() => {
     if (!rootPath) return t('rightSidebar.workspace');
-    const normalized = rootPath.replace(/\/+$/, '');
-    return normalized.split('/').pop() || normalized;
+    return getPathBasename(rootPath);
   }, [rootPath, t]);
+
+  const explorerName = useMemo(() => getPathBasename(fileTreeRoot) || rootName, [fileTreeRoot, rootName]);
+  const explorerParentPath = useMemo(() => getParentPath(fileTreeRoot), [fileTreeRoot]);
+  const browsingOutsideProject = Boolean(rootPath && explorerRoot && explorerRoot !== rootPath);
+
+  const goToExplorerParent = useCallback(() => {
+    if (explorerParentPath) setExplorerRoot(explorerParentPath);
+  }, [explorerParentPath, setExplorerRoot]);
+
+  const goToProjectRoot = useCallback(() => {
+    resetExplorerToProject();
+  }, [resetExplorerToProject]);
+
+  const refreshExplorerRoot = useCallback(() => {
+    if (!fileTreeRoot) return;
+    invalidateDirectoryCache(fileTreeRoot, false);
+  }, [fileTreeRoot, invalidateDirectoryCache]);
+
+  const watchedFileRoots = useMemo(() => {
+    return Array.from(new Set([rootPath, fileTreeRoot].filter(Boolean) as string[]));
+  }, [fileTreeRoot, rootPath]);
+
+  useEffect(() => {
+    if (!isOpen || watchedFileRoots.length === 0) return;
+    const controller = new AbortController();
+    setFileWatchError(null);
+    watchFileSystem(watchedFileRoots, (events) => {
+      applyFileWatchEvents(events);
+    }, controller.signal).catch((error) => {
+      if (isAbortError(error) || controller.signal.aborted) return;
+      setFileWatchError(error instanceof Error ? error.message : 'File watching unavailable');
+    });
+    return () => controller.abort();
+  }, [applyFileWatchEvents, isOpen, watchedFileRoots]);
 
   const changedSummary = useMemo(() => {
     const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, copied: 0, untracked: 0, conflicted: 0, staged: 0, other: 0 };
@@ -1604,6 +1660,78 @@ export function RightSidebar(
     setLineRange(null);
   }, []);
 
+  const fileExplorerNavigation = (
+    <div className="sticky top-0 z-10 border-b border-border/15 bg-surface/95 px-2.5 py-1.5 backdrop-blur">
+      <div className="flex min-h-9 items-center gap-1.5">
+        <button
+          type="button"
+          onClick={goToExplorerParent}
+          disabled={!explorerParentPath}
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
+          aria-label={t('rightSidebar.parentFolder')}
+          title={t('rightSidebar.parentFolder')}
+        >
+          <RiArrowUp size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={goToProjectRoot}
+          disabled={!rootPath || explorerRoot === rootPath}
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
+          aria-label={t('rightSidebar.backToProjectRoot')}
+          title={t('rightSidebar.backToProjectRoot')}
+        >
+          <RiHome size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={refreshExplorerRoot}
+          disabled={!fileTreeRoot}
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
+          aria-label={t('rightSidebar.refreshFiles')}
+          title={fileWatchError ? t('rightSidebar.fileWatchUnavailable', { message: fileWatchError }) : t('rightSidebar.refreshFiles')}
+        >
+          <RiRefresh size={13} />
+        </button>
+        <div className="mx-1 h-4 w-px shrink-0 bg-border/20" />
+        <div className="min-w-0 flex-1" title={fileTreeRoot ?? undefined}>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+              {t('rightSidebar.browsingLocation')}
+            </span>
+            <span className="truncate text-[12px] font-medium text-foreground">{explorerName}</span>
+          </div>
+          {fileTreeRoot && (
+            <div className="mt-0.5 truncate text-[10px] text-muted-foreground/75">
+              {fileTreeRoot}
+            </div>
+          )}
+        </div>
+        {browsingOutsideProject && (
+          <span
+            className="hidden shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary sm:inline-flex"
+            title={t('rightSidebar.browsingOutsideProjectHint')}
+          >
+            {t('rightSidebar.browsingOutsideProject')}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+
+  const diffRefreshButton = gitContext?.available ? (
+    <button
+      type="button"
+      onClick={() => void refreshGitState()}
+      disabled={gitBundleLoading}
+      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
+      aria-label={t('rightSidebar.refreshGit')}
+      title={t('rightSidebar.refreshGit')}
+    >
+      <RiRefresh size={13} className={gitBundleLoading ? 'animate-spin' : ''} />
+    </button>
+  ) : null;
+
   return (
     <Sidebar
       side="right"
@@ -1654,18 +1782,6 @@ export function RightSidebar(
           >
             <RiSearch size={14} />
           </button>
-          {gitContext?.available && (
-            <button
-              type="button"
-              onClick={() => void refreshGitState()}
-              disabled={gitBundleLoading}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50 active:scale-95"
-              aria-label={t('rightSidebar.refreshGit')}
-              title={t('common.refresh')}
-            >
-              <RiRefresh size={13} className={gitBundleLoading ? 'animate-spin' : ''} />
-            </button>
-          )}
           <button
             type="button"
             onClick={onClose}
@@ -1964,8 +2080,9 @@ export function RightSidebar(
                 onScroll={handleFileTreeScroll}
                 className="w-[300px] min-w-[260px] shrink-0 overflow-y-auto overscroll-contain border-r border-border/15"
               >
+                {fileExplorerNavigation}
                 <FileTree
-                  rootPath={rootPath ?? ''}
+                  rootPath={fileTreeRoot ?? ''}
                   onFileSelect={handleFileSelect}
                   onPathReference={insertPathReference}
                   selectedFilePath={selectedFilePath}
@@ -1990,8 +2107,9 @@ export function RightSidebar(
                 className={`h-full overflow-y-auto overscroll-contain ${mobilePreviewActive ? 'hidden' : 'block'}`}
                 aria-hidden={mobilePreviewActive}
               >
+                {fileExplorerNavigation}
                 <FileTree
-                  rootPath={rootPath ?? ''}
+                  rootPath={fileTreeRoot ?? ''}
                   onFileSelect={handleFileSelect}
                   onPathReference={insertPathReference}
                   selectedFilePath={selectedFilePath}
@@ -2015,8 +2133,9 @@ export function RightSidebar(
               onScroll={handleFileTreeScroll}
               className="h-full overflow-y-auto overscroll-contain"
             >
+              {fileExplorerNavigation}
               <FileTree
-                rootPath={rootPath ?? ''}
+                rootPath={fileTreeRoot ?? ''}
                 onFileSelect={handleFileSelect}
                 onPathReference={insertPathReference}
                 selectedFilePath={selectedFilePath}
@@ -2040,21 +2159,30 @@ export function RightSidebar(
           {isWide ? (
             <div className="flex h-full min-h-0">
               <div className="w-[320px] min-w-[260px] shrink-0 flex flex-col overflow-hidden border-r border-border/15">
-                {changedFiles.size > 0 && (
+                {gitContext?.available && (
                   <div className="shrink-0 border-b border-border/15 px-3 py-2">
                     <div className="flex items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => selectDiffFile(null)}
-                        className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-                          selectedFilePath === null
-                            ? 'bg-surface-elevated text-foreground'
-                            : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
-                        }`}
-                      >
-                        {t('rightSidebar.allChanges')}
-                      </button>
-                      <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                      {changedFiles.size > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => selectDiffFile(null)}
+                          className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+                            selectedFilePath === null
+                              ? 'bg-surface-elevated text-foreground'
+                              : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+                          }`}
+                        >
+                          {t('rightSidebar.allChanges')}
+                        </button>
+                      ) : (
+                        <span className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                          {t('rightSidebar.allChanges')}
+                        </span>
+                      )}
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                        {diffRefreshButton}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -2125,7 +2253,7 @@ export function RightSidebar(
             </div>
           ) : (
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
-              {changedFiles.size > 0 && (
+              {gitContext?.available && (
                 <div className="shrink-0 border-b border-border/15 px-3 py-2">
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
@@ -2136,20 +2264,23 @@ export function RightSidebar(
                         {filteredChangedFiles.length}/{changedFiles.size}
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setDiffWrap((prev) => !prev)}
-                      aria-pressed={diffWrap}
-                      title={t('rightSidebar.wrapLongLines')}
-                      className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
-                        diffWrap
-                          ? 'bg-primary/15 text-primary'
-                          : 'bg-background-subtle text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      <span className="font-mono text-[12px] leading-none">Aa</span>
-                      <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
-                    </button>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {diffRefreshButton}
+                      <button
+                        type="button"
+                        onClick={() => setDiffWrap((prev) => !prev)}
+                        aria-pressed={diffWrap}
+                        title={t('rightSidebar.wrapLongLines')}
+                        className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
+                          diffWrap
+                            ? 'bg-primary/15 text-primary'
+                            : 'bg-background-subtle text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        <span className="font-mono text-[12px] leading-none">Aa</span>
+                        <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}

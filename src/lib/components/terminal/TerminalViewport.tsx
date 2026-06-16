@@ -11,10 +11,12 @@ import { useTouchScroll, type TouchScrollConfig } from '../../hooks/useTouchScro
 import { useGesture } from '../../hooks/useGesture';
 import { PRIORITY_LONG_PRESS, PRIORITY_TMUX_SCROLL } from '../../gesture/types';
 import type { GestureAction } from '../../gesture/types';
-import { light as hapticLight } from 'browser-haptic';
+import { vibrate as hapticVibrate } from 'browser-haptic';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
 import { createDebugLogger } from '../../utils/debug';
+
+const TERMINAL_HAPTIC_PATTERN_MS = 8;
 
 /**
  * 清洗用户输入，处理各种特殊字符
@@ -1518,7 +1520,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           now - s.lastTapTime <= 150 &&
           Math.hypot(x - s.lastTapX, y - s.lastTapY) <= 25
         ) {
-          hapticLight();
+          hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
           onDoubleTapRef.current?.();
           setTabIndicator(true);
           if (tabIndicatorTimerRef.current) clearTimeout(tabIndicatorTimerRef.current);
@@ -1549,7 +1551,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         s.holdTimer = null;
         if (s.mode === 'holding') {
           s.mode = 'arrow';
-          hapticLight();
+          hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
           notifyGestureLock(true);
           requestAnimationFrame(() => {
             setArrowIndicator({ visible: true, activeDir: '' });
@@ -1657,7 +1659,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             lp_inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
             const now = performance.now();
             if (now - s.lastHapticTime > 120) {
-              hapticLight();
+              hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
               s.lastHapticTime = now;
             }
             // First activation: longer delay (user likely wants single step)
@@ -1668,7 +1670,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               lp_inputHandlerRef.current(ARROW_SEQUENCES[newDir]);
               const t = performance.now();
               if (t - s.lastHapticTime > 120) {
-                hapticLight();
+                hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
                 s.lastHapticTime = t;
               }
               s.joystickRepeatTimer = setTimeout(repeat, s.repeatIntervalMs);

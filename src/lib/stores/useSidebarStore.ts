@@ -1,12 +1,14 @@
 import { create } from 'zustand';
-import type { GitChangedFile } from '../terminal/api';
+import type { FileWatchEvent, GitChangedFile } from '../terminal/api';
 import { readCache, writeCache } from '../utils/localStorageCache';
 
 export type RightSidebarTab = 'git' | 'files' | 'diff' | 'file';
 
 const RIGHT_SIDEBAR_TAB_CACHE_KEY = 'termdock:right-sidebar:tab:v1';
+const EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:explorer-roots:v1';
 
 interface ProjectSidebarState {
+  explorerRoot: string | null;
   expandedPaths: Set<string>;
   selectedFilePath: string | null;
   directoryCache: Map<string, FileTreeNode[]>;
@@ -23,6 +25,19 @@ function getInitialRightTab(): RightSidebarTab {
   return readCache(RIGHT_SIDEBAR_TAB_CACHE_KEY, isRightSidebarTab) ?? 'files';
 }
 
+function isExplorerRootCache(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((entry) => typeof entry === 'string');
+}
+
+function readExplorerRootCache(): Record<string, string> {
+  return readCache(EXPLORER_ROOTS_CACHE_KEY, isExplorerRootCache) ?? {};
+}
+
+function writeExplorerRootCache(cache: Record<string, string>): void {
+  writeCache(EXPLORER_ROOTS_CACHE_KEY, cache);
+}
+
 export interface FileTreeNode {
   name: string;
   path: string;
@@ -30,6 +45,37 @@ export interface FileTreeNode {
   expanded?: boolean;
   loaded?: boolean;
   children?: FileTreeNode[];
+}
+
+function getParentPath(filePath: string): string {
+  const normalized = filePath.replace(/\/+$/, '') || '/';
+  if (normalized === '/') return '/';
+  return normalized.slice(0, normalized.lastIndexOf('/')) || '/';
+}
+
+function isSameOrChildPath(parent: string, child: string): boolean {
+  const normalizedParent = parent.replace(/\/+$/, '') || '/';
+  return child === normalizedParent || child.startsWith(`${normalizedParent}/`);
+}
+
+function sortFileTreeNodes(nodes: FileTreeNode[]): FileTreeNode[] {
+  return [...nodes].sort((a, b) => {
+    if (a.type === 'directory' && b.type !== 'directory') return -1;
+    if (a.type !== 'directory' && b.type === 'directory') return 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function toFileTreeNode(event: FileWatchEvent): FileTreeNode | null {
+  if (!event.entry) return null;
+  return {
+    name: event.entry.name,
+    path: event.entry.path,
+    type: event.entry.type,
+    expanded: false,
+    loaded: false,
+    children: event.entry.type === 'directory' ? [] : undefined,
+  };
 }
 
 interface SidebarState {
@@ -42,6 +88,8 @@ interface SidebarState {
 
   // File tree state
   rootPath: string | null;
+  explorerRoot: string | null;
+  explorerRootCache: Record<string, string>;
   expandedPaths: Set<string>;
   selectedFilePath: string | null;
   directoryCache: Map<string, FileTreeNode[]>;
@@ -66,9 +114,13 @@ interface SidebarState {
   closeAll: () => void;
   setRightTab: (tab: RightSidebarTab) => void;
   setRootPath: (path: string | null) => void;
+  setExplorerRoot: (path: string | null) => void;
+  resetExplorerToProject: () => void;
   toggleExpanded: (path: string) => void;
   selectFile: (path: string | null) => void;
   setDirectoryCache: (path: string, entries: FileTreeNode[]) => void;
+  invalidateDirectoryCache: (path: string, recursive?: boolean) => void;
+  applyFileWatchEvents: (events: FileWatchEvent[]) => void;
   setChangedFiles: (files: Map<string, GitChangedFile>) => void;
   setGitBundleLoading: (loading: boolean) => void;
   setGitBundleSlow: (slow: boolean) => void;
@@ -81,6 +133,8 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   rightOpen: false,
   rightTab: getInitialRightTab(),
   rootPath: null,
+  explorerRoot: null,
+  explorerRootCache: readExplorerRootCache(),
   expandedPaths: new Set(),
   selectedFilePath: null,
   directoryCache: new Map(),
@@ -108,6 +162,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     const projectStateCache = new Map(s.projectStateCache);
     if (s.rootPath) {
       projectStateCache.set(s.rootPath, {
+        explorerRoot: s.explorerRoot,
         expandedPaths: new Set(s.expandedPaths),
         selectedFilePath: s.selectedFilePath,
         directoryCache: new Map(s.directoryCache),
@@ -118,8 +173,10 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     }
 
     const cached = path ? projectStateCache.get(path) : undefined;
+    const persistedExplorerRoot = path ? s.explorerRootCache[path] : undefined;
     return {
       rootPath: path,
+      explorerRoot: cached?.explorerRoot ?? persistedExplorerRoot ?? path,
       expandedPaths: cached ? new Set(cached.expandedPaths) : new Set(),
       selectedFilePath: cached?.selectedFilePath ?? null,
       directoryCache: cached ? new Map(cached.directoryCache) : new Map(),
@@ -130,6 +187,26 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       gitBundleLastLoadedAt: cached?.gitBundleLastLoadedAt ?? null,
       projectStateCache,
     };
+  }),
+
+  setExplorerRoot: (path) => set((s) => {
+    if (s.explorerRoot === path) return s;
+    const explorerRootCache = { ...s.explorerRootCache };
+    if (s.rootPath && path) {
+      explorerRootCache[s.rootPath] = path;
+      writeExplorerRootCache(explorerRootCache);
+    }
+    return { explorerRoot: path, explorerRootCache };
+  }),
+
+  resetExplorerToProject: () => set((s) => {
+    if (s.explorerRoot === s.rootPath) return s;
+    const explorerRootCache = { ...s.explorerRootCache };
+    if (s.rootPath) {
+      explorerRootCache[s.rootPath] = s.rootPath;
+      writeExplorerRootCache(explorerRootCache);
+    }
+    return { explorerRoot: s.rootPath, explorerRootCache };
   }),
 
   toggleExpanded: (path) =>
@@ -147,6 +224,67 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       const next = new Map(s.directoryCache);
       next.set(path, entries);
       return { directoryCache: next };
+    }),
+
+  invalidateDirectoryCache: (path, recursive = false) =>
+    set((s) => {
+      const next = new Map(s.directoryCache);
+      for (const key of next.keys()) {
+        if (key === path || (recursive && isSameOrChildPath(path, key))) next.delete(key);
+      }
+      return { directoryCache: next };
+    }),
+
+  applyFileWatchEvents: (events) =>
+    set((s) => {
+      if (events.length === 0) return s;
+      const directoryCache = new Map(s.directoryCache);
+      let selectedFilePath = s.selectedFilePath;
+      let changed = false;
+
+      for (const event of events) {
+        if (event.type === 'rescan-required') {
+          for (const key of directoryCache.keys()) {
+            if (isSameOrChildPath(event.path, key)) {
+              directoryCache.delete(key);
+              changed = true;
+            }
+          }
+          continue;
+        }
+
+        const parent = getParentPath(event.path);
+        const siblings = directoryCache.get(parent);
+
+        if (event.type === 'deleted') {
+          if (selectedFilePath && isSameOrChildPath(event.path, selectedFilePath)) selectedFilePath = null;
+          if (siblings) {
+            const filtered = siblings.filter((node) => node.path !== event.path);
+            if (filtered.length !== siblings.length) {
+              directoryCache.set(parent, filtered);
+              changed = true;
+            }
+          }
+          for (const key of directoryCache.keys()) {
+            if (isSameOrChildPath(event.path, key)) {
+              directoryCache.delete(key);
+              changed = true;
+            }
+          }
+          continue;
+        }
+
+        const node = toFileTreeNode(event);
+        if (!node || !siblings) continue;
+        const existing = siblings.find((entry) => entry.path === node.path);
+        const nextSiblings = sortFileTreeNodes(existing
+          ? siblings.map((entry) => entry.path === node.path ? { ...entry, ...node, children: entry.children } : entry)
+          : [...siblings, node]);
+        directoryCache.set(parent, nextSiblings);
+        changed = true;
+      }
+
+      return changed ? { directoryCache, selectedFilePath } : s;
     }),
 
   setChangedFiles: (files) => set({ changedFiles: files }),

@@ -43,6 +43,49 @@ interface CloseSessionEventDetail {
 
 const SWIPE_ANIMATION_SPEED_MS = 320;
 const SWIPER_TRANSLATE_EPSILON_PX = 1;
+const TOUCH_SWIPE_RELEASE_GUARD_MS = SWIPE_ANIMATION_SPEED_MS + 120;
+
+type SyncSwiperOptions = {
+  immediate?: boolean;
+};
+
+function cancelSwiperWrapperAnimations(swiper: SwiperInstance): void {
+  const wrapper = (swiper as unknown as { wrapperEl?: HTMLElement }).wrapperEl;
+  if (!wrapper) return;
+  try {
+    wrapper.getAnimations().forEach((animation) => animation.cancel());
+  } catch {
+    // Best effort: older WebViews may not expose getAnimations().
+  }
+}
+
+function forceSwiperTranslate(swiper: SwiperInstance, targetIndex: number): void {
+  const targetTranslate = getSwiperTargetTranslate(swiper, targetIndex);
+  if (targetTranslate === null) return;
+  const wrapper = (swiper as unknown as { wrapperEl?: HTMLElement }).wrapperEl;
+  cancelSwiperWrapperAnimations(swiper);
+  if (wrapper) {
+    wrapper.style.transitionDuration = '0ms';
+  }
+  try {
+    const mutableSwiper = swiper as unknown as {
+      setTransition?: (duration: number) => void;
+      setTranslate?: (translate: number) => void;
+    };
+    mutableSwiper.setTransition?.(0);
+    mutableSwiper.setTranslate?.(targetTranslate);
+    cancelSwiperWrapperAnimations(swiper);
+    if (wrapper) {
+      wrapper.style.transitionDuration = '0ms';
+      wrapper.style.transform = `translate3d(${targetTranslate}px, 0px, 0px)`;
+    }
+  } catch {
+    if (wrapper) {
+      wrapper.style.transitionDuration = '0ms';
+      wrapper.style.transform = `translate3d(${targetTranslate}px, 0px, 0px)`;
+    }
+  }
+}
 
 function getSwiperTranslate(swiper: SwiperInstance): number | null {
   try {
@@ -64,6 +107,13 @@ function getSwiperTargetTranslate(swiper: SwiperInstance, targetIndex: number): 
     return null;
   }
   return -targetSnap;
+}
+
+function isSwiperTranslateAligned(swiper: SwiperInstance, targetIndex: number): boolean {
+  const translate = getSwiperTranslate(swiper);
+  const targetTranslate = getSwiperTargetTranslate(swiper, targetIndex);
+  return translate !== null && targetTranslate !== null &&
+    Math.abs(translate - targetTranslate) <= SWIPER_TRANSLATE_EPSILON_PX;
 }
 
 function summarizeDuplicateMappings(sessions: TerminalSession[]): Array<{ kind: 'frontend' | 'backend' | 'tmux'; key: string; sessionIds: string[] }> {
@@ -201,11 +251,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
+  const [resumeRequestToken, setResumeRequestToken] = useState(0);
   const restoredRef = useRef(false);
   const swiperRef = useRef<SwiperInstance | null>(null);
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
   const [focusTransferRequest, setFocusTransferRequest] = useState<{ sessionId: string; token: number } | null>(null);
   const isTouchSwipeRef = useRef(false);
+  const touchSwipeReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const swiperDrivenActiveSessionIdRef = useRef<string | null>(null);
   const isMobileRef = useRef(false);
   const activeSessionIdRef = useRef<string | null>(null);
   const sessionsRef = useRef<TerminalSession[]>([]);
@@ -307,7 +360,22 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   activeSessionIndexRef.current = activeSessionIndex;
 
-  const syncSwiperToActiveIndex = useCallback((reason: string, options: { immediate?: boolean; allowWhileAnimating?: boolean } = {}) => {
+  const clearTouchSwipeReleaseTimer = useCallback(() => {
+    if (!touchSwipeReleaseTimerRef.current) return;
+    clearTimeout(touchSwipeReleaseTimerRef.current);
+    touchSwipeReleaseTimerRef.current = null;
+  }, []);
+
+  const endTouchSwipeAfterNativeSettle = useCallback((reason: string) => {
+    clearTouchSwipeReleaseTimer();
+    touchSwipeReleaseTimerRef.current = setTimeout(() => {
+      touchSwipeReleaseTimerRef.current = null;
+      isTouchSwipeRef.current = false;
+      logSwiperState('[swiper:touch-guard-clear]', { reason });
+    }, TOUCH_SWIPE_RELEASE_GUARD_MS);
+  }, [clearTouchSwipeReleaseTimer, logSwiperState]);
+
+  const syncSwiperToActiveIndex = useCallback((reason: string, options: SyncSwiperOptions = {}) => {
     const swiper = swiperRef.current;
     const targetIndex = activeSessionIndexRef.current;
     const currentSessions = sessionsRef.current;
@@ -321,7 +389,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       logSwiperState('[swiper:sync-skip-touch]', { reason });
       return;
     }
-    if (swiper.animating && !options.allowWhileAnimating) {
+    if (swiper.animating) {
       logSwiperState('[swiper:sync-skip-animating]', { reason });
       return;
     }
@@ -343,11 +411,32 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       return;
     }
 
-    swiper.slideTo(
-      targetIndex,
-      options.immediate ? 0 : SWIPE_ANIMATION_SPEED_MS,
-      false
-    );
+    // When the active index is already correct, any mismatch is layout drift
+    // (for example a stale Web Animation/transition left behind after iOS PWA
+    // resume). Do not start another animated slide here: cancel and snap the
+    // wrapper to the exact target translate so the visible terminal is restored
+    // synchronously.
+    if (activeIndexAligned) {
+      forceSwiperTranslate(swiper, targetIndex);
+      logSwiperState('[swiper:sync-forced-active]', {
+        reason,
+        translateAligned,
+        immediate: options.immediate === true,
+      });
+      return;
+    }
+
+    if (options.immediate) {
+      forceSwiperTranslate(swiper, targetIndex);
+      swiper.slideTo(targetIndex, 0, false);
+      forceSwiperTranslate(swiper, targetIndex);
+    } else {
+      swiper.slideTo(
+        targetIndex,
+        SWIPE_ANIMATION_SPEED_MS,
+        false
+      );
+    }
 
     logSwiperState('[swiper:sync-applied]', {
       reason,
@@ -414,6 +503,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const shouldTransferFocus =
       !isMobileRef.current || isKeyboardOpen;
 
+    // Swiper itself is the source of truth for this update: it has already
+    // moved (or is animating) the wrapper to `instance.activeIndex`. If the
+    // React active-session effect immediately reconciles back into Swiper, it
+    // races the native touch-release animation and may overwrite the wrapper
+    // transform with a 0ms snap. Mark this state change so the effect below
+    // updates app state/persistence only, without commanding Swiper again.
+    swiperDrivenActiveSessionIdRef.current = nextSessionId;
     setActiveSessionId(nextSessionId);
     if (shouldTransferFocus) {
       setFocusTransferRequest({ sessionId: nextSessionId, token: Date.now() });
@@ -423,8 +519,17 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [sessions, activeSessionId, logSwiperState]);
 
   useEffect(() => {
-    syncSwiperToActiveIndex('active-session-index', { immediate: isRestoring });
-  }, [activeSessionIndex, sessions.length, isRestoring, syncSwiperToActiveIndex]);
+    if (swiperDrivenActiveSessionIdRef.current === activeSessionId) {
+      logSwiperState('[swiper:sync-skip-swiper-driven]', { activeSessionId });
+      swiperDrivenActiveSessionIdRef.current = null;
+      return;
+    }
+    // This is a state reconciliation path, not the user's touch gesture path.
+    // Keep it synchronous: after PWA resume WebKit can leave Swiper's wrapper
+    // transition/Web Animation frozen, and another animated slideTo() preserves
+    // the visually wrong transform for too long (or indefinitely).
+    syncSwiperToActiveIndex('active-session-index', { immediate: true });
+  }, [activeSessionId, activeSessionIndex, sessions.length, syncSwiperToActiveIndex, logSwiperState]);
 
   // 同步 Swiper.allowTouchMove。
   //
@@ -460,8 +565,23 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     swiper.updateSlidesClasses();
     if (el) el.scrollLeft = 0;
     logSwiperState('[swiper:layout-after]', { reason, scrollLeft: el?.scrollLeft ?? null });
+    if (isTouchSwipeRef.current || swiper.animating) {
+      logSwiperState('[swiper:layout-skip-sync-motion]', { reason });
+      return;
+    }
     syncSwiperToActiveIndex(`layout:${reason}`, { immediate: true });
+    requestAnimationFrame(() => {
+      const current = swiperRef.current;
+      if (!current) return;
+      if (isTouchSwipeRef.current) return;
+      if (current.animating) return;
+      forceSwiperTranslate(current, activeSessionIndexRef.current);
+    });
   }, [logSwiperState, syncSwiperToActiveIndex]);
+
+  useEffect(() => {
+    return () => clearTouchSwipeReleaseTimer();
+  }, [clearTouchSwipeReleaseTimer]);
 
   useEffect(() => {
     const updateSwiperSize = () => {
@@ -478,6 +598,47 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('resize', updateSwiperSize);
       window.visualViewport?.removeEventListener('resize', updateSwiperSize);
       window.visualViewport?.removeEventListener('scroll', updateSwiperSize);
+    };
+  }, [updateSwiperLayout]);
+
+  // PWA 从后台恢复 / 网络恢复时，不能只让当前 active slide 自检：
+  // Swiper 中其它 TerminalView 虽然不可见但仍持有各自 WebSocket，服务重启后
+  // 它们也会变成半开/已关闭连接。这里广播一个 token 给所有子 TerminalView，
+  // 让每个 session 都 probe / 必要时重新 ensureSession。
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleResume = (reason: string) => {
+      if (reason !== 'online' && document.hidden) return;
+      setResumeRequestToken((token) => token + 1);
+
+      // 刚回前台时 visualViewport / Swiper translate 经常还没稳定，立即 +
+      // 延迟各 update 一次，避免重连后 active slide 宽高/translate 短暂错位。
+      requestAnimationFrame(() => updateSwiperLayout(`resume:${reason}:raf`));
+      if (settleTimer) clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        settleTimer = null;
+        updateSwiperLayout(`resume:${reason}:settled`);
+      }, 320);
+    };
+
+    const handleVisibility = () => {
+      if (!document.hidden) scheduleResume('visibility');
+    };
+    const handlePageShow = (event: PageTransitionEvent) => {
+      scheduleResume(event.persisted ? 'bfcache' : 'pageshow');
+    };
+    const handleOnline = () => scheduleResume('online');
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('online', handleOnline);
+      if (settleTimer) clearTimeout(settleTimer);
     };
   }, [updateSwiperLayout]);
 
@@ -984,6 +1145,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             if (!allowed) {
               return;
             }
+            clearTouchSwipeReleaseTimer();
             isTouchSwipeRef.current = true;
           }}
           onTouchEnd={(_, event) => {
@@ -994,12 +1156,33 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             if (!allowed) {
               return;
             }
-            const swiper = swiperRef.current;
-            if (!swiper || !swiper.animating) {
-              isTouchSwipeRef.current = false;
-            }
+            // Android Chrome can report `swiper.animating === false` at the
+            // exact touchend frame, then start the native release animation a
+            // moment later. If we clear the touch guard immediately, the React
+            // active-session sync effect sees the new activeIndex and calls the
+            // immediate snap path, so the page jumps with no release animation.
+            // Keep the guard through the expected release window; transitionEnd
+            // clears it earlier when Swiper does emit one.
+            endTouchSwipeAfterNativeSettle('touch-end');
           }}
           onTransitionEnd={() => {
+            const swiper = swiperRef.current;
+            if (
+              isTouchSwipeRef.current &&
+              swiper &&
+              !isSwiperTranslateAligned(swiper, activeSessionIndexRef.current)
+            ) {
+              // Android WebView/Chrome can emit a transitionEnd-like callback
+              // on the touchend frame before Swiper's release animation has
+              // actually settled. Clearing the touch guard here re-enables the
+              // active-session sync effect, which then forces translate with
+              // transitionDuration=0 and makes the page jump instantly. Keep the
+              // guard alive until the wrapper is visually aligned, or until the
+              // touch-end fallback timer expires.
+              logSwiperState('[swiper:transition-end-deferred]');
+              return;
+            }
+            clearTouchSwipeReleaseTimer();
             isTouchSwipeRef.current = false;
             logSwiperState('[swiper:transition-end]');
           }}
@@ -1028,6 +1211,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                 toolbarPresets={toolbarPresets}
                 isActive={index === activeSessionIndex}
                 focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
+                resumeRequestToken={resumeRequestToken}
                 onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
                 showDebug={showDebug}
                 onStatusChange={index === activeSessionIndex ? onStatusChange : undefined}

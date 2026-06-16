@@ -74,6 +74,7 @@ interface WsConnection {
   ws: WebSocket;
   onEvent: (event: TerminalStreamEvent) => void;
   onError?: (error: Error, fatal?: boolean) => void;
+  reconnectNow: () => void;
   retryState: {
     maxRetries: number;
     initialDelayMs: number;
@@ -242,10 +243,16 @@ export function connectTerminalStream(
   // Guard against onerror + onclose double-fire: only the first one
   // should trigger handleError for a given disconnection.
   let handlingError = false;
+  let manualReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Sockets we intentionally superseded (wake probe / manual retry). Their
+  // late onclose/onerror events must not schedule another retry against the
+  // freshly created socket.
+  const ignoredSockets = new WeakSet<WebSocket>();
 
   const clearTimeouts = () => {
     if (retryState.retryTimeout) { clearTimeout(retryState.retryTimeout); retryState.retryTimeout = null; }
     if (retryState.connectionTimeoutId) { clearTimeout(retryState.connectionTimeoutId); retryState.connectionTimeoutId = null; }
+    if (manualReconnectTimer) { clearTimeout(manualReconnectTimer); manualReconnectTimer = null; }
   };
 
   const stopHeartbeat = (c: WsConnection) => {
@@ -286,6 +293,12 @@ export function connectTerminalStream(
   const connect = () => {
     if (retryState.isClosed) return;
 
+    if (conn) {
+      ignoredSockets.add(conn.ws);
+      stopHeartbeat(conn);
+      try { conn.ws.close(); } catch { /* ignore */ }
+    }
+
     const url = getWebSocketUrl(sessionId, lastSeq);
     const ws = new WebSocket(url);
     handlingError = false; // reset for new connection attempt
@@ -301,6 +314,30 @@ export function connectTerminalStream(
       ws,
       onEvent,
       onError,
+      reconnectNow: () => {
+        if (retryState.isClosed) return;
+        if (manualReconnectTimer) return;
+        clearTimeouts();
+        if (conn) {
+          ignoredSockets.add(conn.ws);
+          stopHeartbeat(conn);
+          try { conn.ws.close(); } catch { /* ignore */ }
+        }
+        onEvent({
+          type: 'reconnecting',
+          attempt: Math.min(retryState.retryCount + 1, maxRetries),
+          maxAttempts: maxRetries,
+        });
+        // Wake-from-background should not wait for a stale exponential-backoff
+        // timer that may have been scheduled/throttled while the PWA was hidden.
+        retryState.retryCount = Math.min(retryState.retryCount + 1, maxRetries);
+        handlingError = true;
+        manualReconnectTimer = setTimeout(() => {
+          manualReconnectTimer = null;
+          handlingError = false;
+          connect();
+        }, 0);
+      },
       retryState,
       lastSeq,
       pendingInputs,
@@ -422,6 +459,7 @@ export function connectTerminalStream(
     };
 
     ws.onerror = () => {
+      if (ignoredSockets.has(ws)) return;
       clearTimeouts();
       stopHeartbeat(newConn);
       if (!handlingError) {
@@ -431,6 +469,7 @@ export function connectTerminalStream(
     };
 
     ws.onclose = (ev: CloseEvent) => {
+      if (ignoredSockets.has(ws)) return;
       clearTimeouts();
       stopHeartbeat(newConn);
       if (retryState.isClosed) return;
@@ -533,27 +572,28 @@ export async function sendTerminalInput(
 // 主动探测：visibilitychange/online/pageshow 唤醒后调用，确认 WS 是否还活着。
 // - 没有 conn：说明已彻底断开，连重连机器都不存在，调用方需要自行重建。
 // - WS 非 OPEN（CONNECTING/CLOSING/CLOSED）：iOS PWA 后台时 OS 可能撕掉底层 TCP
-//   但 JS 引擎收不到任何 onerror/onclose；这种"僵尸 socket"必须主动 close()，
-//   才能触发 onclose → handleError → 进入指数退避重连。早期版本在这里 early
-//   return，结果用户回前台后页面永远转圈。
+//   但 JS 引擎收不到任何 onerror/onclose；这种"僵尸 socket"不能只 close() 等事件，
+//   要立即替换为新连接。
 // - WS OPEN：发 ping，等 WAKEUP_PROBE_TIMEOUT_MS 内有任何消息就算活着；
-//   超时则主动 close 触发 onclose 走重连补帧路径。
-export function probeTerminalConnection(sessionId: string): void {
+//   超时则主动替换连接，走重连补帧路径。
+export function probeTerminalConnection(sessionId: string): boolean {
   const conn = wsConnections.get(sessionId);
-  if (!conn) return;
+  if (!conn) return false;
   if (conn.ws.readyState !== WebSocket.OPEN) {
-    // 卡死的握手 / 僵尸连接：直接 close，让 onclose 触发重连。
-    try { conn.ws.close(); } catch { /* ignore */ }
-    return;
+    // 卡死的握手 / 僵尸连接：不要只依赖 close/onclose（iOS PWA 唤醒时
+    // onclose 可能延迟或已在后台被吞），直接替换为一条新的连接。
+    conn.reconnectNow();
+    return true;
   }
   const baseline = conn.lastInboundAt;
   try { conn.ws.send(JSON.stringify({ type: 'ping' })); } catch { /* ignore */ }
   setTimeout(() => {
     // 如果在窗口期内 lastInboundAt 没有更新，就视为半开连接，强行 close。
     if (conn.lastInboundAt <= baseline) {
-      try { conn.ws.close(); } catch { /* ignore */ }
+      conn.reconnectNow();
     }
   }, WAKEUP_PROBE_TIMEOUT_MS);
+  return true;
 }
 
 // ---- Terminal focus / flow-control state (WebSocket)
@@ -1226,6 +1266,36 @@ export interface FileEntry {
   modified?: string;
 }
 
+export interface FileSearchResponse {
+  path: string;
+  query: string;
+  entries: FileEntry[];
+  truncated: boolean;
+  total: number;
+  engine: 'rg' | 'fallback';
+  limited?: boolean;
+}
+
+export type FileSearchEngine = 'rg' | 'fallback';
+
+export interface FileSearchProgress {
+  path?: string;
+  query?: string;
+  engine?: FileSearchEngine;
+  entries?: FileEntry[];
+  total?: number;
+  truncated?: boolean;
+  limited?: boolean;
+  done?: boolean;
+}
+
+export interface FileWatchEvent {
+  type: 'created' | 'deleted' | 'updated' | 'rescan-required';
+  path: string;
+  entry?: FileEntry;
+  reason?: string;
+}
+
 export async function listDirectory(dirPath: string, signal?: AbortSignal): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
   const response = await fetch(`/api/terminal/fs/list?path=${encodeURIComponent(dirPath)}`, { signal });
   if (!response.ok) {
@@ -1233,6 +1303,96 @@ export async function listDirectory(dirPath: string, signal?: AbortSignal): Prom
     throw new Error(error.error || 'Failed to list directory');
   }
   return response.json();
+}
+
+export async function searchFiles(dirPath: string, query: string, signal?: AbortSignal): Promise<FileSearchResponse> {
+  const params = new URLSearchParams({ path: dirPath, query });
+  const response = await fetch(`/api/terminal/fs/search?${params}`, { signal });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to search files' }));
+    throw new Error(error.error || 'Failed to search files');
+  }
+  return response.json();
+}
+
+export async function searchFilesStream(
+  dirPath: string,
+  query: string,
+  onProgress: (progress: FileSearchProgress) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const params = new URLSearchParams({ path: dirPath, query, stream: 'true' });
+  const response = await fetch(`/api/terminal/fs/search?${params}`, { signal });
+  if (!response.ok || !response.body) {
+    const error = await response.json().catch(() => ({ error: 'Failed to search files' }));
+    throw new Error(error.error || 'Failed to search files');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const consumeLine = (line: string) => {
+    if (!line.trim()) return;
+    const event = JSON.parse(line) as FileSearchProgress & { type?: string };
+    if (event.type === 'meta') {
+      onProgress({ path: event.path, query: event.query, engine: event.engine, limited: event.limited });
+    } else if (event.type === 'batch') {
+      onProgress({ entries: event.entries ?? [] });
+    } else if (event.type === 'done') {
+      onProgress({ total: event.total, truncated: event.truncated, limited: event.limited, engine: event.engine, done: true });
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex = buffer.indexOf('\n');
+    while (newlineIndex >= 0) {
+      consumeLine(buffer.slice(0, newlineIndex));
+      buffer = buffer.slice(newlineIndex + 1);
+      newlineIndex = buffer.indexOf('\n');
+    }
+  }
+  buffer += decoder.decode();
+  consumeLine(buffer);
+}
+
+export async function watchFileSystem(
+  roots: string[],
+  onEvents: (events: FileWatchEvent[]) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const params = new URLSearchParams();
+  params.set('roots', roots.join('|'));
+  const response = await fetch(`/api/terminal/fs/watch?${params}`, { signal });
+  if (!response.ok || !response.body) {
+    const error = await response.json().catch(() => ({ error: 'Failed to watch files' }));
+    throw new Error(error.error || 'Failed to watch files');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const consumeLine = (line: string) => {
+    if (!line.trim()) return;
+    const event = JSON.parse(line) as { type?: string; events?: FileWatchEvent[] };
+    if (event.type === 'events' && event.events?.length) onEvents(event.events);
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex = buffer.indexOf('\n');
+    while (newlineIndex >= 0) {
+      consumeLine(buffer.slice(0, newlineIndex));
+      buffer = buffer.slice(newlineIndex + 1);
+      newlineIndex = buffer.indexOf('\n');
+    }
+  }
+  buffer += decoder.decode();
+  consumeLine(buffer);
 }
 
 export async function readFileContent(filePath: string, signal?: AbortSignal): Promise<{

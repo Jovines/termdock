@@ -9,7 +9,7 @@ import {
   Loader2 as RiLoader,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
-import { listDirectory, type FileEntry } from '../../terminal/api';
+import { listDirectory, searchFilesStream, type FileEntry, type FileSearchEngine } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 
 interface FileTreeProps {
@@ -21,6 +21,8 @@ interface FileTreeProps {
 }
 
 const CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.rb', '.php', '.swift', '.kt', '.sh', '.css', '.scss', '.html', '.json', '.yaml', '.yml', '.toml', '.md']);
+const SEARCH_INITIAL_VISIBLE = 120;
+const SEARCH_LOAD_MORE_STEP = 120;
 
 const CHANGE_STYLES: Record<string, { label: string; className: string; title: string }> = {
   added: { label: 'A', className: 'text-[color:var(--diff-insert-strong)]', title: 'Added' },
@@ -73,6 +75,22 @@ function hasMatchingDescendant(node: FileTreeNode, queryLower: string, directory
   return children.some((child) => hasMatchingDescendant(child, queryLower, directoryCache));
 }
 
+function toTreeNodes(entries: FileEntry[]): FileTreeNode[] {
+  return entries.map((e) => ({
+    name: e.name,
+    path: e.path,
+    type: e.type,
+    expanded: false,
+    loaded: false,
+    children: e.type === 'directory' ? [] : undefined,
+  }));
+}
+
+function getRelativePath(rootPath: string, filePath: string): string {
+  if (!rootPath || !filePath.startsWith(rootPath)) return filePath;
+  return filePath.slice(rootPath.length).replace(/^\/+/, '') || filePath;
+}
+
 interface FileTreeItemProps {
   node: FileTreeNode;
   depth: number;
@@ -110,15 +128,7 @@ const FileTreeItem = memo(function FileTreeItem({
     return children.filter((child) => hasMatchingDescendant(child, queryLower, cache));
   }, [children, queryLower]);
 
-  const handleToggle = useCallback(async () => {
-    if (node.type !== 'directory') {
-      onFileSelect(node.path);
-      return;
-    }
-
-    toggleExpanded(node.path);
-
-    // Lazy load children if not cached
+  const loadChildren = useCallback(async () => {
     const cached = useSidebarStore.getState().directoryCache.has(node.path);
     if (!cached && !loading) {
       loadAbortRef.current?.abort();
@@ -127,14 +137,7 @@ const FileTreeItem = memo(function FileTreeItem({
       setLoading(true);
       try {
         const result = await listDirectory(node.path, controller.signal);
-        const treeNodes: FileTreeNode[] = result.entries.map((e: FileEntry) => ({
-          name: e.name,
-          path: e.path,
-          type: e.type,
-          expanded: false,
-          loaded: false,
-          children: e.type === 'directory' ? [] : undefined,
-        }));
+        const treeNodes = toTreeNodes(result.entries);
         setDirectoryCache(node.path, treeNodes);
       } catch (error) {
         if (!isAbortError(error)) {
@@ -145,7 +148,24 @@ const FileTreeItem = memo(function FileTreeItem({
         setLoading(false);
       }
     }
-  }, [node.path, node.type, loading, toggleExpanded, setDirectoryCache, onFileSelect]);
+  }, [node.path, loading, setDirectoryCache]);
+
+  const handleToggle = useCallback(async () => {
+    if (node.type !== 'directory') {
+      onFileSelect(node.path);
+      return;
+    }
+
+    const willExpand = !useSidebarStore.getState().expandedPaths.has(node.path);
+    toggleExpanded(node.path);
+    if (willExpand) await loadChildren();
+  }, [node.path, node.type, loadChildren, toggleExpanded, onFileSelect]);
+
+  useEffect(() => {
+    if (node.type === 'directory' && isExpanded && !children && !loading) {
+      void loadChildren();
+    }
+  }, [children, isExpanded, loadChildren, loading, node.type]);
 
   const handleReferenceClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
@@ -215,6 +235,73 @@ const FileTreeItem = memo(function FileTreeItem({
   );
 });
 
+interface FileSearchResultItemProps {
+  node: FileTreeNode;
+  rootPath: string;
+  onFileSelect: (path: string) => void;
+  onPathReference?: (path: string) => void;
+  selectedFilePath: string | null;
+}
+
+const FileSearchResultItem = memo(function FileSearchResultItem({
+  node,
+  rootPath,
+  onFileSelect,
+  onPathReference,
+  selectedFilePath,
+}: FileSearchResultItemProps) {
+  const { t } = useI18n();
+  const isSelected = node.path === selectedFilePath;
+
+  const handleClick = useCallback(() => {
+    if (node.type !== 'directory') onFileSelect(node.path);
+  }, [node.path, node.type, onFileSelect]);
+
+  const handleReferenceClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    onPathReference?.(node.path);
+  }, [onPathReference, node.path]);
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      className={`group flex w-full items-center gap-1 rounded px-2 py-1.5 text-left text-[13px] ${
+        isSelected
+          ? 'bg-surface-elevated text-foreground'
+          : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+      }`}
+      title={node.path}
+    >
+      {node.type === 'directory' ? (
+        <>
+          <span className="w-[14px] shrink-0" />
+          <RiFolder size={14} className="shrink-0 text-amber-300/80" />
+        </>
+      ) : (
+        <>
+          <span className="w-[14px] shrink-0" />
+          <span className={isSelected ? 'text-primary' : 'text-muted-foreground/80'}>{getFileIcon(node.name, node.type)}</span>
+        </>
+      )}
+      <span className="min-w-0 flex-1">
+        <span className={`block truncate ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
+        <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, node.path)}</span>
+      </span>
+      <ChangeBadge path={node.path} />
+      {onPathReference && (
+        <span
+          onClick={handleReferenceClick}
+          className="ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100"
+          title={t('fileTree.insertRefTitle')}
+        >
+          {t('fileTree.insertRef')}
+        </span>
+      )}
+    </button>
+  );
+});
+
 export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFilePath, query = '' }: FileTreeProps) {
   const { t } = useI18n();
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
@@ -223,12 +310,25 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rootTruncated, setRootTruncated] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchEntries, setSearchEntries] = useState<FileTreeNode[]>([]);
+  const [searchMeta, setSearchMeta] = useState<{ truncated: boolean; total: number; engine: FileSearchEngine; limited: boolean; done: boolean } | null>(null);
+  const [visibleSearchCount, setVisibleSearchCount] = useState(SEARCH_INITIAL_VISIBLE);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const queryLower = query.trim().toLowerCase();
 
   // Load root directory
   useEffect(() => {
     if (!rootPath) return;
-    if (useSidebarStore.getState().directoryCache.has(rootPath)) return;
+    if (queryLower) {
+      setLoading(false);
+      return;
+    }
+    if (useSidebarStore.getState().directoryCache.has(rootPath)) {
+      setLoading(false);
+      return;
+    }
 
     let cancelled = false;
     const controller = new AbortController();
@@ -238,14 +338,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
     listDirectory(rootPath, controller.signal)
       .then((result) => {
         if (cancelled) return;
-        const treeNodes: FileTreeNode[] = result.entries.map((e: FileEntry) => ({
-          name: e.name,
-          path: e.path,
-          type: e.type,
-          expanded: false,
-          loaded: false,
-          children: e.type === 'directory' ? [] : undefined,
-        }));
+        const treeNodes = toTreeNodes(result.entries);
         setRootTruncated(Boolean(result.truncated));
         setDirectoryCache(rootPath, treeNodes);
       })
@@ -261,7 +354,85 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
       cancelled = true;
       controller.abort();
     };
-  }, [rootPath, setDirectoryCache]);
+  }, [queryLower, rootEntries, rootPath, setDirectoryCache]);
+
+  useEffect(() => {
+    if (!rootPath || !queryLower) {
+      setSearchLoading(false);
+      setSearchError(null);
+      setSearchEntries([]);
+      setSearchMeta(null);
+      return;
+    }
+
+    let cancelled = false;
+    const controller = new AbortController();
+    const seen = new Set<string>();
+    setSearchLoading(true);
+    setSearchError(null);
+    setSearchEntries([]);
+    setVisibleSearchCount(SEARCH_INITIAL_VISIBLE);
+    setSearchMeta({ truncated: false, total: 0, engine: 'rg', limited: false, done: false });
+
+    searchFilesStream(rootPath, query.trim(), (progress) => {
+      if (cancelled) return;
+      if (progress.engine) {
+        setSearchMeta((current) => ({
+          truncated: current?.truncated ?? false,
+          total: current?.total ?? 0,
+          engine: progress.engine!,
+          limited: progress.limited ?? current?.limited ?? false,
+          done: current?.done ?? false,
+        }));
+      }
+      if (progress.entries?.length) {
+        const nextEntries = progress.entries.filter((entry) => {
+          if (seen.has(entry.path)) return false;
+          seen.add(entry.path);
+          return true;
+        });
+        if (nextEntries.length > 0) {
+          setSearchEntries((current) => [...current, ...toTreeNodes(nextEntries)]);
+          setSearchMeta((current) => current ? { ...current, total: seen.size } : { truncated: false, total: seen.size, engine: 'rg', limited: false, done: false });
+        }
+      }
+      if (progress.done) {
+        setSearchMeta((current) => ({
+          truncated: Boolean(progress.truncated),
+          total: typeof progress.total === 'number' ? progress.total : seen.size,
+          engine: progress.engine ?? current?.engine ?? 'rg',
+          limited: Boolean(progress.limited),
+          done: true,
+        }));
+      }
+    }, controller.signal)
+      .catch((err) => {
+        if (cancelled || isAbortError(err)) return;
+        setSearchError(err instanceof Error ? err.message : 'Failed to search files');
+        setSearchEntries([]);
+        setSearchMeta(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSearchLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [query, queryLower, rootPath]);
+
+  useEffect(() => {
+    if (!queryLower) return;
+    const target = loadMoreRef.current;
+    if (!target) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      setVisibleSearchCount((count) => Math.min(count + SEARCH_LOAD_MORE_STEP, searchEntries.length));
+    }, { rootMargin: '160px 0px' });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [queryLower, searchEntries.length]);
 
   const visibleRootEntries = useMemo(() => {
     if (!rootEntries) return undefined;
@@ -282,6 +453,69 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
     return (
       <div className="flex items-center justify-center py-8">
         <RiLoader size={20} className="animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (queryLower) {
+    const foundCount = searchMeta?.total ?? searchEntries.length;
+    const displayedSearchEntries = searchEntries.slice(0, visibleSearchCount);
+    const hasBufferedMore = visibleSearchCount < searchEntries.length;
+    return (
+      <div className="space-y-px px-2 py-2">
+        <div className="mb-2 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
+          <span>{searchLoading ? t('fileTree.searchingWithCount', { count: foundCount }) : t('fileTree.searchResults', { count: foundCount })}</span>
+          {searchMeta && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-background-subtle px-2 py-0.5 uppercase tracking-[0.12em]">
+              {searchLoading && <RiLoader size={9} className="animate-spin" />}
+              {searchMeta.engine}{searchMeta.limited ? ' · limited' : ''}
+            </span>
+          )}
+        </div>
+        {searchLoading && searchEntries.length === 0 ? (
+          <div className="flex items-center justify-center py-8">
+            <RiLoader size={20} className="animate-spin text-muted-foreground" />
+          </div>
+        ) : searchError ? (
+          <div className="px-4 py-4 text-sm text-destructive">{searchError}</div>
+        ) : searchEntries.length === 0 ? (
+          <div className="mx-1 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
+            {t('fileTree.noMatchingFiles')}
+          </div>
+        ) : (
+          <>
+            {searchMeta?.limited && (
+              <div className="mb-2 rounded-xl bg-yellow-400/10 px-3 py-2 text-[11px] text-yellow-300">
+                {t('fileTree.searchTruncatedHint', { count: searchMeta.total })}
+              </div>
+            )}
+            {displayedSearchEntries.map((node) => (
+              <FileSearchResultItem
+                key={node.path}
+                node={node}
+                rootPath={rootPath}
+                onFileSelect={onFileSelect}
+                onPathReference={onPathReference}
+                selectedFilePath={selectedFilePath}
+              />
+            ))}
+            <div ref={loadMoreRef} className="py-2 text-center text-[11px] text-muted-foreground">
+              {hasBufferedMore ? (
+                <button
+                  type="button"
+                  onClick={() => setVisibleSearchCount((count) => Math.min(count + SEARCH_LOAD_MORE_STEP, searchEntries.length))}
+                  className="rounded-full bg-background-subtle px-3 py-1 hover:bg-surface-2 hover:text-foreground"
+                >
+                  {t('fileTree.loadMoreSearchResults', { shown: displayedSearchEntries.length, total: searchEntries.length })}
+                </button>
+              ) : searchLoading ? (
+                <span className="inline-flex items-center gap-1"><RiLoader size={10} className="animate-spin" />{t('fileTree.searchStillRunning')}</span>
+              ) : displayedSearchEntries.length > 0 ? (
+                <span>{t('fileTree.showingSearchResults', { shown: displayedSearchEntries.length, total: foundCount })}</span>
+              ) : null}
+            </div>
+          </>
+        )}
       </div>
     );
   }

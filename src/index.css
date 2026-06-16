@@ -484,28 +484,16 @@ body {
   animation: slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* Custom scrollbar for session tabs */
-.scrollbar-thin {
-  scrollbar-width: thin;
-  scrollbar-color: var(--muted) transparent;
+/* Hide native scrollbar while preserving horizontal scroll for session tabs */
+.scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-.scrollbar-thin::-webkit-scrollbar {
-  height: 6px;
-}
-
-.scrollbar-thin::-webkit-scrollbar-track {
-  background: transparent;
-  border-radius: 3px;
-}
-
-.scrollbar-thin::-webkit-scrollbar-thumb {
-  background: var(--muted);
-  border-radius: 3px;
-}
-
-.scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: var(--muted-foreground);
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 /* Smooth transitions */

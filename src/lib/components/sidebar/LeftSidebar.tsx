@@ -7,7 +7,8 @@ import {
   Search as RiSearchLine,
   LoaderCircle as RiLoaderCircle,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus } from '../../terminal/types';
 import { getCwdLeafName, getSessionDisplayName } from '../../terminal/display';
@@ -33,9 +34,10 @@ interface LeftSidebarProps {
     isConnecting?: boolean;
     agentStatus: AgentStatus | null;
     agentNeedsReview?: boolean;
-  }>;
+  }>; 
   onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => void;
   onCloseSession: (sessionId: string) => void;
+  onReorderSessions: (sessionIds: string[]) => void;
   onOpenSettings: () => void;
   tmuxAvailable?: boolean;
   defaultSessionMode?: 'shell' | 'tmux';
@@ -70,7 +72,7 @@ export function LeftSidebar(
   {
     isOpen, drawerWidthPx, onClose, onOpen,
     sessions, activeSessionId, sessionStates,
-    onNewSession, onCloseSession, onOpenSettings,
+    onNewSession, onCloseSession, onReorderSessions, onOpenSettings,
     tmuxAvailable = true,
     defaultSessionMode = 'shell',
     push,
@@ -81,10 +83,12 @@ export function LeftSidebar(
   const [searchOpen, setSearchOpen] = useState(false);
   const [confirmNewMode, setConfirmNewMode] = useState<'shell' | 'tmux' | null>(null);
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
+  const trimmedQuery = query.trim();
+  const isFiltering = trimmedQuery.length > 0;
 
   const visibleSessions = useMemo(() => (
-    sessions.filter((session) => matchesSession(query.trim(), session, sessionStates.get(session.id)))
-  ), [query, sessions, sessionStates]);
+    sessions.filter((session) => matchesSession(trimmedQuery, session, sessionStates.get(session.id)))
+  ), [trimmedQuery, sessions, sessionStates]);
 
   const { runningCount, reviewCount } = useMemo(() => {
     let running = 0;
@@ -135,6 +139,15 @@ export function LeftSidebar(
     onNewSession({ mode });
     closeIfOverlay();
   };
+
+  const handleSessionDragEnd = useCallback((result: DropResult) => {
+    if (isFiltering) return;
+    if (!result.destination || result.source.index === result.destination.index) return;
+    const reordered = [...sessions];
+    const [moved] = reordered.splice(result.source.index, 1);
+    reordered.splice(result.destination.index, 0, moved);
+    onReorderSessions(reordered.map((session) => session.id));
+  }, [isFiltering, onReorderSessions, sessions]);
 
   return (
     <Sidebar
@@ -240,8 +253,15 @@ export function LeftSidebar(
             <p className="text-[12px] text-muted-foreground">{t('sidebar.noMatchingSessions')}</p>
           </div>
         ) : (
-          <div className="space-y-0.5">
-            {visibleSessions.map((session) => {
+          <DragDropContext onDragEnd={handleSessionDragEnd}>
+            <Droppable droppableId="sidebar-sessions" direction="vertical">
+              {(provided) => (
+          <div
+            ref={provided.innerRef}
+            {...provided.droppableProps}
+            className="space-y-0.5"
+          >
+            {visibleSessions.map((session, index) => {
               const isActive = session.id === activeSessionId;
               const ts = sessionStates.get(session.id);
               const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
@@ -256,17 +276,23 @@ export function LeftSidebar(
                     : 'bg-primary';
 
               return (
+                <Draggable key={session.id} draggableId={`sidebar:${session.id}`} index={index} isDragDisabled={isFiltering} disableInteractiveElementBlocking>
+                  {(dragProvided, snapshot) => (
                 <div
-                  key={session.id}
+                  ref={dragProvided.innerRef}
+                  {...dragProvided.draggableProps}
                   className={`group relative flex items-center gap-1 rounded-lg pr-1 transition ${
-                    isActive
-                      ? 'bg-surface-elevated text-foreground'
-                      : 'text-muted-foreground hover:bg-surface-2'
-                  }`}
+                    snapshot.isDragging
+                      ? 'bg-surface-elevated text-foreground shadow-lg opacity-90'
+                      : isActive
+                        ? 'bg-surface-elevated text-foreground'
+                        : 'text-muted-foreground hover:bg-surface-2'
+                  } ${isFiltering ? '' : 'cursor-grab active:cursor-grabbing'}`}
                 >
                   <button
                     ref={isActive ? activeItemRef : null}
                     type="button"
+                    {...dragProvided.dragHandleProps}
                     onClick={() => {
                       window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
                       closeIfOverlay();
@@ -325,9 +351,15 @@ export function LeftSidebar(
                     <RiCloseLine size={13} />
                   </button>
                 </div>
+                  )}
+                </Draggable>
               );
             })}
+            {provided.placeholder}
           </div>
+              )}
+            </Droppable>
+          </DragDropContext>
         )}
       </div>
 
