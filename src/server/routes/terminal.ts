@@ -2505,7 +2505,13 @@ async function getRestoreHistory(sessionId: string, session: TerminalSession): P
     try {
       const snapshot = await captureTmuxPane(session.tmuxSessionName);
       return snapshot
-        ? ['\u001b[H\u001b[2J\u001b[3J', snapshot]
+        // capture-pane returns a line-oriented snapshot with LF separators.
+        // In tmux mode the frontend intentionally keeps xterm.convertEol=false
+        // so live TUI output preserves exact terminal semantics; feeding bare LF
+        // during restore moves down without carriage return and renders as sparse
+        // diagonal characters after reconnect. Normalize only this synthetic
+        // snapshot to CRLF so each captured tmux line starts at column 0.
+        ? ['\u001b[H\u001b[2J\u001b[3J', snapshot.replace(/\r?\n/g, '\r\n')]
         : [];
     } catch (error) {
       console.warn(`Failed to capture tmux pane for ${session.tmuxSessionName}: ${getErrorMessage(error)}`);
