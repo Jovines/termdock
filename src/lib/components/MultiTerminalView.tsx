@@ -194,6 +194,49 @@ function syncRuntimeSessionsFromPersisted(current: TerminalSession[], persisted:
   });
 }
 
+function getValidPersistedActiveSessionId(persisted: PersistedSession[], activeSessionId: string | null): string | null {
+  if (persisted.length === 0) return null;
+  return activeSessionId && persisted.some((session) => session.sessionId === activeSessionId)
+    ? activeSessionId
+    : persisted[0]?.sessionId ?? null;
+}
+
+function orderPersistedSessionsByActiveSpread(
+  persisted: PersistedSession[],
+  activeSessionId: string | null,
+): PersistedSession[] {
+  if (persisted.length <= 1) return persisted;
+
+  const activeIndex = activeSessionId
+    ? persisted.findIndex((session) => session.sessionId === activeSessionId)
+    : 0;
+  const centerIndex = activeIndex >= 0 ? activeIndex : 0;
+  const ordered: PersistedSession[] = [persisted[centerIndex]];
+
+  for (let offset = 1; ordered.length < persisted.length; offset += 1) {
+    const leftIndex = centerIndex - offset;
+    const rightIndex = centerIndex + offset;
+
+    if (leftIndex >= 0) {
+      ordered.push(persisted[leftIndex]);
+    }
+    if (rightIndex < persisted.length) {
+      ordered.push(persisted[rightIndex]);
+    }
+  }
+
+  return ordered;
+}
+
+function materializeRestoredSessionsInPersistedOrder(
+  persisted: PersistedSession[],
+  restoredByPersistedId: Map<string, TerminalSession>,
+): TerminalSession[] {
+  return persisted
+    .map((session) => restoredByPersistedId.get(session.sessionId))
+    .filter((session): session is TerminalSession => session !== undefined);
+}
+
 function getSwipeEventPointerType(event: unknown): string {
   if (!event || typeof event !== 'object') {
     return 'unknown';
@@ -716,27 +759,53 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (restoredRef.current) return;  // 防止重复执行
     restoredRef.current = true;
 
+    const nextActiveSessionId = getValidPersistedActiveSessionId(persistedSessions, persistedActiveId);
+    const restoreQueue = orderPersistedSessionsByActiveSpread(persistedSessions, nextActiveSessionId);
+
     debugSession('[Session] Restoring', persistedSessions.length, 'persisted sessions');
     logSwiperState('[swiper:restore-start]', {
       persistedSessionIds: persistedSessions.map((session) => session.sessionId),
+      nextActiveSessionId,
+      restoreQueueSessionIds: restoreQueue.map((session) => session.sessionId),
     });
 
     const restore = async () => {
       let sessionCount = 0;
       try {
-        const restored = await Promise.all(
-          persistedSessions.map(async (session) => restoreOrCreateSession(session))
-        );
+        const restoredByPersistedId = new Map<string, TerminalSession>();
+        for (const session of restoreQueue) {
+          const restoredSession = await restoreOrCreateSession(session);
+          restoredByPersistedId.set(session.sessionId, restoredSession);
+
+          setSessions(materializeRestoredSessionsInPersistedOrder(persistedSessions, restoredByPersistedId));
+          if (restoredSession.id === nextActiveSessionId) {
+            setActiveSessionId(restoredSession.id);
+          }
+
+          if (restoredSession.sessionId) {
+            void updateSessionBackendId(restoredSession.id, restoredSession.sessionId);
+            useTerminalStore.getState().setTerminalSession(restoredSession.id, {
+              sessionId: restoredSession.sessionId,
+              cols: 80,
+              rows: 24,
+              mode: restoredSession.mode,
+              tmuxSessionName: restoredSession.tmuxSessionName,
+              history: restoredSession.history,
+            });
+          }
+        }
+
+        const restored = materializeRestoredSessionsInPersistedOrder(persistedSessions, restoredByPersistedId);
 
         sessionCount = restored.length;
         debugSession('[Session] Restored sessions:', restored.length);
         const restoredSessions = dedupeRuntimeSessions(restored);
         logSwiperState('[swiper:restore-complete]', {
           restoredSessionIds: restoredSessions.map((session) => session.id),
-          nextActiveSessionId: persistedActiveId || restoredSessions[0]?.id || null,
+          nextActiveSessionId: nextActiveSessionId || restoredSessions[0]?.id || null,
         });
         setSessions(restoredSessions);
-        setActiveSessionId(persistedActiveId || restoredSessions[0]?.id || null);
+        setActiveSessionId(nextActiveSessionId || restoredSessions[0]?.id || null);
 
         const store = useTerminalStore.getState();
         restoredSessions.forEach((session) => {
@@ -772,9 +841,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         sessionCount = fallbackSessions.length;
         logSwiperState('[swiper:restore-fallback]', {
           fallbackSessionIds: fallbackSessions.map((session) => session.id),
-          nextActiveSessionId: persistedActiveId || fallbackSessions[0]?.id || null,
+          nextActiveSessionId: nextActiveSessionId || fallbackSessions[0]?.id || null,
         });
-        setActiveSessionId(persistedActiveId || fallbackSessions[0]?.id || null);
+        setActiveSessionId(nextActiveSessionId || fallbackSessions[0]?.id || null);
       } finally {
         // 恢复后若没有任何 session，在设置 isRestoring=false 之前
         // 同步等待创建完成，确保外部 effect 不会同时触发创建。
