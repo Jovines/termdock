@@ -6,6 +6,8 @@ export type RightSidebarTab = 'git' | 'files' | 'diff' | 'file';
 
 const RIGHT_SIDEBAR_TAB_CACHE_KEY = 'termdock:right-sidebar:tab:v1';
 const EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:explorer-roots:v1';
+const PINNED_EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:pinned-explorer-roots:v1';
+const SHOW_HIDDEN_FILES_CACHE_KEY = 'termdock:right-sidebar:show-hidden-files:v1';
 
 interface ProjectSidebarState {
   explorerRoot: string | null;
@@ -36,6 +38,29 @@ function readExplorerRootCache(): Record<string, string> {
 
 function writeExplorerRootCache(cache: Record<string, string>): void {
   writeCache(EXPLORER_ROOTS_CACHE_KEY, cache);
+}
+
+function isPinnedExplorerRootsCache(value: unknown): value is Record<string, string[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((entry) => (
+    Array.isArray(entry) && entry.every((path) => typeof path === 'string')
+  ));
+}
+
+function readPinnedExplorerRootsCache(): Record<string, string[]> {
+  return readCache(PINNED_EXPLORER_ROOTS_CACHE_KEY, isPinnedExplorerRootsCache) ?? {};
+}
+
+function writePinnedExplorerRootsCache(cache: Record<string, string[]>): void {
+  writeCache(PINNED_EXPLORER_ROOTS_CACHE_KEY, cache);
+}
+
+function isBoolean(value: unknown): value is boolean {
+  return typeof value === 'boolean';
+}
+
+function getInitialShowHiddenFiles(): boolean {
+  return readCache(SHOW_HIDDEN_FILES_CACHE_KEY, isBoolean) ?? false;
 }
 
 export interface FileTreeNode {
@@ -90,9 +115,13 @@ interface SidebarState {
   rootPath: string | null;
   explorerRoot: string | null;
   explorerRootCache: Record<string, string>;
+  pinnedExplorerRootsCache: Record<string, string[]>;
   expandedPaths: Set<string>;
   selectedFilePath: string | null;
   directoryCache: Map<string, FileTreeNode[]>;
+
+  // Whether dotfiles / hidden entries are shown in the file explorer.
+  showHiddenFiles: boolean;
 
   // Changed files (from git status/diff)
   changedFiles: Map<string, GitChangedFile>;
@@ -116,8 +145,11 @@ interface SidebarState {
   setRootPath: (path: string | null) => void;
   setExplorerRoot: (path: string | null) => void;
   resetExplorerToProject: () => void;
+  pinExplorerRoot: (path: string) => void;
+  unpinExplorerRoot: (path: string) => void;
   toggleExpanded: (path: string) => void;
   selectFile: (path: string | null) => void;
+  toggleShowHiddenFiles: () => void;
   setDirectoryCache: (path: string, entries: FileTreeNode[]) => void;
   invalidateDirectoryCache: (path: string, recursive?: boolean) => void;
   applyFileWatchEvents: (events: FileWatchEvent[]) => void;
@@ -135,9 +167,11 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   rootPath: null,
   explorerRoot: null,
   explorerRootCache: readExplorerRootCache(),
+  pinnedExplorerRootsCache: readPinnedExplorerRootsCache(),
   expandedPaths: new Set(),
   selectedFilePath: null,
   directoryCache: new Map(),
+  showHiddenFiles: getInitialShowHiddenFiles(),
   changedFiles: new Map(),
   gitBundleLoading: false,
   gitBundleSlow: false,
@@ -209,6 +243,30 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     return { explorerRoot: s.rootPath, explorerRootCache };
   }),
 
+  pinExplorerRoot: (path) => set((s) => {
+    if (!s.rootPath || !path) return s;
+    const pinned = s.pinnedExplorerRootsCache[s.rootPath] ?? [];
+    if (pinned.includes(path)) return s;
+    const pinnedExplorerRootsCache = {
+      ...s.pinnedExplorerRootsCache,
+      [s.rootPath]: [path, ...pinned].slice(0, 12),
+    };
+    writePinnedExplorerRootsCache(pinnedExplorerRootsCache);
+    return { pinnedExplorerRootsCache };
+  }),
+
+  unpinExplorerRoot: (path) => set((s) => {
+    if (!s.rootPath || !path) return s;
+    const pinned = s.pinnedExplorerRootsCache[s.rootPath] ?? [];
+    if (!pinned.includes(path)) return s;
+    const nextPinned = pinned.filter((entry) => entry !== path);
+    const pinnedExplorerRootsCache = { ...s.pinnedExplorerRootsCache };
+    if (nextPinned.length > 0) pinnedExplorerRootsCache[s.rootPath] = nextPinned;
+    else delete pinnedExplorerRootsCache[s.rootPath];
+    writePinnedExplorerRootsCache(pinnedExplorerRootsCache);
+    return { pinnedExplorerRootsCache };
+  }),
+
   toggleExpanded: (path) =>
     set((s) => {
       const next = new Set(s.expandedPaths);
@@ -218,6 +276,21 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     }),
 
   selectFile: (path) => set({ selectedFilePath: path }),
+
+  toggleShowHiddenFiles: () =>
+    set((s) => {
+      const show = !s.showHiddenFiles;
+      writeCache(SHOW_HIDDEN_FILES_CACHE_KEY, show);
+      // Hidden-file visibility is a global preference, so every project's
+      // cached directory listings are now stale. Clear the active cache and
+      // wipe the per-project snapshots so switching projects re-fetches with
+      // the new setting instead of restoring an out-of-date tree.
+      const projectStateCache = new Map(s.projectStateCache);
+      for (const [key, project] of projectStateCache) {
+        projectStateCache.set(key, { ...project, directoryCache: new Map() });
+      }
+      return { showHiddenFiles: show, directoryCache: new Map(), projectStateCache };
+    }),
 
   setDirectoryCache: (path, entries) =>
     set((s) => {

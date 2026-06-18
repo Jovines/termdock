@@ -15,6 +15,7 @@ import {
   Trash2 as RiDeleteBinLine,
   Unplug as RiLogoutBoxRLine,
   Bot as RiBotLine,
+  Bell as RiBellLine,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
 import { useFontSize } from './lib/hooks/useFontSize';
@@ -27,12 +28,25 @@ import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
 import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
+import {
+  getStoredPwaAiNotificationsEnabled,
+  getStoredPwaNotificationAlertStyle,
+  getPwaNotificationPermission,
+  getStoredPwaNotificationsEnabled,
+  isPwaNotificationSupported,
+  requestPwaNotificationPermission,
+  setStoredPwaAiNotificationsEnabled,
+  setStoredPwaNotificationAlertStyle,
+  setStoredPwaNotificationsEnabled,
+  showPwaNotification,
+  type PwaNotificationAlertStyle,
+} from './lib/utils/pwaNotifications';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
 import { useI18n } from './lib/i18n';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
-import { AgentTabIcon, AgentCountBadge } from './lib/components/AgentIndicators';
+import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay } from './lib/components/AgentIndicators';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import { AgentRulesSettings } from './lib/components/settings/AgentRulesSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
@@ -101,6 +115,139 @@ const DEFAULT_LOCAL_ACCESS: LocalAccessState = {
   lanAddresses: [],
   interfaces: [],
 };
+const HISTORY_OVERLAY_STATE_KEY = '__termdockOverlay';
+const HISTORY_BASE_ANCHOR_STATE_KEY = '__termdockBaseAnchor';
+const HISTORY_BASE_GUARD_STATE_KEY = '__termdockBaseGuard';
+const BASE_HISTORY_GUARD_BUFFER_SIZE = 3;
+const BASE_HISTORY_GUARD_REARM_DELAY_MS = 250;
+type HistoryOverlay = 'left-sidebar' | 'right-sidebar' | 'settings';
+
+function reportHistoryGuardDebug(message: string, data: Record<string, unknown> = {}): void {
+  if (typeof window === 'undefined') return;
+  const payload = JSON.stringify({
+    level: 'info',
+    message: `DEBUG_HistoryBack ${message}`,
+    data: {
+      ...data,
+      href: window.location.href,
+      historyLength: window.history.length,
+      historyState: window.history.state,
+      visibilityState: typeof document === 'undefined' ? null : document.visibilityState,
+      userAgent: window.navigator.userAgent,
+      ts: Date.now(),
+    },
+  });
+  try {
+    const blob = new Blob([payload], { type: 'application/json' });
+    if (window.navigator.sendBeacon?.('/api/client-log', blob)) {
+      return;
+    }
+  } catch {
+    // ignore and fall back to fetch
+  }
+  void fetch('/api/client-log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: payload,
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
+function isHistoryOverlay(value: unknown): value is HistoryOverlay {
+  return value === 'left-sidebar' || value === 'right-sidebar' || value === 'settings';
+}
+
+function getHistoryOverlay(state: unknown): HistoryOverlay | null {
+  if (!state || typeof state !== 'object') return null;
+  const value = (state as Record<string, unknown>)[HISTORY_OVERLAY_STATE_KEY];
+  return isHistoryOverlay(value) ? value : null;
+}
+
+function toHistoryStateObject(state: unknown): Record<string, unknown> {
+  return state && typeof state === 'object' ? { ...(state as Record<string, unknown>) } : {};
+}
+
+function withoutHistoryOverlay(state: unknown): Record<string, unknown> {
+  const next = toHistoryStateObject(state);
+  delete next[HISTORY_OVERLAY_STATE_KEY];
+  return next;
+}
+
+function toBaseHistoryAnchorState(state: unknown): Record<string, unknown> {
+  const next = withoutHistoryOverlay(state);
+  delete next[HISTORY_BASE_GUARD_STATE_KEY];
+  return {
+    ...next,
+    [HISTORY_BASE_ANCHOR_STATE_KEY]: true,
+  };
+}
+
+function pushBaseHistoryGuard(): void {
+  if (typeof window === 'undefined') return;
+  reportHistoryGuardDebug('pushBaseHistoryGuard:before');
+  window.history.pushState(
+    {
+      ...withoutHistoryOverlay(window.history.state),
+      [HISTORY_BASE_ANCHOR_STATE_KEY]: true,
+      [HISTORY_BASE_GUARD_STATE_KEY]: true,
+    },
+    '',
+    window.location.href,
+  );
+  reportHistoryGuardDebug('pushBaseHistoryGuard:after');
+}
+
+function pushBaseHistoryGuardBuffer(): void {
+  reportHistoryGuardDebug('pushBaseHistoryGuardBuffer:start', { size: BASE_HISTORY_GUARD_BUFFER_SIZE });
+  for (let index = 0; index < BASE_HISTORY_GUARD_BUFFER_SIZE; index += 1) {
+    pushBaseHistoryGuard();
+  }
+  reportHistoryGuardDebug('pushBaseHistoryGuardBuffer:end', { size: BASE_HISTORY_GUARD_BUFFER_SIZE });
+}
+
+function ensureBaseHistoryGuard(): void {
+  if (typeof window === 'undefined') return;
+  reportHistoryGuardDebug('ensureBaseHistoryGuard:before');
+  window.history.replaceState(
+    toBaseHistoryAnchorState(window.history.state),
+    '',
+    window.location.href,
+  );
+  pushBaseHistoryGuardBuffer();
+  reportHistoryGuardDebug('ensureBaseHistoryGuard:after');
+}
+
+function pushHistoryOverlay(overlay: HistoryOverlay): void {
+  if (typeof window === 'undefined') return;
+  reportHistoryGuardDebug('pushHistoryOverlay:before', { overlay });
+  window.history.pushState(
+    {
+      ...toHistoryStateObject(window.history.state),
+      [HISTORY_BASE_ANCHOR_STATE_KEY]: true,
+      [HISTORY_OVERLAY_STATE_KEY]: overlay,
+      [HISTORY_BASE_GUARD_STATE_KEY]: false,
+    },
+    '',
+    window.location.href,
+  );
+  reportHistoryGuardDebug('pushHistoryOverlay:after', { overlay });
+}
+
+function replaceHistoryOverlay(overlay: HistoryOverlay): void {
+  if (typeof window === 'undefined') return;
+  reportHistoryGuardDebug('replaceHistoryOverlay:before', { overlay });
+  window.history.replaceState(
+    {
+      ...toHistoryStateObject(window.history.state),
+      [HISTORY_BASE_ANCHOR_STATE_KEY]: true,
+      [HISTORY_OVERLAY_STATE_KEY]: overlay,
+      [HISTORY_BASE_GUARD_STATE_KEY]: false,
+    },
+    '',
+    window.location.href,
+  );
+  reportHistoryGuardDebug('replaceHistoryOverlay:after', { overlay });
+}
 // Default shell names for initial render — overridden once the server responds
 // with the actual config. Kept in sync with the backend DEFAULT_PROGRAM_DETECTION.shellNames.
 const DEFAULT_SHELL_NAMES = ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu'];
@@ -202,11 +349,17 @@ function App() {
   const cachedSettings = React.useRef<SettingsCacheDoc | null>(readCache(SETTINGS_CACHE_KEY, isSettingsCacheDoc)).current;
   const [preventSleep, setPreventSleep] = React.useState(cachedSettings?.preventSleep ?? false);
   const [networkAvailable, setNetworkAvailable] = React.useState(cachedSettings?.networkAvailable ?? true);
+  const [pwaNotificationsEnabled, setPwaNotificationsEnabled] = React.useState(getStoredPwaNotificationsEnabled);
+  const [pwaAiNotificationsEnabled, setPwaAiNotificationsEnabled] = React.useState(getStoredPwaAiNotificationsEnabled);
+  const [pwaNotificationAlertStyle, setPwaNotificationAlertStyle] = React.useState<PwaNotificationAlertStyle>(getStoredPwaNotificationAlertStyle);
+  const [pwaNotificationPermission, setPwaNotificationPermission] = React.useState(getPwaNotificationPermission);
   const [localAccess, setLocalAccess] = React.useState<LocalAccessState>(cachedSettings?.localAccess ?? DEFAULT_LOCAL_ACCESS);
   const [localAccessNameInput, setLocalAccessNameInput] = React.useState(cachedSettings?.localAccess?.name ?? '');
   const [localAccessSaving, setLocalAccessSaving] = React.useState(false);
   const [localAccessError, setLocalAccessError] = React.useState<string | null>(null);
   const [localAccessCopied, setLocalAccessCopied] = React.useState<string | null>(null);
+  const [showBackGuardHint, setShowBackGuardHint] = React.useState(false);
+  const backGuardHintTimerRef = React.useRef<number | null>(null);
   const [debugInfo, setDebugInfo] = React.useState<Record<string, any>>({});
   const { fontSize, setFontSize } = useFontSize();
   const { rendererMode, setRendererMode } = useTerminalRenderer();
@@ -305,24 +458,270 @@ function App() {
     ? Math.min(Math.max(viewportWidth * 0.22, 280), 340)
     : Math.min(viewportWidth * 0.86, 380);
 
+  const activeHistoryOverlay: HistoryOverlay | null = isDrawerOpen
+    ? 'settings'
+    : sidebarRightOpen
+      ? 'right-sidebar'
+      : sidebarLeftOpen
+        ? 'left-sidebar'
+        : null;
+  const activeHistoryOverlayRef = React.useRef<HistoryOverlay | null>(activeHistoryOverlay);
+  const lastHistoryOverlayRef = React.useRef<HistoryOverlay | null>(activeHistoryOverlay);
+  const closingFromPopStateRef = React.useRef(false);
+  const baseHistoryGuardArmedByUserRef = React.useRef(false);
+
+  const closeHistoryOverlayDirect = useCallback((overlay: HistoryOverlay) => {
+    if (overlay === 'settings') {
+      setIsDrawerOpen(false);
+      setIsToolbarPresetsOpen(false);
+      setIsNotificationsOpen(false);
+      setIsAgentRulesOpen(false);
+      return;
+    }
+    if (overlay === 'left-sidebar') {
+      useSidebarStore.getState().closeLeft();
+      return;
+    }
+    useSidebarStore.getState().closeRight();
+  }, []);
+
+  const requestCloseHistoryOverlay = useCallback((overlay: HistoryOverlay) => {
+    if (typeof window !== 'undefined'
+      && activeHistoryOverlayRef.current === overlay
+      && getHistoryOverlay(window.history.state) === overlay) {
+      window.history.back();
+      return;
+    }
+    closeHistoryOverlayDirect(overlay);
+  }, [closeHistoryOverlayDirect]);
+
+  const handleOpenLeftSidebar = useCallback(() => {
+    setIsDrawerOpen(false);
+    const sidebar = useSidebarStore.getState();
+    sidebar.closeRight();
+    sidebar.openLeft();
+  }, []);
+
+  const handleOpenRightSidebar = useCallback(() => {
+    setIsDrawerOpen(false);
+    const sidebar = useSidebarStore.getState();
+    sidebar.closeLeft();
+    sidebar.openRight();
+  }, []);
+
+  const handleToggleLeftSidebar = useCallback(() => {
+    if (sidebarLeftOpen) {
+      requestCloseHistoryOverlay('left-sidebar');
+      return;
+    }
+    handleOpenLeftSidebar();
+  }, [handleOpenLeftSidebar, requestCloseHistoryOverlay, sidebarLeftOpen]);
+
+  const handleToggleRightSidebar = useCallback(() => {
+    if (sidebarRightOpen) {
+      requestCloseHistoryOverlay('right-sidebar');
+      return;
+    }
+    handleOpenRightSidebar();
+  }, [handleOpenRightSidebar, requestCloseHistoryOverlay, sidebarRightOpen]);
+
+  const handleOpenSettings = useCallback(() => {
+    if (typeof window !== 'undefined'
+      && activeHistoryOverlayRef.current
+      && getHistoryOverlay(window.history.state) === activeHistoryOverlayRef.current) {
+      replaceHistoryOverlay('settings');
+      lastHistoryOverlayRef.current = 'settings';
+    }
+    useSidebarStore.getState().closeAll();
+    setIsDrawerOpen(true);
+  }, []);
+
+  const handleCloseSettings = useCallback(() => {
+    requestCloseHistoryOverlay('settings');
+  }, [requestCloseHistoryOverlay]);
+
+  const showMainBackGuardHint = useCallback(() => {
+    setShowBackGuardHint(true);
+    if (backGuardHintTimerRef.current !== null) {
+      window.clearTimeout(backGuardHintTimerRef.current);
+      backGuardHintTimerRef.current = null;
+    }
+  }, []);
+
+  const handleContinueAfterBackGuard = useCallback(() => {
+    reportHistoryGuardDebug('continueAfterBackGuard:click');
+    if (backGuardHintTimerRef.current !== null) {
+      window.clearTimeout(backGuardHintTimerRef.current);
+      backGuardHintTimerRef.current = null;
+    }
+    setShowBackGuardHint(false);
+    baseHistoryGuardArmedByUserRef.current = true;
+    ensureBaseHistoryGuard();
+    reportHistoryGuardDebug('continueAfterBackGuard:rearmed', { armedByUser: baseHistoryGuardArmedByUserRef.current });
+  }, []);
+
+  useEffect(() => () => {
+    if (backGuardHintTimerRef.current !== null) {
+      window.clearTimeout(backGuardHintTimerRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    ensureBaseHistoryGuard();
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    let rearmTimer: number | null = null;
+    const clearRearmTimer = () => {
+      if (rearmTimer !== null) {
+        window.clearTimeout(rearmTimer);
+        rearmTimer = null;
+      }
+    };
+    const rearmBaseHistoryGuard = (options?: { force?: boolean; userActivated?: boolean }) => {
+      reportHistoryGuardDebug('rearmBaseHistoryGuard:called', {
+        options: options ?? null,
+        activeOverlay: activeHistoryOverlayRef.current,
+        armedByUser: baseHistoryGuardArmedByUserRef.current,
+      });
+      if (activeHistoryOverlayRef.current) {
+        reportHistoryGuardDebug('rearmBaseHistoryGuard:skip-active-overlay', { activeOverlay: activeHistoryOverlayRef.current });
+        return;
+      }
+      if (!options?.force && baseHistoryGuardArmedByUserRef.current) {
+        reportHistoryGuardDebug('rearmBaseHistoryGuard:skip-already-armed');
+        return;
+      }
+      if (options?.userActivated) {
+        baseHistoryGuardArmedByUserRef.current = true;
+      }
+      ensureBaseHistoryGuard();
+      reportHistoryGuardDebug('rearmBaseHistoryGuard:done', { armedByUser: baseHistoryGuardArmedByUserRef.current });
+    };
+    const rearmBaseHistoryGuardSoon = () => {
+      reportHistoryGuardDebug('rearmBaseHistoryGuardSoon:schedule');
+      clearRearmTimer();
+      rearmTimer = window.setTimeout(() => {
+        rearmTimer = null;
+        reportHistoryGuardDebug('rearmBaseHistoryGuardSoon:fire');
+        rearmBaseHistoryGuard({ force: true });
+      }, BASE_HISTORY_GUARD_REARM_DELAY_MS);
+    };
+    const handleUserActivation = () => {
+      reportHistoryGuardDebug('userActivation', { type: 'pointer/touch/key' });
+      rearmBaseHistoryGuard({ userActivated: true });
+    };
+    const handlePageShow = () => {
+      reportHistoryGuardDebug('pageshow');
+      rearmBaseHistoryGuardSoon();
+    };
+    const handleVisibilityChange = () => {
+      reportHistoryGuardDebug('visibilitychange', { visibilityState: document.visibilityState });
+      if (document.visibilityState === 'visible') {
+        rearmBaseHistoryGuardSoon();
+      }
+    };
+
+    window.addEventListener('pointerdown', handleUserActivation, { capture: true, passive: true });
+    window.addEventListener('touchstart', handleUserActivation, { capture: true, passive: true });
+    window.addEventListener('keydown', handleUserActivation, { capture: true });
+    window.addEventListener('pageshow', handlePageShow);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      clearRearmTimer();
+      window.removeEventListener('pointerdown', handleUserActivation, { capture: true });
+      window.removeEventListener('touchstart', handleUserActivation, { capture: true });
+      window.removeEventListener('keydown', handleUserActivation, { capture: true });
+      window.removeEventListener('pageshow', handlePageShow);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    activeHistoryOverlayRef.current = activeHistoryOverlay;
+    reportHistoryGuardDebug('activeHistoryOverlayRef:update', { activeHistoryOverlay });
+  }, [activeHistoryOverlay]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || activeHistoryOverlay) return;
+    reportHistoryGuardDebug('mainPageRearm:schedule', { activeHistoryOverlay });
+    const rearmTimer = window.setTimeout(() => {
+      if (!activeHistoryOverlayRef.current) {
+        reportHistoryGuardDebug('mainPageRearm:fire');
+        ensureBaseHistoryGuard();
+      } else {
+        reportHistoryGuardDebug('mainPageRearm:skip-active-overlay', { activeOverlay: activeHistoryOverlayRef.current });
+      }
+    }, BASE_HISTORY_GUARD_REARM_DELAY_MS);
+    return () => window.clearTimeout(rearmTimer);
+  }, [activeHistoryOverlay]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const previousOverlay = lastHistoryOverlayRef.current;
+    reportHistoryGuardDebug('overlayEffect', { activeHistoryOverlay, previousOverlay, closingFromPopState: closingFromPopStateRef.current });
+    if (activeHistoryOverlay && activeHistoryOverlay !== previousOverlay && !closingFromPopStateRef.current) {
+      pushHistoryOverlay(activeHistoryOverlay);
+    }
+    lastHistoryOverlayRef.current = activeHistoryOverlay;
+
+    if (!activeHistoryOverlay && closingFromPopStateRef.current) {
+      window.setTimeout(() => {
+        closingFromPopStateRef.current = false;
+      }, 0);
+    }
+  }, [activeHistoryOverlay]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handlePopState = () => {
+      const overlay = activeHistoryOverlayRef.current;
+      reportHistoryGuardDebug('popstate', {
+        overlay,
+        armedByUser: baseHistoryGuardArmedByUserRef.current,
+      });
+      if (!overlay) {
+        // 本次返回已消耗一个 base guard。重置 latch，让下一次用户交互能重新补上
+        // “被信任(user-activated)”的 guard —— popstate 里补的 guard 不带用户激活，
+        // Android/Chrome 可能跳过，仅靠它无法持续拦截返回退出。
+        baseHistoryGuardArmedByUserRef.current = false;
+        reportHistoryGuardDebug('popstate:main-page-guard', { armedByUser: baseHistoryGuardArmedByUserRef.current });
+        showMainBackGuardHint();
+        pushBaseHistoryGuardBuffer();
+        return;
+      }
+      closingFromPopStateRef.current = true;
+      reportHistoryGuardDebug('popstate:close-overlay', { overlay });
+      closeHistoryOverlayDirect(overlay);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [closeHistoryOverlayDirect, showMainBackGuardHint]);
+
   // Desktop keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key === 'b' && !e.shiftKey) {
         e.preventDefault();
-        useSidebarStore.getState().toggleLeft();
+        handleToggleLeftSidebar();
       }
       if (mod && e.shiftKey && e.key === 'E') {
         e.preventDefault();
-        useSidebarStore.getState().toggleRight();
+        handleToggleRightSidebar();
       }
     };
     document.addEventListener('keydown', handler);
     return () => {
       document.removeEventListener('keydown', handler);
     };
-  }, []);
+  }, [handleToggleLeftSidebar, handleToggleRightSidebar]);
 
   const handleSaveLocalAccess = useCallback(async () => {
     setLocalAccessSaving(true);
@@ -425,6 +824,7 @@ function App() {
   const [newSessionShortcutConfirmMode, setNewSessionShortcutConfirmMode] = useState<'shell' | 'tmux' | null>(null);
 
   const [isToolbarPresetsOpen, setIsToolbarPresetsOpen] = React.useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = React.useState(false);
   // Toolbar presets are owned by the server (~/.termdock/toolbar-presets.json)
   // and shared across every browser pointing at this server. We start with the
   // built-in defaults so the UI is usable on first paint, then load + reconcile
@@ -609,6 +1009,53 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!pwaNotificationsEnabled) return;
+    const permission = getPwaNotificationPermission();
+    setPwaNotificationPermission(permission);
+    if (permission !== 'granted') {
+      setPwaNotificationsEnabled(false);
+      setStoredPwaNotificationsEnabled(false);
+    }
+  }, [pwaNotificationsEnabled]);
+
+  const handleTogglePwaNotifications = useCallback(async () => {
+    if (pwaNotificationsEnabled) {
+      setPwaNotificationsEnabled(false);
+      setStoredPwaNotificationsEnabled(false);
+      setPwaNotificationPermission(getPwaNotificationPermission());
+      return;
+    }
+
+    const permission = await requestPwaNotificationPermission();
+    setPwaNotificationPermission(permission);
+    if (permission !== 'granted') {
+      setPwaNotificationsEnabled(false);
+      setStoredPwaNotificationsEnabled(false);
+      return;
+    }
+
+    setPwaNotificationsEnabled(true);
+    setStoredPwaNotificationsEnabled(true);
+    void showPwaNotification({
+      title: 'Termdock',
+      body: t('settings.notificationsTestBody'),
+      tag: 'termdock-notifications-enabled',
+      requireHidden: false,
+      data: { url: '/' },
+    });
+  }, [pwaNotificationsEnabled, t]);
+
+  const handleTogglePwaAiNotifications = useCallback((enabled: boolean) => {
+    setPwaAiNotificationsEnabled(enabled);
+    setStoredPwaAiNotificationsEnabled(enabled);
+  }, []);
+
+  const handleSelectPwaNotificationAlertStyle = useCallback((style: PwaNotificationAlertStyle) => {
+    setPwaNotificationAlertStyle(style);
+    setStoredPwaNotificationAlertStyle(style);
+  }, []);
+
+  useEffect(() => {
     if (!toolbarPresets.some((preset) => preset.id === selectedToolbarPresetId)) {
       setSelectedToolbarPresetId(toolbarPresets[0]?.id ?? 'default');
     }
@@ -670,7 +1117,7 @@ function App() {
     for (const s of sessions) {
       const ts = terminalSessions.get(s.id);
       if (ts?.agentStatus === 'running') running += 1;
-      if (ts?.agentNeedsReview) review += 1;
+      if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) review += 1;
     }
     return { running, review };
   }, [sessions, terminalSessions]);
@@ -836,12 +1283,17 @@ function App() {
           >
             <button
               type="button"
-              onClick={() => useSidebarStore.getState().toggleLeft()}
-              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-surface-elevated hover:text-foreground sm:h-8 sm:w-8"
+              onClick={handleToggleLeftSidebar}
+              className="relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-surface-elevated hover:text-foreground sm:h-8 sm:w-8"
               aria-label={t('tab.sessionsTitle')}
-              title={t('tab.sessionsTitle')}
+              title={`${t('tab.sessionsTitle')} · ${t('agent.aiRunning')}: ${agentTabCounts.running} · ${t('agent.needsReview')}: ${agentTabCounts.review}`}
             >
               <RiPanelLeftLine size={14} />
+              <AgentCompactStatusOverlay
+                runningCount={agentTabCounts.running}
+                reviewCount={agentTabCounts.review}
+                className="sm:hidden"
+              />
             </button>
             <DragDropContext onDragEnd={handleDragEnd}>
             <Droppable droppableId="tabs" direction="horizontal">
@@ -1008,7 +1460,7 @@ function App() {
               )}
               <button
                 type="button"
-                onClick={() => useSidebarStore.getState().toggleRight()}
+                onClick={handleToggleRightSidebar}
                 className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-surface-elevated hover:text-foreground sm:h-8 sm:w-8"
                 aria-label={t('tab.explorerTitle')}
                 title={t('tab.explorerTitle')}
@@ -1034,29 +1486,36 @@ function App() {
         </div>
       </main>
 
-      {/* Settings drawer (single page) */}
+      {/* Settings modal (single page) */}
       {isDrawerOpen && (
         <>
           <button
             type="button"
-            className="fixed inset-0 z-40 bg-[rgba(0,0,0,0.5)] backdrop-blur-sm animate-fade-in cursor-default"
-            onClick={() => setIsDrawerOpen(false)}
+            className="fixed inset-0 z-[80] bg-[rgba(0,0,0,0.55)] backdrop-blur-sm animate-fade-in cursor-default"
+            onClick={handleCloseSettings}
+            aria-label="Close settings"
           />
           <div
-            className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[26rem] flex-col border-l border-border/15 bg-surface animate-fade-in"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-dialog-title"
+            className="fixed inset-0 z-[90] flex items-stretch justify-center p-0 animate-fade-in sm:p-4 md:p-6"
+          >
+          <div
+            className="flex h-full w-full max-w-5xl flex-col overflow-hidden bg-surface shadow-[0_28px_90px_rgba(0,0,0,0.28),0_14px_34px_rgba(0,0,0,0.18)] sm:max-h-[calc(100dvh-3rem)] sm:rounded-3xl sm:border sm:border-border/15"
             style={{ paddingTop: safeTopInset, paddingBottom: safeBottomInset }}
           >
             {/* Header — compact single row */}
-            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/15 px-3 py-2.5">
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/15 px-4 py-3 sm:px-6 sm:py-4">
               <div className="min-w-0 flex items-center gap-2">
-                <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-primary/15 text-primary">
-                  <RiEqualizerLine size={14} />
+                <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-primary/15 text-primary sm:h-9 sm:w-9">
+                  <RiEqualizerLine size={15} />
                 </span>
-                <h2 className="text-[14px] font-semibold text-foreground">{t('settings.title')}</h2>
+                <h2 id="settings-dialog-title" className="text-[15px] font-semibold text-foreground sm:text-[16px]">{t('settings.title')}</h2>
               </div>
               <button
                 type="button"
-                onClick={() => setIsDrawerOpen(false)}
+                onClick={handleCloseSettings}
                 className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive"
                 aria-label="Close"
               >
@@ -1065,7 +1524,7 @@ function App() {
             </div>
 
             {/* Content */}
-            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+            <div className="min-h-0 flex-1 overflow-y-auto bg-background/25 px-3 py-3 sm:px-6 sm:py-5 md:px-8">
               {/* Quick row: font size + renderer + toggles, all visible at-a-glance */}
               <div className="space-y-2">
                 {/* Font size */}
@@ -1204,6 +1663,29 @@ function App() {
                 </div>
               </div>
 
+              {/* Notifications */}
+              <button
+                type="button"
+                onClick={() => setIsNotificationsOpen(true)}
+                className="mt-3 flex w-full items-center justify-between gap-2 rounded-xl bg-surface-2 px-3 py-2.5 text-left text-[13px] transition hover:bg-surface-elevated"
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <RiBellLine size={14} className={pwaNotificationsEnabled ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
+                  <span className="min-w-0">
+                    <span className="block font-medium text-foreground">{t('settings.notifications')}</span>
+                    <span className="block truncate text-[10px] text-muted-foreground">
+                      {pwaNotificationsEnabled
+                        ? (pwaAiNotificationsEnabled ? t('settings.notificationsAiOnSummary') : t('settings.notificationsNoEventsSummary'))
+                        : t('settings.notificationsOffSummary')}
+                    </span>
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <span>{pwaNotificationsEnabled ? t('common.on') : t('common.off')}</span>
+                  <span>›</span>
+                </span>
+              </button>
+
               <details className="mt-3 rounded-xl bg-surface-2 px-3 py-3" open={false}>
                 <summary className="flex cursor-pointer items-start justify-between gap-2 list-none">
                   <div>
@@ -1300,7 +1782,7 @@ function App() {
                     }
                     setNewSessionShortcutConfirmMode(null);
                     dispatchNewSession({ mode: 'shell' });
-                    setIsDrawerOpen(false);
+                    handleCloseSettings();
                   }}
                   className={`flex min-w-0 items-center justify-center gap-1.5 rounded-xl text-[13px] font-semibold transition active:scale-[0.98] ${
                     shellShortcutHighlighted
@@ -1326,7 +1808,7 @@ function App() {
                     }
                     setNewSessionShortcutConfirmMode(null);
                     dispatchNewSession({ mode: 'tmux' });
-                    setIsDrawerOpen(false);
+                    handleCloseSettings();
                   }}
                   className={`flex min-w-0 items-center justify-center gap-1.5 rounded-xl text-[13px] font-semibold transition active:scale-[0.98] ${
                     tmuxStatus.available
@@ -1541,6 +2023,7 @@ function App() {
               </button>
             </div>
           </div>
+          </div>
         </>
       )}
 
@@ -1738,6 +2221,153 @@ function App() {
           </>
         );
       })()}
+
+      {isNotificationsOpen && (
+        <>
+          <button
+            type="button"
+            className="fixed inset-0 z-[60] bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+            onClick={() => setIsNotificationsOpen(false)}
+          />
+          <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto flex max-w-xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)] sm:top-[10%] sm:bottom-auto sm:max-h-[80vh]">
+            <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
+              <div className="min-w-0">
+                <div className="ui-kicker">{t('settings.notifications')}</div>
+                <h2 className="section-title mt-1">{t('settings.notificationsTitle')}</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsNotificationsOpen(false)}
+                className="shrink-0 rounded-full bg-surface-2 p-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                aria-label="Close notifications settings"
+              >
+                <RiCloseLine size={18} />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+              <p className="text-[12px] leading-relaxed text-muted-foreground">
+                {t('settings.notificationsPageHint')}
+              </p>
+
+              <div className="mt-4 rounded-2xl bg-surface-2 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-semibold text-foreground">{t('settings.notificationsMaster')}</div>
+                    <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                      {pwaNotificationPermission === 'denied'
+                        ? t('settings.notificationsDenied')
+                        : !isPwaNotificationSupported()
+                          ? t('settings.notificationsUnsupported')
+                          : t('settings.notificationsMasterHint')}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleTogglePwaNotifications()}
+                    disabled={!isPwaNotificationSupported() || pwaNotificationPermission === 'denied'}
+                    className={`inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
+                      pwaNotificationsEnabled
+                        ? 'bg-primary/80'
+                        : pwaNotificationPermission === 'denied' || !isPwaNotificationSupported()
+                          ? 'cursor-not-allowed bg-surface-elevated/50 opacity-60'
+                          : 'bg-surface-elevated'
+                    }`}
+                    aria-pressed={pwaNotificationsEnabled}
+                  >
+                    <span className={`mx-1 inline-block h-5 w-5 rounded-full bg-white transition ${pwaNotificationsEnabled ? 'translate-x-5' : ''}`} />
+                  </button>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className={`rounded-full px-2 py-0.5 ${pwaNotificationPermission === 'granted' ? 'bg-primary/15 text-primary' : 'bg-surface text-muted-foreground'}`}>
+                    {t('settings.notificationsPermission')}: {pwaNotificationPermission}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!pwaNotificationsEnabled || pwaNotificationPermission !== 'granted'}
+                    onClick={() => void showPwaNotification({
+                      title: 'Termdock',
+                      body: t('settings.notificationsTestBody'),
+                      tag: `termdock-notification-test-${Date.now()}`,
+                      requireHidden: false,
+                      data: { url: '/' },
+                    })}
+                    className="rounded-full bg-surface px-3 py-1.5 font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {t('settings.notificationsTest')}
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-2xl bg-surface-2 p-3">
+                <div className="text-[13px] font-semibold text-foreground">{t('settings.notificationsAlertStyle')}</div>
+                <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                  {t('settings.notificationsAlertStyleHint')}
+                </div>
+                <div className="mt-3 grid grid-cols-3 gap-1 rounded-xl bg-surface p-1">
+                  {([
+                    ['normal', t('settings.notificationsStyleNormal'), t('settings.notificationsStyleNormalHint')],
+                    ['quiet', t('settings.notificationsStyleQuiet'), t('settings.notificationsStyleQuietHint')],
+                    ['persistent', t('settings.notificationsStylePersistent'), t('settings.notificationsStylePersistentHint')],
+                  ] as const).map(([style, label, hint]) => {
+                    const selected = pwaNotificationAlertStyle === style;
+                    return (
+                      <button
+                        key={style}
+                        type="button"
+                        disabled={!pwaNotificationsEnabled}
+                        onClick={() => handleSelectPwaNotificationAlertStyle(style)}
+                        className={`min-w-0 rounded-lg px-2 py-2 text-left transition ${
+                          selected && pwaNotificationsEnabled
+                            ? 'bg-primary/15 text-primary'
+                            : pwaNotificationsEnabled
+                              ? 'text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+                              : 'cursor-not-allowed text-muted-foreground/40'
+                        }`}
+                        title={hint}
+                      >
+                        <span className="block truncate text-[11px] font-semibold">{label}</span>
+                        <span className="mt-0.5 block truncate text-[9px] opacity-80">{hint}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <div className="ui-kicker">{t('settings.notificationsEvents')}</div>
+                <div className="mt-2 rounded-2xl bg-surface-2 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-[13px] font-semibold text-foreground">{t('settings.notificationsAiFinished')}</div>
+                      <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                        {t('settings.notificationsAiFinishedHint')}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!pwaNotificationsEnabled}
+                      onClick={() => handleTogglePwaAiNotifications(!pwaAiNotificationsEnabled)}
+                      className={`inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
+                        pwaAiNotificationsEnabled && pwaNotificationsEnabled
+                          ? 'bg-primary/80'
+                          : pwaNotificationsEnabled
+                            ? 'bg-surface-elevated'
+                            : 'cursor-not-allowed bg-surface-elevated/50 opacity-60'
+                      }`}
+                      aria-pressed={pwaAiNotificationsEnabled && pwaNotificationsEnabled}
+                    >
+                      <span className={`mx-1 inline-block h-5 w-5 rounded-full bg-white transition ${pwaAiNotificationsEnabled && pwaNotificationsEnabled ? 'translate-x-5' : ''}`} />
+                    </button>
+                  </div>
+                </div>
+                <p className="mt-2 text-[10px] text-muted-foreground">
+                  {t('settings.notificationsFutureHint')}
+                </p>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {isToolbarPresetsOpen && (
         <>
@@ -2089,24 +2719,47 @@ function App() {
       <LeftSidebar
         isOpen={sidebarLeftOpen}
         drawerWidthPx={leftDrawerWidthPx}
-        onClose={useSidebarStore.getState().closeLeft}
-        onOpen={useSidebarStore.getState().openLeft}
+        onClose={() => requestCloseHistoryOverlay('left-sidebar')}
+        onOpen={handleOpenLeftSidebar}
         sessions={sessions}
         activeSessionId={activeSessionId}
         sessionStates={terminalSessions}
         onNewSession={(opts) => dispatchNewSession(opts)}
         onCloseSession={handleSidebarCloseSession}
         onReorderSessions={applySessionOrder}
-        onOpenSettings={() => setIsDrawerOpen(true)}
+        onOpenSettings={handleOpenSettings}
         tmuxAvailable={tmuxStatus.available}
         defaultSessionMode={newSessionMode}
       />
       <RightSidebar
         isOpen={sidebarRightOpen}
         drawerWidthPx={rightDrawerWidthPx}
-        onClose={useSidebarStore.getState().closeRight}
-        onOpen={useSidebarStore.getState().openRight}
+        onClose={() => requestCloseHistoryOverlay('right-sidebar')}
+        onOpen={handleOpenRightSidebar}
       />
+
+      {showBackGuardHint && (
+        <button
+          type="button"
+          onClick={handleContinueAfterBackGuard}
+          className="fixed inset-0 z-[120] flex cursor-default items-center justify-center bg-black/20 px-6 text-left backdrop-blur-[1px]"
+          aria-label={locale === 'zh' ? '继续使用 Termdock' : 'Continue using Termdock'}
+        >
+          <div className="max-w-[18rem] rounded-2xl border border-border/15 bg-surface/95 px-5 py-4 text-center shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur animate-fade-in">
+            <div className="text-[14px] font-semibold text-foreground">
+              {locale === 'zh' ? '建议使用 Home' : 'Use Home instead'}
+            </div>
+            <div className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+              {locale === 'zh'
+                ? '按 Home 退后台，点任意位置继续。'
+                : 'Use Home to leave. Tap anywhere to continue.'}
+            </div>
+            <div className="mt-3 text-[11px] font-medium text-muted-foreground/80">
+              {locale === 'zh' ? '轻点关闭提示' : 'Tap to dismiss'}
+            </div>
+          </div>
+        </button>
+      )}
 
       {/* Debug Info Panel */}
       {showDebug && (

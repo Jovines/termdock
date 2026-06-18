@@ -5,6 +5,7 @@ import type { Server as HttpServer } from 'http';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import { homedir } from 'os';
 import cookieParser from 'cookie-parser';
 import { type SecureContextOptions } from 'tls';
@@ -62,6 +63,98 @@ export interface StartServerResult {
 export interface AppOptions {
   port?: number;
   httpsCaPath?: string;
+}
+
+// 静态资源压缩中间件（零依赖，用 Node 内置 zlib）。
+// 动机：跨城/弱网首刷（或 PWA SW 更新后）要下载未压缩的 JS/CSS bundle，
+// express.static 默认不压缩。这里对文本类资源做 br/gzip 压缩，跨城下能把
+// bundle 下载体积砍到 ~1/4，明显缩短首屏等待。
+// 设计要点：
+//  - 只压文本类扩展名；图片/字体/woff2 等已是压缩格式，跳过避免做无用功。
+//  - 编译产物在运行期不变，按 (绝对路径 + mtimeMs + 编码) 缓存压缩结果到内存，
+//    只在第一次请求时压一次，后续直接命中，不占 CPU。
+//  - 路径必须落在 dist 目录内且文件真实存在，否则交回后续中间件（含 SPA
+//    fallback），不影响 index.html 路由与 /api 等。
+const COMPRESSIBLE_EXT = new Set(['.js', '.mjs', '.css', '.html', '.json', '.svg', '.webmanifest', '.map', '.txt']);
+// 扩展名 → Content-Type。自己维护一张小表，不依赖 express.static.mime
+// （express 5 运行期不暴露该字段，访问会抛 TypeError）。
+const CONTENT_TYPE_BY_EXT: Record<string, string> = {
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+};
+function createStaticCompressionMiddleware(rootDir: string): express.RequestHandler {
+  const resolvedRoot = path.resolve(rootDir);
+  const cache = new Map<string, { encoding: 'br' | 'gzip'; body: Buffer; mtimeMs: number }>();
+
+  return (req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+
+    const acceptEncoding = String(req.headers['accept-encoding'] || '');
+    const useBr = /\bbr\b/.test(acceptEncoding);
+    const useGzip = /\bgzip\b/.test(acceptEncoding);
+    if (!useBr && !useGzip) return next();
+
+    // 解析并防目录穿越：只服务 dist 内的文件。
+    let pathname: string;
+    try {
+      pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+    } catch {
+      return next();
+    }
+    const ext = path.extname(pathname).toLowerCase();
+    if (!COMPRESSIBLE_EXT.has(ext)) return next();
+
+    const filePath = path.resolve(resolvedRoot, '.' + pathname);
+    if (filePath !== resolvedRoot && !filePath.startsWith(resolvedRoot + path.sep)) return next();
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      return next();
+    }
+    if (!stat.isFile()) return next();
+
+    const encoding: 'br' | 'gzip' = useBr ? 'br' : 'gzip';
+    const cacheKey = `${filePath}|${encoding}`;
+    let entry = cache.get(cacheKey);
+    if (!entry || entry.mtimeMs !== stat.mtimeMs) {
+      let raw: Buffer;
+      try {
+        raw = fs.readFileSync(filePath);
+      } catch {
+        return next();
+      }
+      const body = encoding === 'br'
+        ? zlib.brotliCompressSync(raw, {
+            params: {
+              [zlib.constants.BROTLI_PARAM_QUALITY]: 9,
+              [zlib.constants.BROTLI_PARAM_SIZE_HINT]: raw.length,
+            },
+          })
+        : zlib.gzipSync(raw, { level: 7 });
+      entry = { encoding, body, mtimeMs: stat.mtimeMs };
+      cache.set(cacheKey, entry);
+    }
+
+    res.setHeader('Content-Encoding', encoding);
+    res.setHeader('Vary', 'Accept-Encoding');
+    const type = CONTENT_TYPE_BY_EXT[ext];
+    if (type) res.setHeader('Content-Type', type);
+    res.setHeader('Content-Length', entry.body.length);
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(entry.body);
+  };
 }
 
 export function createApp(options: AppOptions = {}): express.Express {
@@ -156,6 +249,7 @@ export function createApp(options: AppOptions = {}): express.Express {
   app.use('/api/terminal/fs', filesystemRoutes);
 
   if (fs.existsSync(clientIndexPath)) {
+    app.use(createStaticCompressionMiddleware(clientDistPath));
     app.use(express.static(clientDistPath));
     app.get(/^(?!\/api(?:\/|$)|\/health$|\/onboarding(?:\/|$)|\/ca(?:\/|$)).*/, (_req, res) => {
       res.sendFile(clientIndexPath);
@@ -223,7 +317,26 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   // WebSocket for bidirectional terminal communication.
   // Replaces SSE (server→client) + HTTP POST (client→server) with a single
   // persistent connection per terminal session.
-  const wss = new WebSocketServer({ noServer: true });
+  //
+  // perMessageDeflate: 终端输出是纯文本，压缩比通常 5-10x。弱网/跨城（高 RTT、
+  // 低带宽）下，刷新页面时 N 个终端各自一次性回放全量 scrollback（每个可达
+  // 100KB），未压缩会同时挤满链路、肉眼可见地卡几秒。开启压缩后带宽需求直接
+  // 降到 1/5~1/10。参数：
+  //  - threshold 1024：小于 1KB 的小包（按键回显等）不压缩，避免 CPU 浪费。
+  //  - concurrencyLimit：限制并发压缩任务，防止突发回放打满 CPU。
+  //  - zlib memLevel 7 + level 6：在压缩比和内存/CPU 间取均衡，避免每连接
+  //    分配过大 zlib 上下文（默认 memLevel 8 内存更高）。
+  //  - serverNoContextTakeover：每条消息独立压缩上下文，降低长连接常驻内存。
+  const wss = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: {
+      threshold: 1024,
+      concurrencyLimit: 10,
+      serverNoContextTakeover: true,
+      clientNoContextTakeover: true,
+      zlibDeflateOptions: { level: 6, memLevel: 7 },
+    },
+  });
 
   const WS_PATH_RE = /^\/api\/terminal\/([^/]+)\/ws$/;
   const CONTROL_WS_PATH = '/api/control/ws';

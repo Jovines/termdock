@@ -64,6 +64,10 @@ export interface SessionInventoryClientSession {
   connected: boolean;
   live: boolean;
   restorable: boolean;
+  // 展示名提示（见 display.ts）：随 inventory 返回的当前程序名 / 目录，
+  // 用于冷启动 hydrate 时直接算出 tab 名，避免等 WS 轮询造成的「跳变」。
+  activeProgram?: string | null;
+  cwd?: string | null;
 }
 
 export interface SessionInventoryTmuxSession extends TmuxSessionSummary {

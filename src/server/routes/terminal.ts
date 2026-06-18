@@ -201,6 +201,12 @@ interface SessionInventoryClientSession extends PersistedClientSession {
   connected: boolean;
   live: boolean;
   restorable: boolean;
+  // 展示名提示：tab 名按 activeProgram + cwd 计算（见前端 display.ts）。
+  // 这两个值随 inventory 一起返回，让前端冷启动 / 缓存 hydrate 时无需等
+  // WS 连上轮询 tmux 就能算出「coco termdock」，消除「先 wt-xxx 再跳变」。
+  // 仅作展示用，非持久化字段（不写进 PersistedClientSession / 磁盘）。
+  activeProgram?: string | null;
+  cwd?: string | null;
 }
 
 interface SessionInventoryTmuxSession {
@@ -1541,6 +1547,15 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     const backendLive = !!session.backendSessionId && terminalSessions.has(session.backendSessionId);
     const tmuxLive = session.mode === 'tmux' && !!session.tmuxSessionName && liveTmuxByName.has(session.tmuxSessionName);
     const live = session.mode === 'tmux' ? tmuxLive : backendLive;
+
+    // 展示名提示（activeProgram / cwd）：优先取在线 backend session 的实时值，
+    // 其次回退到 tmux 清单里的 program/cwd（tmux 模式即使 backend 未 attach，
+    // tmux 服务端仍能给出当前 pane 的程序与目录）。让前端 hydrate 即可显示。
+    const backend = backendLive ? terminalSessions.get(session.backendSessionId!) : undefined;
+    const tmuxMeta = session.tmuxSessionName ? liveTmuxByName.get(session.tmuxSessionName) : undefined;
+    const activeProgram = backend?.activeProgram?.command ?? tmuxMeta?.program ?? null;
+    const cwd = backend?.cwd ?? tmuxMeta?.cwd ?? null;
+
     return {
       ...session,
       frontendSessionId: session.sessionId,
@@ -1548,6 +1563,8 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       connected: backendLive,
       live,
       restorable: session.mode === 'tmux' && tmuxLive && !backendLive,
+      activeProgram,
+      cwd,
     };
   });
 
@@ -1761,6 +1778,7 @@ const AGENT_INDICATORS = new Set<AgentIndicator>(['spinner', 'pulse', 'dot', 'ri
 const DEFAULT_AGENT_CLEAR_DELAY_MS = 450;
 const MIN_AGENT_CLEAR_DELAY_MS = 80;
 const MAX_AGENT_CLEAR_DELAY_MS = 10_000;
+const COCO_WAITING_RULE_PATTERN = '(?:Tab/Arrow keys to navigate[\\s\\S]{0,200}(?:select ·|Enter))|Coco\\s*等待态采样';
 
 interface AgentProgramConfig {
   // 兼容旧格式：单程序字段
@@ -1790,18 +1808,76 @@ const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
   {
     program: 'coco',
     rules: [
-      { pattern: 'Tab/Arrow keys to navigate|Esc to|select ·|Coco 等待态采样|AskUserQuestion|User\'s answers', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
+      { pattern: COCO_WAITING_RULE_PATTERN, status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
       { pattern: '[·✢❋❇✽] (thinking|working|generating)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-      { pattern: 'confirm|approve|permission|continue\\?', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
-    ],
-  },
-  {
-    program: 'aider',
-    rules: [
-      { pattern: 'Thinking|Generating|Working', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
     ],
   },
 ];
+
+function isSameAgentRule(a: AgentRule, b: AgentRule): boolean {
+  return a.pattern === b.pattern &&
+    a.status === b.status &&
+    a.color === b.color &&
+    a.indicator === b.indicator &&
+    a.clearDelayMs === b.clearDelayMs;
+}
+
+function isSingleProgramConfig(config: AgentProgramConfig, program: string): boolean {
+  const programs = Array.isArray(config.programs)
+    ? config.programs.filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
+    : (typeof config.program === 'string' && config.program.trim().length > 0 ? [config.program] : []);
+  return programs.length === 1 && programs[0]?.trim().toLowerCase() === program;
+}
+
+function migrateAgentRules(rules: AgentProgramConfig[]): { rules: AgentProgramConfig[]; changed: boolean } {
+  let changed = false;
+  const deprecatedCocoConfirmRule: AgentRule = {
+    pattern: 'confirm|approve|permission|continue\\?',
+    status: 'waiting',
+    color: '#facc15',
+    indicator: 'question',
+    clearDelayMs: 10000,
+  };
+  const deprecatedCocoBroadWaitingRule: AgentRule = {
+    pattern: 'Tab/Arrow keys to navigate|Esc to|select ·|Coco 等待态采样|AskUserQuestion|User\'s answers',
+    status: 'waiting',
+    color: '#facc15',
+    indicator: 'question',
+    clearDelayMs: 10000,
+  };
+  const cocoWaitingRule: AgentRule = {
+    pattern: COCO_WAITING_RULE_PATTERN,
+    status: 'waiting',
+    color: '#facc15',
+    indicator: 'question',
+    clearDelayMs: 10000,
+  };
+
+  const nextRules = rules
+    .filter((config) => {
+      const shouldRemove = isSingleProgramConfig(config, 'aider') &&
+        config.rules.length === 1 &&
+        isSameAgentRule(config.rules[0]!, {
+          pattern: 'Thinking|Generating|Working',
+          status: 'running',
+          color: '#4ade80',
+          indicator: 'pulse',
+          clearDelayMs: 900,
+        });
+      if (shouldRemove) changed = true;
+      return !shouldRemove;
+    })
+    .map((config) => {
+      if (!isSingleProgramConfig(config, 'coco')) return config;
+      let nextRules = config.rules.filter((rule) => !isSameAgentRule(rule, deprecatedCocoConfirmRule));
+      nextRules = nextRules.map((rule) => isSameAgentRule(rule, deprecatedCocoBroadWaitingRule) ? cocoWaitingRule : rule);
+      if (nextRules.length === config.rules.length && nextRules.every((rule, index) => isSameAgentRule(rule, config.rules[index]!))) return config;
+      changed = true;
+      return { ...config, rules: nextRules };
+    });
+
+  return { rules: nextRules, changed };
+}
 
 // Runtime cache: program → compiled rules
 let agentRulesCache: Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]> = new Map();
@@ -1851,7 +1927,13 @@ function loadAgentRulesFromDisk(): AgentProgramConfig[] {
   try {
     const data = fs.readFileSync(AGENT_RULES_FILE, 'utf-8');
     const parsed = JSON.parse(data);
-    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const migrated = migrateAgentRules(parsed);
+      if (migrated.changed) {
+        fs.writeFileSync(AGENT_RULES_FILE, JSON.stringify(migrated.rules, null, 2));
+      }
+      return migrated.rules;
+    }
   } catch { /* file doesn't exist or invalid, use builtins */ }
   return BUILTIN_AGENT_RULES;
 }

@@ -85,6 +85,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   onExpandedChange,
 }) => {
   const [showExtended, setShowExtended] = React.useState(defaultShowExtended);
+  const [suppressExpandedInput, setSuppressExpandedInput] = React.useState(false);
+  const suppressExpandedTimerRef = React.useRef<number | null>(null);
   const isDesktopActions = presentation === 'desktop-actions';
   const isExpandedVisible = isDesktopActions || showExtended;
   const [showPresetMenu, setShowPresetMenu] = React.useState(false);
@@ -218,7 +220,22 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       event.preventDefault();
-      setShowExtended((current) => !current);
+      setShowExtended((current) => {
+        const next = !current;
+        if (next) {
+          // 展开瞬间手指仍在按钮位置，刚冒出来的扩展按钮会因为指下而被判定为 :active。
+          // 在短暂窗口内禁用扩展区交互，避免抬手位置误触/误高亮。
+          setSuppressExpandedInput(true);
+          if (suppressExpandedTimerRef.current !== null) {
+            window.clearTimeout(suppressExpandedTimerRef.current);
+          }
+          suppressExpandedTimerRef.current = window.setTimeout(() => {
+            setSuppressExpandedInput(false);
+            suppressExpandedTimerRef.current = null;
+          }, 350);
+        }
+        return next;
+      });
     },
     [toolbarDisabled]
   );
@@ -234,6 +251,10 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
 
   React.useEffect(() => () => {
     clearPendingTap();
+    if (suppressExpandedTimerRef.current !== null) {
+      window.clearTimeout(suppressExpandedTimerRef.current);
+      suppressExpandedTimerRef.current = null;
+    }
   }, [clearPendingTap]);
 
   const handleTextPointerDown = React.useCallback(
@@ -320,7 +341,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     ]);
   }, [extraActions, hasPresetActions, includeAlt, isDesktopActions]);
   const expandedRows = React.useMemo(() => splitButtonsIntoRows(expandedItems, presetRowLayout), [expandedItems, presetRowLayout]);
-  const expandedContainerClassName = isDesktopActions ? 'space-y-1' : 'mt-1 space-y-1';
+  const expandedContainerClassName = `${isDesktopActions ? 'space-y-1' : 'mt-1 space-y-1'}${
+    suppressExpandedInput ? ' pointer-events-none' : ''
+  }`;
   const presetMenu = showPresetMenu && presetMenuPosition
     ? createPortal(
       <div

@@ -324,6 +324,52 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [resumeRequestToken, probeOrRestartSession]);
 
+  // 失败态自愈：session 用尽底层 10 次重试后会进入 fatal（connection failed），
+  // 此时 wsConnections 里的 conn 已被 cleanup 删除，仅靠 visibility/focus/online
+  // 事件才会触发 probeOrRestartSession 重连。但如果页面一直开在前台、没有任何
+  // 可见性/聚焦变化（桌面常驻、或弱网下某条 session 首连就失败），这条 session
+  // 会永久停在失败态：tab 一直显示默认名、没有程序名/目录——正是偶现「某些
+  // session 一直连接失败」的根因。
+  //
+  // 这里加一个不依赖用户操作的后台自愈定时器：fatal 持续期间按退避节奏自动
+  // 重跑 ensureSession，最多 MAX 次，避免对真正挂掉的后端无限打。
+  //
+  // 实现要点（避免状态抖动）：
+  //  - 成功判据用 isStreamReady（connected 时才置 true），不用 isFatalError，
+  //    因为 timer 重连过程中 isFatalError 会经历 true→false→true 抖动。
+  //  - 每次自愈调用 restartEnsureSession（bump restartTrigger），本 effect 依赖
+  //    restartTrigger，故每次尝试后必然重跑：连上了就 reset 收手，没连上就按
+  //    递增 attempt 继续退避，到 MAX 上限后停手等用户手动 Retry。
+  const fatalSelfHealAttemptRef = React.useRef(0);
+  React.useEffect(() => {
+    // 已连上（流就绪）：清零计数，结束自愈。
+    if (isStreamReady) {
+      fatalSelfHealAttemptRef.current = 0;
+      return;
+    }
+    // 只在 fatal 失败态下自愈；非 fatal 的正常连接中/重连中交给既有路径。
+    if (!isFatalError) return;
+
+    const MAX_SELF_HEAL = 8;
+    if (fatalSelfHealAttemptRef.current >= MAX_SELF_HEAL) return;
+
+    const attempt = fatalSelfHealAttemptRef.current;
+    // 退避：2s, 4s, 8s … 上限 30s。给后端/网络恢复留时间，又不至于太久无响应。
+    const delay = Math.min(2000 * Math.pow(2, attempt), 30000);
+    const timer = setTimeout(() => {
+      fatalSelfHealAttemptRef.current += 1;
+      debugSession('[Terminal] fatal self-heal: auto restarting ensureSession', {
+        attempt: fatalSelfHealAttemptRef.current,
+        backendSessionId: terminalIdRef.current,
+      });
+      setConnectionError('Reconnecting...');
+      setIsFatalError(false);
+      restartEnsureSession();
+    }, delay);
+
+    return () => clearTimeout(timer);
+  }, [isFatalError, isStreamReady, restartTrigger, debugSession, restartEnsureSession]);
+
   // iOS detection
   React.useEffect(() => {
     if (typeof window === 'undefined') {
@@ -545,6 +591,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     tmuxSessionName: event.tmuxSessionName ?? null,
                     cwd: event.cwd ?? null,
                   });
+                }
+
+                // 首帧立即写入 activeProgram：connected 事件已携带服务端连接时
+                // detect 的 activeProgram（terminal.ts:4348-4358 / 4402）。之前
+                // 只写了 cwd，activeProgram 要白等到第一次 active-program 轮询
+                // （1200ms）才到，tab 名会从默认名「迟一拍」跳成程序名。这里补上
+                // 后，WS 一连上 tab 就能显示「coco termdock」，少一次可见跳变。
+                if (event.activeProgram !== undefined) {
+                  setSessionActiveProgram(
+                    storeSessionId,
+                    event.activeProgram ?? null,
+                    event.activeProgramSource ?? null,
+                    event.activeProgramRaw ?? null,
+                  );
                 }
 
                 // 连接建立后强制刷新：等 history 落盘后由编排器完成 fit + atlas + scroll。

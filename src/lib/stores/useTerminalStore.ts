@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { TerminalSession, TerminalChunk, TerminalSessionState, AgentStatus, AgentIndicator } from '../terminal';
+import { getStoredPwaAiNotificationsEnabled, showPwaNotification } from '../utils/pwaNotifications';
 
 export interface TerminalStore {
   sessions: Map<string, TerminalSessionState>;
@@ -252,34 +253,48 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   },
 
   setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null, agentIndicator?: AgentIndicator | null) => {
-    set((state) => {
-      const newSessions = new Map(state.sessions);
-      const existing = newSessions.get(sessionId);
-      if (!existing) return state;
-      const nextAgentColor = agentStatus ? (agentColor ?? existing.agentColor) : null;
-      const nextAgentIndicator = agentStatus ? (agentIndicator ?? existing.agentIndicator ?? null) : null;
-      if (
-        existing.agentStatus === agentStatus &&
-        existing.agentColor === nextAgentColor &&
-        existing.agentIndicator === nextAgentIndicator
-      ) return state;
+    const state = get();
+    const existing = state.sessions.get(sessionId);
+    if (!existing) return;
 
-      // any status → null: AI stopped. If user is NOT on this session, mark needs-review.
-      const wasActive = existing.agentStatus !== null;
-      const nowStopped = agentStatus === null;
-      const userNotViewing = state.activeSessionId !== sessionId;
-      const agentNeedsReview = wasActive && nowStopped && userNotViewing;
+    const nextAgentColor = agentStatus ? (agentColor ?? existing.agentColor) : null;
+    const nextAgentIndicator = agentStatus ? (agentIndicator ?? existing.agentIndicator ?? null) : null;
+    if (
+      existing.agentStatus === agentStatus &&
+      existing.agentColor === nextAgentColor &&
+      existing.agentIndicator === nextAgentIndicator
+    ) return;
 
-      newSessions.set(sessionId, {
-        ...existing,
-        agentStatus,
-        agentColor: nextAgentColor,
-        agentIndicator: nextAgentIndicator,
-        agentNeedsReview: agentNeedsReview || (existing.agentNeedsReview && !agentStatus),
-        updatedAt: Date.now(),
-      });
-      return { sessions: newSessions };
+    // any status → null: AI stopped. If user is NOT on this session, mark needs-review.
+    const wasActive = existing.agentStatus !== null;
+    const nowStopped = agentStatus === null;
+    const userNotViewing = state.activeSessionId !== sessionId;
+    const agentNeedsReview = wasActive && nowStopped && userNotViewing;
+
+    const newSessions = new Map(state.sessions);
+    newSessions.set(sessionId, {
+      ...existing,
+      agentStatus,
+      agentColor: nextAgentColor,
+      agentIndicator: nextAgentIndicator,
+      agentNeedsReview: agentNeedsReview || (existing.agentNeedsReview && !agentStatus),
+      updatedAt: Date.now(),
     });
+    set({ sessions: newSessions });
+
+    if (wasActive && nowStopped && getStoredPwaAiNotificationsEnabled()) {
+      void showPwaNotification({
+        title: 'Termdock',
+        body: existing.activeProgram
+          ? `${existing.activeProgram} finished and needs your attention.`
+          : 'A terminal task finished and needs your attention.',
+        tag: `agent-finished-${sessionId}`,
+        data: {
+          url: '/',
+          sessionId,
+        },
+      });
+    }
   },
 
   clearAgentNeedsReview: (sessionId: string) => {

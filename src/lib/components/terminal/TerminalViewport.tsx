@@ -229,6 +229,18 @@ export type RefreshOptions = {
   dedupeKey?: string;
 };
 
+/**
+ * 「后台返回」语义的 reason 白名单。只有这些离散的、由系统切换触发的一次性
+ * 事件，才允许主动探测 WebGL 上下文并补刷 texture atlas（见 probeAndRecoverWebgl）。
+ * 绝不包含 resize / focus / blur / tmux-layout / dpr-change 等高频或常规 reason，
+ * 避免重蹈历史上的「idle 花屏」（无输出时持续 repaint）。
+ */
+const RESUME_REASONS: ReadonlySet<RefreshReason> = new Set<RefreshReason>([
+  'visibility',
+  'bfcache',
+  'online',
+]);
+
 export type TerminalController = {
   focus: () => void;
   clear: () => void;
@@ -1924,6 +1936,72 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       shouldUseWebgl,
     ]);
 
+    /**
+     * 后台返回时主动探测 WebGL 上下文并按需恢复。
+     *
+     * 背景：xterm WebglAddon 收到原生 `webglcontextlost` 后会先 preventDefault 并
+     * 等 3 秒；若 3 秒内收到 `webglcontextrestored` 就认为恢复成功、取消计时器，
+     * 但**不会主动重画**，只有 3 秒内没恢复才 fire onContextLoss。Android PWA 从
+     * 后台返回常是「上下文丢了又秒恢复」——onContextLoss 永不触发，但 GPU 里的
+     * texture atlas 已被回收清空，残缺画面留屏且无人补救。
+     *
+     * 因此这里不再只依赖 onContextLoss，在后台返回（visibility/bfcache/online）时
+     * 主动探测，三态决策：
+     *   - 上下文真死（gl.isContextLost()===true）→ 置 webglContextLostRef，交给
+     *     runRefreshSequence 既有的 dispose+recreate 出口（不在这里自己拆，避免与
+     *     onContextLoss 双重重建）。
+     *   - 上下文活着（或拿不到 gl 但 addon 在）→ clearTextureAtlas()+refresh() 补刷。
+     *   - 非 WebGL / 无 addon → noop。
+     */
+    const probeAndRecoverWebgl = React.useCallback(
+      (reason: string): 'recreate' | 'refreshed' | 'noop' => {
+        const addon = webglAddonRef.current;
+        if (!shouldUseWebgl || !addon) {
+          return 'noop';
+        }
+
+        // 防御性取底层 gl：访问 addon 私有字段，全程可选链 + try/catch，addon 内部
+        // 结构随版本变动也不能崩。当前 @xterm/addon-webgl 产物里 `_renderer._gl`
+        // 字段名未被 mangle，可用。
+        let gl: WebGL2RenderingContext | undefined;
+        try {
+          gl = (addon as unknown as { _renderer?: { _gl?: WebGL2RenderingContext } })._renderer?._gl;
+        } catch {
+          gl = undefined;
+        }
+
+        let contextLost = false;
+        try {
+          if (gl && typeof gl.isContextLost === 'function') {
+            contextLost = gl.isContextLost();
+          }
+        } catch {
+          contextLost = false;
+        }
+
+        if (contextLost) {
+          // 不在这里 dispose：统一交给 runRefreshSequence 的 needsRecreate 出口，
+          // 避免与 onContextLoss 路径双重重建。
+          webglContextLostRef.current = true;
+          debugTerminal('webgl probe: context lost -> recreate', { reason });
+          return 'recreate';
+        }
+
+        // 上下文活着（或 gl 拿不到但 addon 在）：atlas 可能已被 GPU 回收，主动重建。
+        // 拿不到 gl 时降级走补刷而非重建——补刷幂等低风险，盲目重建活上下文反而
+        // 可能闪一帧白屏。
+        try {
+          addon.clearTextureAtlas();
+        } catch {
+          // 即便 clear 失败，下面的 refresh 仍可能补回大部分内容
+        }
+        refreshTextureAtlasNow(`webgl-resume:${reason}`);
+        debugTerminal('webgl probe: context alive -> clear atlas + refresh', { reason });
+        return 'refreshed';
+      },
+      [shouldUseWebgl, refreshTextureAtlasNow, debugTerminal]
+    );
+
     // ============================================================
     // 刷新编排器（orchestrator）
     // ------------------------------------------------------------
@@ -2053,6 +2131,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // 同理，WebGL renderer 活着时也不再因普通 refresh reason 主动
         // terminal.refresh()：idle 花屏说明“无输出时的 repaint”本身可疑，普通
         // 输出交给 xterm.write/render pipeline，普通事件只做 fit/resize。
+        //
+        // 例外——后台返回（visibility/bfcache/online）：onContextLoss 在「秒恢复」
+        // 场景不会触发（见 probeAndRecoverWebgl 注释），这里主动探测一次。真死则
+        // 置 webglContextLostRef 走下面的重建出口；活着则已 clearTextureAtlas+refresh
+        // 补刷，置 probeHandled 跳过下面的 alive-skip。探测只对这几个离散事件生效，
+        // 不进入 resize/focus/blur 等高频路径，故不会重蹈 idle 花屏。
+        let probeHandled = false;
+        if (
+          shouldUseWebgl &&
+          webglAddonRef.current &&
+          RESUME_REASONS.has(reason) &&
+          options.forceRendererRecreate !== true
+        ) {
+          probeHandled = probeAndRecoverWebgl(reason) === 'refreshed';
+        }
+
         const needsRecreate =
           options.forceRendererRecreate === true ||
           webglContextLostRef.current;
@@ -2069,7 +2163,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
         } else {
           if (webglAddonRef.current && shouldUseWebgl) {
-            debugTerminal('webgl refresh skipped: renderer alive', { reason });
+            // probeHandled 时本次已 clearTextureAtlas+refresh 过，不再重复
+            if (!probeHandled) {
+              debugTerminal('webgl refresh skipped: renderer alive', { reason });
+            }
           } else {
             refreshTextureAtlasNow(`refresh:${reason}`);
           }
@@ -2122,6 +2219,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         shouldUseWebgl,
         disposeWebglRenderer,
         enableWebglRenderer,
+        probeAndRecoverWebgl,
         refreshTextureAtlasNow,
         fitTerminal,
         pushResizeToServer,

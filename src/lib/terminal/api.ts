@@ -1296,8 +1296,10 @@ export interface FileWatchEvent {
   reason?: string;
 }
 
-export async function listDirectory(dirPath: string, signal?: AbortSignal): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
-  const response = await fetch(`/api/terminal/fs/list?path=${encodeURIComponent(dirPath)}`, { signal });
+export async function listDirectory(dirPath: string, signal?: AbortSignal, showHidden?: boolean): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
+  const params = new URLSearchParams({ path: dirPath });
+  if (showHidden) params.set('showHidden', 'true');
+  const response = await fetch(`/api/terminal/fs/list?${params}`, { signal });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list directory' }));
     throw new Error(error.error || 'Failed to list directory');
@@ -1320,8 +1322,10 @@ export async function searchFilesStream(
   query: string,
   onProgress: (progress: FileSearchProgress) => void,
   signal?: AbortSignal,
+  showHidden?: boolean,
 ): Promise<void> {
   const params = new URLSearchParams({ path: dirPath, query, stream: 'true' });
+  if (showHidden) params.set('showHidden', 'true');
   const response = await fetch(`/api/terminal/fs/search?${params}`, { signal });
   if (!response.ok || !response.body) {
     const error = await response.json().catch(() => ({ error: 'Failed to search files' }));

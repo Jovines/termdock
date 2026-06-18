@@ -14,6 +14,11 @@ import {
   RefreshCw as RiRefresh,
   GitBranch as RiGitBranch,
   Loader2 as RiLoader,
+  Pin as RiPin,
+  PinOff as RiPinOff,
+  Link2 as RiLink,
+  Eye as RiEye,
+  EyeOff as RiEyeOff,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
@@ -45,7 +50,6 @@ const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; ti
 const RECENT_REFERENCES_STORAGE_KEY = 'termdock:recent-file-references';
 const FILE_TREE_SCROLL_STORAGE_KEY = 'termdock:right-sidebar:file-tree-scroll:v1';
 const MAX_RECENT_REFERENCES = 8;
-const MAX_CONTEXT_PACK_FILES = 14;
 const MAX_FILE_TREE_SCROLL_ROOTS = 20;
 const FILE_TREE_SCROLL_WRITE_MS = 250;
 const GIT_BUNDLE_SLOW_MS = 700;
@@ -952,10 +956,15 @@ export function RightSidebar(
   const setRightTab = useSidebarStore((s) => s.setRightTab);
   const rootPath = useSidebarStore((s) => s.rootPath);
   const explorerRoot = useSidebarStore((s) => s.explorerRoot);
+  const pinnedExplorerRootsCache = useSidebarStore((s) => s.pinnedExplorerRootsCache);
   const setExplorerRoot = useSidebarStore((s) => s.setExplorerRoot);
   const resetExplorerToProject = useSidebarStore((s) => s.resetExplorerToProject);
+  const pinExplorerRoot = useSidebarStore((s) => s.pinExplorerRoot);
+  const unpinExplorerRoot = useSidebarStore((s) => s.unpinExplorerRoot);
   const selectedFilePath = useSidebarStore((s) => s.selectedFilePath);
   const selectFile = useSidebarStore((s) => s.selectFile);
+  const showHiddenFiles = useSidebarStore((s) => s.showHiddenFiles);
+  const toggleShowHiddenFiles = useSidebarStore((s) => s.toggleShowHiddenFiles);
   const changedFiles = useSidebarStore((s) => s.changedFiles);
   const setChangedFiles = useSidebarStore((s) => s.setChangedFiles);
   const invalidateDirectoryCache = useSidebarStore((s) => s.invalidateDirectoryCache);
@@ -1061,8 +1070,11 @@ export function RightSidebar(
   }, [isMobile]);
 
   const gitKnownUnavailable = Boolean(rootPath && gitBundleLastLoadedAt !== null && gitContext?.available === false);
+  // Non-Git workspaces have no Git/Changes tabs. Only the medium-width desktop
+  // layout keeps a separate "Preview" tab; mobile (overlay) and wide (side-by-
+  // side) layouts render the preview without a dedicated tab.
   const effectiveRightTab: RightSidebarTab = gitKnownUnavailable
-    ? 'files'
+    ? (!isMobile && !isWide && rightTab === 'file' ? 'file' : 'files')
     : (isMobile || isWide) && rightTab === 'file' ? 'files' : rightTab;
   const gitPaneActive = effectiveRightTab === 'git';
   const filesPaneActive = effectiveRightTab === 'files';
@@ -1181,6 +1193,10 @@ export function RightSidebar(
 
   const explorerName = useMemo(() => getPathBasename(fileTreeRoot) || rootName, [fileTreeRoot, rootName]);
   const explorerParentPath = useMemo(() => getParentPath(fileTreeRoot), [fileTreeRoot]);
+  const pinnedExplorerRoots = useMemo(() => (rootPath ? pinnedExplorerRootsCache[rootPath] ?? [] : []), [pinnedExplorerRootsCache, rootPath]);
+  const pinnedExplorerRootSet = useMemo(() => new Set(pinnedExplorerRoots), [pinnedExplorerRoots]);
+  const fileTreeRootPinned = Boolean(fileTreeRoot && pinnedExplorerRoots.includes(fileTreeRoot));
+  const canPinFileTreeRoot = Boolean(rootPath && fileTreeRoot && fileTreeRoot !== rootPath);
   const browsingOutsideProject = Boolean(rootPath && explorerRoot && explorerRoot !== rootPath);
 
   const goToExplorerParent = useCallback(() => {
@@ -1195,6 +1211,23 @@ export function RightSidebar(
     if (!fileTreeRoot) return;
     invalidateDirectoryCache(fileTreeRoot, false);
   }, [fileTreeRoot, invalidateDirectoryCache]);
+
+  const togglePinnedExplorerRoot = useCallback(() => {
+    if (!fileTreeRoot || !canPinFileTreeRoot) return;
+    if (fileTreeRootPinned) unpinExplorerRoot(fileTreeRoot);
+    else pinExplorerRoot(fileTreeRoot);
+  }, [canPinFileTreeRoot, fileTreeRoot, fileTreeRootPinned, pinExplorerRoot, unpinExplorerRoot]);
+
+  const openDirectoryAsExplorerRoot = useCallback((path: string) => {
+    setExplorerRoot(path);
+    setFileQuery('');
+  }, [setExplorerRoot]);
+
+  const togglePinnedDirectory = useCallback((path: string) => {
+    if (!rootPath || path === rootPath) return;
+    if (pinnedExplorerRootSet.has(path)) unpinExplorerRoot(path);
+    else pinExplorerRoot(path);
+  }, [pinExplorerRoot, pinnedExplorerRootSet, rootPath, unpinExplorerRoot]);
 
   const watchedFileRoots = useMemo(() => {
     return Array.from(new Set([rootPath, fileTreeRoot].filter(Boolean) as string[]));
@@ -1333,46 +1366,6 @@ export function RightSidebar(
       changed ? `changed files: ${changed}${more}` : 'changed files: none',
     ].join('; ') + ' ';
   }, [gitContext, rootPath]);
-
-  const changedFileContextLines = useMemo(() => {
-    const files = gitContext?.changedFiles?.length ? gitContext.changedFiles : Array.from(changedFiles.values());
-    return files
-      .slice(0, MAX_CONTEXT_PACK_FILES)
-      .map((file) => `- ${file.status} ${buildPromptReference(file.absolutePath || file.path, rootPath)}`);
-  }, [changedFiles, gitContext, rootPath]);
-
-  const currentFileContextText = useMemo(() => {
-    if (!selectedFilePath) return '';
-    const absolutePath = rootPath && !selectedFilePath.startsWith('/') ? `${rootPath}/${selectedFilePath}` : selectedFilePath;
-    return `${buildPromptReference(absolutePath, rootPath)} `;
-  }, [rootPath, selectedFilePath]);
-
-  const changeContextPackText = useMemo(() => {
-    if (!gitContext?.available && changedFileContextLines.length === 0) return '';
-    return [
-      gitContext?.root || rootPath ? `Git root：${gitContext?.root ?? rootPath}` : '',
-      gitContext?.branch ? `Branch：${gitContext.branch}` : '',
-      changedFileContextLines.length > 0
-        ? `Changed files：\n${changedFileContextLines.join('\n')}`
-        : 'Changed files：none',
-    ].filter(Boolean).join('\n') + '\n';
-  }, [changedFileContextLines, gitContext, rootPath]);
-
-  const searchContextText = useMemo(() => {
-    if (!deferredFileQuery.trim()) return '';
-    const results = filteredChangedFiles
-      .slice(0, MAX_CONTEXT_PACK_FILES)
-      .map(([path, file]) => `- ${file.status} ${buildPromptReference(path, rootPath)}`);
-    return results.length > 0 ? `${results.join('\n')}\n` : '';
-  }, [deferredFileQuery, filteredChangedFiles, rootPath]);
-
-  const recentContextText = useMemo(() => {
-    if (recentReferences.length === 0) return '';
-    const refs = recentReferences
-      .slice(0, MAX_CONTEXT_PACK_FILES)
-      .map((item) => `- ${buildPromptReference(item.path, rootPath)}`);
-    return `${refs.join('\n')}\n`;
-  }, [recentReferences, rootPath]);
 
   const insertGitContext = useCallback(() => {
     if (!gitContextInputText) return;
@@ -1662,7 +1655,7 @@ export function RightSidebar(
 
   const fileExplorerNavigation = (
     <div className="sticky top-0 z-10 border-b border-border/15 bg-surface/95 px-2.5 py-1.5 backdrop-blur">
-      <div className="flex min-h-9 items-center gap-1.5">
+      <div className="flex min-h-9 flex-wrap items-center gap-x-1.5 gap-y-0.5">
         <button
           type="button"
           onClick={goToExplorerParent}
@@ -1693,13 +1686,46 @@ export function RightSidebar(
         >
           <RiRefresh size={13} />
         </button>
-        <div className="mx-1 h-4 w-px shrink-0 bg-border/20" />
-        <div className="min-w-0 flex-1" title={fileTreeRoot ?? undefined}>
-          <div className="flex min-w-0 items-center gap-1.5">
-            <span className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-              {t('rightSidebar.browsingLocation')}
-            </span>
-            <span className="truncate text-[12px] font-medium text-foreground">{explorerName}</span>
+        <button
+          type="button"
+          onClick={togglePinnedExplorerRoot}
+          disabled={!canPinFileTreeRoot}
+          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition disabled:cursor-not-allowed disabled:opacity-35 active:scale-95 ${fileTreeRootPinned ? 'bg-primary/15 text-primary hover:bg-primary/25' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
+          aria-label={fileTreeRootPinned ? t('rightSidebar.unpinCurrentFolder') : t('rightSidebar.pinCurrentFolder')}
+          title={fileTreeRootPinned ? t('rightSidebar.unpinCurrentFolder') : t('rightSidebar.pinCurrentFolder')}
+        >
+          {fileTreeRootPinned ? <RiPinOff size={13} /> : <RiPin size={13} />}
+        </button>
+        <button
+          type="button"
+          onClick={toggleShowHiddenFiles}
+          aria-pressed={showHiddenFiles}
+          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition active:scale-95 ${showHiddenFiles ? 'bg-primary/15 text-primary hover:bg-primary/25' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
+          aria-label={showHiddenFiles ? t('rightSidebar.hideHiddenFiles') : t('rightSidebar.showHiddenFiles')}
+          title={showHiddenFiles ? t('rightSidebar.hideHiddenFiles') : t('rightSidebar.showHiddenFiles')}
+        >
+          {showHiddenFiles ? <RiEye size={13} /> : <RiEyeOff size={13} />}
+        </button>
+        <div className="mx-1 hidden h-4 w-px shrink-0 bg-border/20 sm:block" />
+        <div className="min-w-0 flex-1 basis-full pt-0.5 sm:basis-0 sm:pt-0" title={fileTreeRoot ?? undefined}>
+          <div className="flex min-w-0 items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                {t('rightSidebar.browsingLocation')}
+              </span>
+              <span className="truncate text-[12px] font-medium text-foreground">{explorerName}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => fileTreeRoot && insertPathReference(fileTreeRoot)}
+              disabled={!fileTreeRoot}
+              className="inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary transition hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
+              aria-label={t('rightSidebar.insertCurrentFolder')}
+              title={t('rightSidebar.insertCurrentFolder')}
+            >
+              <RiLink size={12} />
+              <span>{t('rightSidebar.insertCurrentFolderShort')}</span>
+            </button>
           </div>
           {fileTreeRoot && (
             <div className="mt-0.5 truncate text-[10px] text-muted-foreground/75">
@@ -1716,6 +1742,46 @@ export function RightSidebar(
           </span>
         )}
       </div>
+      {rootPath && (pinnedExplorerRoots.length > 0 || browsingOutsideProject) && (
+        <div className="mt-1 flex items-center gap-1 overflow-x-auto pb-0.5 text-[11px]">
+          <span className="shrink-0 px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+            {t('rightSidebar.pinnedFolders')}
+          </span>
+          <button
+            type="button"
+            onClick={goToProjectRoot}
+            className={`inline-flex max-w-[9rem] shrink-0 items-center gap-1 rounded-full px-2 py-0.5 font-medium transition active:scale-95 ${fileTreeRoot === rootPath ? 'bg-surface-elevated text-foreground' : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
+            title={rootPath}
+          >
+            <RiHome size={10} className="shrink-0" />
+            <span className="truncate">{rootName}</span>
+          </button>
+          {pinnedExplorerRoots.map((path) => {
+            const active = fileTreeRoot === path;
+            return (
+              <span key={path} className={`group inline-flex max-w-[12rem] shrink-0 items-center rounded-full transition ${active ? 'bg-primary/15 text-primary' : 'bg-background-subtle text-foreground hover:bg-surface-2'}`} title={path}>
+                <button
+                  type="button"
+                  onClick={() => setExplorerRoot(path)}
+                  className="inline-flex min-w-0 items-center gap-1 px-2 py-0.5 font-medium active:scale-95"
+                >
+                  <RiPin size={10} className="shrink-0" />
+                  <span className="truncate">{getPathBasename(path)}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => unpinExplorerRoot(path)}
+                  className="mr-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                  aria-label={t('rightSidebar.unpinFolder', { name: getPathBasename(path) })}
+                  title={t('rightSidebar.unpinFolder', { name: getPathBasename(path) })}
+                >
+                  <RiCloseLine size={9} />
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 
@@ -1896,51 +1962,10 @@ export function RightSidebar(
           </div>
         )}
 
-        {/* "Insert X" preset chips — always render so toggling visibility
-            never reflows the header. The list of presets is a stable order
-            and each chip occupies its own slot; we just hide unused ones. */}
-        {(() => {
-          const presets: { key: string; text: string; label: string; tone: 'primary' | 'accent' | 'subtle'; title: string }[] = [
-            { key: 'changes', text: changeContextPackText, label: t('rightSidebar.presetAllChanges'), tone: 'primary', title: t('rightSidebar.insertGitContext') },
-            { key: 'current', text: currentFileContextText, label: t('rightSidebar.presetCurrentFile'), tone: 'accent', title: t('rightSidebar.presetCurrentFile') },
-            { key: 'search', text: searchContextText, label: t('rightSidebar.presetSearchResults'), tone: 'subtle', title: t('rightSidebar.presetSearchResults') },
-            { key: 'recent', text: recentContextText, label: t('rightSidebar.presetRecent'), tone: 'subtle', title: t('rightSidebar.presetRecent') },
-          ];
-          const visible = presets.filter((p) => Boolean(p.text));
-          return (
-            <div className="mt-2 flex h-7 gap-1 overflow-x-auto pb-0.5 text-[11px] font-semibold">
-              {presets.map((preset) => {
-                const isVisible = visible.some((v) => v.key === preset.key);
-                const toneClass = !isVisible
-                  ? 'pointer-events-none invisible'
-                  : preset.tone === 'primary'
-                    ? 'bg-primary/15 text-primary hover:bg-primary/25'
-                    : preset.tone === 'accent'
-                      ? 'bg-accent/15 text-accent hover:bg-accent/25'
-                      : 'bg-background-subtle text-foreground hover:bg-surface-2';
-                return (
-                  <button
-                    key={preset.key}
-                    type="button"
-                    tabIndex={isVisible ? 0 : -1}
-                    aria-hidden={!isVisible}
-                    onClick={() => insertContextText(preset.label, preset.text)}
-                    className={`inline-flex shrink-0 items-center rounded-full px-2.5 py-1 transition active:scale-95 ${toneClass}`}
-                    title={preset.title}
-                  >
-                    {t('rightSidebar.insertPreset', { label: preset.label })}
-                  </button>
-                  );
-              })}
-            </div>
-          );
-        })()}
-
-        {/* Recent references — always render the row height so toggling
-            doesn't shift the header. Empty list collapses to a 0-height slot
-            but still occupies the layout baseline. */}
-        <div className="mt-2 h-6">
-          {recentReferences.length > 0 && (
+        {/* Recent references — only rendered when there are entries so the
+            header stays compact (no empty placeholder slot). */}
+        {recentReferences.length > 0 && (
+          <div className="mt-2 h-6">
             <div className="flex h-full items-center gap-1 overflow-x-auto pb-0.5">
               <span className="shrink-0 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">{t('rightSidebar.recent')}</span>
               {recentReferences.slice(0, MAX_RECENT_REFERENCES).map((item) => {
@@ -1967,17 +1992,42 @@ export function RightSidebar(
                 {t('common.clear')}
               </button>
             </div>
-          )}
-        </div>
-
-        {/* Tab bar — non-Git workspaces reduce to Files only. Mobile collapses
-            the third "File" tab because file preview is reachable via Files.
-            Wide desktop also hides it because preview is side-by-side there. */}
-        {gitKnownUnavailable ? (
-          <div className="mt-2 flex items-center justify-center rounded-md bg-background-subtle p-2 text-[11px] font-medium text-foreground">
-            <RiFolder size={12} className="mr-1" />
-            {t('rightSidebar.tabFiles')}
           </div>
+        )}
+
+        {/* Tab bar — non-Git workspaces drop the Git/Changes tabs. On mobile
+            (overlay preview) and wide (side-by-side preview) layouts the file
+            browser fills the panel with no tab bar at all; only the medium
+            desktop layout keeps a Files/Preview switch. */}
+        {gitKnownUnavailable ? (
+          !isMobile && !isWide ? (
+            <div className="mt-2 grid grid-cols-2 gap-0.5 rounded-md bg-background-subtle p-0.5">
+              <button
+                type="button"
+                onClick={() => setRightTab('files')}
+                className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+                  effectiveRightTab === 'files'
+                    ? 'bg-surface-elevated text-foreground'
+                    : 'text-muted-foreground hover:bg-surface-2'
+                }`}
+              >
+                <RiFolder size={12} />
+                {t('rightSidebar.tabFiles')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setRightTab('file')}
+                className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
+                  effectiveRightTab === 'file'
+                    ? 'bg-surface-elevated text-foreground'
+                    : 'text-muted-foreground hover:bg-surface-2'
+                }`}
+              >
+                <RiFileText size={12} />
+                {t('rightSidebar.tabPreview')}
+              </button>
+            </div>
+          ) : null
         ) : (
           <div className={`mt-2 grid gap-0.5 rounded-md bg-background-subtle p-0.5 ${isMobile ? 'grid-cols-3' : isWide ? 'grid-cols-3' : 'grid-cols-4'}`}>
             <button
@@ -2085,6 +2135,9 @@ export function RightSidebar(
                   rootPath={fileTreeRoot ?? ''}
                   onFileSelect={handleFileSelect}
                   onPathReference={insertPathReference}
+                  onDirectoryRoot={openDirectoryAsExplorerRoot}
+                  onDirectoryPinToggle={togglePinnedDirectory}
+                  pinnedDirectoryPaths={pinnedExplorerRootSet}
                   selectedFilePath={selectedFilePath}
                   query={deferredFileQuery}
                 />
@@ -2112,6 +2165,9 @@ export function RightSidebar(
                   rootPath={fileTreeRoot ?? ''}
                   onFileSelect={handleFileSelect}
                   onPathReference={insertPathReference}
+                  onDirectoryRoot={openDirectoryAsExplorerRoot}
+                  onDirectoryPinToggle={togglePinnedDirectory}
+                  pinnedDirectoryPaths={pinnedExplorerRootSet}
                   selectedFilePath={selectedFilePath}
                   query={deferredFileQuery}
                 />
@@ -2138,6 +2194,9 @@ export function RightSidebar(
                 rootPath={fileTreeRoot ?? ''}
                 onFileSelect={handleFileSelect}
                 onPathReference={insertPathReference}
+                onDirectoryRoot={openDirectoryAsExplorerRoot}
+                onDirectoryPinToggle={togglePinnedDirectory}
+                pinnedDirectoryPaths={pinnedExplorerRootSet}
                 selectedFilePath={selectedFilePath}
                 query={deferredFileQuery}
               />

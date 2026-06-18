@@ -7,6 +7,9 @@ import {
   File as RiFile,
   FileCode as RiFileCode,
   Loader2 as RiLoader,
+  Pin as RiPin,
+  PinOff as RiPinOff,
+  MoreHorizontal as RiMoreHorizontal,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
 import { listDirectory, searchFilesStream, type FileEntry, type FileSearchEngine } from '../../terminal/api';
@@ -16,6 +19,9 @@ interface FileTreeProps {
   rootPath: string;
   onFileSelect: (path: string) => void;
   onPathReference?: (path: string) => void;
+  onDirectoryRoot?: (path: string) => void;
+  onDirectoryPinToggle?: (path: string) => void;
+  pinnedDirectoryPaths?: Set<string>;
   selectedFilePath: string | null;
   query?: string;
 }
@@ -23,6 +29,7 @@ interface FileTreeProps {
 const CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.rb', '.php', '.swift', '.kt', '.sh', '.css', '.scss', '.html', '.json', '.yaml', '.yml', '.toml', '.md']);
 const SEARCH_INITIAL_VISIBLE = 120;
 const SEARCH_LOAD_MORE_STEP = 120;
+const EMPTY_PINNED_DIRECTORY_PATHS = new Set<string>();
 
 const CHANGE_STYLES: Record<string, { label: string; className: string; title: string }> = {
   added: { label: 'A', className: 'text-[color:var(--diff-insert-strong)]', title: 'Added' },
@@ -96,6 +103,9 @@ interface FileTreeItemProps {
   depth: number;
   onFileSelect: (path: string) => void;
   onPathReference?: (path: string) => void;
+  onDirectoryRoot?: (path: string) => void;
+  onDirectoryPinToggle?: (path: string) => void;
+  pinnedDirectoryPaths: Set<string>;
   selectedFilePath: string | null;
   queryLower: string;
 }
@@ -105,6 +115,9 @@ const FileTreeItem = memo(function FileTreeItem({
   depth,
   onFileSelect,
   onPathReference,
+  onDirectoryRoot,
+  onDirectoryPinToggle,
+  pinnedDirectoryPaths,
   selectedFilePath,
   queryLower,
 }: FileTreeItemProps) {
@@ -112,12 +125,16 @@ const FileTreeItem = memo(function FileTreeItem({
   // 精确订阅：每个节点只关心和自己相关的字段
   const isExpanded = useSidebarStore((s) => s.expandedPaths.has(node.path));
   const children = useSidebarStore((s) => s.directoryCache.get(node.path));
+  const showHiddenFiles = useSidebarStore((s) => s.showHiddenFiles);
   const toggleExpanded = useSidebarStore((s) => s.toggleExpanded);
   const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
   const [loading, setLoading] = useState(false);
+  const [directoryActionsOpen, setDirectoryActionsOpen] = useState(false);
   const loadAbortRef = useRef<AbortController | null>(null);
+  const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const isSelected = node.path === selectedFilePath;
   const showChildren = node.type === 'directory' && (isExpanded || Boolean(queryLower));
+  const isPinnedDirectory = node.type === 'directory' && pinnedDirectoryPaths.has(node.path);
 
   const visibleChildren = useMemo(() => {
     if (!children) return undefined;
@@ -136,7 +153,7 @@ const FileTreeItem = memo(function FileTreeItem({
       loadAbortRef.current = controller;
       setLoading(true);
       try {
-        const result = await listDirectory(node.path, controller.signal);
+        const result = await listDirectory(node.path, controller.signal, showHiddenFiles);
         const treeNodes = toTreeNodes(result.entries);
         setDirectoryCache(node.path, treeNodes);
       } catch (error) {
@@ -148,7 +165,7 @@ const FileTreeItem = memo(function FileTreeItem({
         setLoading(false);
       }
     }
-  }, [node.path, loading, setDirectoryCache]);
+  }, [node.path, loading, setDirectoryCache, showHiddenFiles]);
 
   const handleToggle = useCallback(async () => {
     if (node.type !== 'directory') {
@@ -172,12 +189,47 @@ const FileTreeItem = memo(function FileTreeItem({
     onPathReference?.(node.path);
   }, [onPathReference, node.path]);
 
+  const handleDirectoryRootClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    onDirectoryRoot?.(node.path);
+    setDirectoryActionsOpen(false);
+  }, [node.path, onDirectoryRoot]);
+
+  const handleDirectoryPinClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    onDirectoryPinToggle?.(node.path);
+    setDirectoryActionsOpen(false);
+  }, [node.path, onDirectoryPinToggle]);
+
+  const handleDirectoryMoreClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    setDirectoryActionsOpen((open) => !open);
+  }, []);
+
+  useEffect(() => {
+    if (!directoryActionsOpen) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && actionMenuRef.current?.contains(target)) return;
+      setDirectoryActionsOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDirectoryActionsOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnPointerDown);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [directoryActionsOpen]);
+
   useEffect(() => () => {
     loadAbortRef.current?.abort();
   }, []);
 
   return (
-    <div>
+    <div ref={actionMenuRef} className="relative">
       <button
         type="button"
         onClick={handleToggle}
@@ -205,6 +257,15 @@ const FileTreeItem = memo(function FileTreeItem({
         <span className={`min-w-0 flex-1 truncate ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
         {loading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
         <ChangeBadge path={node.path} />
+        {node.type === 'directory' && (onDirectoryRoot || onDirectoryPinToggle) && (
+          <span
+            onClick={handleDirectoryMoreClick}
+            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${directoryActionsOpen ? 'bg-surface-elevated text-foreground opacity-100' : 'bg-background-subtle hover:bg-surface-2 hover:text-foreground'}`}
+            title={t('fileTree.moreDirActions')}
+          >
+            <RiMoreHorizontal size={13} />
+          </span>
+        )}
         {onPathReference && (
           <span
             onClick={handleReferenceClick}
@@ -216,6 +277,33 @@ const FileTreeItem = memo(function FileTreeItem({
         )}
       </button>
 
+      {node.type === 'directory' && directoryActionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
+        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-black/20 backdrop-blur animate-fade-in">
+          {onDirectoryRoot && (
+            <button
+              type="button"
+              onClick={handleDirectoryRootClick}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
+              title={t('fileTree.openDirRootTitle')}
+            >
+              <RiFolderOpen size={13} className="shrink-0 text-amber-300/85" />
+              <span className="min-w-0 flex-1 truncate">{t('fileTree.openDirRoot')}</span>
+            </button>
+          )}
+          {onDirectoryPinToggle && (
+            <button
+              type="button"
+              onClick={handleDirectoryPinClick}
+              className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium transition active:scale-[0.99] ${isPinnedDirectory ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}
+              title={isPinnedDirectory ? t('fileTree.unpinDirTitle') : t('fileTree.pinDirTitle')}
+            >
+              {isPinnedDirectory ? <RiPinOff size={13} className="shrink-0" /> : <RiPin size={13} className="shrink-0" />}
+              <span className="min-w-0 flex-1 truncate">{isPinnedDirectory ? t('fileTree.unpinDir') : t('fileTree.pinDir')}</span>
+            </button>
+          )}
+        </div>
+      )}
+
       {showChildren && visibleChildren && visibleChildren.length > 0 && (
         <div className={depth === 0 ? 'mt-0.5' : ''}>
           {visibleChildren.map((child) => (
@@ -225,6 +313,9 @@ const FileTreeItem = memo(function FileTreeItem({
               depth={depth + 1}
               onFileSelect={onFileSelect}
               onPathReference={onPathReference}
+              onDirectoryRoot={onDirectoryRoot}
+              onDirectoryPinToggle={onDirectoryPinToggle}
+              pinnedDirectoryPaths={pinnedDirectoryPaths}
               selectedFilePath={selectedFilePath}
               queryLower={queryLower}
             />
@@ -240,6 +331,9 @@ interface FileSearchResultItemProps {
   rootPath: string;
   onFileSelect: (path: string) => void;
   onPathReference?: (path: string) => void;
+  onDirectoryRoot?: (path: string) => void;
+  onDirectoryPinToggle?: (path: string) => void;
+  pinnedDirectoryPaths: Set<string>;
   selectedFilePath: string | null;
 }
 
@@ -248,65 +342,141 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   rootPath,
   onFileSelect,
   onPathReference,
+  onDirectoryRoot,
+  onDirectoryPinToggle,
+  pinnedDirectoryPaths,
   selectedFilePath,
 }: FileSearchResultItemProps) {
   const { t } = useI18n();
   const isSelected = node.path === selectedFilePath;
+  const isPinnedDirectory = node.type === 'directory' && pinnedDirectoryPaths.has(node.path);
+  const [directoryActionsOpen, setDirectoryActionsOpen] = useState(false);
+  const actionMenuRef = useRef<HTMLDivElement | null>(null);
 
   const handleClick = useCallback(() => {
-    if (node.type !== 'directory') onFileSelect(node.path);
-  }, [node.path, node.type, onFileSelect]);
+    if (node.type === 'directory') onDirectoryRoot?.(node.path);
+    else onFileSelect(node.path);
+  }, [node.path, node.type, onDirectoryRoot, onFileSelect]);
 
   const handleReferenceClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     onPathReference?.(node.path);
   }, [onPathReference, node.path]);
 
+  const handleDirectoryPinClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    onDirectoryPinToggle?.(node.path);
+    setDirectoryActionsOpen(false);
+  }, [node.path, onDirectoryPinToggle]);
+
+  const handleDirectoryMoreClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    setDirectoryActionsOpen((open) => !open);
+  }, []);
+
+  useEffect(() => {
+    if (!directoryActionsOpen) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && actionMenuRef.current?.contains(target)) return;
+      setDirectoryActionsOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDirectoryActionsOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnPointerDown);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [directoryActionsOpen]);
+
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      className={`group flex w-full items-center gap-1 rounded px-2 py-1.5 text-left text-[13px] ${
-        isSelected
-          ? 'bg-surface-elevated text-foreground'
-          : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
-      }`}
-      title={node.path}
-    >
-      {node.type === 'directory' ? (
-        <>
-          <span className="w-[14px] shrink-0" />
-          <RiFolder size={14} className="shrink-0 text-amber-300/80" />
-        </>
-      ) : (
-        <>
-          <span className="w-[14px] shrink-0" />
-          <span className={isSelected ? 'text-primary' : 'text-muted-foreground/80'}>{getFileIcon(node.name, node.type)}</span>
-        </>
-      )}
-      <span className="min-w-0 flex-1">
-        <span className={`block truncate ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
-        <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, node.path)}</span>
-      </span>
-      <ChangeBadge path={node.path} />
-      {onPathReference && (
-        <span
-          onClick={handleReferenceClick}
-          className="ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100"
-          title={t('fileTree.insertRefTitle')}
-        >
-          {t('fileTree.insertRef')}
+    <div ref={actionMenuRef} className="relative">
+      <button
+        type="button"
+        onClick={handleClick}
+        className={`group flex w-full items-center gap-1 rounded px-2 py-1.5 text-left text-[13px] ${
+          isSelected
+            ? 'bg-surface-elevated text-foreground'
+            : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+        }`}
+        title={node.path}
+      >
+        {node.type === 'directory' ? (
+          <>
+            <span className="w-[14px] shrink-0" />
+            <RiFolder size={14} className="shrink-0 text-amber-300/80" />
+          </>
+        ) : (
+          <>
+            <span className="w-[14px] shrink-0" />
+            <span className={isSelected ? 'text-primary' : 'text-muted-foreground/80'}>{getFileIcon(node.name, node.type)}</span>
+          </>
+        )}
+        <span className="min-w-0 flex-1">
+          <span className={`block truncate ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
+          <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, node.path)}</span>
         </span>
+        <ChangeBadge path={node.path} />
+        {node.type === 'directory' && onDirectoryPinToggle && (
+          <span
+            onClick={handleDirectoryMoreClick}
+            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${directoryActionsOpen ? 'bg-surface-elevated text-foreground opacity-100' : 'bg-background-subtle hover:bg-surface-2 hover:text-foreground'}`}
+            title={t('fileTree.moreDirActions')}
+          >
+            <RiMoreHorizontal size={13} />
+          </span>
+        )}
+        {onPathReference && (
+          <span
+            onClick={handleReferenceClick}
+            className="ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100"
+            title={t('fileTree.insertRefTitle')}
+          >
+            {t('fileTree.insertRef')}
+          </span>
+        )}
+      </button>
+      {node.type === 'directory' && directoryActionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
+        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-black/20 backdrop-blur animate-fade-in">
+          {onDirectoryRoot && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDirectoryRoot(node.path);
+                setDirectoryActionsOpen(false);
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
+              title={t('fileTree.openDirRootTitle')}
+            >
+              <RiFolderOpen size={13} className="shrink-0 text-amber-300/85" />
+              <span className="min-w-0 flex-1 truncate">{t('fileTree.openDirRoot')}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleDirectoryPinClick}
+            className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium transition active:scale-[0.99] ${isPinnedDirectory ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}
+            title={isPinnedDirectory ? t('fileTree.unpinDirTitle') : t('fileTree.pinDirTitle')}
+          >
+            {isPinnedDirectory ? <RiPinOff size={13} className="shrink-0" /> : <RiPin size={13} className="shrink-0" />}
+            <span className="min-w-0 flex-1 truncate">{isPinnedDirectory ? t('fileTree.unpinDir') : t('fileTree.pinDir')}</span>
+          </button>
+        </div>
       )}
-    </button>
+    </div>
   );
 });
 
-export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFilePath, query = '' }: FileTreeProps) {
+export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryRoot, onDirectoryPinToggle, pinnedDirectoryPaths = EMPTY_PINNED_DIRECTORY_PATHS, selectedFilePath, query = '' }: FileTreeProps) {
   const { t } = useI18n();
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
   const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
+  const showHiddenFiles = useSidebarStore((s) => s.showHiddenFiles);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rootTruncated, setRootTruncated] = useState(false);
@@ -335,7 +505,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
     setLoading(true);
     setError(null);
 
-    listDirectory(rootPath, controller.signal)
+    listDirectory(rootPath, controller.signal, showHiddenFiles)
       .then((result) => {
         if (cancelled) return;
         const treeNodes = toTreeNodes(result.entries);
@@ -354,7 +524,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
       cancelled = true;
       controller.abort();
     };
-  }, [queryLower, rootEntries, rootPath, setDirectoryCache]);
+  }, [queryLower, rootEntries, rootPath, setDirectoryCache, showHiddenFiles]);
 
   useEffect(() => {
     if (!rootPath || !queryLower) {
@@ -405,7 +575,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
           done: true,
         }));
       }
-    }, controller.signal)
+    }, controller.signal, showHiddenFiles)
       .catch((err) => {
         if (cancelled || isAbortError(err)) return;
         setSearchError(err instanceof Error ? err.message : 'Failed to search files');
@@ -420,7 +590,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
       cancelled = true;
       controller.abort();
     };
-  }, [query, queryLower, rootPath]);
+  }, [query, queryLower, rootPath, showHiddenFiles]);
 
   useEffect(() => {
     if (!queryLower) return;
@@ -496,6 +666,9 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
                 rootPath={rootPath}
                 onFileSelect={onFileSelect}
                 onPathReference={onPathReference}
+                onDirectoryRoot={onDirectoryRoot}
+                onDirectoryPinToggle={onDirectoryPinToggle}
+                pinnedDirectoryPaths={pinnedDirectoryPaths}
                 selectedFilePath={selectedFilePath}
               />
             ))}
@@ -558,6 +731,9 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, selectedFile
           depth={0}
           onFileSelect={onFileSelect}
           onPathReference={onPathReference}
+          onDirectoryRoot={onDirectoryRoot}
+          onDirectoryPinToggle={onDirectoryPinToggle}
+          pinnedDirectoryPaths={pinnedDirectoryPaths}
           selectedFilePath={selectedFilePath}
           queryLower={queryLower}
         />

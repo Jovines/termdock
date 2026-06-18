@@ -163,3 +163,42 @@ export function AgentCountBadge({
     </span>
   );
 }
+
+/**
+ * 移动端顶部栏的零占位汇总：挂在左侧 sessions 按钮角上，避免挤占 tab 横向空间。
+ * 绿色=运行中，黄色=等待/待查看；双状态时上下堆叠，单状态时只显示一个角标。
+ */
+export function AgentCompactStatusOverlay({
+  runningCount,
+  reviewCount,
+  className = '',
+}: {
+  runningCount: number;
+  reviewCount: number;
+  className?: string;
+}): React.ReactElement | null {
+  const items: Array<{ key: 'running' | 'review'; count: number; className: string }> = [];
+  if (runningCount > 0) {
+    items.push({ key: 'running', count: runningCount, className: 'bg-green-400 text-black' });
+  }
+  if (reviewCount > 0) {
+    items.push({ key: 'review', count: reviewCount, className: 'bg-yellow-400 text-black' });
+  }
+  if (items.length === 0) return null;
+
+  return (
+    <span
+      aria-hidden="true"
+      className={`pointer-events-none absolute -right-1 ${items.length > 1 ? 'top-0.5 flex flex-col gap-0.5' : '-top-1'} ${className}`}
+    >
+      {items.map((item) => (
+        <span
+          key={item.key}
+          className={`flex h-3 min-w-3 items-center justify-center rounded-full px-0.5 text-[7px] font-bold leading-3 shadow-sm ring-1 ring-background ${item.className}`}
+        >
+          {item.count > 9 ? '9+' : item.count}
+        </span>
+      ))}
+    </span>
+  );
+}

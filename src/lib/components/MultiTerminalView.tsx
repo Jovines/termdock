@@ -201,42 +201,6 @@ function getValidPersistedActiveSessionId(persisted: PersistedSession[], activeS
     : persisted[0]?.sessionId ?? null;
 }
 
-function orderPersistedSessionsByActiveSpread(
-  persisted: PersistedSession[],
-  activeSessionId: string | null,
-): PersistedSession[] {
-  if (persisted.length <= 1) return persisted;
-
-  const activeIndex = activeSessionId
-    ? persisted.findIndex((session) => session.sessionId === activeSessionId)
-    : 0;
-  const centerIndex = activeIndex >= 0 ? activeIndex : 0;
-  const ordered: PersistedSession[] = [persisted[centerIndex]];
-
-  for (let offset = 1; ordered.length < persisted.length; offset += 1) {
-    const leftIndex = centerIndex - offset;
-    const rightIndex = centerIndex + offset;
-
-    if (leftIndex >= 0) {
-      ordered.push(persisted[leftIndex]);
-    }
-    if (rightIndex < persisted.length) {
-      ordered.push(persisted[rightIndex]);
-    }
-  }
-
-  return ordered;
-}
-
-function materializeRestoredSessionsInPersistedOrder(
-  persisted: PersistedSession[],
-  restoredByPersistedId: Map<string, TerminalSession>,
-): TerminalSession[] {
-  return persisted
-    .map((session) => restoredByPersistedId.get(session.sessionId))
-    .filter((session): session is TerminalSession => session !== undefined);
-}
-
 function getSwipeEventPointerType(event: unknown): string {
   if (!event || typeof event !== 'object') {
     return 'unknown';
@@ -329,7 +293,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     isLoading,
     openSession,
     setActiveSession,
-    updateSessionBackendId,
     removeSession: removePersistedSession,
     renameSession,
     resetSessionCustomName,
@@ -708,51 +671,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     });
   }, [sessions, activeSessionId, onSessionDataUpdate]);
 
-  // 通过服务端 Session Inventory 恢复或打开单个 session。
-  // create / attach / restore 统一走同一个原子 open 接口，避免前端先本地
-  // append 一条，再让持久化层去重造成闪烁或重复创建。
-  const restoreOrCreateSession = useCallback(async (
-    session: typeof persistedSessions[0],
-  ): Promise<TerminalSession> => {
-    const { sessionId, name } = session;
-    const mode: TerminalMode = session.mode === 'tmux' || session.mode === 'shell'
-      ? session.mode
-      : defaultSessionMode;
-    const configuredDefaultTmuxName = defaultTmuxSessionName.trim();
-    const persistedTmuxName = (session.tmuxSessionName || '').trim();
-    const tmuxSessionName = mode === 'tmux'
-      ? (persistedTmuxName || configuredDefaultTmuxName || generateTmuxSessionName(sessionId))
-      : null;
-
-    const result = await openSession({
-      preferredFrontendSessionId: sessionId,
-      name,
-      customName: session.customName === true,
-      mode,
-      tmuxSessionName,
-      termType: 'xterm-256color',
-    });
-    const canonical = result.session;
-    const terminalSession = result.terminalSession;
-    debugSession('[Session] Inventory restore/open:', {
-      requestedFrontendSessionId: sessionId,
-      frontendSessionId: canonical.sessionId,
-      backendSessionId: terminalSession.sessionId,
-      reused: result.reused,
-      mode: canonical.mode,
-      tmuxSessionName: canonical.tmuxSessionName,
-    });
-
-    return {
-      id: canonical.sessionId,
-      name: canonical.name,
-      customName: canonical.customName === true,
-      sessionId: terminalSession.sessionId,
-      mode: terminalSession.mode ?? canonical.mode,
-      tmuxSessionName: terminalSession.tmuxSessionName ?? canonical.tmuxSessionName,
-    };
-  }, [defaultSessionMode, defaultTmuxSessionName, debugSession, openSession]);
-
   // 恢复会话（尝试复用现有 session）- 只执行一次
   useEffect(() => {
     if (isLoading) return;
@@ -760,109 +678,73 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     restoredRef.current = true;
 
     const nextActiveSessionId = getValidPersistedActiveSessionId(persistedSessions, persistedActiveId);
-    const restoreQueue = orderPersistedSessionsByActiveSpread(persistedSessions, nextActiveSessionId);
 
-    debugSession('[Session] Restoring', persistedSessions.length, 'persisted sessions');
+    // 方案 A：一次性把所有 tab 渲染出来。
+    // tab UI 不依赖后端 PTY attach 完成，每个 TerminalView 挂载后会各自跑
+    // ensureSession —— store 里有 backendSessionId 就 health-check 复用，没有
+    // 就自己 createSession。所以这里直接用 persistedSessions 同步渲染全部 tab，
+    // 后端连接由各 TerminalView 并发完成，避免之前"串行 open 一个才 setSessions
+    // 一个"导致 tab 从 1、2、3… 逐个长出来的卡顿。
+    const runtimeSessions = dedupeRuntimeSessions(persistedSessions.map(toRuntimeSession));
+
+    debugSession('[Session] Restoring', runtimeSessions.length, 'persisted sessions (one-shot)');
     logSwiperState('[swiper:restore-start]', {
       persistedSessionIds: persistedSessions.map((session) => session.sessionId),
       nextActiveSessionId,
-      restoreQueueSessionIds: restoreQueue.map((session) => session.sessionId),
     });
 
-    const restore = async () => {
-      let sessionCount = 0;
-      try {
-        const restoredByPersistedId = new Map<string, TerminalSession>();
-        for (const session of restoreQueue) {
-          const restoredSession = await restoreOrCreateSession(session);
-          restoredByPersistedId.set(session.sessionId, restoredSession);
-
-          setSessions(materializeRestoredSessionsInPersistedOrder(persistedSessions, restoredByPersistedId));
-          if (restoredSession.id === nextActiveSessionId) {
-            setActiveSessionId(restoredSession.id);
-          }
-
-          if (restoredSession.sessionId) {
-            void updateSessionBackendId(restoredSession.id, restoredSession.sessionId);
-            useTerminalStore.getState().setTerminalSession(restoredSession.id, {
-              sessionId: restoredSession.sessionId,
-              cols: 80,
-              rows: 24,
-              mode: restoredSession.mode,
-              tmuxSessionName: restoredSession.tmuxSessionName,
-              history: restoredSession.history,
-            });
-          }
+    if (runtimeSessions.length > 0) {
+      // 预填 store：让带 backendSessionId 的 session 走 TerminalView 的复用路径，
+      // 避免 ensureSession 误判为需要新建。backendSessionId 来自 inventory，
+      // 无需再写回服务端。
+      const store = useTerminalStore.getState();
+      runtimeSessions.forEach((session) => {
+        if (session.sessionId) {
+          store.setTerminalSession(session.id, {
+            sessionId: session.sessionId,
+            cols: 80,
+            rows: 24,
+            mode: session.mode,
+            tmuxSessionName: session.tmuxSessionName,
+            history: session.history,
+          });
         }
-
-        const restored = materializeRestoredSessionsInPersistedOrder(persistedSessions, restoredByPersistedId);
-
-        sessionCount = restored.length;
-        debugSession('[Session] Restored sessions:', restored.length);
-        const restoredSessions = dedupeRuntimeSessions(restored);
-        logSwiperState('[swiper:restore-complete]', {
-          restoredSessionIds: restoredSessions.map((session) => session.id),
-          nextActiveSessionId: nextActiveSessionId || restoredSessions[0]?.id || null,
-        });
-        setSessions(restoredSessions);
-        setActiveSessionId(nextActiveSessionId || restoredSessions[0]?.id || null);
-
-        const store = useTerminalStore.getState();
-        restoredSessions.forEach((session) => {
-          if (session.sessionId) {
-            void updateSessionBackendId(session.id, session.sessionId);
-            store.setTerminalSession(session.id, {
-              sessionId: session.sessionId,
-              cols: 80,
-              rows: 24,
-              mode: session.mode,
-              tmuxSessionName: session.tmuxSessionName,
-              history: session.history,
-            });
-            debugSession('[Session] Updated store for frontend session:', {
-              frontendId: session.id,
-              backendId: session.sessionId,
-              hasHistory: !!(session.history?.length),
-              historyLength: session.history?.length ?? 0,
-            });
-          }
-        });
-      } catch (error) {
-        console.error('[Session] Failed to restore sessions:', error);
-        const fallbackSessions = dedupeRuntimeSessions(persistedSessions.map((session) => ({
-          id: session.sessionId,
-          name: session.name,
-          customName: session.customName === true,
-          sessionId: null as string | null,
-          mode: session.mode === 'tmux' || session.mode === 'shell' ? session.mode : defaultSessionMode,
-          tmuxSessionName: session.tmuxSessionName ?? null,
-        })));
-        setSessions(fallbackSessions);
-        sessionCount = fallbackSessions.length;
-        logSwiperState('[swiper:restore-fallback]', {
-          fallbackSessionIds: fallbackSessions.map((session) => session.id),
-          nextActiveSessionId: nextActiveSessionId || fallbackSessions[0]?.id || null,
-        });
-        setActiveSessionId(nextActiveSessionId || fallbackSessions[0]?.id || null);
-      } finally {
-        // 恢复后若没有任何 session，在设置 isRestoring=false 之前
-        // 同步等待创建完成，确保外部 effect 不会同时触发创建。
-        if (sessionCount === 0) {
-          await handleNewSessionRef.current?.();
+      });
+      // 预填展示名提示（activeProgram / cwd）：来自 inventory / localStorage 缓存。
+      // 这样 tab 首帧就能显示「coco termdock」，不必等 WS 连上后轮询 tmux 才跳变。
+      // WS connected / active-program 事件到达后会用实时值覆盖这里的提示值。
+      persistedSessions.forEach((session) => {
+        if (session.activeProgram != null) {
+          store.setSessionActiveProgram(session.sessionId, session.activeProgram);
         }
-        setIsRestoring(false);
-        requestAnimationFrame(() => syncSwiperToActiveIndex('restore-finished', { immediate: true }));
+        if (session.cwd != null) {
+          store.setSessionCwd(session.sessionId, session.cwd);
+        }
+      });
+
+      setSessions(runtimeSessions);
+      setActiveSessionId(nextActiveSessionId || runtimeSessions[0]?.id || null);
+      logSwiperState('[swiper:restore-complete]', {
+        restoredSessionIds: runtimeSessions.map((session) => session.id),
+        nextActiveSessionId: nextActiveSessionId || runtimeSessions[0]?.id || null,
+      });
+    }
+
+    const finalize = async () => {
+      // 没有任何 session 时，在 isRestoring=false 之前同步等待创建完成，
+      // 确保外部 effect 不会同时触发创建。
+      if (runtimeSessions.length === 0) {
+        await handleNewSessionRef.current?.();
       }
+      setIsRestoring(false);
+      requestAnimationFrame(() => syncSwiperToActiveIndex('restore-finished', { immediate: true }));
     };
 
-    void restore();
+    void finalize();
   }, [
     isLoading,
     persistedSessions,
     persistedActiveId,
-    restoreOrCreateSession,
-    updateSessionBackendId,
-    defaultSessionMode,
     debugSession,
     logSwiperState,
     syncSwiperToActiveIndex,

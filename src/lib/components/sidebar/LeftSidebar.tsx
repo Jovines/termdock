@@ -96,7 +96,7 @@ export function LeftSidebar(
     for (const s of sessions) {
       const ts = sessionStates.get(s.id);
       if (ts?.agentStatus === 'running') running += 1;
-      if (ts?.agentNeedsReview) review += 1;
+      if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) review += 1;
     }
     return { runningCount: running, reviewCount: review };
   }, [sessions, sessionStates]);
@@ -193,7 +193,7 @@ export function LeftSidebar(
           </button>
           <button
             type="button"
-            onClick={() => { onOpenSettings(); closeIfOverlay(); }}
+            onClick={onOpenSettings}
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
             aria-label={t('sidebar.settings')}
             title={t('sidebar.settings')}

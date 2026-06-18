@@ -23,6 +23,7 @@ export default defineConfig({
         'pwa-192x192.png',
         'pwa-512x512.png',
         'maskable-icon-512x512.png',
+        'sw-notifications.js',
         'robots.txt',
         'fonts/*.woff2',
       ],
@@ -58,6 +59,7 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         globIgnores: ['**/apple-splash-*.png'],
+        importScripts: ['sw-notifications.js'],
         // 关键：新 SW 安装完不要 wait，直接 activate；并立刻 claim 已打开的页面。
         // 这样以后无论 dev 还是 prod，用户刷新一次就能拿到最新代码，不再有
         // "PWA 缓存了旧 bundle 导致看不到新功能" 的窘境。
