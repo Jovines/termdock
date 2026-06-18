@@ -3052,6 +3052,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                       } as React.CSSProperties;
                     })()),
               }}
+              onContextMenu={(e) => {
+                // Android Chrome 长按 readonly textarea 会弹出系统文字选择器
+                // （-webkit-touch-callout 只对 iOS 生效）。这里直接拦掉，长按交给
+                // 自研的方向键摇杆手势处理。
+                e.preventDefault();
+              }}
               onFocus={() => {
                 debugTerminal('input anchor focus');
                 requestRefresh('focus', { skipResizePush: true, skipScrollToBottom: true });
