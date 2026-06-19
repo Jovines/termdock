@@ -8,10 +8,14 @@ BACKEND_PORT=9835
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-SERVER_PID_FILE="$ROOT_DIR/.dev-server.pid"
-CLIENT_PID_FILE="$ROOT_DIR/.dev-client.pid"
-SERVER_LOG_FILE="$ROOT_DIR/.dev-server.log"
-CLIENT_LOG_FILE="$ROOT_DIR/.dev-client.log"
+# 运行时产物(pid/log)放系统临时目录,避免污染仓库
+RUNTIME_DIR="${TMPDIR:-/tmp}/termdock-dev"
+mkdir -p "$RUNTIME_DIR"
+
+SERVER_PID_FILE="$RUNTIME_DIR/dev-server.pid"
+CLIENT_PID_FILE="$RUNTIME_DIR/dev-client.pid"
+SERVER_LOG_FILE="$RUNTIME_DIR/dev-server.log"
+CLIENT_LOG_FILE="$RUNTIME_DIR/dev-client.log"
 
 kill_pid_and_children() {
   pid="$1"

@@ -412,6 +412,9 @@ function App() {
   const [sidebarCloseChoiceSessionId, setSidebarCloseChoiceSessionId] = useState<string | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLDivElement | null>(null);
+  // 通知点击 / SW postMessage 请求聚焦的目标 session。会话列表可能还没恢复完，
+  // 先记在 ref 里，等对应 session 出现在列表里再 dispatch 切换。
+  const pendingFocusSessionRef = React.useRef<string | null>(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1139,6 +1142,78 @@ function App() {
     window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
   }, []);
 
+  // 请求聚焦某个 session：若它已在当前会话列表里，立即切换；否则记下来，
+  // 等会话恢复 / inventory 同步后由下面的 effect 补发。
+  const requestFocusSession = useCallback((sessionId: string | null) => {
+    if (!sessionId) return;
+    if (sessions.some((s) => s.id === sessionId)) {
+      pendingFocusSessionRef.current = null;
+      window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
+    } else {
+      pendingFocusSessionRef.current = sessionId;
+    }
+  }, [sessions]);
+
+  // 启动时解析 ?session=<id>（来自通知点击的 SW 导航），切换后清理 query。
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const target = params.get('session');
+    if (!target) return;
+    pendingFocusSessionRef.current = target;
+    params.delete('session');
+    const nextSearch = params.toString();
+    const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+    window.history.replaceState(window.history.state, '', nextUrl);
+  }, []);
+
+  // 监听 SW 转发的「已有窗口」聚焦消息：点击通知时若 PWA 已开着，SW 走
+  // postMessage 而非新开窗口，这里收到后切到目标 session。
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+    const handler = (event: MessageEvent) => {
+      const data = event.data;
+      if (data && data.type === 'termdock:focus-session' && typeof data.sessionId === 'string') {
+        requestFocusSession(data.sessionId);
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', handler);
+    return () => navigator.serviceWorker.removeEventListener('message', handler);
+  }, [requestFocusSession]);
+
+  // 会话列表变化时，补发尚未兑现的聚焦请求（目标 session 刚恢复出来）。
+  useEffect(() => {
+    const pending = pendingFocusSessionRef.current;
+    if (!pending) return;
+    if (sessions.some((s) => s.id === pending)) {
+      pendingFocusSessionRef.current = null;
+      window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: pending }));
+    }
+  }, [sessions]);
+
+  // 按 tab 顺序列出「需要我处理」的 session（waiting / 跑完待查看）。
+  const attentionSessionIds = React.useMemo(() => {
+    const ids: string[] = [];
+    for (const s of sessions) {
+      const ts = terminalSessions.get(s.id);
+      if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) {
+        ids.push(s.id);
+      }
+    }
+    return ids;
+  }, [sessions, terminalSessions]);
+
+  // 一键轮转到下一个待处理 session：从当前 active 之后找第一个，环回到列表头。
+  const handleJumpToNextAttention = useCallback(() => {
+    if (attentionSessionIds.length === 0) return;
+    const fromIndex = activeSessionId ? sessions.findIndex((s) => s.id === activeSessionId) : -1;
+    const next = attentionSessionIds.find((id) => sessions.findIndex((s) => s.id === id) > fromIndex)
+      ?? attentionSessionIds[0];
+    if (next) {
+      window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: next }));
+    }
+  }, [attentionSessionIds, sessions, activeSessionId]);
+
   const copyCwdToClipboard = useCallback(async (sessionId: string) => {
     const ts = useTerminalStore.getState().sessions.get(sessionId);
     const cwd = ts?.cwd;
@@ -1295,6 +1370,18 @@ function App() {
                 className="sm:hidden"
               />
             </button>
+            {attentionSessionIds.length > 0 && (
+              <button
+                type="button"
+                onClick={handleJumpToNextAttention}
+                className="relative inline-flex h-7 shrink-0 items-center gap-1 rounded-md bg-yellow-400/10 px-1.5 text-yellow-400 ring-1 ring-yellow-400/30 transition hover:bg-yellow-400/20 sm:h-8"
+                aria-label={t('agent.jumpToNext')}
+                title={t('agent.jumpToNext')}
+              >
+                <RiBellLine size={14} className="animate-pulse" />
+                <span className="text-[11px] font-semibold leading-none">{attentionSessionIds.length}</span>
+              </button>
+            )}
             <DragDropContext onDragEnd={handleDragEnd}>
             <Droppable droppableId="tabs" direction="horizontal">
               {(provided) => (

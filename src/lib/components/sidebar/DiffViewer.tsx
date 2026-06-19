@@ -1,10 +1,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMoveHorizontal } from 'lucide-react';
-import { parseDiff, Diff, Hunk, Decoration } from 'react-diff-view';
+import { parseDiff, Diff, Hunk, Decoration, tokenize, type HunkData, type HunkTokens } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { getFileDiff, isPreviewableImagePath, readImagePreviewBlob, type FileDiffResponse, type GitChangedFile } from '../../terminal/api';
 import { useI18n } from '../../i18n';
+import { loadRefractor, resolveLanguage, MAX_HIGHLIGHT_BYTES, MAX_HIGHLIGHT_LINE_LENGTH, type RefractorLike } from '../../utils/syntaxHighlight';
 
 const MAX_DIFF_CACHE_ENTRIES = 24;
 
@@ -285,6 +286,48 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
     return parseDiff(diffContent);
   }, [diffContent]);
 
+  // Lazily-loaded refractor singleton, shared with the file preview. Loading is
+  // deferred until a diff actually renders so it never weighs on first paint.
+  const [refractor, setRefractor] = useState<RefractorLike | null>(null);
+  useEffect(() => {
+    if (files.length === 0 || refractor) return;
+    let cancelled = false;
+    loadRefractor()
+      .then((mod) => { if (!cancelled) setRefractor(mod); })
+      .catch(() => { /* highlight is best-effort; fall back to plain diff */ });
+    return () => { cancelled = true; };
+  }, [files.length, refractor]);
+
+  // Per-file syntax tokens keyed by the same identity used to render each file.
+  // Computed only when refractor is ready and the file is a known, reasonably
+  // sized text language — large/binary diffs stay plain to protect the main thread.
+  const fileTokens = useMemo(() => {
+    const map = new Map<string, HunkTokens>();
+    if (!refractor) return map;
+    for (const file of files) {
+      if (file.hunks.length === 0) continue;
+      const language = resolveLanguage(file.newPath || file.oldPath);
+      if (!language || !refractor.registered(language)) continue;
+      let bytes = 0;
+      let tooLong = false;
+      for (const hunk of file.hunks) {
+        for (const change of hunk.changes) {
+          bytes += change.content.length + 1;
+          if (change.content.length > MAX_HIGHLIGHT_LINE_LENGTH) tooLong = true;
+        }
+      }
+      if (tooLong || bytes > MAX_HIGHLIGHT_BYTES) continue;
+      try {
+        const tokens = tokenize(file.hunks as HunkData[], { highlight: true, refractor, language });
+        map.set(`${file.oldRevision}-${file.newRevision}-${file.newPath}`, tokens);
+      } catch {
+        // A single bad file shouldn't break the whole diff view.
+      }
+    }
+    return map;
+  }, [files, refractor]);
+
+
   const totalChanges = useMemo(() => {
     let additions = 0;
     let deletions = 0;
@@ -392,6 +435,7 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
                 viewType="unified"
                 diffType={file.type}
                 hunks={file.hunks}
+                tokens={fileTokens.get(key)}
               >
                 {(hunks) =>
                   hunks.map((hunk, index) => {

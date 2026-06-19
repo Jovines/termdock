@@ -284,6 +284,7 @@ export interface TerminalSessionState {
   // 派生,节省 store setState 时的字符串复制。
   bufferChunks: TerminalChunk[];
   bufferLength: number;
+  lastOutputAt: number | null;
   updatedAt: number;
   history?: string[];  // 从后端恢复的历史输出，仅 shell 模式使用
 }

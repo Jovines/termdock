@@ -646,7 +646,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   const suppressionMs = Math.max(300, Math.min(2000, Math.ceil(totalHistoryBytes / 200)));
                   suppressInputUntilRef.current = Date.now() + suppressionMs;
                   sessionState.history.forEach((chunk) => {
-                    appendToBuffer(storeSessionId, chunk);
+                    appendToBuffer(storeSessionId, chunk, { markActivity: false });
                   });
                   useTerminalStore.getState().setSessionHistory(storeSessionId, []);
                   debugSession(`[Terminal] History restoration complete for ${storeSessionId}`);
@@ -1406,7 +1406,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [activeModifier, handleViewportInput]);
 
-  const detectedPreset = React.useMemo(() => detectToolbarPreset(detectedActiveProgram, toolbarPresets), [detectedActiveProgram, toolbarPresets]);
+  // 重连抖动修复：auto-recreate / 短线重连过渡期 activeProgram 会被清成 null
+  // （clearTerminalSession），随后 connected 事件再写回。若直接用它推导 preset，
+  // 桌面工具条 showOnDesktop 会 true→false→true 跳变（max-h-24↔max-h-0 塌陷/撑开），
+  // 作为 terminal flex 同级元素挤压高度，触发 ResizeObserver→fit，造成布局抖动。
+  // 过渡期沿用上一次稳定的 activeProgram，让 preset/工具条高度保持不变。
+  const isConnectionTransition = isConnecting || connectionError !== null;
+  const stableActiveProgramRef = React.useRef(detectedActiveProgram);
+  if (!isConnectionTransition) {
+    stableActiveProgramRef.current = detectedActiveProgram;
+  }
+  const presetActiveProgram = isConnectionTransition ? stableActiveProgramRef.current : detectedActiveProgram;
+  const detectedPreset = React.useMemo(() => detectToolbarPreset(presetActiveProgram, toolbarPresets), [presetActiveProgram, toolbarPresets]);
   const storedPreset = React.useMemo(() => getToolbarPreset(toolbarPresets, toolbarPresetMode), [toolbarPresetMode, toolbarPresets]);
   const renderPresetMode = !isMobile && toolbarPresetMode !== 'auto' && storedPreset.showOnDesktop !== true
     ? 'auto'

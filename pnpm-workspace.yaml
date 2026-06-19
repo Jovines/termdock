@@ -1,4 +1,0 @@
-allowBuilds:
-  esbuild: true
-  node-pty: true
-  sharp: true

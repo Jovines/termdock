@@ -723,6 +723,102 @@ div.swiper {
 }
 
 /*
+ * Prism / refractor syntax token palette (Flexoki dark).
+ * Shared by the diff viewer (`.termdock-diff`) and the file preview
+ * (`.termdock-code`). Colors are tuned to sit on the dark surfaces and to
+ * remain readable on top of the diff insert/delete row backgrounds.
+ */
+.termdock-diff .token,
+.termdock-code .token {
+  background: transparent;
+}
+.termdock-diff .token.comment,
+.termdock-diff .token.prolog,
+.termdock-diff .token.doctype,
+.termdock-diff .token.cdata,
+.termdock-code .token.comment,
+.termdock-code .token.prolog,
+.termdock-code .token.doctype,
+.termdock-code .token.cdata {
+  color: #878580;
+  font-style: italic;
+}
+.termdock-diff .token.punctuation,
+.termdock-code .token.punctuation {
+  color: #9F9D96;
+}
+.termdock-diff .token.property,
+.termdock-diff .token.tag,
+.termdock-diff .token.boolean,
+.termdock-diff .token.number,
+.termdock-diff .token.constant,
+.termdock-diff .token.symbol,
+.termdock-diff .token.deleted,
+.termdock-code .token.property,
+.termdock-code .token.tag,
+.termdock-code .token.boolean,
+.termdock-code .token.number,
+.termdock-code .token.constant,
+.termdock-code .token.symbol,
+.termdock-code .token.deleted {
+  color: #D14D41;
+}
+.termdock-diff .token.selector,
+.termdock-diff .token.attr-name,
+.termdock-diff .token.string,
+.termdock-diff .token.char,
+.termdock-diff .token.builtin,
+.termdock-diff .token.inserted,
+.termdock-code .token.selector,
+.termdock-code .token.attr-name,
+.termdock-code .token.string,
+.termdock-code .token.char,
+.termdock-code .token.builtin,
+.termdock-code .token.inserted {
+  color: #879A39;
+}
+.termdock-diff .token.operator,
+.termdock-diff .token.entity,
+.termdock-diff .token.url,
+.termdock-diff .token.variable,
+.termdock-code .token.operator,
+.termdock-code .token.entity,
+.termdock-code .token.url,
+.termdock-code .token.variable {
+  color: #DA702C;
+}
+.termdock-diff .token.atrule,
+.termdock-diff .token.attr-value,
+.termdock-diff .token.keyword,
+.termdock-code .token.atrule,
+.termdock-code .token.attr-value,
+.termdock-code .token.keyword {
+  color: #4385BE;
+}
+.termdock-diff .token.function,
+.termdock-diff .token.class-name,
+.termdock-code .token.function,
+.termdock-code .token.class-name {
+  color: #D0A215;
+}
+.termdock-diff .token.regex,
+.termdock-diff .token.important,
+.termdock-code .token.regex,
+.termdock-code .token.important {
+  color: #CE5D97;
+}
+.termdock-diff .token.important,
+.termdock-diff .token.bold,
+.termdock-code .token.important,
+.termdock-code .token.bold {
+  font-weight: 600;
+}
+.termdock-diff .token.italic,
+.termdock-code .token.italic {
+  font-style: italic;
+}
+
+/*
  * New diff viewer styles.
  * The previous `DiffViewer` was a single component with inline styles;
  * the new module ships its own CSS so the layout pieces can be

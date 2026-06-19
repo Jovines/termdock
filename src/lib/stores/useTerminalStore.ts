@@ -22,7 +22,7 @@ export interface TerminalStore {
   setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null, agentIndicator?: AgentIndicator | null) => void;
   clearAgentNeedsReview: (sessionId: string) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
-  appendToBuffer: (sessionId: string, chunk: string) => void;
+  appendToBuffer: (sessionId: string, chunk: string, options?: { markActivity?: boolean }) => void;
   replaceBuffer: (sessionId: string, chunks: string[]) => void;
   clearTerminalSession: (sessionId: string) => void;
   clearBuffer: (sessionId: string) => void;
@@ -48,6 +48,7 @@ const MAX_CHUNK_SIZE = 256 * 1024;
 // setState,等于没优化。挂在 create 闭包里(set 函数可访问)。
 interface BatchState {
   pendingChunksBySession: Map<string, string[]>;
+  activitySessionIds: Set<string>;
   batchFlushRafRef: number | null;
 }
 
@@ -70,6 +71,7 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     agentNeedsReview: false,
     bufferChunks: [],
     bufferLength: 0,
+    lastOutputAt: null,
     updatedAt: Date.now(),
   };
 }
@@ -78,6 +80,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   // 闭包内批处理状态。详见顶部 BatchState 接口注释。
   const batch: BatchState = {
     pendingChunksBySession: new Map(),
+    activitySessionIds: new Set(),
     batchFlushRafRef: null,
   };
 
@@ -96,10 +99,13 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   const flushPendingBatches = () => {
     if (batch.pendingChunksBySession.size === 0) return;
     const batches = batch.pendingChunksBySession;
+    const activitySessionIds = batch.activitySessionIds;
     batch.pendingChunksBySession = new Map();
+    batch.activitySessionIds = new Set();
     set((state) => {
       const newSessions = new Map(state.sessions);
       let nextChunkId = state.nextChunkId;
+      const now = Date.now();
       for (const [sessionId, chunks] of batches) {
         const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
         let bufferChunks: TerminalChunk[] = existing.bufferChunks.length > 0
@@ -138,7 +144,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
           ...existing,
           bufferChunks,
           bufferLength,
-          updatedAt: Date.now(),
+          lastOutputAt: activitySessionIds.has(sessionId) ? now : existing.lastOutputAt,
+          updatedAt: now,
         });
       }
       return { sessions: newSessions, nextChunkId };
@@ -182,15 +189,17 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       // Preserve history if provided, otherwise keep existing history
       const history = terminalSession.history ?? existing?.history ?? [];
 
+      // 展示元数据（程序名/目录）延续旧值作为占位：换绑后端连接时 buffer 应重置，
+      // 但 tab 名不应塌空。新连接的 connected/active-program 事件会随后覆盖。
       newSessions.set(sessionId, {
         ...baseState,
         terminalSessionId: terminalSession.sessionId,
         mode: terminalSession.mode ?? baseState.mode,
         tmuxSessionName: terminalSession.tmuxSessionName ?? baseState.tmuxSessionName,
-        activeProgram: terminalSession.activeProgram ?? baseState.activeProgram,
-        activeProgramRaw: terminalSession.activeProgramRaw ?? baseState.activeProgramRaw,
-        activeProgramSource: terminalSession.activeProgramSource ?? baseState.activeProgramSource,
-        cwd: terminalSession.cwd ?? baseState.cwd,
+        activeProgram: terminalSession.activeProgram ?? existing?.activeProgram ?? baseState.activeProgram,
+        activeProgramRaw: terminalSession.activeProgramRaw ?? existing?.activeProgramRaw ?? baseState.activeProgramRaw,
+        activeProgramSource: terminalSession.activeProgramSource ?? existing?.activeProgramSource ?? baseState.activeProgramSource,
+        cwd: terminalSession.cwd ?? existing?.cwd ?? baseState.cwd,
         sessionId,
         isConnecting: false,
         history,
@@ -320,7 +329,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     });
   },
 
-  appendToBuffer: (sessionId: string, chunk: string) => {
+  appendToBuffer: (sessionId: string, chunk: string, options?: { markActivity?: boolean }) => {
     if (!chunk) {
       return;
     }
@@ -333,6 +342,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       batch.pendingChunksBySession.set(sessionId, list);
     }
     list.push(chunk);
+    if (options?.markActivity !== false) {
+      batch.activitySessionIds.add(sessionId);
+    }
     scheduleBatchFlush();
   },
 
@@ -417,12 +429,12 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
       if (existing) {
+        // 只清「连接层」状态。activeProgram / cwd 属于展示元数据，生命周期绑定
+        // 前端 session，应延续作为占位，由新连接的 connected/active-program 事件
+        // 覆盖——否则后台返回重连期间 tab 名会先塌回默认名再跳回，造成闪烁。
         newSessions.set(sessionId, {
           ...existing,
           terminalSessionId: null,
-          activeProgram: null,
-          activeProgramRaw: null,
-          activeProgramSource: null,
           isConnecting: false,
           agentStatus: null,
           agentColor: null,

@@ -56,6 +56,12 @@ export type TranslationDictionary = {
     settings: string;
     filterSessions: string;
     clearSearch: string;
+    sortRecent: string;
+    sortRecentTitle: string;
+    groupByFolder: string;
+    groupByFolderTitle: string;
+    ungrouped: string;
+    needsAttention: string;
     closeSession: (params: TranslatorParams) => string;
     newShell: string;
     newTmux: string;
@@ -400,6 +406,7 @@ export type TranslationDictionary = {
     finishedReview: string;
     aiWaiting: string;
     copyMode: string;
+    jumpToNext: string;
   };
   connection: {
     reconnecting: string;

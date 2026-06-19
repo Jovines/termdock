@@ -1,4 +1,5 @@
 import { useEffect, useCallback, useMemo, useState, useDeferredValue, useRef, type Dispatch, type SetStateAction, type UIEvent, type ReactNode } from 'react';
+import { useGesture } from '@use-gesture/react';
 import {
   X as RiCloseLine,
   ArrowLeft as RiArrowLeft,
@@ -27,6 +28,7 @@ import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarSt
 import { getGitBundle, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCacheThrottled } from '../../utils/localStorageCache';
+import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, type RefractorLike } from '../../utils/syntaxHighlight';
 
 interface RightSidebarProps {
   isOpen: boolean;
@@ -624,6 +626,141 @@ function GitActionChips({ actions, running, completed }: {
   );
 }
 
+const IMAGE_MIN_SCALE = 1;
+const IMAGE_MAX_SCALE = 8;
+
+function clampImageScale(scale: number): number {
+  return Math.min(IMAGE_MAX_SCALE, Math.max(IMAGE_MIN_SCALE, scale));
+}
+
+interface ZoomableImageProps {
+  src: string;
+  alt: string;
+  onLoad: (event: React.SyntheticEvent<HTMLImageElement>) => void;
+  onError: () => void;
+}
+
+// Pinch-to-zoom image viewer. Supports touch pinch (mobile), trackpad pinch and
+// ctrl/⌘ + wheel (desktop), and double-tap / double-click to toggle zoom. The
+// container carries `data-sidebar-gesture-ignore` so the drawer's swipe-to-close
+// gesture never hijacks a pan while the image is zoomed in.
+function ZoomableImage({ src, alt, onLoad, onError }: ZoomableImageProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
+  const transformRef = useRef(transform);
+  transformRef.current = transform;
+
+  // Reset when the image source changes (a new file was selected).
+  useEffect(() => {
+    setTransform({ scale: 1, x: 0, y: 0 });
+  }, [src]);
+
+  // Clamp the pan offset so the (scaled) image can't be dragged completely out
+  // of the viewport. Bounds grow with the scale factor.
+  const clampOffset = useCallback((scale: number, x: number, y: number) => {
+    const el = containerRef.current;
+    if (!el) return { x, y };
+    const maxX = (el.clientWidth * (scale - 1)) / 2;
+    const maxY = (el.clientHeight * (scale - 1)) / 2;
+    return {
+      x: Math.min(maxX, Math.max(-maxX, x)),
+      y: Math.min(maxY, Math.max(-maxY, y)),
+    };
+  }, []);
+
+  const applyZoom = useCallback((nextScale: number, originX?: number, originY?: number) => {
+    setTransform((prev) => {
+      const scale = clampImageScale(nextScale);
+      const el = containerRef.current;
+      if (!el || scale === 1) {
+        return { scale, x: 0, y: 0 };
+      }
+      // Zoom toward the pointer/pinch focal point so the pixel under the cursor
+      // stays put. Falls back to the center when no origin is provided.
+      const rect = el.getBoundingClientRect();
+      const focalX = (originX ?? rect.left + rect.width / 2) - rect.left - rect.width / 2;
+      const focalY = (originY ?? rect.top + rect.height / 2) - rect.top - rect.height / 2;
+      const ratio = scale / prev.scale;
+      const x = focalX - (focalX - prev.x) * ratio;
+      const y = focalY - (focalY - prev.y) * ratio;
+      return { scale, ...clampOffset(scale, x, y) };
+    });
+  }, [clampOffset]);
+
+  const toggleZoom = useCallback((originX?: number, originY?: number) => {
+    if (transformRef.current.scale > 1) {
+      setTransform({ scale: 1, x: 0, y: 0 });
+    } else {
+      applyZoom(2.5, originX, originY);
+    }
+  }, [applyZoom]);
+
+  useGesture(
+    {
+      onPinch: ({ offset: [scale], origin: [ox, oy] }) => {
+        applyZoom(scale, ox, oy);
+      },
+      onDrag: ({ offset: [x, y], pinching, cancel }) => {
+        if (pinching) {
+          cancel();
+          return;
+        }
+        if (transformRef.current.scale <= 1) return;
+        setTransform((prev) => ({ ...prev, ...clampOffset(prev.scale, x, y) }));
+      },
+      onWheel: ({ event, delta: [, dy], ctrlKey }) => {
+        // Trackpad pinch surfaces as a wheel event with ctrlKey on most
+        // browsers; plain scroll is left to the container so users can still
+        // scroll the page when the image isn't zoomed.
+        if (!ctrlKey) return;
+        event.preventDefault();
+        applyZoom(transformRef.current.scale * (1 - dy * 0.01), event.clientX, event.clientY);
+      },
+    },
+    {
+      target: containerRef,
+      eventOptions: { passive: false },
+      drag: {
+        from: () => [transformRef.current.x, transformRef.current.y],
+        filterTaps: true,
+        pointer: { touch: true },
+      },
+      pinch: {
+        scaleBounds: { min: IMAGE_MIN_SCALE, max: IMAGE_MAX_SCALE },
+        from: () => [transformRef.current.scale, 0],
+        rubberband: true,
+      },
+    },
+  );
+
+  const zoomed = transform.scale > 1;
+
+  return (
+    <div
+      ref={containerRef}
+      data-sidebar-gesture-ignore
+      className="flex h-full w-full touch-none select-none items-center justify-center overflow-hidden"
+      style={{ cursor: zoomed ? 'grab' : 'zoom-in' }}
+      onDoubleClick={(event) => toggleZoom(event.clientX, event.clientY)}
+    >
+      <img
+        src={src}
+        alt={alt}
+        draggable={false}
+        className="max-h-full max-w-full touch-none select-none rounded border border-border/15 bg-surface object-contain shadow-sm"
+        style={{
+          transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
+          transformOrigin: 'center center',
+          transition: zoomed ? 'none' : 'transform 0.18s ease-out',
+          willChange: 'transform',
+        }}
+        onLoad={onLoad}
+        onError={onError}
+      />
+    </div>
+  );
+}
+
 interface FilePreviewProps {
   filePath: string | null;
   onInsertReference: (path: string) => void;
@@ -645,6 +782,11 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   const rootPath = useSidebarStore((s) => s.rootPath);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
   const [markdownViewMode, setMarkdownViewMode] = useState<'preview' | 'source'>('preview');
+  const [refractor, setRefractor] = useState<RefractorLike | null>(null);
+  // Per-line highlighted React nodes, keyed implicitly by the current text
+  // content. `null` means "render plain text" (unknown language, too large, or
+  // refractor not loaded yet).
+  const [highlightedLines, setHighlightedLines] = useState<ReactNode[][] | null>(null);
 
   useEffect(() => {
     if (!filePath) {
@@ -693,6 +835,51 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
     };
   }, [filePath, rootPath, onLineRangeChange, t]);
 
+  // Syntax highlighting for the text preview. Runs after the content is loaded,
+  // skips Markdown preview mode (handled separately), unknown languages, and
+  // oversized files. refractor is lazy-loaded the first time it's needed.
+  useEffect(() => {
+    if (previewState.kind !== 'text') {
+      setHighlightedLines(null);
+      return;
+    }
+    const readable = rootPath && filePath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
+    const language = resolveLanguage(readable);
+    const content = previewState.content;
+    // Markdown rendered in "preview" mode uses MarkdownPreview, not the line
+    // renderer, so highlighting would be wasted there. In "source" mode we do
+    // highlight the raw markdown like any other language.
+    const isMarkdownPreview = isMarkdownPath(readable ?? '') && markdownViewMode === 'preview';
+    if (!language || isMarkdownPreview || !shouldHighlight(content)) {
+      setHighlightedLines(null);
+      return;
+    }
+
+    let cancelled = false;
+    const run = (mod: RefractorLike) => {
+      if (cancelled || !mod.registered(language)) {
+        if (!cancelled) setHighlightedLines(null);
+        return;
+      }
+      try {
+        setHighlightedLines(highlightToLines(mod, content, language));
+      } catch {
+        setHighlightedLines(null);
+      }
+    };
+
+    if (refractor) {
+      run(refractor);
+    } else {
+      setHighlightedLines(null);
+      loadRefractor()
+        .then((mod) => { if (!cancelled) { setRefractor(mod); run(mod); } })
+        .catch(() => { /* best-effort: fall back to plain text */ });
+    }
+
+    return () => { cancelled = true; };
+  }, [previewState, refractor, filePath, rootPath, markdownViewMode]);
+
   if (!filePath) {
     return <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
   }
@@ -701,6 +888,10 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   const display = getRelativeDisplayPath(readablePath, rootPath);
   const reference = buildFileReference(readablePath, rootPath);
   const lines = previewState.kind === 'text' && previewState.content ? previewState.content.split('\n') : [];
+  // Gutter only needs room for the widest line number (+1ch breathing room),
+  // so short files render numbers close to the left edge instead of leaving a
+  // fixed gap sized for thousand-line files.
+  const gutterWidthCh = Math.max(2, String(lines.length).length) + 1;
   const meta = previewState.kind === 'text' || previewState.kind === 'image' ? previewState.meta : null;
   const isMarkdown = isMarkdownPath(readablePath);
   const showMarkdownPreview = previewState.kind === 'text' && isMarkdown && markdownViewMode === 'preview';
@@ -828,23 +1019,20 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">{previewState.message}</div>
         </div>
       ) : previewState.kind === 'image' ? (
-        <div className="min-h-0 flex-1 overflow-auto bg-background-subtle p-3">
-          <div className="flex min-h-full items-center justify-center">
-            <img
-              src={previewState.objectUrl}
-              alt={display.name}
-              className="max-h-full max-w-full rounded border border-border/15 bg-surface object-contain shadow-sm"
-              onLoad={(event) => {
-                const img = event.currentTarget;
-                setPreviewState((current) => (
-                  current.kind === 'image'
-                    ? { ...current, dimensions: { width: img.naturalWidth, height: img.naturalHeight } }
-                    : current
-                ));
-              }}
-              onError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.imageLoadFailed') })}
-            />
-          </div>
+        <div className="min-h-0 flex-1 overflow-hidden bg-background-subtle p-3">
+          <ZoomableImage
+            src={previewState.objectUrl}
+            alt={display.name}
+            onLoad={(event) => {
+              const img = event.currentTarget;
+              setPreviewState((current) => (
+                current.kind === 'image'
+                  ? { ...current, dimensions: { width: img.naturalWidth, height: img.naturalHeight } }
+                  : current
+              ));
+            }}
+            onError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.imageLoadFailed') })}
+          />
         </div>
       ) : showMarkdownPreview ? (
         <div
@@ -855,25 +1043,32 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           <MarkdownPreview content={previewState.content} />
         </div>
       ) : previewState.kind === 'text' ? (
-        <div className="min-h-0 flex-1 overflow-auto rounded-none bg-background-subtle p-2 font-mono text-[11px] leading-relaxed text-foreground">
+        <div className="termdock-code min-h-0 flex-1 overflow-auto rounded-none bg-background-subtle p-2 font-mono text-[11px] leading-relaxed text-foreground">
           {lines.length > 0 ? (
             <div className="min-w-full">
               {lines.map((line, index) => {
                 const lineNumber = index + 1;
                 const isSelected = Boolean(lineRange && lineNumber >= lineRange.start && lineNumber <= lineRange.end);
+                const highlighted = highlightedLines && highlightedLines.length === lines.length
+                  ? highlightedLines[index]
+                  : null;
                 return (
                   <button
                     // eslint-disable-next-line react/no-array-index-key
                     key={index}
                     type="button"
                     onClick={() => handleLineClick(lineNumber)}
-                    className={`grid w-full grid-cols-[2.8rem_1fr] gap-2 rounded px-1 text-left transition active:scale-[0.995] ${
+                    // Line-number gutter width tracks the file's digit count so a
+                    // short file doesn't reserve room for thousands of lines and
+                    // leave a big gap between the edge and the numbers.
+                    style={{ gridTemplateColumns: `${gutterWidthCh}ch 1fr` }}
+                    className={`grid w-full gap-2 rounded pr-1 text-left transition active:scale-[0.995] ${
                       isSelected ? 'bg-primary/15 text-foreground' : 'hover:bg-surface-2'
                     }`}
                     title={`Tap to reference ${reference}:${lineNumber}`}
                   >
                     <span className={`select-none text-right text-[10px] ${isSelected ? 'text-primary' : 'text-muted-foreground/55'}`}>{lineNumber}</span>
-                    <span className="min-w-0 whitespace-pre-wrap break-words">{line || ' '}</span>
+                    <span className="min-w-0 whitespace-pre-wrap break-words">{highlighted ?? (line || ' ')}</span>
                   </button>
                 );
               })}
