@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus } from '../../terminal/types';
-import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, reorderGroupedSessionIds, reorderSessionsWithinGroup } from '../../terminal/display';
+import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, reorderSessionsWithinGroup } from '../../terminal/display';
 import { AgentSessionDot, AgentCountBadge } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 import { useTerminalStore } from '../../stores/useTerminalStore';
@@ -206,6 +206,12 @@ export function LeftSidebar(
   const [outputActivityBySession, setOutputActivityBySession] = useState<Map<string, number>>(readOutputActivitySnapshot);
   const [activityClock, setActivityClock] = useState(() => Date.now());
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
+  // 由「翻页→自动展开」机制维护的分组 key 集合，用于区分：
+  //  - 自动展开（翻页进来时我们手动 expand）：翻走后允许自动收起
+  //  - 用户手动展开：不参与自动收起，尊重用户意图
+  // 用 ref 而非 state：变更不需要触发重渲染，store 自身的 collapsedGroups 才是真相。
+  const autoExpandedGroupKeysRef = useRef<Set<string>>(new Set());
+  const prevAutoManagedGroupKeyRef = useRef<string | null>(null);
   const trimmedQuery = query.trim();
   const isFiltering = trimmedQuery.length > 0;
   // 分组模式下禁用拖拽（与搜索 / 自动排序一致）。
@@ -271,7 +277,54 @@ export function LeftSidebar(
   useEffect(() => {
     if (!isOpen) return;
     activeItemRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  }, [activeSessionId, isOpen, visibleSessions.length]);
+  }, [activeSessionId, isOpen, visibleSessions.length, collapsedGroups]);
+
+  // 当前 active session 所在的分组 key（按 cwd 派生），用于「翻页→自动展开/收起」机制。
+  // 关闭分组开关或无 active session 时返回 null，不参与自动管理。
+  const activeSessionGroupKey = useMemo<string | null>(() => {
+    if (!groupByFolder || !activeSessionId) return null;
+    const cwd = sessionStates.get(activeSessionId)?.cwd ?? null;
+    return folderGroupKeyForCwd(cwd);
+  }, [groupByFolder, activeSessionId, sessionStates]);
+
+  // 翻页联动：active session 切换时同步它所在分组的展开状态。
+  //  - 当前所在组若收起 → 自动展开，并记入 auto-expanded 集合（用户翻走后允许自动收起）。
+  //  - 上一组若在 auto-expanded 集合中 → 自动收起，移出集合。
+  //  - 用户手动 toggle 的组由 click handler 单独清掉 auto 标记，不会被本 effect 收回。
+  //  - ''（无 cwd 的「其他」桶）不参与：它语义上是聚合桶，自动展开没意义。
+  useEffect(() => {
+    if (!groupByFolder) {
+      // 分组关闭时清掉追踪状态，等下次开启重新建立。
+      prevAutoManagedGroupKeyRef.current = null;
+      autoExpandedGroupKeysRef.current.clear();
+      return;
+    }
+    if (!activeSessionId) {
+      prevAutoManagedGroupKeyRef.current = null;
+      return;
+    }
+
+    const store = useSidebarStore.getState();
+    const autoSet = autoExpandedGroupKeysRef.current;
+    const prevKey = prevAutoManagedGroupKeyRef.current;
+    const currentKey = activeSessionGroupKey;
+
+    // 离开旧组：旧组若是「自动展开」的就收回。
+    if (prevKey !== null && prevKey !== currentKey && autoSet.has(prevKey)) {
+      if (!store.collapsedGroups.has(prevKey)) {
+        store.toggleGroupCollapsed(prevKey);
+      }
+      autoSet.delete(prevKey);
+    }
+
+    // 进入新组：新组若收起就展开。''（无 cwd）跳过，避免「其他」桶被频繁抖动。
+    if (currentKey !== null && currentKey !== '' && store.collapsedGroups.has(currentKey)) {
+      store.toggleGroupCollapsed(currentKey);
+      autoSet.add(currentKey);
+    }
+
+    prevAutoManagedGroupKeyRef.current = currentKey;
+  }, [groupByFolder, activeSessionId, activeSessionGroupKey]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -668,7 +721,12 @@ export function LeftSidebar(
                   <button
                     type="button"
                     {...(groupDragDisabled ? {} : groupDragProvided.dragHandleProps)}
-                    onClick={() => toggleGroupCollapsed(group.key)}
+                    onClick={() => {
+                      // 用户手动 toggle 一律视为「接管」：从 auto-expanded 集合里清除，
+                      // 这样翻页走开时不会再自动收回。手动展开同理 — 用户意图优先。
+                      toggleGroupCollapsed(group.key);
+                      autoExpandedGroupKeysRef.current.delete(group.key);
+                    }}
                     className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-muted-foreground transition hover:bg-surface-2 ${
                       groupDragDisabled ? '' : 'cursor-grab active:cursor-grabbing'
                     }`}
