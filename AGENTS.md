@@ -15,3 +15,14 @@
 
 - 搜索用 `rg`(ripgrep),不要 `grep -r`;查文件用 `Glob`,不要 `find`。
 - 改完 `src/` 用 `termdock-deploy` skill 验证;若编译错属他人 WIP,先停。
+
+## UI 层级 (z-index)
+
+- 全屏浮层(`fixed` 的遮罩/抽屉/弹窗/浮窗)**禁止**写裸 `z-[数字]`。
+- 统一用语义类:`z-sidebar-* / z-menu-* / z-drawer-* / z-modal-* / z-toast /
+  z-popover`。数值单一来源在 `src/index.css` 的 `--z-*`,映射在
+  `tailwind.config.js`。
+- 新增浮层:先在 `src/index.css` 选/加一个档位,再用对应 `z-*` 类。
+- 规则:子浮层必须高于弹出它的载体(例如设置抽屉里再弹的弹窗用
+  `z-modal-*`,要盖住 `z-drawer-*`)。`src/lib/zIndexTokens.test.ts` 会守卫
+  刻度有序且无裸数值。

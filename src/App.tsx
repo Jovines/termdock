@@ -16,14 +16,15 @@ import {
   Unplug as RiLogoutBoxRLine,
   Bot as RiBotLine,
   Bell as RiBellLine,
+  ChevronRight as RiChevronRightLine,
 } from 'lucide-react';
-import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
+import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { useFontSize } from './lib/hooks/useFontSize';
 import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
-import { getCwdLeafName, getSessionDisplayLines } from './lib/terminal/display';
+import { getCwdLeafName, getSessionDisplayLines, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
 import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
@@ -388,6 +389,9 @@ function App() {
   // Sidebar state — only subscribe to the booleans we render, not the whole store.
   const sidebarLeftOpen = useSidebarStore((s) => s.leftOpen);
   const sidebarRightOpen = useSidebarStore((s) => s.rightOpen);
+  const groupByFolder = useSidebarStore((s) => s.groupByFolder);
+  const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
+  const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
   const [isDesktopViewport, setIsDesktopViewport] = useState(() => (
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1024px)').matches
   ));
@@ -510,6 +514,15 @@ function App() {
     const sidebar = useSidebarStore.getState();
     sidebar.closeLeft();
     sidebar.openRight();
+  }, []);
+
+  const handleOpenRightSearch = useCallback(() => {
+    setIsDrawerOpen(false);
+    const sidebar = useSidebarStore.getState();
+    sidebar.closeLeft();
+    sidebar.openRight();
+    sidebar.setRightTab('files');
+    sidebar.openRightSearch();
   }, []);
 
   const handleToggleLeftSidebar = useCallback(() => {
@@ -719,12 +732,29 @@ function App() {
         e.preventDefault();
         handleToggleRightSidebar();
       }
+      if (mod && e.shiftKey && e.key === 'P') {
+        e.preventDefault();
+        handleOpenRightSearch();
+      }
+      // Session 切换：Cmd/Ctrl+Alt+←/→ 或 Cmd/Ctrl+Shift+[/]
+      if (mod && !e.shiftKey && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault();
+        const direction = e.key === 'ArrowRight' ? 'next' : 'prev';
+        window.dispatchEvent(new CustomEvent('cycle-terminal-session', { detail: { direction } }));
+        return;
+      }
+      if (mod && e.shiftKey && !e.altKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
+        e.preventDefault();
+        const direction = e.code === 'BracketRight' ? 'next' : 'prev';
+        window.dispatchEvent(new CustomEvent('cycle-terminal-session', { detail: { direction } }));
+        return;
+      }
     };
     document.addEventListener('keydown', handler);
     return () => {
       document.removeEventListener('keydown', handler);
     };
-  }, [handleToggleLeftSidebar, handleToggleRightSidebar]);
+  }, [handleToggleLeftSidebar, handleToggleRightSidebar, handleOpenRightSearch]);
 
   const handleSaveLocalAccess = useCallback(async () => {
     setLocalAccessSaving(true);
@@ -1108,6 +1138,35 @@ function App() {
     setDebugInfo(info);
   }, []);
 
+  // 顶栏 tab 分组（贯穿式胶囊）：groups = 按 cwd 聚拢的组，每组一个胶囊容器。
+  const { groups: tabGroups } = React.useMemo(
+    () => deriveGroupedOrder(
+      sessions,
+      (s) => terminalSessions.get(s.id)?.cwd ?? null,
+      groupByFolder,
+      t('sidebar.ungrouped'),
+    ),
+    [sessions, terminalSessions, groupByFolder, t],
+  );
+
+  // 分组模式下的拖拽：单个 DragDropContext，按 result.type 区分两种拖动。
+  //  - type 'group'：整组顺序拖动（组与组之间排序），组内顺序保持不变。
+  //  - type 'session'：组内排序；禁止跨组拖动（分组依据是 cwd，跨组无意义）。
+  const handleGroupedDragEnd = useCallback((result: DropResult) => {
+    if (!result.destination) return;
+    if (result.type === 'group') {
+      if (result.source.index === result.destination.index) return;
+      applySessionOrder(reorderGroupedSessionIds(tabGroups, result.source.index, result.destination.index));
+      return;
+    }
+    // 组内 session 排序：源与目标必须同组。
+    if (result.source.droppableId !== result.destination.droppableId) return;
+    if (result.source.index === result.destination.index) return;
+    const groupKey = result.source.droppableId.replace(/^group-sessions:/, '');
+    applySessionOrder(reorderSessionsWithinGroup(tabGroups, groupKey, result.source.index, result.destination.index));
+  }, [tabGroups, applySessionOrder]);
+
+  // 位置角标 N/total 按全部 session 算。
   const activeSessionIndex = activeSessionId
     ? sessions.findIndex((session) => session.id === activeSessionId)
     : -1;
@@ -1347,6 +1406,123 @@ function App() {
   const shellShortcutHighlighted = highlightedNewSessionMode === 'shell';
   const tmuxShortcutHighlighted = highlightedNewSessionMode === 'tmux' && tmuxStatus.available;
 
+  // 单个 tab 的渲染（编辑态 input / 普通态 tab 外壳），flat 与 分组 两种布局共用。
+  //  - showDir: 是否显示目录副行（分组时为 false，只显示程序名/主名）
+  //  - dragHandleProps: flat 模式由 Draggable 注入；分组模式不传（禁用拖拽）
+  const renderTabShell = (
+    session: TerminalSessionInfo,
+    showDir: boolean,
+    dragHandleProps?: DraggableProvidedDragHandleProps | null,
+    compact = false,
+  ): React.ReactNode => {
+    const isActive = session.id === activeSessionId;
+    const isEditing = session.id === editingSessionId;
+    const ts = terminalSessions.get(session.id);
+    const { primary: displayName, secondary: displaySubName } = getSessionDisplayLines(
+      session,
+      ts?.activeProgram ?? null,
+      ts?.cwd ?? null,
+      SHELL_NAMES,
+    );
+    const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
+    const tabDirLabel = showDir
+      ? (displaySubName ?? (cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null))
+      : null;
+    const tooltip = ts?.cwd || session.name;
+    const accentColor = ts?.agentStatus === 'running'
+      ? '#4ade80'
+      : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
+        ? '#facc15'
+        : ts?.inCopyMode
+          ? '#facc15'
+          : null;
+
+    if (isEditing) {
+      const commitRename = (sessionId: string, value: string) => {
+        const trimmed = value.trim();
+        if (!trimmed) {
+          resetSessionName(sessionId);
+        } else if (trimmed !== session.name) {
+          renameSession(sessionId, trimmed);
+        }
+        setEditingSessionId(null);
+      };
+      return (
+        <input
+          ref={(el) => { renameInputRef.current = el; }}
+          type="text"
+          defaultValue={session.name}
+          maxLength={48}
+          className="h-8 shrink-0 rounded-md bg-surface-elevated px-2 text-[12px] leading-none text-foreground outline-none ring-1 ring-primary/50 sm:h-8 min-w-[5rem]"
+          style={{ width: `${Math.min(Math.max(session.name.length, 5), 18)}ch` }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              commitRename(session.id, (e.target as HTMLInputElement).value);
+            } else if (e.key === 'Escape') {
+              setEditingSessionId(null);
+            }
+          }}
+          onBlur={(e) => commitRename(session.id, e.target.value)}
+        />
+      );
+    }
+
+    return (
+      <div
+        ref={isActive ? activeSessionTabRef : null}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setTabMenuSessionId(session.id);
+        }}
+        className={
+          compact
+            ? `group relative inline-flex h-5 shrink-0 items-center overflow-hidden rounded-sm text-[11px] leading-none transition max-w-[6rem] ${
+                isActive
+                  ? 'bg-surface-elevated text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:bg-surface-elevated/40 hover:text-foreground'
+              }`
+            : `group relative inline-flex h-8 shrink-0 items-center overflow-hidden rounded-md text-[12px] leading-none transition max-w-[6.25rem] sm:h-8 sm:max-w-[12rem] ${
+                isActive
+                  ? 'bg-surface-elevated text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
+              }`
+        }
+        style={!compact && isActive && accentColor
+          ? { boxShadow: `inset 2px 0 0 0 ${accentColor}` }
+          : !compact && isActive
+            ? { boxShadow: 'inset 2px 0 0 0 rgb(var(--primary-rgb, 99 102 241))' }
+            : undefined}
+        title={tooltip}
+      >
+        <button
+          type="button"
+          {...(dragHandleProps ?? {})}
+          onClick={() => handleTabClick(session.id)}
+          className={`inline-flex min-w-0 flex-1 items-center gap-1 overflow-hidden text-left ${
+            compact ? 'px-1' : 'py-1 pl-1 pr-1.5 sm:pl-1.5 sm:pr-2'
+          } ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
+          title={tooltip}
+        >
+          <span className="inline-flex min-w-0 items-center gap-1 overflow-hidden">
+            <span className="inline-flex shrink-0 items-center">
+              {renderTabIcon(session.mode, ts)}
+            </span>
+            {tabDirLabel ? (
+              <span className="flex min-w-0 flex-col justify-center leading-[0.82rem] sm:leading-[0.85rem]">
+                <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+                <span className="truncate text-[9px] text-muted-foreground/80 sm:text-[9.5px]">
+                  {tabDirLabel}
+                </span>
+              </span>
+            ) : (
+              <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+            )}
+          </span>
+        </button>
+      </div>
+    );
+  };
+
   return (
     <div
       className="w-screen h-full flex flex-col bg-background text-foreground"
@@ -1354,7 +1530,9 @@ function App() {
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="flex h-full w-full min-h-0 flex-col overflow-visible bg-background">
           <div
-            className="flex h-9 shrink-0 items-center justify-between gap-1 bg-background px-1 sm:h-10 sm:px-1.5"
+            className={`flex shrink-0 items-center justify-between gap-1 bg-background px-1 sm:px-1.5 ${
+              groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'
+            }`}
           >
             <button
               type="button"
@@ -1382,6 +1560,119 @@ function App() {
                 <span className="text-[11px] font-semibold leading-none">{attentionSessionIds.length}</span>
               </button>
             )}
+            {groupByFolder ? (
+            <DragDropContext onDragEnd={handleGroupedDragEnd}>
+            <Droppable droppableId="groups" type="group" direction="horizontal">
+              {(groupsProvided) => (
+            <div
+              ref={groupsProvided.innerRef}
+              {...groupsProvided.droppableProps}
+              className="scrollbar-hidden flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap px-0.5 py-0.5"
+              style={{ touchAction: 'pan-x' }}
+            >
+              {tabGroups.map((group, groupIndex) => {
+                let groupRunning = 0;
+                let groupReview = 0;
+                for (const s of group.sessions) {
+                  const ts = terminalSessions.get(s.id);
+                  if (ts?.agentStatus === 'running') groupRunning += 1;
+                  if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) groupReview += 1;
+                }
+                const hasActive = group.sessions.some((s) => s.id === activeSessionId);
+                const collapsed = collapsedGroups.has(group.key);
+                // 「其他」组（无 cwd）永远被 buildFolderGroups 排到最后，禁止整组拖动。
+                const groupDragDisabled = group.key === '';
+                return (
+                  <Draggable
+                    key={group.key || '__ungrouped__'}
+                    draggableId={`group-${group.key || '__ungrouped__'}`}
+                    index={groupIndex}
+                    isDragDisabled={groupDragDisabled}
+                    disableInteractiveElementBlocking
+                  >
+                    {(groupDragProvided, groupSnapshot) => (
+                  // 一个组 = 一个垂直胶囊：顶部目录名（点击折叠/展开 + 整组拖动手柄），下面是子 tab 行。
+                  // 压缩间距，内容自然撑开高度。
+                  <div
+                    ref={groupDragProvided.innerRef}
+                    {...groupDragProvided.draggableProps}
+                    className={`flex w-fit shrink-0 flex-col justify-center gap-px rounded-md py-0.5 px-1 ring-1 transition-colors ${
+                      groupSnapshot.isDragging
+                        ? 'bg-surface-elevated ring-primary/30 shadow-lg opacity-90'
+                        : hasActive
+                          ? 'bg-primary/[0.06] ring-primary/20'
+                          : 'bg-surface-2/40 ring-border/10'
+                    }`}
+                  >
+                    {/* 组目录名：点击折叠/展开该组，长按/拖动整组重排。多 session 时 w-0 min-w-full
+                        让目录名宽度跟随下方 tab 行；单 session 时去掉限制，让目录名自然撑宽胶囊，
+                        避免短程序名导致长目录名被截断。 */}
+                    <button
+                      type="button"
+                      {...(groupDragDisabled ? {} : groupDragProvided.dragHandleProps)}
+                      onClick={() => toggleGroupCollapsed(group.key)}
+                      className={`flex ${collapsed ? '' : group.sessions.length > 1 ? 'w-0 min-w-full' : ''} items-center gap-0.5 rounded text-[9px] font-semibold uppercase tracking-[0.08em] leading-none transition hover:bg-surface-elevated/40 ${
+                        groupDragDisabled ? '' : 'cursor-grab active:cursor-grabbing'
+                      } ${
+                        hasActive ? 'text-primary/80' : 'text-muted-foreground/55'
+                      }`}
+                      title={group.key || group.label}
+                    >
+                      <RiChevronRightLine size={9} className={`shrink-0 opacity-70 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+                      <span className="min-w-0 truncate">{group.label}</span>
+                      {groupRunning > 0 && <span className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-green-400" />}
+                      {groupReview > 0 && <span className={`h-1.5 w-1.5 shrink-0 rounded-full bg-yellow-400 ${groupRunning > 0 ? '' : 'ml-auto'}`} />}
+
+                    </button>
+                    {/* 展开时显示子 tab（组内可拖动排序）；折叠时显示 session 数，保持高度一致 */}
+                    {collapsed ? (
+                      <span className="flex h-5 items-center text-[10px] leading-none text-muted-foreground/50">{group.sessions.length} sessions</span>
+                    ) : (
+                      <Droppable droppableId={`group-sessions:${group.key}`} type="session" direction="horizontal">
+                        {(sessionsProvided) => (
+                          <div
+                            ref={sessionsProvided.innerRef}
+                            {...sessionsProvided.droppableProps}
+                            className="flex items-center gap-px"
+                          >
+                            {group.sessions.map((session, sessionIndex) => (
+                              <Draggable key={session.id} draggableId={session.id} index={sessionIndex} disableInteractiveElementBlocking>
+                                {(sessionDragProvided, sessionSnapshot) => (
+                                  <div
+                                    ref={sessionDragProvided.innerRef}
+                                    {...sessionDragProvided.draggableProps}
+                                    className={`flex shrink-0 items-center ${sessionSnapshot.isDragging ? 'opacity-70' : ''}`}
+                                  >
+                                    {renderTabShell(session, false, sessionDragProvided.dragHandleProps, true)}
+                                  </div>
+                                )}
+                              </Draggable>
+                            ))}
+                            {sessionsProvided.placeholder}
+                          </div>
+                        )}
+                      </Droppable>
+                    )}
+                  </div>
+                    )}
+                  </Draggable>
+                );
+              })}
+              {groupsProvided.placeholder}
+              <button
+                type="button"
+                onClick={() => dispatchNewSession()}
+                className="my-auto inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-primary/15 hover:text-primary active:scale-95"
+                aria-label={t('tab.new')}
+                title={t('tab.new')}
+              >
+                <RiAddLine size={14} />
+              </button>
+            </div>
+              )}
+            </Droppable>
+            </DragDropContext>
+            ) : (
             <DragDropContext onDragEnd={handleDragEnd}>
             <Droppable droppableId="tabs" direction="horizontal">
               {(provided) => (
@@ -1392,73 +1683,24 @@ function App() {
               style={{ touchAction: 'pan-x' }}
             >
               {sessions.map((session, index) => {
-                const isActive = session.id === activeSessionId;
                 const isEditing = session.id === editingSessionId;
-                const ts = terminalSessions.get(session.id);
-                const { primary: displayName, secondary: displaySubName } = getSessionDisplayLines(
-                  session,
-                  ts?.activeProgram ?? null,
-                  ts?.cwd ?? null,
-                  SHELL_NAMES,
-                );
-                const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
-                const tabDirLabel = displaySubName ?? (cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null);
-                const tooltip = ts?.cwd || session.name;
-                const accentColor = ts?.agentStatus === 'running'
-                  ? '#4ade80'
-                  : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
-                    ? '#facc15'
-                    : ts?.inCopyMode
-                      ? '#facc15'
-                      : null;
-
                 if (isEditing) {
-                  const commitRename = (sessionId: string, value: string) => {
-                    const trimmed = value.trim();
-                    if (!trimmed) {
-                      // 清空 → 重置为默认(程序名/目录名)显示
-                      resetSessionName(sessionId);
-                    } else if (trimmed !== session.name) {
-                      // 只在值实际改变时才写入,避免双击直接退出就把 session 标成 customName
-                      renameSession(sessionId, trimmed);
-                    }
-                    setEditingSessionId(null);
-                  };
-
-                return (
-                  <React.Fragment key={session.id}>
-                    <Draggable draggableId={session.id} index={index} isDragDisabled>
-                      {(provided) => (
-                    <div
-                      ref={provided.innerRef}
-                      {...provided.draggableProps}
-                      className="flex h-full items-center"
-                    >
-                    <input
-                      ref={(el) => {
-                        renameInputRef.current = el;
-                      }}
-                      type="text"
-                      defaultValue={session.name}
-                      maxLength={48}
-                      className="h-8 shrink-0 rounded-md bg-surface-elevated px-2 text-[12px] leading-none text-foreground outline-none ring-1 ring-primary/50 sm:h-8 min-w-[5rem]"
-                      style={{ width: `${Math.min(Math.max(session.name.length, 5), 18)}ch` }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          commitRename(session.id, (e.target as HTMLInputElement).value);
-                        } else if (e.key === 'Escape') {
-                          setEditingSessionId(null);
-                        }
-                      }}
-                      onBlur={(e) => commitRename(session.id, e.target.value)}
-                    />
-                    </div>
-                      )}
-                    </Draggable>
+                  return (
+                    <React.Fragment key={session.id}>
+                      <Draggable draggableId={session.id} index={index} isDragDisabled>
+                        {(provided) => (
+                          <div
+                            ref={provided.innerRef}
+                            {...provided.draggableProps}
+                            className="flex h-full items-center"
+                          >
+                            {renderTabShell(session, true)}
+                          </div>
+                        )}
+                      </Draggable>
                     </React.Fragment>
                   );
                 }
-
                 return (
                   <React.Fragment key={session.id}>
                   <Draggable draggableId={session.id} index={index} disableInteractiveElementBlocking>
@@ -1466,50 +1708,9 @@ function App() {
                     <div
                       ref={provided.innerRef}
                       {...provided.draggableProps}
-                      {...provided.dragHandleProps}
                       className={`flex h-full shrink-0 items-center ${snapshot.isDragging ? 'opacity-70' : ''}`}
                     >
-                  <div
-                    ref={isActive ? activeSessionTabRef : null}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setTabMenuSessionId(session.id);
-                    }}
-                    className={`group relative inline-flex h-8 shrink-0 items-center overflow-hidden rounded-md text-[12px] leading-none transition max-w-[6.25rem] sm:h-8 sm:max-w-[12rem] ${
-                      isActive
-                        ? 'bg-surface-elevated text-foreground shadow-sm'
-                        : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
-                    }`}
-                    style={isActive && accentColor
-                      ? { boxShadow: `inset 2px 0 0 0 ${accentColor}` }
-                      : isActive
-                        ? { boxShadow: 'inset 2px 0 0 0 rgb(var(--primary-rgb, 99 102 241))' }
-                        : undefined}
-                    title={tooltip}
-                  >
-                  <button
-                    type="button"
-                    onClick={() => handleTabClick(session.id)}
-                    className="inline-flex min-w-0 flex-1 cursor-grab items-center gap-1.5 overflow-hidden py-1 pl-1 pr-1.5 text-left active:cursor-grabbing sm:pl-1.5 sm:pr-2"
-                    title={tooltip}
-                  >
-                    <span className="inline-flex min-w-0 items-center gap-1.5 overflow-hidden">
-                      <span className="inline-flex shrink-0 items-center">
-                        {renderTabIcon(session.mode, ts)}
-                      </span>
-                      {tabDirLabel ? (
-                        <span className="flex min-w-0 flex-col justify-center leading-[0.82rem] sm:leading-[0.85rem]">
-                          <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
-                          <span className="truncate text-[9px] text-muted-foreground/80 sm:text-[9.5px]">
-                            {tabDirLabel}
-                          </span>
-                        </span>
-                      ) : (
-                        <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
-                      )}
-                    </span>
-                  </button>
-                  </div>
+                      {renderTabShell(session, true, provided.dragHandleProps)}
                     </div>
                     )}
                   </Draggable>
@@ -1530,6 +1731,7 @@ function App() {
               )}
             </Droppable>
             </DragDropContext>
+            )}
             <div className="flex shrink-0 items-center gap-1.5">
               {(agentTabCounts.running > 0 || agentTabCounts.review > 0) && (
                 <span className="hidden items-center gap-1 sm:inline-flex">
@@ -1578,7 +1780,7 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-[80] bg-[rgba(0,0,0,0.55)] backdrop-blur-sm animate-fade-in cursor-default"
+            className="fixed inset-0 z-drawer-backdrop bg-[rgba(0,0,0,0.55)] backdrop-blur-sm animate-fade-in cursor-default"
             onClick={handleCloseSettings}
             aria-label="Close settings"
           />
@@ -1586,7 +1788,7 @@ function App() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="settings-dialog-title"
-            className="fixed inset-0 z-[90] flex items-stretch justify-center p-0 animate-fade-in sm:p-4 md:p-6"
+            className="fixed inset-0 z-drawer-panel flex items-stretch justify-center p-0 animate-fade-in sm:p-4 md:p-6"
           >
           <div
             className="flex h-full w-full max-w-5xl flex-col overflow-hidden bg-surface shadow-[0_28px_90px_rgba(0,0,0,0.28),0_14px_34px_rgba(0,0,0,0.18)] sm:max-h-[calc(100dvh-3rem)] sm:rounded-3xl sm:border sm:border-border/15"
@@ -2119,7 +2321,7 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-[55] bg-[rgba(0,0,0,0.4)] backdrop-blur-sm cursor-default animate-fade-in"
+            className="fixed inset-0 z-menu-backdrop bg-[rgba(0,0,0,0.4)] backdrop-blur-sm cursor-default animate-fade-in"
             onClick={() => {
               setSidebarCloseChoiceSessionId(null);
               setTmuxKillError(null);
@@ -2127,7 +2329,7 @@ function App() {
             aria-label="Close close-session chooser"
           />
           <div
-            className="fixed inset-x-3 bottom-6 z-[60] mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_rgba(0,0,0,0.18)] animate-fade-in sm:bottom-auto sm:top-[15%]"
+            className="fixed inset-x-3 bottom-6 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_rgba(0,0,0,0.18)] animate-fade-in sm:bottom-auto sm:top-[15%]"
             style={{ paddingBottom: safeBottomInset }}
           >
             <div className="border-b border-border/15 px-4 py-3">
@@ -2212,12 +2414,12 @@ function App() {
           <>
             <button
               type="button"
-              className="fixed inset-0 z-[55] bg-[rgba(0,0,0,0.4)] backdrop-blur-sm cursor-default animate-fade-in"
+              className="fixed inset-0 z-menu-backdrop bg-[rgba(0,0,0,0.4)] backdrop-blur-sm cursor-default animate-fade-in"
               onClick={() => setTabMenuSessionId(null)}
               aria-label="Close menu"
             />
             <div
-              className="fixed inset-x-3 bottom-6 z-[60] mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_rgba(0,0,0,0.18)] animate-fade-in sm:bottom-auto sm:top-[15%]"
+              className="fixed inset-x-3 bottom-6 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_rgba(0,0,0,0.18)] animate-fade-in sm:bottom-auto sm:top-[15%]"
               style={{ paddingBottom: safeBottomInset }}
             >
               <div className="border-b border-border/15 px-4 py-3">
@@ -2313,10 +2515,10 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-[60] bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+            className="fixed inset-0 z-modal-backdrop bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
             onClick={() => setIsNotificationsOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto flex max-w-xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)] sm:top-[10%] sm:bottom-auto sm:max-h-[80vh]">
+          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)] sm:top-[10%] sm:bottom-auto sm:max-h-[80vh]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
                 <div className="ui-kicker">{t('settings.notifications')}</div>
@@ -2460,10 +2662,10 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-[60] bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+            className="fixed inset-0 z-modal-backdrop bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
             onClick={() => setIsToolbarPresetsOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
+          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
                 <div className="ui-kicker">{t('settings.mobileKeyboard')}</div>
@@ -2521,10 +2723,10 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-[60] bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+            className="fixed inset-0 z-modal-backdrop bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
             onClick={() => setIsAgentRulesOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-[70] mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
+          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
                 <div className="ui-kicker">{t('settings.aiAgentDetection')}</div>
@@ -2829,7 +3031,7 @@ function App() {
         <button
           type="button"
           onClick={handleContinueAfterBackGuard}
-          className="fixed inset-0 z-[120] flex cursor-default items-center justify-center bg-black/20 px-6 text-left backdrop-blur-[1px]"
+          className="fixed inset-0 z-toast flex cursor-default items-center justify-center bg-black/20 px-6 text-left backdrop-blur-[1px]"
           aria-label={locale === 'zh' ? '继续使用 Termdock' : 'Continue using Termdock'}
         >
           <div className="max-w-[18rem] rounded-2xl border border-border/15 bg-surface/95 px-5 py-4 text-center shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur animate-fade-in">

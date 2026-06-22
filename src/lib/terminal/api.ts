@@ -1278,15 +1278,31 @@ export interface FileSearchResponse {
 
 export type FileSearchEngine = 'rg' | 'fallback';
 
+export type FileSearchMode = 'name' | 'content';
+
+export interface FileContentMatchLine {
+  line: number;
+  text: string;
+}
+
+export interface FileContentSearchEntry {
+  name: string;
+  path: string;
+  matches: FileContentMatchLine[];
+}
+
 export interface FileSearchProgress {
   path?: string;
   query?: string;
   engine?: FileSearchEngine;
+  mode?: FileSearchMode;
   entries?: FileEntry[];
+  contentEntries?: FileContentSearchEntry[];
   total?: number;
   truncated?: boolean;
   limited?: boolean;
   done?: boolean;
+  error?: string;
 }
 
 export interface FileWatchEvent {
@@ -1323,9 +1339,11 @@ export async function searchFilesStream(
   onProgress: (progress: FileSearchProgress) => void,
   signal?: AbortSignal,
   showHidden?: boolean,
+  mode: FileSearchMode = 'name',
 ): Promise<void> {
   const params = new URLSearchParams({ path: dirPath, query, stream: 'true' });
   if (showHidden) params.set('showHidden', 'true');
+  if (mode === 'content') params.set('mode', 'content');
   const response = await fetch(`/api/terminal/fs/search?${params}`, { signal });
   if (!response.ok || !response.body) {
     const error = await response.json().catch(() => ({ error: 'Failed to search files' }));
@@ -1337,13 +1355,17 @@ export async function searchFilesStream(
   let buffer = '';
   const consumeLine = (line: string) => {
     if (!line.trim()) return;
-    const event = JSON.parse(line) as FileSearchProgress & { type?: string };
+    const event = JSON.parse(line) as FileSearchProgress & { type?: string; message?: string };
     if (event.type === 'meta') {
-      onProgress({ path: event.path, query: event.query, engine: event.engine, limited: event.limited });
+      onProgress({ path: event.path, query: event.query, engine: event.engine, mode: event.mode, limited: event.limited });
     } else if (event.type === 'batch') {
       onProgress({ entries: event.entries ?? [] });
+    } else if (event.type === 'content-batch') {
+      onProgress({ contentEntries: event.contentEntries ?? [] });
+    } else if (event.type === 'error') {
+      throw new Error(event.message || 'Search failed');
     } else if (event.type === 'done') {
-      onProgress({ total: event.total, truncated: event.truncated, limited: event.limited, engine: event.engine, done: true });
+      onProgress({ total: event.total, truncated: event.truncated, limited: event.limited, engine: event.engine, mode: event.mode, done: true });
     }
   };
 

@@ -347,7 +347,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   const presetMenu = showPresetMenu && presetMenuPosition
     ? createPortal(
       <div
-        className="fixed z-[200] min-w-28 -translate-y-full rounded-2xl bg-surface-elevated p-1.5 shadow-xl border border-border/15"
+        className="fixed z-popover min-w-28 -translate-y-full rounded-2xl bg-surface-elevated p-1.5 shadow-xl border border-border/15"
         style={{ left: presetMenuPosition.left, top: presetMenuPosition.top }}
       >
         <div className="grid gap-1">

@@ -31,7 +31,7 @@ export function getToolbarActionLabel(action: MobileToolbarAction, index: number
 // actions/programs changed). The App reads this on startup and, when the
 // stored version differs, overwrites all built-in preset ids with the latest
 // definitions while keeping any user-authored custom presets intact.
-export const BUILTIN_TOOLBAR_PRESETS_VERSION = 9;
+export const BUILTIN_TOOLBAR_PRESETS_VERSION = 10;
 
 export function getBuiltinToolbarPresetIds(): string[] {
   return DEFAULT_PRESETS.map((preset) => preset.id);
@@ -85,6 +85,22 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
       { id: 'coco-clear', label: '/clear', sequence: '/||clear ', doubleTapSequence: '/||clear ||\r' },
       { id: 'coco-model', label: '/model', sequence: '/||model ', doubleTapSequence: '/||model ||\r' },
       { id: 'coco-resume', label: '/resume', sequence: '/||resume ', doubleTapSequence: '/||resume ||\r' },
+    ],
+    showOnDesktop: true,
+  },
+  {
+    id: 'traex',
+    label: 'TraeX',
+    programs: ['traex', 'traecli'],
+    includeAlt: false,
+    rowLayout: [3, 3],
+    actions: [
+      { id: 'traex-undo', label: '/undo', sequence: '/||undo ', doubleTapSequence: '/||undo ||\r' },
+      { id: 'traex-clear', label: '/clear', sequence: '/||clear ', doubleTapSequence: '/||clear ||\r' },
+      { id: 'traex-compact', label: '/compact', sequence: '/||compact ', doubleTapSequence: '/||compact ||\r' },
+      { id: 'traex-model', label: '/model', sequence: '/||model ', doubleTapSequence: '/||model ||\r' },
+      { id: 'traex-resume', label: '/resume', sequence: '/||resume ', doubleTapSequence: '/||resume ||\r' },
+      { id: 'traex-status', label: '/status', sequence: '/||status ', doubleTapSequence: '/||status ||\r' },
     ],
     showOnDesktop: true,
   },

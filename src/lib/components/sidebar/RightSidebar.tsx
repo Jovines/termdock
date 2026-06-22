@@ -25,7 +25,7 @@ import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { DiffViewer, preloadSidebarDiff } from './DiffViewer';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { getGitBundle, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext } from '../../terminal/api';
+import { getGitBundle, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, type RefractorLike } from '../../utils/syntaxHighlight';
@@ -768,6 +768,8 @@ interface FilePreviewProps {
   isMobile: boolean;
   lineRange: { start: number; end: number } | null;
   onLineRangeChange: Dispatch<SetStateAction<{ start: number; end: number } | null>>;
+  scrollToLine?: number | null;
+  onScrollToLineHandled?: () => void;
 }
 
 type FilePreviewState =
@@ -777,10 +779,11 @@ type FilePreviewState =
   | { kind: 'image'; objectUrl: string; meta: { size: number | null; mimeType: string; modified: string | null }; dimensions?: { width: number; height: number } }
   | { kind: 'error'; message: string };
 
-function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange, onLineRangeChange }: FilePreviewProps) {
+function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange, onLineRangeChange, scrollToLine, onScrollToLineHandled }: FilePreviewProps) {
   const { t } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
+  const lineRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const [markdownViewMode, setMarkdownViewMode] = useState<'preview' | 'source'>('preview');
   const [refractor, setRefractor] = useState<RefractorLike | null>(null);
   // Per-line highlighted React nodes, keyed implicitly by the current text
@@ -879,6 +882,22 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
 
     return () => { cancelled = true; };
   }, [previewState, refractor, filePath, rootPath, markdownViewMode]);
+
+  // After a content-search jump, highlight and scroll to the requested line
+  // once the file's text has actually rendered. We clear the request via the
+  // callback so re-selecting the same line later still works.
+  useEffect(() => {
+    if (scrollToLine == null) return;
+    if (previewState.kind !== 'text') return;
+    onLineRangeChange({ start: scrollToLine, end: scrollToLine });
+    const target = scrollToLine;
+    const frame = requestAnimationFrame(() => {
+      const node = lineRefs.current.get(target);
+      if (node) node.scrollIntoView({ block: 'center' });
+      onScrollToLineHandled?.();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [scrollToLine, previewState, onLineRangeChange, onScrollToLineHandled]);
 
   if (!filePath) {
     return <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
@@ -1056,6 +1075,10 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
                   <button
                     // eslint-disable-next-line react/no-array-index-key
                     key={index}
+                    ref={(node) => {
+                      if (node) lineRefs.current.set(lineNumber, node);
+                      else lineRefs.current.delete(lineNumber);
+                    }}
                     type="button"
                     onClick={() => handleLineClick(lineNumber)}
                     // Line-number gutter width tracks the file's digit count so a
@@ -1117,7 +1140,9 @@ export function RightSidebar(
 ) {
   const { t } = useI18n();
   const [fileQuery, setFileQuery] = useState('');
-  const [searchOpen, setSearchOpen] = useState(false);
+  const searchOpen = useSidebarStore((s) => s.rightSearchOpen);
+  const setRightSearchOpen = useSidebarStore((s) => s.setRightSearchOpen);
+  const [searchMode, setSearchMode] = useState<FileSearchMode>('name');
   const deferredFileQuery = useDeferredValue(fileQuery);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [lastInsertedReference, setLastInsertedReference] = useState<string | null>(null);
@@ -1125,6 +1150,9 @@ export function RightSidebar(
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
   const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
+  // A pending "scroll to this line" request from content search. Cleared by the
+  // preview once it has highlighted and scrolled to the matched line.
+  const [scrollToLine, setScrollToLine] = useState<number | null>(null);
   // On phone-sized panels the diff tab is intentionally a plain grouped list:
   // one file row, tap to expand/collapse its inline diff, no mode switcher.
   const [expandedDiffFiles, setExpandedDiffFiles] = useState<Set<string>>(() => new Set());
@@ -1253,12 +1281,22 @@ export function RightSidebar(
   useEffect(() => {
     if (!isOpen) {
       setFileQuery('');
-      setSearchOpen(false);
+      setRightSearchOpen(false);
       setLineRange(null);
       // Keep diff view mode + wrap preference across close/open so the
       // user's chosen reading mode is preserved within a session.
     }
-  }, [isOpen]);
+  }, [isOpen, setRightSearchOpen]);
+
+  // Focus the search input whenever the search box opens, regardless of whether
+  // it was opened by the header button or a global keyboard shortcut.
+  useEffect(() => {
+    if (!searchOpen) return;
+    const timer = setTimeout(() => {
+      document.querySelector<HTMLInputElement>('input[data-right-search]')?.focus();
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [searchOpen]);
 
   useEffect(() => {
     if (!isMobile) setMobileFilePreviewOpen(false);
@@ -1340,6 +1378,18 @@ export function RightSidebar(
     if (!isWide) setRightTab(isMobile ? 'files' : 'file');
   }, [isMobile, isWide, selectFile, setRightTab]);
 
+  // Jump straight to a content-search match: open the file and ask the preview
+  // to highlight and scroll to the matched line once its content has loaded.
+  const handleContentMatchSelect = useCallback((path: string, line: number) => {
+    selectFile(path);
+    setScrollToLine(line);
+    if (isMobile) {
+      setMobileFilePreviewOpen(true);
+      return;
+    }
+    if (!isWide) setRightTab('file');
+  }, [isMobile, isWide, selectFile, setRightTab]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const projectKey = getRecentReferencesProjectKey(rootPath);
@@ -1389,8 +1439,8 @@ export function RightSidebar(
   const explorerName = useMemo(() => getPathBasename(fileTreeRoot) || rootName, [fileTreeRoot, rootName]);
   const explorerParentPath = useMemo(() => getParentPath(fileTreeRoot), [fileTreeRoot]);
   const pinnedExplorerRoots = useMemo(() => (rootPath ? pinnedExplorerRootsCache[rootPath] ?? [] : []), [pinnedExplorerRootsCache, rootPath]);
-  const pinnedExplorerRootSet = useMemo(() => new Set(pinnedExplorerRoots), [pinnedExplorerRoots]);
-  const fileTreeRootPinned = Boolean(fileTreeRoot && pinnedExplorerRoots.includes(fileTreeRoot));
+  const pinnedExplorerRootSet = useMemo(() => new Set(pinnedExplorerRoots.map((entry) => entry.path)), [pinnedExplorerRoots]);
+  const fileTreeRootPinned = Boolean(fileTreeRoot && pinnedExplorerRootSet.has(fileTreeRoot));
   const canPinFileTreeRoot = Boolean(rootPath && fileTreeRoot && fileTreeRoot !== rootPath);
   const browsingOutsideProject = Boolean(rootPath && explorerRoot && explorerRoot !== rootPath);
 
@@ -1410,7 +1460,7 @@ export function RightSidebar(
   const togglePinnedExplorerRoot = useCallback(() => {
     if (!fileTreeRoot || !canPinFileTreeRoot) return;
     if (fileTreeRootPinned) unpinExplorerRoot(fileTreeRoot);
-    else pinExplorerRoot(fileTreeRoot);
+    else pinExplorerRoot(fileTreeRoot, 'directory');
   }, [canPinFileTreeRoot, fileTreeRoot, fileTreeRootPinned, pinExplorerRoot, unpinExplorerRoot]);
 
   const openDirectoryAsExplorerRoot = useCallback((path: string) => {
@@ -1421,7 +1471,13 @@ export function RightSidebar(
   const togglePinnedDirectory = useCallback((path: string) => {
     if (!rootPath || path === rootPath) return;
     if (pinnedExplorerRootSet.has(path)) unpinExplorerRoot(path);
-    else pinExplorerRoot(path);
+    else pinExplorerRoot(path, 'directory');
+  }, [pinExplorerRoot, pinnedExplorerRootSet, rootPath, unpinExplorerRoot]);
+
+  const togglePinnedFile = useCallback((path: string) => {
+    if (!rootPath || !path) return;
+    if (pinnedExplorerRootSet.has(path)) unpinExplorerRoot(path);
+    else pinExplorerRoot(path, 'file');
   }, [pinExplorerRoot, pinnedExplorerRootSet, rootPath, unpinExplorerRoot]);
 
   const watchedFileRoots = useMemo(() => {
@@ -1951,16 +2007,18 @@ export function RightSidebar(
             <RiHome size={10} className="shrink-0" />
             <span className="truncate">{rootName}</span>
           </button>
-          {pinnedExplorerRoots.map((path) => {
-            const active = fileTreeRoot === path;
+          {pinnedExplorerRoots.map((entry) => {
+            const path = entry.path;
+            const isFile = entry.kind === 'file';
+            const active = isFile ? selectedFilePath === path : fileTreeRoot === path;
             return (
               <span key={path} className={`group inline-flex max-w-[12rem] shrink-0 items-center rounded-full transition ${active ? 'bg-primary/15 text-primary' : 'bg-background-subtle text-foreground hover:bg-surface-2'}`} title={path}>
                 <button
                   type="button"
-                  onClick={() => setExplorerRoot(path)}
+                  onClick={() => (isFile ? handleFileSelect(path) : setExplorerRoot(path))}
                   className="inline-flex min-w-0 items-center gap-1 px-2 py-0.5 font-medium active:scale-95"
                 >
-                  <RiPin size={10} className="shrink-0" />
+                  {isFile ? <RiFileText size={10} className="shrink-0" /> : <RiPin size={10} className="shrink-0" />}
                   <span className="truncate">{getPathBasename(path)}</span>
                 </button>
                 <button
@@ -2027,12 +2085,7 @@ export function RightSidebar(
           </div>
           <button
             type="button"
-            onClick={() => {
-              setSearchOpen((prev) => !prev);
-              if (!searchOpen) setTimeout(() => {
-                document.querySelector<HTMLInputElement>('input[data-right-search]')?.focus();
-              }, 50);
-            }}
+            onClick={() => setRightSearchOpen(!searchOpen)}
             className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
               searchOpen
                 ? 'bg-primary/15 text-primary'
@@ -2054,30 +2107,75 @@ export function RightSidebar(
         </div>
 
         {searchOpen && (
-          <div className="mt-2 flex items-center gap-2 rounded-full bg-surface-2 px-3 py-1.5 text-muted-foreground focus-within:bg-surface-elevated">
-            <RiSearch size={12} className="shrink-0" />
-            <input
-              data-right-search
-              type="search"
-              value={fileQuery}
-              onChange={(event) => setFileQuery(event.target.value)}
-              placeholder={t('rightSidebar.filterChanges')}
-              className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground"
-              autoCapitalize="off"
-              autoCorrect="off"
-              autoComplete="off"
-              enterKeyHint="search"
-              spellCheck={false}
-            />
-            {fileQuery && (
+          <div className="mt-2 space-y-1.5">
+            <div className="flex items-center gap-2 rounded-full bg-surface-2 px-3 py-1.5 text-muted-foreground focus-within:bg-surface-elevated">
+              <RiSearch size={12} className="shrink-0" />
+              <input
+                data-right-search
+                type="search"
+                value={fileQuery}
+                onChange={(event) => setFileQuery(event.target.value)}
+                placeholder={searchMode === 'content' ? t('rightSidebar.searchPlaceholderContent') : t('rightSidebar.filterChanges')}
+                className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground"
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoComplete="off"
+                enterKeyHint="search"
+                spellCheck={false}
+              />
+              {/* Desktop keeps the mode switch compact and inline so it doesn't
+                  add a second full-width row. Mobile uses the larger segmented
+                  control below where tap targets matter more. */}
+              {!isMobile && (
+                <div className="flex shrink-0 items-center gap-0.5 rounded-full bg-surface/70 p-0.5 text-[10px] font-medium">
+                  <button
+                    type="button"
+                    onClick={() => setSearchMode('name')}
+                    aria-pressed={searchMode === 'name'}
+                    className={`rounded-full px-2 py-0.5 transition active:scale-95 ${searchMode === 'name' ? 'bg-primary/15 text-primary' : 'text-muted-foreground/80 hover:text-foreground'}`}
+                  >
+                    {t('rightSidebar.searchModeName')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSearchMode('content')}
+                    aria-pressed={searchMode === 'content'}
+                    className={`rounded-full px-2 py-0.5 transition active:scale-95 ${searchMode === 'content' ? 'bg-primary/15 text-primary' : 'text-muted-foreground/80 hover:text-foreground'}`}
+                  >
+                    {t('rightSidebar.searchModeContent')}
+                  </button>
+                </div>
+              )}
+              {fileQuery && (
+                <button
+                  type="button"
+                  onClick={() => setFileQuery('')}
+                  className="rounded-full p-0.5 text-muted-foreground hover:bg-surface hover:text-foreground"
+                  aria-label={t('rightSidebar.clearSearch')}
+                >
+                  <RiCloseLine size={12} />
+                </button>
+              )}
+            </div>
+            {isMobile && (
+            <div className="flex items-center gap-0.5 rounded-full bg-surface-2 p-0.5 text-[11px] font-medium">
               <button
                 type="button"
-                onClick={() => setFileQuery('')}
-                className="rounded-full p-0.5 text-muted-foreground hover:bg-surface hover:text-foreground"
-                aria-label={t('rightSidebar.clearSearch')}
+                onClick={() => setSearchMode('name')}
+                aria-pressed={searchMode === 'name'}
+                className={`flex-1 rounded-full px-2 py-1 transition active:scale-95 ${searchMode === 'name' ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
               >
-                <RiCloseLine size={12} />
+                {t('rightSidebar.searchModeName')}
               </button>
+              <button
+                type="button"
+                onClick={() => setSearchMode('content')}
+                aria-pressed={searchMode === 'content'}
+                className={`flex-1 rounded-full px-2 py-1 transition active:scale-95 ${searchMode === 'content' ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                {t('rightSidebar.searchModeContent')}
+              </button>
+            </div>
             )}
           </div>
         )}
@@ -2332,9 +2430,12 @@ export function RightSidebar(
                   onPathReference={insertPathReference}
                   onDirectoryRoot={openDirectoryAsExplorerRoot}
                   onDirectoryPinToggle={togglePinnedDirectory}
-                  pinnedDirectoryPaths={pinnedExplorerRootSet}
+                  onFilePinToggle={togglePinnedFile}
+                  pinnedPaths={pinnedExplorerRootSet}
                   selectedFilePath={selectedFilePath}
                   query={deferredFileQuery}
+                  searchMode={searchMode}
+                  onContentMatchSelect={handleContentMatchSelect}
                 />
               </div>
               <div className="min-w-0 flex-1 overflow-hidden">
@@ -2344,6 +2445,8 @@ export function RightSidebar(
                   isMobile={false}
                   lineRange={lineRange}
                   onLineRangeChange={setLineRange}
+                  scrollToLine={scrollToLine}
+                  onScrollToLineHandled={() => setScrollToLine(null)}
                 />
               </div>
             </div>
@@ -2362,9 +2465,12 @@ export function RightSidebar(
                   onPathReference={insertPathReference}
                   onDirectoryRoot={openDirectoryAsExplorerRoot}
                   onDirectoryPinToggle={togglePinnedDirectory}
-                  pinnedDirectoryPaths={pinnedExplorerRootSet}
+                  onFilePinToggle={togglePinnedFile}
+                  pinnedPaths={pinnedExplorerRootSet}
                   selectedFilePath={selectedFilePath}
                   query={deferredFileQuery}
+                  searchMode={searchMode}
+                  onContentMatchSelect={handleContentMatchSelect}
                 />
               </div>
               <div className={`h-full overflow-hidden ${mobilePreviewActive ? 'block' : 'hidden'}`} aria-hidden={!mobilePreviewActive}>
@@ -2375,6 +2481,8 @@ export function RightSidebar(
                   isMobile
                   lineRange={lineRange}
                   onLineRangeChange={setLineRange}
+                  scrollToLine={scrollToLine}
+                  onScrollToLineHandled={() => setScrollToLine(null)}
                 />
               </div>
             </div>
@@ -2391,9 +2499,12 @@ export function RightSidebar(
                 onPathReference={insertPathReference}
                 onDirectoryRoot={openDirectoryAsExplorerRoot}
                 onDirectoryPinToggle={togglePinnedDirectory}
-                pinnedDirectoryPaths={pinnedExplorerRootSet}
+                onFilePinToggle={togglePinnedFile}
+                pinnedPaths={pinnedExplorerRootSet}
                 selectedFilePath={selectedFilePath}
                 query={deferredFileQuery}
+                searchMode={searchMode}
+                onContentMatchSelect={handleContentMatchSelect}
               />
             </div>
           )}
@@ -2406,6 +2517,8 @@ export function RightSidebar(
             isMobile={false}
             lineRange={lineRange}
             onLineRangeChange={setLineRange}
+            scrollToLine={scrollToLine}
+            onScrollToLineHandled={() => setScrollToLine(null)}
           />
         </Pane>
 
@@ -2633,7 +2746,7 @@ export function RightSidebar(
         </Pane>
       </div>
         {confirmGitAction && (
-          <div className="fixed inset-0 z-[70] bg-[rgba(0,0,0,0.42)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>
+          <div className="fixed inset-0 z-modal-panel bg-[rgba(0,0,0,0.42)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>
             <div
               className="fixed inset-x-3 bottom-6 mx-auto max-w-md rounded-2xl border border-border/20 bg-surface-elevated p-4 shadow-2xl"
               onClick={(event) => event.stopPropagation()}

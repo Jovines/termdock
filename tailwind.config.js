@@ -39,6 +39,21 @@ export default {
         mono: ['var(--font-mono)'],
         sans: ['var(--font-sans)'],
       },
+      // 语义化 z-index —— 数值单一来源在 src/index.css 的 :root（--z-*）。
+      // 业务里只用 z-drawer-panel / z-modal-panel 这类语义类，禁止裸 z-[数字]。
+      // 新增浮层先在 index.css 选/加档位，再在这里补一个映射。
+      zIndex: {
+        'sidebar-backdrop': 'var(--z-sidebar-backdrop)',
+        'sidebar-panel': 'var(--z-sidebar-panel)',
+        'menu-backdrop': 'var(--z-menu-backdrop)',
+        'menu-panel': 'var(--z-menu-panel)',
+        'drawer-backdrop': 'var(--z-drawer-backdrop)',
+        'drawer-panel': 'var(--z-drawer-panel)',
+        'modal-backdrop': 'var(--z-modal-backdrop)',
+        'modal-panel': 'var(--z-modal-panel)',
+        'toast': 'var(--z-toast)',
+        'popover': 'var(--z-popover)',
+      },
       animation: {
         'spin-slow': 'spin 3s linear infinite',
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',

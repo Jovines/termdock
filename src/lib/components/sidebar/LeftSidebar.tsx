@@ -15,15 +15,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus } from '../../terminal/types';
-import { getCwdLeafName, getSessionDisplayName } from '../../terminal/display';
+import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, reorderGroupedSessionIds, reorderSessionsWithinGroup } from '../../terminal/display';
 import { AgentSessionDot, AgentCountBadge } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 import { useTerminalStore } from '../../stores/useTerminalStore';
+import { useSidebarStore } from '../../stores/useSidebarStore';
 
 const AUTO_SORT_ACTIVE_SESSIONS_STORAGE_KEY = 'termdock-sidebar-auto-sort-active-sessions';
 const MANUAL_SESSION_ORDER_BEFORE_AUTO_SORT_STORAGE_KEY = 'termdock-sidebar-manual-order-before-auto-sort';
-const GROUP_BY_FOLDER_STORAGE_KEY = 'termdock-sidebar-group-by-folder';
-const COLLAPSED_FOLDER_GROUPS_STORAGE_KEY = 'termdock-sidebar-collapsed-folder-groups';
 // 最近活跃排序不是竞速榜：只分「最近活跃」和「非活跃」两组。
 // 活跃组整体在前，但组内保持当前相对顺序，避免两个持续输出的 session
 // 按毫秒级 lastOutputAt 来回抢第一个位置。
@@ -82,46 +81,6 @@ function clearStoredManualSessionOrder(): void {
   }
 }
 
-function readGroupByFolderEnabled(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    return window.localStorage.getItem(GROUP_BY_FOLDER_STORAGE_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function writeGroupByFolderEnabled(enabled: boolean): void {
-  if (typeof window === 'undefined') return;
-  try {
-    if (enabled) window.localStorage.setItem(GROUP_BY_FOLDER_STORAGE_KEY, '1');
-    else window.localStorage.removeItem(GROUP_BY_FOLDER_STORAGE_KEY);
-  } catch {
-    // ignore storage failures
-  }
-}
-
-function readCollapsedFolderGroups(): Set<string> {
-  if (typeof window === 'undefined') return new Set();
-  try {
-    const raw = window.localStorage.getItem(COLLAPSED_FOLDER_GROUPS_STORAGE_KEY);
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? new Set(parsed.filter((k) => typeof k === 'string')) : new Set();
-  } catch {
-    return new Set();
-  }
-}
-
-function writeCollapsedFolderGroups(keys: Set<string>): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(COLLAPSED_FOLDER_GROUPS_STORAGE_KEY, JSON.stringify([...keys]));
-  } catch {
-    // ignore storage failures
-  }
-}
-
 function readOutputActivitySnapshot(): Map<string, number> {
   const snapshot = new Map<string, number>();
   for (const [id, state] of useTerminalStore.getState().sessions) {
@@ -171,37 +130,6 @@ function getActivityBucketSortedSessionIds<T extends { id: string }>(
   return [...sessions]
     .sort((a, b) => compareSessionsByActivityBucket(a, b, outputActivityBySession, currentIndexBySession, now))
     .map((session) => session.id);
-}
-
-interface FolderGroup<T> {
-  // 完整 cwd 作为稳定 key（折叠状态持久化用）；无 cwd 的会话归到 '' 组。
-  key: string;
-  label: string;
-  sessions: T[];
-}
-
-// 按 cwd 把会话归组，组的先后顺序 = 该组首个会话在列表中的出现顺序，
-// 这样开/关分组时视觉跳动最小。无 cwd 的会话统一进末尾的「其他」组。
-function buildFolderGroups<T extends { id: string }>(
-  sessions: T[],
-  cwdOf: (session: T) => string | null,
-  ungroupedLabel: string,
-): FolderGroup<T>[] {
-  const groups: FolderGroup<T>[] = [];
-  const byKey = new Map<string, FolderGroup<T>>();
-  for (const session of sessions) {
-    const cwd = cwdOf(session);
-    const key = cwd && cwd.trim().length > 0 ? cwd : '';
-    let group = byKey.get(key);
-    if (!group) {
-      group = { key, label: key ? (getCwdLeafName(key) ?? key) : ungroupedLabel, sessions: [] };
-      byKey.set(key, group);
-      groups.push(group);
-    }
-    group.sessions.push(session);
-  }
-  // 「其他」组永远排最后。
-  return groups.sort((a, b) => (a.key === '' ? 1 : 0) - (b.key === '' ? 1 : 0));
 }
 
 interface LeftSidebarProps {
@@ -272,8 +200,9 @@ export function LeftSidebar(
   const [searchOpen, setSearchOpen] = useState(false);
   const [confirmNewMode, setConfirmNewMode] = useState<'shell' | 'tmux' | null>(null);
   const [autoSortByActivity, setAutoSortByActivity] = useState(readAutoSortActiveSessionsEnabled);
-  const [groupByFolder, setGroupByFolder] = useState(readGroupByFolderEnabled);
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(readCollapsedFolderGroups);
+  const groupByFolder = useSidebarStore((s) => s.groupByFolder);
+  const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
+  const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
   const [outputActivityBySession, setOutputActivityBySession] = useState<Map<string, number>>(readOutputActivitySnapshot);
   const [activityClock, setActivityClock] = useState(() => Date.now());
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
@@ -404,29 +333,17 @@ export function LeftSidebar(
   }, [onReorderSessions, sessions]);
 
   // 分组与「最近活跃排序」互斥：开启分组时关掉自动排序并恢复手动顺序。
+  // 分组开关本身存在共享 store，互斥副作用（autoSort 仍是本地 state）留在这里。
   const handleToggleGroupByFolder = useCallback(() => {
-    setGroupByFolder((enabled) => {
-      const nextEnabled = !enabled;
-      writeGroupByFolderEnabled(nextEnabled);
-      if (nextEnabled && readAutoSortActiveSessionsEnabled()) {
-        setAutoSortByActivity(false);
-        const storedOrder = readStoredManualSessionOrder();
-        if (storedOrder) onReorderSessions(storedOrder);
-        clearStoredManualSessionOrder();
-      }
-      return nextEnabled;
-    });
+    const willEnable = !useSidebarStore.getState().groupByFolder;
+    useSidebarStore.getState().toggleGroupByFolder();
+    if (willEnable && readAutoSortActiveSessionsEnabled()) {
+      setAutoSortByActivity(false);
+      const storedOrder = readStoredManualSessionOrder();
+      if (storedOrder) onReorderSessions(storedOrder);
+      clearStoredManualSessionOrder();
+    }
   }, [onReorderSessions]);
-
-  const handleToggleGroupCollapsed = useCallback((groupKey: string) => {
-    setCollapsedGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(groupKey)) next.delete(groupKey);
-      else next.add(groupKey);
-      writeCollapsedFolderGroups(next);
-      return next;
-    });
-  }, []);
 
   // 会话行主体（切换按钮 + 关闭按钮），flat / 分组两种布局共用。
   // dragHandleProps 仅在可拖拽的 flat 模式传入。
@@ -522,6 +439,24 @@ export function LeftSidebar(
       t('sidebar.ungrouped'),
     );
   }, [groupByFolder, visibleSessions, sessionStates, t]);
+
+  // 分组模式下的拖拽：单个 DragDropContext，按 result.type 区分两种拖动。
+  //  - type 'group'：整组顺序拖动（组与组之间排序），组内顺序不变。
+  //  - type 'session'：组内排序；禁止跨组拖动（分组依据是 cwd，跨组无意义）。
+  // 搜索过滤时禁用（folderGroups 基于 visibleSessions，回写会丢失被过滤掉的会话）。
+  const handleGroupedDragEnd = useCallback((result: DropResult) => {
+    if (isFiltering) return;
+    if (!result.destination) return;
+    if (result.type === 'group') {
+      if (result.source.index === result.destination.index) return;
+      onReorderSessions(reorderGroupedSessionIds(folderGroups, result.source.index, result.destination.index));
+      return;
+    }
+    if (result.source.droppableId !== result.destination.droppableId) return;
+    if (result.source.index === result.destination.index) return;
+    const groupKey = result.source.droppableId.replace(/^group-sessions:/, '');
+    onReorderSessions(reorderSessionsWithinGroup(folderGroups, groupKey, result.source.index, result.destination.index));
+  }, [isFiltering, folderGroups, onReorderSessions]);
 
   // 分组模式顶部「待处理」聚合区：跨组聚合所有 waiting / 跑完待查看的会话，
   // 按 sessions 原始顺序排列。这样无论会话属于哪个组、组是否折叠，都能在
@@ -700,9 +635,12 @@ export function LeftSidebar(
                     );
                   })}
                 </div>
-              </div>
-            )}
-            {folderGroups.map((group) => {
+              </div>            )}
+            <DragDropContext onDragEnd={handleGroupedDragEnd}>
+            <Droppable droppableId="sidebar-groups" type="group" direction="vertical">
+              {(groupsProvided) => (
+            <div ref={groupsProvided.innerRef} {...groupsProvided.droppableProps} className="space-y-1.5">
+            {folderGroups.map((group, groupIndex) => {
               const collapsed = collapsedGroups.has(group.key);
               let groupRunning = 0;
               let groupReview = 0;
@@ -711,12 +649,29 @@ export function LeftSidebar(
                 if (ts?.agentStatus === 'running') groupRunning += 1;
                 if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) groupReview += 1;
               }
+              // 「其他」组（无 cwd）永远排最后，禁止整组拖动；搜索过滤时也禁用整组拖动。
+              const groupDragDisabled = group.key === '' || isFiltering;
               return (
-                <div key={group.key || '__ungrouped__'}>
+                <Draggable
+                  key={group.key || '__ungrouped__'}
+                  draggableId={`sidebar-group:${group.key || '__ungrouped__'}`}
+                  index={groupIndex}
+                  isDragDisabled={groupDragDisabled}
+                  disableInteractiveElementBlocking
+                >
+                  {(groupDragProvided, groupSnapshot) => (
+                <div
+                  ref={groupDragProvided.innerRef}
+                  {...groupDragProvided.draggableProps}
+                  className={`rounded-md transition-colors ${groupSnapshot.isDragging ? 'bg-surface-elevated shadow-lg opacity-90' : ''}`}
+                >
                   <button
                     type="button"
-                    onClick={() => handleToggleGroupCollapsed(group.key)}
-                    className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-muted-foreground transition hover:bg-surface-2"
+                    {...(groupDragDisabled ? {} : groupDragProvided.dragHandleProps)}
+                    onClick={() => toggleGroupCollapsed(group.key)}
+                    className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-muted-foreground transition hover:bg-surface-2 ${
+                      groupDragDisabled ? '' : 'cursor-grab active:cursor-grabbing'
+                    }`}
                     title={group.key || group.label}
                   >
                     <RiChevronRightLine
@@ -735,27 +690,56 @@ export function LeftSidebar(
                     <span className="shrink-0 text-[10.5px] text-muted-foreground/70">{group.sessions.length}</span>
                   </button>
                   {!collapsed && (
-                    <div className="mt-0.5 space-y-0.5 pl-2">
-                      {group.sessions.map((session) => {
-                        const isActive = session.id === activeSessionId;
-                        return (
-                          <div
-                            key={session.id}
-                            className={`group relative flex items-center gap-1 rounded-lg pr-1 transition ${
-                              isActive
-                                ? 'bg-surface-elevated text-foreground'
-                                : 'text-muted-foreground hover:bg-surface-2'
-                            }`}
-                          >
-                            {renderSessionRowBody(session)}
-                          </div>
-                        );
-                      })}
-                    </div>
+                    <Droppable droppableId={`group-sessions:${group.key}`} type="session" direction="vertical">
+                      {(sessionsProvided) => (
+                        <div
+                          ref={sessionsProvided.innerRef}
+                          {...sessionsProvided.droppableProps}
+                          className="mt-0.5 space-y-0.5 pl-2"
+                        >
+                          {group.sessions.map((session, sessionIndex) => {
+                            const isActive = session.id === activeSessionId;
+                            return (
+                              <Draggable
+                                key={session.id}
+                                draggableId={`sidebar-grouped:${session.id}`}
+                                index={sessionIndex}
+                                isDragDisabled={isFiltering}
+                                disableInteractiveElementBlocking
+                              >
+                                {(sessionDragProvided, sessionSnapshot) => (
+                                  <div
+                                    ref={sessionDragProvided.innerRef}
+                                    {...sessionDragProvided.draggableProps}
+                                    className={`group relative flex items-center gap-1 rounded-lg pr-1 transition-colors ${
+                                      sessionSnapshot.isDragging
+                                        ? 'bg-surface-elevated text-foreground shadow-lg opacity-90'
+                                        : isActive
+                                          ? 'bg-surface-elevated text-foreground'
+                                          : 'text-muted-foreground hover:bg-surface-2'
+                                    } ${isFiltering ? '' : 'cursor-grab active:cursor-grabbing'}`}
+                                  >
+                                    {renderSessionRowBody(session, sessionDragProvided.dragHandleProps)}
+                                  </div>
+                                )}
+                              </Draggable>
+                            );
+                          })}
+                          {sessionsProvided.placeholder}
+                        </div>
+                      )}
+                    </Droppable>
                   )}
                 </div>
+                  )}
+                </Draggable>
               );
             })}
+            {groupsProvided.placeholder}
+            </div>
+              )}
+            </Droppable>
+            </DragDropContext>
           </div>
         ) : (
           <DragDropContext onDragEnd={handleSessionDragEnd}>
@@ -774,7 +758,7 @@ export function LeftSidebar(
                 <div
                   ref={dragProvided.innerRef}
                   {...dragProvided.draggableProps}
-                  className={`group relative flex items-center gap-1 rounded-lg pr-1 transition ${
+                  className={`group relative flex items-center gap-1 rounded-lg pr-1 transition-colors ${
                     snapshot.isDragging
                       ? 'bg-surface-elevated text-foreground shadow-lg opacity-90'
                       : isActive

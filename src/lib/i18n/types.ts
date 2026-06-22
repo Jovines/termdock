@@ -91,6 +91,9 @@ export type TranslationDictionary = {
     refreshGit: string;
     close: string;
     filterChanges: string;
+    searchPlaceholderContent: string;
+    searchModeName: string;
+    searchModeContent: string;
     clearSearch: string;
     insertGitContext: string;
     copyGitContext: string;
@@ -192,6 +195,8 @@ export type TranslationDictionary = {
     pinDirTitle: string;
     unpinDir: string;
     unpinDirTitle: string;
+    pinFileTitle: string;
+    unpinFileTitle: string;
     noWorkingDir: string;
     emptyDir: string;
     noMatchingFiles: string;
@@ -202,6 +207,10 @@ export type TranslationDictionary = {
     searchStillRunning: string;
     showingSearchResults: (params: TranslatorParams) => string;
     loadMoreSearchResults: (params: TranslatorParams) => string;
+    contentMatchesCount: (params: TranslatorParams) => string;
+    moreMatches: (params: TranslatorParams) => string;
+    noContentMatches: string;
+    contentSearchNeedsRipgrep: string;
     truncatedHint: string;
   };
   diffViewer: {

@@ -13,6 +13,10 @@ const MAX_IMAGE_PREVIEW_SIZE = 20 * 1024 * 1024; // 20MB
 const GIT_TIMEOUT_MS = 5000;
 const MAX_DIRECTORY_ENTRIES = 1000;
 const MAX_FALLBACK_SEARCH_VISITED = 30_000;
+// Content (full-text) search caps so a broad query can't flood the stream/UI.
+const MAX_CONTENT_SEARCH_FILES = 1_000;
+const MAX_CONTENT_MATCHES_PER_FILE = 50;
+const MAX_CONTENT_MATCH_LINE_LENGTH = 400;
 const MAX_GIT_CONTEXT_CHANGED_FILES = 200;
 const MAX_DIFF_BYTES = 2 * 1024 * 1024; // 2MB
 const MAX_UNTRACKED_DIFF_FILE_BYTES = 1024 * 1024; // 1MB
@@ -95,6 +99,17 @@ interface FileSearchPayload {
   total: number;
   engine: 'rg' | 'fallback';
   limited?: boolean;
+}
+
+interface ContentMatchLine {
+  line: number;
+  text: string;
+}
+
+interface ContentSearchEntry {
+  name: string;
+  path: string;
+  matches: ContentMatchLine[];
 }
 
 interface FileWatchEvent {
@@ -717,6 +732,133 @@ async function streamSearchWithFallback(rootPath: string, queryLower: string, sh
   return { total: emitted.size, limited: visited >= MAX_FALLBACK_SEARCH_VISITED };
 }
 
+function createContentBatchEmitter(res: Response) {
+  let batch: ContentSearchEntry[] = [];
+  const flush = () => {
+    if (batch.length === 0 || res.destroyed) return;
+    writeSearchEvent(res, 'content-batch', { contentEntries: batch });
+    batch = [];
+  };
+  return {
+    push(entry: ContentSearchEntry) {
+      batch.push(entry);
+      if (batch.length >= 20) flush();
+    },
+    flush,
+  };
+}
+
+// Full-text search using ripgrep's JSON output. Results are aggregated per
+// file (path + matching lines) and streamed in small batches. Unlike the
+// file-name search there is no fallback engine: a recursive content grep
+// without ripgrep would be far too expensive, so callers get an explicit
+// "ripgrep required" error instead.
+function streamContentSearchWithRipgrep(rootPath: string, query: string, showHidden: boolean, signal: AbortSignal, res: Response): Promise<{ total: number; limited: boolean }> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '--json',
+      '--smart-case',
+      '--no-messages',
+      '-m', String(MAX_CONTENT_MATCHES_PER_FILE),
+    ];
+    if (showHidden) args.push('--hidden', '-g', '!.git/');
+    args.push('--', query);
+
+    const proc = spawn('rg', args, { cwd: rootPath, stdio: ['ignore', 'pipe', 'pipe'] });
+    const batch = createContentBatchEmitter(res);
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let fileCount = 0;
+    let limited = false;
+    // Buffer matches per file until rg emits the file's "end" event.
+    let currentPath: string | null = null;
+    let currentMatches: ContentMatchLine[] = [];
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abortHandler);
+      batch.flush();
+      fn();
+    };
+    const abortHandler = () => {
+      proc.kill('SIGTERM');
+      finish(() => reject(new Error('Search aborted')));
+    };
+    signal.addEventListener('abort', abortHandler);
+
+    const flushCurrentFile = () => {
+      if (currentPath && currentMatches.length > 0) {
+        if (fileCount >= MAX_CONTENT_SEARCH_FILES) {
+          limited = true;
+        } else {
+          fileCount += 1;
+          batch.push({ name: path.basename(currentPath) || currentPath, path: currentPath, matches: currentMatches });
+        }
+      }
+      currentPath = null;
+      currentMatches = [];
+    };
+
+    const handleEvent = (raw: string) => {
+      if (!raw.trim()) return;
+      let event: any;
+      try {
+        event = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      if (event.type === 'begin') {
+        const text = event.data?.path?.text;
+        currentPath = typeof text === 'string' ? path.resolve(rootPath, text) : null;
+        currentMatches = [];
+      } else if (event.type === 'match') {
+        if (!currentPath) return;
+        if (currentMatches.length >= MAX_CONTENT_MATCHES_PER_FILE) return;
+        const lineNumber = typeof event.data?.line_number === 'number' ? event.data.line_number : null;
+        const lineTextRaw = event.data?.lines?.text;
+        if (lineNumber === null || typeof lineTextRaw !== 'string') return;
+        const trimmed = lineTextRaw.replace(/\r?\n$/, '');
+        const text = trimmed.length > MAX_CONTENT_MATCH_LINE_LENGTH
+          ? `${trimmed.slice(0, MAX_CONTENT_MATCH_LINE_LENGTH)}…`
+          : trimmed;
+        currentMatches.push({ line: lineNumber, text });
+      } else if (event.type === 'end') {
+        flushCurrentFile();
+        if (limited) {
+          proc.kill('SIGTERM');
+        }
+      }
+    };
+
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      let newlineIndex = stdout.indexOf('\n');
+      while (newlineIndex >= 0) {
+        handleEvent(stdout.slice(0, newlineIndex));
+        stdout = stdout.slice(newlineIndex + 1);
+        newlineIndex = stdout.indexOf('\n');
+      }
+    });
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (chunk: string) => { stderr += chunk; });
+    proc.on('error', (error) => finish(() => reject(error)));
+    proc.on('close', (code) => {
+      if (settled) return;
+      // rg exits 1 when there are no matches (not an error here) and is killed
+      // (null code) once we hit the file cap; treat >=2 as a real failure.
+      if (code !== null && code !== 0 && code !== 1) {
+        finish(() => reject(new Error(stderr.trim() || `rg exited with code ${code}`)));
+        return;
+      }
+      flushCurrentFile();
+      finish(() => resolve({ total: fileCount, limited }));
+    });
+  });
+}
+
 function execGit(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -954,7 +1096,33 @@ router.get('/search', async (req: Request, res: Response) => {
     }
 
     const showHidden = req.query.showHidden === 'true';
+    const mode = req.query.mode === 'content' ? 'content' : 'name';
     const queryLower = query.toLowerCase();
+
+    if (mode === 'content') {
+      if (req.query.stream !== 'true') {
+        res.status(400).json({ error: 'Content search requires streaming', code: 'CONTENT_SEARCH_STREAM_ONLY' });
+        return;
+      }
+      res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Accel-Buffering', 'no');
+      writeSearchEvent(res, 'meta', { path: resolvedPath, query, engine: 'rg', mode: 'content', limited: false });
+      try {
+        const result = await streamContentSearchWithRipgrep(resolvedPath, query, showHidden, controller.signal, res);
+        if (!controller.signal.aborted && !res.destroyed) {
+          writeSearchEvent(res, 'done', { total: result.total, truncated: result.limited, limited: result.limited, engine: 'rg', mode: 'content' });
+          res.end();
+        }
+      } catch (error) {
+        if (controller.signal.aborted || res.destroyed) return;
+        const message = error instanceof Error ? error.message : 'Content search failed';
+        writeSearchEvent(res, 'error', { message, code: 'CONTENT_SEARCH_UNAVAILABLE' });
+        res.end();
+      }
+      return;
+    }
+
     if (req.query.stream === 'true') {
       res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
       res.setHeader('Cache-Control', 'no-store');

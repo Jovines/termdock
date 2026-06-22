@@ -252,7 +252,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       <div
         ref={backdropRef}
         data-sidebar-backdrop={side}
-        className="fixed inset-0 z-40 bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+        className="fixed inset-0 z-sidebar-backdrop bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
         style={{
           opacity: isOpen ? 1 : 0,
           pointerEvents: isOpen ? 'auto' : 'none',
@@ -266,7 +266,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
         {...bindPanel()}
         ref={setPanelRef}
         data-sidebar={side}
-        className={`fixed inset-y-0 z-50 flex flex-col bg-surface will-change-transform ${
+        className={`fixed inset-y-0 z-sidebar-panel flex flex-col bg-surface will-change-transform ${
           isLeft ? 'border-r border-border/15' : 'border-l border-border/15'
         }`}
         style={{

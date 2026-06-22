@@ -8,6 +8,8 @@ import { closeTerminal, killTmuxSession } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
 import { useTerminalStore } from '../stores/useTerminalStore';
+import { useSidebarStore } from '../stores/useSidebarStore';
+import { deriveGroupedOrder } from '../terminal/display';
 import { createDebugLogger } from '../utils/debug';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
 
@@ -232,6 +234,22 @@ interface MultiTerminalViewProps {
   onSessionDataUpdate?: (data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => void;
 }
 
+function pickCwdById(sessions: Map<string, { cwd: string | null }>): Map<string, string | null> {
+  const map = new Map<string, string | null>();
+  for (const [id, state] of sessions) {
+    map.set(id, state.cwd ?? null);
+  }
+  return map;
+}
+
+function cwdMapEqual(a: Map<string, string | null>, b: Map<string, string | null>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [id, value] of b) {
+    if (a.get(id) !== value) return false;
+  }
+  return true;
+}
+
 function generateTmuxSessionName(seed?: string): string {
   const normalizedSeed = (seed || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 12);
   if (normalizedSeed) {
@@ -299,6 +317,35 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     reorderSessions,
   } = useSessionPersistence();
 
+  // 分组状态（与顶栏 tab / 侧边栏共享同一份）。
+  const groupByFolder = useSidebarStore((s) => s.groupByFolder);
+
+  // 订阅 useTerminalStore 的 cwd（分组按 cwd 归类）。只取 id→cwd 的 Map，
+  // 浅比较避免终端高频输出导致的重渲染。
+  const [cwdById, setCwdById] = useState<Map<string, string | null>>(
+    () => pickCwdById(useTerminalStore.getState().sessions),
+  );
+  useEffect(() => {
+    return useTerminalStore.subscribe((state) => {
+      const next = pickCwdById(state.sessions);
+      setCwdById((current) => (cwdMapEqual(current, next) ? current : next));
+    });
+  }, []);
+
+  // 贯穿式分组：arranged = 所有 session 按 cwd 聚拢的顺序。所有 slide 常驻、
+  // 左右滑动连续穿过全部（不折叠、不隐藏）。
+  const { arranged } = useMemo(
+    () => deriveGroupedOrder(
+      sessions,
+      (session) => cwdById.get(session.id) ?? null,
+      groupByFolder,
+      '',
+    ),
+    [sessions, cwdById, groupByFolder],
+  );
+  const arrangedRef = useRef<TerminalSession[]>(arranged);
+  arrangedRef.current = arranged;
+
   activeSessionIdRef.current = activeSessionId;
   sessionsRef.current = sessions;
   persistedActiveIdRef.current = persistedActiveId;
@@ -352,17 +399,17 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     setActiveSession(activeSessionId);
   }, [activeSessionId, isLoading, isRestoring, persistedActiveId, setActiveSession]);
 
-  // Get active session index
+  // Get active session index (基于 arranged：与 Swiper 的 slide 顺序一致)
   const activeSessionIndex = useMemo(() => {
-    if (sessions.length === 0) {
+    if (arranged.length === 0) {
       return 0;
     }
     if (!activeSessionId) {
       return 0;
     }
-    const foundIndex = sessions.findIndex((s) => s.id === activeSessionId);
+    const foundIndex = arranged.findIndex((s) => s.id === activeSessionId);
     return foundIndex >= 0 ? foundIndex : 0;
-  }, [sessions, activeSessionId]);
+  }, [arranged, activeSessionId]);
 
   activeSessionIndexRef.current = activeSessionIndex;
 
@@ -492,7 +539,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, []);
 
   const handleSwiperChange = useCallback((instance: SwiperInstance) => {
-    const nextSessionId = sessions[instance.activeIndex]?.id;
+    // instance.activeIndex 与 arranged（slide 渲染顺序）对应。
+    const nextSessionId = arrangedRef.current[instance.activeIndex]?.id;
     logSwiperState('[swiper:slide-change]', {
       nextSessionId: nextSessionId ?? null,
       instanceActiveIndex: instance.activeIndex,
@@ -552,12 +600,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   useEffect(() => {
     const swiper = swiperRef.current;
     if (!swiper) return;
-    const nextAllow = sessions.length > 1;
+    const nextAllow = arranged.length > 1;
     if (swiper.allowTouchMove !== nextAllow) {
       swiper.allowTouchMove = nextAllow;
       logSwiperState('[swiper:allow-touch-sync]', { nextAllow });
     }
-  }, [sessions.length, logSwiperState]);
+  }, [arranged.length, logSwiperState]);
 
   const updateSwiperLayout = useCallback((reason: string) => {
     const swiper = swiperRef.current;
@@ -588,6 +636,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   useEffect(() => {
     return () => clearTouchSwipeReleaseTimer();
   }, [clearTouchSwipeReleaseTimer]);
+
+  // 分组开关 / 排列顺序变化后，slide 顺序改变 → 让 Swiper 重算 snapGrid 并把
+  // translate 对齐到当前 active 的位置。
+  const arrangedKey = arranged.map((s) => s.id).join('\u0000');
+  useEffect(() => {
+    requestAnimationFrame(() => updateSwiperLayout('group-change'));
+  }, [groupByFolder, arrangedKey, updateSwiperLayout]);
 
   useEffect(() => {
     const updateSwiperSize = () => {
@@ -1010,6 +1065,23 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       handleSwitchSession(customEvent.detail);
     };
 
+    const handleCycleSessionEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<{ direction: 'prev' | 'next' } | undefined>;
+      const direction = customEvent.detail?.direction;
+      if (direction !== 'prev' && direction !== 'next') return;
+      const list = arrangedRef.current;
+      if (list.length <= 1) return;
+      const currentId = activeSessionIdRef.current;
+      const currentIndex = currentId ? list.findIndex((s) => s.id === currentId) : -1;
+      const base = currentIndex >= 0 ? currentIndex : 0;
+      const delta = direction === 'next' ? 1 : -1;
+      const nextIndex = (base + delta + list.length) % list.length;
+      const nextId = list[nextIndex]?.id;
+      if (nextId && nextId !== currentId) {
+        handleSwitchSession(nextId);
+      }
+    };
+
     const handleCloseSessionEvent = (event: Event) => {
       const customEvent = event as CustomEvent<string | CloseSessionEventDetail>;
       handleCloseSession(customEvent.detail);
@@ -1046,6 +1118,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     window.addEventListener('new-terminal-session', handleNewSessionEvent);
     window.addEventListener('switch-terminal-session', handleSwitchSessionEvent);
+    window.addEventListener('cycle-terminal-session', handleCycleSessionEvent);
     window.addEventListener('close-terminal-session', handleCloseSessionEvent);
     window.addEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
     window.addEventListener('rename-terminal-session', handleRenameSessionEvent);
@@ -1055,6 +1128,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     return () => {
       window.removeEventListener('new-terminal-session', handleNewSessionEvent);
       window.removeEventListener('switch-terminal-session', handleSwitchSessionEvent);
+      window.removeEventListener('cycle-terminal-session', handleCycleSessionEvent);
       window.removeEventListener('close-terminal-session', handleCloseSessionEvent);
       window.removeEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
       window.removeEventListener('rename-terminal-session', handleRenameSessionEvent);
@@ -1083,7 +1157,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         <Swiper
           onSwiper={(instance) => {
             swiperRef.current = instance;
-            instance.allowTouchMove = sessions.length > 1;
+            instance.allowTouchMove = arranged.length > 1;
             logSwiperState('[swiper:on-swiper]', { allowTouchMove: instance.allowTouchMove });
             requestAnimationFrame(() => updateSwiperLayout('on-swiper'));
           }}
@@ -1150,25 +1224,31 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           noSwipingSelector="[data-mobile-keyboard='true']"
           className="h-full"
         >
-          {sessions.map((session, index) => (
-            <SwiperSlide key={session.id} className="h-full">
-              <TerminalView
-                sessionId={session.id}
-                mode={session.mode}
-                tmuxSessionName={session.tmuxSessionName}
-                fontFamily={fontFamily}
-                fontSize={fontSize}
-                rendererMode={rendererMode}
-                toolbarPresets={toolbarPresets}
-                isActive={index === activeSessionIndex}
-                focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
-                resumeRequestToken={resumeRequestToken}
-                onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
-                showDebug={showDebug}
-                onStatusChange={index === activeSessionIndex ? onStatusChange : undefined}
-              />
-            </SwiperSlide>
-          ))}
+          {arranged.map((session) => {
+            const isActive = session.id === activeSessionId;
+            return (
+              <SwiperSlide
+                key={session.id}
+                className="h-full"
+              >
+                <TerminalView
+                  sessionId={session.id}
+                  mode={session.mode}
+                  tmuxSessionName={session.tmuxSessionName}
+                  fontFamily={fontFamily}
+                  fontSize={fontSize}
+                  rendererMode={rendererMode}
+                  toolbarPresets={toolbarPresets}
+                  isActive={isActive}
+                  focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
+                  resumeRequestToken={resumeRequestToken}
+                  onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
+                  showDebug={showDebug}
+                  onStatusChange={isActive ? onStatusChange : undefined}
+                />
+              </SwiperSlide>
+            );
+          })}
         </Swiper>
       </div>
     </div>

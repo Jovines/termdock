@@ -1513,7 +1513,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     };
   }, [isActive, isMobile, sessionId]);
 
-  const isKeyboardVisible = isMobile || (isActive && toolbarPreset.showOnDesktop === true);
+  // 桌面端工具条的「显隐」只看 preset 是否声明 showOnDesktop，不再绑 isActive。
+  // 否则每个非激活 tab 的工具条会被收成 max-h-0，切到该 tab 时 isActive false→true
+  // 重新从 0 撑开，重放 150ms 展开动画 + 终端回流，表现为「先消失再冒出来」。
+  // 让非激活 slide（已在 Swiper 视图外，用户看不见）保持展开，切进来时直接就是
+  // 展开态，同类 tab 间切换不再闪动。交互仍由 isKeyboardInteractive=isActive 控制，
+  // 非激活 tab 的按钮照旧禁用，不会误触。
+  const isKeyboardVisible = isMobile || toolbarPreset.showOnDesktop === true;
   const isKeyboardInteractive = isActive;
 
   // The translateY / margin-top formulas are always applied on mobile.

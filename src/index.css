@@ -22,6 +22,36 @@
   --destructive-foreground: #FFFCF0;
   --ring: #4385BE;
   --hover: #E6E4D9;
+  /*
+   * z-index 单一来源 —— 所有「全屏浮层」(position: fixed 的遮罩 / 抽屉 / 弹窗 /
+   * 浮窗) 的层级只在这里定义，业务组件一律用 Tailwind 语义类 (z-modal-panel
+   * 等，见 tailwind.config.js)，禁止再写 z-[数字] 这种裸数值。
+   *
+   * 历史教训：设置抽屉曾被单独提到 z-[90]，但从抽屉里弹出的子弹窗还停留在
+   * z-[70]，于是子弹窗被抽屉盖住 —— 表现为「点了没反应」。裸数值各写各的，
+   * 迟早错位。集中成一条有序刻度后，关系一目了然，改一处全局生效。
+   *
+   * 层级从低到高（同类 backdrop 比 panel 低 1 档；档位间留间隙便于插入）：
+   *   sidebar  40/50   左右抽屉（会话列表 / 文件树）
+   *   menu     60/70   tab 菜单、关闭会话选择器等轻量浮层
+   *   drawer   80/90   设置抽屉（承载下面的 modal 子弹窗）
+   *   modal   100/110  从设置抽屉/侧栏里再弹出的弹窗，必须盖住 drawer
+   *   toast    120      返回拦截提示等顶层瞬时提示
+   *   popover  200      移动端键盘预设浮窗，永远在最上层
+   *
+   * ⚠️ 新增浮层时：先在这里选/加一个语义档位，再用对应 z-* 类。
+   *    不要凭手感写 z-[数字]，z-index 守卫测试会拦下裸数值。
+   */
+  --z-sidebar-backdrop: 40;
+  --z-sidebar-panel: 50;
+  --z-menu-backdrop: 60;
+  --z-menu-panel: 70;
+  --z-drawer-backdrop: 80;
+  --z-drawer-panel: 90;
+  --z-modal-backdrop: 100;
+  --z-modal-panel: 110;
+  --z-toast: 120;
+  --z-popover: 200;
 
   /*
    * 字体单一来源 —— 所有 UI / 终端 / Tailwind / xterm 都从这两个变量读取。
@@ -494,6 +524,24 @@ body {
   display: none;
   width: 0;
   height: 0;
+}
+
+/* 全局隐藏所有原生滚动条：每个可滚动区域仍可正常滚动（触摸 / 滚轮 / 拖拽 /
+   键盘），只是不再绘制浏览器原生滚动条。
+   - Firefox: scrollbar-width: none
+   - 旧 Edge/IE: -ms-overflow-style: none
+   - WebKit/Blink: ::-webkit-scrollbar 宽高置 0 并隐藏
+   终端的自绘 overlay 滚动条 (.overlay-scrollbar-thumb) 是独立 DOM 元素，
+   不受此规则影响，保持原有交互。 */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 /* Smooth transitions */
