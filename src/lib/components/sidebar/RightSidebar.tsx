@@ -1064,16 +1064,6 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
                 {markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
               </button>
             )}
-            {!isMobile && lineRange && !isImagePreview && !showMarkdownPreview && (
-              <button
-                type="button"
-                onClick={insertRangeReference}
-                className="inline-flex h-9 items-center gap-1 rounded-full bg-accent/15 px-3 text-xs font-semibold text-accent transition hover:bg-accent/25 active:scale-95"
-                title={`Insert code reference: ${lineReference}`}
-              >
-                {t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
-              </button>
-            )}
             {!isMobile && (
               <button
                 type="button"
@@ -1209,9 +1199,9 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           of the viewport. */}
       <div
         className={`shrink-0 overflow-hidden border-t border-border/15 bg-surface transition-all duration-150 ${
-          lineRange && !isImagePreview && !showMarkdownPreview ? 'max-h-24 opacity-100' : 'pointer-events-none max-h-0 opacity-0 border-t-transparent'
+          isMobile && lineRange && !isImagePreview && !showMarkdownPreview ? 'max-h-24 opacity-100' : 'pointer-events-none max-h-0 opacity-0 border-t-transparent'
         }`}
-        aria-hidden={!lineRange || isImagePreview || showMarkdownPreview}
+        aria-hidden={!isMobile || !lineRange || isImagePreview || showMarkdownPreview}
       >
         <div className="flex items-center gap-2">
           <div className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">
