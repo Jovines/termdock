@@ -790,6 +790,30 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   // content. `null` means "render plain text" (unknown language, too large, or
   // refractor not loaded yet).
   const [highlightedLines, setHighlightedLines] = useState<ReactNode[][] | null>(null);
+  // 用户点击"重新加载"时自增。只是给加载 effect 依赖，复用同一份 fetch / 解析逻辑。
+  const [reloadKey, setReloadKey] = useState(0);
+
+  // 把仓库相对路径解析成绝对路径，用作 watcher / version map 的查询 key。
+  const versionedPath = filePath
+    ? (rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath)
+    : null;
+
+  // watcher 在 store 里维护「每个绝对路径的变更版本号」。这里只读取当前预览
+  // 路径对应的版本号，文件无关变化不会让组件重渲。
+  const externalVersion = useSidebarStore((s) => (
+    versionedPath ? s.fileChangeVersions.get(versionedPath) ?? 0 : 0
+  ));
+  // 最近一次"成功加载完毕"时对应的版本号；当前版本号高于它说明文件被外部改过
+  // 但还没重新加载。
+  const loadedVersionRef = useRef<number>(0);
+  // 同一个 path 的版本号是连续的；切换 path 时把基线也对齐到当前版本，
+  // 避免新文件一打开就被判为 stale。
+  const versionedPathRef = useRef<string | null>(null);
+  if (versionedPathRef.current !== versionedPath) {
+    versionedPathRef.current = versionedPath;
+    loadedVersionRef.current = externalVersion;
+  }
+  const isStale = versionedPath !== null && externalVersion > loadedVersionRef.current;
 
   useEffect(() => {
     if (!filePath) {
@@ -797,18 +821,19 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
       return;
     }
 
-    const readablePath = rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
+    const fullPath = rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
     const controller = new AbortController();
     let objectUrl: string | null = null;
-    const isImage = isPreviewableImagePath(readablePath);
-    const isMarkdown = isMarkdownPath(readablePath);
+    const isImage = isPreviewableImagePath(fullPath);
+    const isMarkdown = isMarkdownPath(fullPath);
+    const versionAtLoadStart = useSidebarStore.getState().fileChangeVersions.get(fullPath) ?? 0;
 
     setPreviewState({ kind: 'loading', mode: isImage ? 'image' : 'text' });
     onLineRangeChange(null);
     setMarkdownViewMode(isMarkdown ? 'preview' : 'source');
 
     if (isImage) {
-      readImagePreviewBlob(readablePath, controller.signal)
+      readImagePreviewBlob(fullPath, controller.signal)
         .then((result) => {
           objectUrl = URL.createObjectURL(result.blob);
           setPreviewState({
@@ -816,19 +841,23 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
             objectUrl,
             meta: { size: result.size, mimeType: result.mimeType, modified: result.modified },
           });
+          loadedVersionRef.current = versionAtLoadStart;
         })
         .catch((err) => {
           if (controller.signal.aborted) return;
           setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : t('rightSidebar.imageLoadFailed') });
+          loadedVersionRef.current = versionAtLoadStart;
         });
     } else {
-      readFileContent(readablePath, controller.signal)
+      readFileContent(fullPath, controller.signal)
         .then((result) => {
           setPreviewState({ kind: 'text', content: result.content, meta: { size: result.size, truncated: result.truncated } });
+          loadedVersionRef.current = versionAtLoadStart;
         })
         .catch((err) => {
           if (controller.signal.aborted) return;
           setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : 'Failed to read file' });
+          loadedVersionRef.current = versionAtLoadStart;
         });
     }
 
@@ -836,7 +865,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [filePath, rootPath, onLineRangeChange, t]);
+  }, [filePath, rootPath, reloadKey, onLineRangeChange, t]);
 
   // Syntax highlighting for the text preview. Runs after the content is loaded,
   // skips Markdown preview mode (handled separately), unknown languages, and
@@ -1028,6 +1057,18 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
                 : t('rightSidebar.multiLineHint')}
           </span>
         </div>
+        {isStale && previewState.kind !== 'loading' && (
+          <div className="mt-1.5 flex items-center justify-between gap-2 rounded-md border border-primary/25 bg-primary/10 px-2.5 py-1.5 text-[11px] text-primary">
+            <span className="min-w-0 truncate">{t('rightSidebar.fileChangedExternally')}</span>
+            <button
+              type="button"
+              onClick={() => setReloadKey((key) => key + 1)}
+              className="inline-flex h-6 shrink-0 items-center justify-center rounded-full bg-primary/15 px-2.5 text-[11px] font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
+            >
+              {t('rightSidebar.reloadFile')}
+            </button>
+          </div>
+        )}
       </div>
       {previewState.kind === 'loading' ? (
         <div className="min-h-0 flex-1 overflow-auto px-3 py-8 text-center text-sm text-muted-foreground">

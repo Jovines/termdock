@@ -90,6 +90,8 @@ export const en: TranslationDictionary = {
     insertedToast: ({ label }) => `Inserted ${label}`,
     selectFilePrompt: 'Select a file to preview its contents',
     backToFileList: 'Back to file list',
+    fileChangedExternally: 'File changed externally',
+    reloadFile: 'Reload',
     insertLineRef: ({ lineLabel }) => `Insert ${lineLabel}`,
     insertFileRef: 'Insert',
     copyFileRef: 'Copy file reference',

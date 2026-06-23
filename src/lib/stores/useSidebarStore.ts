@@ -215,6 +215,11 @@ interface SidebarState {
   // Changed files (from git status/diff)
   changedFiles: Map<string, GitChangedFile>;
 
+  // 每个绝对路径的"外部变更版本号"。watcher 收到 created / updated / deleted
+  // 事件时自增对应路径的版本号，FilePreview 据此判断已加载内容是否过期，
+  // 显示提示式重新加载横条（避免外部写入风暴时直接覆盖用户视图）。
+  fileChangeVersions: Map<string, number>;
+
   // Git bundle loading state (for right sidebar UX)
   gitBundleLoading: boolean;
   gitBundleSlow: boolean;
@@ -271,6 +276,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   groupByFolder: readGroupByFolder(),
   collapsedGroups: readCollapsedGroups(),
   changedFiles: new Map(),
+  fileChangeVersions: new Map(),
   gitBundleLoading: false,
   gitBundleSlow: false,
   gitBundleError: null,
@@ -436,8 +442,15 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     set((s) => {
       if (events.length === 0) return s;
       const directoryCache = new Map(s.directoryCache);
+      const fileChangeVersions = new Map(s.fileChangeVersions);
       let selectedFilePath = s.selectedFilePath;
       let changed = false;
+      let versionsChanged = false;
+
+      const bumpVersion = (path: string) => {
+        fileChangeVersions.set(path, (fileChangeVersions.get(path) ?? 0) + 1);
+        versionsChanged = true;
+      };
 
       for (const event of events) {
         if (event.type === 'rescan-required') {
@@ -447,6 +460,11 @@ export const useSidebarStore = create<SidebarState>((set) => ({
               changed = true;
             }
           }
+          // rescan 范围内的所有已知文件都视为可能变更，但我们只追踪当前
+          // 选中的文件即可，无需遍历整张表。
+          if (selectedFilePath && isSameOrChildPath(event.path, selectedFilePath)) {
+            bumpVersion(selectedFilePath);
+          }
           continue;
         }
 
@@ -454,6 +472,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
         const siblings = directoryCache.get(parent);
 
         if (event.type === 'deleted') {
+          bumpVersion(event.path);
           if (selectedFilePath && isSameOrChildPath(event.path, selectedFilePath)) selectedFilePath = null;
           if (siblings) {
             const filtered = siblings.filter((node) => node.path !== event.path);
@@ -471,6 +490,9 @@ export const useSidebarStore = create<SidebarState>((set) => ({
           continue;
         }
 
+        // created / updated
+        bumpVersion(event.path);
+
         const node = toFileTreeNode(event);
         if (!node || !siblings) continue;
         const existing = siblings.find((entry) => entry.path === node.path);
@@ -481,7 +503,12 @@ export const useSidebarStore = create<SidebarState>((set) => ({
         changed = true;
       }
 
-      return changed ? { directoryCache, selectedFilePath } : s;
+      if (!changed && !versionsChanged) return s;
+      return {
+        directoryCache: changed ? directoryCache : s.directoryCache,
+        selectedFilePath,
+        fileChangeVersions: versionsChanged ? fileChangeVersions : s.fileChangeVersions,
+      };
     }),
 
   setChangedFiles: (files) => set({ changedFiles: files }),
