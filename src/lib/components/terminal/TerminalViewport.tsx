@@ -257,6 +257,19 @@ export type TerminalController = {
    * 后端 session id 变化由 `session-key-change` refresh reason 额外处理。
    */
   setSessionReady: (ready: boolean) => void;
+  /**
+   * 服务端 ws 推送的 pty-size 广播：把"服务端事实"同步到 viewport 的
+   * lastServerSize 状态。多端切换时另一个客户端把 pty 拉小后，本端 fit
+   * 后才能正确判断"我跟服务端不一致，要重推"。
+   */
+  notifyServerSize: (cols: number, rows: number, source?: string) => void;
+  /**
+   * 用户在本端有交互（点击 / 键入 / 触摸）时调一次。viewport 比较本端
+   * xterm 真实尺寸与服务端最近广播的尺寸，不一致就立即重推一次 resize。
+   * 内部带冷却（最近 ~1.5s 服务端刚广播过则跳过），避免多端互相拉扯。
+   * 仅在 document.visibilityState === 'visible' 时才会真正推。
+   */
+  ensureSizeMatches: (reason: string) => void;
 };
 
 export type TerminalViewportInputOptions = {
@@ -404,6 +417,60 @@ function convertTheme(theme: TerminalTheme): Record<string, string> {
   };
 }
 
+/**
+ * 在 `new Terminal()` 之前算出真实容器对应的 cols/rows，让 xterm 第一帧就用
+ * 正确尺寸渲染，而不是先以默认 80×24 渲染一帧再 fit 到真实值的肉眼跳变。
+ *
+ * 算法与 xterm.js FitAddon.proposeDimensions 同源：
+ *   cols = floor(clientWidth  / cellWidth)
+ *   rows = floor(clientHeight / cellHeight)
+ *
+ * cell 度量都来自 canvas measureText：
+ *   cellWidth  = measureText('M').width                        — monospace 等宽字体下稳定
+ *   cellHeight = ascent + descent ( = font bounding box height) — 与 xterm 内部测量等价
+ *
+ * 容器不可用（hidden / 0 size）或 measureText 失败时返回 null，xterm 走默认 80×24。
+ */
+const cellMetricsCache = new Map<string, { cellWidth: number; cellHeight: number }>();
+function estimateInitialDimensions(
+  container: HTMLElement,
+  fontFamily: string,
+  fontSize: number,
+): { cols: number; rows: number } | null {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return null;
+  const rect = container.getBoundingClientRect();
+  if (rect.width < 24 || rect.height < 24) return null;
+
+  const cacheKey = `${fontSize}::${fontFamily}`;
+  let metrics = cellMetricsCache.get(cacheKey);
+  if (!metrics) {
+    try {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.font = `${fontSize}px ${fontFamily}`;
+      const m = ctx.measureText('M');
+      const cellWidth = m.width;
+      // actualBoundingBox 在所有现代浏览器都支持；缺省值保底。
+      const ascent = (m as TextMetrics).actualBoundingBoxAscent ?? fontSize * 0.8;
+      const descent = (m as TextMetrics).actualBoundingBoxDescent ?? fontSize * 0.2;
+      const cellHeight = Math.ceil(ascent + descent);
+      if (cellWidth >= 1 && cellHeight >= 1) {
+        metrics = { cellWidth, cellHeight };
+        cellMetricsCache.set(cacheKey, metrics);
+      }
+    } catch {
+      return null;
+    }
+  }
+  if (!metrics) return null;
+
+  const cols = Math.max(2, Math.floor(rect.width / metrics.cellWidth));
+  const rows = Math.max(2, Math.floor(rect.height / metrics.cellHeight));
+  if (!Number.isFinite(cols) || !Number.isFinite(rows)) return null;
+  return { cols, rows };
+}
+
 const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewportProps>(
   (
     {
@@ -456,9 +523,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     );
     const lastBufferTypeRef = React.useRef<string | null>(null);
     const isComposingRef = React.useRef(false);
-    // composition 刚结束的时间戳：IME 选词紧随 compositionend 之后会补发一记
-    // keydown(Enter) / beforeinput(insertLineBreak)，我们用时间窗口吞掉。
-    const lastCompositionEndAtRef = React.useRef(0);
+    // compositionend 之后某些 IME（搜狗等）会自动补发一记假 Enter
+    // (keydown Enter / beforeinput insertLineBreak)，必须吞掉。
+    // 用「一次性 token + 短超时」实现：compositionend 时置位 + 50ms 兜底清除，
+    // 真正吞 Enter 时立刻消费 token，下一记真实 Enter 即可正常发送，避免
+    // 时间窗口（200ms）误伤用户手快连按造成"要按两次回车才发出去"。
+    const swallowNextEnterRef = React.useRef(false);
+    const swallowEnterTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const sentValueRef = React.useRef('');
     const pendingTextareaSyncTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingTextareaSyncTargetRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -2092,6 +2163,86 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       [cancelPendingResizeTimer]
     );
 
+    // ── 多端同步 / 防拉扯支持 ──
+    //
+    // 多端场景：手机连上时把 tmux window 拉小，桌面回来后 tmux 仍停在小尺寸。
+    // 桌面想把 pty 拉回桌面尺寸，但 lastServerSizeRef 还停在桌面上次推过的大
+    // 尺寸 → "尺寸没变，不发" 会误判，never 重推。
+    //
+    // 对策：服务端在任意 resize 后广播 pty-size 给所有 ws client，本端用
+    // notifyServerSize 同步 lastServerSizeRef。这样 ensureSizeMatches 在用户
+    // 交互时一比较，就会发现"我 xterm 是 200×50，但 server 是 80×24，要推"。
+    //
+    // 防拉扯：lastServerBroadcastAtRef 记录服务端最近一次广播的时间。如果在
+    // 冷却窗口内（最近 1.5s 内刚收到广播），就不主动推回去 —— 视为"对端刚改
+    // 过"，让对方先生效，避免双端互相覆盖。
+    const SERVER_BROADCAST_COOLDOWN_MS = 1500;
+    const ENSURE_SIZE_THROTTLE_MS = 400;
+    const lastServerBroadcastAtRef = React.useRef(0);
+    const lastEnsureSizeAtRef = React.useRef(0);
+
+    const notifyServerSize = React.useCallback(
+      (cols: number, rows: number, source?: string) => {
+        if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) {
+          return;
+        }
+        const cleanCols = Math.floor(cols);
+        const cleanRows = Math.floor(rows);
+        // 取消本端排队中的 resize push：服务端尺寸是新的事实，再发已 stale
+        // 的尺寸只会拖累。
+        cancelPendingResizeTimer();
+        lastServerSizeRef.current = { cols: cleanCols, rows: cleanRows };
+        lastServerBroadcastAtRef.current = Date.now();
+        debugTerminal('pty-size broadcast received', {
+          cols: cleanCols,
+          rows: cleanRows,
+          source: source ?? 'unknown',
+        });
+      },
+      [cancelPendingResizeTimer, debugTerminal]
+    );
+
+    const ensureSizeMatches = React.useCallback(
+      (reason: string) => {
+        const terminal = terminalRef.current;
+        if (!terminal || !terminal.cols || !terminal.rows) return;
+        if (!sessionReadyRef.current) return;
+        // 仅在前台可见的客户端主动推：后台标签 / 锁屏的手机绝不能跟在线端
+        // 互相拉扯。
+        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+          return;
+        }
+        const now = Date.now();
+        // 服务端刚广播过尺寸（说明刚有别的客户端改过）：冷却期内不主动推回，
+        // 让对方先生效。
+        if (now - lastServerBroadcastAtRef.current < SERVER_BROADCAST_COOLDOWN_MS) {
+          return;
+        }
+        // 本端短时间内已经检查过一次：交互高频时降频，避免无意义的尺寸比较。
+        if (now - lastEnsureSizeAtRef.current < ENSURE_SIZE_THROTTLE_MS) {
+          return;
+        }
+        const cols = terminal.cols;
+        const rows = terminal.rows;
+        const last = lastServerSizeRef.current;
+        if (last && last.cols === cols && last.rows === rows) {
+          return;
+        }
+        lastEnsureSizeAtRef.current = now;
+        debugTerminal('ensureSizeMatches push', {
+          reason,
+          cols,
+          rows,
+          lastServerSize: last,
+        });
+        // 立刻发（immediate），别等 debounce —— 这是 user-initiated 的"我希望
+        // pty 跟我现在的可视尺寸吻合"。
+        lastServerSizeRef.current = { cols, rows };
+        resizeHandlerRef.current(cols, rows);
+      },
+      [debugTerminal]
+    );
+
     const runRefreshSequence = React.useCallback(
       (reason: RefreshReason, options: RefreshOptions) => {
         const terminal = terminalRef.current;
@@ -2395,7 +2546,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (disposed) return;
 
         try {
+          // 预估真实 cols/rows，避免 xterm 先以默认 80×24 渲染一帧再 fit。
+          // 估算失败时省略 cols/rows，xterm 用内置默认值，等 init-fit 校准。
+          const initialDims = estimateInitialDimensions(
+            container,
+            getTerminalFontFamily(fontFamily),
+            fontSize,
+          );
           const terminal = new Terminal({
+            ...(initialDims ? { cols: initialDims.cols, rows: initialDims.rows } : {}),
             fontFamily: getTerminalFontFamily(fontFamily),
             fontSize,
             theme: convertTheme(theme),
@@ -2750,6 +2909,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // 不复位的话下一次进来 isComposingRef 仍是 true，所有 input 会被
         // gate 掉。同时把 IME overlay 状态归零。
         isComposingRef.current = false;
+        if (swallowEnterTimerRef.current !== null) {
+          clearTimeout(swallowEnterTimerRef.current);
+          swallowEnterTimerRef.current = null;
+        }
+        swallowNextEnterRef.current = false;
         imeFrozenAnchorRef.current = null;
         clearPendingTextareaSync();
         setImeComposition({ active: false, text: '' });
@@ -2910,12 +3074,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         setSessionReady: (ready: boolean) => {
           sessionReadyRef.current = ready;
         },
+        notifyServerSize,
+        ensureSizeMatches,
       }),
       [
         enableTouchScroll,
         focusHiddenInput,
         resetWriteState,
         requestRefresh,
+        notifyServerSize,
+        ensureSizeMatches,
       ]
     );
 
@@ -3114,9 +3282,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 }
 
                 if (nativeEvent.inputType === 'insertLineBreak') {
-                  const sinceCompEnd = Date.now() - lastCompositionEndAtRef.current;
                   // IME 选词后浏览器会补一记 insertLineBreak，必须吞掉。
-                  if (sinceCompEnd < 200) {
+                  // 用一次性 token 而非时间窗口，避免误伤紧跟的真实回车。
+                  if (swallowNextEnterRef.current) {
+                    swallowNextEnterRef.current = false;
+                    if (swallowEnterTimerRef.current !== null) {
+                      clearTimeout(swallowEnterTimerRef.current);
+                      swallowEnterTimerRef.current = null;
+                    }
                     event.preventDefault();
                     return;
                   }
@@ -3246,17 +3419,28 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 //   - isComposingRef.current：composition* 事件维护的状态，
                 //     某些 IME（搜狗）首次按 Enter 不带 isComposing 标志，
                 //     只能靠这条兜底
+                //   - swallowNextEnterRef：compositionend 之后 IME 自动补发的
+                //     那一记假 Enter，由一次性 token 吞掉（消费即清除）。
                 if (event.key === 'Enter' || event.key === 'Go' || event.key === 'done' || event.key === 'send') {
-                  const sinceCompEnd = Date.now() - lastCompositionEndAtRef.current;
                   if (
                     event.nativeEvent.isComposing ||
                     (event as unknown as { isComposing?: boolean }).isComposing ||
                     event.keyCode === 229 ||
-                    isComposingRef.current ||
-                    sinceCompEnd < 200
+                    isComposingRef.current
                   ) {
-                    // IME 合成中 / 刚结束：吞掉这一记 Enter，候选词已经通过
-                    // compositionend → syncTextareaToPty 发出去了。
+                    // IME 合成中：吞掉这一记 Enter，候选词将由 compositionend
+                    // → syncTextareaToPty 发出去。
+                    event.preventDefault();
+                    return;
+                  }
+                  if (swallowNextEnterRef.current) {
+                    // compositionend 之后紧跟的那一记假 Enter：消费 token 后吞掉，
+                    // 下一记真实 Enter 不再被误伤。
+                    swallowNextEnterRef.current = false;
+                    if (swallowEnterTimerRef.current !== null) {
+                      clearTimeout(swallowEnterTimerRef.current);
+                      swallowEnterTimerRef.current = null;
+                    }
                     event.preventDefault();
                     return;
                   }
@@ -3293,7 +3477,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }}
               onCompositionEnd={(event) => {
                 isComposingRef.current = false;
-                lastCompositionEndAtRef.current = Date.now();
+                // 置位「吞下一记 Enter」token：IME 在 compositionend 之后会
+                // 同步/微异步补发一记假 Enter（keydown / beforeinput），消费一次
+                // 即清除；50ms 兜底超时清除，防止 token 泄漏到用户后续真实回车。
+                swallowNextEnterRef.current = true;
+                if (swallowEnterTimerRef.current !== null) {
+                  clearTimeout(swallowEnterTimerRef.current);
+                }
+                swallowEnterTimerRef.current = setTimeout(() => {
+                  swallowNextEnterRef.current = false;
+                  swallowEnterTimerRef.current = null;
+                }, 50);
                 setImeComposition({ active: false, text: '' });
                 syncTextareaToPty(event.currentTarget);
                 releaseImeAnchor();
