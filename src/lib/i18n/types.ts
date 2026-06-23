@@ -107,8 +107,6 @@ export type TranslationDictionary = {
     insertedToast: (params: TranslatorParams) => string;
     selectFilePrompt: string;
     backToFileList: string;
-    fileChangedExternally: string;
-    reloadFile: string;
     insertLineRef: (params: TranslatorParams) => string;
     insertFileRef: string;
     copyFileRef: string;

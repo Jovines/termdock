@@ -90,8 +90,6 @@ export const zh: TranslationDictionary = {
     insertedToast: ({ label }) => `已插入 ${label}`,
     selectFilePrompt: '选择文件以预览内容',
     backToFileList: '返回文件列表',
-    fileChangedExternally: '文件已被外部改动',
-    reloadFile: '重新加载',
     insertLineRef: ({ lineLabel }) => `引用${lineLabel}`,
     insertFileRef: '引用',
     copyFileRef: '复制文件引用',

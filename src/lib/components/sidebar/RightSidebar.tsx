@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo, useState, useDeferredValue, useRef, type Dispatch, type SetStateAction, type UIEvent, type ReactNode } from 'react';
+import { useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, type Dispatch, type MouseEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { useGesture } from '@use-gesture/react';
 import {
   X as RiCloseLine,
@@ -27,7 +27,7 @@ import { DiffViewer, preloadSidebarDiff } from './DiffViewer';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
 import { getGitBundle, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
-import { flushCacheThrottled, readCache, writeCacheThrottled } from '../../utils/localStorageCache';
+import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, type RefractorLike } from '../../utils/syntaxHighlight';
 
 interface RightSidebarProps {
@@ -51,6 +51,7 @@ const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; ti
 
 const RECENT_REFERENCES_STORAGE_KEY = 'termdock:recent-file-references';
 const FILE_TREE_SCROLL_STORAGE_KEY = 'termdock:right-sidebar:file-tree-scroll:v1';
+const MARKDOWN_VIEW_MODE_STORAGE_KEY = 'termdock:right-sidebar:markdown-view-mode:v1';
 const MAX_RECENT_REFERENCES = 8;
 const MAX_FILE_TREE_SCROLL_ROOTS = 20;
 const FILE_TREE_SCROLL_WRITE_MS = 250;
@@ -80,6 +81,15 @@ interface GitActionButton {
 }
 
 const MARKDOWN_EXTS = new Set(['.md', '.markdown', '.mdown', '.mkdn', '.mkd']);
+type MarkdownViewMode = 'preview' | 'source';
+
+function isMarkdownViewMode(value: unknown): value is MarkdownViewMode {
+  return value === 'preview' || value === 'source';
+}
+
+function readMarkdownViewMode(): MarkdownViewMode {
+  return readCache(MARKDOWN_VIEW_MODE_STORAGE_KEY, isMarkdownViewMode) ?? 'preview';
+}
 
 function getFileExtension(filePath: string): string {
   const basename = filePath.split(/[\\/]/).pop() ?? filePath;
@@ -784,39 +794,36 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   const rootPath = useSidebarStore((s) => s.rootPath);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
   const lineRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
-  const [markdownViewMode, setMarkdownViewMode] = useState<'preview' | 'source'>('preview');
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  // Floating "引用" button position relative to the scroller. Mouse clicks set
+  // this near the cursor; non-pointer jumps fall back to the selected line.
+  const [floatingInsertPos, setFloatingInsertPos] = useState<{ top: number; left: number } | null>(null);
+  const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>(() => readMarkdownViewMode());
   const [refractor, setRefractor] = useState<RefractorLike | null>(null);
   // Per-line highlighted React nodes, keyed implicitly by the current text
   // content. `null` means "render plain text" (unknown language, too large, or
   // refractor not loaded yet).
   const [highlightedLines, setHighlightedLines] = useState<ReactNode[][] | null>(null);
-  // 用户点击"重新加载"时自增。只是给加载 effect 依赖，复用同一份 fetch / 解析逻辑。
-  const [reloadKey, setReloadKey] = useState(0);
 
   // 把仓库相对路径解析成绝对路径，用作 watcher / version map 的查询 key。
   const versionedPath = filePath
     ? (rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath)
     : null;
 
-  // watcher 在 store 里维护「每个绝对路径的变更版本号」。这里只读取当前预览
-  // 路径对应的版本号，文件无关变化不会让组件重渲。
+  // watcher 在 store 里维护「每个绝对路径的变更版本号」。当前预览路径对应的
+  // 版本号变化时（外部 created/updated/deleted/rescan）自动触发重新加载。
+  // 文件管理器是纯查看场景，没有"覆盖用户编辑"的冲突顾虑，所以直接静默刷新。
   const externalVersion = useSidebarStore((s) => (
     versionedPath ? s.fileChangeVersions.get(versionedPath) ?? 0 : 0
   ));
-  // 最近一次"成功加载完毕"时对应的版本号；当前版本号高于它说明文件被外部改过
-  // 但还没重新加载。
-  const loadedVersionRef = useRef<number>(0);
-  // 同一个 path 的版本号是连续的；切换 path 时把基线也对齐到当前版本，
-  // 避免新文件一打开就被判为 stale。
-  const versionedPathRef = useRef<string | null>(null);
-  if (versionedPathRef.current !== versionedPath) {
-    versionedPathRef.current = versionedPath;
-    loadedVersionRef.current = externalVersion;
-  }
-  const isStale = versionedPath !== null && externalVersion > loadedVersionRef.current;
+
+  // 用于区分"切到新文件"和"同一个文件外部变更"。前者要重置 UI（loading 占位、
+  // 清行选区、重置 markdown 视图模式），后者保留滚动位置与用户选择。
+  const lastFullPathRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!filePath) {
+      lastFullPathRef.current = null;
       setPreviewState({ kind: 'idle' });
       return;
     }
@@ -826,11 +833,14 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
     let objectUrl: string | null = null;
     const isImage = isPreviewableImagePath(fullPath);
     const isMarkdown = isMarkdownPath(fullPath);
-    const versionAtLoadStart = useSidebarStore.getState().fileChangeVersions.get(fullPath) ?? 0;
+    const isPathChange = lastFullPathRef.current !== fullPath;
+    lastFullPathRef.current = fullPath;
 
-    setPreviewState({ kind: 'loading', mode: isImage ? 'image' : 'text' });
-    onLineRangeChange(null);
-    setMarkdownViewMode(isMarkdown ? 'preview' : 'source');
+    if (isPathChange) {
+      setPreviewState({ kind: 'loading', mode: isImage ? 'image' : 'text' });
+      onLineRangeChange(null);
+      setMarkdownViewMode(isMarkdown ? readMarkdownViewMode() : 'source');
+    }
 
     if (isImage) {
       readImagePreviewBlob(fullPath, controller.signal)
@@ -841,23 +851,19 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
             objectUrl,
             meta: { size: result.size, mimeType: result.mimeType, modified: result.modified },
           });
-          loadedVersionRef.current = versionAtLoadStart;
         })
         .catch((err) => {
           if (controller.signal.aborted) return;
           setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : t('rightSidebar.imageLoadFailed') });
-          loadedVersionRef.current = versionAtLoadStart;
         });
     } else {
       readFileContent(fullPath, controller.signal)
         .then((result) => {
           setPreviewState({ kind: 'text', content: result.content, meta: { size: result.size, truncated: result.truncated } });
-          loadedVersionRef.current = versionAtLoadStart;
         })
         .catch((err) => {
           if (controller.signal.aborted) return;
           setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : 'Failed to read file' });
-          loadedVersionRef.current = versionAtLoadStart;
         });
     }
 
@@ -865,7 +871,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [filePath, rootPath, reloadKey, onLineRangeChange, t]);
+  }, [filePath, rootPath, externalVersion, onLineRangeChange, t]);
 
   // Syntax highlighting for the text preview. Runs after the content is loaded,
   // skips Markdown preview mode (handled separately), unknown languages, and
@@ -918,6 +924,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   useEffect(() => {
     if (scrollToLine == null) return;
     if (previewState.kind !== 'text') return;
+    setFloatingInsertPos(null);
     onLineRangeChange({ start: scrollToLine, end: scrollToLine });
     const target = scrollToLine;
     const frame = requestAnimationFrame(() => {
@@ -927,6 +934,39 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
     });
     return () => cancelAnimationFrame(frame);
   }, [scrollToLine, previewState, onLineRangeChange, onScrollToLineHandled]);
+
+  // 没有鼠标事件的场景（例如搜索结果跳转）才兜底定位到选中行右侧。
+  useLayoutEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller || !lineRange) {
+      setFloatingInsertPos(null);
+      return;
+    }
+    if (floatingInsertPos) return;
+    const isImagePreviewLocal = previewState.kind === 'image' || (previewState.kind === 'loading' && previewState.mode === 'image');
+    const readableLocal = rootPath && filePath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
+    const showMarkdownPreviewLocal = previewState.kind === 'text' && isMarkdownPath(readableLocal ?? '') && markdownViewMode === 'preview';
+    if (previewState.kind !== 'text' || isImagePreviewLocal || showMarkdownPreviewLocal) {
+      setFloatingInsertPos(null);
+      return;
+    }
+
+    const computePos = () => {
+      const node = lineRefs.current.get(lineRange.end);
+      if (!node || !scroller) {
+        setFloatingInsertPos(null);
+        return;
+      }
+      const top = node.offsetTop + node.offsetHeight / 2;
+      const left = scroller.scrollLeft + Math.max(8, scroller.clientWidth - 120);
+      setFloatingInsertPos({ top, left });
+    };
+
+    computePos();
+    const ro = new ResizeObserver(() => computePos());
+    ro.observe(scroller);
+    return () => ro.disconnect();
+  }, [lineRange, floatingInsertPos, previewState, markdownViewMode, filePath, rootPath, highlightedLines]);
 
   if (!filePath) {
     return <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
@@ -949,12 +989,27 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
     ? (lineRange.start === lineRange.end ? `L${lineRange.start}` : `L${lineRange.start}-${lineRange.end}`)
     : null;
 
-  const handleLineClick = (lineNumber: number) => {
+  const placeFloatingInsertButton = (event: MouseEvent<HTMLButtonElement>) => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const rect = scroller.getBoundingClientRect();
+    const top = event.clientY - rect.top + scroller.scrollTop;
+    const maxLeft = scroller.scrollLeft + Math.max(8, scroller.clientWidth - 132);
+    const left = Math.min(
+      Math.max(8, event.clientX - rect.left + scroller.scrollLeft + 10),
+      maxLeft,
+    );
+    setFloatingInsertPos({ top, left });
+  };
+
+  const handleLineClick = (event: MouseEvent<HTMLButtonElement>, lineNumber: number) => {
+    placeFloatingInsertButton(event);
     onLineRangeChange((current) => {
       if (!current || current.start !== current.end) {
         return { start: lineNumber, end: lineNumber };
       }
       if (current.start === lineNumber) {
+        setFloatingInsertPos(null);
         return null;
       }
       return { start: Math.min(current.start, lineNumber), end: Math.max(current.start, lineNumber) };
@@ -996,7 +1051,11 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
               <button
                 type="button"
                 onClick={() => {
-                  setMarkdownViewMode((mode) => mode === 'preview' ? 'source' : 'preview');
+                  setMarkdownViewMode((mode) => {
+                    const next = mode === 'preview' ? 'source' : 'preview';
+                    writeCache(MARKDOWN_VIEW_MODE_STORAGE_KEY, next);
+                    return next;
+                  });
                   onLineRangeChange(null);
                 }}
                 className="inline-flex h-9 items-center gap-1 rounded-full bg-background-subtle px-3 text-xs font-semibold text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95"
@@ -1057,18 +1116,6 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
                 : t('rightSidebar.multiLineHint')}
           </span>
         </div>
-        {isStale && previewState.kind !== 'loading' && (
-          <div className="mt-1.5 flex items-center justify-between gap-2 rounded-md border border-primary/25 bg-primary/10 px-2.5 py-1.5 text-[11px] text-primary">
-            <span className="min-w-0 truncate">{t('rightSidebar.fileChangedExternally')}</span>
-            <button
-              type="button"
-              onClick={() => setReloadKey((key) => key + 1)}
-              className="inline-flex h-6 shrink-0 items-center justify-center rounded-full bg-primary/15 px-2.5 text-[11px] font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
-            >
-              {t('rightSidebar.reloadFile')}
-            </button>
-          </div>
-        )}
       </div>
       {previewState.kind === 'loading' ? (
         <div className="min-h-0 flex-1 overflow-auto px-3 py-8 text-center text-sm text-muted-foreground">
@@ -1103,7 +1150,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           <MarkdownPreview content={previewState.content} />
         </div>
       ) : previewState.kind === 'text' ? (
-        <div className="termdock-code min-h-0 flex-1 overflow-auto rounded-none bg-background-subtle p-2 font-mono text-[11px] leading-relaxed text-foreground">
+        <div ref={scrollerRef} className="termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-background-subtle p-2 font-mono text-[11px] leading-relaxed text-foreground">
           {lines.length > 0 ? (
             <div className="min-w-full">
               {lines.map((line, index) => {
@@ -1121,7 +1168,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
                       else lineRefs.current.delete(lineNumber);
                     }}
                     type="button"
-                    onClick={() => handleLineClick(lineNumber)}
+                    onClick={(event) => handleLineClick(event, lineNumber)}
                     // Line-number gutter width tracks the file's digit count so a
                     // short file doesn't reserve room for thousands of lines and
                     // leave a big gap between the edge and the numbers.
@@ -1138,6 +1185,21 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
               })}
             </div>
           ) : 'Empty file.'}
+          {/* Floating insert button — anchors to the selected line so the user
+              doesn't have to drag focus to the bottom action bar. Hidden on
+              mobile (the bottom bar is more thumb-friendly there). */}
+          {!isMobile && lineRange && floatingInsertPos && (
+            <button
+              type="button"
+              onClick={insertRangeReference}
+              style={{ top: floatingInsertPos.top, left: floatingInsertPos.left, transform: 'translateY(-50%)' }}
+              className="pointer-events-auto absolute z-popover inline-flex h-7 items-center gap-1 rounded-full bg-primary px-3 text-[11px] font-semibold text-primary-foreground shadow-lg ring-1 ring-primary/30 transition hover:bg-primary/90 active:scale-95"
+              title={`Insert code reference: ${lineReference}`}
+            >
+              <RiLink size={11} />
+              {t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
+            </button>
+          )}
         </div>
       ) : null}
       {/* Sticky bottom action bar — only shows when a line range is selected.
