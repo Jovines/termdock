@@ -123,7 +123,7 @@ export function createDefaultToolbarPresets(): ToolbarPresetDefinition[] {
 export function sanitizeRowLayout(input: number[] | null | undefined): number[] {
   const sanitized = Array.isArray(input)
     ? input
-      .map((value) => Math.min(6, Math.max(2, Math.floor(value))))
+      .map((value) => Math.min(20, Math.max(2, Math.floor(value))))
       .filter((value) => Number.isFinite(value))
     : [];
 

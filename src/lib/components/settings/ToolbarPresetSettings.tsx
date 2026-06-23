@@ -57,7 +57,7 @@ const SEQUENCE_TEMPLATES: SequenceTemplate[] = [
 ];
 
 const MIN_COLUMNS = 2;
-const MAX_COLUMNS = 6;
+const MAX_COLUMNS = 20;
 
 function PreviewButton({ label }: { label: string }) {
   return (
