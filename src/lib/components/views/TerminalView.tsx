@@ -177,8 +177,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [isActive]);
 
   // Swiper 翻到本页（isActive 从 false→true）：让编排器走一遍刷新。
+  //
+  // 注意只在 isActive 由 false→true 时才跑。terminalSessionId 变化、初次 mount
+  // 不应该触发——那些场景由 'connected' / 'session-key-change' / 'mount' 自己
+  // 的 refresh 负责，page-flip 多来一次会让用户看到 connected 之后再"闪一下"。
+  const wasActiveRef = React.useRef(false);
   React.useEffect(() => {
-    if (!isActive) return;
+    if (!isActive) {
+      wasActiveRef.current = false;
+      return;
+    }
+    if (wasActiveRef.current) {
+      // 已经处于 active，依赖里其它值变化（terminalSessionId）触发的 effect，
+      // 不是真正的翻页，直接跳过。
+      return;
+    }
+    wasActiveRef.current = true;
     // 双 rAF 等 swiper 的 transform 收尾，容器尺寸稳定后再 fit
     let raf1 = 0;
     let raf2 = 0;
@@ -614,7 +628,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     terminalControllerRef.current?.requestRefresh('connected', { force: true, resizeDebounceMs: 0 });
                   });
                 });
-                if (typeof window !== 'undefined' && isActiveRef.current) {
+                // 移动端兜底：软键盘 / Safari 视口尺寸在 connected 后才稳定，
+                // 多刷两次让 fit 跟上最终布局。桌面没有这个抖动，多刷反而会
+                // 让用户看到第二次 fit + scroll 的"闪一下"，所以仅 mobile 启用。
+                if (typeof window !== 'undefined' && isActiveRef.current && isMobileRef.current) {
                   window.setTimeout(() => {
                     terminalControllerRef.current?.requestRefresh('connected', { force: true, resizeDebounceMs: 0 });
                   }, 120);
@@ -728,6 +745,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   backendSessionId: terminalIdRef.current,
                   requested: event.focusTrackingRequested === true,
                 });
+                break;
+              }
+              case 'pty-size': {
+                // 服务端在任意 client resize 之后广播过来的真实 pty 尺寸。
+                // 同步给 viewport 的 lastServerSize：多端切换后 ensureSizeMatches
+                // 比对时才有正确的"服务端事实"。同时让本端进入 ~1.5s 冷却窗口
+                // 不主动反推，避免双端互相覆盖（防拉扯）。
+                if (typeof event.cols === 'number' && typeof event.rows === 'number') {
+                  terminalControllerRef.current?.notifyServerSize(
+                    event.cols,
+                    event.rows,
+                    event.source,
+                  );
+                }
                 break;
               }
               case 'exit': {
@@ -1367,6 +1398,42 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [appendToBuffer, reportFlowControl, sessionId]);
 
+  const handleEnsureSizeMatches = React.useCallback((reason: string) => {
+    if (!isActiveRef.current) return;
+    terminalControllerRef.current?.ensureSizeMatches(reason);
+  }, []);
+
+  // 多端同步：用户在本端做交互（点击 / 按键 / 触摸 / 滚轮）时，让 viewport
+  // 比对本端 xterm 尺寸与服务端最近广播的 pty-size。不一致就立即重推 resize。
+  // 防拉扯逻辑（visibility gate + 服务端广播冷却 + 400ms 节流）在 viewport
+  // 内部完成。
+  //
+  // 监听挂在 viewport 容器上而非 window：
+  //  - 多 tab 时只有 active session 的容器在前台收到事件，避免 N 份监听都
+  //    跑早退判断。
+  //  - 容器外的工具栏 / 侧边栏交互不视为"对终端的操作"，不必触发尺寸比对。
+  // wheel 必须包含——触控板滚动只触发 wheel，不会触发 pointer。
+  const interactionHostRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    if (!isActive) return;
+    const host = interactionHostRef.current;
+    if (!host) return;
+    const onPointerDown = () => handleEnsureSizeMatches('pointerdown');
+    const onKeyDown = () => handleEnsureSizeMatches('keydown');
+    const onTouchStart = () => handleEnsureSizeMatches('touchstart');
+    const onWheel = () => handleEnsureSizeMatches('wheel');
+    host.addEventListener('pointerdown', onPointerDown);
+    host.addEventListener('keydown', onKeyDown);
+    host.addEventListener('touchstart', onTouchStart, { passive: true });
+    host.addEventListener('wheel', onWheel, { passive: true });
+    return () => {
+      host.removeEventListener('pointerdown', onPointerDown);
+      host.removeEventListener('keydown', onKeyDown);
+      host.removeEventListener('touchstart', onTouchStart);
+      host.removeEventListener('wheel', onWheel);
+    };
+  }, [isActive, handleEnsureSizeMatches]);
+
   const handleTerminalControllerRef = React.useCallback((controller: TerminalController | null) => {
     terminalControllerRef.current = controller;
   }, []);
@@ -1562,7 +1629,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           ...keyboardShrinkStyle,
         }}
       >
-        <div className="h-full w-full box-border">
+        <div ref={interactionHostRef} className="h-full w-full box-border">
           <ErrorBoundary
             fallback={
               <div className="flex h-full items-center justify-center bg-background">

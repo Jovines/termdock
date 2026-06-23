@@ -429,6 +429,19 @@ export function connectTerminalStream(
           return;
         }
 
+        // pty-size 广播：服务端在任意 client resize 后把真实 pty 尺寸推
+        // 给所有连接的浏览器。viewport 用它同步 lastServerSize，便于多
+        // 端切换时判断本地 xterm 是否跟服务端脱钩。
+        if (msg.type === 'pty-size') {
+          onEvent({
+            type: 'pty-size',
+            cols: typeof msg.cols === 'number' ? msg.cols : undefined,
+            rows: typeof msg.rows === 'number' ? msg.rows : undefined,
+            source: typeof msg.source === 'string' ? msg.source : undefined,
+          });
+          return;
+        }
+
         // Standard stream events
         const event_ = msg as TerminalStreamEvent;
 
@@ -669,9 +682,11 @@ export async function sendTmuxAction(
 ): Promise<{ success: boolean; layout?: TmuxLayout }> {
   const conn = wsConnections.get(sessionId);
   if (conn && conn.ws.readyState === WebSocket.OPEN) {
-    const isFireAndForget = payload.action === 'scroll' || payload.action === 'copy-mode';
-    if (isFireAndForget) {
-      // Scroll and copy-mode actions don't wait for a server response.
+    // 只有 scroll 走 fire-and-forget：高频、连续，没必要往返。
+    // copy-mode 不能 fire-and-forget——客户端会在退出 copy-mode 后立即
+    // 发送用户输入，必须等服务端真正退出 copy-mode 再发，否则 input 会
+    // 在 tmux 还处于 copy-mode 时被写进 PTY，被 copy-mode keymap 吃掉。
+    if (payload.action === 'scroll') {
       conn.ws.send(JSON.stringify({ type: 'tmux', ...payload }));
       return { success: true };
     }

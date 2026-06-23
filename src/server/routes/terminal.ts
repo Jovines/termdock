@@ -134,6 +134,11 @@ interface TerminalSession {
   cwd: string;
   mode: TerminalMode;
   tmuxSessionName: string | null;
+  // 当前 pty 真实尺寸：每次 resize 后更新并广播给所有 ws client，让其他
+  // 客户端的 lastServerSize 跟服务端事实保持一致，避免多端切换时用陈旧
+  // 值误判"尺寸没变，不发"。
+  cols: number;
+  rows: number;
   lastActivity: number;
   clients: Map<string, express.Response>;
   createdAt: number;
@@ -2794,11 +2799,12 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   }
 }
 
-function broadcastToWs(sessionId: string, data: string): void {
+function broadcastToWs(sessionId: string, data: string, excludeClientId?: string): void {
   const clients = wsClients.get(sessionId);
   const session = terminalSessions.get(sessionId);
   if (!clients) return;
   for (const [clientId, ws] of clients.entries()) {
+    if (excludeClientId && clientId === excludeClientId) continue;
     try {
       ws.send(data);
     } catch {
@@ -2808,8 +2814,46 @@ function broadcastToWs(sessionId: string, data: string): void {
   }
 }
 
-function broadcastJsonWs(sessionId: string, payload: unknown): void {
-  broadcastToWs(sessionId, JSON.stringify(payload));
+function broadcastJsonWs(sessionId: string, payload: unknown, excludeClientId?: string): void {
+  broadcastToWs(sessionId, JSON.stringify(payload), excludeClientId);
+}
+
+// 统一的 pty resize 入口：调用 ptyProcess.resize 改变 pty size 之后，把
+// 真实尺寸广播给除发起方之外的所有 ws client。多端场景下，B 端把 pty
+// 拉小后，A 端能立即知道 server 真实尺寸跟自己 lastServerSize 不一致，
+// 下次 fit 才能正确触发 push。发起方自己已经知道这个尺寸（自己刚发的），
+// 不必再回声一份，避免无意义的 lastServerSize 重复写、pending timer 取消。
+function applyPtyResize(
+  sessionId: string,
+  session: TerminalSession,
+  cols: number,
+  rows: number,
+  source: string,
+  originClientId?: string,
+): boolean {
+  if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) {
+    return false;
+  }
+  const cleanCols = Math.floor(cols);
+  const cleanRows = Math.floor(rows);
+  const changed = session.cols !== cleanCols || session.rows !== cleanRows;
+  try {
+    session.ptyProcess.resize(cleanCols, cleanRows);
+  } catch (error) {
+    console.warn(`[pty-resize] failed session=${sessionId} cols=${cleanCols} rows=${cleanRows}: ${getErrorMessage(error)}`);
+    return false;
+  }
+  session.cols = cleanCols;
+  session.rows = cleanRows;
+  session.lastActivity = Date.now();
+  if (changed) {
+    broadcastJsonWs(
+      sessionId,
+      { type: 'pty-size', cols: cleanCols, rows: cleanRows, source },
+      originClientId,
+    );
+  }
+  return true;
 }
 
 function getFlowPausedClients(session: TerminalSession): Set<string> {
@@ -3080,6 +3124,8 @@ async function spawnTerminalSession(req: express.Request, input: {
     cwd,
     mode,
     tmuxSessionName,
+    cols,
+    rows,
     lastActivity: Date.now(),
     clients: new Map(),
     createdAt: Date.now(),
@@ -4024,9 +4070,11 @@ router.post('/:sessionId/resize', (req, res) => {
   }
 
   try {
-    session.ptyProcess.resize(cols, rows);
-    session.lastActivity = Date.now();
-    res.json({ success: true, cols, rows });
+    const ok = applyPtyResize(sessionId, session, Number(cols), Number(rows), 'http-resize');
+    if (!ok) {
+      return res.status(400).json({ error: 'invalid cols/rows' });
+    }
+    res.json({ success: true, cols: session.cols, rows: session.rows });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('Failed to resize terminal:', errorMessage);
@@ -4574,7 +4622,7 @@ export function handleTerminalWebSocket(
           const cols = Number(msg.cols);
           const rows = Number(msg.rows);
           if (cols > 0 && rows > 0) {
-            session.ptyProcess.resize(cols, rows);
+            applyPtyResize(sessionId, session, cols, rows, `ws-resize:${clientId}`, clientId);
           }
           break;
         }

@@ -132,7 +132,7 @@ export interface TerminalSession {
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -163,6 +163,9 @@ export interface TerminalStreamEvent {
   rows?: number;
   ok?: boolean;
   error?: string;
+  // pty-size 广播：source 用来给客户端做防拉扯的冷却（"上次是不是我自己
+  // 改的"），便于跨端切换时区分回声与远端改动。
+  source?: string;
 }
 
 // Create Session Options
