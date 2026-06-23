@@ -1807,7 +1807,7 @@ const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
     program: 'opencode',
     rules: [
       { pattern: 'thinking|working|generating', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
-      { pattern: 'confirm|approve|permission|continue\\?', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
+      { pattern: '~ Asking questions', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
     ],
   },
   {
