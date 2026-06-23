@@ -127,14 +127,8 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     setPosition(isOpenRef.current ? 0 : closedX);
   }, [closedX, setPosition]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [isOpen, onClose]);
+  // ESC 由 App 顶层统一处理（按层级关闭 modal/drawer/sidebar，并走 history overlay）。
+  // 这里不再单独监听，避免和全局 handler 同时触发 history.back() 两次。
 
   const decideSnap = useCallback((velocity: number, direction: number) => {
     const hasFling = Math.abs(velocity) > SNAP_VELOCITY_THRESHOLD;

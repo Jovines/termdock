@@ -899,6 +899,60 @@ function App() {
   const [programRulesLoaded, setProgramRulesLoaded] = React.useState(cachedProgramRules !== null);
   const [programRulesSaving, setProgramRulesSaving] = React.useState(false);
 
+  // 全局 ESC：按"返回键"语义，从最里层往外依次关闭浮层。
+  // 顺序：通知/工具栏/AI 规则 二级 modal → tab 长按菜单 → settings drawer → 侧边栏。
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (isNotificationsOpen) {
+        event.preventDefault();
+        setIsNotificationsOpen(false);
+        return;
+      }
+      if (isToolbarPresetsOpen) {
+        event.preventDefault();
+        setIsToolbarPresetsOpen(false);
+        return;
+      }
+      if (isAgentRulesOpen) {
+        event.preventDefault();
+        setIsAgentRulesOpen(false);
+        return;
+      }
+      if (tabMenuSessionId) {
+        event.preventDefault();
+        setTabMenuSessionId(null);
+        return;
+      }
+      if (isDrawerOpen) {
+        event.preventDefault();
+        handleCloseSettings();
+        return;
+      }
+      if (sidebarRightOpen) {
+        event.preventDefault();
+        requestCloseHistoryOverlay('right-sidebar');
+        return;
+      }
+      if (sidebarLeftOpen) {
+        event.preventDefault();
+        requestCloseHistoryOverlay('left-sidebar');
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [
+    isNotificationsOpen,
+    isToolbarPresetsOpen,
+    isAgentRulesOpen,
+    tabMenuSessionId,
+    isDrawerOpen,
+    sidebarRightOpen,
+    sidebarLeftOpen,
+    handleCloseSettings,
+    requestCloseHistoryOverlay,
+  ]);
+
   useEffect(() => {
     getAgentRules()
       .then((rules) => {
@@ -1788,10 +1842,10 @@ function App() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="settings-dialog-title"
-            className="fixed inset-0 z-drawer-panel flex items-stretch justify-center p-0 animate-fade-in sm:p-4 md:p-6"
+            className="pointer-events-none fixed inset-0 z-drawer-panel flex items-stretch justify-center p-0 animate-fade-in sm:p-4 md:p-6"
           >
           <div
-            className="flex h-full w-full max-w-5xl flex-col overflow-hidden bg-surface shadow-[0_28px_90px_rgba(0,0,0,0.28),0_14px_34px_rgba(0,0,0,0.18)] sm:max-h-[calc(100dvh-3rem)] sm:rounded-3xl sm:border sm:border-border/15"
+            className="pointer-events-auto flex h-full w-full max-w-5xl flex-col overflow-hidden bg-surface shadow-[0_28px_90px_rgba(0,0,0,0.28),0_14px_34px_rgba(0,0,0,0.18)] sm:max-h-[calc(100dvh-3rem)] sm:rounded-3xl sm:border sm:border-border/15"
             style={{ paddingTop: safeTopInset, paddingBottom: safeBottomInset }}
           >
             {/* Header — compact single row */}
