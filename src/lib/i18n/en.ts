@@ -280,6 +280,7 @@ export const en: TranslationDictionary = {
     attached: 'Attached',
     restorable: 'Restorable',
     attach: 'Attach',
+    attaching: 'Attaching…',
     destroy: 'Destroy',
     sessions: ({ n }) => `${n} session${n === 1 ? '' : 's'}`,
     windows: ({ n }) => `${n} window${n === 1 ? '' : 's'}`,

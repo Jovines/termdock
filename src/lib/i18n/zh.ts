@@ -280,6 +280,7 @@ export const zh: TranslationDictionary = {
     attached: '已连接',
     restorable: '可恢复',
     attach: '连接',
+    attaching: '连接中…',
     destroy: '销毁',
     sessions: ({ n }) => `${n} 个会话`,
     windows: ({ n }) => `${n} 个窗口`,

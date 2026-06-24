@@ -297,6 +297,7 @@ export type TranslationDictionary = {
     attached: string;
     restorable: string;
     attach: string;
+    attaching: string;
     destroy: string;
     sessions: (params: TranslatorParams) => string;
     windows: (params: TranslatorParams) => string;

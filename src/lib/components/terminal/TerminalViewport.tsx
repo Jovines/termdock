@@ -2490,6 +2490,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             fontFamily: getTerminalFontFamily(fontFamily),
             fontSize,
             theme: convertTheme(theme),
+            logLevel: 'off',
             // WebGL renderer 在 idle 状态下也会因为 cursor blink 周期重绘；
             // 某些 Chromium/GPU 组合会在这种空闲重绘中触发 atlas 花屏。
             // WebGL 下禁用闪烁，避免“什么都不干”时仍持续 repaint；DOM 路径保持原行为。

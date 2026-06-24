@@ -17,6 +17,7 @@ import {
   Bot as RiBotLine,
   Bell as RiBellLine,
   ChevronRight as RiChevronRightLine,
+  Loader2 as RiLoaderLine,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { useFontSize } from './lib/hooks/useFontSize';
@@ -410,6 +411,7 @@ function App() {
   const [tmuxConfirmKillName, setTmuxConfirmKillName] = useState<string | null>(null);
   const [tmuxKillingName, setTmuxKillingName] = useState<string | null>(null);
   const [tmuxKillError, setTmuxKillError] = useState<string | null>(null);
+  const [tmuxAttachingName, setTmuxAttachingName] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [tabMenuSessionId, setTabMenuSessionId] = useState<string | null>(null);
   const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
@@ -1403,6 +1405,18 @@ function App() {
     }
   }, [refreshTmuxSessions]);
 
+  // Clear attaching state when the tmux session becomes connected or after timeout
+  useEffect(() => {
+    if (!tmuxAttachingName) return;
+    const attached = tmuxSessions.find(s => s.name === tmuxAttachingName && (s.connected || s.boundFrontendSessionId));
+    if (attached) {
+      setTmuxAttachingName(null);
+      return;
+    }
+    const timer = setTimeout(() => setTmuxAttachingName(null), 10000);
+    return () => clearTimeout(timer);
+  }, [tmuxAttachingName, tmuxSessions]);
+
   const dispatchCloseSession = useCallback((detail: string | CloseSessionEventDetail) => {
     window.dispatchEvent(new CustomEvent('close-terminal-session', { detail }));
   }, []);
@@ -2212,6 +2226,7 @@ function App() {
                             : null;
                           const confirming = tmuxConfirmKillName === tmux.name;
                           const killing = tmuxKillingName === tmux.name;
+                          const attaching = tmuxAttachingName === tmux.name;
                           return (
                             <div
                               key={tmux.name}
@@ -2222,7 +2237,11 @@ function App() {
                               <RiLayoutGridLine size={12} className={connected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
                               <div className="min-w-0 flex-1">
                                 <div className="truncate text-[12px] font-medium text-foreground">{tmux.name}</div>
-                                <div className="text-[10px] text-muted-foreground">
+                                <div className="truncate text-[10px] text-muted-foreground">
+                                  {tmux.program && <span className="text-foreground/70">{tmux.program}</span>}
+                                  {tmux.program && tmux.cwd && ' · '}
+                                  {tmux.cwd && <span>{tmux.cwd}</span>}
+                                  {(tmux.program || tmux.cwd) && ' · '}
                                   {t('settings.windows', { n: tmux.windows })}
                                   {tmux.attached > 0 && ` · tmux:${tmux.attached}`}
                                   {connected && ` · ${tmux.restorable ? t('settings.restorable') : t('settings.attached')}`}
@@ -2236,16 +2255,20 @@ function App() {
                                       if (existingSession) {
                                         handleTabClick(existingSession.id);
                                       } else {
+                                        setTmuxAttachingName(tmux.name);
                                         dispatchNewSession({ mode: 'tmux', tmuxSessionName: tmux.name });
                                       }
                                     }}
-                                    className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition ${
+                                    disabled={attaching}
+                                    className={`shrink-0 inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium transition disabled:opacity-50 ${
                                       connected
                                         ? 'bg-surface text-foreground hover:bg-surface-elevated'
-                                        : 'bg-primary/15 text-primary hover:bg-primary/25'
+                                        : attaching
+                                          ? 'bg-primary/10 text-primary'
+                                          : 'bg-primary/15 text-primary hover:bg-primary/25'
                                     }`}
                                   >
-                                    {connected ? t('settings.attached') : t('settings.attach')}
+                                    {attaching ? <><RiLoaderLine size={10} className="animate-spin" />{t('settings.attaching')}</> : connected ? t('settings.attached') : t('settings.attach')}
                                   </button>
                                   <button
                                     type="button"
