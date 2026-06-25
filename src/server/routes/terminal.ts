@@ -265,6 +265,8 @@ let globalSessionState: GlobalSessionState = { sessions: [], updatedAt: Date.now
 const GLOBAL_SESSION_STATE_FILE = `${os.homedir()}/.termdock/global-session-state.json`;
 const CLIENT_STATES_FILE = `${os.homedir()}/.termdock/client-states.json`; // 保留用于迁移
 let persistGlobalStateTimer: ReturnType<typeof setTimeout> | null = null;
+let globalSessionStateWatcher: fs.FSWatcher | null = null;
+let globalSessionStateReloadTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ── Control WebSocket: pushes the canonical client-state to every connected
 // browser in real time. Each client gets a fresh snapshot on connect, then
@@ -470,6 +472,53 @@ function loadGlobalSessionStateFromDisk(): void {
   }
 }
 
+function reloadGlobalSessionStateFromDisk(source: 'watch' | 'manual'): void {
+  try {
+    const previous = JSON.stringify(globalSessionState);
+    loadGlobalSessionStateFromDisk();
+    const next = JSON.stringify(globalSessionState);
+    if (previous === next) {
+      return;
+    }
+    console.log(`[session-persist] Reloaded global state from disk via ${source}`);
+    broadcastClientState();
+  } catch (error) {
+    console.warn('[session-persist] Failed to reload global state:', getErrorMessage(error));
+  }
+}
+
+function scheduleReloadGlobalSessionState(): void {
+  if (globalSessionStateReloadTimer) {
+    clearTimeout(globalSessionStateReloadTimer);
+  }
+  globalSessionStateReloadTimer = setTimeout(() => {
+    globalSessionStateReloadTimer = null;
+    reloadGlobalSessionStateFromDisk('watch');
+  }, 120);
+  globalSessionStateReloadTimer.unref?.();
+}
+
+function watchGlobalSessionStateFile(): void {
+  try {
+    const dir = path.dirname(GLOBAL_SESSION_STATE_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    globalSessionStateWatcher?.close();
+    globalSessionStateWatcher = fs.watch(dir, (_eventType, filename) => {
+      if (filename !== path.basename(GLOBAL_SESSION_STATE_FILE)) {
+        return;
+      }
+      scheduleReloadGlobalSessionState();
+    });
+    globalSessionStateWatcher.on('error', (error) => {
+      console.warn('[session-persist] Global state watcher failed:', getErrorMessage(error));
+    });
+  } catch (error) {
+    console.warn('[session-persist] Failed to watch global state file:', getErrorMessage(error));
+  }
+}
+
 function schedulePersistGlobalState(): void {
   if (persistGlobalStateTimer) clearTimeout(persistGlobalStateTimer);
   persistGlobalStateTimer = setTimeout(() => {
@@ -500,6 +549,7 @@ process.on('SIGINT', () => { flushPersistAndExit(); persistToolbarPresetsNow(); 
 
 // 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
 loadGlobalSessionStateFromDisk();
+watchGlobalSessionStateFile();
 caffeinateManager.startNetworkMonitor();
 
 // 清理磁盘恢复后后端已不存在的 session 引用。
@@ -1549,6 +1599,30 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       return tmux;
     }
   }));
+
+  let discoveredManagedTmuxSession = false;
+  for (const tmux of refreshedTmuxSessions) {
+    if (!isTermdockManagedTmuxSession(tmux)) continue;
+    const exists = globalSessionState.sessions.some((session) =>
+      session.mode === 'tmux' && session.tmuxSessionName === tmux.name,
+    );
+    if (exists) continue;
+
+    const liveBackend = findBackendSessionForTmux(tmux.name);
+    upsertGlobalSessionRecord({
+      sessionId: randomUUID(),
+      name: `tmux:${tmux.name}`,
+      backendSessionId: liveBackend?.[0] ?? null,
+      mode: 'tmux',
+      tmuxSessionName: tmux.name,
+      createdAt: tmux.createdAt ?? Date.now(),
+      lastActivity: tmux.lastActiveAt ?? Date.now(),
+    });
+    discoveredManagedTmuxSession = true;
+  }
+  if (discoveredManagedTmuxSession) {
+    schedulePersistGlobalState();
+  }
 
   const liveTmuxByName = new Map(refreshedTmuxSessions.map((session) => [session.name, session]));
   const clientSessions = globalSessionState.sessions.map((session): SessionInventoryClientSession => {

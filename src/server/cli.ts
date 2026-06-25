@@ -4,6 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import readline from 'readline';
+import { randomUUID } from 'crypto';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { Writable } from 'stream';
@@ -111,8 +112,26 @@ interface ServerState {
   startedAt: string;
 }
 
+interface PersistedCliSession {
+  sessionId: string;
+  name: string;
+  customName?: boolean;
+  backendSessionId: string | null;
+  mode: 'shell' | 'tmux';
+  tmuxSessionName: string | null;
+  createdAt: number;
+  lastActivity: number;
+}
+
+interface GlobalCliSessionState {
+  sessions: PersistedCliSession[];
+  updatedAt: number;
+}
+
 function printHelp() {
-  console.log(`Usage: termdock [options]
+  console.log(`Usage: td [options]
+       td <cmd> [args]
+       termdock [options]
 
 Options:
   --host <host>      Host to bind to (default: ${DEFAULT_HOST})
@@ -134,20 +153,38 @@ Options:
   --attach-tmux [n]  Attach to a termdock-managed tmux session.
                      With no name: interactive picker.
                      With name: attach directly (e.g. --attach-tmux wt-foo).
-  --new-tmux [name]  Create (or ensure) and stamp a tmux session for termdock.
-                     With no name: auto-generate a wt-* name.
-                     Prints the session name; pair with --attach-tmux to enter it.
+  --new-tmux [name]  Create (or ensure) and attach to a tmux session for termdock.
+                     With no name: auto-generate a wt-* name and enter it directly.
+                     Use --tls to inspect sessions without attaching.
   -h, --help         Show this help message
+
+Short commands:
+  s                  Same as --status
+  st                 Same as --status
+  x                  Same as --stop
+  stop               Same as --stop
+  l                  Same as --tls
+  ls                 Same as --tls
+  la                 Same as --tls --all
+  a [name]           Same as --attach-tmux [name]
+  at [name]          Same as --attach-tmux [name]
+  n [name]           Same as --new-tmux [name]
+  nt [name]          Same as --new-tmux [name]
+  p                  Same as --set-password
+  pw                 Same as --set-password
+  pc                 Same as --clear-password
+  pwc                Same as --clear-password
+  https              Same as --setup-local-https
 
 Password examples:
   ${c.dim('# Set password interactively (recommended)')}
-  termdock --set-password
+  td --set-password
 
   ${c.dim('# Pipe a password from stdin (CI / scripted setup)')}
-  echo "my-secret" | termdock --set-password
+  echo "my-secret" | td --set-password
 
   ${c.dim('# Disable authentication entirely')}
-  termdock --clear-password
+  td --clear-password
 
 Auth state lives in ${c.cyan(path.join('~', '.termdock', 'auth.json'))} (mode 0600).`);
 }
@@ -377,7 +414,7 @@ async function runSetupLocalHttps(options: { quietRestartHint?: boolean } = {}):
   }
   console.log('');
   if (!options.quietRestartHint) {
-    console.log(`${ICON.info} ${c.dim('Restart Termdock to use HTTPS:')} ${c.cyan('termdock --stop && termdock')}`);
+    console.log(`${ICON.info} ${c.dim('Restart Termdock to use HTTPS:')} ${c.cyan('td --stop && td')}`);
   }
 }
 
@@ -416,12 +453,50 @@ function parseArgs(argv: string[]): CliOptions {
   let newTmux = false;
   let newTmuxName: string | undefined;
 
-  // Allow `termdock tls` as shorthand for `termdock --tls`. Only honour the
-  // bare token when it's the first argument so we don't accidentally swallow
-  // a literal value somewhere down the line.
-  if (argv[0] === 'tls') {
-    tls = true;
-    argv = argv.slice(1);
+  // Short command aliases for the common path. Keep these positional-only so
+  // long-form flags remain the single source of truth for option semantics.
+  if (argv[0] && !argv[0].startsWith('-')) {
+    const command = argv[0];
+    const next = argv[1];
+    if (command === 'tls' || command === 'l' || command === 'ls') {
+      tls = true;
+      argv = argv.slice(1);
+    } else if (command === 'la') {
+      tls = true;
+      tlsAll = true;
+      argv = argv.slice(1);
+    } else if (command === 's' || command === 'st') {
+      status = true;
+      argv = argv.slice(1);
+    } else if (command === 'x' || command === 'stop') {
+      stop = true;
+      argv = argv.slice(1);
+    } else if (command === 'p' || command === 'pw') {
+      setPassword = true;
+      argv = argv.slice(1);
+    } else if (command === 'pc' || command === 'pwc') {
+      clearPassword = true;
+      argv = argv.slice(1);
+    } else if (command === 'https') {
+      setupLocalHttps = true;
+      argv = argv.slice(1);
+    } else if (command === 'a' || command === 'at') {
+      attachTmux = true;
+      if (next && !next.startsWith('-')) {
+        attachTmuxName = next;
+        argv = argv.slice(2);
+      } else {
+        argv = argv.slice(1);
+      }
+    } else if (command === 'n' || command === 'nt') {
+      newTmux = true;
+      if (next && !next.startsWith('-')) {
+        newTmuxName = next;
+        argv = argv.slice(2);
+      } else {
+        argv = argv.slice(1);
+      }
+    }
   }
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -562,7 +637,7 @@ function parseArgs(argv: string[]): CliOptions {
 
 // Reads a single line from stdin without echoing keystrokes. Used for password
 // entry. Falls back to plain readline (with echo) if stdin is not a TTY, e.g.
-// when piping a password in via `echo ... | termdock --set-password`.
+// when piping a password in via `echo ... | td --set-password`.
 async function promptHidden(prompt: string): Promise<string> {
   const isTty = Boolean((process.stdin as NodeJS.ReadStream).isTTY);
 
@@ -652,10 +727,10 @@ async function runSetPassword(): Promise<void> {
   if (running) {
     console.log('');
     console.log(`${ICON.info} ${c.yellow('Termdock is currently running — restart it so the change takes effect:')}`);
-    console.log(`     ${c.cyan('termdock --stop && termdock')}`);
+    console.log(`     ${c.cyan('td --stop && td')}`);
   } else {
     console.log('');
-    console.log(`${ICON.info} ${c.dim('Start Termdock with:')} ${c.cyan('termdock')}`);
+    console.log(`${ICON.info} ${c.dim('Start Termdock with:')} ${c.cyan('td')}`);
   }
 }
 
@@ -672,13 +747,13 @@ function runClearPassword(): void {
   console.log(`  ${c.dim('All existing sessions have been invalidated.')}`);
   console.log('');
   console.log(`${ICON.warn} ${c.yellow('Warning:')} ${c.dim('the server is now reachable by anyone who can reach the host/port.')}`);
-  console.log(`  ${c.dim('Re-enable auth at any time with:')} ${c.cyan('termdock --set-password')}`);
+  console.log(`  ${c.dim('Re-enable auth at any time with:')} ${c.cyan('td --set-password')}`);
 
   const running = getRunningState();
   if (running) {
     console.log('');
     console.log(`${ICON.info} ${c.yellow('Termdock is currently running — restart it so the change takes effect:')}`);
-    console.log(`     ${c.cyan('termdock --stop && termdock')}`);
+    console.log(`     ${c.cyan('td --stop && td')}`);
   }
 }
 
@@ -705,13 +780,13 @@ function warnIfAuthDisabled(host: string): void {
     console.log(c.yellow('  │   ') + c.dim('The server is bound to ') + c.red(host)
       + c.dim(' — reachable from the LAN.') + c.yellow('     │'));
   }
-  console.log(c.yellow('  │   ') + c.dim('Set a password with: ') + c.cyan('termdock --set-password')
+  console.log(c.yellow('  │   ') + c.dim('Set a password with: ') + c.cyan('td --set-password')
     + c.yellow('             │'));
   console.log(c.yellow('  ╰─────────────────────────────────────────────────────────────╯'));
   console.log('');
 }
 
-// ── `termdock --tls` (a.k.a `termdock tls`) ──
+// ── `td --tls` (a.k.a `td l` / `td ls` / `termdock --tls`) ──
 // Reads termdock metadata directly out of tmux user options. Does not contact
 // the termdock server, so it works over plain ssh on any machine that has
 // termdock-managed tmux sessions on it (even if the termdock daemon is down).
@@ -860,6 +935,124 @@ function formatIdle(lastActiveAtRaw: string): string {
   return `${days}d`;
 }
 
+function getCwdLeafName(cwd: string): string {
+  if (cwd === '/') return '/';
+  const segments = cwd.replace(/\/+$/, '').split('/');
+  return segments[segments.length - 1] || cwd;
+}
+
+function buildTmuxFolderGroups(rows: TlsRow[]): Array<{ key: string; label: string; sessions: TlsRow[] }> {
+  const groups: Array<{ key: string; label: string; sessions: TlsRow[] }> = [];
+  const byKey = new Map<string, { key: string; label: string; sessions: TlsRow[] }>();
+
+  for (const row of rows) {
+    const key = row.cwd.trim().length > 0 ? row.cwd.trim() : '';
+    let group = byKey.get(key);
+    if (!group) {
+      group = {
+        key,
+        label: key ? getCwdLeafName(key) : 'Other',
+        sessions: [],
+      };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.sessions.push(row);
+  }
+
+  return groups.sort((a, b) => (a.key === '' ? 1 : 0) - (b.key === '' ? 1 : 0));
+}
+
+function normalizePersistedCliSession(input: unknown): PersistedCliSession | null {
+  if (!input || typeof input !== 'object') return null;
+  const candidate = input as Partial<PersistedCliSession>;
+  if (typeof candidate.sessionId !== 'string' || typeof candidate.name !== 'string') {
+    return null;
+  }
+  return {
+    sessionId: candidate.sessionId,
+    name: candidate.name,
+    customName: candidate.customName === true ? true : undefined,
+    backendSessionId: typeof candidate.backendSessionId === 'string' && candidate.backendSessionId.trim().length > 0
+      ? candidate.backendSessionId
+      : null,
+    mode: candidate.mode === 'tmux' ? 'tmux' : 'shell',
+    tmuxSessionName: typeof candidate.tmuxSessionName === 'string' && candidate.tmuxSessionName.trim().length > 0
+      ? candidate.tmuxSessionName
+      : null,
+    createdAt: typeof candidate.createdAt === 'number' && Number.isFinite(candidate.createdAt)
+      ? Math.floor(candidate.createdAt)
+      : Date.now(),
+    lastActivity: typeof candidate.lastActivity === 'number' && Number.isFinite(candidate.lastActivity)
+      ? Math.floor(candidate.lastActivity)
+      : Date.now(),
+  };
+}
+
+function readGlobalCliSessionState(): GlobalCliSessionState {
+  try {
+    if (!fs.existsSync(globalSessionStateFilePath)) {
+      return { sessions: [], updatedAt: Date.now() };
+    }
+    const raw = fs.readFileSync(globalSessionStateFilePath, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<GlobalCliSessionState> & { sessions?: unknown[] };
+    const sessions = Array.isArray(parsed.sessions)
+      ? parsed.sessions
+        .map((session) => normalizePersistedCliSession(session))
+        .filter((session): session is PersistedCliSession => session !== null)
+      : [];
+    return {
+      sessions,
+      updatedAt: typeof parsed.updatedAt === 'number' && Number.isFinite(parsed.updatedAt)
+        ? Math.floor(parsed.updatedAt)
+        : Date.now(),
+    };
+  } catch {
+    return { sessions: [], updatedAt: Date.now() };
+  }
+}
+
+function writeGlobalCliSessionState(state: GlobalCliSessionState): void {
+  ensureStateDir();
+  fs.writeFileSync(globalSessionStateFilePath, JSON.stringify(state, null, 2));
+}
+
+function registerGuiTmuxSession(sessionName: string): void {
+  const now = Date.now();
+  const state = readGlobalCliSessionState();
+  const nextRecord: PersistedCliSession = {
+    sessionId: randomUUID(),
+    name: `tmux:${sessionName}`,
+    backendSessionId: null,
+    mode: 'tmux',
+    tmuxSessionName: sessionName,
+    createdAt: now,
+    lastActivity: now,
+  };
+
+  const nextSessions: PersistedCliSession[] = [];
+  let replaced = false;
+  for (const session of state.sessions) {
+    if (session.mode === 'tmux' && session.tmuxSessionName === sessionName) {
+      nextSessions.push({
+        ...session,
+        lastActivity: now,
+      });
+      replaced = true;
+      continue;
+    }
+    nextSessions.push(session);
+  }
+  if (!replaced) {
+    nextSessions.push(nextRecord);
+  }
+
+  writeGlobalCliSessionState({
+    sessions: nextSessions,
+    updatedAt: now,
+  });
+}
+
 function toSortableTs(raw: string): number {
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? value : Number.POSITIVE_INFINITY;
@@ -1005,7 +1198,7 @@ async function runTls(opts: { all: boolean; json: boolean }): Promise<void> {
       console.log(`${ICON.info} ${c.dim('No tmux sessions on this host.')}`);
     } else {
       console.log(`${ICON.info} ${c.dim('No termdock-managed tmux sessions on this host.')}`);
-      console.log(`  ${c.dim('Use')} ${c.cyan('termdock --tls -a')} ${c.dim('to include all tmux sessions.')}`);
+      console.log(`  ${c.dim('Use')} ${c.cyan('td la')} ${c.dim('to include all tmux sessions.')}`);
     }
     return;
   }
@@ -1015,7 +1208,7 @@ async function runTls(opts: { all: boolean; json: boolean }): Promise<void> {
 
 // ── end --tls ──
 
-// ── `termdock --attach-tmux [name]` ──
+// ── `td --attach-tmux [name]` / `td a [name]` / `td at [name]` ──
 //
 // Attach to a termdock-managed tmux session. If `name` is provided, attach
 // directly. Otherwise show an interactive picker that lists termdock sessions
@@ -1056,21 +1249,29 @@ async function pickTmuxSession(rows: TlsRow[]): Promise<string | null> {
   }
 
   if (!process.stdin.isTTY) {
-    console.error(`${ICON.err} ${c.red('No TTY — pass a session name explicitly: termdock --attach-tmux <name>')}`);
+    console.error(`${ICON.err} ${c.red('No TTY — pass a session name explicitly: td --attach-tmux <name>')}`);
     return null;
   }
 
   console.log(c.bold('Select a tmux session to attach:'));
   const indexWidth = String(rows.length).length;
-  rows.forEach((row, idx) => {
-    const num = c.cyan(String(idx + 1).padStart(indexWidth));
-    const heading = row.label || row.friendlyName || row.name;
-    const meta: string[] = [];
-    if (row.cwd) meta.push(row.cwd);
-    if (row.clientCount && row.clientCount !== '0') meta.push(`${row.clientCount} client(s)`);
-    const tail = meta.length > 0 ? c.dim(`  ${meta.join(' · ')}`) : '';
-    console.log(`  ${num}. ${heading} ${c.dim(`(${row.name})`)}${tail}`);
-  });
+  const groups = buildTmuxFolderGroups(rows);
+  const orderedRows = groups.flatMap((group) => group.sessions);
+  let optionIndex = 0;
+  for (const group of groups) {
+    const groupTitle = group.key ? `${group.label} ${c.dim(`(${group.key})`)}` : `${group.label} ${c.dim('(no cwd)')}`;
+    console.log(`  ${c.bold(groupTitle)}`);
+    for (const row of group.sessions) {
+      optionIndex += 1;
+      const num = c.cyan(String(optionIndex).padStart(indexWidth));
+      const heading = row.label || row.friendlyName || row.name;
+      const meta: string[] = [];
+      if (row.cwd) meta.push(row.cwd);
+      if (row.clientCount && row.clientCount !== '0') meta.push(`${row.clientCount} client(s)`);
+      const tail = meta.length > 0 ? c.dim(`  ${meta.join(' · ')}`) : '';
+      console.log(`    ${num}. ${heading} ${c.dim(`(${row.name})`)}${tail}`);
+    }
+  }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const answer = await new Promise<string>((resolve) => {
@@ -1082,11 +1283,11 @@ async function pickTmuxSession(rows: TlsRow[]): Promise<string | null> {
 
   if (!answer || answer.toLowerCase() === 'q') return null;
   const choice = Number(answer);
-  if (!Number.isInteger(choice) || choice < 1 || choice > rows.length) {
+  if (!Number.isInteger(choice) || choice < 1 || choice > orderedRows.length) {
     console.error(`${ICON.err} ${c.red(`Invalid choice: ${answer}`)}`);
     return null;
   }
-  return rows[choice - 1].name;
+  return orderedRows[choice - 1]?.name ?? null;
 }
 
 async function runAttachTmux(opts: { name?: string }): Promise<void> {
@@ -1129,14 +1330,15 @@ async function runAttachTmux(opts: { name?: string }): Promise<void> {
 async function runNewTmux(opts: { name?: string; attach?: boolean }): Promise<void> {
   const sessionName = normalizeTmuxSessionName(opts.name);
   const result = await ensureStampedTmuxSession(sessionName);
+  registerGuiTmuxSession(result.sessionName);
   const verb = result.created ? 'Created' : 'Reused';
   console.log(`${ICON.ok} ${c.green(`${verb} tmux session:`)} ${c.cyan(result.sessionName)}`);
-  if (opts.attach) {
-    console.log(`${ICON.info} ${c.dim('Attaching...')}`);
-    execTmuxAttach(result.sessionName);
+  if (opts.attach === false) {
+    console.log(`  ${c.dim('Tip: attach with')} ${c.cyan(`td --attach-tmux ${result.sessionName}`)}`);
     return;
   }
-  console.log(`  ${c.dim('Tip: attach with')} ${c.cyan(`termdock --attach-tmux ${result.sessionName}`)}`);
+  console.log(`${ICON.info} ${c.dim('Attaching...')}`);
+  execTmuxAttach(result.sessionName);
 }
 
 // ── end --attach-tmux / --new-tmux ──
@@ -1170,10 +1372,10 @@ async function runFirstRunWizard(): Promise<void> {
       await runSetupLocalHttps();
     } catch (error) {
       console.error(error instanceof Error ? error.message : error);
-      console.log(`  ${ICON.info} ${c.dim('You can enable HTTPS later with:')} ${c.cyan('termdock --setup-local-https')}`);
+      console.log(`  ${ICON.info} ${c.dim('You can enable HTTPS later with:')} ${c.cyan('td --setup-local-https')}`);
     }
   } else {
-    console.log(`  ${ICON.info} ${c.dim('You can enable HTTPS later with:')} ${c.cyan('termdock --setup-local-https')}`);
+    console.log(`  ${ICON.info} ${c.dim('You can enable HTTPS later with:')} ${c.cyan('td --setup-local-https')}`);
   }
   markFirstRunCompleted();
   console.log('');
@@ -1228,7 +1430,7 @@ async function main(): Promise<void> {
   }
 
   if (options.newTmux) {
-    await runNewTmux({ name: options.newTmuxName, attach: options.attachTmux });
+    await runNewTmux({ name: options.newTmuxName, attach: true });
     return; // execTmuxAttach handles process exit when attach=true
   }
 
@@ -1403,7 +1605,7 @@ async function main(): Promise<void> {
   if (scheme === 'https') {
     console.log(`  ${c.dim('HTTPS:')} ${activeHttps.source === 'default' ? c.green('auto') : c.green('enabled')}`);
   } else {
-    console.log(`  ${c.dim('HTTPS:')} ${c.dim('not configured — run termdock --setup-local-https')}`);
+    console.log(`  ${c.dim('HTTPS:')} ${c.dim('not configured — run td --setup-local-https')}`);
   }
   console.log(`  ${c.dim('PID:')} ${child.pid}`);
   console.log(`  ${c.dim('Log:')} ${logFilePath}`);

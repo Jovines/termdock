@@ -18,9 +18,9 @@ import type { AgentStatus, AgentIndicator } from '../terminal/types';
 import { useI18n } from '../i18n';
 
 /** 黄色（待查看 / 等待用户 / copy mode） */
-export const AGENT_COLOR_ATTENTION = '#facc15';
+export const AGENT_COLOR_ATTENTION = 'var(--warning)';
 /** 绿色（running） */
-export const AGENT_COLOR_RUNNING = '#4ade80';
+export const AGENT_COLOR_RUNNING = 'var(--success)';
 
 /** 给 tab 图标 / dot 共享的轻量 session 状态 */
 export interface AgentVisualState {
@@ -88,8 +88,8 @@ export function AgentTabIcon({
   // 没有 agentStatus（已停止），但仍是"未读"：黄色呼吸动效图标
   if (state?.agentNeedsReview || state?.inCopyMode) {
     return sessionMode === 'tmux'
-      ? <RiLayoutGridLine size={size} className="shrink-0 text-yellow-400 animate-pulse" />
-      : <RiTerminalLine size={size} className="shrink-0 text-yellow-400 animate-pulse" />;
+      ? <RiLayoutGridLine size={size} className="shrink-0 text-[color:var(--warning)] animate-pulse" />
+      : <RiTerminalLine size={size} className="shrink-0 text-[color:var(--warning)] animate-pulse" />;
   }
 
   return baseIcon;
@@ -112,7 +112,7 @@ export function AgentSessionDot({
   if (status === 'running') {
     return (
       <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-green-400 ring-2 ring-surface animate-pulse"
+        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--success)] ring-2 ring-surface animate-pulse"
         title={t('agent.aiRunning')}
       />
     );
@@ -120,7 +120,7 @@ export function AgentSessionDot({
   if (status === 'waiting' || needsReview) {
     return (
       <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-yellow-400 ring-2 ring-surface animate-pulse"
+        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--warning)] ring-2 ring-surface animate-pulse"
         title={needsReview ? t('agent.finishedReview') : t('agent.aiWaiting')}
       />
     );
@@ -128,7 +128,7 @@ export function AgentSessionDot({
   if (inCopyMode) {
     return (
       <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-yellow-400/80 ring-2 ring-surface animate-pulse"
+        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[rgb(var(--warning-rgb)_/_0.80)] ring-2 ring-surface animate-pulse"
         title={t('agent.copyMode')}
       />
     );
@@ -151,11 +151,11 @@ export function AgentCountBadge({
 }): React.ReactElement | null {
   if (count <= 0) return null;
   const className = tone === 'running'
-    ? 'inline-flex items-center gap-1 rounded-full bg-green-400/10 px-1.5 py-0.5 text-[10px] font-medium text-green-400'
-    : 'inline-flex items-center gap-1 rounded-full bg-yellow-400/10 px-1.5 py-0.5 text-[10px] font-medium text-yellow-400';
+    ? 'inline-flex items-center gap-1 rounded-full bg-[rgb(var(--success-rgb)_/_0.12)] px-1.5 py-0.5 text-[10px] font-medium text-[color:var(--success)]'
+    : 'inline-flex items-center gap-1 rounded-full bg-[rgb(var(--warning-rgb)_/_0.12)] px-1.5 py-0.5 text-[10px] font-medium text-[color:var(--warning)]';
   const dotClassName = tone === 'running'
-    ? 'h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse'
-    : 'h-1.5 w-1.5 rounded-full bg-yellow-400 animate-pulse';
+    ? 'h-1.5 w-1.5 rounded-full bg-[var(--success)] animate-pulse'
+    : 'h-1.5 w-1.5 rounded-full bg-[var(--warning)] animate-pulse';
   return (
     <span className={className} title={title}>
       <span className={dotClassName} />
@@ -179,10 +179,10 @@ export function AgentCompactStatusOverlay({
 }): React.ReactElement | null {
   const items: Array<{ key: 'running' | 'review'; count: number; className: string }> = [];
   if (runningCount > 0) {
-    items.push({ key: 'running', count: runningCount, className: 'bg-green-400 text-black' });
+    items.push({ key: 'running', count: runningCount, className: 'bg-[var(--success)] text-[color:var(--success-foreground)]' });
   }
   if (reviewCount > 0) {
-    items.push({ key: 'review', count: reviewCount, className: 'bg-yellow-400 text-black' });
+    items.push({ key: 'review', count: reviewCount, className: 'bg-[var(--warning)] text-[color:var(--warning-foreground)]' });
   }
   if (items.length === 0) return null;
 

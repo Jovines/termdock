@@ -27,24 +27,24 @@ export interface TerminalTheme {
 export type TermdockColorTheme = 'dark' | 'light';
 
 // Flexoki Dark — warm low-contrast palette for readability
-// https://github.com/euandeas/omarchy-flexoki-dark-theme
+// https://stephango.com/flexoki
 export const FLEXOKI_DARK: TerminalTheme = {
-  background: '#1C1B1A',
+  background: '#100F0F',
   foreground: '#CECDC3',
   cursor: '#CECDC3',
-  cursorAccent: '#1C1B1A',
+  cursorAccent: '#100F0F',
   selectionBackground: '#403E3C',
   selectionForeground: '#CECDC3',
   selectionInactiveBackground: '#403E3C50',
-  black: '#6F6E69',
-  red: '#AF3029',
-  green: '#66800B',
-  yellow: '#AD8301',
-  blue: '#205EA6',
-  magenta: '#A02F6F',
-  cyan: '#24837B',
+  black: '#100F0F',
+  red: '#D14D41',
+  green: '#879A39',
+  yellow: '#D0A215',
+  blue: '#4385BE',
+  magenta: '#CE5D97',
+  cyan: '#3AA99F',
   white: '#CECDC3',
-  brightBlack: '#6F6E69',
+  brightBlack: '#575653',
   brightRed: '#D14D41',
   brightGreen: '#879A39',
   brightYellow: '#D0A215',

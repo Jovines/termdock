@@ -4,7 +4,8 @@
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
   "bin": {
-    "termdock": "dist/server/cli.js"
+    "termdock": "dist/server/cli.js",
+    "td": "dist/server/cli.js"
   },
   "exports": {
     ".": "./dist/server/entry.js"

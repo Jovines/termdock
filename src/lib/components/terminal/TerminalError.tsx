@@ -9,9 +9,9 @@ export const TerminalError: React.FC<TerminalErrorProps> = ({ message, onRetry }
   return (
     <div className="absolute inset-0 flex items-center justify-center p-4">
       <div className="flex flex-col items-center gap-3 text-center max-w-md">
-        <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center">
+        <div className="w-12 h-12 rounded-full bg-destructive/10 flex items-center justify-center">
           <svg
-            className="w-6 h-6 text-red-500"
+            className="w-6 h-6 text-destructive"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"

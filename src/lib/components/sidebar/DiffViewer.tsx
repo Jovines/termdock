@@ -499,11 +499,11 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
 
   if (diffNotice && !diffContent) {
     return embedded ? (
-      <div className="bg-yellow-400/10 px-3 py-3 text-xs text-yellow-300">
+      <div className="bg-[rgb(var(--warning-rgb)_/_0.12)] px-3 py-3 text-xs text-[color:var(--warning)]">
         {diffNotice}
       </div>
     ) : (
-      <div className="mx-3 mt-3 border border-yellow-400/20 bg-yellow-400/10 px-4 py-4 text-sm text-yellow-300">
+      <div className="mx-3 mt-3 border border-[rgb(var(--warning-rgb)_/_0.24)] bg-[rgb(var(--warning-rgb)_/_0.12)] px-4 py-4 text-sm text-[color:var(--warning)]">
         {diffNotice}
       </div>
     );
@@ -553,7 +553,7 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
   }
 
   const diffNoticeBanner = diffNotice ? (
-    <div className="mb-2 border border-yellow-400/20 bg-yellow-400/10 px-3 py-2 text-xs text-yellow-300">
+    <div className="mb-2 border border-[rgb(var(--warning-rgb)_/_0.24)] bg-[rgb(var(--warning-rgb)_/_0.12)] px-3 py-2 text-xs text-[color:var(--warning)]">
       {diffNotice}
     </div>
   ) : null;

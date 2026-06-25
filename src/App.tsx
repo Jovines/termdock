@@ -63,6 +63,31 @@ const PROGRAM_RULES_CACHE_KEY = 'termdock-program-rules-cache';
 const TOOLBAR_PRESETS_CACHE_KEY = 'termdock-toolbar-presets-cache';
 const SETTINGS_CACHE_KEY = 'termdock-settings-cache';
 const COLOR_THEME_CACHE_KEY = 'termdock-color-theme';
+const DESKTOP_TAB_MENU_WIDTH = 320;
+const DESKTOP_TAB_MENU_MAX_HEIGHT = 420;
+const DESKTOP_TAB_MENU_GAP = 8;
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function getDesktopTabMenuPosition(anchor: { x: number; y: number } | null): React.CSSProperties {
+  if (typeof window === 'undefined') {
+    return { left: DESKTOP_TAB_MENU_GAP, top: DESKTOP_TAB_MENU_GAP };
+  }
+  const fallbackX = window.innerWidth / 2;
+  const fallbackY = Math.min(64, window.innerHeight / 4);
+  const sourceX = anchor?.x ?? fallbackX;
+  const sourceY = anchor?.y ?? fallbackY;
+  const maxLeft = Math.max(DESKTOP_TAB_MENU_GAP, window.innerWidth - DESKTOP_TAB_MENU_WIDTH - DESKTOP_TAB_MENU_GAP);
+  const maxTop = Math.max(DESKTOP_TAB_MENU_GAP, window.innerHeight - DESKTOP_TAB_MENU_MAX_HEIGHT - DESKTOP_TAB_MENU_GAP);
+  return {
+    left: clampNumber(sourceX + DESKTOP_TAB_MENU_GAP, DESKTOP_TAB_MENU_GAP, maxLeft),
+    top: clampNumber(sourceY + DESKTOP_TAB_MENU_GAP, DESKTOP_TAB_MENU_GAP, maxTop),
+    width: DESKTOP_TAB_MENU_WIDTH,
+    maxHeight: `min(${DESKTOP_TAB_MENU_MAX_HEIGHT}px, calc(100vh - ${DESKTOP_TAB_MENU_GAP * 2}px))`,
+  };
+}
 
 function isTermdockColorTheme(v: unknown): v is TermdockColorTheme {
   return v === 'dark' || v === 'light';
@@ -430,10 +455,15 @@ function App() {
   const [tmuxAttachingName, setTmuxAttachingName] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [tabMenuSessionId, setTabMenuSessionId] = useState<string | null>(null);
+  const [tabMenuAnchor, setTabMenuAnchor] = useState<{ x: number; y: number } | null>(null);
   const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
   const [sidebarCloseChoiceSessionId, setSidebarCloseChoiceSessionId] = useState<string | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   const activeSessionTabRef = React.useRef<HTMLDivElement | null>(null);
+  const closeTabMenu = useCallback(() => {
+    setTabMenuSessionId(null);
+    setTabMenuAnchor(null);
+  }, []);
   // 通知点击 / SW postMessage 请求聚焦的目标 session。会话列表可能还没恢复完，
   // 先记在 ref 里，等对应 session 出现在列表里再 dispatch 切换。
   const pendingFocusSessionRef = React.useRef<string | null>(null);
@@ -939,7 +969,7 @@ function App() {
       }
       if (tabMenuSessionId) {
         event.preventDefault();
-        setTabMenuSessionId(null);
+        closeTabMenu();
         return;
       }
       if (isDrawerOpen) {
@@ -964,6 +994,7 @@ function App() {
     isToolbarPresetsOpen,
     isAgentRulesOpen,
     tabMenuSessionId,
+    closeTabMenu,
     isDrawerOpen,
     sidebarRightOpen,
     sidebarLeftOpen,
@@ -1238,13 +1269,17 @@ function App() {
     applySessionOrder(reorderSessionsWithinGroup(tabGroups, groupKey, result.source.index, result.destination.index));
   }, [tabGroups, applySessionOrder]);
 
-  // 位置角标 N/total 按全部 session 算。
+  // 位置角标 N/total 按当前可见的分组后顺序算，避免分组时编号与视觉顺序不一致。
+  const arrangedSessions = React.useMemo(
+    () => tabGroups.length > 0 ? tabGroups.flatMap((group) => group.sessions) : sessions,
+    [tabGroups, sessions],
+  );
   const activeSessionIndex = activeSessionId
-    ? sessions.findIndex((session) => session.id === activeSessionId)
+    ? arrangedSessions.findIndex((session) => session.id === activeSessionId)
     : -1;
-  const activeSessionPositionLabel = sessions.length > 0 && activeSessionIndex >= 0
-    ? `${activeSessionIndex + 1}/${sessions.length}`
-    : `${sessions.length}`;
+  const activeSessionPositionLabel = arrangedSessions.length > 0 && activeSessionIndex >= 0
+    ? `${activeSessionIndex + 1}/${arrangedSessions.length}`
+    : `${arrangedSessions.length}`;
   const agentTabCounts = React.useMemo(() => {
     let running = 0;
     let review = 0;
@@ -1445,6 +1480,7 @@ function App() {
       return;
     }
     setSidebarCloseChoiceSessionId(sessionId);
+    setTmuxKillError(null);
   }, [sessions, dispatchCloseSession]);
 
   const sidebarCloseChoiceSession = React.useMemo(
@@ -1514,11 +1550,11 @@ function App() {
       : null;
     const tooltip = ts?.cwd || session.name;
     const accentColor = ts?.agentStatus === 'running'
-      ? '#4ade80'
+      ? 'var(--success)'
       : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
-        ? '#facc15'
+        ? 'var(--warning)'
         : ts?.inCopyMode
-          ? '#facc15'
+          ? 'var(--warning)'
           : null;
 
     if (isEditing) {
@@ -1556,6 +1592,7 @@ function App() {
         ref={isActive ? activeSessionTabRef : null}
         onContextMenu={(e) => {
           e.preventDefault();
+          setTabMenuAnchor({ x: e.clientX, y: e.clientY });
           setTabMenuSessionId(session.id);
         }}
         className={
@@ -1593,13 +1630,13 @@ function App() {
             </span>
             {tabDirLabel ? (
               <span className="flex min-w-0 flex-col justify-center leading-[0.82rem] sm:leading-[0.85rem]">
-                <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+                <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>{displayName}</span>
                 <span className="truncate text-[9px] text-muted-foreground/80 sm:text-[9.5px]">
                   {tabDirLabel}
                 </span>
               </span>
             ) : (
-              <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>{displayName}</span>
+              <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>{displayName}</span>
             )}
           </span>
         </button>
@@ -1636,7 +1673,7 @@ function App() {
               <button
                 type="button"
                 onClick={handleJumpToNextAttention}
-                className="relative inline-flex h-7 shrink-0 items-center gap-1 rounded-md bg-yellow-400/10 px-1.5 text-yellow-400 ring-1 ring-yellow-400/30 transition hover:bg-yellow-400/20 sm:h-8"
+                className="relative inline-flex h-7 shrink-0 items-center gap-1 rounded-md bg-[rgb(var(--warning-rgb)_/_0.12)] px-1.5 text-[color:var(--warning)] ring-1 ring-[rgb(var(--warning-rgb)_/_0.30)] transition hover:bg-[rgb(var(--warning-rgb)_/_0.20)] sm:h-8"
                 aria-label={t('agent.jumpToNext')}
                 title={t('agent.jumpToNext')}
               >
@@ -1704,8 +1741,8 @@ function App() {
                     >
                       <RiChevronRightLine size={9} className={`shrink-0 opacity-70 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
                       <span className="min-w-0 truncate">{group.label}</span>
-                      {groupRunning > 0 && <span className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-green-400" />}
-                      {groupReview > 0 && <span className={`h-1.5 w-1.5 shrink-0 rounded-full bg-yellow-400 ${groupRunning > 0 ? '' : 'ml-auto'}`} />}
+                      {groupRunning > 0 && <span className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />}
+                      {groupReview > 0 && <span className={`h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--warning)] ${groupRunning > 0 ? '' : 'ml-auto'}`} />}
 
                     </button>
                     {/* 展开时显示子 tab（组内可拖动排序）；折叠时显示 session 数，保持高度一致 */}
@@ -2049,16 +2086,16 @@ function App() {
                       }
                     }}
                     className={`flex items-center justify-between rounded-xl px-3 py-2 text-[12px] transition ${
-                      preventSleep ? 'bg-green-500/15 text-green-400' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'
+                      preventSleep ? 'bg-[rgb(var(--success-rgb)_/_0.15)] text-[color:var(--success)]' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'
                     }`}
                     title={!networkAvailable && preventSleep ? t('settings.noSleepUnavailable') : undefined}
                   >
                     <span className="font-medium truncate">{t('settings.noSleep')}</span>
                     <span className={`inline-flex h-4 w-7 items-center rounded-full transition ${
-                      preventSleep ? 'bg-green-500' : 'bg-surface-elevated'
+                      preventSleep ? 'bg-[var(--success)]' : 'bg-surface-elevated'
                     }`}>
                       <span className={`mx-0.5 inline-block h-3 w-3 rounded-full transition ${
-                        preventSleep ? 'translate-x-3 bg-white' : 'bg-foreground/90'
+                        preventSleep ? 'translate-x-3 bg-[var(--background)]' : 'bg-foreground/90'
                       }`} />
                     </span>
                   </button>
@@ -2144,7 +2181,7 @@ function App() {
                               <div className="text-[11px] font-medium text-foreground/85">{entry.label} ({entry.name})</div>
                               <div className="mt-0.5 text-[10px] text-muted-foreground">{entry.address}</div>
                               {entry.qrDataUrl && (
-                                <div className="mt-2 inline-block rounded-lg bg-white p-1.5">
+                                <div className="mt-2 inline-block rounded-lg bg-[var(--background)] p-1.5">
                                   <img src={entry.qrDataUrl} alt={`QR code for ${url}`} className="h-28 w-28" />
                                 </div>
                               )}
@@ -2168,7 +2205,7 @@ function App() {
                     {localAccess.httpsEnabled ? t('settings.httpsActive') : t('settings.httpsInactive')}
                     {!localAccess.caAvailable && ` · ${t('settings.caMissing')}`}
                   </div>
-                  {localAccess.reason && <div className="text-amber-400">{localAccess.reason}</div>}
+                  {localAccess.reason && <div className="text-[color:var(--warning)]">{localAccess.reason}</div>}
                   {localAccessError && <div className="text-destructive">{localAccessError}</div>}
                 </div>
               </details>
@@ -2532,19 +2569,37 @@ function App() {
           ts?.cwd ?? null,
           SHELL_NAMES,
         );
+        const isDesktopTabMenu = isDesktopViewport;
+        const menuPanelStyle = isDesktopTabMenu
+          ? getDesktopTabMenuPosition(tabMenuAnchor)
+          : { paddingBottom: safeBottomInset };
+        const menuPanelClassName = isDesktopTabMenu
+          ? 'fixed z-menu-panel overflow-y-auto overflow-x-hidden rounded-lg bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in'
+          : 'fixed inset-x-3 bottom-6 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in sm:bottom-auto sm:top-[15%]';
+        const menuHeaderClassName = isDesktopTabMenu
+          ? 'border-b border-border/15 px-3 py-2'
+          : 'border-b border-border/15 px-4 py-3';
+        const menuItemClassName = isDesktopTabMenu
+          ? 'flex items-center gap-2 px-3 py-2 text-left text-[12px] transition'
+          : 'flex items-center gap-3 px-4 py-3 text-left text-[13px] transition';
+        const menuIconClassName = isDesktopTabMenu
+          ? 'inline-flex h-6 w-6 items-center justify-center rounded-md'
+          : 'inline-flex h-7 w-7 items-center justify-center rounded-full';
         return (
           <>
             <button
               type="button"
-              className="fixed inset-0 z-menu-backdrop bg-[var(--app-backdrop-soft)] backdrop-blur-sm cursor-default animate-fade-in"
-              onClick={() => setTabMenuSessionId(null)}
+              className={`fixed inset-0 z-menu-backdrop cursor-default animate-fade-in ${
+                isDesktopTabMenu ? 'bg-transparent' : 'bg-[var(--app-backdrop-soft)] backdrop-blur-sm'
+              }`}
+              onClick={closeTabMenu}
               aria-label="Close menu"
             />
             <div
-              className="fixed inset-x-3 bottom-6 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in sm:bottom-auto sm:top-[15%]"
-              style={{ paddingBottom: safeBottomInset }}
+              className={menuPanelClassName}
+              style={menuPanelStyle}
             >
-              <div className="border-b border-border/15 px-4 py-3">
+              <div className={menuHeaderClassName}>
                 <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{t('tab.session')}</div>
                 <div className="mt-0.5 truncate text-[14px] font-medium text-foreground">{menuName}</div>
                 {ts?.cwd && (
@@ -2555,12 +2610,12 @@ function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    setTabMenuSessionId(null);
+                    closeTabMenu();
                     setEditingSessionId(menuSession.id);
                   }}
-                  className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-foreground transition hover:bg-surface-2"
+                  className={`${menuItemClassName} text-foreground hover:bg-surface-2`}
                 >
-                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-primary/15 text-primary">
+                  <span className={`${menuIconClassName} bg-primary/15 text-primary`}>
                     <RiPencilLine size={14} />
                   </span>
                   <span className="min-w-0 flex-1">
@@ -2573,15 +2628,15 @@ function App() {
                   disabled={!ts?.cwd}
                   onClick={() => {
                     void copyCwdToClipboard(menuSession.id);
-                    setTabMenuSessionId(null);
+                    closeTabMenu();
                   }}
-                  className={`flex items-center gap-3 px-4 py-3 text-left text-[13px] transition ${
+                  className={`${menuItemClassName} ${
                     ts?.cwd
                       ? 'text-foreground hover:bg-surface-2'
                       : 'text-muted-foreground/50 cursor-not-allowed'
                   }`}
                 >
-                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
+                  <span className={`${menuIconClassName} bg-surface-2 text-muted-foreground`}>
                     <RiStackLine size={14} />
                   </span>
                   <span className="min-w-0 flex-1">
@@ -2593,41 +2648,91 @@ function App() {
                   )}
                 </button>
                 <div className="my-1 border-t border-border/15" />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTabMenuSessionId(null);
-                    dispatchCloseSession({ sessionId: menuSession.id, source: 'tab-menu', closeMode: 'auto' });
-                  }}
-                  className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-destructive transition hover:bg-destructive/10"
-                >
-                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-destructive/15 text-destructive">
-                    <RiCloseLine size={14} />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-medium">{t('tab.close')}</span>
-                    <span className="block text-[11px] text-muted-foreground">{t('tab.closeHint')}</span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="flex items-center justify-center px-4 py-2 text-[11px] text-muted-foreground/80 transition hover:text-foreground"
-                  onClick={() => {
-                    setTabMenuSessionId(null);
-                  }}
-                >
-                  {t('tab.longPressTip')}
-                </button>
+                {menuSession.mode === 'tmux' ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        dispatchCloseSession({
+                          sessionId: menuSession.id,
+                          source: 'tab-menu',
+                          closeMode: 'detach',
+                        });
+                        closeTabMenu();
+                        setTmuxKillError(null);
+                      }}
+                      className={`${menuItemClassName} text-foreground hover:bg-surface-2`}
+                    >
+                      <span className={`${menuIconClassName} bg-surface-2 text-muted-foreground`}>
+                        <RiTerminalLine size={14} />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-medium">Detach</span>
+                        <span className="block text-[11px] text-muted-foreground">Close this tab only, keep tmux session running.</span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        dispatchCloseSession({
+                          sessionId: menuSession.id,
+                          source: 'tab-menu',
+                          closeMode: 'destroy',
+                        });
+                        closeTabMenu();
+                      }}
+                      className={`${menuItemClassName} text-destructive hover:bg-destructive/10`}
+                    >
+                      <span className={`${menuIconClassName} bg-destructive/15 text-destructive`}>
+                        <RiDeleteBinLine size={14} />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-medium">Destroy</span>
+                        <span className="block text-[11px] text-muted-foreground">Kill the tmux session and all processes inside it.</span>
+                      </span>
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      closeTabMenu();
+                      dispatchCloseSession({ sessionId: menuSession.id, source: 'tab-menu', closeMode: 'auto' });
+                    }}
+                    className={`${menuItemClassName} text-destructive hover:bg-destructive/10`}
+                  >
+                    <span className={`${menuIconClassName} bg-destructive/15 text-destructive`}>
+                      <RiCloseLine size={14} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-medium">{t('tab.close')}</span>
+                      <span className="block text-[11px] text-muted-foreground">{t('tab.closeHint')}</span>
+                    </span>
+                  </button>
+                )}
+                {!isDesktopTabMenu && (
+                  <button
+                    type="button"
+                    className="flex items-center justify-center px-4 py-2 text-[11px] text-muted-foreground/80 transition hover:text-foreground"
+                    onClick={() => {
+                      closeTabMenu();
+                    }}
+                  >
+                    {t('tab.longPressTip')}
+                  </button>
+                )}
               </div>
-              <div className="border-t border-border/15 px-3 py-2">
-                <button
-                  type="button"
-                  onClick={() => setTabMenuSessionId(null)}
-                  className="w-full rounded-full bg-surface-2 px-3 py-2 text-[12px] font-medium text-muted-foreground transition hover:bg-surface hover:text-foreground"
-                >
-                  {t('common.cancel')}
-                </button>
-              </div>
+              {!isDesktopTabMenu && (
+                <div className="border-t border-border/15 px-3 py-2">
+                  <button
+                    type="button"
+                    onClick={closeTabMenu}
+                    className="w-full rounded-full bg-surface-2 px-3 py-2 text-[12px] font-medium text-muted-foreground transition hover:bg-surface hover:text-foreground"
+                  >
+                    {t('common.cancel')}
+                  </button>
+                </div>
+              )}
             </div>
           </>
         );
@@ -2685,7 +2790,7 @@ function App() {
                     }`}
                     aria-pressed={pwaNotificationsEnabled}
                   >
-                    <span className={`mx-1 inline-block h-5 w-5 rounded-full bg-white transition ${pwaNotificationsEnabled ? 'translate-x-5' : ''}`} />
+                    <span className={`mx-1 inline-block h-5 w-5 rounded-full bg-[var(--background)] transition ${pwaNotificationsEnabled ? 'translate-x-5' : ''}`} />
                   </button>
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
@@ -2767,7 +2872,7 @@ function App() {
                       }`}
                       aria-pressed={pwaAiNotificationsEnabled && pwaNotificationsEnabled}
                     >
-                      <span className={`mx-1 inline-block h-5 w-5 rounded-full bg-white transition ${pwaAiNotificationsEnabled && pwaNotificationsEnabled ? 'translate-x-5' : ''}`} />
+                      <span className={`mx-1 inline-block h-5 w-5 rounded-full bg-[var(--background)] transition ${pwaAiNotificationsEnabled && pwaNotificationsEnabled ? 'translate-x-5' : ''}`} />
                     </button>
                   </div>
                 </div>

@@ -3,33 +3,48 @@
 @tailwind utilities;
 
 :root {
-  --background: #1C1B1A;
+  --background: #100F0F;
   --foreground: #CECDC3;
-  --surface: #222120;
-  --surface-2: #282726;
-  --surface-elevated: #343331;
-  --background-subtle: #1E1D1C;
-  --muted: #6F6E69;
-  --muted-foreground: #9F9D96;
+  --surface: #282726;
+  --surface-2: #343331;
+  --surface-elevated: #403E3C;
+  --background-subtle: #1C1B1A;
+  --muted: #575653;
+  --muted-foreground: #878580;
   --border: #403E3C;
   --border-strong: #575653;
-  --input: #222120;
-  --primary: #66800B;
-  --primary-foreground: #FFFCF0;
+  --input: #282726;
+  --primary: #879A39;
+  --primary-foreground: #100F0F;
   --accent: #4385BE;
-  --accent-foreground: #FFFCF0;
-  --destructive: #AF3029;
-  --destructive-foreground: #FFFCF0;
+  --accent-foreground: #100F0F;
+  --destructive: #D14D41;
+  --destructive-foreground: #100F0F;
+  --warning: #D0A215;
+  --warning-foreground: #100F0F;
+  --warning-rgb: 208 162 21;
+  --success: #879A39;
+  --success-foreground: #100F0F;
+  --success-rgb: 135 154 57;
+  --folder: #D0A215;
+  --tmux: #8B7EC8;
+  --tmux-rgb: 139 126 200;
   --ring: #4385BE;
-  --hover: #E6E4D9;
-  --primary-rgb: 102 128 11;
+  --hover: #CECDC3;
+  --primary-rgb: 135 154 57;
+  --accent-rgb: 67 133 190;
   --app-backdrop: rgba(0, 0, 0, 0.55);
   --app-backdrop-soft: rgba(0, 0, 0, 0.4);
   --app-shadow-strong: rgba(0, 0, 0, 0.28);
   --app-shadow-soft: rgba(0, 0, 0, 0.18);
+  --overlay-foreground: #FFFCF0;
+  --overlay-foreground-rgb: 255 252 240;
+  --overlay-background: rgb(16 15 15 / 0.76);
+  --overlay-control-bg: rgb(255 252 240 / 0.22);
+  --overlay-control-muted: rgb(255 252 240 / 0.34);
   --diff-accent-rgb: 67, 133, 190;
-  --diff-insert-rgb: 102, 128, 11;
-  --diff-delete-rgb: 175, 48, 41;
+  --diff-insert-rgb: 135, 154, 57;
+  --diff-delete-rgb: 209, 77, 65;
   --diff-border-rgb: 64, 62, 60;
   --skeleton-base-rgb: 255, 255, 255;
   /*
@@ -108,30 +123,45 @@ html {
 
 html[data-theme='light'] {
   color-scheme: light;
-  --background: #F2F0E5;
+  --background: #FFFCF0;
   --foreground: #100F0F;
-  --surface: #FFFCF0;
-  --surface-2: #F7F4EA;
-  --surface-elevated: #FFFFFF;
-  --background-subtle: #E6E4D9;
+  --surface: #E6E4D9;
+  --surface-2: #DAD8CE;
+  --surface-elevated: #CECDC3;
+  --background-subtle: #F2F0E5;
   --muted: #B7B5AC;
   --muted-foreground: #6F6E69;
   --border: #CECDC3;
-  --border-strong: #ADACA5;
-  --input: #FFFCF0;
+  --border-strong: #B7B5AC;
+  --input: #E6E4D9;
   --primary: #66800B;
   --primary-foreground: #FFFCF0;
   --accent: #205EA6;
   --accent-foreground: #FFFCF0;
   --destructive: #AF3029;
   --destructive-foreground: #FFFCF0;
+  --warning: #AD8301;
+  --warning-foreground: #FFFCF0;
+  --warning-rgb: 173 131 1;
+  --success: #66800B;
+  --success-foreground: #FFFCF0;
+  --success-rgb: 102 128 11;
+  --folder: #AD8301;
+  --tmux: #5E409D;
+  --tmux-rgb: 94 64 157;
   --ring: #205EA6;
   --hover: #282726;
   --primary-rgb: 102 128 11;
+  --accent-rgb: 32 94 166;
   --app-backdrop: rgba(16, 15, 15, 0.28);
   --app-backdrop-soft: rgba(16, 15, 15, 0.18);
   --app-shadow-strong: rgba(16, 15, 15, 0.16);
   --app-shadow-soft: rgba(16, 15, 15, 0.10);
+  --overlay-foreground: #FFFCF0;
+  --overlay-foreground-rgb: 255 252 240;
+  --overlay-background: rgb(16 15 15 / 0.76);
+  --overlay-control-bg: rgb(255 252 240 / 0.22);
+  --overlay-control-muted: rgb(255 252 240 / 0.34);
   --diff-accent-rgb: 32, 94, 166;
   --diff-insert-rgb: 102, 128, 11;
   --diff-delete-rgb: 175, 48, 41;
@@ -351,7 +381,7 @@ textarea:focus-within {
 
 .ui-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(67, 133, 190, 0.3);
+  box-shadow: 0 0 0 2px rgb(var(--accent-rgb, 67 133 190) / 0.3);
 }
 
 /*
@@ -600,8 +630,15 @@ body {
 }
 
 .xterm .xterm-viewport {
+  background-color: var(--background) !important;
   overflow-y: auto !important;
   scrollbar-width: none !important;
+}
+
+.xterm .composition-view {
+  background: var(--surface-elevated) !important;
+  color: var(--foreground) !important;
+  border: 1px solid var(--border);
 }
 
 .xterm .xterm-viewport::-webkit-scrollbar {
@@ -677,9 +714,9 @@ div.swiper {
    extraction order. */
 :root,
 .termdock-diff {
-  --diff-insert-strong: #9aa36f;
-  --diff-delete-strong: #b48a84;
-  --diff-hunk-accent: #8b9aa6;
+  --diff-insert-strong: var(--success);
+  --diff-delete-strong: var(--destructive);
+  --diff-hunk-accent: var(--accent);
 }
 
 .termdock-diff {
@@ -1015,7 +1052,7 @@ html[data-theme='light'] .termdock-code .token.important {
  */
 
 .diff-file-card {
-  border: 1px solid rgba(64, 62, 60, 0.28);
+  border: 1px solid rgba(var(--diff-border-rgb), 0.28);
   background: var(--surface);
   border-radius: 0.5rem;
   margin-bottom: 0.625rem;
@@ -1028,12 +1065,12 @@ html[data-theme='light'] .termdock-code .token.important {
 }
 
 .diff-file-card:hover {
-  border-color: rgba(64, 62, 60, 0.5);
+  border-color: rgba(var(--diff-border-rgb), 0.5);
 }
 
 .diff-file-card__header {
-  background: linear-gradient(180deg, rgba(67, 133, 190, 0.04) 0%, transparent 100%);
-  border-bottom: 1px solid rgba(64, 62, 60, 0.18);
+  background: linear-gradient(180deg, rgba(var(--diff-accent-rgb), 0.04) 0%, transparent 100%);
+  border-bottom: 1px solid rgba(var(--diff-border-rgb), 0.18);
   /* Clip the header background to the card's rounded top corners.
      The body uses `border-bottom-left-radius` / `border-bottom-right-radius`
      to match the card's bottom curve. */
@@ -1144,7 +1181,7 @@ html[data-theme='light'] .termdock-code .token.important {
 
 /* Collapsed hunk style: header only, no body. */
 .diff-hunk--collapsed {
-  background: rgba(67, 133, 190, 0.025);
+  background: rgba(var(--diff-accent-rgb), 0.025);
 }
 
 .diff-hunk {

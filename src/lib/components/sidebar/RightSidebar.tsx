@@ -186,7 +186,7 @@ function MarkdownPreview({ content }: { content: string }) {
         if (index < lines.length) index += 1;
         rendered.push(
           <div key={`code-${index}`} className="overflow-hidden rounded-lg border border-border/20 bg-surface shadow-sm">
-            {lang && <div className="border-b border-border/15 bg-background-subtle px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">{lang}</div>}
+            {lang && <div className="border-b border-border/15 bg-surface-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">{lang}</div>}
             <pre className="overflow-auto p-3 text-[11px] leading-relaxed text-foreground"><code>{codeLines.join('\n') || ' '}</code></pre>
           </div>,
         );
@@ -238,12 +238,12 @@ function MarkdownPreview({ content }: { content: string }) {
           <div key={`table-${index}`} className="overflow-auto rounded-lg border border-border/20 bg-surface">
             <table className="min-w-full border-collapse text-left text-xs">
               <thead className="bg-background-subtle text-foreground">
-                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className="border-b border-border/15 px-3 py-2 font-semibold">{renderMarkdownInline(cell, `th-${index}-${cellIndex}`)}</th>)}</tr>
+                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className="border-b border-r border-border/15 px-3 py-2 font-semibold last:border-r-0">{renderMarkdownInline(cell, `th-${index}-${cellIndex}`)}</th>)}</tr>
               </thead>
               <tbody>
                 {rows.map((row, rowIndex) => (
                   <tr key={`r-${rowIndex}`} className="border-t border-border/10">
-                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className="px-3 py-2 align-top text-muted-foreground">{renderMarkdownInline(row[cellIndex] ?? '', `td-${index}-${rowIndex}-${cellIndex}`)}</td>)}
+                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className="border-r border-border/10 px-3 py-2 align-top text-muted-foreground last:border-r-0">{renderMarkdownInline(row[cellIndex] ?? '', `td-${index}-${rowIndex}-${cellIndex}`)}</td>)}
                   </tr>
                 ))}
               </tbody>
@@ -432,7 +432,7 @@ function writeFileTreeScrollPosition(rootPath: string, top: number): void {
 
 function Pane({ active, mounted = true, children }: { active: boolean; mounted?: boolean; children: ReactNode }) {
   return (
-    <div className={`h-full min-h-0 overflow-hidden ${active ? 'block' : 'hidden'}`} aria-hidden={!active}>
+    <div className={`h-full min-h-0 overflow-hidden bg-background text-foreground ${active ? 'block' : 'hidden'}`} aria-hidden={!active}>
       {mounted ? children : null}
     </div>
   );
@@ -1027,7 +1027,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
     // The container is a flex column that fills the panel. The middle scroller
     // is `min-h-0 flex-1` so the bottom action bar can stick to the visible
     // bottom regardless of file length.
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
       <div className="shrink-0 border-b border-border/15 px-3 py-2">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
@@ -1089,7 +1089,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
         {meta && (
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
             {meta.size !== null && <span>{meta.size.toLocaleString()} bytes</span>}
-            {'truncated' in meta && meta.truncated && <span className="text-yellow-400">preview truncated to 1MB</span>}
+            {'truncated' in meta && meta.truncated && <span className="text-[color:var(--warning)]">preview truncated to 1MB</span>}
             {'mimeType' in meta && <span>{meta.mimeType}</span>}
             {'dimensions' in previewState && previewState.dimensions && <span>{previewState.dimensions.width} × {previewState.dimensions.height}</span>}
           </div>
@@ -1134,14 +1134,14 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
         </div>
       ) : showMarkdownPreview ? (
         <div
-          className="min-h-0 flex-1 overflow-auto bg-background-subtle"
+          className="min-h-0 flex-1 overflow-auto bg-background"
           data-sidebar-gesture-ignore
           style={{ touchAction: 'pan-x pan-y' }}
         >
           <MarkdownPreview content={previewState.content} />
         </div>
       ) : previewState.kind === 'text' ? (
-        <div ref={scrollerRef} className="termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-background-subtle p-2 font-mono text-[11px] leading-relaxed text-foreground">
+        <div ref={scrollerRef} className="termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-background p-2 font-mono text-[11px] leading-relaxed text-foreground">
           {lines.length > 0 ? (
             <div className="min-w-full">
               {lines.map((line, index) => {
@@ -2540,7 +2540,7 @@ export function RightSidebar(
                   onContentMatchSelect={handleContentMatchSelect}
                 />
               </div>
-              <div className="min-w-0 flex-1 overflow-hidden">
+              <div className="min-w-0 flex-1 overflow-hidden bg-background">
                 <FilePreview
                   filePath={selectedFilePath}
                   onInsertReference={insertPathReference}
@@ -2575,7 +2575,7 @@ export function RightSidebar(
                   onContentMatchSelect={handleContentMatchSelect}
                 />
               </div>
-              <div className={`h-full overflow-hidden ${mobilePreviewActive ? 'block' : 'hidden'}`} aria-hidden={!mobilePreviewActive}>
+              <div className={`h-full overflow-hidden bg-background ${mobilePreviewActive ? 'block' : 'hidden'}`} aria-hidden={!mobilePreviewActive}>
                 <FilePreview
                   filePath={selectedFilePath}
                   onInsertReference={insertPathReference}
@@ -2848,7 +2848,7 @@ export function RightSidebar(
         </Pane>
       </div>
         {confirmGitAction && (
-          <div className="fixed inset-0 z-modal-panel bg-[rgba(0,0,0,0.42)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>
+          <div className="fixed inset-0 z-modal-panel bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>
             <div
               className="fixed inset-x-3 bottom-6 mx-auto max-w-md rounded-2xl border border-border/20 bg-surface-elevated p-4 shadow-2xl"
               onClick={(event) => event.stopPropagation()}

@@ -418,15 +418,15 @@ function convertTheme(theme: TerminalTheme): Record<string, string> {
     cursorAccent: theme.cursorAccent || theme.background,
     selectionBackground: theme.selectionBackground || 'rgba(0, 0, 0, 0.3)',
     selectionForeground: theme.selectionForeground || theme.foreground,
-    black: theme.black || '#6F6E69',
-    red: theme.red || '#AF3029',
-    green: theme.green || '#66800B',
-    yellow: theme.yellow || '#AD8301',
-    blue: theme.blue || '#205EA6',
-    magenta: theme.magenta || '#A02F6F',
-    cyan: theme.cyan || '#24837B',
+    black: theme.black || '#100F0F',
+    red: theme.red || '#D14D41',
+    green: theme.green || '#879A39',
+    yellow: theme.yellow || '#D0A215',
+    blue: theme.blue || '#4385BE',
+    magenta: theme.magenta || '#CE5D97',
+    cyan: theme.cyan || '#3AA99F',
     white: theme.white || '#CECDC3',
-    brightBlack: theme.brightBlack || '#6F6E69',
+    brightBlack: theme.brightBlack || '#575653',
     brightRed: theme.brightRed || '#D14D41',
     brightGreen: theme.brightGreen || '#879A39',
     brightYellow: theme.brightYellow || '#D0A215',
@@ -3454,7 +3454,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             <div
               aria-hidden
               className="absolute left-1/2 -translate-x-1/2 top-6 z-30 pointer-events-none
-                         rounded-full bg-white/90 px-4 py-1.5 text-sm font-semibold text-gray-900
+                         rounded-full bg-[var(--surface-elevated)] px-4 py-1.5 text-sm font-semibold text-foreground
                          shadow-lg transition-all duration-150 ease-out"
               style={{
                 opacity: tabIndicator ? 1 : 0,
@@ -3483,25 +3483,25 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 const A = (d: string) => activeDir === d;
 
                 return (
-                  <div className="flex flex-col items-center gap-0.5 rounded-xl bg-black/70 backdrop-blur-sm shadow-lg px-1.5 py-1.5">
+                  <div className="flex flex-col items-center gap-0.5 rounded-xl bg-[var(--overlay-background)] backdrop-blur-sm shadow-lg px-1.5 py-1.5">
                     {/* Up */}
-                    <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('up') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                    <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('up') ? 'bg-[var(--overlay-control-bg)] text-[color:var(--overlay-foreground)]' : 'text-[rgb(var(--overlay-foreground-rgb)_/_0.34)]'}`}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M7 11l5-5 5 5"/></svg>
                     </div>
                     {/* Left / Right */}
                     <div className="flex items-center gap-0.5">
-                      <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('left') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                      <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('left') ? 'bg-[var(--overlay-control-bg)] text-[color:var(--overlay-foreground)]' : 'text-[rgb(var(--overlay-foreground-rgb)_/_0.34)]'}`}>
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
                       </div>
-                      <div className="w-7 h-7 flex items-center justify-center rounded-lg text-white/15">
+                      <div className="w-7 h-7 flex items-center justify-center rounded-lg text-[rgb(var(--overlay-foreground-rgb)_/_0.18)]">
                         <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4"/></svg>
                       </div>
-                      <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('right') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                      <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('right') ? 'bg-[var(--overlay-control-bg)] text-[color:var(--overlay-foreground)]' : 'text-[rgb(var(--overlay-foreground-rgb)_/_0.34)]'}`}>
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
                       </div>
                     </div>
                     {/* Down */}
-                    <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('down') ? 'bg-white/25 text-white' : 'text-white/30'}`}>
+                    <div className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${A('down') ? 'bg-[var(--overlay-control-bg)] text-[color:var(--overlay-foreground)]' : 'text-[rgb(var(--overlay-foreground-rgb)_/_0.34)]'}`}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
                     </div>
                   </div>

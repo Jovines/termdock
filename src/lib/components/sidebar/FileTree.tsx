@@ -256,7 +256,7 @@ const FileTreeItem = memo(function FileTreeItem({
         {node.type === 'directory' ? (
           <>
             {showChildren ? <RiChevronDown size={14} className="shrink-0 text-muted-foreground/80" /> : <RiChevronRight size={14} className="shrink-0 text-muted-foreground/80" />}
-            {showChildren ? <RiFolderOpen size={14} className="shrink-0 text-amber-300/85" /> : <RiFolder size={14} className="shrink-0 text-amber-300/80" />}
+            {showChildren ? <RiFolderOpen size={14} className="shrink-0 text-[color:var(--folder)]" /> : <RiFolder size={14} className="shrink-0 text-[color:var(--folder)]" />}
           </>
         ) : (
           <>
@@ -299,7 +299,7 @@ const FileTreeItem = memo(function FileTreeItem({
       </button>
 
       {node.type === 'directory' && directoryActionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
-        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-black/20 backdrop-blur animate-fade-in">
+        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {onDirectoryRoot && (
             <button
               type="button"
@@ -307,7 +307,7 @@ const FileTreeItem = memo(function FileTreeItem({
               className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
               title={t('fileTree.openDirRootTitle')}
             >
-              <RiFolderOpen size={13} className="shrink-0 text-amber-300/85" />
+              <RiFolderOpen size={13} className="shrink-0 text-[color:var(--folder)]" />
               <span className="min-w-0 flex-1 truncate">{t('fileTree.openDirRoot')}</span>
             </button>
           )}
@@ -438,7 +438,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {node.type === 'directory' ? (
           <>
             <span className="w-[14px] shrink-0" />
-            <RiFolder size={14} className="shrink-0 text-amber-300/80" />
+            <RiFolder size={14} className="shrink-0 text-[color:var(--folder)]" />
           </>
         ) : (
           <>
@@ -480,7 +480,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         )}
       </button>
       {node.type === 'directory' && directoryActionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
-        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-black/20 backdrop-blur animate-fade-in">
+        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {onDirectoryRoot && (
             <button
               type="button"
@@ -492,7 +492,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
               className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
               title={t('fileTree.openDirRootTitle')}
             >
-              <RiFolderOpen size={13} className="shrink-0 text-amber-300/85" />
+              <RiFolderOpen size={13} className="shrink-0 text-[color:var(--folder)]" />
               <span className="min-w-0 flex-1 truncate">{t('fileTree.openDirRoot')}</span>
             </button>
           )}
@@ -535,7 +535,7 @@ function highlightMatch(text: string, query: string): React.ReactNode {
   while (index >= 0 && needle) {
     if (index > from) nodes.push(text.slice(from, index));
     nodes.push(
-      <mark key={`m-${key++}`} className="rounded-sm bg-yellow-400/30 px-0.5 text-foreground">
+      <mark key={`m-${key++}`} className="rounded-sm bg-[rgb(var(--warning-rgb)_/_0.30)] px-0.5 text-foreground">
         {text.slice(index, index + needle.length)}
       </mark>,
     );
@@ -821,7 +821,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
         ) : (
           <>
             {searchMeta?.limited && (
-              <div className="mb-2 rounded-xl bg-yellow-400/10 px-3 py-2 text-[11px] text-yellow-300">
+              <div className="mb-2 rounded-xl bg-[rgb(var(--warning-rgb)_/_0.12)] px-3 py-2 text-[11px] text-[color:var(--warning)]">
                 {t('fileTree.searchTruncatedHint', { count: searchMeta.total })}
               </div>
             )}
@@ -885,7 +885,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
         ) : (
           <>
             {searchMeta?.limited && (
-              <div className="mb-2 rounded-xl bg-yellow-400/10 px-3 py-2 text-[11px] text-yellow-300">
+              <div className="mb-2 rounded-xl bg-[rgb(var(--warning-rgb)_/_0.12)] px-3 py-2 text-[11px] text-[color:var(--warning)]">
                 {t('fileTree.searchTruncatedHint', { count: searchMeta.total })}
               </div>
             )}
@@ -951,7 +951,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
   return (
     <div className="space-y-px px-2 py-2">
       {rootTruncated && (
-        <div className="mb-2 rounded-xl bg-yellow-400/10 px-3 py-2 text-[11px] text-yellow-300">
+        <div className="mb-2 rounded-xl bg-[rgb(var(--warning-rgb)_/_0.12)] px-3 py-2 text-[11px] text-[color:var(--warning)]">
           {t('fileTree.truncatedHint')}
         </div>
       )}

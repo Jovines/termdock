@@ -246,7 +246,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       <div
         ref={backdropRef}
         data-sidebar-backdrop={side}
-        className="fixed inset-0 z-sidebar-backdrop bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+        className="fixed inset-0 z-sidebar-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm cursor-default"
         style={{
           opacity: isOpen ? 1 : 0,
           pointerEvents: isOpen ? 'auto' : 'none',

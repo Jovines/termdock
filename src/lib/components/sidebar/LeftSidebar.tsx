@@ -422,11 +422,11 @@ export function LeftSidebar(
     // Fall back to agentStatus for AI tools that don't emit OSC 133.
     const isRunning = ts?.promptState === 'running' || ts?.agentStatus === 'running';
     const accentClass = isRunning
-      ? 'bg-green-400'
+      ? 'bg-[var(--success)]'
       : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
-        ? 'bg-yellow-400'
+        ? 'bg-[var(--warning)]'
         : ts?.inCopyMode
-          ? 'bg-yellow-400/70'
+          ? 'bg-[rgb(var(--warning-rgb)_/_0.70)]'
           : 'bg-primary';
     return (
       <>
@@ -447,10 +447,10 @@ export function LeftSidebar(
           <span className={`relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
             isActive
               ? session.mode === 'tmux'
-                ? 'bg-purple-400/15 text-purple-300'
+                ? 'bg-[rgb(var(--tmux-rgb)_/_0.15)] text-[color:var(--tmux)]'
                 : 'bg-primary/15 text-primary'
               : session.mode === 'tmux'
-                ? 'bg-surface text-purple-300/80'
+                ? 'bg-surface text-[rgb(var(--tmux-rgb)_/_0.80)]'
                 : 'bg-surface text-muted-foreground'
           }`}>
             {ts?.isConnecting ? (
@@ -469,7 +469,7 @@ export function LeftSidebar(
           <span className="min-w-0 flex-1">
             <span className={`block truncate text-[13px] leading-tight ${
               isActive ? 'font-medium text-foreground' : ''
-            } ${ts?.inCopyMode ? 'text-yellow-400' : ''}`}>
+            } ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>
               {displayName}
             </span>
             {cwdSecondary && (
@@ -641,7 +641,7 @@ export function LeftSidebar(
             <RiSortDescLine size={12} className="shrink-0" />
             <span className="min-w-0 flex-1 truncate">{t('sidebar.sortRecent')}</span>
             <span className={`relative h-4 w-7 shrink-0 rounded-full transition ${autoSortByActivity ? 'bg-primary' : 'bg-muted-foreground/25'}`}>
-              <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition ${autoSortByActivity ? 'left-3.5' : 'left-0.5'}`} />
+              <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-[var(--background)] shadow transition ${autoSortByActivity ? 'left-3.5' : 'left-0.5'}`} />
             </span>
           </button>
           <button
@@ -675,13 +675,13 @@ export function LeftSidebar(
         ) : groupByFolder ? (
           <div className="space-y-1.5">
             {attentionSessions.length > 0 && (
-              <div className="rounded-lg bg-yellow-400/5 pb-1 ring-1 ring-yellow-400/15">
-                <div className="flex items-center gap-1.5 px-1.5 py-1 text-yellow-400">
+              <div className="rounded-lg bg-[rgb(var(--warning-rgb)_/_0.08)] pb-1 ring-1 ring-[rgb(var(--warning-rgb)_/_0.18)]">
+                <div className="flex items-center gap-1.5 px-1.5 py-1 text-[color:var(--warning)]">
                   <RiBellLine size={13} className="shrink-0 animate-pulse" />
                   <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold uppercase tracking-wide">
                     {t('sidebar.needsAttention')}
                   </span>
-                  <span className="shrink-0 text-[10.5px] text-yellow-400/70">{attentionSessions.length}</span>
+                  <span className="shrink-0 text-[10.5px] text-[rgb(var(--warning-rgb)_/_0.70)]">{attentionSessions.length}</span>
                 </div>
                 <div className="space-y-0.5 px-1">
                   {attentionSessions.map((session) => {
@@ -752,10 +752,10 @@ export function LeftSidebar(
                       {group.label}
                     </span>
                     {groupRunning > 0 && (
-                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-green-400" />
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
                     )}
                     {groupReview > 0 && (
-                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-yellow-400" />
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--warning)]" />
                     )}
                     <span className="shrink-0 text-[10.5px] text-muted-foreground/70">{group.sessions.length}</span>
                   </button>

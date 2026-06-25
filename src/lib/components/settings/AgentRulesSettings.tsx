@@ -48,13 +48,13 @@ function normalizeProgramListInput(input: string): string[] {
 function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSettingsProps) {
   const { t } = useI18n();
   const presetColors = [
-    { value: '#4ade80', label: t('agentRules.ruleColors.green') },
-    { value: '#facc15', label: t('agentRules.ruleColors.yellow') },
-    { value: '#f87171', label: t('agentRules.ruleColors.red') },
-    { value: '#60a5fa', label: t('agentRules.ruleColors.blue') },
-    { value: '#c084fc', label: t('agentRules.ruleColors.purple') },
-    { value: '#fb923c', label: t('agentRules.ruleColors.orange') },
-    { value: '#888888', label: t('agentRules.ruleColors.gray') },
+    { value: '#879A39', label: t('agentRules.ruleColors.green') },
+    { value: '#D0A215', label: t('agentRules.ruleColors.yellow') },
+    { value: '#D14D41', label: t('agentRules.ruleColors.red') },
+    { value: '#4385BE', label: t('agentRules.ruleColors.blue') },
+    { value: '#8B7EC8', label: t('agentRules.ruleColors.purple') },
+    { value: '#DA702C', label: t('agentRules.ruleColors.orange') },
+    { value: '#878580', label: t('agentRules.ruleColors.gray') },
   ] as const;
   const addProgram = () => {
     onChange([...rules, { programs: [], rules: [{ pattern: '', status: 'running', indicator: 'pulse', clearDelayMs: 700 }] }]);
@@ -115,7 +115,7 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
             <button
               type="button"
               onClick={() => removeProgram(pi)}
-              className="shrink-0 rounded-lg p-1.5 text-muted-foreground hover:bg-surface-elevated hover:text-red-400 transition"
+              className="shrink-0 rounded-lg p-1.5 text-muted-foreground hover:bg-surface-elevated hover:text-destructive transition"
               aria-label={t('settings.removeProgram')}
             >
               <RiDeleteBinLine size={14} />
@@ -138,20 +138,20 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
                     onChange={(e) => updateRule(pi, ri, 'pattern', e.target.value)}
                     placeholder={t('settings.patternPlaceholder')}
                     className={`flex-1 rounded-lg bg-surface px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground/40 outline-none focus:ring-1 ${
-                      regexError ? 'ring-1 ring-red-400' : 'focus:ring-primary/30'
+                      regexError ? 'ring-1 ring-destructive' : 'focus:ring-primary/30'
                     }`}
                   />
                   <button
                     type="button"
                     onClick={() => removeRule(pi, ri)}
-                    className="shrink-0 rounded p-1 text-muted-foreground/60 hover:text-red-400 transition"
+                    className="shrink-0 rounded p-1 text-muted-foreground/60 hover:text-destructive transition"
                     aria-label={t('settings.removeRule')}
                   >
                     <RiCloseLine size={12} />
                   </button>
                 </div>
                 {regexError && (
-                  <p className="px-1 text-[10px] text-red-400">{regexError}</p>
+                  <p className="px-1 text-[10px] text-destructive">{regexError}</p>
                 )}
                 <div className="flex flex-wrap items-center gap-1.5">
                   <input
@@ -175,7 +175,7 @@ function AgentRulesSettings({ rules, onChange, onResetDefaults }: AgentRulesSett
                   ))}
                   <input
                     type="color"
-                    value={rule.color || '#4ade80'}
+                    value={rule.color || '#879A39'}
                     onChange={(e) => updateRule(pi, ri, 'color', e.target.value)}
                     className="h-5 w-5 shrink-0 cursor-pointer rounded-full border-0 bg-transparent p-0"
                     title={t('settings.customColor')}

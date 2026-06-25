@@ -110,7 +110,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
       <form onSubmit={handleSubmit} className="w-full max-w-xs">
         <div
           className={`flex items-center gap-1 rounded-full border bg-surface-2 p-1 pl-4 transition ${
-            error ? 'border-red-500/60' : 'border-border'
+            error ? 'border-destructive/60' : 'border-border'
           }`}
         >
           <input
@@ -144,7 +144,7 @@ export function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
         </div>
 
         {error && !blocked ? (
-          <div className="mt-3 text-center text-xs text-red-400">{error}</div>
+          <div className="mt-3 text-center text-xs text-destructive">{error}</div>
         ) : null}
       </form>
 
