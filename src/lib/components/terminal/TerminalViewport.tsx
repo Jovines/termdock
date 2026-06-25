@@ -339,6 +339,12 @@ const TERMINAL_FONT_PRELOADS = [
     text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
   },
   {
+    // 真实 italic 字形，替代 xterm 合成斜体。预加载确保 man / less 等
+    // TUI 程序首帧就能拿到 italic 字形，不会先画成正体再跳变。
+    font: 'italic 400 13px "JetBrains Mono NL"',
+    text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
+  },
+  {
     font: '400 13px "Symbols Nerd Font Mono"',
     // CSS Font Loading API 的 text 参数必须命中 @font-face unicode-range。
     // 不传 text 时默认只检查空格，Nerd Font 的 PUA 图标不会被真正下载，
@@ -351,6 +357,12 @@ const TERMINAL_FONT_PRELOADS = [
   },
   {
     font: '400 13px "Noto Sans Mono CJK SC"',
+    text: '终端中文路径',
+  },
+  {
+    // CJK Bold 预加载：终端 ANSI bold 里的中文（如 echo -e '\e[1m粗体\e[0m'）
+    // 没有预加载时会先合成 bold（描边加粗），字体加载后跳变到真实 bold 字形。
+    font: '700 13px "Noto Sans Mono CJK SC"',
     text: '终端中文路径',
   },
 ] as const;
