@@ -154,6 +154,8 @@ interface TerminalSession {
   tmuxControl?: TmuxControl;
   oscSniffBuf: string;
   lastOscCwd: string | null;
+  lastOscTitle: string | null;
+  lastPromptState: 'idle' | 'running' | null;
   agentStatus: string | null;
   agentColor: string | null;
   agentIndicator: AgentIndicator | null;
@@ -1712,10 +1714,17 @@ function getPtyProcessPid(ptyProcess: PtyProcess): number | null {
   return null;
 }
 
-// ── OSC 0/2 title sniffing for CWD tracking ──
+// ── OSC sniffing for CWD tracking + prompt state + title ──
 
 const OSC_SNIFF_CAP = 32768; // 32 KB rolling buffer
-const OSC_PATTERN = /\x1b\][02];([^\x07\x1b]*)(\x07|\x1b\\)/g;
+
+// Match all OSC sequences we care about:
+//   OSC 0;... / OSC 2;...  → title (may contain cwd or command name)
+//   OSC 7;...              → cwd report (kitty-shell-cwd://host/path)
+//   OSC 133;A / P          → prompt start (idle)
+//   OSC 133;C              → command start (running)
+//   OSC 133;D[;exitcode]   → command end (idle, with optional exit code)
+const OSC_ANY_PATTERN = /\x1b\](\d+);([^\x07\x1b]*)(\x07|\x1b\\)/g;
 
 function parseTitleCwd(title: string, home: string): string | null {
   // Format: user@host:/path/to/dir
@@ -1742,30 +1751,77 @@ function parseTitleCwd(title: string, home: string): string | null {
   return null;
 }
 
-function sniffCwdFromOsc(buf: string, home: string): { cwd: string | null; remaining: string } {
+function parseOsc7Cwd(data: string, home: string): string | null {
+  // Format: kitty-shell-cwd://hostname/path or file://hostname/path
+  const match = data.match(/^(?:kitty-shell-cwd|file):\/\/[^/]+(.+)/i);
+  if (match) {
+    const p = match[1];
+    if (p.startsWith('~/')) return home + p.slice(1);
+    if (p.startsWith('/')) return p;
+  }
+  return null;
+}
+
+export interface OscSniffResult {
+  cwd: string | null;
+  title: string | null;
+  promptState: 'idle' | 'running' | null;
+  exitCode: number | null;
+  remaining: string;
+}
+
+function sniffOsc(buf: string, home: string): OscSniffResult {
   let match: RegExpExecArray | null;
   let lastCwd: string | null = null;
+  let lastTitle: string | null = null;
+  let promptState: 'idle' | 'running' | null = null;
+  let exitCode: number | null = null;
   let lastMatchEnd = 0;
 
-  // Reset lastIndex since we're passing a concatenated string each time
-  OSC_PATTERN.lastIndex = 0;
+  OSC_ANY_PATTERN.lastIndex = 0;
 
-  while ((match = OSC_PATTERN.exec(buf)) !== null) {
-    lastCwd = parseTitleCwd(match[1] || '', home) || lastCwd;
+  while ((match = OSC_ANY_PATTERN.exec(buf)) !== null) {
+    const oscNum = match[1];
+    const oscData = match[2] || '';
     lastMatchEnd = match.index + match[0].length;
+
+    if (oscNum === '0' || oscNum === '2') {
+      // Title — could be cwd or command name
+      lastTitle = oscData;
+      const cwd = parseTitleCwd(oscData, home);
+      if (cwd) lastCwd = cwd;
+    } else if (oscNum === '7') {
+      // CWD report
+      const cwd = parseOsc7Cwd(oscData, home);
+      if (cwd) lastCwd = cwd;
+    } else if (oscNum === '133') {
+      // Semantic prompt marks
+      if (oscData.startsWith('C')) {
+        promptState = 'running';
+      } else if (oscData.startsWith('D')) {
+        promptState = 'idle';
+        // Parse optional exit code: 133;D;exitcode
+        const parts = oscData.split(';');
+        if (parts.length >= 2) {
+          const code = parseInt(parts[1], 10);
+          if (!isNaN(code)) exitCode = code;
+        }
+      } else if (oscData.startsWith('A') || oscData.startsWith('P')) {
+        promptState = 'idle';
+      }
+    }
   }
 
-  // Keep the tail that might contain an incomplete OSC sequence
-  const remaining = buf.slice(lastMatchEnd).slice(-128); // keep at most 128 bytes of tail
+  const remaining = buf.slice(lastMatchEnd).slice(-128);
 
-  return { cwd: lastCwd, remaining };
+  return { cwd: lastCwd, title: lastTitle, promptState, exitCode, remaining };
 }
 
 // ── end OSC sniffing ──
 
-// ── Agent status detection for AI coding tools ──
+// ── Agent status detection for AI coding tools (DISABLED — see setupPtyHandlers) ──
 
-const AGENT_BUF_CAP = 4096;  // 滚动缓冲区容量
+// const AGENT_BUF_CAP = 4096;  // 滚动缓冲区容量
 
 // ── Agent detection rules (user-configurable) ──
 
@@ -1969,6 +2025,8 @@ function stripAnsi(data: string): string {
     .replace(/\x1b[^[\]()0-9]/g, '')                   // Other escapes
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');    // Control chars
 }
+// Retained for potential future re-enablement of agent status detection.
+void stripAnsi;
 
 /**
  * 基于可配置规则匹配检测 AI 工具状态
@@ -2445,6 +2503,64 @@ async function ensureTmuxSessionExists(sessionName: string, cwd?: string): Promi
     args.push('-c', cwd);
   }
   await runTmux(args);
+
+  // Inject shell integration env into the tmux session so inner shells
+  // get the same OSC 133/2/7 marks as direct shell mode.
+  await injectTmuxShellIntegration(sessionName);
+}
+
+/**
+ * Inject shell integration environment variables into a tmux session.
+ *
+ * tmux's `set-environment` makes vars available to processes spawned in
+ * that session (i.e. the inner shell). We detect the shell type from
+ * the tmux session's default-command / default-shell, then inject the
+ * same env vars as injectShellIntegration does for direct shell mode.
+ */
+async function injectTmuxShellIntegration(sessionName: string): Promise<void> {
+  // Determine the shell used inside tmux. tmux's default-shell is usually
+  // the user's $SHELL, but can be overridden. We read it.
+  let shellPath = process.env.SHELL || '/bin/bash';
+  try {
+    const tmuxShell = (await runTmux(['show-options', '-t', sessionName, '-v', 'default-shell'])).trim();
+    if (tmuxShell) shellPath = tmuxShell;
+  } catch {
+    // default-shell not set for this session, use global $SHELL
+  }
+
+  const shellType = detectShellType(shellPath);
+  const integrationDir = resolveShellIntegrationDir();
+  if (!integrationDir) return;
+
+  const home = (process.env.HOME || '/root').replace(/\/+$/, '') || '/';
+
+  if (shellType === 'zsh') {
+    // Create a temporary ZDOTDIR for tmux's inner zsh.
+    // Use session name in the dir to avoid collisions between sessions.
+    const safeName = sessionName.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const zdotdir = '/tmp/termdock-zsh-tmux-' + safeName;
+    try {
+      fs.mkdirSync(zdotdir, { recursive: true });
+      fs.writeFileSync(zdotdir + '/.zshenv',
+        '[[ -f "' + home + '/.zshenv" ]] && source "' + home + '/.zshenv"\n');
+      fs.writeFileSync(zdotdir + '/.zshrc',
+        'ZDOTDIR=\n' +
+        '[[ -f "' + home + '/.zshrc" ]] && source "' + home + '/.zshrc"\n' +
+        'source "' + integrationDir + '/termdock.zsh"\n');
+      await runTmux(['set-environment', '-t', sessionName, 'ZDOTDIR', zdotdir]);
+    } catch {
+      // If we can't create the ZDOTDIR, skip integration
+    }
+  } else if (shellType === 'bash') {
+    const scriptPath = path.join(integrationDir, 'termdock.bash');
+    await runTmux(['set-environment', '-t', sessionName, 'BASH_ENV', scriptPath]);
+    // Also set a bootstrap PROMPT_COMMAND for interactive bash
+    const bootstrap = 'source "' + scriptPath + '" 2>/dev/null';
+    await runTmux(['set-environment', '-t', sessionName, 'TERMDOCK_BASH_BOOTSTRAP', bootstrap]);
+  } else if (shellType === 'fish') {
+    const scriptPath = path.join(integrationDir, 'termdock.fish');
+    await runTmux(['set-environment', '-t', sessionName, 'TERMDOCK_FISH_INTEGRATION', scriptPath]);
+  }
 }
 
 async function enableTmuxFocusEvents(): Promise<void> {
@@ -2989,48 +3105,50 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
       updateFocusTrackingFromOutput(sessionId, session, data);
     }
 
-    // Sniff OSC 0/2 sequences for CWD tracking
+    // Sniff OSC sequences for CWD tracking + prompt state + title
     try {
       const buf = session.oscSniffBuf + data;
       if (buf.length > OSC_SNIFF_CAP) {
         session.oscSniffBuf = buf.slice(-OSC_SNIFF_CAP / 4); // trim
       }
-      const { cwd, remaining } = sniffCwdFromOsc(buf, home);
-      session.oscSniffBuf = remaining;
-      if (cwd && cwd !== session.lastOscCwd) {
-        session.lastOscCwd = cwd;
-        session.cwd = cwd;
-        console.log(`[osc-cwd] session=${sessionId} cwd=${cwd}`);
-        broadcastEvent(sessionId, { type: 'cwd', cwd });
+      const result = sniffOsc(buf, home);
+      session.oscSniffBuf = result.remaining;
+
+      // CWD change
+      if (result.cwd && result.cwd !== session.lastOscCwd) {
+        session.lastOscCwd = result.cwd;
+        session.cwd = result.cwd;
+        broadcastEvent(sessionId, { type: 'cwd', cwd: result.cwd });
+      }
+
+      // Title change — broadcast so the frontend can update tab/sidebar
+      if (result.title !== null && result.title !== session.lastOscTitle) {
+        session.lastOscTitle = result.title;
+        broadcastJsonWs(sessionId, { type: 'shell-title', title: result.title });
+      }
+
+      // Prompt state change (OSC 133)
+      if (result.promptState !== null && result.promptState !== session.lastPromptState) {
+        session.lastPromptState = result.promptState;
+        broadcastJsonWs(sessionId, {
+          type: 'prompt-state',
+          state: result.promptState,
+          exitCode: result.exitCode,
+        });
       }
     } catch { /* sniff failure should never block data */ }
 
-    // Agent status detection for AI coding tools
-    try {
-      if (isAiToolProgram(session.activeProgram?.command)) {
-        // Append stripped text to rolling buffer for pattern matching
-        const stripped = stripAnsi(data);
-        if (stripped) {
-          const buf = session.agentStatusBuf + stripped;
-          session.agentStatusBuf = buf.length > AGENT_BUF_CAP ? buf.slice(-AGENT_BUF_CAP / 2) : buf;
-          // Log spinner/prompt patterns for debugging (capped at 512KB)
-          const tail = session.agentStatusBuf.slice(-200);
-          if (/[·✢✳✶✻✽❋❇⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠁⠂⠃⠄⠅⠆⠉⠊]/.test(tail) || /Tab\/Arrow keys to navigate|Esc to|select ·|AskUserQuestion/i.test(tail)) {
-            try {
-              const logPath = `${os.homedir()}/.termdock/agent-debug.log`;
-              const { statSync, appendFileSync } = fs;
-              let size = 0;
-              try { size = statSync(logPath).size; } catch { /* not exists yet */ }
-              if (size > 512 * 1024) fs.writeFileSync(logPath, ''); // truncate if too large
-              appendFileSync(logPath, `[${new Date().toISOString()}] program=${session.activeProgram?.command} tail=${JSON.stringify(tail)}\n`);
-            } catch { /* logging failure should never block */ }
-          }
-        }
-
-        // Content-based detection on every data chunk
-        evaluateAgentStatus(sessionId, session, stripped);
-      }
-    } catch { /* agent status detection failure should never block data */ }
+    // Agent status content-based detection — DISABLED.
+    // OSC 133 promptState now provides real-time running/idle state for all
+    // programs (not just AI tools). The content-based detection was inaccurate
+    // (false positives from spinner characters in normal output, false negatives
+    // when AI tools changed their output format). Keeping the code for potential
+    // future re-enablement but not calling it.
+    // try {
+    //   if (isAiToolProgram(session.activeProgram?.command)) {
+    //     ...evaluateAgentStatus...
+    //   }
+    // } catch {}
 
     broadcastEvent(sessionId, seq !== undefined ? { type: 'data', data, seq } : { type: 'data', data });
   });
@@ -3089,8 +3207,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     ptyProcess = (() => {
       for (const shellCandidate of shellCandidates) {
         try {
-          const env = injectShellTitleHooks(shellCandidate, baseEnv);
-          console.log(`[osc-cwd] spawning shell=${shellCandidate} env.PROMPT_COMMAND=${env.PROMPT_COMMAND ? 'set' : 'unset'} env.ZDOTDIR=${env.ZDOTDIR ? 'set' : 'unset'}`);
+          const env = injectShellIntegration(shellCandidate, baseEnv);
           return pty.spawn(shellCandidate, [], {
             name: termValue,
             cols,
@@ -3133,6 +3250,8 @@ async function spawnTerminalSession(req: express.Request, input: {
     activeProgram: null,
     oscSniffBuf: '',
     lastOscCwd: null,
+    lastOscTitle: null,
+    lastPromptState: null,
     agentStatus: null,
     agentColor: null,
     agentIndicator: null,
@@ -3184,16 +3303,57 @@ function detectShellType(shellPath: string): 'bash' | 'zsh' | 'fish' | 'other' {
   return 'other';
 }
 
-function injectShellTitleHooks(shellPath: string, baseEnv: Record<string, string>): Record<string, string> {
+/**
+ * Resolve the shell-integration script directory.
+ *
+ * In dev (tsx): scripts live at <project-root>/public/shell-integration/
+ * In prod (installed): scripts are copied to <dist>/client/shell-integration/
+ * by the build. We probe both locations.
+ */
+let cachedIntegrationDir: string | null = null;
+function resolveShellIntegrationDir(): string | null {
+  if (cachedIntegrationDir !== null) return cachedIntegrationDir;
+  const candidates = [
+    path.join(process.cwd(), 'public', 'shell-integration'),
+    path.join(__dirname, '..', 'client', 'shell-integration'),
+    path.join(process.cwd(), 'dist', 'client', 'shell-integration'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'termdock.zsh'))) {
+      cachedIntegrationDir = dir;
+      return dir;
+    }
+  }
+  return null;
+}
+
+/**
+ * Inject termdock shell integration via environment variables.
+ *
+ * This replaces the old injectShellTitleHooks with a full Ghostty-style
+ * integration that emits OSC 133 (prompt marks), OSC 2 (title), and OSC 7 (cwd).
+ *
+ * Works for both shell mode (env passed to PTY spawn) and tmux mode
+ * (env passed to `tmux set-environment`).
+ */
+function injectShellIntegration(shellPath: string, baseEnv: Record<string, string>): Record<string, string> {
   const shellType = detectShellType(shellPath);
   const home = (process.env.HOME || '/root').replace(/\/+$/, '') || '/';
+  const integrationDir = resolveShellIntegrationDir();
   const env = { ...baseEnv };
 
-  // Emit full PWD path in OSC 0 — parser resolves absolute paths directly
-  if (shellType === 'bash') {
-    env.PROMPT_COMMAND = 'printf "\\033]0;%s@%s:%s\\007" "${USER}" "${HOSTNAME%%.*}" "${PWD}"';
-  } else if (shellType === 'zsh') {
-    const zdotdir = '/tmp/dinotty-zsh-' + String(process.pid);
+  if (!integrationDir) {
+    // Fallback: no integration scripts found, use minimal title hooks
+    if (shellType === 'bash') {
+      env.PROMPT_COMMAND = 'printf "\\033]0;%s@%s:%s\\007" "${USER}" "${HOSTNAME%%.*}" "${PWD}"';
+    }
+    return env;
+  }
+
+  if (shellType === 'zsh') {
+    // Create a temporary ZDOTDIR that sources user's zshenv/zshrc then
+    // sources our integration script. Same approach as Ghostty.
+    const zdotdir = '/tmp/termdock-zsh-' + String(process.pid);
     try {
       fs.mkdirSync(zdotdir, { recursive: true });
       fs.writeFileSync(zdotdir + '/.zshenv',
@@ -3201,16 +3361,42 @@ function injectShellTitleHooks(shellPath: string, baseEnv: Record<string, string
       fs.writeFileSync(zdotdir + '/.zshrc',
         'ZDOTDIR=\n' +
         '[[ -f "' + home + '/.zshrc" ]] && source "' + home + '/.zshrc"\n' +
-        'function _wt_precmd { printf "\\033]0;%s@%s:%s\\007" "${USER}" "${HOST%%.*}" "${PWD}"; }\n' +
-        'function _wt_preexec { printf "\\033]0;%s\\007" "$1"; }\n' +
-        'if [[ -z "${precmd_functions[(r)_wt_precmd]}" ]]; then precmd_functions+=(_wt_precmd); fi\n' +
-        'if [[ -z "${preexec_functions[(r)_wt_preexec]}" ]]; then preexec_functions+=(_wt_preexec); fi\n');
+        'source "' + integrationDir + '/termdock.zsh"\n');
       env.ZDOTDIR = zdotdir;
     } catch {
-      // Fallback: rely on user's zsh config for title
+      // Fallback: no ZDOTDIR, integration won't load
     }
+  } else if (shellType === 'bash') {
+    // For bash, we use BASH_ENV to source our script. BASH_ENV is sourced
+    // for non-interactive bash, but since our script checks $- for interactive,
+    // it's safe. For interactive shells, bash sources .bashrc which we can't
+    // easily prepend to. Instead, use PROMPT_COMMAND as a bootstrap.
+    const scriptPath = path.join(integrationDir, 'termdock.bash');
+    // Use ENV alias trick: set BASH_ENV for non-interactive, and for interactive
+    // bash, we prepend a source command via PROMPT_COMMAND bootstrap.
+    // The script itself checks $- and returns early for non-interactive.
+    env.BASH_ENV = scriptPath;
+    // Bootstrap: source our integration on first prompt if not already loaded.
+    // This is a one-shot that self-removes from PROMPT_COMMAND.
+    if (!env.PROMPT_COMMAND || !env.PROMPT_COMMAND.includes('__termdock_hook')) {
+      const existing = env.PROMPT_COMMAND || '';
+      env.PROMPT_COMMAND = 'source "' + scriptPath + '" 2>/dev/null' + (existing ? '; ' + existing : '');
+    }
+  } else if (shellType === 'fish') {
+    // Fish uses vendor_conf.d for automatic sourcing. We can't easily inject
+    // a vendor dir, so we use fish's --init-command equivalent: set
+    // __fish_config_dir to point to a dir that includes our script.
+    // Simpler: just set an env var that the user's fish config can source,
+    // or use fish's XDG_DATA_DIRS to include our vendor conf.
+    const scriptPath = path.join(integrationDir, 'termdock.fish');
+    // Fish doesn't have a clean env-based injection. We set a variable
+    // that the startup can use, but for now, rely on the user's fish
+    // config or fish's native title support. The OSC 133 marks won't
+    // be emitted without explicit sourcing.
+    // TODO: For fish, we could create a temporary XDG_CONFIG_HOME/fish/conf.d/
+    // But that's risky. Leave fish to use its native fish_title for now.
+    env.TERMDOCK_FISH_INTEGRATION = scriptPath;
   }
-  // fish already sets terminal title by default via fish_title function
 
   return env;
 }
@@ -3895,6 +4081,22 @@ router.get('/:sessionId/stream', async (req, res) => {
         console.log(`[tmux-cwd][sse] session=${sessionId} cwd=${newCwd}`);
         writeSse(res, { type: 'cwd', cwd: newCwd });
       }
+      // tmux 消费了 inner shell 发的 OSC 2/133，不透传到外层 PTY。
+      // 从 tmux layout 提取 active pane 的 title 和 command 来推导。
+      if (activePane) {
+        const paneTitle = activePane.title || '';
+        if (paneTitle && paneTitle !== session.lastOscTitle) {
+          session.lastOscTitle = paneTitle;
+          writeSse(res, { type: 'shell-title', title: paneTitle });
+        }
+        const paneCmd = activePane.command || '';
+        const inferredState: 'idle' | 'running' =
+          paneCmd && !shellNamesBackend.has(paneCmd) ? 'running' : 'idle';
+        if (inferredState !== session.lastPromptState) {
+          session.lastPromptState = inferredState;
+          writeSse(res, { type: 'prompt-state', state: inferredState });
+        }
+      }
       // Mirror dynamic metadata onto tmux user options (cheap when nothing
       // changed thanks to the full metadata snapshot cache).
       const meta = syncDynamicTmuxMetadata({
@@ -4547,6 +4749,24 @@ export function handleTerminalWebSocket(
           session.cwd = newCwd;
           console.log(`[tmux-cwd][ws] session=${sessionId} cwd=${newCwd}`);
           ws.send(JSON.stringify({ type: 'cwd', cwd: newCwd }));
+        }
+        // tmux 消费了 inner shell 发的 OSC 2（存入 pane_title）和 OSC 133，
+        // 不透传到外层 PTY。因此从 tmux layout 提取 active pane 的 title
+        // 和 command 来推导 shell-title / prompt-state。
+        if (activePane) {
+          const paneTitle = activePane.title || '';
+          if (paneTitle && paneTitle !== session.lastOscTitle) {
+            session.lastOscTitle = paneTitle;
+            ws.send(JSON.stringify({ type: 'shell-title', title: paneTitle }));
+          }
+          // prompt-state: command 是 shell 名 → idle；否则 → running
+          const paneCmd = activePane.command || '';
+        const inferredState: 'idle' | 'running' =
+          paneCmd && !shellNamesBackend.has(paneCmd) ? 'running' : 'idle';
+        if (inferredState !== session.lastPromptState) {
+          session.lastPromptState = inferredState;
+          ws.send(JSON.stringify({ type: 'prompt-state', state: inferredState }));
+          }
         }
         // Mirror dynamic metadata onto tmux user options.
         const meta = syncDynamicTmuxMetadata({

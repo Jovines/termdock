@@ -442,6 +442,26 @@ export function connectTerminalStream(
           return;
         }
 
+        // Shell-reported title (OSC 2) — shell integration sets this to
+        // cwd when idle or command name when running.
+        if (msg.type === 'shell-title') {
+          onEvent({
+            type: 'shell-title',
+            title: typeof msg.title === 'string' ? msg.title : '',
+          });
+          return;
+        }
+
+        // Shell-reported prompt state (OSC 133) — 'idle' at prompt, 'running' when command executing.
+        if (msg.type === 'prompt-state') {
+          onEvent({
+            type: 'prompt-state',
+            state: msg.state === 'running' ? 'running' : 'idle',
+            exitCode: typeof msg.exitCode === 'number' ? msg.exitCode : undefined,
+          });
+          return;
+        }
+
         // Standard stream events
         const event_ = msg as TerminalStreamEvent;
 

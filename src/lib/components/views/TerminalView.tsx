@@ -121,6 +121,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const setSessionCwd = terminalStore.setSessionCwd;
   const setSessionCopyMode = terminalStore.setSessionCopyMode;
   const setSessionAgentStatus = terminalStore.setSessionAgentStatus;
+  const setSessionShellTitle = terminalStore.setSessionShellTitle;
+  const setSessionPromptState = terminalStore.setSessionPromptState;
 
   const terminalState = React.useMemo(() => {
     if (!sessionId) return undefined;
@@ -761,6 +763,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 }
                 break;
               }
+              case 'shell-title': {
+                // Shell integration (OSC 2) reported title — cwd when idle, command when running.
+                setSessionShellTitle(storeSessionId, event.title ?? null);
+                break;
+              }
+              case 'prompt-state': {
+                // Shell integration (OSC 133) reported prompt state — 'idle' or 'running'.
+                setSessionPromptState(storeSessionId, event.state ?? 'idle', event.exitCode ?? null);
+                break;
+              }
               case 'exit': {
                 const exitCode =
                   typeof event.exitCode === 'number' ? event.exitCode : null;
@@ -851,7 +863,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, reportFlowControl, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, terminal, sessionId]
+    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, reportFlowControl, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionShellTitle, setSessionPromptState, terminal, sessionId]
   );
 
   const hasInitializedRef = React.useRef(false);

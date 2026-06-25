@@ -18,6 +18,8 @@ export interface TerminalStore {
     activeProgramRaw?: string | null,
   ) => void;
   setSessionCwd: (sessionId: string, cwd: string | null) => void;
+  setSessionShellTitle: (sessionId: string, title: string | null) => void;
+  setSessionPromptState: (sessionId: string, state: 'idle' | 'running', exitCode?: number | null) => void;
   setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => void;
   setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null, agentIndicator?: AgentIndicator | null) => void;
   clearAgentNeedsReview: (sessionId: string) => void;
@@ -69,6 +71,9 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     agentColor: null,
     agentIndicator: null,
     agentNeedsReview: false,
+    shellTitle: null,
+    promptState: null,
+    shellExitCode: null,
     bufferChunks: [],
     bufferLength: 0,
     lastOutputAt: null,
@@ -245,6 +250,31 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       newSessions.set(sessionId, {
         ...existing,
         cwd,
+        updatedAt: Date.now(),
+      });
+      return { sessions: newSessions };
+    });
+  },
+
+  setSessionShellTitle: (sessionId: string, title: string | null) => {
+    set((state) => {
+      const existing = state.sessions.get(sessionId);
+      if (!existing || existing.shellTitle === title) return state;
+      const newSessions = new Map(state.sessions);
+      newSessions.set(sessionId, { ...existing, shellTitle: title, updatedAt: Date.now() });
+      return { sessions: newSessions };
+    });
+  },
+
+  setSessionPromptState: (sessionId: string, promptState: 'idle' | 'running', exitCode?: number | null) => {
+    set((state) => {
+      const existing = state.sessions.get(sessionId);
+      if (!existing || existing.promptState === promptState) return state;
+      const newSessions = new Map(state.sessions);
+      newSessions.set(sessionId, {
+        ...existing,
+        promptState,
+        shellExitCode: exitCode ?? existing.shellExitCode,
         updatedAt: Date.now(),
       });
       return { sessions: newSessions };

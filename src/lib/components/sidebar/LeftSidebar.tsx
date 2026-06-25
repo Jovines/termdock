@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus } from '../../terminal/types';
-import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, reorderSessionsWithinGroup } from '../../terminal/display';
+import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, reorderSessionsWithinGroup, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
 import { AgentSessionDot, AgentCountBadge } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 import { useTerminalStore } from '../../stores/useTerminalStore';
@@ -151,6 +151,8 @@ interface LeftSidebarProps {
     isConnecting?: boolean;
     agentStatus: AgentStatus | null;
     agentNeedsReview?: boolean;
+    shellTitle?: string | null;
+    promptState?: 'idle' | 'running' | null;
   }>; 
   onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => void;
   onCloseSession: (sessionId: string) => void;
@@ -407,9 +409,19 @@ export function LeftSidebar(
     const isActive = session.id === activeSessionId;
     const ts = sessionStates.get(session.id);
     const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
-    const displayName = getSessionDisplayName(session, ts?.activeProgram ?? null, ts?.cwd ?? null);
+    const displayName = getSessionDisplayName(
+      session,
+      ts?.activeProgram ?? null,
+      ts?.cwd ?? null,
+      DEFAULT_SESSION_DISPLAY_SHELL_NAMES,
+      ts?.shellTitle ?? null,
+      ts?.promptState ?? null,
+    );
     const cwdSecondary = cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null;
-    const accentClass = ts?.agentStatus === 'running'
+    // Shell integration (OSC 133) provides real-time running state.
+    // Fall back to agentStatus for AI tools that don't emit OSC 133.
+    const isRunning = ts?.promptState === 'running' || ts?.agentStatus === 'running';
+    const accentClass = isRunning
       ? 'bg-green-400'
       : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
         ? 'bg-yellow-400'

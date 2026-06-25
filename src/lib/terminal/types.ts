@@ -132,7 +132,7 @@ export interface TerminalSession {
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size' | 'shell-title' | 'prompt-state';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -151,6 +151,11 @@ export interface TerminalStreamEvent {
   agentColor?: string | null;
   agentIndicator?: AgentIndicator | null;
   focusTrackingRequested?: boolean;
+  // Shell-reported title (OSC 2) — the raw string the shell set, which may
+  // be a cwd path (idle) or a command name (running).
+  title?: string;
+  // Shell-reported prompt state (OSC 133): 'idle' = at prompt, 'running' = command executing.
+  state?: 'idle' | 'running';
   // 短线重连补帧（仅 connected 事件携带）：
   // replayChunks 是断线期间产生的输出，前端要追加到 buffer。
   // replayLastSeq 是新的客户端基线（保存为下一次重连的 since）。
@@ -282,6 +287,11 @@ export interface TerminalSessionState {
   agentColor: string | null;
   agentIndicator: AgentIndicator | null;
   agentNeedsReview: boolean;  // 前端状态：AI 从运行变为停止时，用户未查看 → 黄点提醒
+  // Shell integration (OSC 133/2) — shell-reported title and prompt state.
+  // These provide real-time, shell-driven updates (faster than server polling).
+  shellTitle: string | null;     // OSC 2 title: cwd when idle, command name when running
+  promptState: 'idle' | 'running' | null;  // OSC 133: 'idle' at prompt, 'running' executing
+  shellExitCode: number | null;  // last reported exit code from OSC 133;D
   // 已删: 之前维护 `buffer: string` 派生字段,每次 setState 都 map+join 整个
   // chunks 数组(1MB 字符串 copy)。view 端自己用 useMemo 从 bufferChunks
   // 派生,节省 store setState 时的字符串复制。

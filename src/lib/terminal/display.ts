@@ -24,8 +24,20 @@ export function getSessionDisplayLines(
   activeProgram: string | null,
   cwd: string | null,
   shellNames: ReadonlySet<string> = DEFAULT_SESSION_DISPLAY_SHELL_NAMES,
+  shellTitle: string | null = null,
+  promptState: 'idle' | 'running' | null = null,
 ): { primary: string; secondary: string | null } {
   if (session.customName) return { primary: session.name, secondary: getCwdLeafName(cwd) };
+
+  // Shell integration (OSC 2) provides real-time title: command name when running,
+  // cwd when idle. This is faster and more accurate than server-side process polling.
+  if (shellTitle) {
+    // If the shell reports a running state, the title is the command name.
+    if (promptState === 'running' && !shellNames.has(shellTitle)) {
+      return { primary: shellTitle, secondary: getCwdLeafName(cwd) };
+    }
+    // If idle, the title is typically the cwd — fall through to show cwd leaf.
+  }
 
   if (activeProgram && !shellNames.has(activeProgram)) {
     return { primary: activeProgram, secondary: getCwdLeafName(cwd) };
@@ -41,8 +53,10 @@ export function getSessionDisplayName(
   activeProgram: string | null,
   cwd: string | null,
   shellNames: ReadonlySet<string> = DEFAULT_SESSION_DISPLAY_SHELL_NAMES,
+  shellTitle: string | null = null,
+  promptState: 'idle' | 'running' | null = null,
 ): string {
-  return getSessionDisplayLines(session, activeProgram, cwd, shellNames).primary;
+  return getSessionDisplayLines(session, activeProgram, cwd, shellNames, shellTitle, promptState).primary;
 }
 
 export interface FolderGroup<T> {
