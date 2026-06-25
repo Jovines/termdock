@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
 import QRCode from 'qrcode';
 import { execFile, spawn, type ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
@@ -3313,16 +3314,26 @@ function detectShellType(shellPath: string): 'bash' | 'zsh' | 'fish' | 'other' {
 let cachedIntegrationDir: string | null = null;
 function resolveShellIntegrationDir(): string | null {
   if (cachedIntegrationDir !== null) return cachedIntegrationDir;
+  // 项目是 ESM (`"type": "module"`)，__dirname 不存在；用 import.meta.url 推导。
+  // dev 模式下此文件位于 src/server/routes/，对应 dist 路径为 dist/server/routes/；
+  // 探针覆盖 dev / 安装后 dist 两种位置。
+  let sourceDir = process.cwd();
+  try {
+    sourceDir = path.dirname(fileURLToPath(import.meta.url));
+  } catch { /* fall through to cwd */ }
   const candidates = [
     path.join(process.cwd(), 'public', 'shell-integration'),
-    path.join(__dirname, '..', 'client', 'shell-integration'),
+    path.join(sourceDir, '..', '..', '..', 'client', 'shell-integration'),
+    path.join(sourceDir, '..', '..', 'client', 'shell-integration'),
     path.join(process.cwd(), 'dist', 'client', 'shell-integration'),
   ];
   for (const dir of candidates) {
-    if (fs.existsSync(path.join(dir, 'termdock.zsh'))) {
-      cachedIntegrationDir = dir;
-      return dir;
-    }
+    try {
+      if (fs.existsSync(path.join(dir, 'termdock.zsh'))) {
+        cachedIntegrationDir = dir;
+        return dir;
+      }
+    } catch { /* existsSync 抛错跳过这个候选 */ }
   }
   return null;
 }
