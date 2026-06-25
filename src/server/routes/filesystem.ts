@@ -119,6 +119,12 @@ interface FileWatchEvent {
   reason?: string;
 }
 
+function compareFileTreeEntries(a: Pick<FileSearchEntry, 'name' | 'type'>, b: Pick<FileSearchEntry, 'name' | 'type'>): number {
+  if (a.type === 'directory' && b.type !== 'directory') return -1;
+  if (a.type !== 'directory' && b.type === 'directory') return 1;
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+}
+
 const WATCH_IGNORED_NAMES = new Set([
   '.git', 'node_modules', 'dist', 'build', '.next', '.nuxt', '.turbo', 'coverage', 'target', '.gradle', '.idea', '.DS_Store',
 ]);
@@ -927,6 +933,7 @@ async function findGitRoot(cwd: string): Promise<string | null> {
 
 // Directory listing
 router.get('/list', async (req: Request, res: Response) => {
+  const startedAt = Date.now();
   try {
     const requestedPath = req.query.path as string;
     if (!requestedPath) {
@@ -954,14 +961,12 @@ router.get('/list', async (req: Request, res: Response) => {
           type: dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : 'file',
         };
       })
-      .sort((a, b) => {
-        // Directories first, then files, alphabetical within each group
-        if (a.type === 'directory' && b.type !== 'directory') return -1;
-        if (a.type !== 'directory' && b.type === 'directory') return 1;
-        return a.name.localeCompare(b.name);
-      })
+      .sort(compareFileTreeEntries)
       .slice(0, MAX_DIRECTORY_ENTRIES);
 
+    res.setHeader('X-Termdock-FS-List-Duration-Ms', String(Date.now() - startedAt));
+    res.setHeader('X-Termdock-FS-List-Total', String(visibleDirents.length));
+    res.setHeader('X-Termdock-FS-List-Returned', String(entries.length));
     res.json({ path: resolvedPath, entries, truncated: visibleDirents.length > entries.length, total: visibleDirents.length });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';

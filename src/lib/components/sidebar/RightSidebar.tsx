@@ -56,6 +56,7 @@ const MAX_RECENT_REFERENCES = 8;
 const MAX_FILE_TREE_SCROLL_ROOTS = 20;
 const FILE_TREE_SCROLL_WRITE_MS = 250;
 const GIT_BUNDLE_SLOW_MS = 700;
+const SIDEBAR_BACKGROUND_IO_DELAY_MS = 600;
 // Below this width we treat the panel as a phone-sized overlay: dual-pane
 // mode collapses to a single column with back-navigation, and the third
 // "File" tab is hidden (its content is reachable via the Files tab).
@@ -1408,23 +1409,23 @@ export function RightSidebar(
   const previewPaneActive = effectiveRightTab === 'file' && !isMobile && !isWide;
   const mobilePreviewActive = isMobile && mobileFilePreviewOpen && Boolean(selectedFilePath);
 
-  // Warm Git state when the sidebar is visible so non-Git workspaces can collapse
-  // to a files-only UI without waiting for the user to touch Git/Changes tabs.
-  // Git/Changes still request diff preloading because those panes need it.
+  // Warm Git state after the file tree has had a chance to render. On large
+  // repositories, Git probes can compete with directory expansion for disk I/O.
   useEffect(() => {
     const shouldPreloadDiff = gitPaneActive || diffPaneActive || rightTab === 'git' || rightTab === 'diff';
     const shouldProbeRepository = isOpen && gitBundleLastLoadedAt === null;
     if ((!shouldPreloadDiff && !shouldProbeRepository) || !rootPath || gitBundleLoading) return;
+    if (!shouldPreloadDiff && !rootEntriesLoaded) return;
     const hasCachedGitBundle = gitBundleLastLoadedAt !== null;
     if (hasCachedGitBundle && lastAutoRefreshRootRef.current === rootPath) return;
     lastAutoRefreshRootRef.current = rootPath;
     const handle = window.setTimeout(() => {
       void loadGitBundle(rootPath, { preloadDiff: shouldPreloadDiff });
-    }, hasCachedGitBundle ? 0 : (isOpen ? 80 : 180));
+    }, hasCachedGitBundle || shouldPreloadDiff ? 0 : SIDEBAR_BACKGROUND_IO_DELAY_MS);
     return () => {
       window.clearTimeout(handle);
     };
-  }, [diffPaneActive, gitBundleLastLoadedAt, gitBundleLoading, gitPaneActive, isOpen, loadGitBundle, rightTab, rootPath]);
+  }, [diffPaneActive, gitBundleLastLoadedAt, gitBundleLoading, gitPaneActive, isOpen, loadGitBundle, rightTab, rootEntriesLoaded, rootPath]);
 
   useEffect(() => {
     if (diffPaneActive) setHasMountedDiffPane(true);
@@ -1578,17 +1579,25 @@ export function RightSidebar(
   }, [fileTreeRoot, rootPath]);
 
   useEffect(() => {
-    if (!isOpen || watchedFileRoots.length === 0) return;
+    if (!isOpen || !rootEntriesLoaded || watchedFileRoots.length === 0) return;
     const controller = new AbortController();
+    let cancelled = false;
     setFileWatchError(null);
-    watchFileSystem(watchedFileRoots, (events) => {
-      applyFileWatchEvents(events);
-    }, controller.signal).catch((error) => {
-      if (isAbortError(error) || controller.signal.aborted) return;
-      setFileWatchError(error instanceof Error ? error.message : 'File watching unavailable');
-    });
-    return () => controller.abort();
-  }, [applyFileWatchEvents, isOpen, watchedFileRoots]);
+    const handle = window.setTimeout(() => {
+      if (cancelled) return;
+      watchFileSystem(watchedFileRoots, (events) => {
+        applyFileWatchEvents(events);
+      }, controller.signal).catch((error) => {
+        if (isAbortError(error) || controller.signal.aborted) return;
+        setFileWatchError(error instanceof Error ? error.message : 'File watching unavailable');
+      });
+    }, SIDEBAR_BACKGROUND_IO_DELAY_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+      controller.abort();
+    };
+  }, [applyFileWatchEvents, isOpen, rootEntriesLoaded, watchedFileRoots]);
 
   const changedSummary = useMemo(() => {
     const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, copied: 0, untracked: 0, conflicted: 0, staged: 0, other: 0 };

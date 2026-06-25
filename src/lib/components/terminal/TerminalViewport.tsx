@@ -88,6 +88,14 @@ function mapSpecialKey(event: React.KeyboardEvent, terminal: Terminal): string |
   }
 }
 
+function isImeComposingKeyEvent(event: React.KeyboardEvent): boolean {
+  return (
+    event.nativeEvent.isComposing ||
+    (event as unknown as { isComposing?: boolean }).isComposing === true ||
+    event.keyCode === 229
+  );
+}
+
 function decodeBase64Utf8(base64Data: string): string | null {
   try {
     const raw = atob(base64Data);
@@ -3264,6 +3272,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 syncTextareaToPty(event.currentTarget);
               }}
               onKeyDown={(event) => {
+                const isImeComposingKey = isImeComposingKeyEvent(event);
                 // ===== 桌面端独有：先处理 Cmd/Ctrl/Alt 修饰组合 =====
                 if (!enableTouchScroll) {
                   const term = terminalRef.current;
@@ -3342,6 +3351,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   }
 
                   // ---- 特殊键（方向 / Home / End / F1–F12 / Tab / Esc 等）----
+                  // IME 合成中，这些按键可能是输入法的候选选择/翻页控制。
+                  // 尤其是中文输入法按 Tab 选词时，不能抢先发给 PTY，否则
+                  // 浏览器不会正常提交 composition，行内提示会悬挂在终端下方。
+                  if (isImeComposingKey || isComposingRef.current) {
+                    return;
+                  }
                   if (term) {
                     const seq = mapSpecialKey(event, term);
                     if (seq !== null) {
@@ -3366,9 +3381,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 //     那一记假 Enter，由一次性 token 吞掉（消费即清除）。
                 if (event.key === 'Enter' || event.key === 'Go' || event.key === 'done' || event.key === 'send') {
                   if (
-                    event.nativeEvent.isComposing ||
-                    (event as unknown as { isComposing?: boolean }).isComposing ||
-                    event.keyCode === 229 ||
+                    isImeComposingKey ||
                     isComposingRef.current
                   ) {
                     // IME 合成中：吞掉这一记 Enter，候选词将由 compositionend
