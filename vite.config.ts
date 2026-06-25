@@ -88,6 +88,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      'node:diagnostics_channel': path.resolve(__dirname, './src/lib/shims/diagnosticsChannel.ts'),
     },
   },
   server: {

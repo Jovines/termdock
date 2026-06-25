@@ -1,12 +1,24 @@
 import React from 'react';
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { SearchAddon } from '@xterm/addon-search';
+import { SerializeAddon } from '@xterm/addon-serialize';
+import { ClipboardAddon, BrowserClipboardProvider } from '@xterm/addon-clipboard';
+import { ImageAddon } from '@xterm/addon-image';
+import { LigaturesAddon } from '@xterm/addon-ligatures';
+import { ProgressAddon } from '@xterm/addon-progress';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
-import type { TerminalRendererMode } from '../../terminal/renderer';
+import {
+  TERMINAL_FALLBACK_LIGATURES,
+  TERMINAL_LIGATURE_FEATURE_SETTINGS,
+  type TerminalFontWeight,
+  type TerminalSettings,
+} from '../../terminal/settings';
 import { useTouchScroll, type TouchScrollConfig } from '../../hooks/useTouchScroll';
 import { useGesture } from '../../hooks/useGesture';
 import { PRIORITY_LONG_PRESS, PRIORITY_TMUX_SCROLL } from '../../gesture/types';
@@ -251,6 +263,7 @@ const RESUME_REASONS: ReadonlySet<RefreshReason> = new Set<RefreshReason>([
 
 export type TerminalController = {
   focus: () => void;
+  blur: () => void;
   clear: () => void;
   /** 当前 xterm 的 cols/rows；xterm 未初始化时返回 null */
   getDimensions: () => { cols: number; rows: number } | null;
@@ -295,10 +308,8 @@ interface TerminalViewportProps {
   tmuxScrollSensitivity?: number;
   onDoubleTap?: () => void;
   onInputFocusChange?: (isFocused: boolean) => void;
-  rendererMode?: TerminalRendererMode;
+  terminalSettings: TerminalSettings;
   theme: TerminalTheme;
-  fontFamily: string;
-  fontSize: number;
   className?: string;
   enableTouchScroll?: boolean;
   autoFocus?: boolean;
@@ -409,6 +420,16 @@ const getTerminalFontFamily = (userFontFamily: string): string => {
   return userFontFamily;
 };
 
+function normalizeXtermFontWeight(weight: TerminalFontWeight): FontWeight {
+  if (weight === 'normal' || weight === 'bold') return weight;
+  return Math.max(1, Math.min(1000, Math.round(weight)));
+}
+
+function getMeasuredLineHeightPx(terminal: Terminal | null, fontSize: number, lineHeight: number): number {
+  const cellHeight = terminal?.dimensions?.css.cell.height;
+  return Math.max(8, Math.round(cellHeight || fontSize * lineHeight));
+}
+
 // Convert TerminalTheme to an xterm.js theme object.
 //
 // This must stay a direct TerminalTheme -> xterm palette mapping. Avoid
@@ -460,12 +481,15 @@ function estimateInitialDimensions(
   container: HTMLElement,
   fontFamily: string,
   fontSize: number,
+  letterSpacing: number,
+  lineHeight: number,
 ): { cols: number; rows: number } | null {
   if (typeof window === 'undefined' || typeof document === 'undefined') return null;
   const rect = container.getBoundingClientRect();
   if (rect.width < 24 || rect.height < 24) return null;
 
-  const cacheKey = `${fontSize}::${fontFamily}`;
+  const dpr = window.devicePixelRatio || 1;
+  const cacheKey = `${fontSize}::${letterSpacing}::${lineHeight}::${dpr}::${fontFamily}`;
   let metrics = cellMetricsCache.get(cacheKey);
   if (!metrics) {
     try {
@@ -474,14 +498,14 @@ function estimateInitialDimensions(
       if (!ctx) return null;
       ctx.font = `${fontSize}px ${fontFamily}`;
       const m = ctx.measureText('M');
-      // letterSpacing=1 补偿 WebGL floor 误差：cell.width = char.width + letterSpacing
-      const cellWidth = m.width + 1;
+      const deviceCharWidth = Math.floor(m.width * dpr);
+      const cellWidth = (deviceCharWidth + Math.round(letterSpacing)) / dpr;
       // actualBoundingBox 在所有现代浏览器都支持；缺省值保底。
       const ascent = (m as TextMetrics).actualBoundingBoxAscent ?? fontSize * 0.8;
       const descent = (m as TextMetrics).actualBoundingBoxDescent ?? fontSize * 0.2;
       // 与 xterm WebGL renderer _updateDimensions 对齐：
       // charHeight = ceil(boundingBoxHeight), cellHeight = floor(charHeight * lineHeight)
-      const cellHeight = Math.floor(Math.ceil(ascent + descent) * 1.05);
+      const cellHeight = Math.floor(Math.ceil(ascent + descent) * lineHeight);
       if (cellWidth >= 1 && cellHeight >= 1) {
         metrics = { cellWidth, cellHeight };
         cellMetricsCache.set(cacheKey, metrics);
@@ -510,10 +534,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       tmuxScrollSensitivity = 0.55,
       onDoubleTap,
       onInputFocusChange,
-      rendererMode = 'auto',
+      terminalSettings,
       theme,
-      fontFamily,
-      fontSize,
       className,
       enableTouchScroll,
       autoFocus = true,
@@ -528,6 +550,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const resizeHandlerRef = React.useRef<(cols: number, rows: number) => void>(onResize);
     const inputFocusHandlerRef = React.useRef<typeof onInputFocusChange>(onInputFocusChange);
     const flowControlHandlerRef = React.useRef<typeof onFlowControl>(onFlowControl);
+    const rendererModeRef = React.useRef(terminalSettings.rendererMode);
     const lastReportedSizeRef = React.useRef<{ cols: number; rows: number } | null>(null);
     const pendingWriteRef = React.useRef('');
     const pendingBytesRef = React.useRef(0);
@@ -537,6 +560,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
+    const imageAddonLoadedRef = React.useRef(false);
     const remainderPxRef = React.useRef(0);
     const osc52RemainderRef = React.useRef('');
     const webglAddonRef = React.useRef<WebglAddon | null>(null);
@@ -565,6 +589,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const desktopWheelRemainderRef = React.useRef(0);
     const keepInputFocusUntilRef = React.useRef(0);
     const lastTouchInteractionAtRef = React.useRef(0);
+    const mobileTapFocusPointerRef = React.useRef<{
+      pointerId: number;
+      startX: number;
+      startY: number;
+      moved: boolean;
+    } | null>(null);
     const lastFocusHiddenInputAtRef = React.useRef(0);
     const [, forceRender] = React.useReducer((x) => x + 1, 0);
     const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
@@ -602,17 +632,31 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     resizeHandlerRef.current = onResize;
     inputFocusHandlerRef.current = onInputFocusChange;
     flowControlHandlerRef.current = onFlowControl;
+    rendererModeRef.current = terminalSettings.rendererMode;
     const autoFocusRef = React.useRef(autoFocus);
     autoFocusRef.current = autoFocus;
     const enableTouchScrollRef = React.useRef(enableTouchScroll);
     enableTouchScrollRef.current = enableTouchScroll;
     const hasTmuxScroll = !!onTmuxScroll;
     const terminalConvertEol = getTerminalConvertEol(hasTmuxScroll);
+    const {
+      rendererMode,
+      fontFamily,
+      fontSize,
+      fontWeight,
+      fontWeightBold,
+      letterSpacing,
+      lineHeight,
+      minimumContrastRatio,
+      drawBoldTextInBrightColors,
+      unicodeVersion,
+      customGlyphs,
+      rescaleOverlappingGlyphs,
+      fontLigatures,
+      enableImages,
+      smoothScrolling,
+    } = terminalSettings;
 
-    // WebGL renderer is fast, but xterm.js / browser GPU pipelines still have
-    // known environment-specific rendering artifacts. Best practice for a
-    // product-facing terminal is stability-first: keep WebGL available as an
-    // explicit opt-in, while Auto uses xterm's built-in renderer.
     const shouldUseWebgl = rendererMode === 'webgl';
 
     React.useEffect(() => {
@@ -682,7 +726,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const terminal = terminalRef.current;
       if (!terminal) return false;
 
-      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+      const lineHeightPx = getMeasuredLineHeightPx(terminalRef.current, fontSize, lineHeight);
       const total = remainderPxRef.current + deltaPixels;
       const scrollLines = Math.trunc(total / lineHeightPx);
       remainderPxRef.current = total - scrollLines * lineHeightPx;
@@ -692,14 +736,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         return true;
       }
       return false;
-    }, [fontSize]);
+    }, [fontSize, lineHeight]);
 
     // --- Tmux mode: server-side copy-mode scrolling ---
     const handleTmuxScrollInternal = React.useCallback((deltaPixels: number): boolean => {
       const terminal = terminalRef.current;
       if (!terminal) return false;
 
-      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+      const lineHeightPx = getMeasuredLineHeightPx(terminalRef.current, fontSize, lineHeight);
       const effectiveLineHeight = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
       const total = remainderPxRef.current + deltaPixels;
       let scrollLines = Math.trunc(total / effectiveLineHeight);
@@ -719,7 +763,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const linesToSend = Math.max(1, Math.min(Math.abs(scrollLines), 10));
       onTmuxScroll!(direction, linesToSend);
       return true;
-    }, [fontSize, onTmuxScroll, tmuxScrollSensitivity]);
+    }, [fontSize, lineHeight, onTmuxScroll, tmuxScrollSensitivity]);
 
     // Stash the latest mode-specific handlers in refs so the top-level
     // handleScroll has a stable identity.  This prevents useTouchScroll
@@ -1168,6 +1212,55 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       lastTouchInteractionAtRef.current = nowMs();
     }, [markInputBlurGuard, nowMs]);
 
+    const prepareMobileInputForTouch = React.useCallback(() => {
+      if (!enableTouchScroll) return;
+      hiddenInputRef.current?.removeAttribute('readonly');
+    }, [enableTouchScroll]);
+
+    const handleMobilePointerDownCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+      prepareMobileInputForTouch();
+      extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
+      if (!enableTouchScroll || event.pointerType !== 'touch') {
+        mobileTapFocusPointerRef.current = null;
+        return;
+      }
+      mobileTapFocusPointerRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        moved: false,
+      };
+    }, [enableTouchScroll, extendBlurGuard, prepareMobileInputForTouch]);
+
+    const handleMobilePointerMoveCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+      extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
+      const state = mobileTapFocusPointerRef.current;
+      if (!state || state.pointerId !== event.pointerId) {
+        return;
+      }
+      if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY) > 12) {
+        state.moved = true;
+      }
+    }, [extendBlurGuard]);
+
+    const handleMobilePointerUpCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+      extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS);
+      const state = mobileTapFocusPointerRef.current;
+      mobileTapFocusPointerRef.current = null;
+      if (!enableTouchScroll || event.pointerType !== 'touch') {
+        return;
+      }
+      if (!state || state.pointerId !== event.pointerId || state.moved) {
+        return;
+      }
+      focusHiddenInput(event.clientX, event.clientY);
+    }, [enableTouchScroll, extendBlurGuard, focusHiddenInput]);
+
+    const handleMobilePointerCancelCapture = React.useCallback(() => {
+      mobileTapFocusPointerRef.current = null;
+      extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS);
+    }, [extendBlurGuard]);
+
     // ---- Normal-mode touch scroll (useTouchScroll) ----
     // Handlers stay mounted in both modes, but claim is gated by
     // pointerdown-time tmux snapshot so one gesture only runs one path.
@@ -1364,11 +1457,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     tmuxSendSgrScrollRef.current = tmuxSendSgrScroll;
 
     const tmuxDynamicEff = React.useCallback((): number => {
-      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+      const lineHeightPx = getMeasuredLineHeightPx(terminalRef.current, fontSize, lineHeight);
       const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
       const factor = 1 + tmuxScrollStateRef.current.instantSpeed * 0.10;
       return eff / Math.min(6, factor);
-    }, [fontSize, tmuxScrollSensitivity]);
+    }, [fontSize, lineHeight, tmuxScrollSensitivity]);
 
     const tmuxTick = React.useCallback(() => {
       const st = tmuxScrollStateRef.current;
@@ -1466,7 +1559,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       st.velocity = st.velocity * 0.45 + deltaPixels * 0.55;
 
       if (isClaimed) {
-        const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+        const lineHeightPx = getMeasuredLineHeightPx(terminalRef.current, fontSize, lineHeight);
         const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
         if (Math.abs(st.remainder) >= eff / 3) {
           st.didScroll = true;
@@ -1475,7 +1568,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
 
       return 'claim';
-    }, [fontSize, tmuxScrollSensitivity, tmuxScheduleTick]);
+    }, [fontSize, lineHeight, tmuxScrollSensitivity, tmuxScheduleTick]);
 
     const tmux_onPointerUp = React.useCallback((e: PointerEvent): void => {
       const st = tmuxScrollStateRef.current;
@@ -1494,7 +1587,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
       st.gestureAxis = null;
 
-      const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+      const lineHeightPx = getMeasuredLineHeightPx(terminalRef.current, fontSize, lineHeight);
       const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
 
       if (st.didScroll && Math.abs(st.velocity) > eff * 0.05) {
@@ -1535,7 +1628,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (st.didScroll) {
         e.stopImmediatePropagation();
       }
-    }, [tmuxStopRaf, tmuxSendSgrScroll, tmuxScheduleTick, tmuxScrollSensitivity, fontSize]);
+    }, [tmuxStopRaf, tmuxSendSgrScroll, tmuxScheduleTick, tmuxScrollSensitivity, fontSize, lineHeight]);
 
     const tmux_onPointerCancel = React.useCallback((e: PointerEvent): void => {
       const st = tmuxScrollStateRef.current;
@@ -1983,7 +2076,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
 
       try {
-        const webglAddon = new WebglAddon();
+        const webglAddon = new WebglAddon({ customGlyphs });
 
         webglContextLossDisposableRef.current = webglAddon.onContextLoss(() => {
           debugTerminal('webgl context loss', { reason: 'onContextLoss' });
@@ -2007,10 +2100,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           type: 'webgl',
           reason,
           mobile: enableTouchScroll,
-          mode: rendererMode,
+          mode: rendererModeRef.current,
         });
         // 新建 renderer 后立即同步刷新一次，确保字符立刻正确
         refreshTextureAtlasNow(`webgl-enabled:${reason}`);
+        fitTerminal(`webgl-enabled:${reason}`);
         rendererReadyRef.current = true;
         return true;
       } catch (error) {
@@ -2018,7 +2112,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           reason,
           error,
           mobile: enableTouchScroll,
-          mode: rendererMode,
+          mode: rendererModeRef.current,
         });
         // WebGL 失败后会落到内置 DOM renderer（init useEffect 会跑下面的
         // 兜底分支并显式 setReady）。这里保持 false 即可。
@@ -2026,12 +2120,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
     }, [
       debugTerminal,
-      disposeWebglRenderer,
+      customGlyphs,
       enableTouchScroll,
       fitTerminal,
       refreshTextureAtlasNow,
-      rendererMode,
-      shouldUseWebgl,
     ]);
 
     // ============================================================
@@ -2496,11 +2588,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             container,
             getTerminalFontFamily(fontFamily),
             fontSize,
+            letterSpacing,
+            lineHeight,
           );
           const terminal = new Terminal({
             ...(initialDims ? { cols: initialDims.cols, rows: initialDims.rows } : {}),
+            allowProposedApi: true,
             fontFamily: getTerminalFontFamily(fontFamily),
             fontSize,
+            fontWeight: normalizeXtermFontWeight(fontWeight),
+            fontWeightBold: normalizeXtermFontWeight(fontWeightBold),
             theme: convertTheme(theme),
             logLevel: 'off',
             // WebGL renderer 在 idle 状态下也会因为 cursor blink 周期重绘；
@@ -2510,24 +2607,23 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             cursorStyle: 'block',
             cursorInactiveStyle: 'bar',
             scrollback: onTmuxScroll ? 2000 : 5000,
-            allowTransparency: false,
+            allowTransparency: enableImages,
             convertEol: terminalConvertEol,
-            customGlyphs: true,
-            rescaleOverlappingGlyphs: true,
-            // WebGL renderer 对 char.width 做 Math.floor、对 char.height 做 Math.ceil
-            // (addons/addon-webgl/src/WebglRenderer.ts _updateDimensions)。fontSize=13px
-            // 下 JetBrains Mono NL 的真实 cell width = 0.6em = 7.8px，floor 后丢掉 0.8px
-            // (10% 误差)，字符被挤压。letterSpacing=1 让 cell.width = char.width + 1 ≈ 8px，
-            // 把误差从 10% 降到 2.5%。
-            letterSpacing: 1,
-            // char.height 用 ceil 后比真实行高多 ~0.8px，lineHeight=1 时 char.top=0 (不居中)。
-            // lineHeight=1.05 让 cell.height 略大于 char.height，触发
-            // char.top = round((cellH - charH) / 2) 垂直居中逻辑，字符在 cell 里上下居中，
-            // 不再贴着顶部。1.05 是保守值：行距增幅仅 5%，肉眼几乎无感，但在高 DPI
-            // (dpr≥2) 上能产生 1-2px 的居中偏移，消除"字符偏上"的观感。
-            lineHeight: 1.05,
-            overviewRuler: {
-              width: 0,
+            drawBoldTextInBrightColors,
+            rescaleOverlappingGlyphs,
+            minimumContrastRatio,
+            letterSpacing,
+            lineHeight,
+            smoothScrollDuration: smoothScrolling ? 125 : 0,
+            scrollOnEraseInDisplay: true,
+            tabStopWidth: 8,
+            vtExtensions: {
+              kittyKeyboard: true,
+            },
+            windowOptions: {
+              getWinSizePixels: true,
+              getCellSizePixels: true,
+              getWinSizeChars: true,
             },
           });
 
@@ -2543,7 +2639,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           };
           terminal.loadAddon(fitAddon);
           terminal.loadAddon(new WebLinksAddon());
-
+          const unicode11Addon = new Unicode11Addon();
+          terminal.loadAddon(unicode11Addon);
+          terminal.unicode.activeVersion = unicodeVersion;
+          terminal.loadAddon(new SearchAddon({ highlightLimit: 1000 }));
+          terminal.loadAddon(new SerializeAddon());
+          terminal.loadAddon(new ProgressAddon());
+          try {
+            terminal.loadAddon(new ClipboardAddon(undefined, new BrowserClipboardProvider()));
+          } catch (error) {
+            debugTerminal('clipboard addon skipped', { error });
+          }
           localTerminal = terminal;
           terminalRef.current = terminal;
           fitAddonRef.current = fitAddon;
@@ -2551,6 +2657,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           lastBufferTypeRef.current = terminal.buffer.active.type;
 
           terminal.open(container);
+          if (fontLigatures) {
+            terminal.loadAddon(new LigaturesAddon({
+              fontFeatureSettings: TERMINAL_LIGATURE_FEATURE_SETTINGS,
+              fallbackLigatures: TERMINAL_FALLBACK_LIGATURES,
+            }));
+          }
 
           // 强制让 xterm 把光标视为"已初始化"。
           try {
@@ -2625,7 +2737,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             let rafId: number | null = null;
             const flushWheel = () => {
               rafId = null;
-              const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+              const lineHeightPx = getMeasuredLineHeightPx(terminalRef.current, fontSize, lineHeight);
               const total = desktopWheelRemainderRef.current + pendingDeltaPx;
               pendingDeltaPx = 0;
               const lines = Math.trunc(total / lineHeightPx);
@@ -2671,7 +2783,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 return true;
               }
 
-              const lineHeightPx = Math.max(12, Math.round(fontSize * 1.35));
+              const lineHeightPx = getMeasuredLineHeightPx(terminalRef.current, fontSize, lineHeight);
               let deltaPixels = ev.deltaY;
               if (ev.deltaMode === 1 /* DOM_DELTA_LINE */) {
                 deltaPixels = ev.deltaY * lineHeightPx;
@@ -2896,14 +3008,65 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       fitTerminal,
       fontFamily,
       fontSize,
+      fontWeight,
+      fontWeightBold,
+      letterSpacing,
+      lineHeight,
+      minimumContrastRatio,
+      drawBoldTextInBrightColors,
+      unicodeVersion,
+      customGlyphs,
+      rescaleOverlappingGlyphs,
+      fontLigatures,
+      enableImages,
+      smoothScrolling,
       theme,
       resetWriteState,
       clearPendingTextareaSync,
       enableTouchScroll,
-      shouldUseWebgl,
-      rendererMode,
       enableWebglRenderer,
       disposeWebglRenderer,
+      debugTerminal,
+    ]);
+
+    React.useEffect(() => {
+      const terminal = terminalRef.current;
+      if (!terminal) {
+        return;
+      }
+
+      if (shouldUseWebgl) {
+        terminal.options.cursorBlink = false;
+        const enabled = enableWebglRenderer(terminal, 'renderer-mode-change');
+        if (enabled && enableImages && !imageAddonLoadedRef.current) {
+          try {
+            terminal.loadAddon(new ImageAddon({
+              storageLimit: 64,
+              pixelLimit: 1 << 24,
+              sixelSupport: true,
+              iipSupport: true,
+              kittySupport: true,
+            }));
+            imageAddonLoadedRef.current = true;
+          } catch (error) {
+            debugTerminal('image addon skipped', { error });
+          }
+        }
+        return;
+      }
+
+      terminal.options.cursorBlink = true;
+      if (disposeWebglRenderer('renderer-mode-change')) {
+        refreshTextureAtlasNow('renderer-mode-change:webgl-disabled');
+        fitTerminal('renderer-mode-change:webgl-disabled');
+      }
+    }, [
+      shouldUseWebgl,
+      enableImages,
+      enableWebglRenderer,
+      disposeWebglRenderer,
+      refreshTextureAtlasNow,
+      fitTerminal,
       debugTerminal,
     ]);
 
@@ -3010,6 +3173,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 否则 IME 会抢到 xterm.textarea 上绕开 diff-sync。
           hiddenInputRef.current?.focus({ preventScroll: true });
         },
+        blur: () => {
+          const input = hiddenInputRef.current;
+          if (input && typeof document !== 'undefined' && document.activeElement === input) {
+            input.blur();
+          }
+          if (enableTouchScrollRef.current) {
+            input?.setAttribute('readonly', '');
+          }
+          inputFocusHandlerRef.current?.(false);
+        },
         clear: () => {
           const terminal = terminalRef.current;
           if (!terminal) {
@@ -3052,11 +3225,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }}
         role="button"
         tabIndex={-1}
-        onPointerDownCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
-        onPointerMoveCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
-        onPointerUpCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
-        onPointerCancelCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
-        onTouchStartCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
+        onPointerDownCapture={handleMobilePointerDownCapture}
+        onPointerMoveCapture={handleMobilePointerMoveCapture}
+        onPointerUpCapture={handleMobilePointerUpCapture}
+        onPointerCancelCapture={handleMobilePointerCancelCapture}
+        onTouchStartCapture={() => {
+          prepareMobileInputForTouch();
+          extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
+        }}
         onTouchMoveCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS)}
         onTouchEndCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}
         onTouchCancelCapture={() => extendBlurGuard(INPUT_BLUR_GUARD_RELEASE_MS)}

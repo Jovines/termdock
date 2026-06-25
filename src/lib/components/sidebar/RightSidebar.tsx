@@ -117,7 +117,7 @@ function getSafeMarkdownHref(href: string): string | null {
   return null;
 }
 
-function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
+function renderMarkdownInline(text: string, keyPrefix: string, wrapLongTokens = true): ReactNode[] {
   const pattern = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|_[^_\s][^_]*_|\[[^\]]+\]\([^\s)]+(?:\s+"[^"]*")?\))/g;
   const nodes: ReactNode[] = [];
   let lastIndex = 0;
@@ -129,17 +129,17 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
     const key = `${keyPrefix}-${match.index}`;
 
     if (token.startsWith('`')) {
-      nodes.push(<code key={key} className="break-all rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.92em] text-foreground">{token.slice(1, -1)}</code>);
+      nodes.push(<code key={key} className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.92em] text-foreground`}>{token.slice(1, -1)}</code>);
     } else if (token.startsWith('**') || token.startsWith('__')) {
-      nodes.push(<strong key={key} className="font-semibold text-foreground">{renderMarkdownInline(token.slice(2, -2), `${key}-strong`)}</strong>);
+      nodes.push(<strong key={key} className="font-semibold text-foreground">{renderMarkdownInline(token.slice(2, -2), `${key}-strong`, wrapLongTokens)}</strong>);
     } else if (token.startsWith('*') || token.startsWith('_')) {
-      nodes.push(<em key={key} className="italic">{renderMarkdownInline(token.slice(1, -1), `${key}-em`)}</em>);
+      nodes.push(<em key={key} className="italic">{renderMarkdownInline(token.slice(1, -1), `${key}-em`, wrapLongTokens)}</em>);
     } else {
       const linkMatch = token.match(/^\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)$/);
       const safeHref = linkMatch ? getSafeMarkdownHref(linkMatch[2]) : null;
       nodes.push(safeHref ? (
-        <a key={key} href={safeHref} target="_blank" rel="noreferrer" className="break-all text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary">
-          {renderMarkdownInline(linkMatch?.[1] ?? '', `${key}-link`)}
+        <a key={key} href={safeHref} target="_blank" rel="noreferrer" className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary`}>
+          {renderMarkdownInline(linkMatch?.[1] ?? '', `${key}-link`, wrapLongTokens)}
         </a>
       ) : token);
     }
@@ -237,13 +237,13 @@ function MarkdownPreview({ content }: { content: string }) {
         rendered.push(
           <div key={`table-${index}`} className="overflow-auto rounded-lg border border-border/20 bg-surface">
             <table className="min-w-full border-collapse text-left text-xs">
-              <thead className="bg-background-subtle text-foreground">
-                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className="border-b border-r border-border/15 px-3 py-2 font-semibold last:border-r-0">{renderMarkdownInline(cell, `th-${index}-${cellIndex}`)}</th>)}</tr>
+              <thead className="bg-surface-2 text-foreground">
+                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className="whitespace-nowrap border-b border-r border-border/15 px-3 py-2 font-semibold last:border-r-0">{renderMarkdownInline(cell, `th-${index}-${cellIndex}`, false)}</th>)}</tr>
               </thead>
               <tbody>
                 {rows.map((row, rowIndex) => (
                   <tr key={`r-${rowIndex}`} className="border-t border-border/10">
-                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className="border-r border-border/10 px-3 py-2 align-top text-muted-foreground last:border-r-0">{renderMarkdownInline(row[cellIndex] ?? '', `td-${index}-${rowIndex}-${cellIndex}`)}</td>)}
+                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className="whitespace-nowrap border-r border-border/10 px-3 py-2 align-top text-muted-foreground last:border-r-0">{renderMarkdownInline(row[cellIndex] ?? '', `td-${index}-${rowIndex}-${cellIndex}`, false)}</td>)}
                   </tr>
                 ))}
               </tbody>
@@ -432,7 +432,7 @@ function writeFileTreeScrollPosition(rootPath: string, top: number): void {
 
 function Pane({ active, mounted = true, children }: { active: boolean; mounted?: boolean; children: ReactNode }) {
   return (
-    <div className={`h-full min-h-0 overflow-hidden bg-background text-foreground ${active ? 'block' : 'hidden'}`} aria-hidden={!active}>
+    <div className={`h-full min-h-0 overflow-hidden bg-surface text-foreground ${active ? 'block' : 'hidden'}`} aria-hidden={!active}>
       {mounted ? children : null}
     </div>
   );
@@ -441,7 +441,7 @@ function Pane({ active, mounted = true, children }: { active: boolean; mounted?:
 function GitChangesLoadingState({ slow }: { slow: boolean }) {
   const { t } = useI18n();
   return (
-    <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
+    <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
       <RiLoader size={20} className="mx-auto mb-2 animate-spin text-muted-foreground/80" />
       <div>{t('rightSidebar.loadingGitChanges')}</div>
       {slow && <div className="mt-1 text-xs text-muted-foreground/75">{t('rightSidebar.loadingGitChangesSlow')}</div>}
@@ -469,7 +469,7 @@ function GitChangesErrorState({ message, onRetry }: { message: string; onRetry: 
 function GitChangesRefreshingBanner() {
   const { t } = useI18n();
   return (
-    <div className="mb-2 flex items-center gap-2 rounded-lg bg-background-subtle px-3 py-2 text-[11px] text-muted-foreground">
+    <div className="mb-2 flex items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-[11px] text-muted-foreground">
       <RiLoader size={12} className="shrink-0 animate-spin" />
       <span>{t('rightSidebar.refreshingGitChanges')}</span>
     </div>
@@ -624,7 +624,7 @@ function GitActionChips({ actions, running, completed }: {
                 ? 'bg-accent/10 text-accent'
                 : action.destructive
                 ? 'bg-destructive/10 text-destructive hover:bg-destructive/15'
-                : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
             }`}
           >
             <span className={isRunning || isCompleted ? 'opacity-0' : ''}>{action.label}</span>
@@ -970,7 +970,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   }, [lineRange, floatingInsertPos, previewState, markdownViewMode, filePath, rootPath, highlightedLines]);
 
   if (!filePath) {
-    return <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
+    return <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
   }
 
   const readablePath = rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
@@ -1027,7 +1027,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
     // The container is a flex column that fills the panel. The middle scroller
     // is `min-h-0 flex-1` so the bottom action bar can stick to the visible
     // bottom regardless of file length.
-    <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
+    <div className="flex h-full min-h-0 flex-col bg-surface text-foreground">
       <div className="shrink-0 border-b border-border/15 px-3 py-2">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
@@ -1059,7 +1059,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
                   });
                   onLineRangeChange(null);
                 }}
-                className="inline-flex h-9 items-center gap-1 rounded-full bg-background-subtle px-3 text-xs font-semibold text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95"
+                className="inline-flex h-9 items-center gap-1 rounded-full bg-surface-2 px-3 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
                 title={markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
               >
                 {markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
@@ -1078,7 +1078,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
             <button
               type="button"
               onClick={() => void navigator.clipboard?.writeText(reference)}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-background-subtle text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
               title={`Copy reference: ${reference}`}
               aria-label={t('rightSidebar.copyFileRef')}
             >
@@ -1117,7 +1117,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">{previewState.message}</div>
         </div>
       ) : previewState.kind === 'image' ? (
-        <div className="min-h-0 flex-1 overflow-hidden bg-background-subtle p-3">
+        <div className="min-h-0 flex-1 overflow-hidden bg-surface p-3">
           <ZoomableImage
             src={previewState.objectUrl}
             alt={display.name}
@@ -1134,14 +1134,14 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
         </div>
       ) : showMarkdownPreview ? (
         <div
-          className="min-h-0 flex-1 overflow-auto bg-background"
+          className="min-h-0 flex-1 overflow-auto bg-surface"
           data-sidebar-gesture-ignore
           style={{ touchAction: 'pan-x pan-y' }}
         >
           <MarkdownPreview content={previewState.content} />
         </div>
       ) : previewState.kind === 'text' ? (
-        <div ref={scrollerRef} className="termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-background p-2 font-mono text-[11px] leading-relaxed text-foreground">
+        <div ref={scrollerRef} className="termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-surface p-2 font-mono text-[11px] leading-relaxed text-foreground">
           {lines.length > 0 ? (
             <div className="min-w-full">
               {lines.map((line, index) => {
@@ -1211,7 +1211,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           <button
             type="button"
             onClick={() => onLineRangeChange(null)}
-            className="inline-flex h-9 items-center rounded-full bg-background-subtle px-3 text-[12px] font-medium text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95"
+            className="inline-flex h-9 items-center rounded-full bg-surface-2 px-3 text-[12px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
           >
             {t('rightSidebar.clearSelection')}
           </button>
@@ -1671,7 +1671,7 @@ export function RightSidebar(
       return { text: t('rightSidebar.pushAheadCount', { count: ahead }), className: 'bg-accent/10 text-accent' };
     }
     if (behind > 0) {
-      return { text: t('rightSidebar.pushBehindCount', { count: behind }), className: 'bg-background-subtle text-[color:var(--diff-hunk-accent)]' };
+      return { text: t('rightSidebar.pushBehindCount', { count: behind }), className: 'bg-surface-2 text-[color:var(--diff-hunk-accent)]' };
     }
     return { text: t('rightSidebar.pushUpToDate'), className: 'bg-surface-2 text-muted-foreground' };
   }, [gitContext?.ahead, gitContext?.behind, gitContext?.upstream, t]);
@@ -2103,7 +2103,7 @@ export function RightSidebar(
           <button
             type="button"
             onClick={goToProjectRoot}
-            className={`inline-flex max-w-[9rem] shrink-0 items-center gap-1 rounded-full px-2 py-0.5 font-medium transition active:scale-95 ${fileTreeRoot === rootPath ? 'bg-surface-elevated text-foreground' : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
+            className={`inline-flex max-w-[9rem] shrink-0 items-center gap-1 rounded-full px-2 py-0.5 font-medium transition active:scale-95 ${fileTreeRoot === rootPath ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
             title={rootPath}
           >
             <RiHome size={10} className="shrink-0" />
@@ -2114,7 +2114,7 @@ export function RightSidebar(
             const isFile = entry.kind === 'file';
             const active = isFile ? selectedFilePath === path : fileTreeRoot === path;
             return (
-              <span key={path} className={`group inline-flex max-w-[12rem] shrink-0 items-center rounded-full transition ${active ? 'bg-primary/15 text-primary' : 'bg-background-subtle text-foreground hover:bg-surface-2'}`} title={path}>
+              <span key={path} className={`group inline-flex max-w-[12rem] shrink-0 items-center rounded-full transition ${active ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`} title={path}>
                 <button
                   type="button"
                   onClick={() => (isFile ? handleFileSelect(path) : setExplorerRoot(path))}
@@ -2286,28 +2286,28 @@ export function RightSidebar(
         {changedFiles.size > 0 && (
           <div className="mt-2 flex flex-wrap items-center gap-1 text-[10px] font-medium">
             {changedSummary.modified > 0 && (
-              <span className="rounded bg-background-subtle px-1.5 py-0.5 text-[color:var(--diff-hunk-accent)]">{changedSummary.modified}M</span>
+              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-hunk-accent)]">{changedSummary.modified}M</span>
             )}
             {changedSummary.added > 0 && (
-              <span className="rounded bg-background-subtle px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">+{changedSummary.added}</span>
+              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">+{changedSummary.added}</span>
             )}
             {changedSummary.deleted > 0 && (
-              <span className="rounded bg-background-subtle px-1.5 py-0.5 text-[color:var(--diff-delete-strong)]">-{changedSummary.deleted}</span>
+              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-delete-strong)]">-{changedSummary.deleted}</span>
             )}
             {changedSummary.renamed > 0 && (
-              <span className="rounded bg-background-subtle px-1.5 py-0.5 text-muted-foreground">{changedSummary.renamed}R</span>
+              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-muted-foreground">{changedSummary.renamed}R</span>
             )}
             {changedSummary.copied > 0 && (
-              <span className="rounded bg-background-subtle px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">{changedSummary.copied}C</span>
+              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">{changedSummary.copied}C</span>
             )}
             {changedSummary.untracked > 0 && (
-              <span className="rounded bg-background-subtle px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">{changedSummary.untracked}U</span>
+              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">{changedSummary.untracked}U</span>
             )}
             {changedSummary.conflicted > 0 && (
               <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">{changedSummary.conflicted}!</span>
             )}
             {changedSummary.other > 0 && (
-              <span className="rounded bg-background-subtle px-1.5 py-0.5 text-muted-foreground">{changedSummary.other}?</span>
+              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-muted-foreground">{changedSummary.other}?</span>
             )}
             {changedSummary.staged > 0 && (
               <span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">已暂存 {changedSummary.staged}</span>
@@ -2328,7 +2328,7 @@ export function RightSidebar(
                 type="button"
                 onClick={() => setConfirmGitAction({ kind: 'stash-all' })}
                 disabled={Boolean(runningGitAction)}
-                className="rounded-full bg-background-subtle px-2 py-0.5 font-medium text-foreground hover:bg-surface-2 disabled:opacity-50"
+                className="rounded-full bg-surface-2 px-2 py-0.5 font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
                 title={t('rightSidebar.stashAll')}
               >
                 {t('rightSidebar.stashAll')}
@@ -2381,7 +2381,7 @@ export function RightSidebar(
               <button
                 type="button"
                 onClick={() => setRecentReferences([])}
-                className="ml-auto shrink-0 rounded-full bg-background-subtle px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+                className="ml-auto shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
                 title={t('rightSidebar.clearRecent')}
               >
                 {t('common.clear')}
@@ -2396,7 +2396,7 @@ export function RightSidebar(
             desktop layout keeps a Files/Preview switch. */}
         {gitKnownUnavailable ? (
           !isMobile && !isWide ? (
-            <div className="mt-2 grid grid-cols-2 gap-0.5 rounded-md bg-background-subtle p-0.5">
+            <div className="mt-2 grid grid-cols-2 gap-0.5 rounded-md bg-surface-2 p-0.5">
               <button
                 type="button"
                 onClick={() => setRightTab('files')}
@@ -2424,7 +2424,7 @@ export function RightSidebar(
             </div>
           ) : null
         ) : (
-          <div className={`mt-2 grid gap-0.5 rounded-md bg-background-subtle p-0.5 ${isMobile ? 'grid-cols-3' : isWide ? 'grid-cols-3' : 'grid-cols-4'}`}>
+          <div className={`mt-2 grid gap-0.5 rounded-md bg-surface-2 p-0.5 ${isMobile ? 'grid-cols-3' : isWide ? 'grid-cols-3' : 'grid-cols-4'}`}>
             <button
               type="button"
               onClick={() => setRightTab('git')}
@@ -2500,7 +2500,7 @@ export function RightSidebar(
       </div>
 
       {/* Content */}
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden bg-surface">
         <Pane active={gitPaneActive}>
           <div className="h-full overflow-y-auto overscroll-contain px-2 py-2">
             {gitQuickActionsPanel ? (
@@ -2523,7 +2523,7 @@ export function RightSidebar(
               <div
                 ref={fileTreeScrollRef}
                 onScroll={handleFileTreeScroll}
-                className="w-[300px] min-w-[260px] shrink-0 overflow-y-auto overscroll-contain border-r border-border/15"
+                className="w-[300px] min-w-[260px] shrink-0 overflow-y-auto overscroll-contain border-r border-border/15 bg-surface"
               >
                 {fileExplorerNavigation}
                 <FileTree
@@ -2540,7 +2540,7 @@ export function RightSidebar(
                   onContentMatchSelect={handleContentMatchSelect}
                 />
               </div>
-              <div className="min-w-0 flex-1 overflow-hidden bg-background">
+              <div className="min-w-0 flex-1 overflow-hidden bg-surface">
                 <FilePreview
                   filePath={selectedFilePath}
                   onInsertReference={insertPathReference}
@@ -2557,7 +2557,7 @@ export function RightSidebar(
               <div
                 ref={fileTreeScrollRef}
                 onScroll={handleFileTreeScroll}
-                className={`h-full overflow-y-auto overscroll-contain ${mobilePreviewActive ? 'hidden' : 'block'}`}
+                className={`h-full overflow-y-auto overscroll-contain bg-surface ${mobilePreviewActive ? 'hidden' : 'block'}`}
                 aria-hidden={mobilePreviewActive}
               >
                 {fileExplorerNavigation}
@@ -2575,7 +2575,7 @@ export function RightSidebar(
                   onContentMatchSelect={handleContentMatchSelect}
                 />
               </div>
-              <div className={`h-full overflow-hidden bg-background ${mobilePreviewActive ? 'block' : 'hidden'}`} aria-hidden={!mobilePreviewActive}>
+              <div className={`h-full overflow-hidden bg-surface ${mobilePreviewActive ? 'block' : 'hidden'}`} aria-hidden={!mobilePreviewActive}>
                 <FilePreview
                   filePath={selectedFilePath}
                   onInsertReference={insertPathReference}
@@ -2638,7 +2638,7 @@ export function RightSidebar(
                           className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
                             selectedFilePath === null
                               ? 'bg-surface-elevated text-foreground'
-                              : 'bg-background-subtle text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+                              : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
                           }`}
                         >
                           {t('rightSidebar.allChanges')}
@@ -2666,7 +2666,7 @@ export function RightSidebar(
                       {t('rightSidebar.noChanges')}
                     </div>
                   ) : filteredChangedFiles.length === 0 ? (
-                    <div className="bg-background-subtle px-3 py-4 text-center text-xs text-muted-foreground">
+                    <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
                       {t('rightSidebar.noMatchingChanges')}
                     </div>
                   ) : (
@@ -2743,7 +2743,7 @@ export function RightSidebar(
                         className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
                           diffWrap
                             ? 'bg-primary/15 text-primary'
-                            : 'bg-background-subtle text-muted-foreground hover:text-foreground'
+                            : 'bg-surface-2 text-muted-foreground hover:text-foreground'
                         }`}
                       >
                         <span className="font-mono text-[12px] leading-none">Aa</span>
@@ -2764,7 +2764,7 @@ export function RightSidebar(
                     {t('rightSidebar.noChanges')}
                   </div>
                 ) : filteredChangedFiles.length === 0 ? (
-                  <div className="bg-background-subtle px-3 py-4 text-center text-xs text-muted-foreground">
+                  <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
                     {t('rightSidebar.noMatchingChanges')}
                   </div>
                 ) : (
@@ -2866,7 +2866,7 @@ export function RightSidebar(
                   value={confirmGitAction.phrase}
                   onChange={(event) => setConfirmGitAction({ ...confirmGitAction, phrase: event.target.value })}
                   placeholder={t('rightSidebar.confirmRestorePlaceholder')}
-                  className="mt-3 w-full rounded-xl border border-border/20 bg-background-subtle px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
+                  className="mt-3 w-full rounded-xl border border-border/20 bg-surface-2 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
                   autoFocus
                 />
               )}
@@ -2874,7 +2874,7 @@ export function RightSidebar(
                 <button
                   type="button"
                   onClick={() => setConfirmGitAction(null)}
-                  className="rounded-full bg-background-subtle px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+                  className="rounded-full bg-surface-2 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
                 >
                   {t('common.cancel')}
                 </button>

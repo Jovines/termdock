@@ -272,7 +272,7 @@ const FileTreeItem = memo(function FileTreeItem({
         {node.type === 'directory' && (onDirectoryRoot || onDirectoryPinToggle) && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${directoryActionsOpen ? 'bg-surface-elevated text-foreground opacity-100' : 'bg-background-subtle hover:bg-surface-2 hover:text-foreground'}`}
+            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${directoryActionsOpen ? 'bg-surface-elevated text-foreground opacity-100' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
@@ -281,7 +281,7 @@ const FileTreeItem = memo(function FileTreeItem({
         {canPinFile && (
           <span
             onClick={handleFilePinClick}
-            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${isPinned ? 'bg-primary/15 text-primary opacity-100' : 'text-muted-foreground bg-background-subtle hover:bg-surface-2 hover:text-foreground opacity-100 sm:opacity-0 sm:group-hover:opacity-100'}`}
+            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${isPinned ? 'bg-primary/15 text-primary opacity-100' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground opacity-100 sm:opacity-0 sm:group-hover:opacity-100'}`}
             title={isPinned ? t('fileTree.unpinFileTitle') : t('fileTree.pinFileTitle')}
           >
             {isPinned ? <RiPinOff size={12} /> : <RiPin size={12} />}
@@ -454,7 +454,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {node.type === 'directory' && onDirectoryPinToggle && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${directoryActionsOpen ? 'bg-surface-elevated text-foreground opacity-100' : 'bg-background-subtle hover:bg-surface-2 hover:text-foreground'}`}
+            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${directoryActionsOpen ? 'bg-surface-elevated text-foreground opacity-100' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
@@ -463,7 +463,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {canPinFile && (
           <span
             onClick={handleFilePinClick}
-            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${isPinned ? 'bg-primary/15 text-primary opacity-100' : 'text-muted-foreground bg-background-subtle hover:bg-surface-2 hover:text-foreground opacity-100 sm:opacity-0 sm:group-hover:opacity-100'}`}
+            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${isPinned ? 'bg-primary/15 text-primary opacity-100' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground opacity-100 sm:opacity-0 sm:group-hover:opacity-100'}`}
             title={isPinned ? t('fileTree.unpinFileTitle') : t('fileTree.pinFileTitle')}
           >
             {isPinned ? <RiPinOff size={12} /> : <RiPin size={12} />}
@@ -576,7 +576,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
           <span className="block truncate font-medium">{entry.name}</span>
           <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, entry.path)}</span>
         </span>
-        <span className="shrink-0 rounded-full bg-background-subtle px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.matches.length}</span>
+        <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.matches.length}</span>
         {onPathReference && (
           <span
             onClick={(event) => {
@@ -799,14 +799,14 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
         <div className="mb-2 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
           <span>{searchLoading ? t('fileTree.searchingWithCount', { count: foundCount }) : t('fileTree.contentMatchesCount', { count: foundCount })}</span>
           {searchMeta && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-background-subtle px-2 py-0.5 uppercase tracking-[0.12em]">
+            <span className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 uppercase tracking-[0.12em]">
               {searchLoading && <RiLoader size={9} className="animate-spin" />}
               {searchMeta.engine}{searchMeta.limited ? ' · limited' : ''}
             </span>
           )}
         </div>
         {searchError ? (
-          <div className="mx-1 mt-3 rounded-xl border border-border/15 bg-background-subtle px-4 py-5 text-center text-sm text-muted-foreground">
+          <div className="mx-1 mt-3 rounded-xl border border-border/15 bg-surface-2 px-4 py-5 text-center text-sm text-muted-foreground">
             {t('fileTree.contentSearchNeedsRipgrep')}
             <div className="mt-1 break-words text-[11px] text-muted-foreground/70">{searchError}</div>
           </div>
@@ -815,7 +815,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
             <RiLoader size={20} className="animate-spin text-muted-foreground" />
           </div>
         ) : contentEntries.length === 0 ? (
-          <div className="mx-1 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
+          <div className="mx-1 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
             {t('fileTree.noContentMatches')}
           </div>
         ) : (
@@ -841,7 +841,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
                 <button
                   type="button"
                   onClick={() => setVisibleSearchCount((count) => Math.min(count + SEARCH_LOAD_MORE_STEP_CONTENT, contentEntries.length))}
-                  className="rounded-full bg-background-subtle px-3 py-1 hover:bg-surface-2 hover:text-foreground"
+                  className="rounded-full bg-surface-2 px-3 py-1 hover:bg-surface-elevated hover:text-foreground"
                 >
                   {t('fileTree.loadMoreSearchResults', { shown: displayedEntries.length, total: contentEntries.length })}
                 </button>
@@ -866,7 +866,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
         <div className="mb-2 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
           <span>{searchLoading ? t('fileTree.searchingWithCount', { count: foundCount }) : t('fileTree.searchResults', { count: foundCount })}</span>
           {searchMeta && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-background-subtle px-2 py-0.5 uppercase tracking-[0.12em]">
+            <span className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 uppercase tracking-[0.12em]">
               {searchLoading && <RiLoader size={9} className="animate-spin" />}
               {searchMeta.engine}{searchMeta.limited ? ' · limited' : ''}
             </span>
@@ -879,7 +879,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
         ) : searchError ? (
           <div className="px-4 py-4 text-sm text-destructive">{searchError}</div>
         ) : searchEntries.length === 0 ? (
-          <div className="mx-1 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
+          <div className="mx-1 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
             {t('fileTree.noMatchingFiles')}
           </div>
         ) : (
@@ -908,7 +908,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
                 <button
                   type="button"
                   onClick={() => setVisibleSearchCount((count) => Math.min(count + SEARCH_LOAD_MORE_STEP, searchEntries.length))}
-                  className="rounded-full bg-background-subtle px-3 py-1 hover:bg-surface-2 hover:text-foreground"
+                  className="rounded-full bg-surface-2 px-3 py-1 hover:bg-surface-elevated hover:text-foreground"
                 >
                   {t('fileTree.loadMoreSearchResults', { shown: displayedSearchEntries.length, total: searchEntries.length })}
                 </button>
@@ -942,7 +942,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
 
   if (!visibleRootEntries || visibleRootEntries.length === 0) {
     return (
-      <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
+      <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
         {t('fileTree.noMatchingFiles')}
       </div>
     );

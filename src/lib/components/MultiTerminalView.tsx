@@ -6,11 +6,16 @@ import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
 import { closeTerminal, killTmuxSession } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
-import type { TerminalRendererMode } from '../terminal/renderer';
+import { getDefaultTerminalSettings, type TerminalSettings } from '../terminal/settings';
 import type { TermdockColorTheme } from '../terminal/theme';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { deriveGroupedOrder } from '../terminal/display';
+import {
+  getEffectiveRendererModeForSession,
+  normalizeRecentSessionIds,
+  WEBGL_SESSION_BUDGET,
+} from '../terminal/webglSessionBudget';
 import { createDebugLogger } from '../utils/debug';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
 
@@ -223,10 +228,13 @@ function getSwipeEventPointerType(event: unknown): string {
   return 'unknown';
 }
 
+function stringArrayEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
+}
+
 interface MultiTerminalViewProps {
-  fontFamily?: string;
-  fontSize?: number;
-  rendererMode?: TerminalRendererMode;
+  terminalSettings?: TerminalSettings;
   colorTheme?: TermdockColorTheme;
   toolbarPresets?: ToolbarPresetDefinition[];
   showDebug?: boolean;
@@ -263,9 +271,7 @@ function generateTmuxSessionName(seed?: string): string {
 }
 
 export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
-  fontFamily = 'var(--font-mono)',
-  fontSize = 13,
-  rendererMode = 'auto',
+  terminalSettings = getDefaultTerminalSettings(),
   colorTheme = 'dark',
   toolbarPresets = [],
   showDebug,
@@ -294,6 +300,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const persistedActiveIdRef = useRef<string | null>(null);
   const isLoadingRef = useRef(false);
   const isRestoringRef = useRef(true);
+  const [recentWebglSessionIds, setRecentWebglSessionIds] = useState<string[]>([]);
   const handleNewSessionRef = useRef<((options?: NewSessionEventDetail) => Promise<void>) | null>(null);
   const lastDuplicateMappingSnapshotRef = useRef('');
 
@@ -415,6 +422,40 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [arranged, activeSessionId]);
 
   activeSessionIndexRef.current = activeSessionIndex;
+
+  const arrangedSessionIds = useMemo(() => arranged.map((session) => session.id), [arranged]);
+  const adjacentSessionIds = useMemo(() => {
+    if (arranged.length <= 1) {
+      return [];
+    }
+    return [
+      arranged[activeSessionIndex - 1]?.id ?? null,
+      arranged[activeSessionIndex + 1]?.id ?? null,
+      arranged[activeSessionIndex - 2]?.id ?? null,
+      arranged[activeSessionIndex + 2]?.id ?? null,
+    ].filter((sessionId): sessionId is string => !!sessionId);
+  }, [arranged, activeSessionIndex]);
+  const webglSessionIds = useMemo(
+    () => normalizeRecentSessionIds(
+      recentWebglSessionIds,
+      activeSessionId,
+      arrangedSessionIds,
+      adjacentSessionIds,
+      WEBGL_SESSION_BUDGET,
+    ),
+    [recentWebglSessionIds, activeSessionId, arrangedSessionIds, adjacentSessionIds],
+  );
+
+  useEffect(() => {
+    setRecentWebglSessionIds((current) => (
+      stringArrayEqual(current, webglSessionIds) ? current : webglSessionIds
+    ));
+  }, [webglSessionIds]);
+
+  const webglSessionIdSet = useMemo(
+    () => new Set(webglSessionIds),
+    [webglSessionIds],
+  );
 
   const clearTouchSwipeReleaseTimer = useCallback(() => {
     if (!touchSwipeReleaseTimerRef.current) return;
@@ -1229,6 +1270,15 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         >
           {arranged.map((session) => {
             const isActive = session.id === activeSessionId;
+            const effectiveRendererMode = getEffectiveRendererModeForSession(
+              terminalSettings.rendererMode,
+              session.id,
+              webglSessionIdSet,
+            );
+            const effectiveTerminalSettings = {
+              ...terminalSettings,
+              rendererMode: effectiveRendererMode,
+            };
             return (
               <SwiperSlide
                 key={session.id}
@@ -1238,9 +1288,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                   sessionId={session.id}
                   mode={session.mode}
                   tmuxSessionName={session.tmuxSessionName}
-                  fontFamily={fontFamily}
-                  fontSize={fontSize}
-                  rendererMode={rendererMode}
+                  terminalSettings={effectiveTerminalSettings}
                   colorTheme={colorTheme}
                   toolbarPresets={toolbarPresets}
                   isActive={isActive}

@@ -13,10 +13,9 @@ import { buildDesktopToolbarPresetOptions, buildToolbarPresetOptions, decodeTool
 import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
-import type { TerminalRendererMode } from '../../terminal/renderer';
+import { getDefaultTerminalSettings, type TerminalSettings } from '../../terminal/settings';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 
-const TERMINAL_FONT_SIZE = 10;
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
 const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'termdock:mobile-keyboard-preset-mode';
@@ -39,9 +38,7 @@ interface TerminalViewProps {
   sessionId?: string;
   mode?: TerminalMode;
   tmuxSessionName?: string | null;
-  fontFamily?: string;
-  fontSize?: number;
-  rendererMode?: TerminalRendererMode;
+  terminalSettings?: TerminalSettings;
   colorTheme?: TermdockColorTheme;
   toolbarPresets?: ToolbarPresetDefinition[];
   isActive?: boolean;
@@ -56,9 +53,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   sessionId: initialSessionId,
   mode: expectedMode,
   tmuxSessionName: expectedTmuxSessionName = null,
-  fontFamily = 'var(--font-mono)',
-  fontSize: initialFontSize = TERMINAL_FONT_SIZE,
-  rendererMode = 'auto',
+  terminalSettings = getDefaultTerminalSettings(),
   colorTheme = 'dark',
   toolbarPresets: configuredToolbarPresets = [],
   isActive = true,
@@ -69,15 +64,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   onStatusChange,
 }) => {
   // Use external fontSize from props, with local override support for pinch-to-zoom
-  const [fontSize, setFontSize] = React.useState(initialFontSize);
+  const [fontSize, setFontSize] = React.useState(terminalSettings.fontSize);
   const terminal = React.useMemo(() => createTermdockAPI(), []);
   const debugSession = React.useMemo(() => createDebugLogger('session'), []);
   const debugKeyboard = React.useMemo(() => createDebugLogger('keyboard'), []);
 
   // Sync with external fontSize changes while allowing local pinch-to-zoom overrides
   React.useEffect(() => {
-    setFontSize(initialFontSize);
-  }, [initialFontSize]);
+    setFontSize(terminalSettings.fontSize);
+  }, [terminalSettings.fontSize]);
+
+  const effectiveTerminalSettings = React.useMemo(() => ({
+    ...terminalSettings,
+    fontSize,
+  }), [terminalSettings, fontSize]);
 
   const [sessionId] = React.useState(initialSessionId || uuidv4());
   const [isMobile, setIsMobile] = React.useState(false);
@@ -188,6 +188,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const wasActiveRef = React.useRef(false);
   React.useEffect(() => {
     if (!isActive) {
+      terminalControllerRef.current?.blur();
       wasActiveRef.current = false;
       return;
     }
@@ -1672,10 +1673,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 handleViewportInput('\t', { skipModifierTransform: true });
               } : undefined}
               onInputFocusChange={handleInputFocusChange}
-              rendererMode={rendererMode}
+              terminalSettings={effectiveTerminalSettings}
               theme={xtermTheme}
-              fontFamily={fontFamily}
-              fontSize={fontSize}
               enableTouchScroll={isMobile}
               autoFocus={!isMobile}
             />

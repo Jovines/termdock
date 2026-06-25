@@ -22,8 +22,7 @@ import {
   Sun as RiSunLine,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
-import { useFontSize } from './lib/hooks/useFontSize';
-import { useTerminalRenderer } from './lib/hooks/useTerminalRenderer';
+import { useTerminalSettings } from './lib/hooks/useTerminalSettings';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
@@ -399,8 +398,9 @@ function App() {
   const [showBackGuardHint, setShowBackGuardHint] = React.useState(false);
   const backGuardHintTimerRef = React.useRef<number | null>(null);
   const [debugInfo, setDebugInfo] = React.useState<Record<string, any>>({});
-  const { fontSize, setFontSize } = useFontSize();
-  const { rendererMode, setRendererMode } = useTerminalRenderer();
+  const { terminalSettings, updateTerminalSettings } = useTerminalSettings();
+  const fontSize = terminalSettings.fontSize;
+  const rendererMode = terminalSettings.rendererMode;
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
@@ -1883,8 +1883,7 @@ function App() {
           <div className="min-h-0 flex-1 flex overflow-hidden bg-background">
             <div className="min-h-0 flex-1 overflow-hidden">
               <MultiTerminalView
-                fontSize={fontSize}
-                rendererMode={rendererMode}
+                terminalSettings={terminalSettings}
                 colorTheme={colorTheme}
                 toolbarPresets={toolbarPresets}
                 showDebug={showDebug}
@@ -1943,7 +1942,7 @@ function App() {
                   <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.font')}</span>
                   <button
                     type="button"
-                    onClick={() => setFontSize(Math.max(8, fontSize - 1))}
+                    onClick={() => updateTerminalSettings({ fontSize: Math.max(8, fontSize - 1) })}
                     className="h-8 w-8 shrink-0 rounded-md bg-surface text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
                   >
                     −
@@ -1953,13 +1952,13 @@ function App() {
                     min="8"
                     max="32"
                     value={fontSize}
-                    onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
+                    onChange={(e) => updateTerminalSettings({ fontSize: parseInt(e.target.value, 10) })}
                     className="min-w-0 flex-1"
                     aria-label={t('settings.font')}
                   />
                   <button
                     type="button"
-                    onClick={() => setFontSize(Math.min(32, fontSize + 1))}
+                    onClick={() => updateTerminalSettings({ fontSize: Math.min(32, fontSize + 1) })}
                     className="h-8 w-8 shrink-0 rounded-md bg-surface text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
                   >
                     +
@@ -1978,7 +1977,7 @@ function App() {
                           <button
                             key={mode}
                             type="button"
-                            onClick={() => setRendererMode(mode)}
+                            onClick={() => updateTerminalSettings({ rendererMode: mode })}
                             className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition ${
                               selected ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:bg-surface-elevated'
                             }`}

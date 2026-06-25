@@ -387,7 +387,7 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
           className={embedded ? 'overflow-hidden bg-surface' : 'mt-3 overflow-hidden border border-border/20 bg-surface'}
         >
           {showFileHeader && (
-            <div className="flex items-center justify-between gap-3 border-b border-border/15 bg-background-subtle px-2 py-1.5">
+            <div className="flex items-center justify-between gap-3 border-b border-border/15 bg-surface-2 px-2 py-1.5">
               <div className="min-w-0" title={file.newPath || file.oldPath}>
                 <div className="truncate font-mono text-[11px] text-foreground">{pathParts.name}</div>
                 {pathParts.dir && <div className="truncate font-mono text-[10px] text-muted-foreground/70">{pathParts.dir}</div>}
@@ -425,7 +425,7 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
             `termdock-diff-wrap` flips long lines to wrap mode instead.
           */}
           {file.hunks.length === 0 ? (
-            <div className="bg-background-subtle px-3 py-5 text-center text-xs text-muted-foreground">
+            <div className="bg-surface-2 px-3 py-5 text-center text-xs text-muted-foreground">
               <RiGitCompare size={18} className="mx-auto mb-2 text-muted-foreground/80" />
               {t('diffViewer.binaryOrEmpty')}
             </div>
@@ -473,12 +473,12 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
 
   if (diffLoading) {
     return embedded ? (
-      <div className="flex items-center justify-center gap-2 bg-background-subtle py-6 text-xs text-muted-foreground">
+      <div className="flex items-center justify-center gap-2 bg-surface-2 py-6 text-xs text-muted-foreground">
         <RiLoader size={18} className="animate-spin" />
         <span>{t('diffViewer.loading')}</span>
       </div>
     ) : (
-      <div className="mx-3 mt-3 flex items-center justify-center gap-2 border border-border/15 bg-background-subtle py-8 text-sm text-muted-foreground">
+      <div className="mx-3 mt-3 flex items-center justify-center gap-2 border border-border/15 bg-surface-2 py-8 text-sm text-muted-foreground">
         <RiLoader size={20} className="animate-spin" />
         <span>{t('diffViewer.loading')}</span>
       </div>
@@ -511,7 +511,7 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
 
   if (imagePreview) {
     const body = (
-      <div className="bg-background-subtle p-3">
+      <div className="bg-surface p-3">
         <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
           <span>{t('rightSidebar.imagePreviewHint')}</span>
           {imagePreview.size !== null && <span>{imagePreview.size.toLocaleString()} bytes</span>}
@@ -560,12 +560,12 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
 
   if (files.length === 0) {
     return embedded ? (
-      <div className="bg-background-subtle px-3 py-5 text-center text-xs text-muted-foreground">
+      <div className="bg-surface-2 px-3 py-5 text-center text-xs text-muted-foreground">
         <RiGitCompare size={20} className="mx-auto mb-2 text-muted-foreground/80" />
         {filePath ? t('diffViewer.noFileChanges') : t('diffViewer.noUnstagedChanges')}
       </div>
     ) : (
-      <div className="mx-3 mt-3 border border-border/15 bg-background-subtle px-4 py-8 text-center text-sm text-muted-foreground">
+      <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
         <RiGitCompare size={24} className="mx-auto mb-2 text-muted-foreground/80" />
         {filePath ? t('diffViewer.noFileChanges') : t('diffViewer.noUnstagedChanges')}
       </div>
