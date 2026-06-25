@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
 import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
-import { FLEXOKI_DARK } from '../../terminal';
+import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
 import { probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
 import { computeTerminalLogicalFocus } from '../../terminal/focus';
@@ -42,6 +42,7 @@ interface TerminalViewProps {
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
+  colorTheme?: TermdockColorTheme;
   toolbarPresets?: ToolbarPresetDefinition[];
   isActive?: boolean;
   focusRequestToken?: number;
@@ -58,6 +59,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   fontFamily = 'var(--font-mono)',
   fontSize: initialFontSize = TERMINAL_FONT_SIZE,
   rendererMode = 'auto',
+  colorTheme = 'dark',
   toolbarPresets: configuredToolbarPresets = [],
   isActive = true,
   focusRequestToken = 0,
@@ -1534,7 +1536,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     [isMobile, toolbarPresets],
   );
 
-  const xtermTheme = FLEXOKI_DARK;
+  const xtermTheme = React.useMemo(() => getTerminalTheme(colorTheme), [colorTheme]);
 
   const terminalSessionKey = React.useMemo(() => {
     // 故意只用前端 sessionId（每个 tab 一个，整个生命周期不变），

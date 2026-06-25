@@ -18,6 +18,8 @@ import {
   Bell as RiBellLine,
   ChevronRight as RiChevronRightLine,
   Loader2 as RiLoaderLine,
+  Moon as RiMoonLine,
+  Sun as RiSunLine,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { useFontSize } from './lib/hooks/useFontSize';
@@ -52,6 +54,7 @@ import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay } from './lib/
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import { AgentRulesSettings } from './lib/components/settings/AgentRulesSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
+import type { TermdockColorTheme } from './lib/terminal/theme';
 
 // Cache keys for app-level lazy data fetched from the server. 缓存只是"上次看到"的
 // 快照，每次启动还是会发 HTTP 校准；命中时让 UI 不再闪烁默认值 → 自定义值。
@@ -59,6 +62,11 @@ const AGENT_RULES_CACHE_KEY = 'termdock-agent-rules-cache';
 const PROGRAM_RULES_CACHE_KEY = 'termdock-program-rules-cache';
 const TOOLBAR_PRESETS_CACHE_KEY = 'termdock-toolbar-presets-cache';
 const SETTINGS_CACHE_KEY = 'termdock-settings-cache';
+const COLOR_THEME_CACHE_KEY = 'termdock-color-theme';
+
+function isTermdockColorTheme(v: unknown): v is TermdockColorTheme {
+  return v === 'dark' || v === 'light';
+}
 
 function isAgentRulesArray(v: unknown): v is AgentProgramConfig[] {
   return Array.isArray(v) && v.every((entry) => {
@@ -346,6 +354,9 @@ function App() {
   useViewportHeight();
 
   const [showDebug, setShowDebug] = React.useState(false);
+  const [colorTheme, setColorTheme] = React.useState<TermdockColorTheme>(() =>
+    readCache(COLOR_THEME_CACHE_KEY, isTermdockColorTheme) ?? 'dark',
+  );
   // Hydrate settings from cache so the toggles show user's real choice on cold
   // start instead of flashing the defaults until the HTTP fetch resolves.
   const cachedSettings = React.useRef<SettingsCacheDoc | null>(readCache(SETTINGS_CACHE_KEY, isSettingsCacheDoc)).current;
@@ -381,6 +392,11 @@ function App() {
       ));
     });
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = colorTheme;
+    writeCache(COLOR_THEME_CACHE_KEY, colorTheme);
+  }, [colorTheme]);
 
   // Per-session xterm scrollback + tab metadata cache 已撤回：高频写 + 多种边界
   // （clearBuffer 写空、setTerminalSession reset、auto-recreate 路径等）导致缓存
@@ -1832,6 +1848,7 @@ function App() {
               <MultiTerminalView
                 fontSize={fontSize}
                 rendererMode={rendererMode}
+                colorTheme={colorTheme}
                 toolbarPresets={toolbarPresets}
                 showDebug={showDebug}
                 defaultSessionMode={newSessionMode}
@@ -1848,7 +1865,7 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-drawer-backdrop bg-[rgba(0,0,0,0.55)] backdrop-blur-sm animate-fade-in cursor-default"
+            className="fixed inset-0 z-drawer-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm animate-fade-in cursor-default"
             onClick={handleCloseSettings}
             aria-label="Close settings"
           />
@@ -1859,7 +1876,7 @@ function App() {
             className="pointer-events-none fixed inset-0 z-drawer-panel flex items-stretch justify-center p-0 animate-fade-in sm:p-4 md:p-6"
           >
           <div
-            className="pointer-events-auto flex h-full w-full max-w-5xl flex-col overflow-hidden bg-surface shadow-[0_28px_90px_rgba(0,0,0,0.28),0_14px_34px_rgba(0,0,0,0.18)] sm:max-h-[calc(100dvh-3rem)] sm:rounded-3xl sm:border sm:border-border/15"
+            className="pointer-events-auto flex h-full w-full max-w-5xl flex-col overflow-hidden bg-surface shadow-[0_28px_90px_var(--app-shadow-strong),0_14px_34px_var(--app-shadow-soft)] sm:max-h-[calc(100dvh-3rem)] sm:rounded-3xl sm:border sm:border-border/15"
             style={{ paddingTop: safeTopInset, paddingBottom: safeBottomInset }}
           >
             {/* Header — compact single row */}
@@ -1930,6 +1947,34 @@ function App() {
                             }`}
                           >
                             {mode === 'auto' ? t('settings.auto') : mode === 'webgl' ? t('settings.webgl') : t('settings.canvas')}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Theme */}
+                <div className="space-y-1.5 rounded-xl bg-surface-2 px-2.5 py-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[12px] font-medium text-foreground/90 w-14 shrink-0">{t('settings.theme')}</span>
+                    <div className="flex flex-1 items-center gap-1 rounded-md bg-surface p-0.5">
+                      {([
+                        ['dark', RiMoonLine, t('settings.darkTheme')],
+                        ['light', RiSunLine, t('settings.lightTheme')],
+                      ] as const).map(([theme, Icon, label]) => {
+                        const selected = colorTheme === theme;
+                        return (
+                          <button
+                            key={theme}
+                            type="button"
+                            onClick={() => setColorTheme(theme)}
+                            className={`flex flex-1 items-center justify-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition ${
+                              selected ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:bg-surface-elevated'
+                            }`}
+                          >
+                            <Icon size={12} />
+                            <span>{label}</span>
                           </button>
                         );
                       })}
@@ -2398,7 +2443,7 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-menu-backdrop bg-[rgba(0,0,0,0.4)] backdrop-blur-sm cursor-default animate-fade-in"
+            className="fixed inset-0 z-menu-backdrop bg-[var(--app-backdrop-soft)] backdrop-blur-sm cursor-default animate-fade-in"
             onClick={() => {
               setSidebarCloseChoiceSessionId(null);
               setTmuxKillError(null);
@@ -2406,7 +2451,7 @@ function App() {
             aria-label="Close close-session chooser"
           />
           <div
-            className="fixed inset-x-3 bottom-6 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_rgba(0,0,0,0.18)] animate-fade-in sm:bottom-auto sm:top-[15%]"
+            className="fixed inset-x-3 bottom-6 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in sm:bottom-auto sm:top-[15%]"
             style={{ paddingBottom: safeBottomInset }}
           >
             <div className="border-b border-border/15 px-4 py-3">
@@ -2491,12 +2536,12 @@ function App() {
           <>
             <button
               type="button"
-              className="fixed inset-0 z-menu-backdrop bg-[rgba(0,0,0,0.4)] backdrop-blur-sm cursor-default animate-fade-in"
+              className="fixed inset-0 z-menu-backdrop bg-[var(--app-backdrop-soft)] backdrop-blur-sm cursor-default animate-fade-in"
               onClick={() => setTabMenuSessionId(null)}
               aria-label="Close menu"
             />
             <div
-              className="fixed inset-x-3 bottom-6 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_rgba(0,0,0,0.18)] animate-fade-in sm:bottom-auto sm:top-[15%]"
+              className="fixed inset-x-3 bottom-6 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in sm:bottom-auto sm:top-[15%]"
               style={{ paddingBottom: safeBottomInset }}
             >
               <div className="border-b border-border/15 px-4 py-3">
@@ -2592,10 +2637,10 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-modal-backdrop bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+            className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm cursor-default"
             onClick={() => setIsNotificationsOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)] sm:top-[10%] sm:bottom-auto sm:max-h-[80vh]">
+          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:top-[10%] sm:bottom-auto sm:max-h-[80vh]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
                 <div className="ui-kicker">{t('settings.notifications')}</div>
@@ -2739,10 +2784,10 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-modal-backdrop bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+            className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm cursor-default"
             onClick={() => setIsToolbarPresetsOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
+          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
                 <div className="ui-kicker">{t('settings.mobileKeyboard')}</div>
@@ -2800,10 +2845,10 @@ function App() {
         <>
           <button
             type="button"
-            className="fixed inset-0 z-modal-backdrop bg-[rgba(0,0,0,0.5)] backdrop-blur-sm cursor-default"
+            className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm cursor-default"
             onClick={() => setIsAgentRulesOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_rgba(0,0,0,0.14),0_14px_32px_rgba(0,0,0,0.10)]">
+          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
                 <div className="ui-kicker">{t('settings.aiAgentDetection')}</div>
@@ -3108,10 +3153,10 @@ function App() {
         <button
           type="button"
           onClick={handleContinueAfterBackGuard}
-          className="fixed inset-0 z-toast flex cursor-default items-center justify-center bg-black/20 px-6 text-left backdrop-blur-[1px]"
+          className="fixed inset-0 z-toast flex cursor-default items-center justify-center bg-[var(--app-backdrop-soft)] px-6 text-left backdrop-blur-[1px]"
           aria-label={locale === 'zh' ? '继续使用 Termdock' : 'Continue using Termdock'}
         >
-          <div className="max-w-[18rem] rounded-2xl border border-border/15 bg-surface/95 px-5 py-4 text-center shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur animate-fade-in">
+          <div className="max-w-[18rem] rounded-2xl border border-border/15 bg-surface/95 px-5 py-4 text-center shadow-[0_18px_50px_var(--app-shadow-strong)] backdrop-blur animate-fade-in">
             <div className="text-[14px] font-semibold text-foreground">
               {locale === 'zh' ? '建议使用 Home' : 'Use Home instead'}
             </div>

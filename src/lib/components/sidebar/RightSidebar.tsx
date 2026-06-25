@@ -1164,13 +1164,13 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
                     // short file doesn't reserve room for thousands of lines and
                     // leave a big gap between the edge and the numbers.
                     style={{ gridTemplateColumns: `${gutterWidthCh}ch 1fr` }}
-                    className={`grid w-full gap-2 rounded pr-1 text-left transition active:scale-[0.995] ${
+                    className={`grid w-max min-w-full gap-2 rounded pr-1 text-left transition active:scale-[0.995] ${
                       isSelected ? 'bg-primary/15 text-foreground' : 'hover:bg-surface-2'
                     }`}
                     title={`Tap to reference ${reference}:${lineNumber}`}
                   >
                     <span className={`select-none text-right text-[10px] ${isSelected ? 'text-primary' : 'text-muted-foreground/55'}`}>{lineNumber}</span>
-                    <span className="min-w-0 whitespace-pre-wrap break-words">{highlighted ?? (line || ' ')}</span>
+                    <span className="whitespace-pre">{highlighted ?? (line || ' ')}</span>
                   </button>
                 );
               })}

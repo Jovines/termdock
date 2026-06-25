@@ -9,6 +9,15 @@ import {
   type AuthStatus,
 } from './lib/terminal/api';
 
+try {
+  const storedTheme = JSON.parse(window.localStorage.getItem('termdock-color-theme') || 'null') as unknown;
+  if (storedTheme === 'dark' || storedTheme === 'light') {
+    document.documentElement.dataset.theme = storedTheme;
+  }
+} catch {
+  // Ignore corrupt storage; App will fall back to the default theme.
+}
+
 // Top-level gate that decides whether to show the LoginScreen or the real
 // App. Listens to `auth:unauthorized` from the global fetch interceptor so
 // that any 401 (e.g. session expired mid-use) drops back to login.

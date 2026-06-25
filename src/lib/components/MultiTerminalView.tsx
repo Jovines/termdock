@@ -7,6 +7,7 @@ import { useSessionPersistence, type PersistedSession } from '../hooks/useSessio
 import { closeTerminal, killTmuxSession } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import type { TerminalRendererMode } from '../terminal/renderer';
+import type { TermdockColorTheme } from '../terminal/theme';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { deriveGroupedOrder } from '../terminal/display';
@@ -226,6 +227,7 @@ interface MultiTerminalViewProps {
   fontFamily?: string;
   fontSize?: number;
   rendererMode?: TerminalRendererMode;
+  colorTheme?: TermdockColorTheme;
   toolbarPresets?: ToolbarPresetDefinition[];
   showDebug?: boolean;
   defaultSessionMode?: TerminalMode;
@@ -264,6 +266,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   fontFamily = 'var(--font-mono)',
   fontSize = 13,
   rendererMode = 'auto',
+  colorTheme = 'dark',
   toolbarPresets = [],
   showDebug,
   defaultSessionMode = 'shell',
@@ -1238,6 +1241,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                   fontFamily={fontFamily}
                   fontSize={fontSize}
                   rendererMode={rendererMode}
+                  colorTheme={colorTheme}
                   toolbarPresets={toolbarPresets}
                   isActive={isActive}
                   focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}

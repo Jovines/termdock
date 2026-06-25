@@ -22,6 +22,16 @@
   --destructive-foreground: #FFFCF0;
   --ring: #4385BE;
   --hover: #E6E4D9;
+  --primary-rgb: 102 128 11;
+  --app-backdrop: rgba(0, 0, 0, 0.55);
+  --app-backdrop-soft: rgba(0, 0, 0, 0.4);
+  --app-shadow-strong: rgba(0, 0, 0, 0.28);
+  --app-shadow-soft: rgba(0, 0, 0, 0.18);
+  --diff-accent-rgb: 67, 133, 190;
+  --diff-insert-rgb: 102, 128, 11;
+  --diff-delete-rgb: 175, 48, 41;
+  --diff-border-rgb: 64, 62, 60;
+  --skeleton-base-rgb: 255, 255, 255;
   /*
    * z-index 单一来源 —— 所有「全屏浮层」(position: fixed 的遮罩 / 抽屉 / 弹窗 /
    * 浮窗) 的层级只在这里定义，业务组件一律用 Tailwind 语义类 (z-modal-panel
@@ -90,6 +100,43 @@
     'Noto Sans Mono CJK SC',
     Roboto, 'Helvetica Neue', Arial,
     sans-serif;
+}
+
+html {
+  color-scheme: dark;
+}
+
+html[data-theme='light'] {
+  color-scheme: light;
+  --background: #F2F0E5;
+  --foreground: #100F0F;
+  --surface: #FFFCF0;
+  --surface-2: #F7F4EA;
+  --surface-elevated: #FFFFFF;
+  --background-subtle: #E6E4D9;
+  --muted: #B7B5AC;
+  --muted-foreground: #6F6E69;
+  --border: #CECDC3;
+  --border-strong: #ADACA5;
+  --input: #FFFCF0;
+  --primary: #66800B;
+  --primary-foreground: #FFFCF0;
+  --accent: #205EA6;
+  --accent-foreground: #FFFCF0;
+  --destructive: #AF3029;
+  --destructive-foreground: #FFFCF0;
+  --ring: #205EA6;
+  --hover: #282726;
+  --primary-rgb: 102 128 11;
+  --app-backdrop: rgba(16, 15, 15, 0.28);
+  --app-backdrop-soft: rgba(16, 15, 15, 0.18);
+  --app-shadow-strong: rgba(16, 15, 15, 0.16);
+  --app-shadow-soft: rgba(16, 15, 15, 0.10);
+  --diff-accent-rgb: 32, 94, 166;
+  --diff-insert-rgb: 102, 128, 11;
+  --diff-delete-rgb: 175, 48, 41;
+  --diff-border-rgb: 206, 205, 195;
+  --skeleton-base-rgb: 16, 15, 15;
 }
 
 body {
@@ -459,7 +506,7 @@ body {
     height: var(--app-base-vh, 100lvh);
     width: 100vw;
     touch-action: pan-y;
-    background-color: #1C1B1A !important;
+    background-color: var(--background) !important;
     color: var(--foreground) !important;
   }
 
@@ -639,23 +686,23 @@ div.swiper {
   --diff-background-color: transparent;
   --diff-text-color: var(--foreground);
   --diff-font-family: var(--font-mono);
-  --diff-selection-background-color: rgba(67, 133, 190, 0.08);
+  --diff-selection-background-color: rgba(var(--diff-accent-rgb), 0.08);
   --diff-selection-text-color: var(--foreground);
-  --diff-gutter-insert-background-color: rgba(102, 128, 11, 0.14);
+  --diff-gutter-insert-background-color: rgba(var(--diff-insert-rgb), 0.14);
   --diff-gutter-insert-text-color: var(--muted-foreground);
-  --diff-gutter-delete-background-color: rgba(175, 48, 41, 0.14);
+  --diff-gutter-delete-background-color: rgba(var(--diff-delete-rgb), 0.14);
   --diff-gutter-delete-text-color: var(--muted-foreground);
-  --diff-gutter-selected-background-color: rgba(67, 133, 190, 0.045);
+  --diff-gutter-selected-background-color: rgba(var(--diff-accent-rgb), 0.045);
   --diff-gutter-selected-text-color: var(--foreground);
-  --diff-code-insert-background-color: rgba(102, 128, 11, 0.18);
+  --diff-code-insert-background-color: rgba(var(--diff-insert-rgb), 0.18);
   --diff-code-insert-text-color: var(--foreground);
-  --diff-code-delete-background-color: rgba(175, 48, 41, 0.18);
+  --diff-code-delete-background-color: rgba(var(--diff-delete-rgb), 0.18);
   --diff-code-delete-text-color: var(--foreground);
-  --diff-code-insert-edit-background-color: rgba(102, 128, 11, 0.30);
+  --diff-code-insert-edit-background-color: rgba(var(--diff-insert-rgb), 0.30);
   --diff-code-insert-edit-text-color: var(--foreground);
-  --diff-code-delete-edit-background-color: rgba(175, 48, 41, 0.30);
+  --diff-code-delete-edit-background-color: rgba(var(--diff-delete-rgb), 0.30);
   --diff-code-delete-edit-text-color: var(--foreground);
-  --diff-code-selected-background-color: rgba(67, 133, 190, 0.045);
+  --diff-code-selected-background-color: rgba(var(--diff-accent-rgb), 0.045);
   --diff-code-selected-text-color: var(--foreground);
 }
 
@@ -676,7 +723,7 @@ div.swiper {
   user-select: none;
   opacity: 0.58;
   font-size: 10px;
-  border-right: 1px solid rgba(64, 62, 60, 0.32);
+  border-right: 1px solid rgba(var(--diff-border-rgb), 0.32);
 }
 
 .diff-code {
@@ -707,9 +754,9 @@ div.swiper {
 .diff-decoration-content {
   padding: 4px 10px;
   color: var(--diff-hunk-accent);
-  background: rgba(67, 133, 190, 0.035);
-  border-top: 1px solid rgba(64, 62, 60, 0.28);
-  border-bottom: 1px solid rgba(64, 62, 60, 0.22);
+  background: rgba(var(--diff-accent-rgb), 0.035);
+  border-top: 1px solid rgba(var(--diff-border-rgb), 0.28);
+  border-bottom: 1px solid rgba(var(--diff-border-rgb), 0.22);
 }
 
 .diff-hunk-header {
@@ -724,7 +771,7 @@ div.swiper {
 }
 
 .termdock-diff .diff-code-insert {
-  border-left: 2px solid rgba(154, 163, 111, 0.78);
+  border-left: 2px solid rgba(var(--diff-insert-rgb), 0.68);
 }
 
 .termdock-diff .diff-code-delete,
@@ -734,7 +781,7 @@ div.swiper {
 }
 
 .termdock-diff .diff-code-delete {
-  border-left: 2px solid rgba(180, 138, 132, 0.78);
+  border-left: 2px solid rgba(var(--diff-delete-rgb), 0.62);
 }
 
 .termdock-diff .diff-code-insert .diff-code-edit,
@@ -798,6 +845,7 @@ div.swiper {
 .termdock-diff .token,
 .termdock-code .token {
   background: transparent;
+  display: inline;
 }
 .termdock-diff .token.comment,
 .termdock-diff .token.prolog,
@@ -810,9 +858,23 @@ div.swiper {
   color: #878580;
   font-style: italic;
 }
+html[data-theme='light'] .termdock-diff .token.comment,
+html[data-theme='light'] .termdock-diff .token.prolog,
+html[data-theme='light'] .termdock-diff .token.doctype,
+html[data-theme='light'] .termdock-diff .token.cdata,
+html[data-theme='light'] .termdock-code .token.comment,
+html[data-theme='light'] .termdock-code .token.prolog,
+html[data-theme='light'] .termdock-code .token.doctype,
+html[data-theme='light'] .termdock-code .token.cdata {
+  color: #6F6E69;
+}
 .termdock-diff .token.punctuation,
 .termdock-code .token.punctuation {
   color: #9F9D96;
+}
+html[data-theme='light'] .termdock-diff .token.punctuation,
+html[data-theme='light'] .termdock-code .token.punctuation {
+  color: #6F6E69;
 }
 .termdock-diff .token.property,
 .termdock-diff .token.tag,
@@ -873,6 +935,66 @@ div.swiper {
 .termdock-code .token.regex,
 .termdock-code .token.important {
   color: #CE5D97;
+}
+html[data-theme='light'] .termdock-diff .token.property,
+html[data-theme='light'] .termdock-diff .token.tag,
+html[data-theme='light'] .termdock-diff .token.boolean,
+html[data-theme='light'] .termdock-diff .token.number,
+html[data-theme='light'] .termdock-diff .token.constant,
+html[data-theme='light'] .termdock-diff .token.symbol,
+html[data-theme='light'] .termdock-diff .token.deleted,
+html[data-theme='light'] .termdock-code .token.property,
+html[data-theme='light'] .termdock-code .token.tag,
+html[data-theme='light'] .termdock-code .token.boolean,
+html[data-theme='light'] .termdock-code .token.number,
+html[data-theme='light'] .termdock-code .token.constant,
+html[data-theme='light'] .termdock-code .token.symbol,
+html[data-theme='light'] .termdock-code .token.deleted {
+  color: #AF3029;
+}
+html[data-theme='light'] .termdock-diff .token.selector,
+html[data-theme='light'] .termdock-diff .token.attr-name,
+html[data-theme='light'] .termdock-diff .token.string,
+html[data-theme='light'] .termdock-diff .token.char,
+html[data-theme='light'] .termdock-diff .token.builtin,
+html[data-theme='light'] .termdock-diff .token.inserted,
+html[data-theme='light'] .termdock-code .token.selector,
+html[data-theme='light'] .termdock-code .token.attr-name,
+html[data-theme='light'] .termdock-code .token.string,
+html[data-theme='light'] .termdock-code .token.char,
+html[data-theme='light'] .termdock-code .token.builtin,
+html[data-theme='light'] .termdock-code .token.inserted {
+  color: #66800B;
+}
+html[data-theme='light'] .termdock-diff .token.operator,
+html[data-theme='light'] .termdock-diff .token.entity,
+html[data-theme='light'] .termdock-diff .token.url,
+html[data-theme='light'] .termdock-diff .token.variable,
+html[data-theme='light'] .termdock-code .token.operator,
+html[data-theme='light'] .termdock-code .token.entity,
+html[data-theme='light'] .termdock-code .token.url,
+html[data-theme='light'] .termdock-code .token.variable {
+  color: #BC5215;
+}
+html[data-theme='light'] .termdock-diff .token.atrule,
+html[data-theme='light'] .termdock-diff .token.attr-value,
+html[data-theme='light'] .termdock-diff .token.keyword,
+html[data-theme='light'] .termdock-code .token.atrule,
+html[data-theme='light'] .termdock-code .token.attr-value,
+html[data-theme='light'] .termdock-code .token.keyword {
+  color: #205EA6;
+}
+html[data-theme='light'] .termdock-diff .token.function,
+html[data-theme='light'] .termdock-diff .token.class-name,
+html[data-theme='light'] .termdock-code .token.function,
+html[data-theme='light'] .termdock-code .token.class-name {
+  color: #AD8301;
+}
+html[data-theme='light'] .termdock-diff .token.regex,
+html[data-theme='light'] .termdock-diff .token.important,
+html[data-theme='light'] .termdock-code .token.regex,
+html[data-theme='light'] .termdock-code .token.important {
+  color: #A02F6F;
 }
 .termdock-diff .token.important,
 .termdock-diff .token.bold,
@@ -1133,7 +1255,7 @@ div.swiper {
  * `prefers-reduced-motion: reduce`.
  */
 .diff-skeleton__bar {
-  background-color: rgba(255, 255, 255, 0.06);
+  background-color: rgba(var(--skeleton-base-rgb), 0.06);
   position: relative;
   overflow: hidden;
 }
@@ -1145,18 +1267,18 @@ div.swiper {
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(255, 255, 255, 0.08) 50%,
+    rgba(var(--skeleton-base-rgb), 0.08) 50%,
     transparent
   );
   animation: diff-skeleton-shimmer 1.6s ease-in-out infinite;
 }
 
 .diff-skeleton__bar--insert {
-  background-color: rgba(102, 128, 11, 0.12);
+  background-color: rgba(var(--diff-insert-rgb), 0.12);
 }
 
 .diff-skeleton__bar--delete {
-  background-color: rgba(175, 48, 41, 0.12);
+  background-color: rgba(var(--diff-delete-rgb), 0.12);
 }
 
 @keyframes diff-skeleton-shimmer {

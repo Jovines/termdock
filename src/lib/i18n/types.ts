@@ -254,6 +254,9 @@ export type TranslationDictionary = {
     title: string;
     font: string;
     render: string;
+    theme: string;
+    darkTheme: string;
+    lightTheme: string;
     newTab: string;
     debug: string;
     noSleep: string;

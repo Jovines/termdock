@@ -24,6 +24,8 @@ export interface TerminalTheme {
   brightWhite: string;
 }
 
+export type TermdockColorTheme = 'dark' | 'light';
+
 // Flexoki Dark — warm low-contrast palette for readability
 // https://github.com/euandeas/omarchy-flexoki-dark-theme
 export const FLEXOKI_DARK: TerminalTheme = {
@@ -51,3 +53,34 @@ export const FLEXOKI_DARK: TerminalTheme = {
   brightCyan: '#3AA99F',
   brightWhite: '#FFFCF0',
 };
+
+// Flexoki Light — paired with the app's light UI tokens.
+export const FLEXOKI_LIGHT: TerminalTheme = {
+  background: '#FFFCF0',
+  foreground: '#100F0F',
+  cursor: '#100F0F',
+  cursorAccent: '#FFFCF0',
+  selectionBackground: '#CECDC3',
+  selectionForeground: '#100F0F',
+  selectionInactiveBackground: '#CECDC350',
+  black: '#100F0F',
+  red: '#AF3029',
+  green: '#66800B',
+  yellow: '#AD8301',
+  blue: '#205EA6',
+  magenta: '#A02F6F',
+  cyan: '#24837B',
+  white: '#CECDC3',
+  brightBlack: '#6F6E69',
+  brightRed: '#D14D41',
+  brightGreen: '#879A39',
+  brightYellow: '#D0A215',
+  brightBlue: '#4385BE',
+  brightMagenta: '#CE5D97',
+  brightCyan: '#3AA99F',
+  brightWhite: '#FFFCF0',
+};
+
+export function getTerminalTheme(colorTheme: TermdockColorTheme): TerminalTheme {
+  return colorTheme === 'light' ? FLEXOKI_LIGHT : FLEXOKI_DARK;
+}
