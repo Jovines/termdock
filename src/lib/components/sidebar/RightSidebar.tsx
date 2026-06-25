@@ -129,7 +129,7 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
     const key = `${keyPrefix}-${match.index}`;
 
     if (token.startsWith('`')) {
-      nodes.push(<code key={key} className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.92em] text-foreground">{token.slice(1, -1)}</code>);
+      nodes.push(<code key={key} className="break-all rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.92em] text-foreground">{token.slice(1, -1)}</code>);
     } else if (token.startsWith('**') || token.startsWith('__')) {
       nodes.push(<strong key={key} className="font-semibold text-foreground">{renderMarkdownInline(token.slice(2, -2), `${key}-strong`)}</strong>);
     } else if (token.startsWith('*') || token.startsWith('_')) {
@@ -138,7 +138,7 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
       const linkMatch = token.match(/^\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)$/);
       const safeHref = linkMatch ? getSafeMarkdownHref(linkMatch[2]) : null;
       nodes.push(safeHref ? (
-        <a key={key} href={safeHref} target="_blank" rel="noreferrer" className="text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary">
+        <a key={key} href={safeHref} target="_blank" rel="noreferrer" className="break-all text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary">
           {renderMarkdownInline(linkMatch?.[1] ?? '', `${key}-link`)}
         </a>
       ) : token);
@@ -293,7 +293,7 @@ function MarkdownPreview({ content }: { content: string }) {
     return rendered;
   }, [content]);
 
-  return <div className="space-y-3 px-4 py-4 text-sm leading-6 text-foreground">{blocks.length > 0 ? blocks : <p className="text-muted-foreground">Empty file.</p>}</div>;
+  return <div className="min-w-0 max-w-full space-y-3 overflow-x-hidden break-words px-4 py-4 text-sm leading-6 text-foreground">{blocks.length > 0 ? blocks : <p className="text-muted-foreground">Empty file.</p>}</div>;
 }
 
 interface RecentReference {

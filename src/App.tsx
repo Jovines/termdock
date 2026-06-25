@@ -2215,10 +2215,6 @@ function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    if (newSessionMode !== 'shell' && newSessionShortcutConfirmMode !== 'shell') {
-                      setNewSessionShortcutConfirmMode('shell');
-                      return;
-                    }
                     setNewSessionShortcutConfirmMode(null);
                     dispatchNewSession({ mode: 'shell' });
                     handleCloseSettings();
@@ -2241,10 +2237,6 @@ function App() {
                   disabled={!tmuxStatus.available}
                   onClick={() => {
                     if (!tmuxStatus.available) return;
-                    if (newSessionMode !== 'tmux' && newSessionShortcutConfirmMode !== 'tmux') {
-                      setNewSessionShortcutConfirmMode('tmux');
-                      return;
-                    }
                     setNewSessionShortcutConfirmMode(null);
                     dispatchNewSession({ mode: 'tmux' });
                     handleCloseSettings();

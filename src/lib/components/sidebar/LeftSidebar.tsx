@@ -351,12 +351,6 @@ export function LeftSidebar(
   const handleNewSessionClick = (mode: 'shell' | 'tmux') => {
     if (mode === 'tmux' && !tmuxAvailable) return;
 
-    const isDefaultMode = mode === defaultSessionMode;
-    if (!isDefaultMode && confirmNewMode !== mode) {
-      setConfirmNewMode(mode);
-      return;
-    }
-
     setConfirmNewMode(null);
     onNewSession({ mode });
     closeIfOverlay();

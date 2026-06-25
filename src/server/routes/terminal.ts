@@ -1493,6 +1493,17 @@ async function tmuxSessionExists(sessionName: string): Promise<boolean> {
   }
 }
 
+async function ensureTmuxColorEnvironment(sessionName?: string): Promise<void> {
+  await runTmux(['set-environment', '-g', 'COLORTERM', 'truecolor']);
+  await runTmux(['set-environment', '-g', 'FORCE_COLOR', '1']);
+  await runTmux(['set-environment', '-g', '-u', 'NO_COLOR']);
+  if (sessionName) {
+    await runTmux(['set-environment', '-t', sessionName, 'COLORTERM', 'truecolor']);
+    await runTmux(['set-environment', '-t', sessionName, 'FORCE_COLOR', '1']);
+    await runTmux(['set-environment', '-t', sessionName, '-u', 'NO_COLOR']);
+  }
+}
+
 async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
   const format = [
     '#{session_name}',
@@ -2565,6 +2576,7 @@ async function resolveTmuxClientTty(sessionName: string, preferredClientPid: num
 async function ensureTmuxSessionExists(sessionName: string, cwd?: string): Promise<void> {
   try {
     await runTmux(['has-session', '-t', sessionName]);
+    await ensureTmuxColorEnvironment(sessionName);
     return;
   } catch (error) {
     const errorMessage = getErrorMessage(error);
@@ -2573,11 +2585,14 @@ async function ensureTmuxSessionExists(sessionName: string, cwd?: string): Promi
     }
   }
 
+  await ensureTmuxColorEnvironment();
+
   const args = ['new-session', '-d', '-s', sessionName];
   if (cwd) {
     args.push('-c', cwd);
   }
   await runTmux(args);
+  await ensureTmuxColorEnvironment(sessionName);
 
   // Inject shell integration env into the tmux session so inner shells
   // get the same OSC 133/2/7 marks as direct shell mode.
@@ -2646,6 +2661,7 @@ async function enableTmuxFocusEvents(): Promise<void> {
 }
 
 async function ensureSharedTmuxServerReady(): Promise<void> {
+  await ensureTmuxColorEnvironment();
   await enableTmuxFocusEvents();
   await configureTmuxWheelBindings();
 }
@@ -2664,6 +2680,12 @@ async function stampTmuxMetadata(sessionName: string): Promise<void> {
 }
 
 async function ensureManagedTmuxSessionReady(sessionName: string): Promise<void> {
+  try {
+    await ensureTmuxColorEnvironment(sessionName);
+  } catch (error) {
+    console.warn(`Failed to set tmux color environment for ${sessionName}: ${getErrorMessage(error)}`);
+  }
+
   try {
     await disableTmuxStatus(sessionName);
   } catch (error) {

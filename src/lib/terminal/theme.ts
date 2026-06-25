@@ -26,25 +26,33 @@ export interface TerminalTheme {
 
 export type TermdockColorTheme = 'dark' | 'light';
 
+// Terminal colors are an ANSI palette, not regular app UI tokens.
+//
+// Keep ANSI 0-7 and bright 8-15 as two distinct ramps so TUI programs can
+// express state through SGR codes. Do not collapse these values into the
+// app's surface/foreground tokens: xterm must render whatever colors the
+// process emits, while this file only defines the palette those ANSI indexes
+// resolve to.
+//
 // Flexoki Dark — warm low-contrast palette for readability
 // https://stephango.com/flexoki
 export const FLEXOKI_DARK: TerminalTheme = {
-  background: '#100F0F',
+  background: '#1C1B1A',
   foreground: '#CECDC3',
   cursor: '#CECDC3',
-  cursorAccent: '#100F0F',
+  cursorAccent: '#1C1B1A',
   selectionBackground: '#403E3C',
   selectionForeground: '#CECDC3',
   selectionInactiveBackground: '#403E3C50',
-  black: '#100F0F',
-  red: '#D14D41',
-  green: '#879A39',
-  yellow: '#D0A215',
-  blue: '#4385BE',
-  magenta: '#CE5D97',
-  cyan: '#3AA99F',
+  black: '#6F6E69',
+  red: '#AF3029',
+  green: '#66800B',
+  yellow: '#AD8301',
+  blue: '#205EA6',
+  magenta: '#A02F6F',
+  cyan: '#24837B',
   white: '#CECDC3',
-  brightBlack: '#575653',
+  brightBlack: '#6F6E69',
   brightRed: '#D14D41',
   brightGreen: '#879A39',
   brightYellow: '#D0A215',
@@ -54,7 +62,7 @@ export const FLEXOKI_DARK: TerminalTheme = {
   brightWhite: '#FFFCF0',
 };
 
-// Flexoki Light — paired with the app's light UI tokens.
+// Flexoki Light — same ANSI contract as dark, on paper background.
 export const FLEXOKI_LIGHT: TerminalTheme = {
   background: '#FFFCF0',
   foreground: '#100F0F',

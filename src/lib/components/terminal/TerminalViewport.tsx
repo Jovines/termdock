@@ -410,6 +410,10 @@ const getTerminalFontFamily = (userFontFamily: string): string => {
 };
 
 // Convert TerminalTheme to an xterm.js theme object.
+//
+// This must stay a direct TerminalTheme -> xterm palette mapping. Avoid
+// replacing ANSI colors with app UI CSS variables here: TUI programs choose
+// colors by writing SGR/ANSI sequences, and xterm should preserve that intent.
 function convertTheme(theme: TerminalTheme): Record<string, string> {
   return {
     background: theme.background,
@@ -418,15 +422,15 @@ function convertTheme(theme: TerminalTheme): Record<string, string> {
     cursorAccent: theme.cursorAccent || theme.background,
     selectionBackground: theme.selectionBackground || 'rgba(0, 0, 0, 0.3)',
     selectionForeground: theme.selectionForeground || theme.foreground,
-    black: theme.black || '#100F0F',
-    red: theme.red || '#D14D41',
-    green: theme.green || '#879A39',
-    yellow: theme.yellow || '#D0A215',
-    blue: theme.blue || '#4385BE',
-    magenta: theme.magenta || '#CE5D97',
-    cyan: theme.cyan || '#3AA99F',
+    black: theme.black || '#6F6E69',
+    red: theme.red || '#AF3029',
+    green: theme.green || '#66800B',
+    yellow: theme.yellow || '#AD8301',
+    blue: theme.blue || '#205EA6',
+    magenta: theme.magenta || '#A02F6F',
+    cyan: theme.cyan || '#24837B',
     white: theme.white || '#CECDC3',
-    brightBlack: theme.brightBlack || '#575653',
+    brightBlack: theme.brightBlack || '#6F6E69',
     brightRed: theme.brightRed || '#D14D41',
     brightGreen: theme.brightGreen || '#879A39',
     brightYellow: theme.brightYellow || '#D0A215',

@@ -630,7 +630,6 @@ body {
 }
 
 .xterm .xterm-viewport {
-  background-color: var(--background) !important;
   overflow-y: auto !important;
   scrollbar-width: none !important;
 }
