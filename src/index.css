@@ -83,12 +83,11 @@
    * 任何字体改动只动这里，不再散落到 index.html / 业务组件 / tailwind.config。
    *
    * --font-mono 字体链顺序（"大和全"原则）:
-   *   1. JetBrains Mono NL          ASCII / 拉丁 / 数字 / 箭头 / 数学 / 制表符 /
-   *                                 方块 / 几何形状 / 杂项技术 / Dingbats
-   *   2. Symbols Nerd Font Mono     Powerline / devicons / Nerd Font 私有区
-   *   3. Noto Sans Symbols 2        补足 JBM 未收录的 Misc Technical + Dingbats
-   *   4. Noto Sans Mono CJK SC      自托管中日韩等宽（GB2312 一级 + 标点）
-   *   5. ui-monospace, ...          系统等宽兜底
+   *   1. Termdock Mono             JetBrains Mono NL Nerd Font Mono 主字体，
+   *                                 覆盖 ASCII / Nerd Font / Powerline / 常用符号
+   *   2. Noto Sans Mono CJK SC      自托管中日韩等宽（GB2312 一级 + 标点）
+   *   3. Noto Sans Symbols 2        只白名单补 ⏸⏹⏺ / ✓✗
+   *   4. ui-monospace, ...          系统等宽兜底
    *
    * 顺序原则：文本字形优先 → 符号 → CJK → 系统兜底。
    * 各字体均通过 unicode-range 限定（见 index.html），不会互相抢字符。
@@ -103,10 +102,9 @@
    *    font-variant-emoji: text 抑制 ⏺⏸ 这类文本符号被误回退。
    */
   --font-mono:
-    'JetBrains Mono NL',
-    'Symbols Nerd Font Mono',
-    'Noto Sans Symbols 2',
+    'Termdock Mono',
     'Noto Sans Mono CJK SC',
+    'Noto Sans Symbols 2',
     ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, monospace;
 
   --font-sans:
@@ -671,7 +669,7 @@ body {
      仅 Chrome 131+ / Safari 17.4+ 支持；老浏览器靠 fontFamily 末尾的字体链兜底。 */
   font-variant-emoji: text;
   /* 归一化回退字体的视觉大小，对齐 Ghostty 的 ic_width 回退缩放策略。
-     JetBrains Mono NL 的 ex-height = 0.55em (OS/2 sxHeight = 550 / upem 1000)。
+     Termdock Mono 的 ex-height = 0.55em (OS/2 sxHeight = 550 / upem 1000)。
      不加此属性时，浏览器按 font-size 原始值渲染回退字体，而 CJK 字体的
      lineHeight = 1.448em (比 JetBrains Mono 的 1.32em 高 9.7%)，导致中文字符
      在 cell 里偏大。font-size-adjust 让浏览器按 ex-height = 0.55em 缩放所有

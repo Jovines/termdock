@@ -87,7 +87,7 @@ export const zh: TranslationDictionary = {
     tabGit: 'Git',
     tabFiles: '文件',
     tabPreview: '预览',
-    insertedToast: ({ label }) => `已插入 ${label}`,
+    inserted: '已插入',
     selectFilePrompt: '选择文件以预览内容',
     backToFileList: '返回文件列表',
     insertLineRef: ({ lineLabel }) => `引用${lineLabel}`,

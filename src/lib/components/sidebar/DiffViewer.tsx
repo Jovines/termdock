@@ -101,7 +101,8 @@ export function preloadSidebarDiff(rootPath: string | null | undefined, filePath
 interface DiffViewerProps {
   filePath: string | null;
   changedFile?: GitChangedFile | null;
-  onInsertDiffReference?: (label: string, text: string) => void;
+  onInsertDiffReference?: (label: string, text: string, key?: string) => void;
+  insertedReferenceKey?: string | null;
   /**
    * When true, long diff lines wrap inside each cell instead of forcing a
    * horizontal scroll. Helpful on phone-sized panels.
@@ -193,7 +194,7 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true }: DiffViewerProps) {
+export function DiffViewer({ filePath, changedFile, onInsertDiffReference, insertedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true }: DiffViewerProps) {
   const { t } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
@@ -359,10 +360,11 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
   }, [files]);
 
   const titleParts = getPathParts(filePath, { name: t('diffViewer.workingTree'), dir: t('diffViewer.allUnstaged') });
+  const wholeDiffReferenceKey = `diff:whole:${filePath ?? 'all'}`;
 
   const insertWholeDiff = () => {
     if (!diffContent || !onInsertDiffReference) return;
-    onInsertDiffReference(filePath ? `${titleParts.name} diff` : t('diffViewer.allDiffLabel'), formatDiffReference(diffContent));
+    onInsertDiffReference(filePath ? `${titleParts.name} diff` : t('diffViewer.allDiffLabel'), formatDiffReference(diffContent), wholeDiffReferenceKey);
   };
 
   const renderFileDiffs = (hideSingleFileHeader: boolean) => (
@@ -398,11 +400,11 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
                 {onInsertDiffReference && files.length > 1 && (
                   <button
                     type="button"
-                    onClick={() => onInsertDiffReference(`${pathParts.name} diff`, formatDiffReference(fileDiffText))}
-                    className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/20 active:scale-95"
+                    onClick={() => onInsertDiffReference(`${pathParts.name} diff`, formatDiffReference(fileDiffText), `diff:file:${displayPath}`)}
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold active:scale-95 ${insertedReferenceKey === `diff:file:${displayPath}` ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary hover:bg-primary/20'}`}
                     title={t('diffViewer.insertFileDiff')}
                   >
-                    引用
+                    {insertedReferenceKey === `diff:file:${displayPath}` ? t('rightSidebar.inserted') : t('diffViewer.insertFileShort')}
                   </button>
                 )}
                 <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
@@ -448,11 +450,11 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
                           {onInsertDiffReference && (
                             <button
                               type="button"
-                              onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, formatDiffReference(hunkDiffText))}
-                              className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/25 active:scale-95"
+                              onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, formatDiffReference(hunkDiffText), `diff:hunk:${displayPath}:${index}`)}
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold active:scale-95 ${insertedReferenceKey === `diff:hunk:${displayPath}:${index}` ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
                               title={t('diffViewer.insertHunkDiff')}
                             >
-                              引用hunk
+                              {insertedReferenceKey === `diff:hunk:${displayPath}:${index}` ? t('rightSidebar.inserted') : t('diffViewer.insertHunkShort')}
                             </button>
                           )}
                         </span>
@@ -600,10 +602,10 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, wrap 
             <button
               type="button"
               onClick={insertWholeDiff}
-              className="inline-flex h-8 shrink-0 items-center rounded-full bg-primary/15 px-3 text-[11px] font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
+              className={`inline-flex h-8 shrink-0 items-center rounded-full px-3 text-[11px] font-semibold transition active:scale-95 ${insertedReferenceKey === wholeDiffReferenceKey ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
               title={t('diffViewer.insertAllDiff')}
             >
-              引用diff
+              {insertedReferenceKey === wholeDiffReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertAllShort')}
             </button>
           )}
         </div>

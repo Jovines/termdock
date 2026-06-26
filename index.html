@@ -85,12 +85,10 @@
     <link rel="stylesheet" href="/src/index.css" />
     <title>Termdock</title>
     
-    <!-- Preload terminal fonts used by the first tmux prompt.
-         JetBrains Mono Regular + Bold + Italic 是 ASCII 文本的三种基本字形，
-         首屏必用。Symbols Nerd Font 提前拉取，避免新开 tmux session 时
-         devicons / powerline 先显示 tofu 方块。 -->
-    <link rel="preload" href="/fonts/JetBrainsMonoNL-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
-    <link rel="preload" href="/fonts/SymbolsNerdFontMono-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <!-- Preload the unified terminal font pack. First paint may wait for these,
+         but PWA/cache hits keep later launches and new sessions stable. -->
+    <link rel="preload" href="/fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf" as="font" type="font/ttf" crossorigin="anonymous">
+    <link rel="preload" href="/fonts/JetBrainsMonoNLNerdFontMono-Bold.ttf" as="font" type="font/ttf" crossorigin="anonymous">
 
     <!-- Self-hosted terminal fonts.
          统一原则：每个 @font-face 都用 unicode-range 限定字符集，浏览器只在
@@ -98,67 +96,49 @@
          所有引用（Tailwind / 业务组件 / xterm）都通过 :root 上的 --font-mono
          CSS 变量读取，单一来源见 src/index.css。 -->
     <style>
-      /* JetBrains Mono NL —— 终端主字体，覆盖 ASCII / 拉丁补充 / 通用标点
-         + 箭头 / 数学运算符 / 几何形状 / 杂项技术符号 / 制表符 / 方块元素。
-         JBM 自带这些区间的高质量等宽字形；不放进 unicode-range 的话浏览器
-         会跳到系统 ui-monospace 渲染，和 JBM 字形风格不一致。Box drawing /
-         block elements 虽然被 xterm customGlyphs 自绘覆盖，但 DOM renderer
-         不走 customGlyphs，仍需字体兜底。
-         四种变体 (Regular / Bold / Italic / Bold Italic) 全部自托管，
-         xterm 的合成 italic/bold 质量远不如真实字形。 */
+      /* JetBrains Mono NL Nerd Font Mono —— 终端主字体，保持 JetBrains
+         Mono NL 的无连字风格，同时内置 Nerd Font / Powerline / devicons。
+         使用 Mono 版本保证图标按终端 cell 设计；首屏强等字体，避免从
+         fallback/tofu 跳到完整图标。 */
       @font-face {
-        font-family: 'JetBrains Mono NL';
-        src: url('/fonts/JetBrainsMonoNL-Regular.woff2') format('woff2');
+        font-family: 'Termdock Mono';
+        src: url('/fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf') format('truetype');
         font-weight: 400;
         font-style: normal;
         font-display: block;
-        unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+2500-257F, U+2580-259F, U+25A0-25FF, U+2190-21FF, U+2200-22FF, U+2300-23FF, U+2600-26FF, U+2700-27BF, U+FEFF, U+FFFD;
       }
       @font-face {
-        font-family: 'JetBrains Mono NL';
-        src: url('/fonts/JetBrainsMonoNL-Bold.woff2') format('woff2');
+        font-family: 'Termdock Mono';
+        src: url('/fonts/JetBrainsMonoNLNerdFontMono-Bold.ttf') format('truetype');
         font-weight: 700;
-        font-style: normal;
-        font-display: swap;
-        unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+2500-257F, U+2580-259F, U+25A0-25FF, U+2190-21FF, U+2200-22FF, U+2300-23FF, U+2600-26FF, U+2700-27BF, U+FEFF, U+FFFD;
-      }
-      @font-face {
-        font-family: 'JetBrains Mono NL';
-        src: url('/fonts/JetBrainsMonoNL-Italic.woff2') format('woff2');
-        font-weight: 400;
-        font-style: italic;
-        font-display: swap;
-        unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+2500-257F, U+2580-259F, U+25A0-25FF, U+2190-21FF, U+2200-22FF, U+2300-23FF, U+2600-26FF, U+2700-27BF, U+FEFF, U+FFFD;
-      }
-      @font-face {
-        font-family: 'JetBrains Mono NL';
-        src: url('/fonts/JetBrainsMonoNL-BoldItalic.woff2') format('woff2');
-        font-weight: 700;
-        font-style: italic;
-        font-display: swap;
-        unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+2500-257F, U+2580-259F, U+25A0-25FF, U+2190-21FF, U+2200-22FF, U+2300-23FF, U+2600-26FF, U+2700-27BF, U+FEFF, U+FFFD;
-      }
-      /* Symbols Nerd Font Mono —— 覆盖 Nerd Font 私有区图标 (Powerline /
-         devicons / file-type icons / Material 等)。子集化后只保留 BMP PUA
-         (U+E000-F8FF) + 少数非 PUA 符号，去掉了 Supplementary PUA
-         (U+F0000+) 的 6896 个极少使用字形，文件从 1.1MB 降到 568KB。 */
-      @font-face {
-        font-family: 'Symbols Nerd Font Mono';
-        src: url('/fonts/SymbolsNerdFontMono-Regular.woff2') format('woff2');
-        font-weight: 400;
         font-style: normal;
         font-display: block;
-        unicode-range: U+E000-F8FF, U+2630-2637, U+2665, U+26A1, U+2B58, U+23FB-23FE, U+276C-2771;
       }
-      /* Noto Sans Symbols 2 —— 补足 JetBrains Mono / Nerd Font 都未收录的
-         Misc Technical (⏺⏸⏹) 与 Dingbats (✓✗)，避免被 emoji 字体抢字形。 */
+      @font-face {
+        font-family: 'Termdock Mono';
+        src: url('/fonts/JetBrainsMonoNLNerdFontMono-Italic.ttf') format('truetype');
+        font-weight: 400;
+        font-style: italic;
+        font-display: block;
+      }
+      @font-face {
+        font-family: 'Termdock Mono';
+        src: url('/fonts/JetBrainsMonoNLNerdFontMono-BoldItalic.ttf') format('truetype');
+        font-weight: 700;
+        font-style: italic;
+        font-display: block;
+      }
+      /* Noto Sans Symbols 2 —— 只补足 JetBrains Mono / Nerd Font 都未收录且
+         容易被 emoji 字体抢走的少数字符：⏸⏹⏺ / ✓✗。
+         不覆盖整段 Dingbats，否则 ❖ 等装饰符号会命中 Noto 的大号字形，
+         在终端 cell 里显得过大。 */
       @font-face {
         font-family: 'Noto Sans Symbols 2';
         src: url('/fonts/NotoSansSymbols2-Subset.woff2') format('woff2');
         font-weight: 400;
         font-style: normal;
         font-display: swap;
-        unicode-range: U+2300-23FF, U+2700-27BF;
+        unicode-range: U+23F8-23FA, U+2713, U+2717;
       }
       /* Noto Sans Mono CJK SC —— 自托管的等宽中日韩字体子集（GB2312 一级
          常用字 + 中文标点 + 全角区），用于在终端 / UI 中正确渲染 CJK，

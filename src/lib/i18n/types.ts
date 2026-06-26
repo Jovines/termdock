@@ -104,7 +104,7 @@ export type TranslationDictionary = {
     tabGit: string;
     tabFiles: string;
     tabPreview: string;
-    insertedToast: (params: TranslatorParams) => string;
+    inserted: string;
     selectFilePrompt: string;
     backToFileList: string;
     insertLineRef: (params: TranslatorParams) => string;

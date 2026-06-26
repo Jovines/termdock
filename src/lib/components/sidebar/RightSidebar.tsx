@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, type Dispatch, type MouseEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
+import { useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, type Dispatch, type KeyboardEvent, type MouseEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { useGesture } from '@use-gesture/react';
 import {
   X as RiCloseLine,
@@ -25,7 +25,7 @@ import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { DiffViewer, preloadSidebarDiff } from './DiffViewer';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { getGitBundle, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type FileSearchMode } from '../../terminal/api';
+import { getGitBundle, getGitContext, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, type RefractorLike } from '../../utils/syntaxHighlight';
@@ -159,141 +159,234 @@ function isMarkdownTableSeparator(line: string): boolean {
   return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line.trim());
 }
 
-function MarkdownPreview({ content }: { content: string }) {
-  const blocks = useMemo(() => {
-    const lines = content.split('\n');
-    const rendered: ReactNode[] = [];
-    let index = 0;
+interface MarkdownPreviewBlock {
+  key: string;
+  startLine: number;
+  endLine: number;
+  content: ReactNode;
+}
 
-    while (index < lines.length) {
-      const line = lines[index];
-      const trimmed = line.trim();
+function buildMarkdownPreviewBlocks(lines: string[]): MarkdownPreviewBlock[] {
+  const blocks: MarkdownPreviewBlock[] = [];
+  let index = 0;
 
-      if (!trimmed) {
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    const fenceMatch = trimmed.match(/^```\s*(.*)$/);
+    if (fenceMatch) {
+      const codeLines: string[] = [];
+      const lang = fenceMatch[1]?.trim();
+      const blockStart = index;
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith('```')) {
+        codeLines.push(lines[index]);
         index += 1;
-        continue;
       }
-
-      const fenceMatch = trimmed.match(/^```\s*(.*)$/);
-      if (fenceMatch) {
-        const codeLines: string[] = [];
-        const lang = fenceMatch[1]?.trim();
-        index += 1;
-        while (index < lines.length && !lines[index].trim().startsWith('```')) {
-          codeLines.push(lines[index]);
-          index += 1;
-        }
-        if (index < lines.length) index += 1;
-        rendered.push(
-          <div key={`code-${index}`} className="overflow-hidden rounded-lg border border-border/20 bg-surface shadow-sm">
+      if (index < lines.length) index += 1;
+      blocks.push({
+        key: `code-${blockStart}`,
+        startLine: blockStart + 1,
+        endLine: index,
+        content: (
+          <div className="overflow-hidden rounded-lg border border-border/20 bg-surface shadow-sm">
             {lang && <div className="border-b border-border/15 bg-surface-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">{lang}</div>}
             <pre className="overflow-auto p-3 text-[11px] leading-relaxed text-foreground"><code>{codeLines.join('\n') || ' '}</code></pre>
-          </div>,
-        );
-        continue;
-      }
+          </div>
+        ),
+      });
+      continue;
+    }
 
-      const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
-      if (headingMatch) {
-        const level = headingMatch[1].length;
-        const headingClasses: Record<number, string> = {
-          1: 'mt-1 border-b border-border/20 pb-2 text-xl',
-          2: 'mt-1 border-b border-border/15 pb-1.5 text-lg',
-          3: 'text-base',
-          4: 'text-sm',
-          5: 'text-xs uppercase tracking-wide',
-          6: 'text-[11px] uppercase tracking-wide text-muted-foreground',
-        };
-        const Tag = `h${level}` as keyof JSX.IntrinsicElements;
-        rendered.push(<Tag key={`heading-${index}`} className={`font-semibold text-foreground ${headingClasses[level]}`}>{renderMarkdownInline(headingMatch[2], `heading-${index}`)}</Tag>);
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const headingClasses: Record<number, string> = {
+        1: 'mt-1 border-b border-border/20 pb-1.5 text-lg sm:pb-2 sm:text-xl',
+        2: 'mt-1 border-b border-border/15 pb-1 text-base sm:pb-1.5 sm:text-lg',
+        3: 'text-sm sm:text-base',
+        4: 'text-[13px] sm:text-sm',
+        5: 'text-[11px] uppercase tracking-wide sm:text-xs',
+        6: 'text-[11px] uppercase tracking-wide text-muted-foreground',
+      };
+      const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+      blocks.push({
+        key: `heading-${index}`,
+        startLine: index + 1,
+        endLine: index + 1,
+        content: <Tag className={`font-semibold text-foreground ${headingClasses[level]}`}>{renderMarkdownInline(headingMatch[2], `heading-${index}`)}</Tag>,
+      });
+      index += 1;
+      continue;
+    }
+
+    if (/^([-*_])(?:\s*\1){2,}\s*$/.test(trimmed)) {
+      blocks.push({
+        key: `hr-${index}`,
+        startLine: index + 1,
+        endLine: index + 1,
+        content: <hr className="border-border/20" />,
+      });
+      index += 1;
+      continue;
+    }
+
+    if (trimmed.startsWith('>')) {
+      const quoteLines: string[] = [];
+      const blockStart = index;
+      while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+        quoteLines.push(lines[index].trim().replace(/^>\s?/, ''));
         index += 1;
-        continue;
       }
+      blocks.push({
+        key: `quote-${blockStart}`,
+        startLine: blockStart + 1,
+        endLine: index,
+        content: <blockquote className="border-l-2 border-border-strong bg-surface-2/70 py-1.5 pl-2.5 pr-2 text-muted-foreground sm:py-2 sm:pl-3">{renderMarkdownInline(quoteLines.join(' '), `quote-${blockStart}`)}</blockquote>,
+      });
+      continue;
+    }
 
-      if (/^([-*_])(?:\s*\1){2,}\s*$/.test(trimmed)) {
-        rendered.push(<hr key={`hr-${index}`} className="border-border/20" />);
+    if (index + 1 < lines.length && line.includes('|') && isMarkdownTableSeparator(lines[index + 1])) {
+      const header = splitMarkdownTableRow(line);
+      const rows: string[][] = [];
+      const blockStart = index;
+      index += 2;
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+        rows.push(splitMarkdownTableRow(lines[index]));
         index += 1;
-        continue;
       }
-
-      if (trimmed.startsWith('>')) {
-        const quoteLines: string[] = [];
-        while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
-          quoteLines.push(lines[index].trim().replace(/^>\s?/, ''));
-          index += 1;
-        }
-        rendered.push(<blockquote key={`quote-${index}`} className="border-l-2 border-primary/50 bg-primary/5 py-2 pl-3 pr-2 text-muted-foreground">{renderMarkdownInline(quoteLines.join(' '), `quote-${index}`)}</blockquote>);
-        continue;
-      }
-
-      if (index + 1 < lines.length && line.includes('|') && isMarkdownTableSeparator(lines[index + 1])) {
-        const header = splitMarkdownTableRow(line);
-        const rows: string[][] = [];
-        index += 2;
-        while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
-          rows.push(splitMarkdownTableRow(lines[index]));
-          index += 1;
-        }
-        rendered.push(
-          <div key={`table-${index}`} className="overflow-auto rounded-lg border border-border/20 bg-surface">
-            <table className="min-w-full border-collapse text-left text-xs">
+      blocks.push({
+        key: `table-${blockStart}`,
+        startLine: blockStart + 1,
+        endLine: index,
+        content: (
+          <div className="overflow-auto rounded-lg border border-border/20 bg-surface">
+            <table className="min-w-full border-collapse text-left text-[11px] sm:text-xs">
               <thead className="bg-surface-2 text-foreground">
-                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className="whitespace-nowrap border-b border-r border-border/15 px-3 py-2 font-semibold last:border-r-0">{renderMarkdownInline(cell, `th-${index}-${cellIndex}`, false)}</th>)}</tr>
+                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className="whitespace-nowrap border-b border-r border-border/15 px-2 py-1.5 font-semibold last:border-r-0 sm:px-3 sm:py-2">{renderMarkdownInline(cell, `th-${blockStart}-${cellIndex}`, false)}</th>)}</tr>
               </thead>
               <tbody>
                 {rows.map((row, rowIndex) => (
                   <tr key={`r-${rowIndex}`} className="border-t border-border/10">
-                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className="whitespace-nowrap border-r border-border/10 px-3 py-2 align-top text-muted-foreground last:border-r-0">{renderMarkdownInline(row[cellIndex] ?? '', `td-${index}-${rowIndex}-${cellIndex}`, false)}</td>)}
+                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className="whitespace-nowrap border-r border-border/10 px-2 py-1.5 align-top text-muted-foreground last:border-r-0 sm:px-3 sm:py-2">{renderMarkdownInline(row[cellIndex] ?? '', `td-${blockStart}-${rowIndex}-${cellIndex}`, false)}</td>)}
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>,
-        );
-        continue;
-      }
+          </div>
+        ),
+      });
+      continue;
+    }
 
-      const listMatch = trimmed.match(/^([-+*]|\d+\.)\s+(.+)$/);
-      if (listMatch) {
-        const ordered = /^\d+\.$/.test(listMatch[1]);
-        const items: string[] = [];
-        while (index < lines.length) {
-          const itemMatch = lines[index].trim().match(/^([-+*]|\d+\.)\s+(.+)$/);
-          if (!itemMatch || /^\d+\.$/.test(itemMatch[1]) !== ordered) break;
-          items.push(itemMatch[2]);
-          index += 1;
-        }
-        const ListTag = ordered ? 'ol' : 'ul';
-        rendered.push(
-          <ListTag key={`list-${index}`} className={`${ordered ? 'list-decimal' : 'list-disc'} space-y-1 pl-5 text-muted-foreground marker:text-muted-foreground/70`}>
+    const listMatch = trimmed.match(/^([-+*]|\d+\.)\s+(.+)$/);
+    if (listMatch) {
+      const ordered = /^\d+\.$/.test(listMatch[1]);
+      const items: string[] = [];
+      const blockStart = index;
+      while (index < lines.length) {
+        const itemMatch = lines[index].trim().match(/^([-+*]|\d+\.)\s+(.+)$/);
+        if (!itemMatch || /^\d+\.$/.test(itemMatch[1]) !== ordered) break;
+        items.push(itemMatch[2]);
+        index += 1;
+      }
+      const ListTag = ordered ? 'ol' : 'ul';
+      blocks.push({
+        key: `list-${blockStart}`,
+        startLine: blockStart + 1,
+        endLine: index,
+        content: (
+          <ListTag className={`${ordered ? 'list-decimal' : 'list-disc'} space-y-0.5 pl-4 text-muted-foreground marker:text-muted-foreground/70 sm:space-y-1 sm:pl-5`}>
             {items.map((item, itemIndex) => {
               const taskMatch = item.match(/^\[([ xX])\]\s+(.+)$/);
               return (
                 <li key={`item-${itemIndex}`} className={taskMatch ? 'list-none' : undefined}>
                   {taskMatch ? <input type="checkbox" checked={taskMatch[1].toLowerCase() === 'x'} readOnly className="mr-2 align-[-2px] accent-primary" /> : null}
-                  {renderMarkdownInline(taskMatch?.[2] ?? item, `li-${index}-${itemIndex}`)}
+                  {renderMarkdownInline(taskMatch?.[2] ?? item, `li-${blockStart}-${itemIndex}`)}
                 </li>
               );
             })}
-          </ListTag>,
-        );
-        continue;
-      }
-
-      const paragraphLines: string[] = [trimmed];
-      index += 1;
-      while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
-        if (index + 1 < lines.length && lines[index].includes('|') && isMarkdownTableSeparator(lines[index + 1])) break;
-        paragraphLines.push(lines[index].trim());
-        index += 1;
-      }
-      rendered.push(<p key={`p-${index}`} className="text-muted-foreground">{renderMarkdownInline(paragraphLines.join(' '), `p-${index}`)}</p>);
+          </ListTag>
+        ),
+      });
+      continue;
     }
 
-    return rendered;
-  }, [content]);
+    const paragraphLines: string[] = [trimmed];
+    const blockStart = index;
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
+      if (index + 1 < lines.length && lines[index].includes('|') && isMarkdownTableSeparator(lines[index + 1])) break;
+      paragraphLines.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push({
+      key: `p-${blockStart}`,
+      startLine: blockStart + 1,
+      endLine: index,
+      content: <p className="text-muted-foreground">{renderMarkdownInline(paragraphLines.join(' '), `p-${blockStart}`)}</p>,
+    });
+  }
 
-  return <div className="min-w-0 max-w-full space-y-3 overflow-x-hidden break-words px-4 py-4 text-sm leading-6 text-foreground">{blocks.length > 0 ? blocks : <p className="text-muted-foreground">Empty file.</p>}</div>;
+  return blocks;
+}
+
+interface MarkdownPreviewProps {
+  content: string;
+  lineRange: { start: number; end: number } | null;
+  onLineRangeClick: (event: MouseEvent<HTMLElement>, startLine: number, endLine: number) => void;
+}
+
+function MarkdownPreview({ content, lineRange, onLineRangeClick }: MarkdownPreviewProps) {
+  const blocks = useMemo(() => buildMarkdownPreviewBlocks(content.split('\n')), [content]);
+
+  if (blocks.length === 0) {
+    return <div className="min-w-0 max-w-full px-4 py-4 text-sm leading-6 text-foreground"><p className="text-muted-foreground">Empty file.</p></div>;
+  }
+
+  return (
+    <div className="min-w-0 max-w-full space-y-1.5 overflow-x-hidden break-words px-1.5 py-3 text-[13px] leading-5 text-foreground sm:space-y-2 sm:px-2 sm:py-4 sm:text-sm sm:leading-6">
+      {blocks.map((block) => {
+        const selected = Boolean(lineRange && block.startLine <= lineRange.end && block.endLine >= lineRange.start);
+        const lineLabel = block.startLine === block.endLine ? String(block.startLine) : `${block.startLine}-${block.endLine}`;
+        return (
+          <div
+            role="button"
+            tabIndex={0}
+            key={block.key}
+            onClick={(event) => {
+              const target = event.target;
+              if (target instanceof HTMLElement && target.closest('a, button, input, textarea, select, label')) return;
+              onLineRangeClick(event, block.startLine, block.endLine);
+            }}
+            onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, block.startLine, block.endLine);
+            }}
+            className={`group grid w-full cursor-pointer grid-cols-[0.625rem_1fr] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition active:scale-[0.998] sm:grid-cols-[0.875rem_1fr] sm:gap-2 sm:pr-2 ${selected ? 'bg-[var(--surface-2)]' : 'hover:bg-[var(--surface-2)]'}`}
+            title={`Reference line ${lineLabel}`}
+            aria-label={`Reference line ${lineLabel}`}
+          >
+            <span
+              className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)] group-hover:bg-[var(--surface-elevated)]'}`}
+              aria-hidden="true"
+            >
+              <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)] group-hover:bg-[var(--muted-foreground)]'}`} />
+            </span>
+            <div className="min-w-0">{block.content}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 interface RecentReference {
@@ -774,11 +867,12 @@ function ZoomableImage({ src, alt, onLoad, onError }: ZoomableImageProps) {
 
 interface FilePreviewProps {
   filePath: string | null;
-  onInsertReference: (path: string) => void;
+  onInsertReference: (path: string, key?: string) => void;
   onClose?: () => void;
   isMobile: boolean;
   lineRange: { start: number; end: number } | null;
   onLineRangeChange: Dispatch<SetStateAction<{ start: number; end: number } | null>>;
+  insertedReferenceKey: string | null;
   scrollToLine?: number | null;
   onScrollToLineHandled?: () => void;
 }
@@ -790,7 +884,7 @@ type FilePreviewState =
   | { kind: 'image'; objectUrl: string; meta: { size: number | null; mimeType: string; modified: string | null }; dimensions?: { width: number; height: number } }
   | { kind: 'error'; message: string };
 
-function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange, onLineRangeChange, scrollToLine, onScrollToLineHandled }: FilePreviewProps) {
+function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange, onLineRangeChange, insertedReferenceKey, scrollToLine, onScrollToLineHandled }: FilePreviewProps) {
   const { t } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
@@ -986,18 +1080,25 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   const showMarkdownPreview = previewState.kind === 'text' && isMarkdown && markdownViewMode === 'preview';
   const isImagePreview = previewState.kind === 'image' || (previewState.kind === 'loading' && previewState.mode === 'image');
   const lineReference = buildLineReference(readablePath, rootPath, lineRange);
+  const fileReferenceKey = `path:${readablePath}`;
+  const lineReferenceKey = lineRange ? `path:${readablePath}:${lineRange.start}-${lineRange.end}` : fileReferenceKey;
+  const fileReferenceInserted = insertedReferenceKey === fileReferenceKey;
+  const lineReferenceInserted = insertedReferenceKey === lineReferenceKey;
   const selectedLineLabel = lineRange
     ? (lineRange.start === lineRange.end ? `L${lineRange.start}` : `L${lineRange.start}-${lineRange.end}`)
     : null;
 
-  const placeFloatingInsertButton = (event: MouseEvent<HTMLButtonElement>) => {
+  const placeFloatingInsertButton = (event: MouseEvent<HTMLElement>) => {
     const scroller = scrollerRef.current;
     if (!scroller) return;
     const rect = scroller.getBoundingClientRect();
-    const top = event.clientY - rect.top + scroller.scrollTop;
+    const targetRect = event.currentTarget.getBoundingClientRect();
+    const clientX = event.clientX || targetRect.left + targetRect.width / 2;
+    const clientY = event.clientY || targetRect.top + targetRect.height / 2;
+    const top = clientY - rect.top + scroller.scrollTop;
     const maxLeft = scroller.scrollLeft + Math.max(8, scroller.clientWidth - 132);
     const left = Math.min(
-      Math.max(8, event.clientX - rect.left + scroller.scrollLeft + 10),
+      Math.max(8, clientX - rect.left + scroller.scrollLeft + 10),
       maxLeft,
     );
     setFloatingInsertPos({ top, left });
@@ -1017,10 +1118,21 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
     });
   };
 
+  const handlePreviewLineRangeClick = (event: MouseEvent<HTMLElement>, startLine: number, endLine: number) => {
+    placeFloatingInsertButton(event);
+    onLineRangeChange((current) => {
+      if (current?.start === startLine && current.end === endLine) {
+        setFloatingInsertPos(null);
+        return null;
+      }
+      return { start: startLine, end: endLine };
+    });
+  };
+
   const insertRangeReference = () => {
     if (!lineRange) return;
     const suffix = lineRange.start === lineRange.end ? `${lineRange.start}` : `${lineRange.start}-${lineRange.end}`;
-    onInsertReference(`${readablePath}:${suffix}`);
+    onInsertReference(`${readablePath}:${suffix}`, lineReferenceKey);
   };
 
   return (
@@ -1068,11 +1180,15 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
             {!isMobile && (
               <button
                 type="button"
-                onClick={() => onInsertReference(readablePath)}
-                className="inline-flex h-9 items-center gap-1 rounded-full bg-primary/15 px-3 text-xs font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
+                onClick={() => onInsertReference(readablePath, fileReferenceKey)}
+                className={`inline-flex h-9 items-center gap-1 rounded-full px-3 text-xs font-semibold transition active:scale-95 ${
+                  fileReferenceInserted
+                    ? 'bg-surface-elevated text-foreground'
+                    : 'bg-primary/15 text-primary hover:bg-primary/25'
+                }`}
                 title={`Insert reference: ${reference}`}
               >
-                {t('rightSidebar.insertFileRef')}
+                {fileReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
               </button>
             )}
             <button
@@ -1134,11 +1250,28 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
         </div>
       ) : showMarkdownPreview ? (
         <div
-          className="min-h-0 flex-1 overflow-auto bg-surface"
+          ref={scrollerRef}
+          className="relative min-h-0 flex-1 overflow-auto bg-surface"
           data-sidebar-gesture-ignore
           style={{ touchAction: 'pan-x pan-y' }}
         >
-          <MarkdownPreview content={previewState.content} />
+          <MarkdownPreview
+            content={previewState.content}
+            lineRange={lineRange}
+            onLineRangeClick={handlePreviewLineRangeClick}
+          />
+          {!isMobile && lineRange && floatingInsertPos && (
+            <button
+              type="button"
+              onClick={insertRangeReference}
+              style={{ top: floatingInsertPos.top, left: floatingInsertPos.left, transform: 'translateY(-50%)' }}
+              className="pointer-events-auto absolute z-popover inline-flex h-7 items-center gap-1 rounded-full bg-surface-elevated px-3 text-[11px] font-semibold text-foreground shadow-lg ring-1 ring-border-strong/40 transition hover:bg-surface-2 active:scale-95"
+              title={`Insert markdown reference: ${lineReference}`}
+            >
+              <RiLink size={11} />
+              {lineReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
+            </button>
+          )}
         </div>
       ) : previewState.kind === 'text' ? (
         <div ref={scrollerRef} className="termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-surface p-2 font-mono text-[11px] leading-relaxed text-foreground">
@@ -1188,7 +1321,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
               title={`Insert code reference: ${lineReference}`}
             >
               <RiLink size={11} />
-              {t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
+              {lineReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
             </button>
           )}
         </div>
@@ -1200,9 +1333,9 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           of the viewport. */}
       <div
         className={`shrink-0 overflow-hidden border-t border-border/15 bg-surface transition-all duration-150 ${
-          isMobile && lineRange && !isImagePreview && !showMarkdownPreview ? 'max-h-24 opacity-100' : 'pointer-events-none max-h-0 opacity-0 border-t-transparent'
+          isMobile && lineRange && !isImagePreview ? 'max-h-24 opacity-100' : 'pointer-events-none max-h-0 opacity-0 border-t-transparent'
         }`}
-        aria-hidden={!isMobile || !lineRange || isImagePreview || showMarkdownPreview}
+        aria-hidden={!isMobile || !lineRange || isImagePreview}
       >
         <div className="flex items-center gap-2">
           <div className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">
@@ -1218,10 +1351,14 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           <button
             type="button"
             onClick={insertRangeReference}
-            className="inline-flex h-9 items-center gap-1 rounded-full bg-primary px-4 text-[12px] font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 active:scale-95"
+            className={`inline-flex h-9 items-center gap-1 rounded-full px-4 text-[12px] font-semibold shadow-sm transition active:scale-95 ${
+              lineReferenceInserted
+                ? 'bg-surface-elevated text-foreground hover:bg-surface-2'
+                : 'bg-primary text-primary-foreground hover:bg-primary/90'
+            }`}
             title={`Insert code reference: ${lineReference}`}
           >
-            {t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
+            {lineReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
           </button>
         </div>
       </div>
@@ -1239,7 +1376,7 @@ export function RightSidebar(
   const [searchMode, setSearchMode] = useState<FileSearchMode>('name');
   const deferredFileQuery = useDeferredValue(fileQuery);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
-  const [lastInsertedReference, setLastInsertedReference] = useState<string | null>(null);
+  const [insertedReferenceKey, setInsertedReferenceKey] = useState<string | null>(null);
   const [recentReferences, setRecentReferences] = useState<RecentReference[]>([]);
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
@@ -1262,6 +1399,7 @@ export function RightSidebar(
   const [confirmGitAction, setConfirmGitAction] = useState<ConfirmGitAction | null>(null);
   const [gitActionError, setGitActionError] = useState<string | null>(null);
   const [gitQuickActionsOpen, setGitQuickActionsOpen] = useState(false);
+  const [gitDetailsLoading, setGitDetailsLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
   const [switchBranch, setSwitchBranch] = useState('');
   const [pushRemote, setPushRemote] = useState('');
@@ -1299,14 +1437,23 @@ export function RightSidebar(
   const fileTreeScrollRef = useRef<HTMLDivElement | null>(null);
   const gitBundleRequestIdRef = useRef(0);
   const gitBundleAbortRef = useRef<AbortController | null>(null);
+  const gitDetailsRequestIdRef = useRef(0);
   const recentReferencesRootRef = useRef<string | null>(null);
   const lastAutoRefreshRootRef = useRef<string | null>(null);
 
   const applyGitBundle = useCallback((bundle: GitBundleResponse, options: { reloadDiff?: boolean } = {}) => {
     setChangedFiles(toChangedFileMap(bundle.files));
-    setGitContext(bundle.context);
+    setGitContext((current) => {
+      if (!bundle.context) return null;
+      const currentRoot = current?.root ?? rootPath;
+      if (!current?.available || currentRoot !== (bundle.context.root ?? rootPath)) return bundle.context;
+      return { ...current, ...bundle.context };
+    });
     const contextRoot = bundle.context?.root ?? rootPath;
-    if (contextRoot) gitContextCache.set(contextRoot, bundle.context);
+    if (contextRoot && bundle.context) {
+      const cached = gitContextCache.get(contextRoot);
+      gitContextCache.set(contextRoot, cached?.available ? { ...cached, ...bundle.context } : bundle.context);
+    }
     if (options.reloadDiff) setDiffRefreshKey((key) => key + 1);
     const current = useSidebarStore.getState().selectedFilePath;
     if (current && !current.startsWith('/') && !bundle.files.some((file) => file.path === current || file.absolutePath === current)) {
@@ -1324,8 +1471,10 @@ export function RightSidebar(
 
   useEffect(() => {
     gitBundleRequestIdRef.current += 1;
+    gitDetailsRequestIdRef.current += 1;
     gitBundleAbortRef.current?.abort();
     gitBundleAbortRef.current = null;
+    setGitDetailsLoading(false);
     setGitContext(rootPath ? (gitContextCache.get(rootPath) ?? null) : null);
   }, [rootPath]);
 
@@ -1372,6 +1521,31 @@ export function RightSidebar(
     await loadGitBundle(rootPath, { reloadDiff: true });
   }, [loadGitBundle, rootPath]);
 
+  const loadGitDetails = useCallback(async (cwd: string | undefined = rootPath ?? undefined) => {
+    if (!cwd) return null;
+    const requestId = gitDetailsRequestIdRef.current + 1;
+    gitDetailsRequestIdRef.current = requestId;
+    setGitDetailsLoading(true);
+    try {
+      const context = await getGitContext(cwd);
+      if (gitDetailsRequestIdRef.current !== requestId) return null;
+      setGitContext((current) => {
+        if (!current?.available || !context.available) return context;
+        return { ...current, ...context };
+      });
+      const contextRoot = context.root ?? cwd;
+      gitContextCache.set(contextRoot, context);
+      return context;
+    } catch (error) {
+      if (gitDetailsRequestIdRef.current === requestId) {
+        setGitActionError(error instanceof Error ? error.message : 'Failed to load Git details');
+      }
+      return null;
+    } finally {
+      if (gitDetailsRequestIdRef.current === requestId) setGitDetailsLoading(false);
+    }
+  }, [rootPath]);
+
   useEffect(() => {
     if (!isOpen) {
       setFileQuery('');
@@ -1415,7 +1589,7 @@ export function RightSidebar(
     const shouldPreloadDiff = gitPaneActive || diffPaneActive || rightTab === 'git' || rightTab === 'diff';
     const shouldProbeRepository = isOpen && gitBundleLastLoadedAt === null;
     if ((!shouldPreloadDiff && !shouldProbeRepository) || !rootPath || gitBundleLoading) return;
-    if (!shouldPreloadDiff && !rootEntriesLoaded) return;
+    if (!rootEntriesLoaded) return;
     const hasCachedGitBundle = gitBundleLastLoadedAt !== null;
     if (hasCachedGitBundle && lastAutoRefreshRootRef.current === rootPath) return;
     lastAutoRefreshRootRef.current = rootPath;
@@ -1426,6 +1600,13 @@ export function RightSidebar(
       window.clearTimeout(handle);
     };
   }, [diffPaneActive, gitBundleLastLoadedAt, gitBundleLoading, gitPaneActive, isOpen, loadGitBundle, rightTab, rootEntriesLoaded, rootPath]);
+
+  const gitDetailsLoaded = Boolean(gitContext?.available && gitContext.branches && gitContext.remotes && gitContext.recentCommits);
+
+  useEffect(() => {
+    if (!rootPath || !gitContext?.available || !gitPaneActive || gitDetailsLoaded || gitDetailsLoading) return;
+    void loadGitDetails(rootPath);
+  }, [gitContext?.available, gitDetailsLoaded, gitDetailsLoading, gitPaneActive, loadGitDetails, rootPath]);
 
   useEffect(() => {
     if (diffPaneActive) setHasMountedDiffPane(true);
@@ -1506,24 +1687,27 @@ export function RightSidebar(
     return label;
   }, [rootPath]);
 
-  const insertPathReference = useCallback((path: string) => {
+  const markReferenceInserted = useCallback((key: string) => {
+    setInsertedReferenceKey(key);
+    window.setTimeout(() => setInsertedReferenceKey((current) => (current === key ? null : current)), 1400);
+  }, []);
+
+  const insertPathReference = useCallback((path: string, key?: string) => {
     const absolutePath = rootPath && !path.startsWith('/') ? `${rootPath}/${path}` : path;
-    const reference = rememberReference(absolutePath);
+    rememberReference(absolutePath);
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
       detail: { text: buildReferenceInputText(absolutePath, rootPath), focus: false },
     }));
-    setLastInsertedReference(reference);
-    window.setTimeout(() => setLastInsertedReference((current) => (current === reference ? null : current)), 1400);
-  }, [rememberReference, rootPath]);
+    markReferenceInserted(key ?? `path:${absolutePath}`);
+  }, [markReferenceInserted, rememberReference, rootPath]);
 
-  const insertContextText = useCallback((label: string, text: string) => {
+  const insertContextText = useCallback((label: string, text: string, key?: string) => {
     if (!text) return;
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
       detail: { text: text.endsWith(' ') ? text : `${text} `, focus: false },
     }));
-    setLastInsertedReference(label);
-    window.setTimeout(() => setLastInsertedReference((current) => (current === label ? null : current)), 1400);
-  }, []);
+    markReferenceInserted(key ?? `context:${label}`);
+  }, [markReferenceInserted]);
 
   const rootName = useMemo(() => {
     if (!rootPath) return t('rightSidebar.workspace');
@@ -1537,6 +1721,8 @@ export function RightSidebar(
   const fileTreeRootPinned = Boolean(fileTreeRoot && pinnedExplorerRootSet.has(fileTreeRoot));
   const canPinFileTreeRoot = Boolean(rootPath && fileTreeRoot && fileTreeRoot !== rootPath);
   const browsingOutsideProject = Boolean(rootPath && explorerRoot && explorerRoot !== rootPath);
+  const fileTreeRootReferenceKey = fileTreeRoot ? `path:${fileTreeRoot}` : null;
+  const gitContextReferenceKey = 'context:git';
 
   const goToExplorerParent = useCallback(() => {
     if (explorerParentPath) setExplorerRoot(explorerParentPath);
@@ -1722,7 +1908,7 @@ export function RightSidebar(
 
   const insertGitContext = useCallback(() => {
     if (!gitContextInputText) return;
-    insertContextText(t('rightSidebar.gitInfo'), gitContextInputText);
+    insertContextText(t('rightSidebar.gitInfo'), gitContextInputText, gitContextReferenceKey);
     if (!push) onClose();
   }, [gitContextInputText, insertContextText, onClose, push, t]);
 
@@ -1815,7 +2001,12 @@ export function RightSidebar(
       <button
         type="button"
         onClick={() => {
-          if (!gitPaneActive) setGitQuickActionsOpen((open) => !open);
+          if (gitPaneActive) return;
+          setGitQuickActionsOpen((open) => {
+            const next = !open;
+            if (next && !gitDetailsLoaded && !gitDetailsLoading) void loadGitDetails(rootPath);
+            return next;
+          });
         }}
         aria-expanded={effectiveGitQuickActionsOpen}
         className={`group flex w-full items-center gap-2 px-1 py-1.5 text-left transition ${gitPaneActive ? 'cursor-default' : 'rounded-lg hover:bg-surface-2 active:scale-[0.99]'}`}
@@ -1827,7 +2018,8 @@ export function RightSidebar(
           {t('rightSidebar.gitQuickActions')}
         </span>
         <span className="flex shrink-0 items-center gap-1">
-          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${changedSummary.staged > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>
+          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${changedSummary.staged > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>
+            {gitDetailsLoading && <RiLoader size={10} className="animate-spin" />}
             {changedSummary.staged > 0 ? t('rightSidebar.stagedCount', { count: changedSummary.staged }) : t('rightSidebar.noStagedChangesShort')}
           </span>
           {!gitPaneActive && (
@@ -2070,14 +2262,18 @@ export function RightSidebar(
             </div>
             <button
               type="button"
-              onClick={() => fileTreeRoot && insertPathReference(fileTreeRoot)}
+              onClick={() => fileTreeRoot && insertPathReference(fileTreeRoot, fileTreeRootReferenceKey ?? undefined)}
               disabled={!fileTreeRoot}
-              className="inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary transition hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
+              className={`inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-full px-2 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-35 active:scale-95 ${
+                fileTreeRootReferenceKey && insertedReferenceKey === fileTreeRootReferenceKey
+                  ? 'bg-surface-elevated text-foreground'
+                  : 'bg-primary/10 text-primary hover:bg-primary/20'
+              }`}
               aria-label={t('rightSidebar.insertCurrentFolder')}
               title={t('rightSidebar.insertCurrentFolder')}
             >
               <RiLink size={12} />
-              <span>{t('rightSidebar.insertCurrentFolderShort')}</span>
+              <span>{fileTreeRootReferenceKey && insertedReferenceKey === fileTreeRootReferenceKey ? t('rightSidebar.inserted') : t('rightSidebar.insertCurrentFolderShort')}</span>
             </button>
           </div>
           {fileTreeRoot && (
@@ -2339,10 +2535,10 @@ export function RightSidebar(
                 <button
                   type="button"
                   onClick={insertGitContext}
-                  className="ml-auto rounded-full bg-primary/10 px-2 py-0.5 font-medium text-primary hover:bg-primary/20"
+                  className={`ml-auto rounded-full px-2 py-0.5 font-medium ${insertedReferenceKey === gitContextReferenceKey ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary hover:bg-primary/20'}`}
                   title={t('rightSidebar.insertGitContext')}
                 >
-                  {t('rightSidebar.insertPreset', { label: t('rightSidebar.gitInfo') })}
+                  {insertedReferenceKey === gitContextReferenceKey ? t('rightSidebar.inserted') : t('rightSidebar.insertPreset', { label: t('rightSidebar.gitInfo') })}
                 </button>
                 <button
                   type="button"
@@ -2369,12 +2565,12 @@ export function RightSidebar(
                   <button
                     key={item.path}
                     type="button"
-                    onClick={() => insertPathReference(item.path)}
-                    className="inline-flex max-w-[10rem] shrink-0 items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium text-foreground transition hover:bg-surface-elevated active:scale-95"
+                    onClick={() => insertPathReference(item.path, `path:${item.path}`)}
+                    className={`inline-flex max-w-[10rem] shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition active:scale-95 ${insertedReferenceKey === `path:${item.path}` ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
                     title={`Insert ${item.label}`}
                   >
                     <RiFileText size={10} className="shrink-0 text-muted-foreground" />
-                    <span className="truncate">{display.name}</span>
+                    <span className="truncate">{insertedReferenceKey === `path:${item.path}` ? t('rightSidebar.inserted') : display.name}</span>
                   </button>
                 );
               })}
@@ -2485,13 +2681,6 @@ export function RightSidebar(
         )}
         <div className="h-2" />
 
-        {/* Toast — absolutely positioned so its 1.4 s lifetime doesn't push
-            the tab bar or scroller. */}
-        {lastInsertedReference && (
-          <div className="pointer-events-none absolute right-12 top-2 z-10 max-w-[60%] truncate rounded-full bg-primary/90 px-3 py-1 text-[11px] font-medium text-primary-foreground shadow-md animate-fade-in">
-            {t('rightSidebar.insertedToast', { label: lastInsertedReference })}
-          </div>
-        )}
         {gitActionError && (
           <div className="pointer-events-none absolute right-3 top-10 z-20 max-w-[72%] rounded-lg bg-destructive/95 px-3 py-2 text-[11px] font-medium text-destructive-foreground shadow-md animate-fade-in">
             {gitActionError}
@@ -2530,6 +2719,7 @@ export function RightSidebar(
                   rootPath={fileTreeRoot ?? ''}
                   onFileSelect={handleFileSelect}
                   onPathReference={insertPathReference}
+                  insertedReferenceKey={insertedReferenceKey}
                   onDirectoryRoot={openDirectoryAsExplorerRoot}
                   onDirectoryPinToggle={togglePinnedDirectory}
                   onFilePinToggle={togglePinnedFile}
@@ -2547,6 +2737,7 @@ export function RightSidebar(
                   isMobile={false}
                   lineRange={lineRange}
                   onLineRangeChange={setLineRange}
+                  insertedReferenceKey={insertedReferenceKey}
                   scrollToLine={scrollToLine}
                   onScrollToLineHandled={() => setScrollToLine(null)}
                 />
@@ -2565,6 +2756,7 @@ export function RightSidebar(
                   rootPath={fileTreeRoot ?? ''}
                   onFileSelect={handleFileSelect}
                   onPathReference={insertPathReference}
+                  insertedReferenceKey={insertedReferenceKey}
                   onDirectoryRoot={openDirectoryAsExplorerRoot}
                   onDirectoryPinToggle={togglePinnedDirectory}
                   onFilePinToggle={togglePinnedFile}
@@ -2583,6 +2775,7 @@ export function RightSidebar(
                   isMobile
                   lineRange={lineRange}
                   onLineRangeChange={setLineRange}
+                  insertedReferenceKey={insertedReferenceKey}
                   scrollToLine={scrollToLine}
                   onScrollToLineHandled={() => setScrollToLine(null)}
                 />
@@ -2599,6 +2792,7 @@ export function RightSidebar(
                 rootPath={fileTreeRoot ?? ''}
                 onFileSelect={handleFileSelect}
                 onPathReference={insertPathReference}
+                insertedReferenceKey={insertedReferenceKey}
                 onDirectoryRoot={openDirectoryAsExplorerRoot}
                 onDirectoryPinToggle={togglePinnedDirectory}
                 onFilePinToggle={togglePinnedFile}
@@ -2619,6 +2813,7 @@ export function RightSidebar(
             isMobile={false}
             lineRange={lineRange}
             onLineRangeChange={setLineRange}
+            insertedReferenceKey={insertedReferenceKey}
             scrollToLine={scrollToLine}
             onScrollToLineHandled={() => setScrollToLine(null)}
           />
@@ -2675,6 +2870,8 @@ export function RightSidebar(
                         const display = getRelativeDisplayPath(absolutePath, rootPath);
                         const relativePath = file.path;
                         const isSelected = selectedFilePath === relativePath || selectedFilePath === absolutePath;
+                        const referenceKey = `path:${absolutePath}`;
+                        const referenceInserted = insertedReferenceKey === referenceKey;
                         const actions = buildGitActionButtons(file);
                         return (
                           <div
@@ -2702,11 +2899,11 @@ export function RightSidebar(
                               <GitActionChips actions={actions} running={runningGitAction} completed={completedGitAction?.path === file.path ? completedGitAction : null} />
                               <button
                                 type="button"
-                                onClick={() => insertPathReference(absolutePath)}
-                                className="ml-auto inline-flex h-6 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100"
+                                onClick={() => insertPathReference(absolutePath, referenceKey)}
+                                className={`ml-auto inline-flex h-6 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
                                 title={t('rightSidebar.insertThisFile')}
                               >
-                                {t('rightSidebar.insertFileRef')}
+                                {referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
                               </button>
                             </div>
                           </div>
@@ -2717,7 +2914,7 @@ export function RightSidebar(
                 </div>
               </div>
               <div className="min-w-0 flex-1 overflow-y-auto overscroll-contain">
-                <DiffViewer active={diffPaneActive} filePath={selectedFilePath} changedFile={selectedChangedFile} reloadKey={diffRefreshKey} onInsertDiffReference={insertContextText} />
+                <DiffViewer active={diffPaneActive} filePath={selectedFilePath} changedFile={selectedChangedFile} reloadKey={diffRefreshKey} onInsertDiffReference={insertContextText} insertedReferenceKey={insertedReferenceKey} />
               </div>
             </div>
           ) : (
@@ -2774,6 +2971,8 @@ export function RightSidebar(
                       const relativePath = file.path;
                       const isExpanded = expandedDiffFiles.has(relativePath);
                       const isSelected = selectedFilePath === relativePath || selectedFilePath === absolutePath;
+                      const referenceKey = `path:${absolutePath}`;
+                      const referenceInserted = insertedReferenceKey === referenceKey;
                       const actions = buildGitActionButtons(file);
                       return (
                         <section
@@ -2810,12 +3009,12 @@ export function RightSidebar(
                               type="button"
                               onClick={(event) => {
                                 event.stopPropagation();
-                                insertPathReference(absolutePath);
+                                insertPathReference(absolutePath, referenceKey);
                               }}
-                              className="mr-2 inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary transition active:scale-95 sm:h-6 sm:min-w-8 md:opacity-0 md:group-hover:opacity-100"
+                              className={`mr-2 inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold transition active:scale-95 sm:h-6 sm:min-w-8 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
                               title={t('rightSidebar.insertThisFile')}
                             >
-                              {t('rightSidebar.insertFileRef')}
+                              {referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
                             </button>
                           </div>
                           {actions.length > 0 && (
@@ -2834,6 +3033,7 @@ export function RightSidebar(
                                 reloadKey={diffRefreshKey}
                                 embedded
                                 onInsertDiffReference={insertContextText}
+                                insertedReferenceKey={insertedReferenceKey}
                               />
                             </div>
                           )}

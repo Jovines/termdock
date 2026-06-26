@@ -87,7 +87,7 @@ export const en: TranslationDictionary = {
     tabGit: 'Git',
     tabFiles: 'Files',
     tabPreview: 'Preview',
-    insertedToast: ({ label }) => `Inserted ${label}`,
+    inserted: 'Inserted',
     selectFilePrompt: 'Select a file to preview its contents',
     backToFileList: 'Back to file list',
     insertLineRef: ({ lineLabel }) => `Insert ${lineLabel}`,

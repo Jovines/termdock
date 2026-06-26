@@ -18,7 +18,8 @@ import { useI18n } from '../../i18n';
 interface FileTreeProps {
   rootPath: string;
   onFileSelect: (path: string) => void;
-  onPathReference?: (path: string) => void;
+  onPathReference?: (path: string, key?: string) => void;
+  insertedReferenceKey?: string | null;
   onDirectoryRoot?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
@@ -105,7 +106,8 @@ interface FileTreeItemProps {
   node: FileTreeNode;
   depth: number;
   onFileSelect: (path: string) => void;
-  onPathReference?: (path: string) => void;
+  onPathReference?: (path: string, key?: string) => void;
+  insertedReferenceKey?: string | null;
   onDirectoryRoot?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
@@ -119,6 +121,7 @@ const FileTreeItem = memo(function FileTreeItem({
   depth,
   onFileSelect,
   onPathReference,
+  insertedReferenceKey,
   onDirectoryRoot,
   onDirectoryPinToggle,
   onFilePinToggle,
@@ -142,6 +145,8 @@ const FileTreeItem = memo(function FileTreeItem({
   const isDirectory = node.type === 'directory';
   const isPinned = pinnedPaths.has(node.path);
   const canPinFile = !isDirectory && Boolean(onFilePinToggle);
+  const referenceKey = `path:${node.path}`;
+  const referenceInserted = insertedReferenceKey === referenceKey;
 
   const visibleChildren = useMemo(() => {
     if (!children) return undefined;
@@ -193,8 +198,8 @@ const FileTreeItem = memo(function FileTreeItem({
 
   const handleReferenceClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
-    onPathReference?.(node.path);
-  }, [onPathReference, node.path]);
+    onPathReference?.(node.path, referenceKey);
+  }, [onPathReference, node.path, referenceKey]);
 
   const handleDirectoryRootClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
@@ -290,10 +295,10 @@ const FileTreeItem = memo(function FileTreeItem({
         {onPathReference && (
           <span
             onClick={handleReferenceClick}
-            className="ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100"
+            className={`ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${referenceInserted ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             title={t('fileTree.insertRefTitle')}
           >
-            {t('fileTree.insertRef')}
+            {referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
           </span>
         )}
       </button>
@@ -340,6 +345,7 @@ const FileTreeItem = memo(function FileTreeItem({
               pinnedPaths={pinnedPaths}
               selectedFilePath={selectedFilePath}
               queryLower={queryLower}
+              insertedReferenceKey={insertedReferenceKey}
             />
           ))}
         </div>
@@ -352,7 +358,8 @@ interface FileSearchResultItemProps {
   node: FileTreeNode;
   rootPath: string;
   onFileSelect: (path: string) => void;
-  onPathReference?: (path: string) => void;
+  onPathReference?: (path: string, key?: string) => void;
+  insertedReferenceKey?: string | null;
   onDirectoryRoot?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
@@ -365,6 +372,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   rootPath,
   onFileSelect,
   onPathReference,
+  insertedReferenceKey,
   onDirectoryRoot,
   onDirectoryPinToggle,
   onFilePinToggle,
@@ -376,6 +384,8 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const isDirectory = node.type === 'directory';
   const isPinned = pinnedPaths.has(node.path);
   const canPinFile = !isDirectory && Boolean(onFilePinToggle);
+  const referenceKey = `path:${node.path}`;
+  const referenceInserted = insertedReferenceKey === referenceKey;
   const [directoryActionsOpen, setDirectoryActionsOpen] = useState(false);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -386,8 +396,8 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
 
   const handleReferenceClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
-    onPathReference?.(node.path);
-  }, [onPathReference, node.path]);
+    onPathReference?.(node.path, referenceKey);
+  }, [onPathReference, node.path, referenceKey]);
 
   const handleDirectoryPinClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
@@ -472,10 +482,10 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {onPathReference && (
           <span
             onClick={handleReferenceClick}
-            className="ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100"
+            className={`ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${referenceInserted ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             title={t('fileTree.insertRefTitle')}
           >
-            {t('fileTree.insertRef')}
+            {referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
           </span>
         )}
       </button>
@@ -521,7 +531,8 @@ interface ContentSearchResultItemProps {
   selectedFilePath: string | null;
   query: string;
   onContentMatchSelect?: (path: string, line: number) => void;
-  onPathReference?: (path: string) => void;
+  onPathReference?: (path: string, key?: string) => void;
+  insertedReferenceKey?: string | null;
 }
 
 function highlightMatch(text: string, query: string): React.ReactNode {
@@ -553,12 +564,15 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   query,
   onContentMatchSelect,
   onPathReference,
+  insertedReferenceKey,
 }: ContentSearchResultItemProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(true);
   const isSelected = entry.path === selectedFilePath;
   const visibleMatches = expanded ? entry.matches.slice(0, MAX_VISIBLE_MATCHES_PER_FILE) : [];
   const hiddenCount = entry.matches.length - visibleMatches.length;
+  const referenceKey = `path:${entry.path}`;
+  const referenceInserted = insertedReferenceKey === referenceKey;
 
   return (
     <div className="rounded">
@@ -581,12 +595,12 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
           <span
             onClick={(event) => {
               event.stopPropagation();
-              onPathReference(entry.path);
+              onPathReference(entry.path, referenceKey);
             }}
-            className="ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100"
+            className={`ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${referenceInserted ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             title={t('fileTree.insertRefTitle')}
           >
-            {t('fileTree.insertRef')}
+            {referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
           </span>
         )}
       </button>
@@ -616,7 +630,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   );
 });
 
-export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect }: FileTreeProps) {
+export function FileTree({ rootPath, onFileSelect, onPathReference, insertedReferenceKey, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect }: FileTreeProps) {
   const { t } = useI18n();
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
@@ -834,6 +848,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
                 query={query.trim()}
                 onContentMatchSelect={onContentMatchSelect}
                 onPathReference={onPathReference}
+                insertedReferenceKey={insertedReferenceKey}
               />
             ))}
             <div ref={loadMoreRef} className="py-2 text-center text-[11px] text-muted-foreground">
@@ -901,6 +916,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
                 onFilePinToggle={onFilePinToggle}
                 pinnedPaths={pinnedPaths}
                 selectedFilePath={selectedFilePath}
+                insertedReferenceKey={insertedReferenceKey}
               />
             ))}
             <div ref={loadMoreRef} className="py-2 text-center text-[11px] text-muted-foreground">
@@ -968,6 +984,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, onDirectoryR
           pinnedPaths={pinnedPaths}
           selectedFilePath={selectedFilePath}
           queryLower={queryLower}
+          insertedReferenceKey={insertedReferenceKey}
         />
       ))}
     </div>

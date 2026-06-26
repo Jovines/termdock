@@ -1,0 +1,11 @@
+{
+  "description": "Termdock Mono glyph patches. Keep this list intentionally small: only patch characters that are known to appear in prompts/UI and whose platform fallback is visually broken. Do not bulk-alias whole Unicode blocks.",
+  "composites": {
+    "2756": {
+      "name": "BLACK DIAMOND MINUS WHITE X",
+      "source": "25C6",
+      "reason": "Used by prompts; Android fallback renders much larger than ◆/◇. Build a distinct four-diamond glyph instead of aliasing to ◆."
+    }
+  },
+  "aliases": {}
+}

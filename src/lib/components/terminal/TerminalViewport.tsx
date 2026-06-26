@@ -341,7 +341,7 @@ function getTerminalConvertEol(hasTmuxScroll: boolean): boolean {
  *
  * 这里：
  *   - 用 module 级 promise 缓存，整个应用只等一次。
- *   - 显式 load 终端主字体 (JetBrains Mono NL Regular / Bold)，避免 unicode-range
+ *   - 显式 load 终端主字体 (Termdock Mono Regular / Bold)，避免 unicode-range
  *     懒加载导致 ready 提前 resolve（document.fonts.ready 只等当前已注册的
  *     FontFace，懒加载字体在被使用前不会注册）。
  *   - 兼容老浏览器 / 测试环境：API 缺失时直接 resolve。
@@ -350,25 +350,22 @@ function getTerminalConvertEol(hasTmuxScroll: boolean): boolean {
 let terminalFontsReadyPromise: Promise<void> | null = null;
 const TERMINAL_FONT_PRELOADS = [
   {
-    font: '400 13px "JetBrains Mono NL"',
+    font: '400 13px "Termdock Mono"',
     text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
   },
   {
-    font: '700 13px "JetBrains Mono NL"',
+    font: '700 13px "Termdock Mono"',
     text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
   },
   {
     // 真实 italic 字形，替代 xterm 合成斜体。预加载确保 man / less 等
     // TUI 程序首帧就能拿到 italic 字形，不会先画成正体再跳变。
-    font: 'italic 400 13px "JetBrains Mono NL"',
+    font: 'italic 400 13px "Termdock Mono"',
     text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
   },
   {
-    font: '400 13px "Symbols Nerd Font Mono"',
-    // CSS Font Loading API 的 text 参数必须命中 @font-face unicode-range。
-    // 不传 text 时默认只检查空格，Nerd Font 的 PUA 图标不会被真正下载，
-    // tmux prompt 首帧仍可能先画成 tofu 方块，再在字体懒加载后跳成图标。
-    text: '\ue0b0\ue0b1\uf07b\uf120\uf489\udb80\ude00',
+    font: '700 italic 13px "Termdock Mono"',
+    text: 'Termdock 0123456789 ❖ \ue0b0\ue0b1\uf07b\uf120\uf489',
   },
   {
     font: '400 13px "Noto Sans Symbols 2"',
@@ -3498,6 +3495,34 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                     return;
                   }
 
+                  // ---- macOS-style line editing ----
+                  // Cmd+Backspace clears the prompt input before cursor; at the
+                  // usual end-of-line cursor position this clears the whole input.
+                  if (cmd && !ctrl && !alt && !shift && key === 'Backspace') {
+                    event.preventDefault();
+                    sendTerminalSeq('\x15', event.currentTarget);
+                    return;
+                  }
+
+                  // Cmd+Fn+Delete / forward Delete: clear from cursor to line end.
+                  if (cmd && !ctrl && !alt && !shift && key === 'Delete') {
+                    event.preventDefault();
+                    sendTerminalSeq('\x0b', event.currentTarget);
+                    return;
+                  }
+
+                  if (cmd && !ctrl && !alt && !shift && key === 'ArrowLeft') {
+                    event.preventDefault();
+                    sendTerminalSeq('\x01', event.currentTarget);
+                    return;
+                  }
+
+                  if (cmd && !ctrl && !alt && !shift && key === 'ArrowRight') {
+                    event.preventDefault();
+                    sendTerminalSeq('\x05', event.currentTarget);
+                    return;
+                  }
+
                   // ---- 其他 Cmd / Cmd+Shift / Cmd+Alt 组合 ----
                   // 不识别就交给 App.tsx 的全局监听器（Cmd+B / Cmd+Shift+E 等）。
                   // 不 preventDefault、也不发 PTY；textarea 对这些组合的默认行为
@@ -3521,6 +3546,30 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                       sendTerminalSeq(String.fromCharCode(code & 0x1f), event.currentTarget);
                       return;
                     }
+                  }
+
+                  if (alt && !ctrl && !cmd && !shift && key === 'Backspace') {
+                    event.preventDefault();
+                    sendTerminalSeq('\x1b\x7f', event.currentTarget);
+                    return;
+                  }
+
+                  if (alt && !ctrl && !cmd && !shift && key === 'Delete') {
+                    event.preventDefault();
+                    sendTerminalSeq('\x1bd', event.currentTarget);
+                    return;
+                  }
+
+                  if (alt && !ctrl && !cmd && !shift && key === 'ArrowLeft') {
+                    event.preventDefault();
+                    sendTerminalSeq('\x1bb', event.currentTarget);
+                    return;
+                  }
+
+                  if (alt && !ctrl && !cmd && !shift && key === 'ArrowRight') {
+                    event.preventDefault();
+                    sendTerminalSeq('\x1bf', event.currentTarget);
+                    return;
                   }
 
                   // ---- Alt + letter → ESC-prefix ----

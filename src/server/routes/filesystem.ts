@@ -299,10 +299,119 @@ function finalizeChangedFiles(files: Map<string, GitChangedFile>): GitChangedFil
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
+function parsePorcelainStatusCode(code: string | undefined): GitChangeStatus {
+  if (!code || code === '.') return 'unknown';
+  return normalizeNameStatus(code);
+}
+
+function applyPorcelainStatus(file: GitChangedFile, xy: string): void {
+  const indexStatus = xy[0] && xy[0] !== '.' ? xy[0] : undefined;
+  const worktreeStatus = xy[1] && xy[1] !== '.' ? xy[1] : undefined;
+  file.indexStatus = indexStatus;
+  file.worktreeStatus = worktreeStatus;
+  file.staged = Boolean(indexStatus);
+  file.unstaged = Boolean(worktreeStatus);
+  file.status = combineChangeStatus({
+    ...file,
+    indexStatus,
+    worktreeStatus,
+  });
+}
+
+function parseGitStatusPorcelainV2(gitRoot: string, output: string): {
+  branch: string | null;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
+  files: GitChangedFile[];
+} {
+  let branch: string | null = null;
+  let upstream: string | null = null;
+  let ahead: number | null = null;
+  let behind: number | null = null;
+  const files = new Map<string, GitChangedFile>();
+  const records = output.split('\0').filter(Boolean);
+
+  for (let i = 0; i < records.length; i += 1) {
+    const record = records[i];
+    if (record.startsWith('# branch.head ')) {
+      const value = record.slice('# branch.head '.length).trim();
+      branch = value && value !== '(detached)' ? value : null;
+      continue;
+    }
+    if (record.startsWith('# branch.upstream ')) {
+      upstream = record.slice('# branch.upstream '.length).trim() || null;
+      continue;
+    }
+    if (record.startsWith('# branch.ab ')) {
+      const match = record.match(/^# branch\.ab \+(-?\d+) -(-?\d+)$/);
+      if (match) {
+        ahead = Number.parseInt(match[1], 10);
+        behind = Number.parseInt(match[2], 10);
+      }
+      continue;
+    }
+    if (record.startsWith('? ')) {
+      const filePath = record.slice(2);
+      const file = emptyChangedFile(gitRoot, filePath);
+      file.status = 'untracked';
+      file.untracked = true;
+      file.unstaged = true;
+      file.tracked = false;
+      files.set(filePath, file);
+      continue;
+    }
+    if (record.startsWith('! ')) {
+      continue;
+    }
+
+    const parts = record.split(' ');
+    const kind = parts[0];
+    const xy = parts[1] ?? '';
+    if (kind === '1') {
+      const filePath = parts.slice(8).join(' ');
+      if (!filePath) continue;
+      const file = emptyChangedFile(gitRoot, filePath);
+      applyPorcelainStatus(file, xy);
+      files.set(filePath, file);
+      continue;
+    }
+    if (kind === '2') {
+      const filePath = parts.slice(9).join(' ');
+      const oldPath = records[i + 1];
+      if (!filePath) continue;
+      const file = emptyChangedFile(gitRoot, filePath);
+      applyPorcelainStatus(file, xy);
+      file.status = parsePorcelainStatusCode(xy[0]) === 'renamed' || parsePorcelainStatusCode(xy[1]) === 'renamed'
+        ? 'renamed'
+        : file.status;
+      if (oldPath) {
+        file.oldPath = oldPath;
+        i += 1;
+      }
+      files.set(filePath, file);
+      continue;
+    }
+    if (kind === 'u') {
+      const filePath = parts.slice(10).join(' ');
+      if (!filePath) continue;
+      const file = emptyChangedFile(gitRoot, filePath);
+      file.status = 'conflicted';
+      file.staged = true;
+      file.unstaged = true;
+      file.indexStatus = xy[0] && xy[0] !== '.' ? xy[0] : 'U';
+      file.worktreeStatus = xy[1] && xy[1] !== '.' ? xy[1] : 'U';
+      files.set(filePath, file);
+    }
+  }
+
+  return { branch, upstream, ahead, behind, files: finalizeChangedFiles(files) };
+}
+
 async function getChangedFiles(gitRoot: string): Promise<GitChangedFile[]> {
   const [stagedOutput, unstagedOutput, untrackedOutput] = await Promise.all([
-    execGit(['diff', '--cached', '--name-status', '-M', '-C', '--find-copies-harder', '-z'], gitRoot).catch(() => ''),
-    execGit(['diff', '--name-status', '-M', '-C', '--find-copies-harder', '-z'], gitRoot).catch(() => ''),
+    execGit(['diff', '--cached', '--name-status', '-M', '-z'], gitRoot).catch(() => ''),
+    execGit(['diff', '--name-status', '-M', '-z'], gitRoot).catch(() => ''),
     execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot).catch(() => ''),
   ]);
 
@@ -373,13 +482,8 @@ async function getGitPushTargets(gitRoot: string) {
 }
 
 async function buildGitBundle(resolvedCwd: string, gitRoot: string): Promise<GitBundlePayload> {
-  const [files, branchOutput, statusOutput, logOutput, pushTargets] = await Promise.all([
-    getChangedFiles(gitRoot),
-    execGit(['branch', '--show-current'], gitRoot).catch(() => ''),
-    execGit(['status', '--short', '--branch'], gitRoot).catch(() => ''),
-    execGit(['log', '--oneline', '-8'], gitRoot).catch(() => ''),
-    getGitPushTargets(gitRoot),
-  ]);
+  const statusOutput = await execGit(['status', '--porcelain=v2', '-z', '--branch'], gitRoot).catch(() => '');
+  const { files, branch, upstream, ahead, behind } = parseGitStatusPorcelainV2(gitRoot, statusOutput);
   const changedFiles = toContextFiles(files);
 
   return {
@@ -389,10 +493,11 @@ async function buildGitBundle(resolvedCwd: string, gitRoot: string): Promise<Git
       available: true,
       cwd: resolvedCwd,
       root: gitRoot,
-      branch: branchOutput.trim() || null,
-      ...pushTargets,
+      branch,
+      upstream,
+      ahead,
+      behind,
       status: statusOutput.trim(),
-      recentCommits: logOutput.split('\n').map((line) => line.trim()).filter(Boolean),
       changedFiles,
       truncated: changedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES,
     },
