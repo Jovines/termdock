@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, type Dispatch, type KeyboardEvent, type MouseEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
+import { useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { useGesture } from '@use-gesture/react';
 import {
   X as RiCloseLine,
@@ -29,6 +29,7 @@ import { getGitBundle, getGitContext, isPreviewableImagePath, readFileContent, r
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, type RefractorLike } from '../../utils/syntaxHighlight';
+import { useReferenceLongPressCopy } from './referenceLongPress';
 
 interface RightSidebarProps {
   isOpen: boolean;
@@ -51,12 +52,17 @@ const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; ti
 
 const RECENT_REFERENCES_STORAGE_KEY = 'termdock:recent-file-references';
 const FILE_TREE_SCROLL_STORAGE_KEY = 'termdock:right-sidebar:file-tree-scroll:v1';
+const FILE_TREE_WIDTH_STORAGE_KEY = 'termdock:right-sidebar:file-tree-width:v1';
 const MARKDOWN_VIEW_MODE_STORAGE_KEY = 'termdock:right-sidebar:markdown-view-mode:v1';
 const MAX_RECENT_REFERENCES = 8;
 const MAX_FILE_TREE_SCROLL_ROOTS = 20;
 const FILE_TREE_SCROLL_WRITE_MS = 250;
+const FILE_TREE_WIDTH_WRITE_MS = 120;
 const GIT_BUNDLE_SLOW_MS = 700;
 const SIDEBAR_BACKGROUND_IO_DELAY_MS = 600;
+const DEFAULT_FILE_TREE_WIDTH_PX = 300;
+const MIN_FILE_TREE_WIDTH_PX = 240;
+const MAX_FILE_TREE_WIDTH_PX = 560;
 // Below this width we treat the panel as a phone-sized overlay: dual-pane
 // mode collapses to a single column with back-navigation, and the third
 // "File" tab is hidden (its content is reachable via the Files tab).
@@ -90,6 +96,20 @@ function isMarkdownViewMode(value: unknown): value is MarkdownViewMode {
 
 function readMarkdownViewMode(): MarkdownViewMode {
   return readCache(MARKDOWN_VIEW_MODE_STORAGE_KEY, isMarkdownViewMode) ?? 'preview';
+}
+
+function clampFileTreeWidth(width: number, drawerWidthPx: number): number {
+  const maxByDrawer = Math.max(MIN_FILE_TREE_WIDTH_PX, drawerWidthPx - 320);
+  const max = Math.min(MAX_FILE_TREE_WIDTH_PX, maxByDrawer);
+  return Math.min(max, Math.max(MIN_FILE_TREE_WIDTH_PX, width));
+}
+
+function isFileTreeWidth(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function readFileTreeWidth(drawerWidthPx: number): number {
+  return clampFileTreeWidth(readCache(FILE_TREE_WIDTH_STORAGE_KEY, isFileTreeWidth) ?? DEFAULT_FILE_TREE_WIDTH_PX, drawerWidthPx);
 }
 
 function getFileExtension(filePath: string): string {
@@ -868,11 +888,13 @@ function ZoomableImage({ src, alt, onLoad, onError }: ZoomableImageProps) {
 interface FilePreviewProps {
   filePath: string | null;
   onInsertReference: (path: string, key?: string) => void;
+  onReferenceCopied: (key: string) => void;
   onClose?: () => void;
   isMobile: boolean;
   lineRange: { start: number; end: number } | null;
   onLineRangeChange: Dispatch<SetStateAction<{ start: number; end: number } | null>>;
   insertedReferenceKey: string | null;
+  copiedReferenceKey: string | null;
   scrollToLine?: number | null;
   onScrollToLineHandled?: () => void;
 }
@@ -884,7 +906,7 @@ type FilePreviewState =
   | { kind: 'image'; objectUrl: string; meta: { size: number | null; mimeType: string; modified: string | null }; dimensions?: { width: number; height: number } }
   | { kind: 'error'; message: string };
 
-function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange, onLineRangeChange, insertedReferenceKey, scrollToLine, onScrollToLineHandled }: FilePreviewProps) {
+function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, isMobile, lineRange, onLineRangeChange, insertedReferenceKey, copiedReferenceKey, scrollToLine, onScrollToLineHandled }: FilePreviewProps) {
   const { t } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
@@ -899,6 +921,7 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   // content. `null` means "render plain text" (unknown language, too large, or
   // refractor not loaded yet).
   const [highlightedLines, setHighlightedLines] = useState<ReactNode[][] | null>(null);
+  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
 
   // 把仓库相对路径解析成绝对路径，用作 watcher / version map 的查询 key。
   const versionedPath = filePath
@@ -1084,6 +1107,8 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
   const lineReferenceKey = lineRange ? `path:${readablePath}:${lineRange.start}-${lineRange.end}` : fileReferenceKey;
   const fileReferenceInserted = insertedReferenceKey === fileReferenceKey;
   const lineReferenceInserted = insertedReferenceKey === lineReferenceKey;
+  const fileReferenceCopied = copiedReferenceKey === fileReferenceKey;
+  const lineReferenceCopied = copiedReferenceKey === lineReferenceKey;
   const selectedLineLabel = lineRange
     ? (lineRange.start === lineRange.end ? `L${lineRange.start}` : `L${lineRange.start}-${lineRange.end}`)
     : null;
@@ -1181,14 +1206,15 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
               <button
                 type="button"
                 onClick={() => onInsertReference(readablePath, fileReferenceKey)}
+                {...getReferenceLongPressHandlers(reference, fileReferenceKey)}
                 className={`inline-flex h-9 items-center gap-1 rounded-full px-3 text-xs font-semibold transition active:scale-95 ${
-                  fileReferenceInserted
+                  fileReferenceInserted || fileReferenceCopied
                     ? 'bg-surface-elevated text-foreground'
                     : 'bg-primary/15 text-primary hover:bg-primary/25'
                 }`}
                 title={`Insert reference: ${reference}`}
               >
-                {fileReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
+                {fileReferenceCopied ? t('rightSidebar.copied') : fileReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
               </button>
             )}
             <button
@@ -1264,12 +1290,13 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
             <button
               type="button"
               onClick={insertRangeReference}
+              {...getReferenceLongPressHandlers(lineReference, lineReferenceKey)}
               style={{ top: floatingInsertPos.top, left: floatingInsertPos.left, transform: 'translateY(-50%)' }}
               className="pointer-events-auto absolute z-popover inline-flex h-7 items-center gap-1 rounded-full bg-surface-elevated px-3 text-[11px] font-semibold text-foreground shadow-lg ring-1 ring-border-strong/40 transition hover:bg-surface-2 active:scale-95"
               title={`Insert markdown reference: ${lineReference}`}
             >
               <RiLink size={11} />
-              {lineReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
+              {lineReferenceCopied ? t('rightSidebar.copied') : lineReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
             </button>
           )}
         </div>
@@ -1316,12 +1343,13 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
             <button
               type="button"
               onClick={insertRangeReference}
+              {...getReferenceLongPressHandlers(lineReference, lineReferenceKey)}
               style={{ top: floatingInsertPos.top, left: floatingInsertPos.left, transform: 'translateY(-50%)' }}
               className="pointer-events-auto absolute z-popover inline-flex h-7 items-center gap-1 rounded-full bg-primary px-3 text-[11px] font-semibold text-primary-foreground shadow-lg ring-1 ring-primary/30 transition hover:bg-primary/90 active:scale-95"
               title={`Insert code reference: ${lineReference}`}
             >
               <RiLink size={11} />
-              {lineReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
+              {lineReferenceCopied ? t('rightSidebar.copied') : lineReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
             </button>
           )}
         </div>
@@ -1351,14 +1379,15 @@ function FilePreview({ filePath, onInsertReference, onClose, isMobile, lineRange
           <button
             type="button"
             onClick={insertRangeReference}
+            {...getReferenceLongPressHandlers(lineReference, lineReferenceKey)}
             className={`inline-flex h-9 items-center gap-1 rounded-full px-4 text-[12px] font-semibold shadow-sm transition active:scale-95 ${
-              lineReferenceInserted
+              lineReferenceInserted || lineReferenceCopied
                 ? 'bg-surface-elevated text-foreground hover:bg-surface-2'
                 : 'bg-primary text-primary-foreground hover:bg-primary/90'
             }`}
             title={`Insert code reference: ${lineReference}`}
           >
-            {lineReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
+            {lineReferenceCopied ? t('rightSidebar.copied') : lineReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
           </button>
         </div>
       </div>
@@ -1377,6 +1406,7 @@ export function RightSidebar(
   const deferredFileQuery = useDeferredValue(fileQuery);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [insertedReferenceKey, setInsertedReferenceKey] = useState<string | null>(null);
+  const [copiedReferenceKey, setCopiedReferenceKey] = useState<string | null>(null);
   const [recentReferences, setRecentReferences] = useState<RecentReference[]>([]);
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
@@ -1407,6 +1437,7 @@ export function RightSidebar(
   const [fileWatchError, setFileWatchError] = useState<string | null>(null);
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
   const isWide = !isMobile && drawerWidthPx >= WIDE_WIDTH_THRESHOLD_PX;
+  const [fileTreeWidthPx, setFileTreeWidthPx] = useState(() => readFileTreeWidth(drawerWidthPx));
   const rightTab = useSidebarStore((s) => s.rightTab);
   const setRightTab = useSidebarStore((s) => s.setRightTab);
   const rootPath = useSidebarStore((s) => s.rootPath);
@@ -1440,6 +1471,7 @@ export function RightSidebar(
   const gitDetailsRequestIdRef = useRef(0);
   const recentReferencesRootRef = useRef<string | null>(null);
   const lastAutoRefreshRootRef = useRef<string | null>(null);
+  const fileTreeResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
 
   const applyGitBundle = useCallback((bundle: GitBundleResponse, options: { reloadDiff?: boolean } = {}) => {
     setChangedFiles(toChangedFileMap(bundle.files));
@@ -1570,6 +1602,41 @@ export function RightSidebar(
     if (!isMobile) setMobileFilePreviewOpen(false);
   }, [isMobile]);
 
+  useEffect(() => {
+    setFileTreeWidthPx((width) => clampFileTreeWidth(width, drawerWidthPx));
+  }, [drawerWidthPx]);
+
+  const startFileTreeResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (!isWide) return;
+    event.preventDefault();
+    fileTreeResizeRef.current = {
+      startX: event.clientX,
+      startWidth: fileTreeWidthPx,
+      pointerId: event.pointerId,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, [fileTreeWidthPx, isWide]);
+
+  const handleFileTreeResizeMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const resize = fileTreeResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    const nextWidth = clampFileTreeWidth(resize.startWidth + event.clientX - resize.startX, drawerWidthPx);
+    setFileTreeWidthPx(nextWidth);
+    writeCacheThrottled(FILE_TREE_WIDTH_STORAGE_KEY, nextWidth, FILE_TREE_WIDTH_WRITE_MS);
+  }, [drawerWidthPx]);
+
+  const stopFileTreeResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const resize = fileTreeResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    fileTreeResizeRef.current = null;
+    flushCacheThrottled(FILE_TREE_WIDTH_STORAGE_KEY);
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture may already be released if the browser cancelled drag.
+    }
+  }, []);
+
   const gitKnownUnavailable = Boolean(rootPath && gitBundleLastLoadedAt !== null && gitContext?.available === false);
   // Non-Git workspaces have no Git/Changes tabs. Only the medium-width desktop
   // layout keeps a separate "Preview" tab; mobile (overlay) and wide (side-by-
@@ -1583,19 +1650,19 @@ export function RightSidebar(
   const previewPaneActive = effectiveRightTab === 'file' && !isMobile && !isWide;
   const mobilePreviewActive = isMobile && mobileFilePreviewOpen && Boolean(selectedFilePath);
 
-  // Warm Git state after the file tree has had a chance to render. On large
-  // repositories, Git probes can compete with directory expansion for disk I/O.
+  // Load Git state only when the Git/Changes panes are actually used. On large
+  // repositories, even a delayed status probe can compete with file browsing
+  // for disk I/O, so Files stays isolated from Git unless the user asks for it.
   useEffect(() => {
     const shouldPreloadDiff = gitPaneActive || diffPaneActive || rightTab === 'git' || rightTab === 'diff';
-    const shouldProbeRepository = isOpen && gitBundleLastLoadedAt === null;
-    if ((!shouldPreloadDiff && !shouldProbeRepository) || !rootPath || gitBundleLoading) return;
+    if (!shouldPreloadDiff || !rootPath || gitBundleLoading) return;
     if (!rootEntriesLoaded) return;
     const hasCachedGitBundle = gitBundleLastLoadedAt !== null;
     if (hasCachedGitBundle && lastAutoRefreshRootRef.current === rootPath) return;
     lastAutoRefreshRootRef.current = rootPath;
     const handle = window.setTimeout(() => {
       void loadGitBundle(rootPath, { preloadDiff: shouldPreloadDiff });
-    }, hasCachedGitBundle || shouldPreloadDiff ? 0 : SIDEBAR_BACKGROUND_IO_DELAY_MS);
+    }, 0);
     return () => {
       window.clearTimeout(handle);
     };
@@ -1625,6 +1692,7 @@ export function RightSidebar(
     return () => {
       gitBundleAbortRef.current?.abort();
       flushCacheThrottled(FILE_TREE_SCROLL_STORAGE_KEY);
+      flushCacheThrottled(FILE_TREE_WIDTH_STORAGE_KEY);
     };
   }, []);
 
@@ -1691,6 +1759,17 @@ export function RightSidebar(
     setInsertedReferenceKey(key);
     window.setTimeout(() => setInsertedReferenceKey((current) => (current === key ? null : current)), 1400);
   }, []);
+
+  const markReferenceCopied = useCallback((key: string) => {
+    setCopiedReferenceKey(key);
+    window.setTimeout(() => setCopiedReferenceKey((current) => (current === key ? null : current)), 1400);
+  }, []);
+
+  const getPathReferenceText = useCallback((path: string) => {
+    const absolutePath = rootPath && !path.startsWith('/') ? `${rootPath}/${path}` : path;
+    return buildPromptReference(absolutePath, rootPath);
+  }, [rootPath]);
+  const getReferenceLongPressHandlers = useReferenceLongPressCopy(markReferenceCopied);
 
   const insertPathReference = useCallback((path: string, key?: string) => {
     const absolutePath = rootPath && !path.startsWith('/') ? `${rootPath}/${path}` : path;
@@ -1761,11 +1840,14 @@ export function RightSidebar(
   }, [pinExplorerRoot, pinnedExplorerRootSet, rootPath, unpinExplorerRoot]);
 
   const watchedFileRoots = useMemo(() => {
-    return Array.from(new Set([rootPath, fileTreeRoot].filter(Boolean) as string[]));
-  }, [fileTreeRoot, rootPath]);
+    if (!rootPath || !selectedFilePath) return [];
+    const selectedAbsolutePath = selectedFilePath.startsWith('/') ? selectedFilePath : `${rootPath}/${selectedFilePath}`;
+    const selectedParent = getParentPath(selectedAbsolutePath);
+    return selectedParent ? [selectedParent] : [];
+  }, [rootPath, selectedFilePath]);
 
   useEffect(() => {
-    if (!isOpen || !rootEntriesLoaded || watchedFileRoots.length === 0) return;
+    if (!isOpen || watchedFileRoots.length === 0) return;
     const controller = new AbortController();
     let cancelled = false;
     setFileWatchError(null);
@@ -1783,7 +1865,7 @@ export function RightSidebar(
       window.clearTimeout(handle);
       controller.abort();
     };
-  }, [applyFileWatchEvents, isOpen, rootEntriesLoaded, watchedFileRoots]);
+  }, [applyFileWatchEvents, isOpen, watchedFileRoots]);
 
   const changedSummary = useMemo(() => {
     const counts = { added: 0, modified: 0, deleted: 0, renamed: 0, copied: 0, untracked: 0, conflicted: 0, staged: 0, other: 0 };
@@ -2260,21 +2342,22 @@ export function RightSidebar(
               </span>
               <span className="truncate text-[12px] font-medium text-foreground">{explorerName}</span>
             </div>
-            <button
-              type="button"
-              onClick={() => fileTreeRoot && insertPathReference(fileTreeRoot, fileTreeRootReferenceKey ?? undefined)}
-              disabled={!fileTreeRoot}
-              className={`inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-full px-2 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-35 active:scale-95 ${
-                fileTreeRootReferenceKey && insertedReferenceKey === fileTreeRootReferenceKey
+              <button
+                type="button"
+                onClick={() => fileTreeRoot && insertPathReference(fileTreeRoot, fileTreeRootReferenceKey ?? undefined)}
+                disabled={!fileTreeRoot}
+                {...(fileTreeRoot && fileTreeRootReferenceKey ? getReferenceLongPressHandlers(getPathReferenceText(fileTreeRoot), fileTreeRootReferenceKey) : {})}
+                className={`inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-full px-2 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-35 active:scale-95 ${
+                fileTreeRootReferenceKey && (insertedReferenceKey === fileTreeRootReferenceKey || copiedReferenceKey === fileTreeRootReferenceKey)
                   ? 'bg-surface-elevated text-foreground'
                   : 'bg-primary/10 text-primary hover:bg-primary/20'
               }`}
-              aria-label={t('rightSidebar.insertCurrentFolder')}
-              title={t('rightSidebar.insertCurrentFolder')}
-            >
-              <RiLink size={12} />
-              <span>{fileTreeRootReferenceKey && insertedReferenceKey === fileTreeRootReferenceKey ? t('rightSidebar.inserted') : t('rightSidebar.insertCurrentFolderShort')}</span>
-            </button>
+                aria-label={t('rightSidebar.insertCurrentFolder')}
+                title={t('rightSidebar.insertCurrentFolder')}
+              >
+                <RiLink size={12} />
+              <span>{fileTreeRootReferenceKey && copiedReferenceKey === fileTreeRootReferenceKey ? t('rightSidebar.copied') : fileTreeRootReferenceKey && insertedReferenceKey === fileTreeRootReferenceKey ? t('rightSidebar.inserted') : t('rightSidebar.insertCurrentFolderShort')}</span>
+              </button>
           </div>
           {fileTreeRoot && (
             <div className="mt-0.5 truncate text-[10px] text-muted-foreground/75">
@@ -2535,10 +2618,11 @@ export function RightSidebar(
                 <button
                   type="button"
                   onClick={insertGitContext}
-                  className={`ml-auto rounded-full px-2 py-0.5 font-medium ${insertedReferenceKey === gitContextReferenceKey ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary hover:bg-primary/20'}`}
+                  {...getReferenceLongPressHandlers(gitContextInputText.trimEnd(), gitContextReferenceKey)}
+                  className={`ml-auto rounded-full px-2 py-0.5 font-medium ${insertedReferenceKey === gitContextReferenceKey || copiedReferenceKey === gitContextReferenceKey ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary hover:bg-primary/20'}`}
                   title={t('rightSidebar.insertGitContext')}
                 >
-                  {insertedReferenceKey === gitContextReferenceKey ? t('rightSidebar.inserted') : t('rightSidebar.insertPreset', { label: t('rightSidebar.gitInfo') })}
+                  {copiedReferenceKey === gitContextReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === gitContextReferenceKey ? t('rightSidebar.inserted') : t('rightSidebar.insertPreset', { label: t('rightSidebar.gitInfo') })}
                 </button>
                 <button
                   type="button"
@@ -2561,16 +2645,18 @@ export function RightSidebar(
               <span className="shrink-0 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">{t('rightSidebar.recent')}</span>
               {recentReferences.slice(0, MAX_RECENT_REFERENCES).map((item) => {
                 const display = getRelativeDisplayPath(item.path, rootPath);
+                const referenceKey = `path:${item.path}`;
                 return (
                   <button
                     key={item.path}
                     type="button"
-                    onClick={() => insertPathReference(item.path, `path:${item.path}`)}
-                    className={`inline-flex max-w-[10rem] shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition active:scale-95 ${insertedReferenceKey === `path:${item.path}` ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
+                    onClick={() => insertPathReference(item.path, referenceKey)}
+                    {...getReferenceLongPressHandlers(getPathReferenceText(item.path), referenceKey)}
+                    className={`inline-flex max-w-[10rem] shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition active:scale-95 ${insertedReferenceKey === referenceKey || copiedReferenceKey === referenceKey ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
                     title={`Insert ${item.label}`}
                   >
                     <RiFileText size={10} className="shrink-0 text-muted-foreground" />
-                    <span className="truncate">{insertedReferenceKey === `path:${item.path}` ? t('rightSidebar.inserted') : display.name}</span>
+                    <span className="truncate">{copiedReferenceKey === referenceKey ? t('rightSidebar.copied') : insertedReferenceKey === referenceKey ? t('rightSidebar.inserted') : display.name}</span>
                   </button>
                 );
               })}
@@ -2712,14 +2798,18 @@ export function RightSidebar(
               <div
                 ref={fileTreeScrollRef}
                 onScroll={handleFileTreeScroll}
-                className="w-[300px] min-w-[260px] shrink-0 overflow-y-auto overscroll-contain border-r border-border/15 bg-surface"
+                className="shrink-0 overflow-y-auto overscroll-contain bg-surface"
+                style={{ width: fileTreeWidthPx }}
               >
                 {fileExplorerNavigation}
                 <FileTree
                   rootPath={fileTreeRoot ?? ''}
                   onFileSelect={handleFileSelect}
                   onPathReference={insertPathReference}
+                  getReferenceText={getPathReferenceText}
+                  onReferenceCopied={markReferenceCopied}
                   insertedReferenceKey={insertedReferenceKey}
+                  copiedReferenceKey={copiedReferenceKey}
                   onDirectoryRoot={openDirectoryAsExplorerRoot}
                   onDirectoryPinToggle={togglePinnedDirectory}
                   onFilePinToggle={togglePinnedFile}
@@ -2730,14 +2820,33 @@ export function RightSidebar(
                   onContentMatchSelect={handleContentMatchSelect}
                 />
               </div>
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label={t('rightSidebar.resizeFileTree')}
+                title={t('rightSidebar.resizeFileTree')}
+                className="group relative z-10 w-2 shrink-0 cursor-col-resize touch-none border-l border-border/15 bg-surface"
+                onPointerDown={startFileTreeResize}
+                onPointerMove={handleFileTreeResizeMove}
+                onPointerUp={stopFileTreeResize}
+                onPointerCancel={stopFileTreeResize}
+                onDoubleClick={() => {
+                  setFileTreeWidthPx(DEFAULT_FILE_TREE_WIDTH_PX);
+                  writeCache(FILE_TREE_WIDTH_STORAGE_KEY, DEFAULT_FILE_TREE_WIDTH_PX);
+                }}
+              >
+                <span className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-border/20 transition group-hover:bg-primary/45" />
+              </div>
               <div className="min-w-0 flex-1 overflow-hidden bg-surface">
                 <FilePreview
                   filePath={selectedFilePath}
                   onInsertReference={insertPathReference}
+                  onReferenceCopied={markReferenceCopied}
                   isMobile={false}
                   lineRange={lineRange}
                   onLineRangeChange={setLineRange}
                   insertedReferenceKey={insertedReferenceKey}
+                  copiedReferenceKey={copiedReferenceKey}
                   scrollToLine={scrollToLine}
                   onScrollToLineHandled={() => setScrollToLine(null)}
                 />
@@ -2756,7 +2865,10 @@ export function RightSidebar(
                   rootPath={fileTreeRoot ?? ''}
                   onFileSelect={handleFileSelect}
                   onPathReference={insertPathReference}
+                  getReferenceText={getPathReferenceText}
+                  onReferenceCopied={markReferenceCopied}
                   insertedReferenceKey={insertedReferenceKey}
+                  copiedReferenceKey={copiedReferenceKey}
                   onDirectoryRoot={openDirectoryAsExplorerRoot}
                   onDirectoryPinToggle={togglePinnedDirectory}
                   onFilePinToggle={togglePinnedFile}
@@ -2771,11 +2883,13 @@ export function RightSidebar(
                 <FilePreview
                   filePath={selectedFilePath}
                   onInsertReference={insertPathReference}
+                  onReferenceCopied={markReferenceCopied}
                   onClose={closeFilePreview}
                   isMobile
                   lineRange={lineRange}
                   onLineRangeChange={setLineRange}
                   insertedReferenceKey={insertedReferenceKey}
+                  copiedReferenceKey={copiedReferenceKey}
                   scrollToLine={scrollToLine}
                   onScrollToLineHandled={() => setScrollToLine(null)}
                 />
@@ -2792,7 +2906,10 @@ export function RightSidebar(
                 rootPath={fileTreeRoot ?? ''}
                 onFileSelect={handleFileSelect}
                 onPathReference={insertPathReference}
+                getReferenceText={getPathReferenceText}
+                onReferenceCopied={markReferenceCopied}
                 insertedReferenceKey={insertedReferenceKey}
+                copiedReferenceKey={copiedReferenceKey}
                 onDirectoryRoot={openDirectoryAsExplorerRoot}
                 onDirectoryPinToggle={togglePinnedDirectory}
                 onFilePinToggle={togglePinnedFile}
@@ -2810,10 +2927,12 @@ export function RightSidebar(
           <FilePreview
             filePath={selectedFilePath}
             onInsertReference={insertPathReference}
+            onReferenceCopied={markReferenceCopied}
             isMobile={false}
             lineRange={lineRange}
             onLineRangeChange={setLineRange}
             insertedReferenceKey={insertedReferenceKey}
+            copiedReferenceKey={copiedReferenceKey}
             scrollToLine={scrollToLine}
             onScrollToLineHandled={() => setScrollToLine(null)}
           />
@@ -2872,6 +2991,7 @@ export function RightSidebar(
                         const isSelected = selectedFilePath === relativePath || selectedFilePath === absolutePath;
                         const referenceKey = `path:${absolutePath}`;
                         const referenceInserted = insertedReferenceKey === referenceKey;
+                        const referenceCopied = copiedReferenceKey === referenceKey;
                         const actions = buildGitActionButtons(file);
                         return (
                           <div
@@ -2900,10 +3020,11 @@ export function RightSidebar(
                               <button
                                 type="button"
                                 onClick={() => insertPathReference(absolutePath, referenceKey)}
-                                className={`ml-auto inline-flex h-6 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+                                {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
+                                className={`ml-auto inline-flex h-6 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
                                 title={t('rightSidebar.insertThisFile')}
                               >
-                                {referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
+                                {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
                               </button>
                             </div>
                           </div>
@@ -2914,7 +3035,7 @@ export function RightSidebar(
                 </div>
               </div>
               <div className="min-w-0 flex-1 overflow-y-auto overscroll-contain">
-                <DiffViewer active={diffPaneActive} filePath={selectedFilePath} changedFile={selectedChangedFile} reloadKey={diffRefreshKey} onInsertDiffReference={insertContextText} insertedReferenceKey={insertedReferenceKey} />
+                <DiffViewer active={diffPaneActive} filePath={selectedFilePath} changedFile={selectedChangedFile} reloadKey={diffRefreshKey} onInsertDiffReference={insertContextText} onReferenceCopied={markReferenceCopied} insertedReferenceKey={insertedReferenceKey} copiedReferenceKey={copiedReferenceKey} />
               </div>
             </div>
           ) : (
@@ -2973,14 +3094,15 @@ export function RightSidebar(
                       const isSelected = selectedFilePath === relativePath || selectedFilePath === absolutePath;
                       const referenceKey = `path:${absolutePath}`;
                       const referenceInserted = insertedReferenceKey === referenceKey;
+                      const referenceCopied = copiedReferenceKey === referenceKey;
                       const actions = buildGitActionButtons(file);
                       return (
                         <section
                           key={absolutePath}
-                          className={`relative scroll-mt-2 rounded-xl border transition ${
+                          className={`relative scroll-mt-2 overflow-hidden rounded-xl border transition ${
                             isExpanded
                               ? 'border-primary/25 bg-surface-elevated shadow-sm'
-                              : 'overflow-hidden border-border/15 bg-surface hover:border-border/30'
+                              : 'border-border/15 bg-surface hover:border-border/30'
                           }`}
                         >
                           <div
@@ -3011,10 +3133,11 @@ export function RightSidebar(
                                 event.stopPropagation();
                                 insertPathReference(absolutePath, referenceKey);
                               }}
-                              className={`mr-2 inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold transition active:scale-95 sm:h-6 sm:min-w-8 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+                              {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
+                              className={`mr-2 inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold transition active:scale-95 sm:h-6 sm:min-w-8 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
                               title={t('rightSidebar.insertThisFile')}
                             >
-                              {referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
+                              {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
                             </button>
                           </div>
                           {actions.length > 0 && (
@@ -3033,7 +3156,9 @@ export function RightSidebar(
                                 reloadKey={diffRefreshKey}
                                 embedded
                                 onInsertDiffReference={insertContextText}
+                                onReferenceCopied={markReferenceCopied}
                                 insertedReferenceKey={insertedReferenceKey}
+                                copiedReferenceKey={copiedReferenceKey}
                               />
                             </div>
                           )}

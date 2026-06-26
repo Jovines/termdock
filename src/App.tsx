@@ -20,6 +20,9 @@ import {
   Loader2 as RiLoaderLine,
   Moon as RiMoonLine,
   Sun as RiSunLine,
+  Folder as RiFolderLine,
+  Hash as RiHashLine,
+  Clock as RiClockLine,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { useTerminalSettings } from './lib/hooks/useTerminalSettings';
@@ -1572,9 +1575,8 @@ function App() {
           ref={(el) => { renameInputRef.current = el; }}
           type="text"
           defaultValue={session.name}
-          maxLength={48}
           className="h-8 shrink-0 rounded-md bg-surface-elevated px-2 text-[12px] leading-none text-foreground outline-none ring-1 ring-primary/50 sm:h-8 min-w-[5rem]"
-          style={{ width: `${Math.min(Math.max(session.name.length, 5), 18)}ch` }}
+          style={{ width: `${Math.max(session.name.length, 5)}ch` }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               commitRename(session.id, (e.target as HTMLInputElement).value);
@@ -1597,12 +1599,12 @@ function App() {
         }}
         className={
           compact
-            ? `group relative inline-flex h-5 shrink-0 items-center overflow-hidden rounded-sm text-[11px] leading-none transition max-w-[6rem] ${
+            ? `group relative inline-flex h-5 shrink-0 items-center rounded-sm text-[11px] leading-none transition ${
                 isActive
                   ? 'bg-surface-elevated text-foreground shadow-sm'
                   : 'text-muted-foreground hover:bg-surface-elevated/40 hover:text-foreground'
               }`
-            : `group relative inline-flex h-8 shrink-0 items-center overflow-hidden rounded-md text-[12px] leading-none transition max-w-[6.25rem] sm:h-8 sm:max-w-[12rem] ${
+            : `group relative inline-flex h-8 shrink-0 items-center rounded-md text-[12px] leading-none transition sm:h-8 ${
                 isActive
                   ? 'bg-surface-elevated text-foreground shadow-sm'
                   : 'text-muted-foreground hover:bg-surface-elevated/50 hover:text-foreground'
@@ -1630,13 +1632,13 @@ function App() {
             </span>
             {tabDirLabel ? (
               <span className="flex min-w-0 flex-col justify-center leading-[0.82rem] sm:leading-[0.85rem]">
-                <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>{displayName}</span>
+                <span className={`whitespace-nowrap text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>{displayName}</span>
                 <span className="truncate text-[9px] text-muted-foreground/80 sm:text-[9.5px]">
                   {tabDirLabel}
                 </span>
               </span>
             ) : (
-              <span className={`truncate text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>{displayName}</span>
+              <span className={`whitespace-nowrap text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>{displayName}</span>
             )}
           </span>
         </button>
@@ -2297,27 +2299,71 @@ function App() {
                           const existingSession = boundFrontendSessionId
                             ? sessions.find((session) => session.id === boundFrontendSessionId) ?? null
                             : null;
+                          const rawTmuxLabel = `tmux:${tmux.name}`;
+                          const friendlyTitle = tmux.friendlyName?.trim() || null;
+                          const existingTitle = existingSession?.customName ? existingSession.name : null;
+                          const labelTitle = tmux.label && tmux.label !== tmux.name ? tmux.label : null;
+                          const title = friendlyTitle || existingTitle || labelTitle || rawTmuxLabel;
+                          const subtitleParts = [
+                            title !== rawTmuxLabel ? rawTmuxLabel : null,
+                            connected ? (tmux.restorable ? t('settings.restorable') : t('settings.attached')) : null,
+                            tmux.clientCount != null ? `web:${tmux.clientCount}` : null,
+                            tmux.attached > 0 ? `tmux:${tmux.attached}` : null,
+                          ].filter((part): part is string => Boolean(part));
+                          const metaParts = [
+                            t('settings.windows', { n: tmux.windows }),
+                            tmux.createdAt ? new Date(tmux.createdAt).toLocaleDateString() : null,
+                          ].filter((part): part is string => Boolean(part));
                           const confirming = tmuxConfirmKillName === tmux.name;
                           const killing = tmuxKillingName === tmux.name;
                           const attaching = tmuxAttachingName === tmux.name;
                           return (
                             <div
                               key={tmux.name}
-                              className={`flex items-center gap-2 rounded-lg px-2 py-1.5 ${
+                              className={`flex items-start gap-2 rounded-lg px-2.5 py-2 ${
                                 confirming ? 'bg-destructive/10 ring-1 ring-destructive/40' : 'bg-surface'
                               }`}
                             >
-                              <RiLayoutGridLine size={12} className={connected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
-                              <div className="min-w-0 flex-1">
-                                <div className="truncate text-[12px] font-medium text-foreground">{tmux.name}</div>
-                                <div className="truncate text-[10px] text-muted-foreground">
-                                  {tmux.program && <span className="text-foreground/70">{tmux.program}</span>}
-                                  {tmux.program && tmux.cwd && ' · '}
-                                  {tmux.cwd && <span>{tmux.cwd}</span>}
-                                  {(tmux.program || tmux.cwd) && ' · '}
-                                  {t('settings.windows', { n: tmux.windows })}
-                                  {tmux.attached > 0 && ` · tmux:${tmux.attached}`}
-                                  {connected && ` · ${tmux.restorable ? t('settings.restorable') : t('settings.attached')}`}
+                              <RiLayoutGridLine size={13} className={connected ? 'mt-0.5 shrink-0 text-primary' : 'mt-0.5 shrink-0 text-muted-foreground'} />
+                              <div className="min-w-0 flex-1 space-y-1">
+                                <div className="flex min-w-0 items-center gap-1.5">
+                                  <div className="truncate text-[12px] font-semibold text-foreground">{title}</div>
+                                  {tmux.friendlyName && (
+                                    <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium text-primary">
+                                      {locale === 'zh' ? '自定义' : 'custom'}
+                                    </span>
+                                  )}
+                                </div>
+                                {subtitleParts.length > 0 && (
+                                  <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
+                                    {subtitleParts.map((part) => (
+                                      <span key={part} className="max-w-full truncate">{part}</span>
+                                    ))}
+                                  </div>
+                                )}
+                                {(tmux.program || tmux.cwd) && (
+                                  <div className="grid min-w-0 gap-0.5 text-[10px] text-muted-foreground">
+                                    {tmux.program && (
+                                      <div className="flex min-w-0 items-center gap-1">
+                                        <RiHashLine size={10} className="shrink-0 text-muted-foreground/70" />
+                                        <span className="truncate text-foreground/75">{tmux.program}</span>
+                                      </div>
+                                    )}
+                                    {tmux.cwd && (
+                                      <div className="flex min-w-0 items-center gap-1">
+                                        <RiFolderLine size={10} className="shrink-0 text-muted-foreground/70" />
+                                        <span className="truncate">{tmux.cwd}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                                <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground/80">
+                                  {metaParts.map((part) => (
+                                    <span key={part} className="inline-flex items-center gap-1">
+                                      <RiClockLine size={10} className="shrink-0 text-muted-foreground/60" />
+                                      {part}
+                                    </span>
+                                  ))}
                                 </div>
                               </div>
                               {!confirming ? (

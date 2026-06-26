@@ -96,6 +96,7 @@ interface CliOptions {
   attachTmuxName?: string;
   newTmux: boolean;
   newTmuxName?: string;
+  newTmuxAttach: boolean;
 }
 
 interface ServerState {
@@ -154,8 +155,11 @@ Options:
                      With no name: interactive picker.
                      With name: attach directly (e.g. --attach-tmux wt-foo).
   --new-tmux [name]  Create (or ensure) and attach to a tmux session for termdock.
+                     New sessions start in the directory where td was invoked.
                      With no name: auto-generate a wt-* name and enter it directly.
                      Use --tls to inspect sessions without attaching.
+  --new-tmux-detached [name]
+                     Create (or ensure) a tmux session and leave it detached.
   -h, --help         Show this help message
 
 Short commands:
@@ -170,6 +174,7 @@ Short commands:
   at [name]          Same as --attach-tmux [name]
   n [name]           Same as --new-tmux [name]
   nt [name]          Same as --new-tmux [name]
+  nd [name]          Same as --new-tmux-detached [name]
   p                  Same as --set-password
   pw                 Same as --set-password
   pc                 Same as --clear-password
@@ -452,6 +457,7 @@ function parseArgs(argv: string[]): CliOptions {
   let attachTmuxName: string | undefined;
   let newTmux = false;
   let newTmuxName: string | undefined;
+  let newTmuxAttach = true;
 
   // Short command aliases for the common path. Keep these positional-only so
   // long-form flags remain the single source of truth for option semantics.
@@ -490,6 +496,16 @@ function parseArgs(argv: string[]): CliOptions {
       }
     } else if (command === 'n' || command === 'nt') {
       newTmux = true;
+      newTmuxAttach = true;
+      if (next && !next.startsWith('-')) {
+        newTmuxName = next;
+        argv = argv.slice(2);
+      } else {
+        argv = argv.slice(1);
+      }
+    } else if (command === 'nd') {
+      newTmux = true;
+      newTmuxAttach = false;
       if (next && !next.startsWith('-')) {
         newTmuxName = next;
         argv = argv.slice(2);
@@ -600,6 +616,18 @@ function parseArgs(argv: string[]): CliOptions {
 
     if (arg === '--new-tmux') {
       newTmux = true;
+      newTmuxAttach = true;
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        newTmuxName = next;
+        index += 1;
+      }
+      continue;
+    }
+
+    if (arg === '--new-tmux-detached') {
+      newTmux = true;
+      newTmuxAttach = false;
       const next = argv[index + 1];
       if (next && !next.startsWith('-')) {
         newTmuxName = next;
@@ -632,6 +660,7 @@ function parseArgs(argv: string[]): CliOptions {
     attachTmuxName,
     newTmux,
     newTmuxName,
+    newTmuxAttach,
   };
 }
 
@@ -870,10 +899,50 @@ async function getTmuxOption(sessionName: string, key: string): Promise<string |
   }
 }
 
-async function ensureStampedTmuxSession(sessionName: string): Promise<{ sessionName: string; created: boolean }> {
+function resolveInvocationCwd(): string {
+  const fallback = process.cwd();
+  const pwd = process.env.PWD;
+  if (!pwd || !path.isAbsolute(pwd)) return fallback;
+
+  try {
+    const pwdStat = fs.statSync(pwd);
+    const fallbackStat = fs.statSync(fallback);
+    if (pwdStat.dev === fallbackStat.dev && pwdStat.ino === fallbackStat.ino && pwdStat.isDirectory()) {
+      return pwd;
+    }
+  } catch {
+    // Fall back to Node's cwd when the shell-provided PWD is stale.
+  }
+
+  return fallback;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function resolveUserShell(): string {
+  const shell = process.env.SHELL;
+  if (shell && path.isAbsolute(shell) && fs.existsSync(shell)) {
+    return shell;
+  }
+  return process.platform === 'win32' ? 'powershell.exe' : '/bin/sh';
+}
+
+async function ensureStampedTmuxSession(
+  sessionName: string,
+  cwd?: string,
+): Promise<{ sessionName: string; created: boolean }> {
   const exists = await tmuxSessionExists(sessionName);
   if (!exists) {
-    await execFileAsync('tmux', ['new-session', '-d', '-s', sessionName], {
+    const args = ['new-session', '-d', '-s', sessionName];
+    if (cwd) {
+      args.push('-c', cwd);
+    }
+    if (cwd && process.platform !== 'win32') {
+      args.push(`cd ${shellQuote(cwd)} && exec ${shellQuote(resolveUserShell())}`);
+    }
+    await execFileAsync('tmux', args, {
       timeout: 5000,
       maxBuffer: 256 * 1024,
     });
@@ -887,6 +956,10 @@ async function ensureStampedTmuxSession(sessionName: string): Promise<{ sessionN
   const existingCreatedAt = await getTmuxOption(sessionName, '@termdock-created-at');
   if (!existingCreatedAt) {
     await setTmuxOption(sessionName, '@termdock-created-at', String(Date.now()));
+  }
+  if (!exists && cwd) {
+    await setTmuxOption(sessionName, '@termdock-cwd', cwd);
+    await setTmuxOption(sessionName, '@termdock-label', getCwdLeafName(cwd));
   }
 
   return { sessionName, created: !exists };
@@ -1329,10 +1402,14 @@ async function runAttachTmux(opts: { name?: string }): Promise<void> {
 
 async function runNewTmux(opts: { name?: string; attach?: boolean }): Promise<void> {
   const sessionName = normalizeTmuxSessionName(opts.name);
-  const result = await ensureStampedTmuxSession(sessionName);
+  const cwd = resolveInvocationCwd();
+  const result = await ensureStampedTmuxSession(sessionName, cwd);
   registerGuiTmuxSession(result.sessionName);
   const verb = result.created ? 'Created' : 'Reused';
   console.log(`${ICON.ok} ${c.green(`${verb} tmux session:`)} ${c.cyan(result.sessionName)}`);
+  if (result.created) {
+    console.log(`  ${c.dim('Directory:')} ${c.cyan(cwd)}`);
+  }
   if (opts.attach === false) {
     console.log(`  ${c.dim('Tip: attach with')} ${c.cyan(`td --attach-tmux ${result.sessionName}`)}`);
     return;
@@ -1430,7 +1507,7 @@ async function main(): Promise<void> {
   }
 
   if (options.newTmux) {
-    await runNewTmux({ name: options.newTmuxName, attach: true });
+    await runNewTmux({ name: options.newTmuxName, attach: options.newTmuxAttach });
     return; // execTmuxAttach handles process exit when attach=true
   }
 

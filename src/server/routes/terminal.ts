@@ -51,6 +51,7 @@ const TERMDOCK_VERSION: string = (() => {
 })();
 const TERMDOCK_HOST = os.hostname();
 const TERMDOCK_PID = String(process.pid);
+const TERMDOCK_GUI_DETACHED_AT_OPTION = '@termdock-gui-detached-at';
 
 // WebSocket clients per session (separate from SSE clients).
 const wsClients = new Map<string, Map<string, WebSocket>>();
@@ -201,6 +202,7 @@ interface TmuxInventoryMeta {
   version: string | null;
   createdAt: number | null;
   lastActiveAt: number | null;
+  guiDetachedAt: number | null;
 }
 
 interface SessionInventoryClientSession extends PersistedClientSession {
@@ -532,6 +534,20 @@ function schedulePersistGlobalState(): void {
   }, 200);
 }
 
+function persistGlobalStateNow(): void {
+  if (persistGlobalStateTimer) {
+    clearTimeout(persistGlobalStateTimer);
+    persistGlobalStateTimer = null;
+  }
+  try {
+    const dir = `${os.homedir()}/.termdock`;
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(GLOBAL_SESSION_STATE_FILE, JSON.stringify(globalSessionState, null, 2), 'utf-8');
+  } catch (error) {
+    console.warn('[session-persist] Failed to persist global state:', getErrorMessage(error));
+  }
+}
+
 // 进程退出前立即刷盘，避免 tsx watch 重启导致状态丢失
 function flushPersistAndExit(): void {
   if (persistGlobalStateTimer) {
@@ -857,7 +873,7 @@ interface TmuxRuntimeMetadata {
 }
 
 function isTermdockManagedTmuxSession(session: TmuxInventoryMeta): boolean {
-  return !!(session.version || session.host || session.pid || session.createdAt || session.lastActiveAt || session.label || session.program || session.cwd);
+  return !!(session.version || session.host || session.pid || session.createdAt || session.lastActiveAt || session.label || session.program || session.cwd || session.guiDetachedAt);
 }
 
 function normalizeMetadataProgram(program: string | null | undefined): string | null {
@@ -1016,6 +1032,7 @@ async function ensureBackendSessionForRecord(
   }
 
   if (record.mode === 'tmux' && record.tmuxSessionName) {
+    await unsetTmuxOption(record.tmuxSessionName, TERMDOCK_GUI_DETACHED_AT_OPTION);
     const existingTmuxBackend = findBackendSessionForTmux(record.tmuxSessionName);
     if (existingTmuxBackend) {
       const [backendSessionId, session] = existingTmuxBackend;
@@ -1519,6 +1536,7 @@ async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
     '#{@termdock-version}',
     '#{@termdock-created-at}',
     '#{@termdock-last-active-at}',
+    `#{${TERMDOCK_GUI_DETACHED_AT_OPTION}}`,
   ].join(TMUX_DELIMITER);
 
   try {
@@ -1527,7 +1545,7 @@ async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
-      .map((line) => parseDelimitedRow(line, 13))
+      .map((line) => parseDelimitedRow(line, 14))
       .filter((row): row is string[] => row !== null)
       .map(([
         name,
@@ -1543,6 +1561,7 @@ async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
         version,
         createdAtRaw,
         lastActiveAtRaw,
+        guiDetachedAtRaw,
       ]) => ({
         name,
         windows: Number.parseInt(windowsRaw || '0', 10) || 0,
@@ -1557,6 +1576,7 @@ async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
         version: version || null,
         createdAt: parseNumberOption(createdAtRaw),
         lastActiveAt: parseNumberOption(lastActiveAtRaw),
+        guiDetachedAt: parseNumberOption(guiDetachedAtRaw),
       }))
       .sort((a, b) => {
         const aCreated = a.createdAt ?? Number.POSITIVE_INFINITY;
@@ -1614,15 +1634,18 @@ async function buildSessionInventory(): Promise<SessionInventory> {
   let discoveredManagedTmuxSession = false;
   for (const tmux of refreshedTmuxSessions) {
     if (!isTermdockManagedTmuxSession(tmux)) continue;
+    if (tmux.guiDetachedAt !== null) continue;
     const exists = globalSessionState.sessions.some((session) =>
       session.mode === 'tmux' && session.tmuxSessionName === tmux.name,
     );
     if (exists) continue;
 
     const liveBackend = findBackendSessionForTmux(tmux.name);
+    const friendlyName = tmux.friendlyName?.trim() || null;
     upsertGlobalSessionRecord({
       sessionId: randomUUID(),
-      name: `tmux:${tmux.name}`,
+      name: friendlyName ?? `tmux:${tmux.name}`,
+      customName: friendlyName ? true : undefined,
       backendSessionId: liveBackend?.[0] ?? null,
       mode: 'tmux',
       tmuxSessionName: tmux.name,
@@ -1636,6 +1659,32 @@ async function buildSessionInventory(): Promise<SessionInventory> {
   }
 
   const liveTmuxByName = new Map(refreshedTmuxSessions.map((session) => [session.name, session]));
+  let synchronizedTmuxFriendlyName = false;
+  globalSessionState = {
+    sessions: globalSessionState.sessions.map((session) => {
+      if (session.mode !== 'tmux' || !session.tmuxSessionName) {
+        return session;
+      }
+      const friendlyName = liveTmuxByName.get(session.tmuxSessionName)?.friendlyName?.trim();
+      if (!friendlyName) {
+        return session;
+      }
+      if (session.customName === true && session.name === friendlyName) {
+        return session;
+      }
+      synchronizedTmuxFriendlyName = true;
+      return {
+        ...session,
+        name: friendlyName,
+        customName: true,
+      };
+    }),
+    updatedAt: synchronizedTmuxFriendlyName ? Date.now() : globalSessionState.updatedAt,
+  };
+  if (synchronizedTmuxFriendlyName) {
+    schedulePersistGlobalState();
+  }
+
   const clientSessions = globalSessionState.sessions.map((session): SessionInventoryClientSession => {
     const backendLive = !!session.backendSessionId && terminalSessions.has(session.backendSessionId);
     const tmuxLive = session.mode === 'tmux' && !!session.tmuxSessionName && liveTmuxByName.has(session.tmuxSessionName);
@@ -3760,16 +3809,16 @@ router.patch('/session-inventory/sessions/:frontendSessionId', async (req, res) 
     if (next.tmuxSessionName) next.mode = 'tmux';
   }
 
-  upsertGlobalSessionRecord(next);
-  persistAndBroadcastGlobalState();
-
   if (next.mode === 'tmux' && next.tmuxSessionName) {
     if (next.customName === true && next.name.trim().length > 0) {
-      void setTmuxOption(next.tmuxSessionName, '@termdock-friendly-name', next.name);
+      await setTmuxOption(next.tmuxSessionName, '@termdock-friendly-name', next.name);
     } else if (previous.customName === true) {
-      void unsetTmuxOption(next.tmuxSessionName, '@termdock-friendly-name');
+      await unsetTmuxOption(next.tmuxSessionName, '@termdock-friendly-name');
     }
   }
+  upsertGlobalSessionRecord(next);
+  persistGlobalStateNow();
+  broadcastClientState();
 
   const inventory = await buildSessionInventory();
   latestSessionInventory = inventory;
@@ -3802,9 +3851,17 @@ router.delete('/session-inventory/sessions/:frontendSessionId', async (req, res)
   if (!frontendSessionId) {
     return res.status(400).json({ error: 'frontendSessionId is required' });
   }
+  const removedSession = globalSessionState.sessions.find((session) => session.sessionId === frontendSessionId) ?? null;
   const changed = removeGlobalSessionRecord(frontendSessionId);
   if (changed) {
-    schedulePersistGlobalState();
+    if (removedSession?.mode === 'tmux' && removedSession.tmuxSessionName) {
+      await setTmuxOption(
+        removedSession.tmuxSessionName,
+        TERMDOCK_GUI_DETACHED_AT_OPTION,
+        String(Date.now()),
+      );
+    }
+    persistGlobalStateNow();
     broadcastClientState();
   }
   res.status(204).send();

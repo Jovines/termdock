@@ -76,6 +76,7 @@ export type TranslationDictionary = {
     parentFolder: string;
     backToProjectRoot: string;
     refreshFiles: string;
+    resizeFileTree: string;
     pinCurrentFolder: string;
     unpinCurrentFolder: string;
     showHiddenFiles: string;
@@ -105,6 +106,7 @@ export type TranslationDictionary = {
     tabFiles: string;
     tabPreview: string;
     inserted: string;
+    copied: string;
     selectFilePrompt: string;
     backToFileList: string;
     insertLineRef: (params: TranslatorParams) => string;

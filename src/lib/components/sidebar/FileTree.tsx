@@ -14,12 +14,16 @@ import {
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
 import { listDirectory, searchFilesStream, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
+import { useReferenceLongPressCopy } from './referenceLongPress';
 
 interface FileTreeProps {
   rootPath: string;
   onFileSelect: (path: string) => void;
   onPathReference?: (path: string, key?: string) => void;
+  getReferenceText?: (path: string) => string;
+  onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
+  copiedReferenceKey?: string | null;
   onDirectoryRoot?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
@@ -69,6 +73,16 @@ function ChangeBadge({ path }: { path: string }) {
   );
 }
 
+function iconActionVisibilityClass(visible: boolean): string {
+  if (visible) return 'ml-1 w-6 opacity-100';
+  return 'ml-1 w-6 opacity-100 sm:ml-0 sm:w-0 sm:overflow-hidden sm:opacity-0 sm:group-hover:ml-1 sm:group-hover:w-6 sm:group-hover:opacity-100';
+}
+
+function textActionVisibilityClass(visible: boolean): string {
+  if (visible) return 'ml-1 min-w-8 px-2 opacity-100';
+  return 'ml-1 min-w-8 px-2 opacity-100 sm:ml-0 sm:w-0 sm:min-w-0 sm:overflow-hidden sm:px-0 sm:opacity-0 sm:group-hover:ml-1 sm:group-hover:w-auto sm:group-hover:min-w-8 sm:group-hover:px-2 sm:group-hover:opacity-100';
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
@@ -107,7 +121,10 @@ interface FileTreeItemProps {
   depth: number;
   onFileSelect: (path: string) => void;
   onPathReference?: (path: string, key?: string) => void;
+  getReferenceText?: (path: string) => string;
+  onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
+  copiedReferenceKey?: string | null;
   onDirectoryRoot?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
@@ -121,7 +138,10 @@ const FileTreeItem = memo(function FileTreeItem({
   depth,
   onFileSelect,
   onPathReference,
+  getReferenceText,
+  onReferenceCopied,
   insertedReferenceKey,
+  copiedReferenceKey,
   onDirectoryRoot,
   onDirectoryPinToggle,
   onFilePinToggle,
@@ -147,6 +167,9 @@ const FileTreeItem = memo(function FileTreeItem({
   const canPinFile = !isDirectory && Boolean(onFilePinToggle);
   const referenceKey = `path:${node.path}`;
   const referenceInserted = insertedReferenceKey === referenceKey;
+  const referenceCopied = copiedReferenceKey === referenceKey;
+  const referenceText = getReferenceText?.(node.path) ?? node.path;
+  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
 
   const visibleChildren = useMemo(() => {
     if (!children) return undefined;
@@ -271,13 +294,13 @@ const FileTreeItem = memo(function FileTreeItem({
             </span>
           </>
         )}
-        <span className={`min-w-0 flex-1 truncate ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
+        <span className={`min-w-0 flex-1 whitespace-normal break-all text-left leading-snug ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
         {loading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
         <ChangeBadge path={node.path} />
         {node.type === 'directory' && (onDirectoryRoot || onDirectoryPinToggle) && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${directoryActionsOpen ? 'bg-surface-elevated text-foreground opacity-100' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(directoryActionsOpen)} ${directoryActionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
@@ -286,7 +309,7 @@ const FileTreeItem = memo(function FileTreeItem({
         {canPinFile && (
           <span
             onClick={handleFilePinClick}
-            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${isPinned ? 'bg-primary/15 text-primary opacity-100' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground opacity-100 sm:opacity-0 sm:group-hover:opacity-100'}`}
+            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${iconActionVisibilityClass(isPinned)} ${isPinned ? 'bg-primary/15 text-primary' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={isPinned ? t('fileTree.unpinFileTitle') : t('fileTree.pinFileTitle')}
           >
             {isPinned ? <RiPinOff size={12} /> : <RiPin size={12} />}
@@ -295,10 +318,11 @@ const FileTreeItem = memo(function FileTreeItem({
         {onPathReference && (
           <span
             onClick={handleReferenceClick}
-            className={`ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${referenceInserted ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            {...getReferenceLongPressHandlers(referenceText, referenceKey)}
+            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             title={t('fileTree.insertRefTitle')}
           >
-            {referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
+            {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
           </span>
         )}
       </button>
@@ -339,6 +363,8 @@ const FileTreeItem = memo(function FileTreeItem({
               depth={depth + 1}
               onFileSelect={onFileSelect}
               onPathReference={onPathReference}
+              getReferenceText={getReferenceText}
+              onReferenceCopied={onReferenceCopied}
               onDirectoryRoot={onDirectoryRoot}
               onDirectoryPinToggle={onDirectoryPinToggle}
               onFilePinToggle={onFilePinToggle}
@@ -346,6 +372,7 @@ const FileTreeItem = memo(function FileTreeItem({
               selectedFilePath={selectedFilePath}
               queryLower={queryLower}
               insertedReferenceKey={insertedReferenceKey}
+              copiedReferenceKey={copiedReferenceKey}
             />
           ))}
         </div>
@@ -359,7 +386,10 @@ interface FileSearchResultItemProps {
   rootPath: string;
   onFileSelect: (path: string) => void;
   onPathReference?: (path: string, key?: string) => void;
+  getReferenceText?: (path: string) => string;
+  onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
+  copiedReferenceKey?: string | null;
   onDirectoryRoot?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
@@ -372,7 +402,10 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   rootPath,
   onFileSelect,
   onPathReference,
+  getReferenceText,
+  onReferenceCopied,
   insertedReferenceKey,
+  copiedReferenceKey,
   onDirectoryRoot,
   onDirectoryPinToggle,
   onFilePinToggle,
@@ -386,6 +419,9 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const canPinFile = !isDirectory && Boolean(onFilePinToggle);
   const referenceKey = `path:${node.path}`;
   const referenceInserted = insertedReferenceKey === referenceKey;
+  const referenceCopied = copiedReferenceKey === referenceKey;
+  const referenceText = getReferenceText?.(node.path) ?? node.path;
+  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
   const [directoryActionsOpen, setDirectoryActionsOpen] = useState(false);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -457,14 +493,14 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           </>
         )}
         <span className="min-w-0 flex-1">
-          <span className={`block truncate ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
+          <span className={`block whitespace-normal break-all leading-snug ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
           <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, node.path)}</span>
         </span>
         <ChangeBadge path={node.path} />
         {node.type === 'directory' && onDirectoryPinToggle && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${directoryActionsOpen ? 'bg-surface-elevated text-foreground opacity-100' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(directoryActionsOpen)} ${directoryActionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
@@ -473,7 +509,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {canPinFile && (
           <span
             onClick={handleFilePinClick}
-            className={`ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${isPinned ? 'bg-primary/15 text-primary opacity-100' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground opacity-100 sm:opacity-0 sm:group-hover:opacity-100'}`}
+            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${iconActionVisibilityClass(isPinned)} ${isPinned ? 'bg-primary/15 text-primary' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={isPinned ? t('fileTree.unpinFileTitle') : t('fileTree.pinFileTitle')}
           >
             {isPinned ? <RiPinOff size={12} /> : <RiPin size={12} />}
@@ -482,10 +518,11 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {onPathReference && (
           <span
             onClick={handleReferenceClick}
-            className={`ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${referenceInserted ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            {...getReferenceLongPressHandlers(referenceText, referenceKey)}
+            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             title={t('fileTree.insertRefTitle')}
           >
-            {referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
+            {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
           </span>
         )}
       </button>
@@ -532,7 +569,10 @@ interface ContentSearchResultItemProps {
   query: string;
   onContentMatchSelect?: (path: string, line: number) => void;
   onPathReference?: (path: string, key?: string) => void;
+  getReferenceText?: (path: string) => string;
+  onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
+  copiedReferenceKey?: string | null;
 }
 
 function highlightMatch(text: string, query: string): React.ReactNode {
@@ -564,7 +604,10 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   query,
   onContentMatchSelect,
   onPathReference,
+  getReferenceText,
+  onReferenceCopied,
   insertedReferenceKey,
+  copiedReferenceKey,
 }: ContentSearchResultItemProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(true);
@@ -573,6 +616,9 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   const hiddenCount = entry.matches.length - visibleMatches.length;
   const referenceKey = `path:${entry.path}`;
   const referenceInserted = insertedReferenceKey === referenceKey;
+  const referenceCopied = copiedReferenceKey === referenceKey;
+  const referenceText = getReferenceText?.(entry.path) ?? entry.path;
+  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
 
   return (
     <div className="rounded">
@@ -587,7 +633,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
         {expanded ? <RiChevronDown size={14} className="shrink-0 text-muted-foreground/80" /> : <RiChevronRight size={14} className="shrink-0 text-muted-foreground/80" />}
         <span className={isSelected ? 'text-primary' : 'text-muted-foreground/80'}>{getFileIcon(entry.name, 'file')}</span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-medium">{entry.name}</span>
+          <span className="block whitespace-normal break-all font-medium leading-snug">{entry.name}</span>
           <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, entry.path)}</span>
         </span>
         <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.matches.length}</span>
@@ -597,10 +643,11 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
               event.stopPropagation();
               onPathReference(entry.path, referenceKey);
             }}
-            className={`ml-1 inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 sm:opacity-0 sm:group-hover:opacity-100 ${referenceInserted ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            {...getReferenceLongPressHandlers(referenceText, referenceKey)}
+            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             title={t('fileTree.insertRefTitle')}
           >
-            {referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
+            {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
           </span>
         )}
       </button>
@@ -630,7 +677,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   );
 });
 
-export function FileTree({ rootPath, onFileSelect, onPathReference, insertedReferenceKey, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect }: FileTreeProps) {
+export function FileTree({ rootPath, onFileSelect, onPathReference, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect }: FileTreeProps) {
   const { t } = useI18n();
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
@@ -848,7 +895,10 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, insertedRefe
                 query={query.trim()}
                 onContentMatchSelect={onContentMatchSelect}
                 onPathReference={onPathReference}
+                getReferenceText={getReferenceText}
+                onReferenceCopied={onReferenceCopied}
                 insertedReferenceKey={insertedReferenceKey}
+                copiedReferenceKey={copiedReferenceKey}
               />
             ))}
             <div ref={loadMoreRef} className="py-2 text-center text-[11px] text-muted-foreground">
@@ -911,12 +961,15 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, insertedRefe
                 rootPath={rootPath}
                 onFileSelect={onFileSelect}
                 onPathReference={onPathReference}
+                getReferenceText={getReferenceText}
+                onReferenceCopied={onReferenceCopied}
                 onDirectoryRoot={onDirectoryRoot}
                 onDirectoryPinToggle={onDirectoryPinToggle}
                 onFilePinToggle={onFilePinToggle}
                 pinnedPaths={pinnedPaths}
                 selectedFilePath={selectedFilePath}
                 insertedReferenceKey={insertedReferenceKey}
+                copiedReferenceKey={copiedReferenceKey}
               />
             ))}
             <div ref={loadMoreRef} className="py-2 text-center text-[11px] text-muted-foreground">
@@ -978,6 +1031,8 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, insertedRefe
           depth={0}
           onFileSelect={onFileSelect}
           onPathReference={onPathReference}
+          getReferenceText={getReferenceText}
+          onReferenceCopied={onReferenceCopied}
           onDirectoryRoot={onDirectoryRoot}
           onDirectoryPinToggle={onDirectoryPinToggle}
           onFilePinToggle={onFilePinToggle}
@@ -985,6 +1040,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, insertedRefe
           selectedFilePath={selectedFilePath}
           queryLower={queryLower}
           insertedReferenceKey={insertedReferenceKey}
+          copiedReferenceKey={copiedReferenceKey}
         />
       ))}
     </div>

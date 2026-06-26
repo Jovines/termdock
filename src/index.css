@@ -86,8 +86,9 @@
    *   1. Termdock Mono             JetBrains Mono NL Nerd Font Mono 主字体，
    *                                 覆盖 ASCII / Nerd Font / Powerline / 常用符号
    *   2. Noto Sans Mono CJK SC      自托管中日韩等宽（GB2312 一级 + 标点）
-   *   3. Noto Sans Symbols 2        只白名单补 ⏸⏹⏺ / ✓✗
-   *   4. ui-monospace, ...          系统等宽兜底
+   *   3. Termdock Star Symbol       Menlo 抽取的 ✦/✧ 符号子集
+   *   4. Noto Sans Symbols 2        只白名单补 ⏸⏹⏺ / ✓✗
+   *   5. ui-monospace, ...          系统等宽兜底
    *
    * 顺序原则：文本字形优先 → 符号 → CJK → 系统兜底。
    * 各字体均通过 unicode-range 限定（见 index.html），不会互相抢字符。
@@ -104,6 +105,7 @@
   --font-mono:
     'Termdock Mono',
     'Noto Sans Mono CJK SC',
+    'Termdock Star Symbol',
     'Noto Sans Symbols 2',
     ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, monospace;
 
@@ -1088,7 +1090,20 @@ html[data-theme='light'] .termdock-code .token.important {
    full-width "page" inside the diff scroller — we drop the rounded
    corners and the margin so multiple cards flow into one another. */
 .termdock-diff-card-mobile {
-  border-radius: 0;
+  border-bottom-left-radius: 0.75rem;
+  border-bottom-right-radius: 0.75rem;
+  overflow: hidden;
+}
+
+.termdock-diff-card-mobile > [data-diff-file-anchor] {
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+}
+
+.termdock-diff-card-mobile .termdock-diff-scroll:last-child,
+.termdock-diff-card-mobile .diff:last-child {
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
 }
 
 /* Desktop / narrow card body: match the card's bottom corners so the

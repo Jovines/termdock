@@ -89,6 +89,7 @@
          but PWA/cache hits keep later launches and new sessions stable. -->
     <link rel="preload" href="/fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf" as="font" type="font/ttf" crossorigin="anonymous">
     <link rel="preload" href="/fonts/JetBrainsMonoNLNerdFontMono-Bold.ttf" as="font" type="font/ttf" crossorigin="anonymous">
+    <link rel="preload" href="/fonts/TermdockStarSymbol-Subset.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
     <!-- Self-hosted terminal fonts.
          统一原则：每个 @font-face 都用 unicode-range 限定字符集，浏览器只在
@@ -128,8 +129,30 @@
         font-style: italic;
         font-display: block;
       }
+      /* Termdock Star Symbol —— 从 Menlo Regular 抽取 U+2726/U+2727
+         (✦/✧) 的子集。Menlo 是 macOS 上这两个符号与等宽文本视觉大小
+         最接近的系统字形，避免手机端走系统符号 fallback 后偏大。
+
+         新增类似“桌面正常、手机偏大/偏小”的自维护符号时：
+         1. 先确认本机实际看起来正常的等宽字形来源，优先检查 Menlo：
+            fc-list ':charset=<hex>' file family style
+            fc-match -v 'Menlo:style=Regular:charset=<hex>'
+         2. 不要只信默认 fc-match。它可能返回 Arial Unicode MS，但 Chrome/
+            Safari 的 CoreText fallback 不一定等同于 fontconfig 默认结果。
+         3. 优先从 Menlo Regular 追加抽取字符到这份子集，并扩展下面的
+            unicode-range；避免用 size-adjust 硬调，否则不同设备又会偏大/偏小。
+         4. 同步更新 src/index.css 的字体链说明，以及 TerminalViewport.tsx 里的
+            TERMINAL_FONT_PRELOADS 文本，确保首帧不会先走系统 fallback。 */
+      @font-face {
+        font-family: 'Termdock Star Symbol';
+        src: url('/fonts/TermdockStarSymbol-Subset.woff2') format('woff2');
+        font-weight: 400;
+        font-style: normal;
+        font-display: swap;
+        unicode-range: U+2726, U+2727;
+      }
       /* Noto Sans Symbols 2 —— 只补足 JetBrains Mono / Nerd Font 都未收录且
-         容易被 emoji 字体抢走的少数字符：⏸⏹⏺ / ✓✗。
+         容易被 emoji / 系统符号字体抢走的少数字符：⏸⏹⏺ / ✓✗。
          不覆盖整段 Dingbats，否则 ❖ 等装饰符号会命中 Noto 的大号字形，
          在终端 cell 里显得过大。 */
       @font-face {

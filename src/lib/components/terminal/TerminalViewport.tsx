@@ -372,6 +372,14 @@ const TERMINAL_FONT_PRELOADS = [
     text: '⏺⏸⏹✓✗',
   },
   {
+    // Keep this text in sync with the Termdock Star Symbol unicode-range in
+    // index.html. It forces the self-hosted symbol subset to load before xterm
+    // measures cells, so mobile does not briefly fall back to oversized system
+    // symbol fonts.
+    font: '400 13px "Termdock Star Symbol"',
+    text: '✦✧',
+  },
+  {
     font: '400 13px "Noto Sans Mono CJK SC"',
     text: '终端中文路径',
   },

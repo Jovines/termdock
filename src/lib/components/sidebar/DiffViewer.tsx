@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMoveHorizontal } from 'lucide-react';
 import { parseDiff, Diff, Hunk, Decoration, tokenize, type HunkData, type HunkTokens } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
@@ -6,6 +6,7 @@ import { useSidebarStore } from '../../stores/useSidebarStore';
 import { getFileDiff, isPreviewableImagePath, readImagePreviewBlob, type FileDiffResponse, type GitChangedFile } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { loadRefractor, resolveLanguage, MAX_HIGHLIGHT_BYTES, MAX_HIGHLIGHT_LINE_LENGTH, type RefractorLike } from '../../utils/syntaxHighlight';
+import { useReferenceLongPressCopy } from './referenceLongPress';
 
 const MAX_DIFF_CACHE_ENTRIES = 24;
 
@@ -102,7 +103,9 @@ interface DiffViewerProps {
   filePath: string | null;
   changedFile?: GitChangedFile | null;
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
+  onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
+  copiedReferenceKey?: string | null;
   /**
    * When true, long diff lines wrap inside each cell instead of forcing a
    * horizontal scroll. Helpful on phone-sized panels.
@@ -194,7 +197,7 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, changedFile, onInsertDiffReference, insertedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true }: DiffViewerProps) {
+export function DiffViewer({ filePath, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true }: DiffViewerProps) {
   const { t } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
@@ -211,6 +214,7 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, inser
   } | null>(null);
   const rootPath = useSidebarStore((s) => s.rootPath);
   const previousReloadKeyRef = useRef(reloadKey);
+  const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
 
   useEffect(() => {
     if (!active) return;
@@ -362,10 +366,10 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, inser
   const titleParts = getPathParts(filePath, { name: t('diffViewer.workingTree'), dir: t('diffViewer.allUnstaged') });
   const wholeDiffReferenceKey = `diff:whole:${filePath ?? 'all'}`;
 
-  const insertWholeDiff = () => {
+  const insertWholeDiff = useCallback(() => {
     if (!diffContent || !onInsertDiffReference) return;
     onInsertDiffReference(filePath ? `${titleParts.name} diff` : t('diffViewer.allDiffLabel'), formatDiffReference(diffContent), wholeDiffReferenceKey);
-  };
+  }, [diffContent, filePath, onInsertDiffReference, t, titleParts.name, wholeDiffReferenceKey]);
 
   const renderFileDiffs = (hideSingleFileHeader: boolean) => (
     <>
@@ -375,10 +379,13 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, inser
         const pathParts = getPathParts(file.newPath || file.oldPath, { name: 'unknown file', dir: '' });
         const displayPath = file.newPath || file.oldPath || 'unknown file';
         const showFileHeader = !hideSingleFileHeader || files.length > 1;
-        const fileDiffText = [
+        const fileDiffReferenceText = [
           `diff --git a/${file.oldPath || displayPath} b/${file.newPath || displayPath}`,
           ...file.hunks.flatMap((hunk) => [hunk.content, ...hunk.changes.map((change) => change.content)]),
         ].join('\n');
+        const fileDiffText = formatDiffReference(fileDiffReferenceText);
+        const fileDiffReferenceKey = `diff:file:${displayPath}`;
+        const fileDiffReferenceActive = insertedReferenceKey === fileDiffReferenceKey || copiedReferenceKey === fileDiffReferenceKey;
         return (
         // Keep a stable file anchor on each parsed diff block. It is useful for
         // deep links/debugging and preserves the previous DOM contract even when
@@ -400,11 +407,12 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, inser
                 {onInsertDiffReference && files.length > 1 && (
                   <button
                     type="button"
-                    onClick={() => onInsertDiffReference(`${pathParts.name} diff`, formatDiffReference(fileDiffText), `diff:file:${displayPath}`)}
-                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold active:scale-95 ${insertedReferenceKey === `diff:file:${displayPath}` ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary hover:bg-primary/20'}`}
+                    onClick={() => onInsertDiffReference(`${pathParts.name} diff`, fileDiffText, fileDiffReferenceKey)}
+                    {...getReferenceLongPressHandlers(fileDiffText, fileDiffReferenceKey)}
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold active:scale-95 ${fileDiffReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary hover:bg-primary/20'}`}
                     title={t('diffViewer.insertFileDiff')}
                   >
-                    {insertedReferenceKey === `diff:file:${displayPath}` ? t('rightSidebar.inserted') : t('diffViewer.insertFileShort')}
+                    {copiedReferenceKey === fileDiffReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === fileDiffReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertFileShort')}
                   </button>
                 )}
                 <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
@@ -441,7 +449,9 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, inser
               >
                 {(hunks) =>
                   hunks.map((hunk, index) => {
-                    const hunkDiffText = [hunk.content, ...hunk.changes.map((change) => change.content)].join('\n');
+                    const hunkDiffText = formatDiffReference([hunk.content, ...hunk.changes.map((change) => change.content)].join('\n'));
+                    const hunkReferenceKey = `diff:hunk:${displayPath}:${index}`;
+                    const hunkReferenceActive = insertedReferenceKey === hunkReferenceKey || copiedReferenceKey === hunkReferenceKey;
                     return (
                     <Fragment key={hunk.content}>
                       <Decoration>
@@ -450,11 +460,12 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, inser
                           {onInsertDiffReference && (
                             <button
                               type="button"
-                              onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, formatDiffReference(hunkDiffText), `diff:hunk:${displayPath}:${index}`)}
-                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold active:scale-95 ${insertedReferenceKey === `diff:hunk:${displayPath}:${index}` ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
+                              onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, hunkDiffText, hunkReferenceKey)}
+                              {...getReferenceLongPressHandlers(hunkDiffText, hunkReferenceKey)}
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold active:scale-95 ${hunkReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
                               title={t('diffViewer.insertHunkDiff')}
                             >
-                              {insertedReferenceKey === `diff:hunk:${displayPath}:${index}` ? t('rightSidebar.inserted') : t('diffViewer.insertHunkShort')}
+                              {copiedReferenceKey === hunkReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === hunkReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertHunkShort')}
                             </button>
                           )}
                         </span>
@@ -576,12 +587,14 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, inser
 
   if (embedded) {
     return (
-      <div className="termdock-diff termdock-diff-card-mobile">
+      <div className="termdock-diff termdock-diff-card-mobile overflow-hidden rounded-b-xl">
         {diffNoticeBanner}
         {renderFileDiffs(true)}
       </div>
     );
   }
+
+  const wholeDiffReferenceActive = insertedReferenceKey === wholeDiffReferenceKey || copiedReferenceKey === wholeDiffReferenceKey;
 
   return (
     <div className="termdock-diff px-3 py-2">
@@ -602,10 +615,11 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, inser
             <button
               type="button"
               onClick={insertWholeDiff}
-              className={`inline-flex h-8 shrink-0 items-center rounded-full px-3 text-[11px] font-semibold transition active:scale-95 ${insertedReferenceKey === wholeDiffReferenceKey ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
+              {...getReferenceLongPressHandlers(formatDiffReference(diffContent ?? ''), wholeDiffReferenceKey)}
+              className={`inline-flex h-8 shrink-0 items-center rounded-full px-3 text-[11px] font-semibold transition active:scale-95 ${wholeDiffReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
               title={t('diffViewer.insertAllDiff')}
             >
-              {insertedReferenceKey === wholeDiffReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertAllShort')}
+              {copiedReferenceKey === wholeDiffReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === wholeDiffReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertAllShort')}
             </button>
           )}
         </div>
