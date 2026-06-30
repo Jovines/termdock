@@ -10,6 +10,7 @@ import {
   Pin as RiPin,
   PinOff as RiPinOff,
   MoreHorizontal as RiMoreHorizontal,
+  Link2 as RiLink,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
 import { listDirectory, searchFilesStream, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
@@ -105,6 +106,7 @@ function toTreeNodes(entries: FileEntry[]): FileTreeNode[] {
     name: e.name,
     path: e.path,
     type: e.type,
+    isSymlink: e.isSymlink,
     expanded: false,
     loaded: false,
     children: e.type === 'directory' ? [] : undefined,
@@ -294,7 +296,14 @@ const FileTreeItem = memo(function FileTreeItem({
             </span>
           </>
         )}
-        <span className={`min-w-0 flex-1 whitespace-normal break-all text-left leading-snug ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
+        <span className={`min-w-0 flex-1 whitespace-normal break-all text-left leading-snug ${isSelected ? 'font-medium' : ''}`}>
+          {node.name}
+          {node.isSymlink && (
+            <span className="ml-1 inline-flex align-middle text-muted-foreground/70" title="Symbolic link">
+              <RiLink size={11} />
+            </span>
+          )}
+        </span>
         {loading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
         <ChangeBadge path={node.path} />
         {node.type === 'directory' && (onDirectoryRoot || onDirectoryPinToggle) && (
@@ -493,7 +502,14 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           </>
         )}
         <span className="min-w-0 flex-1">
-          <span className={`block whitespace-normal break-all leading-snug ${isSelected ? 'font-medium' : ''}`}>{node.name}</span>
+          <span className={`block whitespace-normal break-all leading-snug ${isSelected ? 'font-medium' : ''}`}>
+            {node.name}
+            {node.isSymlink && (
+              <span className="ml-1 inline-flex align-middle text-muted-foreground/70" title="Symbolic link">
+                <RiLink size={11} />
+              </span>
+            )}
+          </span>
           <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, node.path)}</span>
         </span>
         <ChangeBadge path={node.path} />

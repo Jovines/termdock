@@ -1298,6 +1298,7 @@ export interface FileEntry {
   name: string;
   path: string;
   type: 'file' | 'directory' | 'symlink';
+  isSymlink?: boolean;
   size?: number;
   modified?: string;
 }
@@ -1537,6 +1538,9 @@ export type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'co
 export interface GitChangedFile {
   path: string;
   absolutePath: string;
+  repoRoot?: string;
+  repoRelativeRoot?: string;
+  repoName?: string;
   status: GitChangeStatus;
   oldPath?: string;
   indexStatus?: string;
@@ -1593,6 +1597,22 @@ export interface GitBundleResponse {
   available: boolean;
   files: GitChangedFile[];
   context: GitContext | null;
+  repositories?: GitRepositoryBundle[];
+  truncatedRepositories?: boolean;
+  error?: string;
+}
+
+export interface GitRepositoryBundle {
+  id: string;
+  root: string;
+  displayRoot?: string;
+  relativeRoot: string;
+  name: string;
+  depth: number;
+  nested: boolean;
+  available: boolean;
+  files: GitChangedFile[];
+  context: GitContext | null;
   error?: string;
 }
 
@@ -1616,9 +1636,10 @@ export interface GitActionResponse {
   bundle: GitBundleResponse;
 }
 
-export async function getGitBundle(cwd?: string, signal?: AbortSignal): Promise<GitBundleResponse> {
+export async function getGitBundle(cwd?: string, signal?: AbortSignal, options: { includeNested?: boolean } = {}): Promise<GitBundleResponse> {
   const params = new URLSearchParams();
   if (cwd) params.set('cwd', cwd);
+  if (options.includeNested) params.set('includeNested', 'true');
   const qs = params.toString();
   const response = await fetch(`/api/terminal/fs/git-bundle${qs ? `?${qs}` : ''}`, { signal });
   if (!response.ok) {

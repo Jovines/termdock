@@ -166,6 +166,7 @@ export interface FileTreeNode {
   name: string;
   path: string;
   type: 'file' | 'directory' | 'symlink';
+  isSymlink?: boolean;
   expanded?: boolean;
   loaded?: boolean;
   children?: FileTreeNode[];
@@ -196,6 +197,7 @@ function toFileTreeNode(event: FileWatchEvent): FileTreeNode | null {
     name: event.entry.name,
     path: event.entry.path,
     type: event.entry.type,
+    isSymlink: event.entry.isSymlink,
     expanded: false,
     loaded: false,
     children: event.entry.type === 'directory' ? [] : undefined,

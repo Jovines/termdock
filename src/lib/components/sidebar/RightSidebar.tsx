@@ -30,7 +30,7 @@ import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { DiffViewer, preloadSidebarDiff } from './DiffViewer';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { getGitBundle, getGitContext, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type FileSearchMode } from '../../terminal/api';
+import { getGitBundle, getGitContext, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitRepositoryBundle, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, refractorNodesToReact, type RefractorLike } from '../../utils/syntaxHighlight';
@@ -99,7 +99,7 @@ type GitActionKey = GitActionRequest['action'];
 
 type ConfirmGitAction =
   | { kind: 'restore'; file: GitChangedFile; phrase: string }
-  | { kind: 'stash-all' };
+  | { kind: 'stash-all'; repoRoot?: string | null; repoLabel?: string };
 
 interface GitActionButton {
   key: GitActionKey;
@@ -2475,9 +2475,33 @@ function buildLineReference(path: string, rootPath: string | null, lineRange: { 
 function toChangedFileMap(files: GitChangedFile[]): Map<string, GitChangedFile> {
   const map = new Map<string, GitChangedFile>();
   for (const file of files) {
-    map.set(file.absolutePath || file.path, file);
+    map.set(getChangedFileKey(file), file);
   }
   return map;
+}
+
+function getChangedFileRepoRoot(file: GitChangedFile, fallbackRoot: string | null): string | null {
+  return file.repoRoot ?? fallbackRoot;
+}
+
+function getChangedFileKey(file: GitChangedFile): string {
+  return `${file.repoRoot ?? ''}\u0000${file.path}`;
+}
+
+function getChangedFileSelectionPath(file: GitChangedFile): string {
+  return file.absolutePath || file.path;
+}
+
+function getChangedFileBusyPath(file: GitChangedFile): string {
+  return getChangedFileKey(file);
+}
+
+function getChangedFileRepoLabel(file: GitChangedFile): string {
+  return file.repoRelativeRoot && file.repoRelativeRoot !== '.' ? file.repoRelativeRoot : (file.repoName ?? '');
+}
+
+function countStagedChanges(files: GitChangedFile[]): number {
+  return files.reduce((count, file) => count + (file.staged ? 1 : 0), 0);
 }
 
 function isAbortError(error: unknown): boolean {
@@ -3319,6 +3343,7 @@ export function RightSidebar(
   const [searchMode, setSearchMode] = useState<FileSearchMode>('name');
   const deferredFileQuery = useDeferredValue(fileQuery);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
+  const [gitRepositories, setGitRepositories] = useState<GitRepositoryBundle[]>([]);
   const [insertedReferenceKey, setInsertedReferenceKey] = useState<string | null>(null);
   const [copiedReferenceKey, setCopiedReferenceKey] = useState<string | null>(null);
   // Line-range selection lives in the sidebar so the sticky action bar and
@@ -3387,6 +3412,18 @@ export function RightSidebar(
 
   const applyGitBundle = useCallback((bundle: GitBundleResponse, options: { reloadDiff?: boolean } = {}) => {
     setChangedFiles(toChangedFileMap(bundle.files));
+    setGitRepositories(bundle.repositories ?? (bundle.context?.root ? [{
+      id: bundle.context.root,
+      root: bundle.context.root,
+      relativeRoot: '.',
+      name: getPathBasename(bundle.context.root) || bundle.context.root,
+      depth: 0,
+      nested: false,
+      available: bundle.available,
+      files: bundle.files,
+      context: bundle.context,
+      error: bundle.error,
+    }] : []));
     setGitContext((current) => {
       if (!bundle.context) return null;
       const currentRoot = current?.root ?? rootPath;
@@ -3404,7 +3441,7 @@ export function RightSidebar(
       selectFile(null);
     }
     setExpandedDiffFiles((expanded) => {
-      const valid = new Set(bundle.files.map((file) => file.path));
+      const valid = new Set(bundle.files.map((file) => getChangedFileSelectionPath(file)));
       const next = new Set<string>();
       for (const path of expanded) {
         if (valid.has(path)) next.add(path);
@@ -3419,6 +3456,7 @@ export function RightSidebar(
     gitBundleAbortRef.current?.abort();
     gitBundleAbortRef.current = null;
     setGitDetailsLoading(false);
+    setGitRepositories([]);
     setGitContext(rootPath ? (gitContextCache.get(rootPath) ?? null) : null);
   }, [rootPath]);
 
@@ -3439,13 +3477,13 @@ export function RightSidebar(
     }
 
     try {
-      const bundle = await getGitBundle(cwd, controller.signal);
+      const bundle = await getGitBundle(cwd, controller.signal, { includeNested: true });
       if (gitBundleRequestIdRef.current !== requestId) return null;
       applyGitBundle(bundle, { reloadDiff: options.reloadDiff ?? false });
       if (options.preloadDiff) {
         const current = useSidebarStore.getState().selectedFilePath;
-        const currentStillChanged = Boolean(current && bundle.files.some((file) => file.path === current || file.absolutePath === current));
-        preloadSidebarDiff(cwd ?? rootPath, currentStillChanged ? current : null, { force: options.reloadDiff ?? false });
+        const currentFile = current ? bundle.files.find((file) => file.path === current || file.absolutePath === current) : undefined;
+        preloadSidebarDiff(cwd ?? rootPath, currentFile ? current : null, { force: options.reloadDiff ?? false, repoRoot: currentFile?.repoRoot });
       }
       return bundle;
     } catch (err) {
@@ -3857,6 +3895,180 @@ export function RightSidebar(
     return { text: t('rightSidebar.pushUpToDate'), className: 'bg-surface-2 text-muted-foreground' };
   }, [gitContext?.ahead, gitContext?.behind, gitContext?.upstream, t]);
 
+  function renderChangeRow(entry: [string, GitChangedFile], options: { compact: boolean; expandable?: boolean }) {
+    const [, file] = entry;
+    const repoRoot = getChangedFileRepoRoot(file, rootPath);
+    const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
+    const display = getRelativeDisplayPath(absolutePath, repoRoot ?? rootPath);
+    const selectionPath = getChangedFileSelectionPath(file);
+    const isExpanded = expandedDiffFiles.has(selectionPath);
+    const isSelected = selectedFilePath === file.path || selectedFilePath === absolutePath;
+    const referenceKey = `path:${absolutePath}`;
+    const referenceInserted = insertedReferenceKey === referenceKey;
+    const referenceCopied = copiedReferenceKey === referenceKey;
+    const actions = buildGitActionButtons(file);
+    const busyPath = getChangedFileBusyPath(file);
+    if (!options.expandable) {
+      return (
+        <div
+          key={getChangedFileKey(file)}
+          className={`group rounded-lg px-2 py-1.5 transition ${
+            isSelected
+              ? 'bg-surface-elevated text-foreground'
+              : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+          }`}
+          title={absolutePath}
+        >
+          <button
+            type="button"
+            onClick={() => selectDiffFile(selectionPath)}
+            className="flex w-full items-center gap-2 text-left active:scale-[0.99]"
+          >
+            <ChangeBadge status={file.status} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[12px] font-medium">{display.name}</span>
+              {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
+              {file.oldPath && <span className="block truncate text-[10px] text-muted-foreground/60">{t('rightSidebar.changedFromPath', { path: file.oldPath })}</span>}
+            </span>
+          </button>
+          <div className="mt-1 flex items-center justify-between gap-1 pl-6">
+            <GitActionChips actions={actions} running={runningGitAction} completed={completedGitAction?.path === busyPath ? completedGitAction : null} />
+            <button
+              type="button"
+              onClick={() => insertPathReference(absolutePath, referenceKey)}
+              {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
+              className={`ml-auto inline-flex h-6 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+              title={t('rightSidebar.insertThisFile')}
+            >
+              {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <section
+        key={getChangedFileKey(file)}
+        className={`relative scroll-mt-2 overflow-hidden rounded-xl border transition ${
+          isExpanded
+            ? 'border-primary/25 bg-surface-elevated shadow-sm'
+            : 'border-border/15 bg-surface hover:border-border/30'
+        }`}
+      >
+        <div
+          className={`sticky -top-px z-20 flex w-full items-center gap-1 rounded-t-xl ${
+            isExpanded ? 'border-b border-border/15 bg-surface-elevated shadow-sm' : ''
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => toggleDiffFile(selectionPath)}
+            aria-expanded={isExpanded}
+            className="group flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2.5 text-left transition active:scale-[0.99]"
+            title={absolutePath}
+          >
+            <span className="shrink-0 text-muted-foreground transition-transform">
+              {isExpanded ? <RiChevronDown size={15} /> : <RiChevronRight size={15} />}
+            </span>
+            <ChangeBadge status={file.status} />
+            <span className="min-w-0 flex-1">
+              <span className={`block truncate text-[13px] ${isSelected || isExpanded ? 'font-semibold text-foreground' : 'font-medium text-foreground'}`}>{display.name}</span>
+              {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
+              {file.oldPath && <span className="block truncate text-[10px] text-muted-foreground/60">{t('rightSidebar.changedFromPath', { path: file.oldPath })}</span>}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              insertPathReference(absolutePath, referenceKey);
+            }}
+            {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
+            className={`mr-2 inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold transition active:scale-95 sm:h-6 sm:min-w-8 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            title={t('rightSidebar.insertThisFile')}
+          >
+            {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
+          </button>
+        </div>
+        {actions.length > 0 && (
+          <div className="flex border-t border-border/10 px-2 py-1.5">
+            <GitActionChips actions={actions} running={runningGitAction} completed={completedGitAction?.path === busyPath ? completedGitAction : null} />
+          </div>
+        )}
+        {isExpanded && (
+          <div>
+            <DiffViewer
+              active={diffPaneActive}
+              repoRoot={repoRoot}
+              filePath={file.path}
+              changedFile={file}
+              wrap={diffWrap}
+              showScrollHint={!diffWrap}
+              reloadKey={diffRefreshKey}
+              embedded
+              onInsertDiffReference={insertContextText}
+              onReferenceCopied={markReferenceCopied}
+              insertedReferenceKey={insertedReferenceKey}
+              copiedReferenceKey={copiedReferenceKey}
+            />
+          </div>
+        )}
+      </section>
+    );
+  }
+
+  function renderChangeGroups(options: { compact: boolean; expandable?: boolean }) {
+    return (
+    <div className={options.expandable ? 'space-y-3 pt-2' : 'space-y-2'}>
+      {filteredChangedFileGroups.map((group) => {
+        const staged = countStagedChanges(group.files.map(([, file]) => file));
+        const showRepoHeader = filteredChangedFileGroups.length > 1 || group.label !== rootName;
+        return (
+          <section key={group.root ?? group.label} className={showRepoHeader ? 'rounded-lg border border-border/15 bg-surface/60' : ''}>
+            {showRepoHeader && (
+              <div className="flex items-center gap-2 border-b border-border/10 px-2 py-1.5">
+                <RiGitBranch size={12} className="shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[11px] font-semibold text-foreground">{group.label}</div>
+                  {group.branch && <div className="truncate text-[10px] text-muted-foreground">{group.branch}</div>}
+                </div>
+                <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{group.files.length}</span>
+                {staged > 0 && <span className="shrink-0 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">{staged}</span>}
+                {group.root && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => runRepoGitAction('stage-all', group.root, group.label)}
+                      disabled={Boolean(runningGitAction)}
+                      className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+                      title={t('rightSidebar.stageAll')}
+                    >
+                      {t('rightSidebar.stageAll')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => runRepoGitAction('stash-all', group.root, group.label)}
+                      disabled={Boolean(runningGitAction)}
+                      className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
+                      title={t('rightSidebar.stashAll')}
+                    >
+                      {t('rightSidebar.stashAll')}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+            <div className={options.expandable ? 'space-y-1.5 p-2' : showRepoHeader ? 'space-y-px p-1.5' : 'space-y-px'}>
+              {group.files.map((entry) => renderChangeRow(entry, options))}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+    );
+  }
+
   const canPull = Boolean(!runningGitAction && (gitContext?.upstream || (pushRemote.trim() && pushBranch.trim())));
   const canPush = Boolean(!runningGitAction && (gitContext?.upstream || (pushRemote.trim() && pushBranch.trim())));
   const canSwitchBranch = Boolean(!runningGitAction && switchBranch.trim() && switchBranch.trim() !== gitContext?.branch);
@@ -3865,7 +4077,7 @@ export function RightSidebar(
     const query = deferredFileQuery.trim().toLowerCase();
     const entries = Array.from(changedFiles.entries()).sort(([a], [b]) => a.localeCompare(b));
     if (!query) return entries;
-    return entries.filter(([path, file]) => `${path} ${file.path} ${file.status}`.toLowerCase().includes(query));
+    return entries.filter(([path, file]) => `${path} ${file.path} ${file.status} ${file.repoRelativeRoot ?? ''} ${file.repoName ?? ''}`.toLowerCase().includes(query));
   }, [changedFiles, deferredFileQuery]);
 
   const selectedChangedFile = useMemo(() => {
@@ -3874,6 +4086,31 @@ export function RightSidebar(
       file.path === selectedFilePath || file.absolutePath === selectedFilePath
     )) ?? null;
   }, [changedFiles, selectedFilePath]);
+
+  const gitRepositoryByRoot = useMemo(() => {
+    const map = new Map<string, GitRepositoryBundle>();
+    for (const repo of gitRepositories) map.set(repo.root, repo);
+    return map;
+  }, [gitRepositories]);
+
+  const filteredChangedFileGroups = useMemo(() => {
+    const groups = new Map<string, { root: string | null; label: string; branch?: string | null; files: Array<[string, GitChangedFile]> }>();
+    for (const entry of filteredChangedFiles) {
+      const [, file] = entry;
+      const repoRoot = getChangedFileRepoRoot(file, rootPath);
+      const label = getChangedFileRepoLabel(file) || rootName;
+      const key = repoRoot ?? label;
+      const repo = repoRoot ? gitRepositoryByRoot.get(repoRoot) : undefined;
+      const group = groups.get(key) ?? { root: repoRoot, label, branch: repo?.context?.branch, files: [] };
+      group.files.push(entry);
+      groups.set(key, group);
+    }
+    return Array.from(groups.values()).sort((a, b) => {
+      if (a.label === rootName) return -1;
+      if (b.label === rootName) return 1;
+      return a.label.localeCompare(b.label);
+    });
+  }, [filteredChangedFiles, gitRepositoryByRoot, rootName, rootPath]);
 
   const gitContextText = useMemo(() => {
     if (!gitContext?.available) return '';
@@ -3929,7 +4166,10 @@ export function RightSidebar(
     setRunningGitAction({ action: request.action, path: pathForBusy });
     try {
       const result = await runGitAction(request);
-      applyGitBundle(result.bundle, { reloadDiff: true });
+      const refreshedBundle = rootPath
+        ? await getGitBundle(rootPath, undefined, { includeNested: true }).catch(() => result.bundle)
+        : result.bundle;
+      applyGitBundle(refreshedBundle, { reloadDiff: true });
       const completedAction = { action: request.action, path: pathForBusy, label };
       setCompletedGitAction(completedAction);
       window.setTimeout(() => setCompletedGitAction((current) => (
@@ -3944,7 +4184,16 @@ export function RightSidebar(
     } finally {
       setRunningGitAction(null);
     }
-  }, [applyGitBundle, t]);
+  }, [applyGitBundle, rootPath, t]);
+
+  const runRepoGitAction = useCallback((action: 'stage-all' | 'stash-all', repoRoot: string | null, repoLabel: string) => {
+    if (!repoRoot) return;
+    if (action === 'stage-all') {
+      void runSidebarGitAction({ action: 'stage-all', cwd: repoRoot }, t('rightSidebar.stageAll'), `repo:${repoRoot}`);
+      return;
+    }
+    setConfirmGitAction({ kind: 'stash-all', repoRoot, repoLabel });
+  }, [runSidebarGitAction, t]);
 
   const handleSwitchBranch = useCallback(async () => {
     if (!rootPath) return;
@@ -4154,27 +4403,29 @@ export function RightSidebar(
   ) : null;
 
   const buildGitActionButtons = useCallback((file: GitChangedFile): GitActionButton[] => {
-    if (!rootPath) return [];
+    const repoRoot = getChangedFileRepoRoot(file, rootPath);
+    if (!repoRoot) return [];
+    const busyPath = getChangedFileBusyPath(file);
     const buttons: GitActionButton[] = [];
     if (file.canStage) {
       buttons.push({
         key: 'stage-file',
         label: t('rightSidebar.stageFile'),
-        onClick: () => void runSidebarGitAction({ action: 'stage-file', cwd: rootPath, paths: [file.path] }, t('rightSidebar.stageFile'), file.path),
+        onClick: () => void runSidebarGitAction({ action: 'stage-file', cwd: repoRoot, paths: [file.path] }, t('rightSidebar.stageFile'), busyPath),
       });
     }
     if (file.canUnstage) {
       buttons.push({
         key: 'unstage-file',
         label: t('rightSidebar.unstageFile'),
-        onClick: () => void runSidebarGitAction({ action: 'unstage-file', cwd: rootPath, paths: [file.path] }, t('rightSidebar.unstageFile'), file.path),
+        onClick: () => void runSidebarGitAction({ action: 'unstage-file', cwd: repoRoot, paths: [file.path] }, t('rightSidebar.unstageFile'), busyPath),
       });
     }
     if (file.canStash) {
       buttons.push({
         key: 'stash-file',
         label: t('rightSidebar.stashFile'),
-        onClick: () => void runSidebarGitAction({ action: 'stash-file', cwd: rootPath, paths: [file.path] }, t('rightSidebar.stashFile'), file.path),
+        onClick: () => void runSidebarGitAction({ action: 'stash-file', cwd: repoRoot, paths: [file.path] }, t('rightSidebar.stashFile'), busyPath),
       });
     }
     if (file.canRestoreWorktree) {
@@ -4508,7 +4759,7 @@ export function RightSidebar(
             {changedSummary.staged > 0 && (
               <span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">已暂存 {changedSummary.staged}</span>
             )}
-            {gitContext?.available && rootPath && changedFiles.size > 0 && (
+            {gitContext?.available && rootPath && changedFiles.size > 0 && gitRepositories.length <= 1 && (
               <button
                 type="button"
                 onClick={() => void runSidebarGitAction({ action: 'stage-all', cwd: rootPath }, t('rightSidebar.stageAll'))}
@@ -4519,10 +4770,10 @@ export function RightSidebar(
                 {t('rightSidebar.stageAll')}
               </button>
             )}
-            {gitContext?.available && rootPath && changedFiles.size > 0 && (
+            {gitContext?.available && rootPath && changedFiles.size > 0 && gitRepositories.length <= 1 && (
               <button
                 type="button"
-                onClick={() => setConfirmGitAction({ kind: 'stash-all' })}
+                onClick={() => setConfirmGitAction({ kind: 'stash-all', repoRoot: rootPath, repoLabel: rootName })}
                 disabled={Boolean(runningGitAction)}
                 className="rounded-full bg-surface-2 px-2 py-0.5 font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
                 title={t('rightSidebar.stashAll')}
@@ -4892,59 +5143,11 @@ export function RightSidebar(
                     <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
                       {t('rightSidebar.noMatchingChanges')}
                     </div>
-                  ) : (
-                    <div className="space-y-px">
-                      {filteredChangedFiles.map(([absolutePath, file]) => {
-                        const display = getRelativeDisplayPath(absolutePath, rootPath);
-                        const relativePath = file.path;
-                        const isSelected = selectedFilePath === relativePath || selectedFilePath === absolutePath;
-                        const referenceKey = `path:${absolutePath}`;
-                        const referenceInserted = insertedReferenceKey === referenceKey;
-                        const referenceCopied = copiedReferenceKey === referenceKey;
-                        const actions = buildGitActionButtons(file);
-                        return (
-                          <div
-                            key={absolutePath}
-                            className={`group rounded-lg px-2 py-1.5 transition ${
-                              isSelected
-                                ? 'bg-surface-elevated text-foreground'
-                                : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
-                            }`}
-                            title={absolutePath}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => selectDiffFile(relativePath)}
-                              className="flex w-full items-center gap-2 text-left active:scale-[0.99]"
-                            >
-                              <ChangeBadge status={file.status} />
-                              <span className="min-w-0 flex-1">
-                                <span className="block truncate text-[12px] font-medium">{display.name}</span>
-                                {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
-                                {file.oldPath && <span className="block truncate text-[10px] text-muted-foreground/60">{t('rightSidebar.changedFromPath', { path: file.oldPath })}</span>}
-                              </span>
-                            </button>
-                            <div className="mt-1 flex items-center justify-between gap-1 pl-6">
-                              <GitActionChips actions={actions} running={runningGitAction} completed={completedGitAction?.path === file.path ? completedGitAction : null} />
-                              <button
-                                type="button"
-                                onClick={() => insertPathReference(absolutePath, referenceKey)}
-                                {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
-                                className={`ml-auto inline-flex h-6 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-                                title={t('rightSidebar.insertThisFile')}
-                              >
-                                {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                  ) : renderChangeGroups({ compact: true })}
                 </div>
               </div>
               <div className="min-w-0 flex-1 overflow-y-auto overscroll-contain">
-                <DiffViewer active={diffPaneActive} filePath={selectedFilePath} changedFile={selectedChangedFile} reloadKey={diffRefreshKey} onInsertDiffReference={insertContextText} onReferenceCopied={markReferenceCopied} insertedReferenceKey={insertedReferenceKey} copiedReferenceKey={copiedReferenceKey} />
+                <DiffViewer active={diffPaneActive} repoRoot={selectedChangedFile?.repoRoot} filePath={selectedChangedFile?.path ?? selectedFilePath} changedFile={selectedChangedFile} reloadKey={diffRefreshKey} onInsertDiffReference={insertContextText} onReferenceCopied={markReferenceCopied} insertedReferenceKey={insertedReferenceKey} copiedReferenceKey={copiedReferenceKey} />
               </div>
             </div>
           ) : (
@@ -4994,88 +5197,7 @@ export function RightSidebar(
                   <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
                     {t('rightSidebar.noMatchingChanges')}
                   </div>
-                ) : (
-                  <div className="space-y-1.5 pt-2">
-                    {filteredChangedFiles.map(([absolutePath, file]) => {
-                      const display = getRelativeDisplayPath(absolutePath, rootPath);
-                      const relativePath = file.path;
-                      const isExpanded = expandedDiffFiles.has(relativePath);
-                      const isSelected = selectedFilePath === relativePath || selectedFilePath === absolutePath;
-                      const referenceKey = `path:${absolutePath}`;
-                      const referenceInserted = insertedReferenceKey === referenceKey;
-                      const referenceCopied = copiedReferenceKey === referenceKey;
-                      const actions = buildGitActionButtons(file);
-                      return (
-                        <section
-                          key={absolutePath}
-                          className={`relative scroll-mt-2 overflow-hidden rounded-xl border transition ${
-                            isExpanded
-                              ? 'border-primary/25 bg-surface-elevated shadow-sm'
-                              : 'border-border/15 bg-surface hover:border-border/30'
-                          }`}
-                        >
-                          <div
-                            className={`sticky -top-px z-20 flex w-full items-center gap-1 rounded-t-xl ${
-                              isExpanded ? 'border-b border-border/15 bg-surface-elevated shadow-sm' : ''
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => toggleDiffFile(relativePath)}
-                              aria-expanded={isExpanded}
-                              className="group flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2.5 text-left transition active:scale-[0.99]"
-                              title={absolutePath}
-                            >
-                              <span className={`shrink-0 text-muted-foreground transition-transform ${isExpanded ? 'rotate-0' : ''}`}>
-                                {isExpanded ? <RiChevronDown size={15} /> : <RiChevronRight size={15} />}
-                              </span>
-                              <ChangeBadge status={file.status} />
-                              <span className="min-w-0 flex-1">
-                                <span className={`block truncate text-[13px] ${isSelected || isExpanded ? 'font-semibold text-foreground' : 'font-medium text-foreground'}`}>{display.name}</span>
-                                {display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
-                                {file.oldPath && <span className="block truncate text-[10px] text-muted-foreground/60">{t('rightSidebar.changedFromPath', { path: file.oldPath })}</span>}
-                              </span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                insertPathReference(absolutePath, referenceKey);
-                              }}
-                              {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
-                              className={`mr-2 inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold transition active:scale-95 sm:h-6 sm:min-w-8 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-                              title={t('rightSidebar.insertThisFile')}
-                            >
-                              {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
-                            </button>
-                          </div>
-                          {actions.length > 0 && (
-                            <div className="flex border-t border-border/10 px-2 py-1.5">
-                              <GitActionChips actions={actions} running={runningGitAction} completed={completedGitAction?.path === file.path ? completedGitAction : null} />
-                            </div>
-                          )}
-                          {isExpanded && (
-                            <div>
-                              <DiffViewer
-                                active={diffPaneActive}
-                                filePath={relativePath}
-                                changedFile={file}
-                                wrap={diffWrap}
-                                showScrollHint={!diffWrap}
-                                reloadKey={diffRefreshKey}
-                                embedded
-                                onInsertDiffReference={insertContextText}
-                                onReferenceCopied={markReferenceCopied}
-                                insertedReferenceKey={insertedReferenceKey}
-                                copiedReferenceKey={copiedReferenceKey}
-                              />
-                            </div>
-                          )}
-                        </section>
-                      );
-                    })}
-                  </div>
-                )}
+                ) : renderChangeGroups({ compact: false, expandable: true })}
               </div>
             </div>
           )}
@@ -5116,16 +5238,19 @@ export function RightSidebar(
                   type="button"
                   disabled={Boolean(runningGitAction) || (confirmGitAction.kind === 'restore' && confirmGitAction.phrase.trim() !== t('rightSidebar.confirmRestorePhrase'))}
                   onClick={() => {
-                    if (!rootPath) return;
                     if (confirmGitAction.kind === 'restore') {
+                      const repoRoot = getChangedFileRepoRoot(confirmGitAction.file, rootPath);
+                      if (!repoRoot) return;
                       void runSidebarGitAction({
                         action: 'restore-worktree-file',
-                        cwd: rootPath,
+                        cwd: repoRoot,
                         paths: [confirmGitAction.file.path],
                         confirm: { acknowledged: true, phrase: confirmGitAction.phrase },
-                      }, t('rightSidebar.restoreFile'), confirmGitAction.file.path);
+                      }, t('rightSidebar.restoreFile'), getChangedFileBusyPath(confirmGitAction.file));
                     } else {
-                      void runSidebarGitAction({ action: 'stash-all', cwd: rootPath }, t('rightSidebar.stashAll'));
+                      const repoRoot = confirmGitAction.repoRoot ?? rootPath;
+                      if (!repoRoot) return;
+                      void runSidebarGitAction({ action: 'stash-all', cwd: repoRoot }, t('rightSidebar.stashAll'), `repo:${repoRoot}`);
                     }
                   }}
                   className={`rounded-full px-3 py-1.5 text-xs font-semibold disabled:opacity-50 ${

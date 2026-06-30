@@ -91,16 +91,18 @@ function toDiffRequestPath(path: string | null, rootPath: string | null): string
     : path;
 }
 
-export function preloadSidebarDiff(rootPath: string | null | undefined, filePath: string | null, options: { force?: boolean } = {}): void {
-  if (!rootPath) return;
-  const requestPath = toDiffRequestPath(filePath, rootPath);
-  void loadFileDiffCached(requestPath, rootPath, options.force).catch(() => {
+export function preloadSidebarDiff(rootPath: string | null | undefined, filePath: string | null, options: { force?: boolean; repoRoot?: string | null } = {}): void {
+  const cwd = options.repoRoot ?? rootPath;
+  if (!cwd) return;
+  const requestPath = toDiffRequestPath(filePath, cwd);
+  void loadFileDiffCached(requestPath, cwd, options.force).catch(() => {
     // Preload is best-effort; DiffViewer will surface errors when it becomes visible.
   });
 }
 
 interface DiffViewerProps {
   filePath: string | null;
+  repoRoot?: string | null;
   changedFile?: GitChangedFile | null;
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
   onReferenceCopied?: (key: string) => void;
@@ -197,7 +199,7 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true }: DiffViewerProps) {
+export function DiffViewer({ filePath, repoRoot, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true }: DiffViewerProps) {
   const { t } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
@@ -223,13 +225,14 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, onRef
     let objectUrl: string | null = null;
     const controller = new AbortController();
     const path = filePath;
+    const gitRoot = repoRoot ?? changedFile?.repoRoot ?? rootPath;
 
-    const requestPath = toDiffRequestPath(path, rootPath);
-    const readablePath = path && rootPath && !path.startsWith('/') ? `${rootPath}/${path}` : path;
+    const requestPath = toDiffRequestPath(path, gitRoot);
+    const readablePath = path && gitRoot && !path.startsWith('/') ? `${gitRoot}/${path}` : path;
     const forceReload = previousReloadKeyRef.current !== reloadKey;
     previousReloadKeyRef.current = reloadKey;
 
-    const cachedDiff = !forceReload ? getCachedDiffResult(requestPath, rootPath ?? undefined) : undefined;
+    const cachedDiff = !forceReload ? getCachedDiffResult(requestPath, gitRoot ?? undefined) : undefined;
     setDiffContent(cachedDiff?.diff ?? null);
     setDiffNotice(cachedDiff ? formatDiffLimitMessage(cachedDiff) : null);
     setDiffLoading(!cachedDiff);
@@ -238,8 +241,8 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, onRef
 
     const loadTextDiff = () => (
       (cachedDiff && !forceReload
-        ? revalidateVisibleFileDiff(requestPath, rootPath ?? undefined, controller.signal)
-        : loadVisibleFileDiff(requestPath, rootPath ?? undefined, controller.signal, forceReload))
+        ? revalidateVisibleFileDiff(requestPath, gitRoot ?? undefined, controller.signal)
+        : loadVisibleFileDiff(requestPath, gitRoot ?? undefined, controller.signal, forceReload))
         .then((result) => {
           if (cancelled) return;
           const notice = formatDiffLimitMessage(result);
@@ -284,7 +287,7 @@ export function DiffViewer({ filePath, changedFile, onInsertDiffReference, onRef
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [active, changedFile, filePath, reloadKey, rootPath]);
+  }, [active, changedFile, filePath, reloadKey, repoRoot, rootPath]);
 
   const files = useMemo(() => {
     if (!diffContent || diffContent.trim() === '') return [];

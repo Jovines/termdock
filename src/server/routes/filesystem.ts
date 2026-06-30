@@ -20,6 +20,7 @@ const MAX_CONTENT_MATCH_LINE_LENGTH = 400;
 const MAX_GIT_CONTEXT_CHANGED_FILES = 200;
 const MAX_DIFF_BYTES = 2 * 1024 * 1024; // 2MB
 const MAX_UNTRACKED_DIFF_FILE_BYTES = 1024 * 1024; // 1MB
+const MAX_NESTED_GIT_REPOS = 32;
 const RESTORE_CONFIRM_PHRASES = new Set(['丢弃改动', 'discard changes']);
 
 type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted' | 'unknown';
@@ -29,6 +30,9 @@ type GitAction = 'stage-file' | 'stage-all' | 'unstage-file' | 'stash-file' | 's
 interface GitChangedFile {
   path: string;
   absolutePath: string;
+  repoRoot?: string;
+  repoRelativeRoot?: string;
+  repoName?: string;
   status: GitChangeStatus;
   oldPath?: string;
   indexStatus?: string;
@@ -64,7 +68,28 @@ interface GitBundlePayload {
     truncated?: boolean;
     error?: string;
   } | null;
+  repositories?: GitRepositoryBundle[];
+  truncatedRepositories?: boolean;
   error?: string;
+}
+
+interface GitRepositoryBundle {
+  id: string;
+  root: string;
+  displayRoot?: string;
+  relativeRoot: string;
+  name: string;
+  depth: number;
+  nested: boolean;
+  available: boolean;
+  files: GitChangedFile[];
+  context: GitBundlePayload['context'];
+  error?: string;
+}
+
+interface DiscoveredGitRepository {
+  root: string;
+  displayRoot: string;
 }
 
 interface DiffSkippedFile {
@@ -89,6 +114,7 @@ interface FileSearchEntry {
   name: string;
   path: string;
   type: 'file' | 'directory' | 'symlink';
+  isSymlink?: boolean;
 }
 
 interface FileSearchPayload {
@@ -127,6 +153,10 @@ function compareFileTreeEntries(a: Pick<FileSearchEntry, 'name' | 'type'>, b: Pi
 
 const WATCH_IGNORED_NAMES = new Set([
   '.git', 'node_modules', 'dist', 'build', '.next', '.nuxt', '.turbo', 'coverage', 'target', '.gradle', '.idea', '.DS_Store',
+]);
+const NESTED_GIT_DISCOVERY_IGNORED_NAMES = new Set([
+  '.git', 'node_modules', 'dist', 'build', '.next', '.nuxt', '.turbo', 'coverage', 'target', '.gradle', '.idea', '.DS_Store',
+  '.cache', '.parcel-cache', '.yarn', '.pnpm-store', 'vendor',
 ]);
 const WATCH_BATCH_MS = 120;
 const WATCH_EVENT_STORM_LIMIT = 1200;
@@ -244,6 +274,7 @@ function emptyChangedFile(gitRoot: string, filePath: string): GitChangedFile {
   return {
     path: filePath,
     absolutePath: path.join(gitRoot, filePath),
+    repoRoot: gitRoot,
     status: 'unknown',
     staged: false,
     unstaged: false,
@@ -487,14 +518,38 @@ async function getGitPushTargets(gitRoot: string) {
   return { remotes, branches, upstream, upstreamRemote, upstreamBranch, ahead, behind };
 }
 
+function getRepoRelativeRoot(workspaceRoot: string, repoRoot: string, displayRoot: string = repoRoot): string {
+  const relative = path.relative(workspaceRoot, displayRoot).split(path.sep).join('/');
+  return relative || '.';
+}
+
+function getRepoDepth(workspaceRoot: string, repoRoot: string, displayRoot: string = repoRoot): number {
+  const relative = path.relative(workspaceRoot, displayRoot);
+  if (!relative) return 0;
+  return relative.split(path.sep).filter(Boolean).length;
+}
+
+function annotateRepoFiles(files: GitChangedFile[], workspaceRoot: string, repoRoot: string, displayRoot: string = repoRoot): GitChangedFile[] {
+  const relativeRoot = getRepoRelativeRoot(workspaceRoot, repoRoot, displayRoot);
+  const repoName = relativeRoot === '.' ? path.basename(displayRoot) || displayRoot : relativeRoot;
+  return files.map((file) => ({
+    ...file,
+    repoRoot,
+    repoRelativeRoot: relativeRoot,
+    repoName,
+    absolutePath: path.join(repoRoot, file.path),
+  }));
+}
+
 async function buildGitBundle(resolvedCwd: string, gitRoot: string): Promise<GitBundlePayload> {
   const statusOutput = await execGit(['status', '--porcelain=v2', '-z', '--branch'], gitRoot).catch(() => '');
   const { files, branch, upstream, ahead, behind } = parseGitStatusPorcelainV2(gitRoot, statusOutput);
-  const changedFiles = toContextFiles(files);
+  const annotatedFiles = annotateRepoFiles(files, gitRoot, gitRoot);
+  const changedFiles = toContextFiles(annotatedFiles);
 
   return {
     available: true,
-    files,
+    files: annotatedFiles,
     context: {
       available: true,
       cwd: resolvedCwd,
@@ -508,6 +563,48 @@ async function buildGitBundle(resolvedCwd: string, gitRoot: string): Promise<Git
       truncated: changedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES,
     },
   };
+}
+
+async function buildGitRepositoryBundle(workspaceRoot: string, resolvedCwd: string, repoRoot: string, displayRoot: string = repoRoot): Promise<GitRepositoryBundle> {
+  try {
+    const bundle = await buildGitBundle(repoRoot === workspaceRoot ? resolvedCwd : repoRoot, repoRoot);
+    const relativeRoot = getRepoRelativeRoot(workspaceRoot, repoRoot, displayRoot);
+    const files = annotateRepoFiles(bundle.files, workspaceRoot, repoRoot, displayRoot);
+    const changedFiles = toContextFiles(files);
+    return {
+      id: repoRoot,
+      root: repoRoot,
+      displayRoot,
+      relativeRoot,
+      name: relativeRoot === '.' ? path.basename(displayRoot) || displayRoot : relativeRoot,
+      depth: getRepoDepth(workspaceRoot, repoRoot, displayRoot),
+      nested: repoRoot !== workspaceRoot,
+      available: true,
+      files,
+      context: bundle.context ? {
+        ...bundle.context,
+        cwd: repoRoot === workspaceRoot ? resolvedCwd : repoRoot,
+        root: repoRoot,
+        changedFiles,
+        truncated: changedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES,
+      } : null,
+    };
+  } catch (error) {
+    const relativeRoot = getRepoRelativeRoot(workspaceRoot, repoRoot, displayRoot);
+    return {
+      id: repoRoot,
+      root: repoRoot,
+      displayRoot,
+      relativeRoot,
+      name: relativeRoot === '.' ? path.basename(displayRoot) || displayRoot : relativeRoot,
+      depth: getRepoDepth(workspaceRoot, repoRoot, displayRoot),
+      nested: repoRoot !== workspaceRoot,
+      available: false,
+      files: [],
+      context: { available: false, cwd: repoRoot, root: repoRoot, error: error instanceof Error ? error.message : 'Unknown error' },
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
 }
 
 function getSinglePath(paths: unknown): string {
@@ -583,12 +680,40 @@ function addSearchEntry(entries: Map<string, FileSearchEntry>, entryPath: string
   });
 }
 
-function toFileEntry(entryPath: string, stat: fs.Stats): FileSearchEntry {
+function toFileEntry(entryPath: string, stat: fs.Stats, isSymlink = false): FileSearchEntry {
   return {
     name: path.basename(entryPath) || entryPath,
     path: entryPath,
     type: stat.isDirectory() ? 'directory' : stat.isSymbolicLink() ? 'symlink' : 'file',
+    isSymlink,
   };
+}
+
+async function toDirectoryEntry(dir: string, dirent: Dirent): Promise<FileSearchEntry> {
+  const entryPath = path.join(dir, dirent.name);
+  if (!dirent.isSymbolicLink()) {
+    return {
+      name: dirent.name,
+      path: entryPath,
+      type: dirent.isDirectory() ? 'directory' : 'file',
+    };
+  }
+  try {
+    const stat = await fs.promises.stat(entryPath);
+    return {
+      name: dirent.name,
+      path: entryPath,
+      type: stat.isDirectory() ? 'directory' : 'symlink',
+      isSymlink: true,
+    };
+  } catch {
+    return {
+      name: dirent.name,
+      path: entryPath,
+      type: 'symlink',
+      isSymlink: true,
+    };
+  }
 }
 
 function isIgnoredWatchPath(rootPath: string, candidatePath: string): boolean {
@@ -1042,6 +1167,71 @@ async function findGitRoot(cwd: string): Promise<string | null> {
   }
 }
 
+async function hasGitMetadata(candidate: string): Promise<boolean> {
+  try {
+    const stat = await fs.promises.lstat(path.join(candidate, '.git'));
+    return stat.isDirectory() || stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
+async function getDirectoryTarget(candidate: string, entry: Dirent): Promise<string | null> {
+  if (entry.isDirectory()) return candidate;
+  if (!entry.isSymbolicLink()) return null;
+  try {
+    const realPath = await fs.promises.realpath(candidate);
+    const stat = await fs.promises.stat(realPath);
+    return stat.isDirectory() ? realPath : null;
+  } catch {
+    return null;
+  }
+}
+
+async function discoverNestedGitRoots(workspaceRoot: string): Promise<{ repositories: DiscoveredGitRepository[]; truncated: boolean }> {
+  const repositories: DiscoveredGitRepository[] = [];
+  const seen = new Set<string>([workspaceRoot]);
+  let truncated = false;
+
+  async function visit(dir: string): Promise<void> {
+    if (truncated) return;
+    let entries: Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (truncated) return;
+      if (NESTED_GIT_DISCOVERY_IGNORED_NAMES.has(entry.name)) continue;
+      const candidate = path.join(dir, entry.name);
+      const target = await getDirectoryTarget(candidate, entry);
+      if (!target) continue;
+      // A Git repository is a hard boundary: record it, then do not scan
+      // deeper inside it. This catches containers like `repos/android` while
+      // avoiding expensive nested scans through large project worktrees.
+      if (await hasGitMetadata(candidate) || await hasGitMetadata(target)) {
+        const root = await findGitRoot(target);
+        if (root && root !== workspaceRoot && !seen.has(root)) {
+          seen.add(root);
+          repositories.push({ root, displayRoot: candidate });
+          if (repositories.length >= MAX_NESTED_GIT_REPOS) {
+            truncated = true;
+            return;
+          }
+        }
+        continue;
+      }
+      if (!entry.isSymbolicLink()) await visit(target);
+    }
+  }
+
+  await visit(workspaceRoot);
+  repositories.sort((a, b) => a.displayRoot.localeCompare(b.displayRoot));
+  return { repositories, truncated };
+}
+
 // Directory listing
 router.get('/list', async (req: Request, res: Response) => {
   const startedAt = Date.now();
@@ -1063,15 +1253,7 @@ router.get('/list', async (req: Request, res: Response) => {
     const showHidden = req.query.showHidden === 'true';
     const allEntries = await fs.promises.readdir(resolvedPath, { withFileTypes: true });
     const visibleDirents = allEntries.filter(dirent => showHidden || !dirent.name.startsWith('.'));
-    const entries = visibleDirents
-      .map((dirent): { name: string; path: string; type: 'file' | 'directory' | 'symlink' } => {
-        const fullPath = path.join(resolvedPath, dirent.name);
-        return {
-          name: dirent.name,
-          path: fullPath,
-          type: dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : 'file',
-        };
-      })
+    const entries = (await Promise.all(visibleDirents.map((dirent) => toDirectoryEntry(resolvedPath, dirent))))
       .sort(compareFileTreeEntries)
       .slice(0, MAX_DIRECTORY_ENTRIES);
 
@@ -1540,6 +1722,7 @@ router.get('/git-context', async (req: Request, res: Response) => {
 router.get('/git-bundle', async (req: Request, res: Response) => {
   try {
     const cwd = req.query.cwd as string | undefined;
+    const includeNested = req.query.includeNested === 'true';
     if (!cwd) {
       res.json({ available: false, files: [], context: null, error: 'No cwd provided' });
       return;
@@ -1556,7 +1739,24 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
       return;
     }
 
-    res.json(await buildGitBundle(resolvedCwd, gitRoot));
+    if (!includeNested) {
+      res.json(await buildGitBundle(resolvedCwd, gitRoot));
+      return;
+    }
+
+    const { repositories: nestedRepositories, truncated } = await discoverNestedGitRoots(gitRoot);
+    const repositories = await Promise.all([
+      buildGitRepositoryBundle(gitRoot, resolvedCwd, gitRoot),
+      ...nestedRepositories.map((repo) => buildGitRepositoryBundle(gitRoot, resolvedCwd, repo.root, repo.displayRoot)),
+    ]);
+    const primary = repositories[0];
+    res.json({
+      available: true,
+      files: repositories.flatMap((repo) => repo.files),
+      context: primary.context,
+      repositories,
+      truncatedRepositories: truncated,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     res.json({ available: false, files: [], context: null, error: message });
