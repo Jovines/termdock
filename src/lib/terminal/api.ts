@@ -1273,6 +1273,7 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
   '.avif': 'image/avif',
   '.bmp': 'image/bmp',
   '.ico': 'image/x-icon',
+  '.svg': 'image/svg+xml',
 };
 
 export function getImageMimeTypeForPath(filePath: string): string | null {

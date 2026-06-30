@@ -29,7 +29,7 @@ import { useTerminalSettings } from './lib/hooks/useTerminalSettings';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
-import { getCwdLeafName, getSessionDisplayLines, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
+import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
 import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
@@ -157,7 +157,13 @@ const HISTORY_BASE_ANCHOR_STATE_KEY = '__termdockBaseAnchor';
 const HISTORY_BASE_GUARD_STATE_KEY = '__termdockBaseGuard';
 const BASE_HISTORY_GUARD_BUFFER_SIZE = 3;
 const BASE_HISTORY_GUARD_REARM_DELAY_MS = 250;
-type HistoryOverlay = 'left-sidebar' | 'right-sidebar' | 'settings';
+type HistoryOverlay =
+  | 'left-sidebar'
+  | 'right-sidebar'
+  | 'right-sidebar-file-preview'
+  | 'settings'
+  | 'markdown-outline'
+  | 'markdown-image-lightbox';
 
 function reportHistoryGuardDebug(message: string, data: Record<string, unknown> = {}): void {
   if (typeof window === 'undefined') return;
@@ -191,7 +197,12 @@ function reportHistoryGuardDebug(message: string, data: Record<string, unknown> 
 }
 
 function isHistoryOverlay(value: unknown): value is HistoryOverlay {
-  return value === 'left-sidebar' || value === 'right-sidebar' || value === 'settings';
+  return value === 'left-sidebar'
+    || value === 'right-sidebar'
+    || value === 'right-sidebar-file-preview'
+    || value === 'settings'
+    || value === 'markdown-outline'
+    || value === 'markdown-image-lightbox';
 }
 
 function getHistoryOverlay(state: unknown): HistoryOverlay | null {
@@ -399,6 +410,12 @@ function App() {
   const [localAccessError, setLocalAccessError] = React.useState<string | null>(null);
   const [localAccessCopied, setLocalAccessCopied] = React.useState<string | null>(null);
   const [showBackGuardHint, setShowBackGuardHint] = React.useState(false);
+  const [rightSidebarFilePreviewOpen, setRightSidebarFilePreviewOpen] = React.useState(false);
+  const [rightSidebarFilePreviewCloseSignal, setRightSidebarFilePreviewCloseSignal] = React.useState(0);
+  const [markdownOutlineOpen, setMarkdownOutlineOpen] = React.useState(false);
+  const [markdownOutlineCloseSignal, setMarkdownOutlineCloseSignal] = React.useState(0);
+  const [markdownImageLightboxOpen, setMarkdownImageLightboxOpen] = React.useState(false);
+  const [markdownImageLightboxCloseSignal, setMarkdownImageLightboxCloseSignal] = React.useState(0);
   const backGuardHintTimerRef = React.useRef<number | null>(null);
   const [debugInfo, setDebugInfo] = React.useState<Record<string, any>>({});
   const { terminalSettings, updateTerminalSettings } = useTerminalSettings();
@@ -516,19 +533,42 @@ function App() {
     ? Math.min(Math.max(viewportWidth * 0.22, 280), 340)
     : Math.min(viewportWidth * 0.86, 380);
 
-  const activeHistoryOverlay: HistoryOverlay | null = isDrawerOpen
-    ? 'settings'
-    : sidebarRightOpen
-      ? 'right-sidebar'
-      : sidebarLeftOpen
-        ? 'left-sidebar'
-        : null;
+  const activeHistoryOverlay: HistoryOverlay | null = markdownImageLightboxOpen
+    ? 'markdown-image-lightbox'
+    : markdownOutlineOpen
+      ? 'markdown-outline'
+      : rightSidebarFilePreviewOpen
+        ? 'right-sidebar-file-preview'
+        : isDrawerOpen
+          ? 'settings'
+          : sidebarRightOpen
+            ? 'right-sidebar'
+            : sidebarLeftOpen
+              ? 'left-sidebar'
+              : null;
   const activeHistoryOverlayRef = React.useRef<HistoryOverlay | null>(activeHistoryOverlay);
   const lastHistoryOverlayRef = React.useRef<HistoryOverlay | null>(activeHistoryOverlay);
   const closingFromPopStateRef = React.useRef(false);
   const baseHistoryGuardArmedByUserRef = React.useRef(false);
 
   const closeHistoryOverlayDirect = useCallback((overlay: HistoryOverlay) => {
+    if (overlay === 'markdown-image-lightbox') {
+      setMarkdownImageLightboxOpen(false);
+      setMarkdownImageLightboxCloseSignal((value) => value + 1);
+      return;
+    }
+    if (overlay === 'markdown-outline') {
+      setMarkdownOutlineOpen(false);
+      setMarkdownOutlineCloseSignal((value) => value + 1);
+      return;
+    }
+    if (overlay === 'right-sidebar-file-preview') {
+      setMarkdownOutlineOpen(false);
+      setMarkdownOutlineCloseSignal((value) => value + 1);
+      setRightSidebarFilePreviewOpen(false);
+      setRightSidebarFilePreviewCloseSignal((value) => value + 1);
+      return;
+    }
     if (overlay === 'settings') {
       setIsDrawerOpen(false);
       setIsToolbarPresetsOpen(false);
@@ -540,6 +580,12 @@ function App() {
       useSidebarStore.getState().closeLeft();
       return;
     }
+    setMarkdownOutlineOpen(false);
+    setMarkdownOutlineCloseSignal((value) => value + 1);
+    setRightSidebarFilePreviewOpen(false);
+    setRightSidebarFilePreviewCloseSignal((value) => value + 1);
+    setMarkdownImageLightboxOpen(false);
+    setMarkdownImageLightboxCloseSignal((value) => value + 1);
     useSidebarStore.getState().closeRight();
   }, []);
 
@@ -591,6 +637,50 @@ function App() {
     }
     handleOpenRightSidebar();
   }, [handleOpenRightSidebar, requestCloseHistoryOverlay, sidebarRightOpen]);
+
+  const handleOpenRightSidebarFilePreview = useCallback(() => {
+    if (!rightSidebarFilePreviewOpen
+      && typeof window !== 'undefined'
+      && activeHistoryOverlayRef.current === 'right-sidebar'
+      && getHistoryOverlay(window.history.state) === 'right-sidebar') {
+      pushHistoryOverlay('right-sidebar-file-preview');
+      lastHistoryOverlayRef.current = 'right-sidebar-file-preview';
+    }
+    setRightSidebarFilePreviewOpen(true);
+  }, [rightSidebarFilePreviewOpen]);
+
+  const handleCloseRightSidebarFilePreview = useCallback(() => {
+    requestCloseHistoryOverlay('right-sidebar-file-preview');
+  }, [requestCloseHistoryOverlay]);
+
+  const handleOpenMarkdownOutline = useCallback(() => {
+    if (!markdownOutlineOpen
+      && typeof window !== 'undefined'
+      && activeHistoryOverlayRef.current
+      && getHistoryOverlay(window.history.state) === activeHistoryOverlayRef.current) {
+      pushHistoryOverlay('markdown-outline');
+      lastHistoryOverlayRef.current = 'markdown-outline';
+    }
+    setMarkdownOutlineOpen(true);
+  }, [markdownOutlineOpen]);
+
+  const handleCloseMarkdownOutline = useCallback(() => {
+    requestCloseHistoryOverlay('markdown-outline');
+  }, [requestCloseHistoryOverlay]);
+
+  const handleOpenMarkdownImageLightbox = useCallback(() => {
+    if (typeof window !== 'undefined'
+      && activeHistoryOverlayRef.current
+      && getHistoryOverlay(window.history.state) === activeHistoryOverlayRef.current) {
+      pushHistoryOverlay('markdown-image-lightbox');
+      lastHistoryOverlayRef.current = 'markdown-image-lightbox';
+    }
+    setMarkdownImageLightboxOpen(true);
+  }, []);
+
+  const handleCloseMarkdownImageLightbox = useCallback(() => {
+    requestCloseHistoryOverlay('markdown-image-lightbox');
+  }, [requestCloseHistoryOverlay]);
 
   const handleOpenSettings = useCallback(() => {
     if (typeof window !== 'undefined'
@@ -1528,6 +1618,14 @@ function App() {
   const highlightedNewSessionMode = newSessionShortcutConfirmMode ?? newSessionMode;
   const shellShortcutHighlighted = highlightedNewSessionMode === 'shell';
   const tmuxShortcutHighlighted = highlightedNewSessionMode === 'tmux' && tmuxStatus.available;
+  const tmuxSessionGroups = React.useMemo(
+    () => buildFolderGroups(
+      tmuxSessions.map((session) => ({ ...session, id: session.name })),
+      (session) => session.cwd ?? null,
+      t('sidebar.ungrouped'),
+    ),
+    [tmuxSessions, t],
+  );
 
   // 单个 tab 的渲染（编辑态 input / 普通态 tab 外壳），flat 与 分组 两种布局共用。
   //  - showDir: 是否显示目录副行（分组时为 false，只显示程序名/主名）
@@ -2292,8 +2390,18 @@ function App() {
                         {t('settings.noTmuxSessions')}
                       </p>
                     ) : (
-                      <div className="space-y-1">
-                        {tmuxSessions.map((tmux) => {
+                      <div className="space-y-2">
+                        {tmuxSessionGroups.map((group) => (
+                          <div key={group.key || '__ungrouped_tmux__'} className="space-y-1">
+                            <div className="flex min-w-0 items-center gap-2 px-1.5 py-1 text-[10px] text-muted-foreground">
+                              <RiFolderLine size={11} className="shrink-0 text-muted-foreground/70" />
+                              <span className="shrink-0 font-medium text-foreground/75">{group.label}</span>
+                              <span className="shrink-0 text-muted-foreground/70">{t('settings.sessions', { n: group.sessions.length })}</span>
+                              {group.key && (
+                                <span className="min-w-0 truncate text-muted-foreground/60">{group.key}</span>
+                              )}
+                            </div>
+                            {group.sessions.map((tmux) => {
                           const boundFrontendSessionId = tmux.boundFrontendSessionId ?? null;
                           const connected = Boolean(tmux.connected || boundFrontendSessionId);
                           const existingSession = boundFrontendSessionId
@@ -2304,11 +2412,17 @@ function App() {
                           const existingTitle = existingSession?.customName ? existingSession.name : null;
                           const labelTitle = tmux.label && tmux.label !== tmux.name ? tmux.label : null;
                           const title = friendlyTitle || existingTitle || labelTitle || rawTmuxLabel;
+                          const termdockClientLabel = tmux.clientCount && tmux.clientCount > 0
+                            ? (locale === 'zh' ? `网页连接 ${tmux.clientCount}` : `Web clients ${tmux.clientCount}`)
+                            : null;
+                          const nativeTmuxClientLabel = tmux.attached > 0
+                            ? (locale === 'zh' ? `原生 tmux ${tmux.attached}` : `Native tmux ${tmux.attached}`)
+                            : null;
                           const subtitleParts = [
                             title !== rawTmuxLabel ? rawTmuxLabel : null,
                             connected ? (tmux.restorable ? t('settings.restorable') : t('settings.attached')) : null,
-                            tmux.clientCount != null ? `web:${tmux.clientCount}` : null,
-                            tmux.attached > 0 ? `tmux:${tmux.attached}` : null,
+                            termdockClientLabel,
+                            nativeTmuxClientLabel,
                           ].filter((part): part is string => Boolean(part));
                           const metaParts = [
                             t('settings.windows', { n: tmux.windows }),
@@ -2421,7 +2535,9 @@ function App() {
                               )}
                             </div>
                           );
-                        })}
+                            })}
+                          </div>
+                        ))}
                         {tmuxKillError && (
                           <p className="px-2 text-[11px] text-destructive">{tmuxKillError}</p>
                         )}
@@ -3289,6 +3405,18 @@ function App() {
         drawerWidthPx={rightDrawerWidthPx}
         onClose={() => requestCloseHistoryOverlay('right-sidebar')}
         onOpen={handleOpenRightSidebar}
+        rightSidebarFilePreviewOpen={rightSidebarFilePreviewOpen}
+        rightSidebarFilePreviewCloseSignal={rightSidebarFilePreviewCloseSignal}
+        onOpenRightSidebarFilePreview={handleOpenRightSidebarFilePreview}
+        onCloseRightSidebarFilePreview={handleCloseRightSidebarFilePreview}
+        markdownOutlineOpen={markdownOutlineOpen}
+        markdownOutlineCloseSignal={markdownOutlineCloseSignal}
+        onOpenMarkdownOutline={handleOpenMarkdownOutline}
+        onCloseMarkdownOutline={handleCloseMarkdownOutline}
+        markdownImageLightboxOpen={markdownImageLightboxOpen}
+        markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
+        onOpenMarkdownImageLightbox={handleOpenMarkdownImageLightbox}
+        onCloseMarkdownImageLightbox={handleCloseMarkdownImageLightbox}
       />
 
       {showBackGuardHint && (

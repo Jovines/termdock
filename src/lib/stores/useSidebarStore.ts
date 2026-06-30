@@ -7,6 +7,7 @@ export type RightSidebarTab = 'git' | 'files' | 'diff' | 'file';
 const RIGHT_SIDEBAR_TAB_CACHE_KEY = 'termdock:right-sidebar:tab:v1';
 const EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:explorer-roots:v1';
 const PINNED_EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:pinned-explorer-roots:v1';
+const SELECTED_FILE_PATHS_CACHE_KEY = 'termdock:right-sidebar:selected-files:v1';
 const SHOW_HIDDEN_FILES_CACHE_KEY = 'termdock:right-sidebar:show-hidden-files:v1';
 // 分组开关 / 折叠状态：复用 LeftSidebar 旧 localStorage key 以保留用户已有偏好。
 // 旧编码是裸 localStorage（'1' 与 JSON 数组），与 readCache 包装格式不兼容，
@@ -134,6 +135,23 @@ function readPinnedExplorerRootsCache(): Record<string, PinnedExplorerEntry[]> {
 
 function writePinnedExplorerRootsCache(cache: Record<string, PinnedExplorerEntry[]>): void {
   writeCache(PINNED_EXPLORER_ROOTS_CACHE_KEY, cache);
+}
+
+function isSelectedFilePathCache(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((entry) => typeof entry === 'string');
+}
+
+function readSelectedFilePathCache(): Record<string, string> {
+  return readCache(SELECTED_FILE_PATHS_CACHE_KEY, isSelectedFilePathCache) ?? {};
+}
+
+function writeSelectedFilePath(rootPath: string | null, path: string | null): void {
+  if (!rootPath) return;
+  const cache = { ...readSelectedFilePathCache() };
+  if (path) cache[rootPath] = path;
+  else delete cache[rootPath];
+  writeCache(SELECTED_FILE_PATHS_CACHE_KEY, cache);
 }
 
 function isBoolean(value: unknown): value is boolean {
@@ -315,11 +333,12 @@ export const useSidebarStore = create<SidebarState>((set) => ({
 
     const cached = path ? projectStateCache.get(path) : undefined;
     const persistedExplorerRoot = path ? s.explorerRootCache[path] : undefined;
+    const persistedSelectedFilePath = path ? readSelectedFilePathCache()[path] : undefined;
     return {
       rootPath: path,
       explorerRoot: cached?.explorerRoot ?? persistedExplorerRoot ?? path,
       expandedPaths: cached ? new Set(cached.expandedPaths) : new Set(),
-      selectedFilePath: cached?.selectedFilePath ?? null,
+      selectedFilePath: cached?.selectedFilePath ?? persistedSelectedFilePath ?? null,
       directoryCache: cached ? new Map(cached.directoryCache) : new Map(),
       changedFiles: cached ? new Map(cached.changedFiles) : new Map(),
       gitBundleLoading: false,
@@ -382,7 +401,10 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       return { expandedPaths: next };
     }),
 
-  selectFile: (path) => set({ selectedFilePath: path }),
+  selectFile: (path) => set((s) => {
+    writeSelectedFilePath(s.rootPath, path);
+    return { selectedFilePath: path };
+  }),
 
   toggleShowHiddenFiles: () =>
     set((s) => {
@@ -473,7 +495,10 @@ export const useSidebarStore = create<SidebarState>((set) => ({
 
         if (event.type === 'deleted') {
           bumpVersion(event.path);
-          if (selectedFilePath && isSameOrChildPath(event.path, selectedFilePath)) selectedFilePath = null;
+          if (selectedFilePath && isSameOrChildPath(event.path, selectedFilePath)) {
+            selectedFilePath = null;
+            writeSelectedFilePath(s.rootPath, null);
+          }
           if (siblings) {
             const filtered = siblings.filter((node) => node.path !== event.path);
             if (filtered.length !== siblings.length) {

@@ -85,6 +85,50 @@ export class PathValidator {
   }
 
   /**
+   * 异步验证和规范化路径（仅允许目录）。用于 HTTP 热路径，避免同步 fs I/O 阻塞 event loop。
+   */
+  async validateAsync(requestedPath: string): Promise<string> {
+    if (!requestedPath || typeof requestedPath !== 'string') {
+      throw new Error('Path must be a non-empty string');
+    }
+
+    let resolvedPath: string;
+    try {
+      resolvedPath = path.resolve(requestedPath);
+    } catch (error) {
+      throw new Error(`Invalid path format: ${requestedPath}`);
+    }
+
+    let realPath: string;
+    try {
+      realPath = await fs.promises.realpath(resolvedPath);
+    } catch {
+      throw new Error(`Directory does not exist: ${resolvedPath}`);
+    }
+
+    try {
+      const stat = await fs.promises.stat(realPath);
+      if (!stat.isDirectory()) {
+        throw new Error(`Path is not a directory: ${realPath}`);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('not a directory')) {
+        throw error;
+      }
+      throw new Error(`Cannot access directory: ${realPath}`);
+    }
+
+    if (!this.isInAllowedPaths(realPath)) {
+      console.warn(`Access denied: ${realPath} is not in allowed paths`);
+      throw new Error('Access denied: directory not allowed');
+    }
+
+    this.checkDangerousPatterns(realPath);
+
+    return realPath;
+  }
+
+  /**
    * 验证和规范化路径（允许文件和目录）
    * @param requestedPath 请求的路径
    * @returns 安全、规范化的路径
@@ -109,6 +153,45 @@ export class PathValidator {
     const realPath = fs.realpathSync(resolvedPath);
 
     // 对最终真实路径做白名单校验，避免允许目录内的 symlink 指向敏感位置。
+    try {
+      if (!this.isInAllowedPaths(realPath)) {
+        console.warn(`Access denied: ${realPath} is not in allowed paths`);
+        throw new Error('Access denied: path not allowed');
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('not allowed')) {
+        throw error;
+      }
+      throw new Error(`Cannot access path: ${realPath}`);
+    }
+
+    this.checkDangerousPatterns(realPath);
+
+    return realPath;
+  }
+
+  /**
+   * 异步验证和规范化路径（允许文件和目录）。用于 HTTP 热路径，避免同步 fs I/O 阻塞 event loop。
+   */
+  async validatePathAsync(requestedPath: string): Promise<string> {
+    if (!requestedPath || typeof requestedPath !== 'string') {
+      throw new Error('Path must be a non-empty string');
+    }
+
+    let resolvedPath: string;
+    try {
+      resolvedPath = path.resolve(requestedPath);
+    } catch (error) {
+      throw new Error(`Invalid path format: ${requestedPath}`);
+    }
+
+    let realPath: string;
+    try {
+      realPath = await fs.promises.realpath(resolvedPath);
+    } catch {
+      throw new Error(`Path does not exist: ${resolvedPath}`);
+    }
+
     try {
       if (!this.isInAllowedPaths(realPath)) {
         console.warn(`Access denied: ${realPath} is not in allowed paths`);

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process';
 import dns from 'dns';
 import os from 'os';
-import { getPreventSleepSetting, setPreventSleepSetting } from './settings.js';
+import { getPreventSleepSetting, setPreventSleepSettingAsync } from './settings.js';
 
 // ── Network detection ─────────────────────────────────────────────────
 async function checkNetworkConnectivity(): Promise<boolean> {
@@ -89,7 +89,9 @@ async function checkNetwork(): Promise<void> {
 export const caffeinateManager = {
   setPreventSleep(enabled: boolean): void {
     preventSleep = enabled;
-    setPreventSleepSetting(enabled);
+    void setPreventSleepSettingAsync(enabled).catch((error) => {
+      console.warn('[caffeinate] Failed to persist preventSleep setting:', error);
+    });
     evaluate();
   },
 

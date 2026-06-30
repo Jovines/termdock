@@ -22,11 +22,6 @@ export interface SettingsDoc {
   updatedAt: number;
 }
 
-function ensureSettingsDir(): void {
-  if (!fs.existsSync(SETTINGS_DIR)) {
-    fs.mkdirSync(SETTINGS_DIR, { recursive: true });
-  }
-}
 
 function generateAutoName(): string {
   const alphabet = LOCAL_ACCESS.generatedNameAlphabet;
@@ -83,23 +78,38 @@ function normalizeSettings(value: unknown): SettingsDoc {
 
 export function loadSettings(): SettingsDoc {
   try {
-    if (fs.existsSync(SETTINGS_FILE)) {
-      const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
-      const doc = normalizeSettings(JSON.parse(raw));
-      // Persist migrated defaults (for example the first generated local-access name)
-      // so the advertised hostname stays stable across restarts.
-      saveSettings(doc);
-      return doc;
-    }
-  } catch { /* ignore malformed settings */ }
+    const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
+    const doc = normalizeSettings(JSON.parse(raw));
+    // Persist migrated defaults (for example the first generated local-access name)
+    // so the advertised hostname stays stable across restarts.
+    saveSettings(doc);
+    return doc;
+  } catch { /* ignore missing/malformed settings */ }
   const initial = normalizeSettings(null);
   try { saveSettings(initial); } catch { /* best effort */ }
   return initial;
 }
 
+export async function loadSettingsAsync(): Promise<SettingsDoc> {
+  try {
+    const raw = await fs.promises.readFile(SETTINGS_FILE, 'utf-8');
+    const doc = normalizeSettings(JSON.parse(raw));
+    await saveSettingsAsync(doc);
+    return doc;
+  } catch { /* ignore missing/malformed settings */ }
+  const initial = normalizeSettings(null);
+  try { await saveSettingsAsync(initial); } catch { /* best effort */ }
+  return initial;
+}
+
 export function saveSettings(next: SettingsDoc): void {
-  ensureSettingsDir();
+  fs.mkdirSync(SETTINGS_DIR, { recursive: true });
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(next, null, 2), 'utf-8');
+}
+
+export async function saveSettingsAsync(next: SettingsDoc): Promise<void> {
+  await fs.promises.mkdir(SETTINGS_DIR, { recursive: true });
+  await fs.promises.writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), 'utf-8');
 }
 
 export function updateSettings(mutator: (current: SettingsDoc) => SettingsDoc | void): SettingsDoc {
@@ -110,8 +120,20 @@ export function updateSettings(mutator: (current: SettingsDoc) => SettingsDoc | 
   return next;
 }
 
+export async function updateSettingsAsync(mutator: (current: SettingsDoc) => SettingsDoc | void): Promise<SettingsDoc> {
+  const current = await loadSettingsAsync();
+  const next = mutator(current) ?? current;
+  next.updatedAt = Date.now();
+  await saveSettingsAsync(next);
+  return next;
+}
+
 export function getPreventSleepSetting(): boolean {
   return loadSettings().preventSleep;
+}
+
+export async function getPreventSleepSettingAsync(): Promise<boolean> {
+  return (await loadSettingsAsync()).preventSleep;
 }
 
 export function setPreventSleepSetting(enabled: boolean): SettingsDoc {
@@ -120,12 +142,28 @@ export function setPreventSleepSetting(enabled: boolean): SettingsDoc {
   });
 }
 
+export async function setPreventSleepSettingAsync(enabled: boolean): Promise<SettingsDoc> {
+  return updateSettingsAsync((settings) => {
+    settings.preventSleep = enabled;
+  });
+}
+
 export function getLocalAccessSetting(): LocalAccessSettings {
   return loadSettings().localAccess;
 }
 
+export async function getLocalAccessSettingAsync(): Promise<LocalAccessSettings> {
+  return (await loadSettingsAsync()).localAccess;
+}
+
 export function setLocalAccessSetting(next: LocalAccessSettings): SettingsDoc {
   return updateSettings((settings) => {
+    settings.localAccess = next;
+  });
+}
+
+export async function setLocalAccessSettingAsync(next: LocalAccessSettings): Promise<SettingsDoc> {
+  return updateSettingsAsync((settings) => {
     settings.localAccess = next;
   });
 }

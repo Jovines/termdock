@@ -99,8 +99,6 @@ export type TranslationDictionary = {
     insertGitContext: string;
     copyGitContext: string;
     insertPreset: (params: TranslatorParams) => string;
-    recent: string;
-    clearRecent: string;
     tabChanges: string;
     tabGit: string;
     tabFiles: string;
@@ -120,6 +118,9 @@ export type TranslationDictionary = {
     markdownPreview: string;
     markdownSource: string;
     markdownPreviewHint: string;
+    markdownOutline: string;
+    markdownOutlineShort: string;
+    closeMarkdownOutline: string;
     changedFromPath: (params: TranslatorParams) => string;
     selectedLineFooter: (params: TranslatorParams) => string;
     clearSelection: string;

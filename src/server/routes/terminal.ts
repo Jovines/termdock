@@ -31,6 +31,22 @@ import {
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
+const TERMDOCK_DIR = `${os.homedir()}/.termdock`;
+
+async function readJsonFileIfExists<T>(filePath: string): Promise<T | null> {
+  try {
+    const raw = await fs.promises.readFile(filePath, 'utf-8');
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.promises.writeFile(filePath, JSON.stringify(value, null, 2), 'utf-8');
+}
 
 // Termdock metadata constants used to populate tmux user options
 // (`@termdock-*`) so external tools (e.g. `termdock --tls`) can identify
@@ -264,8 +280,8 @@ interface OpenInventoryResult {
 const terminalSessions = new Map<string, TerminalSession>();
 let globalSessionState: GlobalSessionState = { sessions: [], updatedAt: Date.now() };
 // ── 持久化 globalSessionState 到磁盘，防止服务重启后丢失 ──
-const GLOBAL_SESSION_STATE_FILE = `${os.homedir()}/.termdock/global-session-state.json`;
-const CLIENT_STATES_FILE = `${os.homedir()}/.termdock/client-states.json`; // 保留用于迁移
+const GLOBAL_SESSION_STATE_FILE = `${TERMDOCK_DIR}/global-session-state.json`;
+const CLIENT_STATES_FILE = `${TERMDOCK_DIR}/client-states.json`; // 保留用于迁移
 let persistGlobalStateTimer: ReturnType<typeof setTimeout> | null = null;
 let globalSessionStateWatcher: fs.FSWatcher | null = null;
 let globalSessionStateReloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -427,11 +443,10 @@ function deduplicateGlobalSessions(sessions: PersistedClientSession[]): Persiste
   return sessions.filter((_, i) => keep[i]);
 }
 
-function migrateFromClientStatesFile(): GlobalSessionState | null {
+async function migrateFromClientStatesFile(): Promise<GlobalSessionState | null> {
   try {
-    if (!fs.existsSync(CLIENT_STATES_FILE)) return null;
-    const raw = fs.readFileSync(CLIENT_STATES_FILE, 'utf-8');
-    const data = JSON.parse(raw) as Record<string, { sessions: unknown[] }>;
+    const data = await readJsonFileIfExists<Record<string, { sessions: unknown[] }>>(CLIENT_STATES_FILE);
+    if (!data) return null;
     const allSessions: PersistedClientSession[] = [];
     for (const state of Object.values(data)) {
       for (const s of (state.sessions || [])) {
@@ -448,11 +463,10 @@ function migrateFromClientStatesFile(): GlobalSessionState | null {
   }
 }
 
-function loadGlobalSessionStateFromDisk(): void {
+async function loadGlobalSessionStateFromDisk(): Promise<void> {
   try {
-    if (fs.existsSync(GLOBAL_SESSION_STATE_FILE)) {
-      const raw = fs.readFileSync(GLOBAL_SESSION_STATE_FILE, 'utf-8');
-      const data = JSON.parse(raw) as GlobalSessionState;
+    const data = await readJsonFileIfExists<GlobalSessionState>(GLOBAL_SESSION_STATE_FILE);
+    if (data) {
       globalSessionState = {
         sessions: deduplicateGlobalSessions(
           (data.sessions || []).map(s => normalizePersistedClientSession(s)).filter((s): s is PersistedClientSession => s !== null)
@@ -462,7 +476,7 @@ function loadGlobalSessionStateFromDisk(): void {
       console.log(`[session-persist] Loaded ${globalSessionState.sessions.length} sessions from global state`);
       return;
     }
-    const migrated = migrateFromClientStatesFile();
+    const migrated = await migrateFromClientStatesFile();
     if (migrated) {
       globalSessionState = migrated;
       schedulePersistGlobalState();
@@ -474,10 +488,10 @@ function loadGlobalSessionStateFromDisk(): void {
   }
 }
 
-function reloadGlobalSessionStateFromDisk(source: 'watch' | 'manual'): void {
+async function reloadGlobalSessionStateFromDisk(source: 'watch' | 'manual'): Promise<void> {
   try {
     const previous = JSON.stringify(globalSessionState);
-    loadGlobalSessionStateFromDisk();
+    await loadGlobalSessionStateFromDisk();
     const next = JSON.stringify(globalSessionState);
     if (previous === next) {
       return;
@@ -495,17 +509,15 @@ function scheduleReloadGlobalSessionState(): void {
   }
   globalSessionStateReloadTimer = setTimeout(() => {
     globalSessionStateReloadTimer = null;
-    reloadGlobalSessionStateFromDisk('watch');
+    void reloadGlobalSessionStateFromDisk('watch');
   }, 120);
   globalSessionStateReloadTimer.unref?.();
 }
 
-function watchGlobalSessionStateFile(): void {
+async function watchGlobalSessionStateFile(): Promise<void> {
   try {
     const dir = path.dirname(GLOBAL_SESSION_STATE_FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    await fs.promises.mkdir(dir, { recursive: true });
     globalSessionStateWatcher?.close();
     globalSessionStateWatcher = fs.watch(dir, (_eventType, filename) => {
       if (filename !== path.basename(GLOBAL_SESSION_STATE_FILE)) {
@@ -525,24 +537,22 @@ function schedulePersistGlobalState(): void {
   if (persistGlobalStateTimer) clearTimeout(persistGlobalStateTimer);
   persistGlobalStateTimer = setTimeout(() => {
     try {
-      const dir = `${os.homedir()}/.termdock`;
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(GLOBAL_SESSION_STATE_FILE, JSON.stringify(globalSessionState, null, 2), 'utf-8');
+      void writeJsonFile(GLOBAL_SESSION_STATE_FILE, globalSessionState).catch((error) => {
+        console.warn('[session-persist] Failed to persist global state:', getErrorMessage(error));
+      });
     } catch (error) {
       console.warn('[session-persist] Failed to persist global state:', getErrorMessage(error));
     }
   }, 200);
 }
 
-function persistGlobalStateNow(): void {
+async function persistGlobalStateNow(): Promise<void> {
   if (persistGlobalStateTimer) {
     clearTimeout(persistGlobalStateTimer);
     persistGlobalStateTimer = null;
   }
   try {
-    const dir = `${os.homedir()}/.termdock`;
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(GLOBAL_SESSION_STATE_FILE, JSON.stringify(globalSessionState, null, 2), 'utf-8');
+    await writeJsonFile(GLOBAL_SESSION_STATE_FILE, globalSessionState);
   } catch (error) {
     console.warn('[session-persist] Failed to persist global state:', getErrorMessage(error));
   }
@@ -555,24 +565,27 @@ function flushPersistAndExit(): void {
     persistGlobalStateTimer = null;
   }
   try {
-    const dir = `${os.homedir()}/.termdock`;
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(TERMDOCK_DIR, { recursive: true });
     fs.writeFileSync(GLOBAL_SESSION_STATE_FILE, JSON.stringify(globalSessionState, null, 2), 'utf-8');
   } catch { /* best effort */ }
 }
-process.on('SIGTERM', () => { flushPersistAndExit(); persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
-process.on('SIGINT', () => { flushPersistAndExit(); persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
+process.on('SIGTERM', () => { flushPersistAndExit(); void persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
+process.on('SIGINT', () => { flushPersistAndExit(); void persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
 
 // 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
-loadGlobalSessionStateFromDisk();
-watchGlobalSessionStateFile();
+void (async () => {
+  await loadGlobalSessionStateFromDisk();
+  await watchGlobalSessionStateFile();
+  pruneOrphanSessions();
+  await backfillPersistedTmuxMetadata();
+})();
 caffeinateManager.startNetworkMonitor();
 
 // 清理磁盘恢复后后端已不存在的 session 引用。
 // 服务重启时 terminalSessions 是空的，持久化的 global state
 // 全部指向已销毁的 session。shell session 的 PTY 已死无法复用，直接删除；
 // tmux session 的 tmux 进程独立于 termdock，保留条目但清空 backendSessionId。
-(function pruneOrphanSessions(): void {
+function pruneOrphanSessions(): void {
   let changed = false;
   const cleaned = globalSessionState.sessions.filter((s) => {
     // Shell sessions with no live backend: PTY is dead, can't be reattached — remove entirely
@@ -607,14 +620,14 @@ caffeinateManager.startNetworkMonitor();
   };
   schedulePersistGlobalState();
   broadcastClientState();
-})();
+}
 
 // On boot, backfill termdock metadata onto every tmux session referenced by
 // the persisted client states. Lets `termdock --tls` work the first time
 // after upgrading from a version that didn't write `@termdock-*`.
 // Dynamic fields (label/program/cwd/last-active-at) are intentionally left
 // for the per-session polling to fill in lazily.
-void (async () => {
+async function backfillPersistedTmuxMetadata(): Promise<void> {
   const seen = new Set<string>();
   for (const s of globalSessionState.sessions) {
     if (s.mode !== 'tmux' || !s.tmuxSessionName) continue;
@@ -643,7 +656,7 @@ void (async () => {
       );
     }
   }
-})();
+}
 
 // ── end persistence ──
 
@@ -653,7 +666,7 @@ void (async () => {
 // `presets` (array) and `version` (number) so the client owns all merge /
 // upgrade logic. The whole document is global (not keyed by clientId) so
 // every browser pointing at this server sees the same toolbar config.
-const TOOLBAR_PRESETS_FILE = `${os.homedir()}/.termdock/toolbar-presets.json`;
+const TOOLBAR_PRESETS_FILE = `${TERMDOCK_DIR}/toolbar-presets.json`;
 interface ToolbarPresetsDoc {
   version: number;
   presets: unknown[];
@@ -662,11 +675,10 @@ interface ToolbarPresetsDoc {
 let toolbarPresetsDoc: ToolbarPresetsDoc | null = null;
 let persistToolbarPresetsTimer: ReturnType<typeof setTimeout> | null = null;
 
-function loadToolbarPresetsFromDisk(): void {
+async function loadToolbarPresetsFromDisk(): Promise<void> {
   try {
-    if (fs.existsSync(TOOLBAR_PRESETS_FILE)) {
-      const raw = fs.readFileSync(TOOLBAR_PRESETS_FILE, 'utf-8');
-      const parsed = JSON.parse(raw) as Partial<ToolbarPresetsDoc>;
+    const parsed = await readJsonFileIfExists<Partial<ToolbarPresetsDoc>>(TOOLBAR_PRESETS_FILE);
+    if (parsed) {
       toolbarPresetsDoc = {
         version: typeof parsed.version === 'number' ? parsed.version : 0,
         presets: Array.isArray(parsed.presets) ? parsed.presets : [],
@@ -678,12 +690,10 @@ function loadToolbarPresetsFromDisk(): void {
   }
 }
 
-function persistToolbarPresetsNow(): void {
+async function persistToolbarPresetsNow(): Promise<void> {
   if (!toolbarPresetsDoc) return;
   try {
-    const dir = `${os.homedir()}/.termdock`;
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(TOOLBAR_PRESETS_FILE, JSON.stringify(toolbarPresetsDoc, null, 2), 'utf-8');
+    await writeJsonFile(TOOLBAR_PRESETS_FILE, toolbarPresetsDoc);
   } catch (error) {
     console.warn('[toolbar-presets] Failed to persist:', getErrorMessage(error));
   }
@@ -691,10 +701,10 @@ function persistToolbarPresetsNow(): void {
 
 function schedulePersistToolbarPresets(): void {
   if (persistToolbarPresetsTimer) clearTimeout(persistToolbarPresetsTimer);
-  persistToolbarPresetsTimer = setTimeout(persistToolbarPresetsNow, 200);
+  persistToolbarPresetsTimer = setTimeout(() => { void persistToolbarPresetsNow(); }, 200);
 }
 
-loadToolbarPresetsFromDisk();
+void loadToolbarPresetsFromDisk();
 // ── end toolbar presets persistence ──
 
 // 开发模式下使用更激进的清理策略
@@ -2090,8 +2100,7 @@ function normalizeAgentClearDelay(value: unknown): number {
   return Math.min(MAX_AGENT_CLEAR_DELAY_MS, Math.max(MIN_AGENT_CLEAR_DELAY_MS, n));
 }
 
-function loadAgentRules(): Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]> {
-  const rules = loadAgentRulesFromDisk();
+function compileAgentRules(rules: AgentProgramConfig[]): Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]> {
   const map = new Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]>();
   for (const config of rules) {
     const compiled = config.rules.map(r => ({
@@ -2117,16 +2126,15 @@ function loadAgentRules(): Map<string, { status: string; color: string | undefin
   return map;
 }
 
-const AGENT_RULES_FILE = `${os.homedir()}/.termdock/agent-rules.json`;
+const AGENT_RULES_FILE = `${TERMDOCK_DIR}/agent-rules.json`;
 
-function loadAgentRulesFromDisk(): AgentProgramConfig[] {
+async function loadAgentRulesFromDisk(): Promise<AgentProgramConfig[]> {
   try {
-    const data = fs.readFileSync(AGENT_RULES_FILE, 'utf-8');
-    const parsed = JSON.parse(data);
+    const parsed = await readJsonFileIfExists<unknown>(AGENT_RULES_FILE);
     if (Array.isArray(parsed) && parsed.length > 0) {
       const migrated = migrateAgentRules(parsed);
       if (migrated.changed) {
-        fs.writeFileSync(AGENT_RULES_FILE, JSON.stringify(migrated.rules, null, 2));
+        await writeJsonFile(AGENT_RULES_FILE, migrated.rules);
       }
       return migrated.rules;
     }
@@ -2134,15 +2142,17 @@ function loadAgentRulesFromDisk(): AgentProgramConfig[] {
   return BUILTIN_AGENT_RULES;
 }
 
-function saveAgentRulesToDisk(rules: AgentProgramConfig[]): void {
-  const dir = path.dirname(AGENT_RULES_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(AGENT_RULES_FILE, JSON.stringify(rules, null, 2));
-  loadAgentRules();
+async function loadAgentRules(): Promise<Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]>> {
+  return compileAgentRules(await loadAgentRulesFromDisk());
+}
+
+async function saveAgentRulesToDisk(rules: AgentProgramConfig[]): Promise<void> {
+  await writeJsonFile(AGENT_RULES_FILE, rules);
+  compileAgentRules(rules);
 }
 
 // Initialize on startup
-loadAgentRules();
+void loadAgentRules();
 
 function isAiToolProgram(command: string | null | undefined): boolean {
   if (!command) return false;
@@ -2253,7 +2263,7 @@ function evaluateAgentStatus(sessionId: string, session: TerminalSession, latest
 
 // ── Program detection config (persisted to ~/.termdock/program-detection.json) ──
 
-const PROGRAM_DETECTION_FILE = `${os.homedir()}/.termdock/program-detection.json`;
+const PROGRAM_DETECTION_FILE = `${TERMDOCK_DIR}/program-detection.json`;
 
 interface ProgramDetectionConfig {
   genericProgramNames: string[];
@@ -2271,10 +2281,10 @@ let genericProgramNames = new Set(DEFAULT_PROGRAM_DETECTION.genericProgramNames)
 let wrapperScriptNames = new Set(DEFAULT_PROGRAM_DETECTION.wrapperScriptNames);
 let shellNamesBackend = new Set(DEFAULT_PROGRAM_DETECTION.shellNames);
 
-function loadProgramDetectionFromDisk(): ProgramDetectionConfig {
+async function loadProgramDetectionFromDisk(): Promise<ProgramDetectionConfig> {
   try {
-    const data = fs.readFileSync(PROGRAM_DETECTION_FILE, 'utf-8');
-    const parsed = JSON.parse(data);
+    const parsed = await readJsonFileIfExists<Partial<ProgramDetectionConfig>>(PROGRAM_DETECTION_FILE);
+    if (!parsed) return { ...DEFAULT_PROGRAM_DETECTION };
     return {
       genericProgramNames: Array.isArray(parsed.genericProgramNames) ? parsed.genericProgramNames : DEFAULT_PROGRAM_DETECTION.genericProgramNames,
       wrapperScriptNames: Array.isArray(parsed.wrapperScriptNames) ? parsed.wrapperScriptNames : DEFAULT_PROGRAM_DETECTION.wrapperScriptNames,
@@ -2290,15 +2300,13 @@ function applyProgramDetectionConfig(config: ProgramDetectionConfig): void {
   shellNamesBackend = new Set(config.shellNames);
 }
 
-function saveProgramDetectionToDisk(config: ProgramDetectionConfig): void {
-  const dir = path.dirname(PROGRAM_DETECTION_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(PROGRAM_DETECTION_FILE, JSON.stringify(config, null, 2));
+async function saveProgramDetectionToDisk(config: ProgramDetectionConfig): Promise<void> {
+  await writeJsonFile(PROGRAM_DETECTION_FILE, config);
   applyProgramDetectionConfig(config);
 }
 
 // Initialize on startup
-applyProgramDetectionConfig(loadProgramDetectionFromDisk());
+void loadProgramDetectionFromDisk().then(applyProgramDetectionConfig);
 
 async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
   command: string | null;
@@ -2668,7 +2676,7 @@ async function injectTmuxShellIntegration(sessionName: string): Promise<void> {
   }
 
   const shellType = detectShellType(shellPath);
-  const integrationDir = resolveShellIntegrationDir();
+  const integrationDir = await resolveShellIntegrationDir();
   if (!integrationDir) return;
 
   const home = (process.env.HOME || '/root').replace(/\/+$/, '') || '/';
@@ -2679,10 +2687,10 @@ async function injectTmuxShellIntegration(sessionName: string): Promise<void> {
     const safeName = sessionName.replace(/[^a-zA-Z0-9_-]/g, '_');
     const zdotdir = '/tmp/termdock-zsh-tmux-' + safeName;
     try {
-      fs.mkdirSync(zdotdir, { recursive: true });
-      fs.writeFileSync(zdotdir + '/.zshenv',
+      await fs.promises.mkdir(zdotdir, { recursive: true });
+      await fs.promises.writeFile(zdotdir + '/.zshenv',
         '[[ -f "' + home + '/.zshenv" ]] && source "' + home + '/.zshenv"\n');
-      fs.writeFileSync(zdotdir + '/.zshrc',
+      await fs.promises.writeFile(zdotdir + '/.zshrc',
         'ZDOTDIR=\n' +
         '[[ -f "' + home + '/.zshrc" ]] && source "' + home + '/.zshrc"\n' +
         'source "' + integrationDir + '/termdock.zsh"\n');
@@ -2871,19 +2879,15 @@ async function getRestoreHistory(sessionId: string, session: TerminalSession): P
   return getReconnectionHistory(sessionId);
 }
 
-function resolveWorkingDirectory(req: express.Request, inputCwd?: string): string {
+async function resolveWorkingDirectory(req: express.Request, inputCwd?: string): Promise<string> {
   const requestedCwd = inputCwd || os.homedir();
 
   if (req.pathValidator) {
-    return req.pathValidator.validate(requestedCwd);
-  }
-
-  if (!fs.existsSync(requestedCwd)) {
-    throw new Error('Invalid working directory');
+    return req.pathValidator.validateAsync(requestedCwd);
   }
 
   try {
-    fs.accessSync(requestedCwd, fs.constants.R_OK | fs.constants.X_OK);
+    await fs.promises.access(requestedCwd, fs.constants.R_OK | fs.constants.X_OK);
   } catch {
     throw new Error(`Working directory is not accessible: ${requestedCwd}`);
   }
@@ -3314,7 +3318,7 @@ async function spawnTerminalSession(req: express.Request, input: {
   tmuxSessionName?: string;
   termType?: string;
 }): Promise<{ sessionId: string; session: TerminalSession; cols: number; rows: number }> {
-  const cwd = resolveWorkingDirectory(req, input.cwd);
+  const cwd = await resolveWorkingDirectory(req, input.cwd);
   const cols = input.cols || 80;
   const rows = input.rows || 24;
   const sessionId = Math.random().toString(36).substring(2, 15) +
@@ -3344,33 +3348,34 @@ async function spawnTerminalSession(req: express.Request, input: {
     COLORTERM: 'truecolor',
   };
 
-  let ptyProcess: PtyProcess;
+  let ptyProcess: PtyProcess | null = null;
 
   if (mode === 'shell' && process.platform !== 'win32') {
     const shellCandidates = resolveShellCandidates();
     let lastError: unknown = null;
 
-    ptyProcess = (() => {
-      for (const shellCandidate of shellCandidates) {
-        try {
-          const env = injectShellIntegration(shellCandidate, baseEnv);
-          return pty.spawn(shellCandidate, [], {
-            name: termValue,
-            cols,
-            rows,
-            cwd,
-            env,
-          });
-        } catch (error) {
-          lastError = error;
-          if (!shouldRetryShellSpawn(error)) {
-            throw error;
-          }
+    for (const shellCandidate of shellCandidates) {
+      try {
+        const env = await injectShellIntegration(shellCandidate, baseEnv);
+        ptyProcess = pty.spawn(shellCandidate, [], {
+          name: termValue,
+          cols,
+          rows,
+          cwd,
+          env,
+        });
+        break;
+      } catch (error) {
+        lastError = error;
+        if (!shouldRetryShellSpawn(error)) {
+          throw error;
         }
       }
+    }
 
+    if (!ptyProcess) {
       throw lastError ?? new Error('Failed to start shell');
-    })();
+    }
   } else {
     ptyProcess = pty.spawn(command, args, {
       name: termValue,
@@ -3379,6 +3384,10 @@ async function spawnTerminalSession(req: express.Request, input: {
       cwd,
       env: baseEnv,
     });
+  }
+
+  if (!ptyProcess) {
+    throw new Error('Failed to start PTY process');
   }
 
   const session: TerminalSession = {
@@ -3457,7 +3466,7 @@ function detectShellType(shellPath: string): 'bash' | 'zsh' | 'fish' | 'other' {
  * by the build. We probe both locations.
  */
 let cachedIntegrationDir: string | null = null;
-function resolveShellIntegrationDir(): string | null {
+async function resolveShellIntegrationDir(): Promise<string | null> {
   if (cachedIntegrationDir !== null) return cachedIntegrationDir;
   // 项目是 ESM (`"type": "module"`)，__dirname 不存在；用 import.meta.url 推导。
   // dev 模式下此文件位于 src/server/routes/，对应 dist 路径为 dist/server/routes/；
@@ -3474,11 +3483,10 @@ function resolveShellIntegrationDir(): string | null {
   ];
   for (const dir of candidates) {
     try {
-      if (fs.existsSync(path.join(dir, 'termdock.zsh'))) {
-        cachedIntegrationDir = dir;
-        return dir;
-      }
-    } catch { /* existsSync 抛错跳过这个候选 */ }
+      await fs.promises.access(path.join(dir, 'termdock.zsh'), fs.constants.R_OK);
+      cachedIntegrationDir = dir;
+      return dir;
+    } catch { /* access 抛错跳过这个候选 */ }
   }
   return null;
 }
@@ -3492,10 +3500,10 @@ function resolveShellIntegrationDir(): string | null {
  * Works for both shell mode (env passed to PTY spawn) and tmux mode
  * (env passed to `tmux set-environment`).
  */
-function injectShellIntegration(shellPath: string, baseEnv: Record<string, string>): Record<string, string> {
+async function injectShellIntegration(shellPath: string, baseEnv: Record<string, string>): Promise<Record<string, string>> {
   const shellType = detectShellType(shellPath);
   const home = (process.env.HOME || '/root').replace(/\/+$/, '') || '/';
-  const integrationDir = resolveShellIntegrationDir();
+  const integrationDir = await resolveShellIntegrationDir();
   const env = { ...baseEnv };
 
   if (!integrationDir) {
@@ -3511,10 +3519,10 @@ function injectShellIntegration(shellPath: string, baseEnv: Record<string, strin
     // sources our integration script. Same approach as Ghostty.
     const zdotdir = '/tmp/termdock-zsh-' + String(process.pid);
     try {
-      fs.mkdirSync(zdotdir, { recursive: true });
-      fs.writeFileSync(zdotdir + '/.zshenv',
+      await fs.promises.mkdir(zdotdir, { recursive: true });
+      await fs.promises.writeFile(zdotdir + '/.zshenv',
         '[[ -f "' + home + '/.zshenv" ]] && source "' + home + '/.zshenv"\n');
-      fs.writeFileSync(zdotdir + '/.zshrc',
+      await fs.promises.writeFile(zdotdir + '/.zshrc',
         'ZDOTDIR=\n' +
         '[[ -f "' + home + '/.zshrc" ]] && source "' + home + '/.zshrc"\n' +
         'source "' + integrationDir + '/termdock.zsh"\n');
@@ -3817,7 +3825,7 @@ router.patch('/session-inventory/sessions/:frontendSessionId', async (req, res) 
     }
   }
   upsertGlobalSessionRecord(next);
-  persistGlobalStateNow();
+  await persistGlobalStateNow();
   broadcastClientState();
 
   const inventory = await buildSessionInventory();
@@ -3861,7 +3869,7 @@ router.delete('/session-inventory/sessions/:frontendSessionId', async (req, res)
         String(Date.now()),
       );
     }
-    persistGlobalStateNow();
+    await persistGlobalStateNow();
     broadcastClientState();
   }
   res.status(204).send();
@@ -3987,11 +3995,11 @@ router.put('/settings', async (req, res) => {
 
 // ── Agent detection rules API ──
 
-router.get('/agent-rules', (_req, res) => {
-  res.json(loadAgentRulesFromDisk());
+router.get('/agent-rules', async (_req, res) => {
+  res.json(await loadAgentRulesFromDisk());
 });
 
-router.put('/agent-rules', (req, res) => {
+router.put('/agent-rules', async (req, res) => {
   const rules = req.body;
   if (!Array.isArray(rules)) {
     res.status(400).json({ error: 'Expected array of program configs' });
@@ -4028,24 +4036,24 @@ router.put('/agent-rules', (req, res) => {
       }
     }
   }
-  saveAgentRulesToDisk(rules);
+  await saveAgentRulesToDisk(rules);
   res.json(rules);
 });
 
-router.delete('/agent-rules', (_req, res) => {
+router.delete('/agent-rules', async (_req, res) => {
   // Remove custom rules file so builtins take effect again
-  try { fs.unlinkSync(AGENT_RULES_FILE); } catch { /* already gone */ }
-  loadAgentRules();
+  await fs.promises.unlink(AGENT_RULES_FILE).catch(() => undefined);
+  compileAgentRules(BUILTIN_AGENT_RULES);
   res.json(BUILTIN_AGENT_RULES);
 });
 
 // ── Program detection config API ──
 
-router.get('/program-detection', (_req, res) => {
-  res.json(loadProgramDetectionFromDisk());
+router.get('/program-detection', async (_req, res) => {
+  res.json(await loadProgramDetectionFromDisk());
 });
 
-router.put('/program-detection', (req, res) => {
+router.put('/program-detection', async (req, res) => {
   const config = req.body;
   if (!config || typeof config !== 'object') {
     res.status(400).json({ error: 'Expected object with genericProgramNames, wrapperScriptNames, shellNames' });
@@ -4062,12 +4070,12 @@ router.put('/program-detection', (req, res) => {
       ? config.shellNames.filter((s: unknown) => typeof s === 'string' && s.trim())
       : DEFAULT_PROGRAM_DETECTION.shellNames,
   };
-  saveProgramDetectionToDisk(validated);
+  await saveProgramDetectionToDisk(validated);
   res.json(validated);
 });
 
-router.delete('/program-detection', (_req, res) => {
-  try { fs.unlinkSync(PROGRAM_DETECTION_FILE); } catch { /* already gone */ }
+router.delete('/program-detection', async (_req, res) => {
+  await fs.promises.unlink(PROGRAM_DETECTION_FILE).catch(() => undefined);
   applyProgramDetectionConfig({ ...DEFAULT_PROGRAM_DETECTION });
   res.json(DEFAULT_PROGRAM_DETECTION);
 });

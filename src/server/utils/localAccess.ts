@@ -4,8 +4,9 @@ import { LOCAL_ACCESS } from '../config.js';
 import {
   createAutoLocalAccessName,
   getLocalAccessSetting,
+  getLocalAccessSettingAsync,
   normalizeLocalAccessName,
-  setLocalAccessSetting,
+  setLocalAccessSettingAsync,
   type LocalAccessNameSource,
 } from './settings.js';
 import { isAuthEnabled } from './authProtection.js';
@@ -133,7 +134,7 @@ export class LocalAccessManager {
     this.options = options;
     await this.stop();
 
-    let setting = getLocalAccessSetting();
+    let setting = await getLocalAccessSettingAsync();
     const lanAddresses = getLanIPv4Addresses();
     if (isLoopbackHost(options.host)) {
       this.state = buildState(setting, options, 'loopback-only', 'Server is bound to loopback only.');
@@ -157,7 +158,7 @@ export class LocalAccessManager {
         return this.state;
       }
       setting = { name: createAutoLocalAccessName(), source: 'auto' };
-      setLocalAccessSetting(setting);
+      await setLocalAccessSettingAsync(setting);
     }
 
     this.mdns = multicastDns({ loopback: true, reuseAddr: true });
@@ -173,7 +174,7 @@ export class LocalAccessManager {
       this.state = { ...current, status: 'error', reason: 'Invalid local access name.' };
       return this.state;
     }
-    setLocalAccessSetting({ name: normalized, source });
+    await setLocalAccessSettingAsync({ name: normalized, source });
     if (!this.options) {
       this.state = buildState({ name: normalized, source }, { host: '0.0.0.0', port: 9834, scheme: 'http' }, 'disabled', 'Local access has not started yet.');
       return this.state;
@@ -182,9 +183,9 @@ export class LocalAccessManager {
   }
 
   async resetAutoName(): Promise<LocalAccessState> {
-    setLocalAccessSetting({ name: createAutoLocalAccessName(), source: 'auto' });
+    await setLocalAccessSettingAsync({ name: createAutoLocalAccessName(), source: 'auto' });
     if (!this.options) {
-      const setting = getLocalAccessSetting();
+      const setting = await getLocalAccessSettingAsync();
       this.state = buildState(setting, { host: '0.0.0.0', port: 9834, scheme: 'http' }, 'disabled', 'Local access has not started yet.');
       return this.state;
     }

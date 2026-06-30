@@ -140,6 +140,7 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
   '.avif': 'image/avif',
   '.bmp': 'image/bmp',
   '.ico': 'image/x-icon',
+  '.svg': 'image/svg+xml',
 };
 
 function getImageMimeType(filePath: string): string | null {
@@ -155,14 +156,19 @@ function isPathInside(parent: string, child: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
-function toGitPathspec(gitRoot: string, requestedPath: string): string {
+async function toGitPathspec(gitRoot: string, requestedPath: string): Promise<string> {
   const absoluteCandidate = path.isAbsolute(requestedPath)
     ? path.resolve(requestedPath)
     : path.resolve(gitRoot, requestedPath);
 
-  const candidate = fs.existsSync(absoluteCandidate)
-    ? pathValidator.validatePath(absoluteCandidate)
-    : absoluteCandidate;
+  let candidate = absoluteCandidate;
+  try {
+    candidate = await pathValidator.validatePathAsync(absoluteCandidate);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes('does not exist')) {
+      throw error;
+    }
+  }
 
   if (!isPathInside(gitRoot, candidate)) {
     throw new Error('Path is outside git repository');
@@ -190,11 +196,11 @@ function truncateDiffIfNeeded(payload: DiffResponsePayload): DiffResponsePayload
   };
 }
 
-function getRelativeFileSize(gitRoot: string, filePath: string): number | null {
+async function getRelativeFileSize(gitRoot: string, filePath: string): Promise<number | null> {
   try {
     const absolutePath = path.resolve(gitRoot, filePath);
     if (!isPathInside(gitRoot, absolutePath)) return null;
-    const stat = fs.statSync(absolutePath);
+    const stat = await fs.promises.stat(absolutePath);
     return stat.isFile() ? stat.size : null;
   } catch {
     return null;
@@ -540,16 +546,16 @@ function getBranchName(branch: unknown): string | undefined {
   return normalized;
 }
 
-function readFilePrefix(filePath: string, bytesToRead: number): string {
+async function readFilePrefix(filePath: string, bytesToRead: number): Promise<string> {
   if (bytesToRead <= 0) return '';
 
-  const fd = fs.openSync(filePath, 'r');
+  const handle = await fs.promises.open(filePath, 'r');
   try {
     const buffer = Buffer.allocUnsafe(bytesToRead);
-    const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, 0);
+    const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0);
     return buffer.subarray(0, bytesRead).toString('utf-8');
   } finally {
-    fs.closeSync(fd);
+    await handle.close();
   }
 }
 
@@ -1046,7 +1052,7 @@ router.get('/list', async (req: Request, res: Response) => {
       return;
     }
 
-    const resolvedPath = pathValidator.validatePath(requestedPath);
+    const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
     const stat = await fs.promises.stat(resolvedPath);
 
     if (!stat.isDirectory()) {
@@ -1090,8 +1096,8 @@ router.get('/watch', async (req: Request, res: Response) => {
   for (const rawRoot of rawRoots) {
     if (!rawRoot) continue;
     try {
-      const resolved = pathValidator.validatePath(rawRoot);
-      const stat = fs.statSync(resolved);
+      const resolved = await pathValidator.validatePathAsync(rawRoot);
+      const stat = await fs.promises.stat(resolved);
       if (stat.isDirectory() && !roots.includes(resolved)) roots.push(resolved);
     } catch {
       // Ignore invalid watch roots; the visible tree will still work via manual list requests.
@@ -1198,7 +1204,7 @@ router.get('/search', async (req: Request, res: Response) => {
       return;
     }
 
-    const resolvedPath = pathValidator.validatePath(requestedPath);
+    const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
     const stat = await fs.promises.stat(resolvedPath);
     if (!stat.isDirectory()) {
       res.status(400).json({ error: 'Path is not a directory' });
@@ -1280,8 +1286,8 @@ router.get('/read', async (req: Request, res: Response) => {
       return;
     }
 
-    const resolvedPath = pathValidator.validatePath(requestedPath);
-    const stat = fs.statSync(resolvedPath);
+    const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
+    const stat = await fs.promises.stat(resolvedPath);
 
     if (stat.isDirectory()) {
       res.status(400).json({ error: 'Path is a directory, not a file' });
@@ -1290,7 +1296,7 @@ router.get('/read', async (req: Request, res: Response) => {
 
     const bytesToRead = Math.min(stat.size, MAX_FILE_SIZE);
     const truncated = stat.size > bytesToRead;
-    const content = readFilePrefix(resolvedPath, bytesToRead);
+    const content = await readFilePrefix(resolvedPath, bytesToRead);
 
     res.json({
       path: resolvedPath,
@@ -1314,8 +1320,8 @@ router.get('/blob', async (req: Request, res: Response) => {
       return;
     }
 
-    const resolvedPath = pathValidator.validatePath(requestedPath);
-    const stat = fs.statSync(resolvedPath);
+    const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
+    const stat = await fs.promises.stat(resolvedPath);
 
     if (!stat.isFile()) {
       res.status(400).json({ error: 'Path is not a file' });
@@ -1371,11 +1377,11 @@ router.get('/diff', async (req: Request, res: Response) => {
     // Determine the git working directory
     let gitCwd: string | null;
     if (requestedPath && path.isAbsolute(requestedPath)) {
-      const resolvedPath = pathValidator.validatePath(requestedPath);
-      const stat = fs.existsSync(resolvedPath) ? fs.statSync(resolvedPath) : null;
+      const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
+      const stat = await fs.promises.stat(resolvedPath).catch(() => null);
       gitCwd = await findGitRoot(stat?.isDirectory() ? resolvedPath : path.dirname(resolvedPath));
     } else if (cwd) {
-      const resolvedCwd = pathValidator.validatePath(cwd);
+      const resolvedCwd = await pathValidator.validatePathAsync(cwd);
       gitCwd = await findGitRoot(resolvedCwd);
     } else {
       gitCwd = null;
@@ -1386,7 +1392,7 @@ router.get('/diff', async (req: Request, res: Response) => {
       return;
     }
 
-    const pathspec = requestedPath ? toGitPathspec(gitCwd, requestedPath) : null;
+    const pathspec = requestedPath ? await toGitPathspec(gitCwd, requestedPath) : null;
     const skippedFiles: DiffSkippedFile[] = [];
     const buildDiffArgs = (includeCached: boolean) => {
       const args = ['diff', '-M', '-C', '--find-copies-harder'];
@@ -1415,7 +1421,7 @@ router.get('/diff', async (req: Request, res: Response) => {
     // Note: git diff --no-index exits with code 1 when there are differences,
     // but stdout still contains the valid diff text.
     if (!diff && requestedPath && !cached && pathspec) {
-      const size = getRelativeFileSize(gitCwd, pathspec);
+      const size = await getRelativeFileSize(gitCwd, pathspec);
       if (size !== null && size > MAX_UNTRACKED_DIFF_FILE_BYTES) {
         skippedFiles.push(makeSkippedUntracked(pathspec, size));
       } else {
@@ -1431,7 +1437,7 @@ router.get('/diff', async (req: Request, res: Response) => {
     if (!requestedPath && !cached && totalBytes <= MAX_DIFF_BYTES) {
       const untracked = await execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitCwd).catch(() => '');
       for (const p of untracked.split('\0').filter(Boolean)) {
-        const size = getRelativeFileSize(gitCwd, p);
+        const size = await getRelativeFileSize(gitCwd, p);
         if (size !== null && size > MAX_UNTRACKED_DIFF_FILE_BYTES) {
           skippedFiles.push(makeSkippedUntracked(p, size));
           continue;
@@ -1470,7 +1476,7 @@ router.get('/diff-files', async (req: Request, res: Response) => {
       return;
     }
 
-    const resolvedCwd = pathValidator.validatePath(cwd);
+    const resolvedCwd = await pathValidator.validatePathAsync(cwd);
     const gitCwd = await findGitRoot(resolvedCwd);
     if (!gitCwd) {
       res.json({ files: [], error: 'Not a git repository' });
@@ -1493,7 +1499,7 @@ router.get('/git-context', async (req: Request, res: Response) => {
       return;
     }
 
-    const resolvedCwd = pathValidator.validatePath(cwd);
+    const resolvedCwd = await pathValidator.validatePathAsync(cwd);
     const gitRoot = await findGitRoot(resolvedCwd);
     if (!gitRoot) {
       res.json({ available: false, cwd: resolvedCwd, error: 'Not a git repository' });
@@ -1539,7 +1545,7 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
       return;
     }
 
-    const resolvedCwd = pathValidator.validatePath(cwd);
+    const resolvedCwd = await pathValidator.validatePathAsync(cwd);
     const gitRoot = await findGitRoot(resolvedCwd);
     if (!gitRoot) {
       res.json({
@@ -1578,7 +1584,7 @@ router.post('/git-action', async (req: Request, res: Response) => {
       return;
     }
 
-    const resolvedCwd = pathValidator.validatePath(cwd);
+    const resolvedCwd = await pathValidator.validatePathAsync(cwd);
     const gitRoot = await findGitRoot(resolvedCwd);
     if (!gitRoot) {
       res.status(404).json({ error: 'Not a git repository', code: 'NOT_GIT_REPOSITORY' });
@@ -1611,7 +1617,7 @@ router.post('/git-action', async (req: Request, res: Response) => {
       output = await execGit(['switch', branch], gitRoot);
     } else {
       const requestedPath = getSinglePath(paths);
-      const pathspec = toGitPathspec(gitRoot, requestedPath);
+      const pathspec = await toGitPathspec(gitRoot, requestedPath);
 
       if (action === 'stage-file') {
         output = await execGit(['--literal-pathspecs', 'add', '--', pathspec], gitRoot);

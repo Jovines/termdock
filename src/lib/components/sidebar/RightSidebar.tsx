@@ -1,8 +1,12 @@
 import { useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { useGesture } from '@use-gesture/react';
+import { Swiper, SwiperSlide } from 'swiper/react';
+import type { Swiper as SwiperInstance } from 'swiper';
+import 'swiper/css';
 import {
   X as RiCloseLine,
   ArrowLeft as RiArrowLeft,
+  ArrowRight as RiArrowRight,
   ArrowUp as RiArrowUp,
   ChevronRight as RiChevronRight,
   ChevronDown as RiChevronDown,
@@ -15,6 +19,7 @@ import {
   RefreshCw as RiRefresh,
   GitBranch as RiGitBranch,
   Loader2 as RiLoader,
+  ListTree as RiListTree,
   Pin as RiPin,
   PinOff as RiPinOff,
   Link2 as RiLink,
@@ -28,7 +33,7 @@ import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarSt
 import { getGitBundle, getGitContext, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
-import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, type RefractorLike } from '../../utils/syntaxHighlight';
+import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, refractorNodesToReact, type RefractorLike } from '../../utils/syntaxHighlight';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 
 interface RightSidebarProps {
@@ -37,6 +42,18 @@ interface RightSidebarProps {
   onClose: () => void;
   onOpen?: () => void;
   push?: boolean;
+  rightSidebarFilePreviewOpen?: boolean;
+  rightSidebarFilePreviewCloseSignal?: number;
+  onOpenRightSidebarFilePreview?: () => void;
+  onCloseRightSidebarFilePreview?: () => void;
+  markdownOutlineOpen?: boolean;
+  markdownOutlineCloseSignal?: number;
+  onOpenMarkdownOutline?: () => void;
+  onCloseMarkdownOutline?: () => void;
+  markdownImageLightboxOpen?: boolean;
+  markdownImageLightboxCloseSignal?: number;
+  onOpenMarkdownImageLightbox?: () => void;
+  onCloseMarkdownImageLightbox?: () => void;
 }
 
 const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; title: string }> = {
@@ -50,13 +67,14 @@ const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; ti
   unknown: { label: '?', className: 'text-muted-foreground', title: 'Unknown' },
 };
 
-const RECENT_REFERENCES_STORAGE_KEY = 'termdock:recent-file-references';
 const FILE_TREE_SCROLL_STORAGE_KEY = 'termdock:right-sidebar:file-tree-scroll:v1';
+const FILE_PREVIEW_READING_STATE_STORAGE_KEY = 'termdock:right-sidebar:file-preview-reading-state:v1';
 const FILE_TREE_WIDTH_STORAGE_KEY = 'termdock:right-sidebar:file-tree-width:v1';
 const MARKDOWN_VIEW_MODE_STORAGE_KEY = 'termdock:right-sidebar:markdown-view-mode:v1';
-const MAX_RECENT_REFERENCES = 8;
 const MAX_FILE_TREE_SCROLL_ROOTS = 20;
+const MAX_FILE_PREVIEW_READING_STATE_FILES = 120;
 const FILE_TREE_SCROLL_WRITE_MS = 250;
+const FILE_PREVIEW_READING_STATE_WRITE_MS = 250;
 const FILE_TREE_WIDTH_WRITE_MS = 120;
 const GIT_BUNDLE_SLOW_MS = 700;
 const SIDEBAR_BACKGROUND_IO_DELAY_MS = 600;
@@ -70,6 +88,10 @@ const MOBILE_WIDTH_THRESHOLD_PX = 600;
 // Wide mode keeps the dual-pane workspace; below this width the panel falls
 // back to stacked tabs even on desktop.
 const WIDE_WIDTH_THRESHOLD_PX = 720;
+const MARKDOWN_TABLE_CELL_CLASS = 'border-r px-2 py-1.5 sm:px-3 sm:py-2';
+const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'max-w-[18rem] whitespace-normal break-words sm:max-w-[27rem]';
+const MARKDOWN_TABLE_HEADER_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-b border-border/15 font-semibold last:border-r-0`;
+const MARKDOWN_TABLE_BODY_CELL_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-border/10 align-top text-muted-foreground last:border-r-0`;
 
 const gitContextCache = new Map<string, GitContext | null>();
 
@@ -122,44 +144,616 @@ function isMarkdownPath(filePath: string): boolean {
   return MARKDOWN_EXTS.has(getFileExtension(filePath));
 }
 
+function isMarkdownHorizontalRule(line: string): boolean {
+  const compact = line.trim().replace(/\s+/g, '');
+  return /^-{3,}$/.test(compact) || /^\*{3,}$/.test(compact) || /^_{3,}$/.test(compact);
+}
+
 function isMarkdownBlockStart(line: string): boolean {
   const trimmed = line.trim();
   return /^#{1,6}\s+/.test(trimmed)
-    || /^([-*_])(?:\s*\1){2,}\s*$/.test(trimmed)
+    || isMarkdownHorizontalRule(line)
     || /^>\s?/.test(trimmed)
-    || /^```/.test(trimmed)
-    || /^(?:[-+*]|\d+\.)\s+/.test(trimmed);
+    || /^(```|~~~)/.test(trimmed)
+    || /^(?:[-+*]|\d+[.)])\s+/.test(trimmed);
 }
 
 function getSafeMarkdownHref(href: string): string | null {
   const trimmed = href.trim();
   if (/^(https?:|mailto:|#|\/|\.\/|\.\.\/)/i.test(trimmed)) return trimmed;
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(trimmed) && !/[<>]/.test(trimmed)) return trimmed;
   return null;
 }
 
-function renderMarkdownInline(text: string, keyPrefix: string, wrapLongTokens = true): ReactNode[] {
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|_[^_\s][^_]*_|\[[^\]]+\]\([^\s)]+(?:\s+"[^"]*")?\))/g;
+interface MarkdownReferenceDefinition {
+  href: string;
+  title?: string;
+}
+
+type MarkdownReferenceDefinitions = Map<string, MarkdownReferenceDefinition>;
+
+interface MarkdownFootnoteDefinition {
+  id: string;
+  text: string;
+  index: number;
+}
+
+type MarkdownFootnoteDefinitions = Map<string, MarkdownFootnoteDefinition>;
+
+interface MarkdownPreviewImage {
+  src: string;
+  alt: string;
+  title?: string;
+}
+
+interface MarkdownRenderContext {
+  markdownFilePath: string | null;
+  rootPath: string | null;
+  referenceDefinitions: MarkdownReferenceDefinitions;
+  footnoteDefinitions: MarkdownFootnoteDefinitions;
+  headingSlugCounts: Map<string, number>;
+  images: MarkdownPreviewImage[];
+  onImageOpen?: (index: number) => void;
+}
+
+interface MarkdownPreviewRenderResult {
+  blocks: MarkdownPreviewBlock[];
+  images: MarkdownPreviewImage[];
+}
+
+interface MarkdownHeadingInfo {
+  level: number;
+  text: string;
+  id: string;
+}
+
+function normalizeMarkdownReferenceId(id: string): string {
+  return id.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function getMarkdownPlainText(text: string): string {
+  return text
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\[[^\]]*\]/g, '$1')
+    .replace(/[`*_~]/g, '')
+    .replace(/<[^>]+>/g, '')
+    .trim();
+}
+
+function normalizeMarkdownAtxHeadingText(text: string): string {
+  return text.replace(/\s+#+\s*$/, '').trim();
+}
+
+function getMarkdownHeadingId(text: string, context: MarkdownRenderContext): string {
+  const plain = getMarkdownPlainText(text);
+  const base = plain
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s-]/gu, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    || 'section';
+  const count = context.headingSlugCounts.get(base) ?? 0;
+  context.headingSlugCounts.set(base, count + 1);
+  return count === 0 ? base : `${base}-${count}`;
+}
+
+function getMarkdownHeadingDisplayText(text: string): string {
+  return getMarkdownPlainText(text) || text.trim();
+}
+
+function parseMarkdownReferenceDefinition(line: string): { id: string; definition: MarkdownReferenceDefinition } | null {
+  const match = line.match(/^\s{0,3}\[([^\]]+)\]:\s+(.+?)\s*$/);
+  if (!match) return null;
+  const target = parseMarkdownInlineTarget(match[2]);
+  if (!target) return null;
+  return {
+    id: normalizeMarkdownReferenceId(match[1]),
+    definition: {
+      href: target.href,
+      title: target.title,
+    },
+  };
+}
+
+function collectMarkdownReferenceDefinitions(lines: string[]): MarkdownReferenceDefinitions {
+  const definitions: MarkdownReferenceDefinitions = new Map();
+  for (const line of lines) {
+    const parsed = parseMarkdownReferenceDefinition(line);
+    if (parsed) definitions.set(parsed.id, parsed.definition);
+  }
+  return definitions;
+}
+
+function normalizeMarkdownFootnoteId(id: string): string {
+  return id.trim().toLowerCase();
+}
+
+function parseMarkdownFootnoteDefinition(line: string): { id: string; text: string } | null {
+  const match = line.match(/^\s{0,3}\[\^([^\]]+)\]:\s+(.+)\s*$/);
+  if (!match) return null;
+  return { id: normalizeMarkdownFootnoteId(match[1]), text: match[2] };
+}
+
+function collectMarkdownFootnoteDefinitions(lines: string[]): MarkdownFootnoteDefinitions {
+  const definitions: MarkdownFootnoteDefinitions = new Map();
+  let currentId: string | null = null;
+  for (const line of lines) {
+    const parsed = parseMarkdownFootnoteDefinition(line);
+    if (parsed) {
+      currentId = parsed.id;
+      definitions.set(parsed.id, {
+        id: parsed.id,
+        text: parsed.text,
+        index: definitions.size + 1,
+      });
+      continue;
+    }
+    if (currentId && /^\s{4,}\S/.test(line)) {
+      const current = definitions.get(currentId);
+      if (current) current.text = `${current.text} ${line.trim()}`;
+      continue;
+    }
+    if (line.trim()) currentId = null;
+  }
+  return definitions;
+}
+
+function collectMarkdownFootnoteDefinitionLineIndexes(lines: string[]): Set<number> {
+  const indexes = new Set<number>();
+  let activeFootnote = false;
+  lines.forEach((line, index) => {
+    if (parseMarkdownFootnoteDefinition(line)) {
+      indexes.add(index);
+      activeFootnote = true;
+      return;
+    }
+    if (activeFootnote && /^\s{4,}\S/.test(line)) {
+      indexes.add(index);
+      return;
+    }
+    if (line.trim()) activeFootnote = false;
+  });
+  return indexes;
+}
+
+function maskMarkdownHiddenLines(lines: string[]): string[] {
+  const masked = [...lines];
+  let index = 0;
+
+  const frontMatterDelimiter = lines[0]?.trim();
+  if (frontMatterDelimiter === '---' || frontMatterDelimiter === '+++') {
+    masked[0] = '';
+    index = 1;
+    while (index < lines.length && lines[index].trim() !== frontMatterDelimiter) {
+      masked[index] = '';
+      index += 1;
+    }
+    if (index < lines.length) {
+      masked[index] = '';
+      index += 1;
+    }
+  }
+
+  while (index < lines.length) {
+    const trimmed = lines[index].trim();
+    if (trimmed.startsWith('<!--')) {
+      masked[index] = '';
+      if (!trimmed.includes('-->')) {
+        index += 1;
+        while (index < lines.length && !lines[index].includes('-->')) {
+          masked[index] = '';
+          index += 1;
+        }
+        if (index < lines.length) masked[index] = '';
+      }
+      index += 1;
+      continue;
+    }
+    index += 1;
+  }
+
+  return masked;
+}
+
+function getParentDirectoryPath(filePath: string): string {
+  const normalized = filePath.replace(/\/+$/, '');
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex <= 0) return slashIndex === 0 ? '/' : '';
+  return normalized.slice(0, slashIndex);
+}
+
+function normalizeMarkdownLocalImagePath(path: string): string {
+  const pathname = path.split(/[?#]/, 1)[0];
+  const absolute = pathname.startsWith('/');
+  const stack: string[] = [];
+
+  for (const part of pathname.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (stack.length > 0) stack.pop();
+      continue;
+    }
+    stack.push(part);
+  }
+
+  const normalizedPathname = `${absolute ? '/' : ''}${stack.join('/')}`;
+  return normalizedPathname || (absolute ? '/' : '.');
+}
+
+function resolveMarkdownImageSrc(src: string, markdownFilePath: string | null, rootPath: string | null): string | null {
+  const trimmed = src.trim();
+  if (!trimmed || /^(?:javascript|data):/i.test(trimmed)) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (!isPreviewableImagePath(trimmed.split(/[?#]/, 1)[0])) return null;
+
+  let absolutePath: string;
+  if (trimmed.startsWith('/')) {
+    const isFileSystemAbsolute = rootPath && (trimmed === rootPath || trimmed.startsWith(`${rootPath}/`));
+    absolutePath = normalizeMarkdownLocalImagePath(rootPath && !isFileSystemAbsolute ? `${rootPath}/${trimmed.slice(1)}` : trimmed);
+  } else {
+    if (!markdownFilePath) return null;
+    absolutePath = normalizeMarkdownLocalImagePath(`${getParentDirectoryPath(markdownFilePath)}/${trimmed}`);
+  }
+
+  return `/api/terminal/fs/blob?path=${encodeURIComponent(absolutePath)}`;
+}
+
+function renderMarkdownImage(
+  key: string,
+  alt: string,
+  src: string,
+  title: string | undefined,
+  context: MarkdownRenderContext,
+): ReactNode {
+  const imageSrc = resolveMarkdownImageSrc(src, context.markdownFilePath, context.rootPath);
+  if (!imageSrc) return `![${alt}](${src})`;
+
+  const imageIndex = context.images.length;
+  context.images.push({ src: imageSrc, alt, title });
+  const image = (
+      <img
+        src={imageSrc}
+        alt={alt}
+        title={title}
+        loading="lazy"
+        decoding="async"
+        className="block max-h-[480px] max-w-full object-contain"
+      />
+  );
+
+  return context.onImageOpen ? (
+    <button
+      key={key}
+      type="button"
+      className="my-2 block max-w-full overflow-hidden rounded-md border border-border/20 bg-surface-2 text-left transition hover:border-border-strong focus:outline-none focus:ring-2 focus:ring-ring/45"
+      title={title || alt || 'Open image'}
+      onClick={(event) => {
+        event.stopPropagation();
+        context.onImageOpen?.(imageIndex);
+      }}
+    >
+      {image}
+    </button>
+  ) : (
+    <span key={key} className="my-2 block max-w-full overflow-hidden rounded-md border border-border/20 bg-surface-2">
+      {image}
+    </span>
+  );
+}
+
+function splitAutoLinkPunctuation(token: string): { linkText: string; suffix: string } {
+  let linkText = token;
+  let suffix = '';
+  while (/[.,;:!?)]$/.test(linkText)) {
+    suffix = `${linkText.slice(-1)}${suffix}`;
+    linkText = linkText.slice(0, -1);
+  }
+  return { linkText, suffix };
+}
+
+function isMarkdownEmail(text: string): boolean {
+  return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(text);
+}
+
+function parseMarkdownInlineTarget(raw: string): { href: string; title?: string } | null {
+  const trimmed = raw.trim();
+  const angleMatch = trimmed.match(/^<([^>]+)>(?:\s+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?$/);
+  if (angleMatch) {
+    return { href: angleMatch[1], title: angleMatch[2] ?? angleMatch[3] ?? angleMatch[4] };
+  }
+  const plainMatch = trimmed.match(/^(\S+)(?:\s+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?$/);
+  if (!plainMatch) return null;
+  return { href: plainMatch[1], title: plainMatch[2] ?? plainMatch[3] ?? plainMatch[4] };
+}
+
+const MARKDOWN_ESCAPE_SENTINEL = '\uE000';
+const MARKDOWN_ESCAPABLE = /\\([\\`*{}\[\]#+\-.!_|~>$])/g;
+
+function maskMarkdownEscapes(text: string): string {
+  return text.replace(MARKDOWN_ESCAPABLE, (_, char: string) => `${MARKDOWN_ESCAPE_SENTINEL}${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+function unmaskMarkdownEscapes(text: string): string {
+  return text
+    .replace(new RegExp(`${MARKDOWN_ESCAPE_SENTINEL}([0-9a-f]{4})`, 'g'), (_, code: string) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/\\([()])/g, '$1');
+}
+
+function normalizeMarkdownCodeSpan(code: string): string {
+  const normalized = code.replace(/[\r\n]+/g, ' ');
+  if (/^ .+ $/.test(normalized) && /[^ ]/.test(normalized.slice(1, -1))) {
+    return normalized.slice(1, -1);
+  }
+  return normalized;
+}
+
+interface DOMPurifyLike {
+  sanitize: (dirty: string, config?: Record<string, unknown>) => string;
+}
+
+const MARKDOWN_HTML_SANITIZE_CONFIG = {
+  ALLOWED_TAGS: [
+    'a', 'abbr', 'b', 'blockquote', 'br', 'code', 'del', 'details',
+    'div', 'em', 'i', 'kbd', 'li', 'mark', 'ol', 'p', 'pre', 's',
+    'span', 'strong', 'sub', 'summary', 'sup', 'table', 'tbody', 'td',
+    'th', 'thead', 'tr', 'u', 'ul',
+  ],
+  ALLOWED_ATTR: ['href', 'title', 'class', 'id', 'colspan', 'rowspan'],
+  ALLOW_DATA_ATTR: false,
+  ALLOW_ARIA_ATTR: true,
+};
+
+let domPurifyPromise: Promise<DOMPurifyLike> | null = null;
+
+function loadDOMPurify(): Promise<DOMPurifyLike> {
+  if (!domPurifyPromise) {
+    domPurifyPromise = import('dompurify')
+      .then((mod) => ((mod as { default?: DOMPurifyLike }).default ?? mod) as DOMPurifyLike)
+      .catch((error) => {
+        domPurifyPromise = null;
+        throw error;
+      });
+  }
+  return domPurifyPromise;
+}
+
+function MarkdownSanitizedHtml({ html }: { html: string }) {
+  const [sanitized, setSanitized] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSanitized(null);
+    loadDOMPurify()
+      .then((domPurify) => {
+        if (cancelled) return;
+        setSanitized(domPurify.sanitize(html, MARKDOWN_HTML_SANITIZE_CONFIG));
+      })
+      .catch(() => {
+        if (!cancelled) setSanitized('');
+      });
+    return () => { cancelled = true; };
+  }, [html]);
+
+  if (sanitized === null) return <div className="py-2 text-xs text-muted-foreground">Rendering HTML...</div>;
+  if (!sanitized) return null;
+  return <div className="text-muted-foreground" dangerouslySetInnerHTML={{ __html: sanitized }} />;
+}
+
+function MarkdownSanitizedInlineHtml({ html }: { html: string }) {
+  const [sanitized, setSanitized] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSanitized(null);
+    loadDOMPurify()
+      .then((domPurify) => {
+        if (!cancelled) setSanitized(domPurify.sanitize(html, MARKDOWN_HTML_SANITIZE_CONFIG));
+      })
+      .catch(() => {
+        if (!cancelled) setSanitized('');
+      });
+    return () => { cancelled = true; };
+  }, [html]);
+
+  if (sanitized === null) return null;
+  if (!sanitized) return html;
+  return <span dangerouslySetInnerHTML={{ __html: sanitized }} />;
+}
+
+function parseMarkdownHtmlBlockStart(line: string): { tag: string; selfContained: boolean } | null {
+  const match = line.trim().match(/^<(div|section|article|aside|table|p|ul|ol|li|blockquote|pre|figure|figcaption)\b[^>]*>/i);
+  if (!match) return null;
+  const tag = match[1].toLowerCase();
+  return {
+    tag,
+    selfContained: new RegExp(`</${tag}>`, 'i').test(line),
+  };
+}
+
+interface KatexLike {
+  renderToString: (tex: string, options?: Record<string, unknown>) => string;
+}
+
+let katexPromise: Promise<KatexLike> | null = null;
+
+function loadKatex(): Promise<KatexLike> {
+  if (!katexPromise) {
+    katexPromise = Promise.all([
+      import('katex'),
+      import('katex/dist/katex.min.css'),
+    ])
+      .then(([mod]) => ((mod as { default?: KatexLike }).default ?? mod) as KatexLike)
+      .catch((error) => {
+        katexPromise = null;
+        throw error;
+      });
+  }
+  return katexPromise;
+}
+
+function MarkdownMath({ tex, display = false }: { tex: string; display?: boolean }) {
+  const [html, setHtml] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setHtml(null);
+    setFailed(false);
+    loadKatex()
+      .then((katex) => {
+        if (cancelled) return;
+        setHtml(katex.renderToString(tex, {
+          displayMode: display,
+          throwOnError: false,
+          trust: false,
+          strict: 'ignore',
+        }));
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => { cancelled = true; };
+  }, [display, tex]);
+
+  if (failed) return <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.92em] text-foreground">{display ? `$$${tex}$$` : `$${tex}$`}</code>;
+  if (!html) return <span className="text-muted-foreground/70">{display ? 'Rendering formula...' : tex}</span>;
+
+  const className = display
+    ? 'my-2 overflow-auto rounded-md bg-surface-2 px-3 py-2 text-center'
+    : 'inline-block align-middle';
+
+  // KaTeX returns sanitized HTML for a restricted TeX language. `trust:false`
+  // keeps URL / HTML-like extensions inert; unsupported input is rendered as
+  // error text instead of throwing.
+  return <span className={className} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+function renderMarkdownHtmlInline(token: string, key: string, context: MarkdownRenderContext): ReactNode | null {
+  if (/^<br\s*\/?>$/i.test(token)) return <br key={key} />;
+
+  const match = token.match(/^<(kbd|mark|sub|sup)>(.*?)<\/\1>$/i);
+  if (!match) {
+    if (/^<(a|abbr|span|b|strong|em|i|u|s|del|code)\b[\s\S]*<\/\1>$/i.test(token)) {
+      return <MarkdownSanitizedInlineHtml key={key} html={token} />;
+    }
+    return null;
+  }
+
+  const tag = match[1].toLowerCase();
+  const children = renderMarkdownInline(match[2], `${key}-${tag}`, true, context);
+  if (tag === 'kbd') {
+    return <kbd key={key} className="rounded border border-border/30 bg-surface-2 px-1.5 py-0.5 font-mono text-[0.85em] text-foreground shadow-sm">{children}</kbd>;
+  }
+  if (tag === 'mark') {
+    return <mark key={key} className="rounded bg-warning/25 px-0.5 text-foreground">{children}</mark>;
+  }
+  if (tag === 'sub') return <sub key={key}>{children}</sub>;
+  return <sup key={key}>{children}</sup>;
+}
+
+function renderMarkdownInline(
+  text: string,
+  keyPrefix: string,
+  wrapLongTokens = true,
+  context: MarkdownRenderContext,
+): ReactNode[] {
+  const maskedText = maskMarkdownEscapes(text);
+  const pattern = /(\\\([^)]*\\\)|\$[^$\n]+\$|<br\s*\/?>|<(?:a|abbr|span|b|strong|em|i|u|s|del|code|kbd|mark|sub|sup)\b[\s\S]*?<\/(?:a|abbr|span|b|strong|em|i|u|s|del|code|kbd|mark|sub|sup)>|!?\[[^\]]*\]\((?:<[^>]+>|(?:[^\s()]+|\([^()\s]*\))+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)|!?\[[^\]]+\]\[[^\]]*\]|!?\[[^\]]+\]|\[\^[^\]]+\]|(`+)([\s\S]*?)\2|~~[^~]+~~|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|_[^_\s][^_]*_|<https?:\/\/[^>\s]+>|<[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>|https?:\/\/[^\s<]+|www\.[^\s<]+|[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+)/gi;
   const nodes: ReactNode[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
+  while ((match = pattern.exec(maskedText)) !== null) {
+    if (match.index > lastIndex) nodes.push(unmaskMarkdownEscapes(maskedText.slice(lastIndex, match.index)));
     const token = match[0];
     const key = `${keyPrefix}-${match.index}`;
 
-    if (token.startsWith('`')) {
-      nodes.push(<code key={key} className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.92em] text-foreground`}>{token.slice(1, -1)}</code>);
+    const htmlInline = token.startsWith('<') ? renderMarkdownHtmlInline(token, key, context) : null;
+    if (htmlInline) {
+      nodes.push(htmlInline);
+    } else if (token.startsWith('\\(') && token.endsWith('\\)')) {
+      nodes.push(<MarkdownMath key={key} tex={token.slice(2, -2)} />);
+    } else if (token.startsWith('$') && token.endsWith('$')) {
+      nodes.push(<MarkdownMath key={key} tex={token.slice(1, -1)} />);
+    } else if (token.startsWith('`')) {
+      const tickLength = token.match(/^`+/)?.[0].length ?? 1;
+      nodes.push(<code key={key} className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.92em] text-foreground`}>{normalizeMarkdownCodeSpan(token.slice(tickLength, -tickLength))}</code>);
+    } else if (token.startsWith('~~')) {
+      nodes.push(<del key={key} className="text-muted-foreground decoration-border-strong">{renderMarkdownInline(token.slice(2, -2), `${key}-del`, wrapLongTokens, context)}</del>);
     } else if (token.startsWith('**') || token.startsWith('__')) {
-      nodes.push(<strong key={key} className="font-semibold text-foreground">{renderMarkdownInline(token.slice(2, -2), `${key}-strong`, wrapLongTokens)}</strong>);
+      nodes.push(<strong key={key} className="font-semibold text-foreground">{renderMarkdownInline(token.slice(2, -2), `${key}-strong`, wrapLongTokens, context)}</strong>);
     } else if (token.startsWith('*') || token.startsWith('_')) {
-      nodes.push(<em key={key} className="italic">{renderMarkdownInline(token.slice(1, -1), `${key}-em`, wrapLongTokens)}</em>);
+      nodes.push(<em key={key} className="italic">{renderMarkdownInline(token.slice(1, -1), `${key}-em`, wrapLongTokens, context)}</em>);
+    } else if (token.startsWith('![')) {
+      const inlineImageMatch = token.match(/^!\[([^\]]*)\]\((.*)\)$/);
+      const referenceImageMatch = token.match(/^!\[([^\]]+)\]\[([^\]]*)\]$/);
+      const shortcutImageMatch = token.match(/^!\[([^\]]+)\]$/);
+      if (inlineImageMatch) {
+        const target = parseMarkdownInlineTarget(inlineImageMatch[2]);
+        nodes.push(target ? renderMarkdownImage(key, inlineImageMatch[1], target.href, target.title, context) : token);
+      } else if (referenceImageMatch) {
+        const definitionId = referenceImageMatch[2] || referenceImageMatch[1];
+        const definition = context.referenceDefinitions.get(normalizeMarkdownReferenceId(definitionId));
+        nodes.push(definition ? renderMarkdownImage(key, referenceImageMatch[1], definition.href, definition.title, context) : token);
+      } else if (shortcutImageMatch) {
+        const definition = context.referenceDefinitions.get(normalizeMarkdownReferenceId(shortcutImageMatch[1]));
+        nodes.push(definition ? renderMarkdownImage(key, shortcutImageMatch[1], definition.href, definition.title, context) : token);
+      } else {
+        nodes.push(token);
+      }
+    } else if (token.startsWith('[^')) {
+      const footnoteId = normalizeMarkdownFootnoteId(token.slice(2, -1));
+      const footnote = context.footnoteDefinitions.get(footnoteId);
+      nodes.push(footnote ? (
+        <sup key={key} id={`fnref-${footnote.id}`} title={footnote.text} className="ml-0.5 rounded bg-surface-2 px-1 text-[0.72em] font-semibold text-primary">
+          <a href={`#fn-${footnote.id}`} className="text-primary no-underline">{footnote.index}</a>
+        </sup>
+      ) : token);
+    } else if (token.startsWith('<http')) {
+      const linkText = token.slice(1, -1);
+      nodes.push(
+        <a key={key} href={linkText} target="_blank" rel="noreferrer" className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary`}>
+          {linkText}
+        </a>,
+      );
+    } else if (token.startsWith('<') && token.endsWith('>') && isMarkdownEmail(token.slice(1, -1))) {
+      const email = token.slice(1, -1);
+      nodes.push(
+        <a key={key} href={`mailto:${email}`} className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary`}>
+          {email}
+        </a>,
+      );
+    } else if (isMarkdownEmail(splitAutoLinkPunctuation(token).linkText)) {
+      const { linkText, suffix } = splitAutoLinkPunctuation(token);
+      nodes.push(
+        <a key={key} href={`mailto:${linkText}`} className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary`}>
+          {linkText}
+        </a>,
+      );
+      if (suffix) nodes.push(suffix);
+    } else if (token.startsWith('http') || token.startsWith('www.')) {
+      const { linkText, suffix } = splitAutoLinkPunctuation(token);
+      const href = linkText.startsWith('www.') ? `https://${linkText}` : linkText;
+      nodes.push(
+        <a key={key} href={href} target="_blank" rel="noreferrer" className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary`}>
+          {linkText}
+        </a>,
+      );
+      if (suffix) nodes.push(suffix);
     } else {
-      const linkMatch = token.match(/^\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)$/);
-      const safeHref = linkMatch ? getSafeMarkdownHref(linkMatch[2]) : null;
+      const inlineLinkMatch = token.match(/^\[([^\]]+)\]\((.*)\)$/);
+      const referenceLinkMatch = token.match(/^\[([^\]]+)\]\[([^\]]*)\]$/);
+      const shortcutLinkMatch = token.match(/^\[([^\]]+)\]$/);
+      const definitionId = referenceLinkMatch ? referenceLinkMatch[2] || referenceLinkMatch[1] : shortcutLinkMatch?.[1] ?? null;
+      const definition = definitionId ? context.referenceDefinitions.get(normalizeMarkdownReferenceId(definitionId)) : null;
+      const inlineTarget = inlineLinkMatch ? parseMarkdownInlineTarget(inlineLinkMatch[2]) : null;
+      const href = inlineTarget?.href ?? definition?.href ?? null;
+      const safeHref = href ? getSafeMarkdownHref(href) : null;
+      const label = inlineLinkMatch?.[1] ?? referenceLinkMatch?.[1] ?? shortcutLinkMatch?.[1] ?? '';
       nodes.push(safeHref ? (
-        <a key={key} href={safeHref} target="_blank" rel="noreferrer" className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary`}>
-          {renderMarkdownInline(linkMatch?.[1] ?? '', `${key}-link`, wrapLongTokens)}
+        <a key={key} href={safeHref} title={inlineTarget?.title ?? definition?.title} target="_blank" rel="noreferrer" className={`${wrapLongTokens ? 'break-all' : 'whitespace-nowrap'} text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary`}>
+          {renderMarkdownInline(label, `${key}-link`, wrapLongTokens, context)}
         </a>
       ) : token);
     }
@@ -167,16 +761,406 @@ function renderMarkdownInline(text: string, keyPrefix: string, wrapLongTokens = 
     lastIndex = pattern.lastIndex;
   }
 
-  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  if (lastIndex < maskedText.length) nodes.push(unmaskMarkdownEscapes(maskedText.slice(lastIndex)));
   return nodes.length > 0 ? nodes : [text];
 }
 
+function hasMarkdownHardBreak(line: string): boolean {
+  return /(?: {2,}|\\)$/.test(line);
+}
+
+function stripMarkdownHardBreak(line: string): string {
+  return line.replace(/(?: {2,}|\\)$/, '');
+}
+
+function isIndentedCodeLine(line: string): boolean {
+  return /^(?: {4}|\t)/.test(line);
+}
+
+function stripIndentedCodeLine(line: string): string {
+  return line.startsWith('\t') ? line.slice(1) : line.replace(/^ {4}/, '');
+}
+
+function renderMarkdownInlineLines(lines: string[], keyPrefix: string, context: MarkdownRenderContext): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  lines.forEach((line, index) => {
+    const hardBreak = hasMarkdownHardBreak(line);
+    nodes.push(...renderMarkdownInline(stripMarkdownHardBreak(line), `${keyPrefix}-${index}`, true, context));
+    if (index < lines.length - 1) nodes.push(hardBreak ? <br key={`${keyPrefix}-${index}-br`} /> : ' ');
+  });
+  return nodes;
+}
+
 function splitMarkdownTableRow(line: string): string[] {
-  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+  const normalized = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  const cells: string[] = [];
+  let current = '';
+  let escaping = false;
+  let codeFenceLength = 0;
+  let bracketDepth = 0;
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaping = true;
+      continue;
+    }
+    if (char === '`') {
+      const start = index;
+      while (index + 1 < normalized.length && normalized[index + 1] === '`') index += 1;
+      const tickLength = index - start + 1;
+      current += '`'.repeat(tickLength);
+      if (codeFenceLength === 0) codeFenceLength = tickLength;
+      else if (codeFenceLength === tickLength) codeFenceLength = 0;
+      continue;
+    }
+    if (codeFenceLength === 0 && char === '[') {
+      bracketDepth += 1;
+    } else if (codeFenceLength === 0 && char === ']' && bracketDepth > 0) {
+      bracketDepth -= 1;
+    }
+    if (char === '|' && codeFenceLength === 0 && bracketDepth === 0) {
+      cells.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (escaping) current += '\\';
+  cells.push(current.trim());
+  return cells;
+}
+
+type MarkdownTableAlign = 'left' | 'center' | 'right' | null;
+
+function parseMarkdownTableAlignments(line: string): MarkdownTableAlign[] {
+  return splitMarkdownTableRow(line).map((cell) => {
+    if (/^:-+:$/.test(cell)) return 'center';
+    if (/^-+:$/.test(cell)) return 'right';
+    if (/^:-+$/.test(cell)) return 'left';
+    return null;
+  });
+}
+
+function getMarkdownTableAlignClass(align: MarkdownTableAlign): string {
+  if (align === 'center') return 'text-center';
+  if (align === 'right') return 'text-right';
+  return 'text-left';
 }
 
 function isMarkdownTableSeparator(line: string): boolean {
-  return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line.trim());
+  return /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?$/.test(line.trim());
+}
+
+export function shouldCloseMarkdownImageLightboxDrag(verticalMovement: number, verticalVelocity: number): boolean {
+  return verticalMovement > 96 || (verticalMovement > 44 && verticalVelocity > 0.35);
+}
+
+interface MarkdownListItem {
+  content: string;
+  ordered: boolean;
+  start?: number;
+  children: MarkdownListItem[];
+  paragraphs: string[];
+}
+
+function getMarkdownListIndent(line: string): number {
+  return (line.match(/^\s*/)?.[0] ?? '').replace(/\t/g, '    ').length;
+}
+
+function parseMarkdownListItemLine(line: string): { ordered: boolean; start?: number; content: string } | null {
+  const match = line.trim().match(/^([-+*]|\d+[.)])\s+(.+)$/);
+  if (!match) return null;
+  const ordered = /^\d+[.)]$/.test(match[1]);
+  return { ordered, start: ordered ? Number.parseInt(match[1], 10) : undefined, content: match[2] };
+}
+
+function parseMarkdownListBlock(
+  lines: string[],
+  startIndex: number,
+  baseIndent: number,
+  ordered: boolean,
+  skipDefinitionLines: boolean,
+  footnoteDefinitionLines: Set<number> = new Set(),
+): { items: MarkdownListItem[]; nextIndex: number } {
+  const items: MarkdownListItem[] = [];
+  const stack: Array<{ indent: number; item: MarkdownListItem }> = [];
+  let index = startIndex;
+
+  while (index < lines.length) {
+    const currentLine = lines[index];
+    if (skipDefinitionLines && (parseMarkdownReferenceDefinition(currentLine) || footnoteDefinitionLines.has(index))) {
+      index += 1;
+      continue;
+    }
+
+    const itemMatch = parseMarkdownListItemLine(currentLine);
+    const indent = getMarkdownListIndent(currentLine);
+
+    if (!itemMatch) {
+      if (indent > baseIndent && stack.length > 0) {
+        const target = [...stack].reverse().find((entry) => entry.indent < indent)?.item ?? stack[stack.length - 1].item;
+        target.paragraphs.push(currentLine.trim());
+        index += 1;
+        continue;
+      }
+      break;
+    }
+
+    if (indent < baseIndent) break;
+    if (indent === baseIndent && itemMatch.ordered !== ordered) break;
+
+    const item: MarkdownListItem = { content: itemMatch.content, ordered: itemMatch.ordered, start: itemMatch.start, children: [], paragraphs: [] };
+    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop();
+    const parent = stack[stack.length - 1]?.item ?? null;
+    if (parent) parent.children.push(item);
+    else items.push(item);
+    stack.push({ indent, item });
+    index += 1;
+  }
+
+  return { items, nextIndex: index };
+}
+
+export function __testParseMarkdownListBlock(lines: string[]): MarkdownListItem[] {
+  const first = lines.find((line) => parseMarkdownListItemLine(line));
+  if (!first) return [];
+  const parsed = parseMarkdownListItemLine(first);
+  if (!parsed) return [];
+  return parseMarkdownListBlock(lines, 0, getMarkdownListIndent(first), parsed.ordered, true, collectMarkdownFootnoteDefinitionLineIndexes(lines)).items;
+}
+
+function renderMarkdownListItems(
+  items: MarkdownListItem[],
+  blockStart: number,
+  context: MarkdownRenderContext,
+): ReactNode[] {
+  return items.map((item, itemIndex) => {
+    const taskMatch = item.content.match(/^\[([ xX])\]\s+(.+)$/);
+    return (
+      <li key={`item-${itemIndex}`} className={taskMatch ? 'list-none' : undefined}>
+        {taskMatch ? <input type="checkbox" checked={taskMatch[1].toLowerCase() === 'x'} readOnly className="mr-2 align-[-2px] accent-primary" /> : null}
+        {renderMarkdownInline(taskMatch?.[2] ?? item.content, `li-${blockStart}-${itemIndex}`, true, context)}
+        {item.paragraphs.length > 0 && (
+          <div className="mt-1 space-y-1 text-muted-foreground">
+            {item.paragraphs.map((paragraph, paragraphIndex) => (
+              <p key={`paragraph-${paragraphIndex}`}>
+                {renderMarkdownInline(paragraph, `li-${blockStart}-${itemIndex}-p-${paragraphIndex}`, true, context)}
+              </p>
+            ))}
+          </div>
+        )}
+        {item.children.length > 0 && renderMarkdownNestedLists(item.children, blockStart + itemIndex + 1, context)}
+      </li>
+    );
+  });
+}
+
+function renderMarkdownNestedLists(items: MarkdownListItem[], blockStart: number, context: MarkdownRenderContext): ReactNode[] {
+  const groups: Array<{ ordered: boolean; items: MarkdownListItem[] }> = [];
+  for (const item of items) {
+    const current = groups[groups.length - 1];
+    if (current && current.ordered === item.ordered) current.items.push(item);
+    else groups.push({ ordered: item.ordered, items: [item] });
+  }
+
+  return groups.map((group, groupIndex) => {
+    const ListTag = group.ordered ? 'ol' : 'ul';
+    return (
+      <ListTag key={`nested-${groupIndex}`} start={group.ordered ? group.items[0]?.start : undefined} className={`${group.ordered ? 'list-decimal' : 'list-disc'} mt-1 space-y-0.5 pl-4 marker:text-muted-foreground/60`}>
+        {renderMarkdownListItems(group.items, blockStart + groupIndex + 1, context)}
+      </ListTag>
+    );
+  });
+}
+
+function renderMarkdownFootnotes(context: MarkdownRenderContext): ReactNode | null {
+  const footnotes = Array.from(context.footnoteDefinitions.values()).sort((a, b) => a.index - b.index);
+  if (footnotes.length === 0) return null;
+
+  return (
+    <section className="mt-3 border-t border-border/20 pt-2 text-[12px] leading-5 text-muted-foreground">
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/80">Footnotes</div>
+      <ol className="list-decimal space-y-1 pl-5">
+        {footnotes.map((footnote) => (
+          <li key={footnote.id} id={`fn-${footnote.id}`}>
+            {renderMarkdownInline(footnote.text, `footnote-${footnote.id}`, true, context)}
+            {' '}
+            <a href={`#fnref-${footnote.id}`} className="text-primary no-underline" aria-label={`Back to footnote ${footnote.index}`}>↩</a>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: MarkdownRenderContext): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    if (/^<details>\s*$/i.test(trimmed)) {
+      const blockStart = index;
+      let summary = 'Details';
+      const bodyLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !/^<\/details>\s*$/i.test(lines[index].trim())) {
+        const summaryMatch = lines[index].trim().match(/^<summary>(.*?)<\/summary>\s*$/i);
+        if (summaryMatch) summary = summaryMatch[1].trim() || summary;
+        else bodyLines.push(lines[index].trimStart());
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      nodes.push(
+        <details key={`${keyPrefix}-details-${blockStart}`} className="rounded-lg border border-border/20 bg-surface px-3 py-2 text-muted-foreground">
+          <summary className="cursor-pointer text-sm font-semibold text-foreground">{renderMarkdownInline(summary, `${keyPrefix}-details-${blockStart}-summary`, true, context)}</summary>
+          {bodyLines.length > 0 && (
+            <div className="mt-2 text-sm leading-6">{renderMarkdownInlineLines(bodyLines, `${keyPrefix}-details-${blockStart}`, context)}</div>
+          )}
+        </details>,
+      );
+      continue;
+    }
+
+    const htmlBlockStart = parseMarkdownHtmlBlockStart(line);
+    if (htmlBlockStart) {
+      const htmlLines = [line];
+      const blockStart = index;
+      index += 1;
+      while (
+        index < lines.length
+        && !htmlBlockStart.selfContained
+        && !new RegExp(`</${htmlBlockStart.tag}>`, 'i').test(lines[index])
+      ) {
+        htmlLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length && !htmlBlockStart.selfContained) {
+        htmlLines.push(lines[index]);
+        index += 1;
+      }
+      nodes.push(<MarkdownSanitizedHtml key={`${keyPrefix}-html-${blockStart}`} html={htmlLines.join('\n')} />);
+      continue;
+    }
+
+    const fenceMatch = trimmed.match(/^(```|~~~)\s*(.*)$/);
+    if (fenceMatch) {
+      const codeLines: string[] = [];
+      const fence = fenceMatch[1];
+      const lang = fenceMatch[2]?.trim();
+      const blockStart = index;
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith(fence)) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      nodes.push(
+        lang.toLowerCase() === 'mermaid'
+          ? <MarkdownMermaidBlock key={`${keyPrefix}-code-${blockStart}`} code={codeLines.join('\n')} blockKey={`${keyPrefix}-code-${blockStart}`} />
+          : ['math', 'latex', 'tex'].includes(lang.toLowerCase())
+          ? <MarkdownMath key={`${keyPrefix}-code-${blockStart}`} tex={codeLines.join('\n')} display />
+          : <MarkdownCodeBlock key={`${keyPrefix}-code-${blockStart}`} code={codeLines.join('\n')} lang={lang} blockKey={`${keyPrefix}-code-${blockStart}`} />,
+      );
+      continue;
+    }
+
+    if (isIndentedCodeLine(line)) {
+      const codeLines: string[] = [];
+      const blockStart = index;
+      while (index < lines.length && (isIndentedCodeLine(lines[index]) || !lines[index].trim())) {
+        codeLines.push(lines[index].trim() ? stripIndentedCodeLine(lines[index]) : '');
+        index += 1;
+      }
+      nodes.push(<MarkdownCodeBlock key={`${keyPrefix}-indented-code-${blockStart}`} code={codeLines.join('\n').replace(/\n+$/, '')} lang="" blockKey={`${keyPrefix}-indented-code-${blockStart}`} />);
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = Math.min(6, headingMatch[1].length + 1);
+      const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+      const headingText = normalizeMarkdownAtxHeadingText(headingMatch[2]);
+      const headingId = getMarkdownHeadingId(headingText, context);
+      nodes.push(
+        <Tag key={`${keyPrefix}-heading-${index}`} id={headingId} className="scroll-mt-16 font-semibold text-foreground">
+          {renderMarkdownInline(headingText, `${keyPrefix}-heading-${index}`, true, context)}
+        </Tag>,
+      );
+      index += 1;
+      continue;
+    }
+
+    if (index + 1 < lines.length && line.includes('|') && isMarkdownTableSeparator(lines[index + 1])) {
+      const header = splitMarkdownTableRow(line);
+      const alignments = parseMarkdownTableAlignments(lines[index + 1]);
+      const rows: string[][] = [];
+      const blockStart = index;
+      index += 2;
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+        rows.push(splitMarkdownTableRow(lines[index]));
+        index += 1;
+      }
+      nodes.push(
+        <div key={`${keyPrefix}-table-${blockStart}`} className="overflow-auto rounded-lg border border-border/20 bg-surface">
+            <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
+              <thead className="bg-surface-2 text-foreground">
+              <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(cell, `${keyPrefix}-th-${blockStart}-${cellIndex}`, true, context)}</div></th>)}</tr>
+              </thead>
+              <tbody>
+                {rows.map((row, rowIndex) => (
+                  <tr key={`r-${rowIndex}`} className="border-t border-border/10">
+                  {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className={`${MARKDOWN_TABLE_BODY_CELL_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(row[cellIndex] ?? '', `${keyPrefix}-td-${blockStart}-${rowIndex}-${cellIndex}`, true, context)}</div></td>)}
+                  </tr>
+                ))}
+              </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
+    const listMatch = parseMarkdownListItemLine(line);
+    if (listMatch) {
+      const ordered = listMatch.ordered;
+      const baseIndent = getMarkdownListIndent(line);
+      const start = listMatch.start;
+      const blockStart = index;
+      const parsed = parseMarkdownListBlock(lines, index, baseIndent, ordered, false);
+      index = parsed.nextIndex;
+      const ListTag = ordered ? 'ol' : 'ul';
+      nodes.push(
+        <ListTag key={`${keyPrefix}-list-${blockStart}`} start={ordered ? start : undefined} className={`${ordered ? 'list-decimal' : 'list-disc'} space-y-0.5 pl-4 marker:text-muted-foreground/70`}>
+          {renderMarkdownListItems(parsed.items, blockStart, context)}
+        </ListTag>,
+      );
+      continue;
+    }
+
+    const paragraphLines = [line.trimStart()];
+    const blockStart = index;
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
+      if (index + 1 < lines.length && lines[index].includes('|') && isMarkdownTableSeparator(lines[index + 1])) break;
+      paragraphLines.push(lines[index].trimStart());
+      index += 1;
+    }
+    nodes.push(<p key={`${keyPrefix}-p-${blockStart}`}>{renderMarkdownInlineLines(paragraphLines, `${keyPrefix}-p-${blockStart}`, context)}</p>);
+  }
+
+  return nodes;
 }
 
 interface MarkdownPreviewBlock {
@@ -184,9 +1168,155 @@ interface MarkdownPreviewBlock {
   startLine: number;
   endLine: number;
   content: ReactNode;
+  heading?: MarkdownHeadingInfo;
 }
 
-function buildMarkdownPreviewBlocks(lines: string[]): MarkdownPreviewBlock[] {
+interface MarkdownCodeBlockProps {
+  code: string;
+  lang: string;
+  blockKey: string;
+}
+
+interface MermaidLike {
+  initialize: (config: Record<string, unknown>) => void;
+  render: (id: string, text: string) => Promise<{ svg: string }>;
+}
+
+let mermaidPromise: Promise<MermaidLike> | null = null;
+let mermaidInitialized = false;
+
+function loadMermaid(): Promise<MermaidLike> {
+  if (!mermaidPromise) {
+    mermaidPromise = import('mermaid')
+      .then((mod) => ((mod as { default?: MermaidLike }).default ?? mod) as MermaidLike)
+      .catch((error) => {
+        mermaidPromise = null;
+        throw error;
+      });
+  }
+  return mermaidPromise;
+}
+
+function initializeMermaid(mermaid: MermaidLike): void {
+  if (mermaidInitialized) return;
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: 'dark',
+  });
+  mermaidInitialized = true;
+}
+
+function normalizeMarkdownFenceLanguage(lang: string): string | null {
+  const firstToken = lang.trim().split(/\s+/, 1)[0]?.toLowerCase();
+  if (!firstToken) return null;
+  const normalized = firstToken.replace(/^language-/, '');
+  return resolveLanguage(`code.${normalized}`) ?? normalized;
+}
+
+function MarkdownMermaidBlock({ code, blockKey }: { code: string; blockKey: string }) {
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let url: string | null = null;
+    setObjectUrl(null);
+    setFailed(false);
+
+    loadMermaid()
+      .then(async (mermaid) => {
+        initializeMermaid(mermaid);
+        const id = `termdock-md-mermaid-${blockKey.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+        const { svg } = await mermaid.render(id, code);
+        if (cancelled) return;
+        const blob = new Blob([svg], { type: 'image/svg+xml' });
+        url = URL.createObjectURL(blob);
+        setObjectUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [blockKey, code]);
+
+  if (failed) {
+    return <MarkdownCodeBlock code={code} lang="mermaid" blockKey={`${blockKey}-fallback`} />;
+  }
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border/20 bg-surface shadow-sm">
+      <div className="border-b border-border/15 bg-surface-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">mermaid</div>
+      <div className="overflow-auto bg-surface p-3">
+        {objectUrl ? (
+          <img src={objectUrl} alt="Mermaid diagram" className="max-w-full rounded bg-white p-2" />
+        ) : (
+          <div className="py-6 text-center text-xs text-muted-foreground">Rendering diagram...</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MarkdownCodeBlock({ code, lang, blockKey }: MarkdownCodeBlockProps) {
+  const language = normalizeMarkdownFenceLanguage(lang);
+  const [highlighted, setHighlighted] = useState<ReactNode[] | null>(null);
+
+  useEffect(() => {
+    if (!language || !shouldHighlight(code)) {
+      setHighlighted(null);
+      return;
+    }
+    let cancelled = false;
+    loadRefractor()
+      .then((refractor) => {
+        if (cancelled || !refractor.registered(language)) {
+          if (!cancelled) setHighlighted(null);
+          return;
+        }
+        try {
+          setHighlighted(refractorNodesToReact(refractor.highlight(code, language), `md-code-${blockKey}`));
+        } catch {
+          if (!cancelled) setHighlighted(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setHighlighted(null);
+      });
+    return () => { cancelled = true; };
+  }, [blockKey, code, language]);
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border/20 bg-surface shadow-sm">
+      {lang && <div className="border-b border-border/15 bg-surface-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">{lang}</div>}
+      <pre className="termdock-code overflow-auto p-3 text-[11px] leading-relaxed text-foreground"><code>{highlighted ?? (code || ' ')}</code></pre>
+    </div>
+  );
+}
+
+export function buildMarkdownPreviewRenderResult(
+  lines: string[],
+  markdownFilePath: string | null,
+  rootPath: string | null,
+  onImageOpen?: (index: number) => void,
+): MarkdownPreviewRenderResult {
+  lines = maskMarkdownHiddenLines(lines);
+  const referenceDefinitions = collectMarkdownReferenceDefinitions(lines);
+  const footnoteDefinitionLines = collectMarkdownFootnoteDefinitionLineIndexes(lines);
+  const images: MarkdownPreviewImage[] = [];
+  const context: MarkdownRenderContext = {
+    markdownFilePath,
+    rootPath,
+    referenceDefinitions,
+    footnoteDefinitions: collectMarkdownFootnoteDefinitions(lines),
+    headingSlugCounts: new Map(),
+    images,
+    onImageOpen,
+  };
   const blocks: MarkdownPreviewBlock[] = [];
   let index = 0;
 
@@ -194,18 +1324,78 @@ function buildMarkdownPreviewBlocks(lines: string[]): MarkdownPreviewBlock[] {
     const line = lines[index];
     const trimmed = line.trim();
 
+    if (parseMarkdownReferenceDefinition(line) || footnoteDefinitionLines.has(index)) {
+      index += 1;
+      continue;
+    }
+
     if (!trimmed) {
       index += 1;
       continue;
     }
 
-    const fenceMatch = trimmed.match(/^```\s*(.*)$/);
-    if (fenceMatch) {
-      const codeLines: string[] = [];
-      const lang = fenceMatch[1]?.trim();
+    if (/^<details>\s*$/i.test(trimmed)) {
+      const blockStart = index;
+      let summary = 'Details';
+      const bodyLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !/^<\/details>\s*$/i.test(lines[index].trim())) {
+        const summaryMatch = lines[index].trim().match(/^<summary>(.*?)<\/summary>\s*$/i);
+        if (summaryMatch) summary = summaryMatch[1].trim() || summary;
+        else bodyLines.push(lines[index].trimStart());
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push({
+        key: `details-${blockStart}`,
+        startLine: blockStart + 1,
+        endLine: index,
+        content: (
+          <details className="rounded-lg border border-border/20 bg-surface px-3 py-2 text-muted-foreground">
+            <summary className="cursor-pointer text-sm font-semibold text-foreground">{renderMarkdownInline(summary, `details-${blockStart}-summary`, true, context)}</summary>
+            {bodyLines.length > 0 && (
+              <div className="mt-2 text-sm leading-6">{renderMarkdownInlineLines(bodyLines, `details-${blockStart}`, context)}</div>
+            )}
+          </details>
+        ),
+      });
+      continue;
+    }
+
+    const htmlBlockStart = parseMarkdownHtmlBlockStart(line);
+    if (htmlBlockStart) {
+      const htmlLines = [line];
       const blockStart = index;
       index += 1;
-      while (index < lines.length && !lines[index].trim().startsWith('```')) {
+      while (
+        index < lines.length
+        && !htmlBlockStart.selfContained
+        && !new RegExp(`</${htmlBlockStart.tag}>`, 'i').test(lines[index])
+      ) {
+        htmlLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length && !htmlBlockStart.selfContained) {
+        htmlLines.push(lines[index]);
+        index += 1;
+      }
+      blocks.push({
+        key: `html-${blockStart}`,
+        startLine: blockStart + 1,
+        endLine: index,
+        content: <MarkdownSanitizedHtml html={htmlLines.join('\n')} />,
+      });
+      continue;
+    }
+
+    const fenceMatch = trimmed.match(/^(```|~~~)\s*(.*)$/);
+    if (fenceMatch) {
+      const codeLines: string[] = [];
+      const fence = fenceMatch[1];
+      const lang = fenceMatch[2]?.trim();
+      const blockStart = index;
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith(fence)) {
         codeLines.push(lines[index]);
         index += 1;
       }
@@ -214,19 +1404,90 @@ function buildMarkdownPreviewBlocks(lines: string[]): MarkdownPreviewBlock[] {
         key: `code-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
+        content: lang.toLowerCase() === 'mermaid'
+          ? <MarkdownMermaidBlock code={codeLines.join('\n')} blockKey={`code-${blockStart}`} />
+          : ['math', 'latex', 'tex'].includes(lang.toLowerCase())
+          ? <MarkdownMath tex={codeLines.join('\n')} display />
+          : <MarkdownCodeBlock code={codeLines.join('\n')} lang={lang} blockKey={`code-${blockStart}`} />,
+      });
+      continue;
+    }
+
+    if (isIndentedCodeLine(line)) {
+      const codeLines: string[] = [];
+      const blockStart = index;
+      index += 0;
+      while (index < lines.length && (isIndentedCodeLine(lines[index]) || !lines[index].trim())) {
+        codeLines.push(lines[index].trim() ? stripIndentedCodeLine(lines[index]) : '');
+        index += 1;
+      }
+      blocks.push({
+        key: `indented-code-${blockStart}`,
+        startLine: blockStart + 1,
+        endLine: index,
+        content: <MarkdownCodeBlock code={codeLines.join('\n').replace(/\n+$/, '')} lang="" blockKey={`indented-code-${blockStart}`} />,
+      });
+      continue;
+    }
+
+    if (trimmed.startsWith('$$')) {
+      const mathLines: string[] = [];
+      const blockStart = index;
+      const firstLine = trimmed.replace(/^\$\$\s*/, '');
+      if (firstLine.endsWith('$$') && firstLine.length > 2) {
+        mathLines.push(firstLine.replace(/\s*\$\$$/, ''));
+        index += 1;
+      } else {
+        if (firstLine) mathLines.push(firstLine);
+        index += 1;
+        while (index < lines.length && !lines[index].trim().endsWith('$$')) {
+          mathLines.push(lines[index]);
+          index += 1;
+        }
+        if (index < lines.length) {
+          const closingLine = lines[index].trim().replace(/\s*\$\$$/, '');
+          if (closingLine) mathLines.push(closingLine);
+          index += 1;
+        }
+      }
+      blocks.push({
+        key: `math-${blockStart}`,
+        startLine: blockStart + 1,
+        endLine: index,
+        content: <MarkdownMath tex={mathLines.join('\n')} display />,
+      });
+      continue;
+    }
+
+    if (
+      index + 1 < lines.length
+      && trimmed
+      && !isMarkdownBlockStart(line)
+      && /^(=+|-+)\s*$/.test(lines[index + 1].trim())
+    ) {
+      const level = lines[index + 1].trim().startsWith('=') ? 1 : 2;
+      const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+      const headingId = getMarkdownHeadingId(trimmed, context);
+      const heading: MarkdownHeadingInfo = { level, text: getMarkdownHeadingDisplayText(trimmed), id: headingId };
+      blocks.push({
+        key: `setext-heading-${index}`,
+        startLine: index + 1,
+        endLine: index + 2,
+        heading,
         content: (
-          <div className="overflow-hidden rounded-lg border border-border/20 bg-surface shadow-sm">
-            {lang && <div className="border-b border-border/15 bg-surface-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">{lang}</div>}
-            <pre className="overflow-auto p-3 text-[11px] leading-relaxed text-foreground"><code>{codeLines.join('\n') || ' '}</code></pre>
-          </div>
+          <Tag id={headingId} className={`scroll-mt-16 font-semibold text-foreground ${level === 1 ? 'mt-1 border-b border-border/20 pb-1.5 text-lg sm:pb-2 sm:text-xl' : 'mt-1 border-b border-border/15 pb-1 text-base sm:pb-1.5 sm:text-lg'}`}>
+            {renderMarkdownInline(trimmed, `setext-heading-${index}`, true, context)}
+          </Tag>
         ),
       });
+      index += 2;
       continue;
     }
 
     const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
+      const headingText = normalizeMarkdownAtxHeadingText(headingMatch[2]);
       const headingClasses: Record<number, string> = {
         1: 'mt-1 border-b border-border/20 pb-1.5 text-lg sm:pb-2 sm:text-xl',
         2: 'mt-1 border-b border-border/15 pb-1 text-base sm:pb-1.5 sm:text-lg',
@@ -236,17 +1497,20 @@ function buildMarkdownPreviewBlocks(lines: string[]): MarkdownPreviewBlock[] {
         6: 'text-[11px] uppercase tracking-wide text-muted-foreground',
       };
       const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+      const headingId = getMarkdownHeadingId(headingText, context);
+      const heading: MarkdownHeadingInfo = { level, text: getMarkdownHeadingDisplayText(headingText), id: headingId };
       blocks.push({
         key: `heading-${index}`,
         startLine: index + 1,
         endLine: index + 1,
-        content: <Tag className={`font-semibold text-foreground ${headingClasses[level]}`}>{renderMarkdownInline(headingMatch[2], `heading-${index}`)}</Tag>,
+        heading,
+        content: <Tag id={headingId} className={`scroll-mt-16 font-semibold text-foreground ${headingClasses[level]}`}>{renderMarkdownInline(headingText, `heading-${index}`, true, context)}</Tag>,
       });
       index += 1;
       continue;
     }
 
-    if (/^([-*_])(?:\s*\1){2,}\s*$/.test(trimmed)) {
+    if (isMarkdownHorizontalRule(line)) {
       blocks.push({
         key: `hr-${index}`,
         startLine: index + 1,
@@ -264,17 +1528,43 @@ function buildMarkdownPreviewBlocks(lines: string[]): MarkdownPreviewBlock[] {
         quoteLines.push(lines[index].trim().replace(/^>\s?/, ''));
         index += 1;
       }
+      const calloutMatch = quoteLines[0]?.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
+      if (calloutMatch) {
+        const label = calloutMatch[1].toUpperCase();
+        const firstLine = calloutMatch[2]?.trim();
+        const bodyLines = [
+          ...(firstLine ? [firstLine] : []),
+          ...quoteLines.slice(1),
+        ];
+        blocks.push({
+          key: `callout-${blockStart}`,
+          startLine: blockStart + 1,
+          endLine: index,
+          content: (
+            <aside className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-muted-foreground">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-primary">{label}</div>
+              {bodyLines.length > 0 && <div>{renderMarkdownInlineLines(bodyLines, `callout-${blockStart}`, context)}</div>}
+            </aside>
+          ),
+        });
+        continue;
+      }
       blocks.push({
         key: `quote-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
-        content: <blockquote className="border-l-2 border-border-strong bg-surface-2/70 py-1.5 pl-2.5 pr-2 text-muted-foreground sm:py-2 sm:pl-3">{renderMarkdownInline(quoteLines.join(' '), `quote-${blockStart}`)}</blockquote>,
+        content: (
+          <blockquote className="space-y-2 border-l-2 border-border-strong bg-surface-2/70 py-1.5 pl-2.5 pr-2 text-muted-foreground sm:py-2 sm:pl-3">
+            {renderMarkdownQuoteBlocks(quoteLines, `quote-${blockStart}`, context)}
+          </blockquote>
+        ),
       });
       continue;
     }
 
     if (index + 1 < lines.length && line.includes('|') && isMarkdownTableSeparator(lines[index + 1])) {
       const header = splitMarkdownTableRow(line);
+      const alignments = parseMarkdownTableAlignments(lines[index + 1]);
       const rows: string[][] = [];
       const blockStart = index;
       index += 2;
@@ -288,14 +1578,14 @@ function buildMarkdownPreviewBlocks(lines: string[]): MarkdownPreviewBlock[] {
         endLine: index,
         content: (
           <div className="overflow-auto rounded-lg border border-border/20 bg-surface">
-            <table className="min-w-full border-collapse text-left text-[11px] sm:text-xs">
+            <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
               <thead className="bg-surface-2 text-foreground">
-                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className="whitespace-nowrap border-b border-r border-border/15 px-2 py-1.5 font-semibold last:border-r-0 sm:px-3 sm:py-2">{renderMarkdownInline(cell, `th-${blockStart}-${cellIndex}`, false)}</th>)}</tr>
+                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(cell, `th-${blockStart}-${cellIndex}`, true, context)}</div></th>)}</tr>
               </thead>
               <tbody>
                 {rows.map((row, rowIndex) => (
                   <tr key={`r-${rowIndex}`} className="border-t border-border/10">
-                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className="whitespace-nowrap border-r border-border/10 px-2 py-1.5 align-top text-muted-foreground last:border-r-0 sm:px-3 sm:py-2">{renderMarkdownInline(row[cellIndex] ?? '', `td-${blockStart}-${rowIndex}-${cellIndex}`, false)}</td>)}
+                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className={`${MARKDOWN_TABLE_BODY_CELL_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(row[cellIndex] ?? '', `td-${blockStart}-${rowIndex}-${cellIndex}`, true, context)}</div></td>)}
                   </tr>
                 ))}
               </tbody>
@@ -306,115 +1596,584 @@ function buildMarkdownPreviewBlocks(lines: string[]): MarkdownPreviewBlock[] {
       continue;
     }
 
-    const listMatch = trimmed.match(/^([-+*]|\d+\.)\s+(.+)$/);
+    const listMatch = parseMarkdownListItemLine(line);
     if (listMatch) {
-      const ordered = /^\d+\.$/.test(listMatch[1]);
-      const items: string[] = [];
+      const ordered = listMatch.ordered;
+      const baseIndent = getMarkdownListIndent(line);
+      const start = listMatch.start;
       const blockStart = index;
-      while (index < lines.length) {
-        const itemMatch = lines[index].trim().match(/^([-+*]|\d+\.)\s+(.+)$/);
-        if (!itemMatch || /^\d+\.$/.test(itemMatch[1]) !== ordered) break;
-        items.push(itemMatch[2]);
-        index += 1;
-      }
+      const parsed = parseMarkdownListBlock(lines, index, baseIndent, ordered, true, footnoteDefinitionLines);
+      index = parsed.nextIndex;
       const ListTag = ordered ? 'ol' : 'ul';
       blocks.push({
         key: `list-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
         content: (
-          <ListTag className={`${ordered ? 'list-decimal' : 'list-disc'} space-y-0.5 pl-4 text-muted-foreground marker:text-muted-foreground/70 sm:space-y-1 sm:pl-5`}>
-            {items.map((item, itemIndex) => {
-              const taskMatch = item.match(/^\[([ xX])\]\s+(.+)$/);
-              return (
-                <li key={`item-${itemIndex}`} className={taskMatch ? 'list-none' : undefined}>
-                  {taskMatch ? <input type="checkbox" checked={taskMatch[1].toLowerCase() === 'x'} readOnly className="mr-2 align-[-2px] accent-primary" /> : null}
-                  {renderMarkdownInline(taskMatch?.[2] ?? item, `li-${blockStart}-${itemIndex}`)}
-                </li>
-              );
-            })}
+          <ListTag start={ordered ? start : undefined} className={`${ordered ? 'list-decimal' : 'list-disc'} space-y-0.5 pl-4 text-muted-foreground marker:text-muted-foreground/70 sm:space-y-1 sm:pl-5`}>
+            {renderMarkdownListItems(parsed.items, blockStart, context)}
           </ListTag>
         ),
       });
       continue;
     }
 
-    const paragraphLines: string[] = [trimmed];
+    const paragraphLines: string[] = [line.trimStart()];
     const blockStart = index;
     index += 1;
     while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
       if (index + 1 < lines.length && lines[index].includes('|') && isMarkdownTableSeparator(lines[index + 1])) break;
-      paragraphLines.push(lines[index].trim());
+      if (parseMarkdownReferenceDefinition(lines[index]) || footnoteDefinitionLines.has(index)) {
+        index += 1;
+        continue;
+      }
+      paragraphLines.push(lines[index].trimStart());
       index += 1;
     }
     blocks.push({
       key: `p-${blockStart}`,
       startLine: blockStart + 1,
       endLine: index,
-      content: <p className="text-muted-foreground">{renderMarkdownInline(paragraphLines.join(' '), `p-${blockStart}`)}</p>,
+      content: <p className="text-muted-foreground">{renderMarkdownInlineLines(paragraphLines, `p-${blockStart}`, context)}</p>,
     });
   }
 
-  return blocks;
+  const footnotes = renderMarkdownFootnotes(context);
+  if (footnotes) {
+    blocks.push({
+      key: 'footnotes',
+      startLine: lines.length,
+      endLine: lines.length,
+      content: footnotes,
+    });
+  }
+
+  return { blocks, images };
+}
+
+export function buildMarkdownPreviewBlocks(lines: string[], markdownFilePath: string | null, rootPath: string | null): MarkdownPreviewBlock[] {
+  return buildMarkdownPreviewRenderResult(lines, markdownFilePath, rootPath).blocks;
+}
+
+interface MarkdownHeadingPathItem extends MarkdownHeadingInfo {
+  startLine: number;
+}
+
+export function getMarkdownHeadingPathAtLine(blocks: MarkdownPreviewBlock[], line: number): MarkdownHeadingPathItem[] {
+  const stack: MarkdownHeadingPathItem[] = [];
+  for (const block of blocks) {
+    if (block.startLine > line) break;
+    if (!block.heading) continue;
+    while (stack.length > 0 && stack[stack.length - 1].level >= block.heading.level) stack.pop();
+    stack.push({ ...block.heading, startLine: block.startLine });
+  }
+  return stack;
+}
+
+export function getMarkdownHeadingOutline(blocks: MarkdownPreviewBlock[]): MarkdownHeadingPathItem[] {
+  return blocks
+    .filter((block): block is MarkdownPreviewBlock & { heading: MarkdownHeadingInfo } => Boolean(block.heading))
+    .map((block) => ({ ...block.heading, startLine: block.startLine }));
 }
 
 interface MarkdownPreviewProps {
   content: string;
+  filePath: string | null;
+  rootPath: string | null;
   lineRange: { start: number; end: number } | null;
   onLineRangeClick: (event: MouseEvent<HTMLElement>, startLine: number, endLine: number) => void;
+  scrollTop: number;
+  outlineOpen: boolean;
+  outlineCloseSignal?: number;
+  onOutlineOpen?: () => void;
+  onOutlineClose?: () => void;
+  lightboxOpen: boolean;
+  lightboxCloseSignal?: number;
+  onLightboxOpen?: () => void;
+  onLightboxClose?: () => void;
 }
 
-function MarkdownPreview({ content, lineRange, onLineRangeClick }: MarkdownPreviewProps) {
-  const blocks = useMemo(() => buildMarkdownPreviewBlocks(content.split('\n')), [content]);
+interface MarkdownImageLightboxProps {
+  images: MarkdownPreviewImage[];
+  index: number;
+  onChange: (index: number) => void;
+  onClose: () => void;
+}
+
+export function MarkdownImageLightbox({ images, index, onChange, onClose }: MarkdownImageLightboxProps) {
+  const active = images[index];
+  const canNavigate = images.length > 1;
+  const swiperRef = useRef<SwiperInstance | null>(null);
+  const lightboxDragRef = useRef<HTMLDivElement | null>(null);
+  const closeTapTimerRef = useRef<number | null>(null);
+  const suppressTapCloseUntilRef = useRef(0);
+  const [imageZoomed, setImageZoomed] = useState(false);
+  const [dragOffsetY, setDragOffsetY] = useState(0);
+  const [dragging, setDragging] = useState(false);
+
+  const clearTapCloseTimer = useCallback(() => {
+    if (closeTapTimerRef.current === null) return;
+    window.clearTimeout(closeTapTimerRef.current);
+    closeTapTimerRef.current = null;
+  }, []);
+
+  const scheduleTapClose = useCallback(() => {
+    if (imageZoomed || Date.now() < suppressTapCloseUntilRef.current) return;
+    clearTapCloseTimer();
+    closeTapTimerRef.current = window.setTimeout(() => {
+      closeTapTimerRef.current = null;
+      onClose();
+    }, 300);
+  }, [clearTapCloseTimer, imageZoomed, onClose]);
+
+  const goTo = useCallback((nextIndex: number) => {
+    if (images.length === 0) return;
+    const normalizedIndex = (nextIndex + images.length) % images.length;
+    swiperRef.current?.slideTo(normalizedIndex);
+    onChange(normalizedIndex);
+  }, [images.length, onChange]);
+
+  const goPrevious = useCallback(() => goTo(index - 1), [goTo, index]);
+  const goNext = useCallback(() => goTo(index + 1), [goTo, index]);
+
+  useEffect(() => {
+    clearTapCloseTimer();
+    setDragOffsetY(0);
+    setDragging(false);
+    setImageZoomed(false);
+  }, [clearTapCloseTimer, index]);
+
+  useEffect(() => {
+    const swiper = swiperRef.current;
+    if (!swiper) return;
+    swiper.allowTouchMove = canNavigate && !imageZoomed;
+  }, [canNavigate, imageZoomed]);
+
+  useEffect(() => {
+    const swiper = swiperRef.current;
+    if (!swiper || swiper.activeIndex === index) return;
+    swiper.slideTo(index, 0);
+  }, [index]);
+
+  useEffect(() => clearTapCloseTimer, [clearTapCloseTimer]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (!canNavigate) return;
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        goPrevious();
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        goNext();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [canNavigate, goNext, goPrevious, onClose]);
+
+  useGesture(
+    {
+      onDrag: ({ movement: [mx, my], pinching }) => {
+        if (pinching || imageZoomed) return;
+        if (Math.abs(my) < Math.abs(mx) * 1.15 && dragOffsetY === 0) return;
+        setDragging(true);
+        if (Math.abs(my) > 8) suppressTapCloseUntilRef.current = Date.now() + 300;
+        setDragOffsetY(Math.max(0, my));
+      },
+      onDragEnd: ({ movement: [, my], velocity: [, vy] }) => {
+        if (imageZoomed) return;
+        setDragging(false);
+        if (Math.abs(my) > 8) suppressTapCloseUntilRef.current = Date.now() + 300;
+        if (shouldCloseMarkdownImageLightboxDrag(my, vy)) {
+          onClose();
+          return;
+        }
+        setDragOffsetY(0);
+      },
+    },
+    {
+      target: lightboxDragRef,
+      drag: {
+        filterTaps: true,
+        pointer: { touch: true },
+      },
+    },
+  );
+
+  if (!active) return null;
+
+  return (
+    <>
+      <div className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-modal-panel flex flex-col bg-background-subtle/95 text-foreground" data-sidebar-gesture-ignore>
+        <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border/20 bg-surface/80 px-3">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium">{active.title || active.alt || 'Image'}</div>
+            <div className="text-[10px] text-muted-foreground">{index + 1} / {images.length}</div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {canNavigate && (
+              <>
+                <button
+                  type="button"
+                  onClick={goPrevious}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                  aria-label="Previous image"
+                  title="Previous"
+                >
+                  <RiArrowLeft size={17} />
+                </button>
+                <button
+                  type="button"
+                  onClick={goNext}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                  aria-label="Next image"
+                  title="Next"
+                >
+                  <RiArrowRight size={17} />
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+              aria-label="Close image preview"
+              title="Close"
+            >
+              <RiCloseLine size={18} />
+            </button>
+          </div>
+        </div>
+        <div
+          ref={lightboxDragRef}
+          className="relative min-h-0 flex-1 overflow-hidden"
+          data-markdown-image-lightbox-stage
+          onClick={scheduleTapClose}
+        >
+          <div
+            className="h-full w-full"
+            style={{
+              transform: `translate3d(0, ${dragOffsetY}px, 0) scale(${Math.max(0.86, 1 - dragOffsetY / 900)})`,
+              opacity: Math.max(0.35, 1 - dragOffsetY / 360),
+              transition: dragging ? 'none' : 'transform 0.2s ease-out, opacity 0.2s ease-out',
+              willChange: 'transform, opacity',
+            }}
+          >
+            <Swiper
+              onSwiper={(instance) => {
+                swiperRef.current = instance;
+                instance.allowTouchMove = canNavigate && !imageZoomed;
+              }}
+              onSlideChange={(instance) => {
+                if (instance.activeIndex !== index) onChange(instance.activeIndex);
+              }}
+              initialSlide={index}
+              speed={260}
+              slidesPerView={1}
+              resistanceRatio={0.82}
+              threshold={6}
+              longSwipesRatio={0.2}
+              touchAngle={45}
+              touchStartPreventDefault={false}
+              simulateTouch={false}
+              className="h-full"
+            >
+              {images.map((image) => (
+                <SwiperSlide key={`${image.src}-${image.alt}`} className="h-full">
+                  <div className="h-full w-full px-3 py-4 sm:px-6 sm:py-6">
+                    <ZoomableImage
+                      src={image.src}
+                      alt={image.alt || image.title || 'Markdown image'}
+                      onLoad={() => undefined}
+                      onError={() => undefined}
+                      onZoomChange={setImageZoomed}
+                      onDoubleTap={clearTapCloseTimer}
+                    />
+                  </div>
+                </SwiperSlide>
+              ))}
+            </Swiper>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function MarkdownPreview({
+  content,
+  filePath,
+  rootPath,
+  lineRange,
+  onLineRangeClick,
+  scrollTop,
+  outlineOpen,
+  outlineCloseSignal,
+  onOutlineOpen,
+  onOutlineClose,
+  lightboxOpen,
+  lightboxCloseSignal,
+  onLightboxOpen,
+  onLightboxClose,
+}: MarkdownPreviewProps) {
+  const { t } = useI18n();
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [activeHeadingLine, setActiveHeadingLine] = useState<number>(1);
+  const [outlineDesktopPos, setOutlineDesktopPos] = useState<{ top: number; right: number } | null>(null);
+  const previewRootRef = useRef<HTMLDivElement | null>(null);
+  const outlineToggleRef = useRef<HTMLButtonElement | null>(null);
+  const { blocks, images } = useMemo(
+    () => buildMarkdownPreviewRenderResult(content.split('\n'), filePath, rootPath, (index) => {
+      setLightboxIndex(index);
+      onLightboxOpen?.();
+    }),
+    [content, filePath, rootPath, onLightboxOpen],
+  );
+
+  useEffect(() => {
+    setLightboxIndex(null);
+  }, [content, filePath]);
+
+  useEffect(() => {
+    setLightboxIndex(null);
+  }, [lightboxCloseSignal]);
+
+  useEffect(() => {
+    if (!lightboxOpen) setLightboxIndex(null);
+  }, [lightboxOpen]);
+
+  useEffect(() => {
+    setActiveHeadingLine(1);
+  }, [content, filePath]);
+
+  useLayoutEffect(() => {
+    const root = previewRootRef.current;
+    if (!root || blocks.length === 0) return;
+    const blockNodes = Array.from(root.querySelectorAll<HTMLElement>('[data-markdown-preview-block-start]'));
+    let nextLine = 1;
+    const threshold = 28;
+    for (const node of blockNodes) {
+      if (node.offsetTop - scrollTop <= threshold) {
+        nextLine = Number(node.dataset.markdownPreviewBlockStart) || nextLine;
+      } else {
+        break;
+      }
+    }
+    setActiveHeadingLine((current) => current === nextLine ? current : nextLine);
+  }, [blocks, scrollTop]);
+
+  const activeHeadingPath = useMemo(() => getMarkdownHeadingPathAtLine(blocks, activeHeadingLine), [activeHeadingLine, blocks]);
+  const headingOutline = useMemo(() => getMarkdownHeadingOutline(blocks), [blocks]);
+  const outlineResetKey = `${filePath ?? ''}\n${content}`;
+  const lastOutlineResetKeyRef = useRef(outlineResetKey);
+
+  useEffect(() => {
+    if (lastOutlineResetKeyRef.current === outlineResetKey) return;
+    lastOutlineResetKeyRef.current = outlineResetKey;
+    onOutlineClose?.();
+  }, [onOutlineClose, outlineResetKey]);
+
+  useEffect(() => {
+    if (outlineCloseSignal !== undefined) setOutlineDesktopPos(null);
+  }, [outlineCloseSignal]);
+
+  useLayoutEffect(() => {
+    if (!outlineOpen) {
+      setOutlineDesktopPos(null);
+      return;
+    }
+    const computePosition = () => {
+      const button = outlineToggleRef.current;
+      if (!button) return;
+      const rect = button.getBoundingClientRect();
+      const viewportWidth = window.innerWidth;
+      setOutlineDesktopPos({
+        top: rect.bottom + 6,
+        right: Math.max(8, viewportWidth - rect.right),
+      });
+    };
+    computePosition();
+    window.addEventListener('resize', computePosition);
+    window.addEventListener('scroll', computePosition, true);
+    return () => {
+      window.removeEventListener('resize', computePosition);
+      window.removeEventListener('scroll', computePosition, true);
+    };
+  }, [outlineOpen, scrollTop, activeHeadingPath]);
+
+
+  const jumpToHeading = useCallback((heading: MarkdownHeadingPathItem) => {
+    const root = previewRootRef.current;
+    const scroller = root?.closest('[data-markdown-preview-scroller]') as HTMLDivElement | null;
+    const target = root?.querySelector<HTMLElement>(`[data-markdown-preview-block-start="${heading.startLine}"]`);
+    if (!scroller || !target) return;
+    const scrollerRect = scroller.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const stickyHeader = root?.querySelector<HTMLElement>('[data-markdown-heading-sticky]');
+    const stickyHeaderHeight = stickyHeader?.getBoundingClientRect().height ?? 0;
+    const targetTop = targetRect.top - scrollerRect.top + scroller.scrollTop;
+    scroller.scrollTo({ top: Math.max(0, targetTop - stickyHeaderHeight - 8), behavior: 'smooth' });
+    setActiveHeadingLine(heading.startLine);
+    onOutlineClose?.();
+  }, [onOutlineClose]);
 
   if (blocks.length === 0) {
     return <div className="min-w-0 max-w-full px-4 py-4 text-sm leading-6 text-foreground"><p className="text-muted-foreground">Empty file.</p></div>;
   }
 
   return (
-    <div className="min-w-0 max-w-full space-y-1.5 overflow-x-hidden break-words px-1.5 py-3 text-[13px] leading-5 text-foreground sm:space-y-2 sm:px-2 sm:py-4 sm:text-sm sm:leading-6">
-      {blocks.map((block) => {
-        const selected = Boolean(lineRange && block.startLine <= lineRange.end && block.endLine >= lineRange.start);
-        const lineLabel = block.startLine === block.endLine ? String(block.startLine) : `${block.startLine}-${block.endLine}`;
-        return (
-          <div
-            role="button"
-            tabIndex={0}
-            key={block.key}
-            onClick={(event) => {
-              const target = event.target;
-              if (target instanceof HTMLElement && target.closest('a, button, input, textarea, select, label')) return;
-              onLineRangeClick(event, block.startLine, block.endLine);
-            }}
-            onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
-              if (event.key !== 'Enter' && event.key !== ' ') return;
-              event.preventDefault();
-              onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, block.startLine, block.endLine);
-            }}
-            className={`group grid w-full cursor-pointer grid-cols-[0.625rem_1fr] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition active:scale-[0.998] sm:grid-cols-[0.875rem_1fr] sm:gap-2 sm:pr-2 ${selected ? 'bg-[var(--surface-2)]' : 'hover:bg-[var(--surface-2)]'}`}
-            title={`Reference line ${lineLabel}`}
-            aria-label={`Reference line ${lineLabel}`}
-          >
-            <span
-              className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)] group-hover:bg-[var(--surface-elevated)]'}`}
-              aria-hidden="true"
-            >
-              <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)] group-hover:bg-[var(--muted-foreground)]'}`} />
-            </span>
-            <div className="min-w-0">{block.content}</div>
+    <>
+      <div ref={previewRootRef} className="relative min-w-0 max-w-full">
+        {activeHeadingPath.length > 0 && (
+          <div className="sticky top-0 z-popover border-b border-border/15 bg-surface px-2 py-1 shadow-sm sm:px-3" data-markdown-heading-sticky>
+            <div className="flex min-w-0 items-center gap-2 overflow-hidden" title={activeHeadingPath.map((heading) => heading.text).join(' / ')}>
+              <span className="h-4 w-0.5 shrink-0 rounded-full bg-primary/70" aria-hidden="true" />
+              <span className="min-w-0 flex-1 truncate text-[12px] font-semibold leading-5 text-foreground sm:text-[13px]" data-markdown-heading-current>
+                {activeHeadingPath[activeHeadingPath.length - 1].text}
+              </span>
+              {headingOutline.length > 1 && (
+                <button
+                  ref={outlineToggleRef}
+                  type="button"
+                  onClick={() => {
+                    if (outlineOpen) onOutlineClose?.();
+                    else onOutlineOpen?.();
+                  }}
+                  className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] font-medium transition active:scale-95 ${outlineOpen ? 'bg-surface-2 text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
+                  aria-expanded={outlineOpen}
+                  aria-label={t('rightSidebar.markdownOutline')}
+                  title={t('rightSidebar.markdownOutline')}
+                >
+                  <RiListTree size={12} />
+                  <span>{t('rightSidebar.markdownOutlineShort')}</span>
+                </button>
+              )}
+            </div>
           </div>
-        );
-      })}
-    </div>
+        )}
+        {outlineOpen && (
+          <>
+            <div className="fixed inset-0 z-drawer-backdrop bg-[rgb(var(--background-rgb)_/_0.18)] sm:hidden" onClick={onOutlineClose} />
+            <div
+              className="hidden fixed z-popover w-80 max-w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border/20 bg-surface p-2 shadow-xl sm:block"
+              style={outlineDesktopPos ? { top: `${outlineDesktopPos.top}px`, right: `${outlineDesktopPos.right}px` } : { top: -9999, right: -9999 }}
+              data-markdown-heading-outline-desktop
+            >
+              <div className="max-h-72 overflow-auto pr-1">
+                {headingOutline.map((heading) => {
+                  const active = activeHeadingPath[activeHeadingPath.length - 1]?.startLine === heading.startLine;
+                  return (
+                    <button
+                      key={`desktop-${heading.id}-${heading.startLine}`}
+                      type="button"
+                      onClick={() => jumpToHeading(heading)}
+                      className={`flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left transition active:scale-[0.995] ${active ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
+                      style={{ paddingLeft: `${Math.min(heading.level - 1, 4) * 12 + 8}px` }}
+                      title={heading.text}
+                    >
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${active ? 'bg-primary' : 'bg-border-strong/70'}`} aria-hidden="true" />
+                      <span className="w-5 shrink-0 font-mono text-[9px] text-muted-foreground/70">H{heading.level}</span>
+                      <span className="min-w-0 flex-1 truncate text-[12px]">{heading.text}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div
+              className="fixed inset-x-0 bottom-0 z-drawer-panel max-h-[min(74vh,34rem)] rounded-t-xl border border-border/20 bg-surface p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] shadow-[0_-18px_48px_var(--app-shadow-strong)] sm:hidden"
+              data-markdown-heading-outline-mobile
+            >
+              <div className="mb-1 flex items-center justify-between gap-2 px-1.5 py-1 sm:hidden">
+                <div className="text-[12px] font-semibold text-foreground">{t('rightSidebar.markdownOutlineShort')}</div>
+                <button
+                  type="button"
+                  onClick={onOutlineClose}
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                  aria-label={t('rightSidebar.closeMarkdownOutline')}
+                  title={t('common.close')}
+                >
+                  <RiCloseLine size={14} />
+                </button>
+              </div>
+              <div className="max-h-[calc(min(74vh,34rem)-3.25rem-env(safe-area-inset-bottom,0px))] overflow-auto overscroll-contain pr-1 sm:max-h-72">
+                {headingOutline.map((heading) => {
+                  const active = activeHeadingPath[activeHeadingPath.length - 1]?.startLine === heading.startLine;
+                  return (
+                    <button
+                      key={`${heading.id}-${heading.startLine}`}
+                      type="button"
+                      onClick={() => jumpToHeading(heading)}
+                      className={`flex min-h-10 w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left transition active:scale-[0.995] ${active ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
+                      style={{ paddingLeft: `${Math.min(heading.level - 1, 4) * 12 + 8}px` }}
+                      title={heading.text}
+                    >
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${active ? 'bg-primary' : 'bg-border-strong/70'}`} aria-hidden="true" />
+                      <span className="w-5 shrink-0 font-mono text-[9px] text-muted-foreground/70">H{heading.level}</span>
+                      <span className="min-w-0 flex-1 truncate text-[12px]">{heading.text}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </>
+        )}
+        <div className="min-w-0 max-w-full space-y-1.5 overflow-x-hidden break-words px-1.5 py-3 text-[13px] leading-5 text-foreground sm:space-y-2 sm:px-2 sm:py-4 sm:text-sm sm:leading-6">
+        {blocks.map((block) => {
+          const selected = Boolean(lineRange && block.startLine <= lineRange.end && block.endLine >= lineRange.start);
+          const lineLabel = block.startLine === block.endLine ? String(block.startLine) : `${block.startLine}-${block.endLine}`;
+          return (
+            <div
+              role="button"
+              tabIndex={0}
+              key={block.key}
+              data-markdown-preview-block-start={block.startLine}
+              onClick={(event) => {
+                const target = event.target;
+                if (target instanceof HTMLElement && target.closest('a, button, input, textarea, select, label')) return;
+                onLineRangeClick(event, block.startLine, block.endLine);
+              }}
+              onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, block.startLine, block.endLine);
+              }}
+              className={`group grid w-full cursor-pointer grid-cols-[0.625rem_1fr] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition active:scale-[0.998] sm:grid-cols-[0.875rem_1fr] sm:gap-2 sm:pr-2 ${selected ? 'bg-[var(--surface-2)]' : 'hover:bg-[var(--surface-2)]'}`}
+              title={`Reference line ${lineLabel}`}
+              aria-label={`Reference line ${lineLabel}`}
+            >
+              <span
+                className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)] group-hover:bg-[var(--surface-elevated)]'}`}
+                aria-hidden="true"
+              >
+                <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)] group-hover:bg-[var(--muted-foreground)]'}`} />
+              </span>
+              <div className="min-w-0">{block.content}</div>
+            </div>
+          );
+        })}
+        </div>
+      </div>
+      {lightboxOpen && lightboxIndex !== null && images[lightboxIndex] && (
+        <MarkdownImageLightbox
+          images={images}
+          index={lightboxIndex}
+          onChange={setLightboxIndex}
+          onClose={() => {
+            setLightboxIndex(null);
+            onLightboxClose?.();
+          }}
+        />
+      )}
+    </>
   );
 }
-
-interface RecentReference {
-  path: string;
-  label: string;
-}
-
-type RecentReferenceCache = Record<string, RecentReference[]>;
 
 interface GitPickerOption {
   value: string;
@@ -435,6 +2194,14 @@ interface GitTargetPickerProps {
 
 interface FileTreeScrollEntry {
   top: number;
+  updatedAt: number;
+}
+
+interface FilePreviewReadingStateEntry {
+  top: number;
+  left?: number;
+  markdownTop?: number;
+  lineRange?: { start: number; end: number } | null;
   updatedAt: number;
 }
 
@@ -543,6 +2310,64 @@ function writeFileTreeScrollPosition(rootPath: string, top: number): void {
   writeCacheThrottled(FILE_TREE_SCROLL_STORAGE_KEY, Object.fromEntries(nextEntries), FILE_TREE_SCROLL_WRITE_MS);
 }
 
+type FilePreviewReadingStateCache = Record<string, FilePreviewReadingStateEntry>;
+
+function isLineRange(value: unknown): value is { start: number; end: number } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const maybeRange = value as { start?: unknown; end?: unknown };
+  return (
+    typeof maybeRange.start === 'number' &&
+    Number.isFinite(maybeRange.start) &&
+    typeof maybeRange.end === 'number' &&
+    Number.isFinite(maybeRange.end) &&
+    maybeRange.start >= 1 &&
+    maybeRange.end >= maybeRange.start
+  );
+}
+
+function isFilePreviewReadingStateCache(value: unknown): value is FilePreviewReadingStateCache {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    const maybeEntry = entry as Partial<FilePreviewReadingStateEntry>;
+    if (typeof maybeEntry.top !== 'number' || !Number.isFinite(maybeEntry.top)) return false;
+    if (maybeEntry.left !== undefined && (typeof maybeEntry.left !== 'number' || !Number.isFinite(maybeEntry.left))) return false;
+    if (maybeEntry.markdownTop !== undefined && (typeof maybeEntry.markdownTop !== 'number' || !Number.isFinite(maybeEntry.markdownTop))) return false;
+    if (maybeEntry.lineRange !== undefined && maybeEntry.lineRange !== null && !isLineRange(maybeEntry.lineRange)) return false;
+    if (typeof maybeEntry.updatedAt !== 'number' || !Number.isFinite(maybeEntry.updatedAt)) return false;
+  }
+  return true;
+}
+
+function getFilePreviewReadingStateKey(rootPath: string | null, filePath: string | null): string | null {
+  if (!filePath) return null;
+  const absolutePath = rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
+  return rootPath ? `${rootPath}::${absolutePath}` : absolutePath;
+}
+
+function readFilePreviewReadingStateCache(): FilePreviewReadingStateCache {
+  return readCache(FILE_PREVIEW_READING_STATE_STORAGE_KEY, isFilePreviewReadingStateCache) ?? {};
+}
+
+function readFilePreviewReadingState(rootPath: string | null, filePath: string | null): FilePreviewReadingStateEntry | null {
+  const key = getFilePreviewReadingStateKey(rootPath, filePath);
+  return key ? (readFilePreviewReadingStateCache()[key] ?? null) : null;
+}
+
+function writeFilePreviewReadingState(rootPath: string | null, filePath: string | null, patch: Partial<FilePreviewReadingStateEntry>): void {
+  const key = getFilePreviewReadingStateKey(rootPath, filePath);
+  if (!key) return;
+  const cache = readFilePreviewReadingStateCache();
+  const current = cache[key] ?? { top: 0, left: 0, markdownTop: 0, lineRange: null, updatedAt: Date.now() };
+  const nextEntries = Object.entries({
+    ...cache,
+    [key]: { ...current, ...patch, updatedAt: Date.now() },
+  })
+    .sort(([, a], [, b]) => b.updatedAt - a.updatedAt)
+    .slice(0, MAX_FILE_PREVIEW_READING_STATE_FILES);
+  writeCacheThrottled(FILE_PREVIEW_READING_STATE_STORAGE_KEY, Object.fromEntries(nextEntries), FILE_PREVIEW_READING_STATE_WRITE_MS);
+}
+
 function Pane({ active, mounted = true, children }: { active: boolean; mounted?: boolean; children: ReactNode }) {
   return (
     <div className={`h-full min-h-0 overflow-hidden bg-surface text-foreground ${active ? 'block' : 'hidden'}`} aria-hidden={!active}>
@@ -587,59 +2412,6 @@ function GitChangesRefreshingBanner() {
       <span>{t('rightSidebar.refreshingGitChanges')}</span>
     </div>
   );
-}
-
-function isRecentReference(value: unknown): value is RecentReference {
-  return (
-    value !== null &&
-    typeof value === 'object' &&
-    typeof (value as RecentReference).path === 'string' &&
-    typeof (value as RecentReference).label === 'string'
-  );
-}
-
-function sanitizeRecentReferences(value: unknown): RecentReference[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter(isRecentReference).slice(0, MAX_RECENT_REFERENCES);
-}
-
-function getRecentReferencesProjectKey(rootPath: string | null): string | null {
-  return rootPath || null;
-}
-
-function loadRecentReferences(rootPath: string | null): RecentReference[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const projectKey = getRecentReferencesProjectKey(rootPath);
-    if (!projectKey) return [];
-    const raw = window.localStorage.getItem(RECENT_REFERENCES_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    // v1 stored one shared array. Keep it visible for the current project once,
-    // then subsequent writes will migrate the key to a project-scoped object.
-    if (Array.isArray(parsed)) return sanitizeRecentReferences(parsed);
-    if (!parsed || typeof parsed !== 'object') return [];
-    return sanitizeRecentReferences((parsed as RecentReferenceCache)[projectKey]);
-  } catch {
-    return [];
-  }
-}
-
-function writeRecentReferences(rootPath: string | null, recentReferences: RecentReference[]): void {
-  if (typeof window === 'undefined') return;
-  const projectKey = getRecentReferencesProjectKey(rootPath);
-  if (!projectKey) return;
-  try {
-    const raw = window.localStorage.getItem(RECENT_REFERENCES_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) as unknown : null;
-    const cache: RecentReferenceCache = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? { ...(parsed as RecentReferenceCache) }
-      : {};
-    cache[projectKey] = recentReferences.slice(0, MAX_RECENT_REFERENCES);
-    window.localStorage.setItem(RECENT_REFERENCES_STORAGE_KEY, JSON.stringify(cache));
-  } catch {
-    // localStorage may be full/disabled; references are a convenience cache.
-  }
 }
 
 function getRelativeDisplayPath(path: string, rootPath: string | null): { name: string; dir: string } {
@@ -762,15 +2534,18 @@ interface ZoomableImageProps {
   alt: string;
   onLoad: (event: React.SyntheticEvent<HTMLImageElement>) => void;
   onError: () => void;
+  onZoomChange?: (zoomed: boolean) => void;
+  onDoubleTap?: () => void;
 }
 
 // Pinch-to-zoom image viewer. Supports touch pinch (mobile), trackpad pinch and
 // ctrl/⌘ + wheel (desktop), and double-tap / double-click to toggle zoom. The
 // container carries `data-sidebar-gesture-ignore` so the drawer's swipe-to-close
 // gesture never hijacks a pan while the image is zoomed in.
-function ZoomableImage({ src, alt, onLoad, onError }: ZoomableImageProps) {
+function ZoomableImage({ src, alt, onLoad, onError, onZoomChange, onDoubleTap }: ZoomableImageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
+  const [animateTransform, setAnimateTransform] = useState(false);
   const transformRef = useRef(transform);
   transformRef.current = transform;
 
@@ -812,16 +2587,19 @@ function ZoomableImage({ src, alt, onLoad, onError }: ZoomableImageProps) {
   }, [clampOffset]);
 
   const toggleZoom = useCallback((originX?: number, originY?: number) => {
+    setAnimateTransform(true);
     if (transformRef.current.scale > 1) {
       setTransform({ scale: 1, x: 0, y: 0 });
     } else {
       applyZoom(2.5, originX, originY);
     }
+    window.setTimeout(() => setAnimateTransform(false), 220);
   }, [applyZoom]);
 
   useGesture(
     {
       onPinch: ({ offset: [scale], origin: [ox, oy] }) => {
+        setAnimateTransform(false);
         applyZoom(scale, ox, oy);
       },
       onDrag: ({ offset: [x, y], pinching, cancel }) => {
@@ -830,6 +2608,7 @@ function ZoomableImage({ src, alt, onLoad, onError }: ZoomableImageProps) {
           return;
         }
         if (transformRef.current.scale <= 1) return;
+        setAnimateTransform(false);
         setTransform((prev) => ({ ...prev, ...clampOffset(prev.scale, x, y) }));
       },
       onWheel: ({ event, delta: [, dy], ctrlKey }) => {
@@ -838,6 +2617,7 @@ function ZoomableImage({ src, alt, onLoad, onError }: ZoomableImageProps) {
         // scroll the page when the image isn't zoomed.
         if (!ctrlKey) return;
         event.preventDefault();
+        setAnimateTransform(false);
         applyZoom(transformRef.current.scale * (1 - dy * 0.01), event.clientX, event.clientY);
       },
     },
@@ -859,13 +2639,21 @@ function ZoomableImage({ src, alt, onLoad, onError }: ZoomableImageProps) {
 
   const zoomed = transform.scale > 1;
 
+  useEffect(() => {
+    onZoomChange?.(zoomed);
+  }, [onZoomChange, zoomed]);
+
   return (
     <div
       ref={containerRef}
       data-sidebar-gesture-ignore
       className="flex h-full w-full touch-none select-none items-center justify-center overflow-hidden"
       style={{ cursor: zoomed ? 'grab' : 'zoom-in' }}
-      onDoubleClick={(event) => toggleZoom(event.clientX, event.clientY)}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        onDoubleTap?.();
+        toggleZoom(event.clientX, event.clientY);
+      }}
     >
       <img
         src={src}
@@ -875,7 +2663,7 @@ function ZoomableImage({ src, alt, onLoad, onError }: ZoomableImageProps) {
         style={{
           transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
           transformOrigin: 'center center',
-          transition: zoomed ? 'none' : 'transform 0.18s ease-out',
+          transition: animateTransform ? 'transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none',
           willChange: 'transform',
         }}
         onLoad={onLoad}
@@ -888,9 +2676,18 @@ function ZoomableImage({ src, alt, onLoad, onError }: ZoomableImageProps) {
 interface FilePreviewProps {
   filePath: string | null;
   onInsertReference: (path: string, key?: string) => void;
+  onInsertText: (text: string, key: string) => void;
   onReferenceCopied: (key: string) => void;
   onClose?: () => void;
   isMobile: boolean;
+  markdownOutlineOpen: boolean;
+  markdownOutlineCloseSignal?: number;
+  onOpenMarkdownOutline?: () => void;
+  onCloseMarkdownOutline?: () => void;
+  markdownImageLightboxOpen: boolean;
+  markdownImageLightboxCloseSignal?: number;
+  onOpenMarkdownImageLightbox?: () => void;
+  onCloseMarkdownImageLightbox?: () => void;
   lineRange: { start: number; end: number } | null;
   onLineRangeChange: Dispatch<SetStateAction<{ start: number; end: number } | null>>;
   insertedReferenceKey: string | null;
@@ -906,7 +2703,28 @@ type FilePreviewState =
   | { kind: 'image'; objectUrl: string; meta: { size: number | null; mimeType: string; modified: string | null }; dimensions?: { width: number; height: number } }
   | { kind: 'error'; message: string };
 
-function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, isMobile, lineRange, onLineRangeChange, insertedReferenceKey, copiedReferenceKey, scrollToLine, onScrollToLineHandled }: FilePreviewProps) {
+function FilePreview({
+  filePath,
+  onInsertReference,
+  onInsertText,
+  onReferenceCopied,
+  onClose,
+  isMobile,
+  markdownOutlineOpen,
+  markdownOutlineCloseSignal,
+  onOpenMarkdownOutline,
+  onCloseMarkdownOutline,
+  markdownImageLightboxOpen,
+  markdownImageLightboxCloseSignal,
+  onOpenMarkdownImageLightbox,
+  onCloseMarkdownImageLightbox,
+  lineRange,
+  onLineRangeChange,
+  insertedReferenceKey,
+  copiedReferenceKey,
+  scrollToLine,
+  onScrollToLineHandled,
+}: FilePreviewProps) {
   const { t } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
@@ -917,11 +2735,14 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
   const [floatingInsertPos, setFloatingInsertPos] = useState<{ top: number; left: number } | null>(null);
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>(() => readMarkdownViewMode());
   const [refractor, setRefractor] = useState<RefractorLike | null>(null);
+  const [markdownPreviewScrollTop, setMarkdownPreviewScrollTop] = useState(0);
   // Per-line highlighted React nodes, keyed implicitly by the current text
   // content. `null` means "render plain text" (unknown language, too large, or
   // refractor not loaded yet).
   const [highlightedLines, setHighlightedLines] = useState<ReactNode[][] | null>(null);
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
+
+  const readingStateKey = getFilePreviewReadingStateKey(rootPath, filePath);
 
   // 把仓库相对路径解析成绝对路径，用作 watcher / version map 的查询 key。
   const versionedPath = filePath
@@ -938,6 +2759,7 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
   // 用于区分"切到新文件"和"同一个文件外部变更"。前者要重置 UI（loading 占位、
   // 清行选区、重置 markdown 视图模式），后者保留滚动位置与用户选择。
   const lastFullPathRef = useRef<string | null>(null);
+  const restoredReadingStateKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!filePath) {
@@ -956,7 +2778,9 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
 
     if (isPathChange) {
       setPreviewState({ kind: 'loading', mode: isImage ? 'image' : 'text' });
-      onLineRangeChange(null);
+      restoredReadingStateKeyRef.current = null;
+      const savedReadingState = readFilePreviewReadingState(rootPath, filePath);
+      onLineRangeChange(savedReadingState?.lineRange ?? null);
       setMarkdownViewMode(isMarkdown ? readMarkdownViewMode() : 'source');
     }
 
@@ -1035,6 +2859,33 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
 
     return () => { cancelled = true; };
   }, [previewState, refractor, filePath, rootPath, markdownViewMode]);
+
+  useLayoutEffect(() => {
+    if (!readingStateKey || previewState.kind !== 'text') return;
+    const restoreKey = `${readingStateKey}:${markdownViewMode}`;
+    if (restoredReadingStateKeyRef.current === restoreKey) return;
+    const savedReadingState = readFilePreviewReadingState(rootPath, filePath);
+    restoredReadingStateKeyRef.current = restoreKey;
+    if (!savedReadingState) return;
+    const frame = requestAnimationFrame(() => {
+      const scroller = scrollerRef.current;
+      if (!scroller) return;
+      const top = markdownViewMode === 'preview'
+        ? savedReadingState.markdownTop ?? savedReadingState.top
+        : savedReadingState.top;
+      scroller.scrollTo({
+        top: Math.max(0, top ?? 0),
+        left: Math.max(0, savedReadingState.left ?? 0),
+      });
+      setMarkdownPreviewScrollTop(markdownViewMode === 'preview' ? Math.max(0, top ?? 0) : 0);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [filePath, markdownViewMode, previewState.kind, readingStateKey, rootPath]);
+
+  useEffect(() => {
+    if (!readingStateKey) return;
+    writeFilePreviewReadingState(rootPath, filePath, { lineRange });
+  }, [filePath, lineRange, readingStateKey, rootPath]);
 
   // After a content-search jump, highlight and scroll to the requested line
   // once the file's text has actually rendered. We clear the request via the
@@ -1154,9 +3005,40 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
     });
   };
 
+  const handleMarkdownPreviewScroll = (event: UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollLeft } = event.currentTarget;
+    setMarkdownPreviewScrollTop(scrollTop);
+    writeFilePreviewReadingState(rootPath, filePath, {
+      top: scrollTop,
+      left: scrollLeft,
+      markdownTop: scrollTop,
+    });
+  };
+
+  const handleSourcePreviewScroll = (event: UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollLeft } = event.currentTarget;
+    writeFilePreviewReadingState(rootPath, filePath, {
+      top: scrollTop,
+      left: scrollLeft,
+    });
+  };
+
   const insertRangeReference = () => {
     if (!lineRange) return;
     const suffix = lineRange.start === lineRange.end ? `${lineRange.start}` : `${lineRange.start}-${lineRange.end}`;
+    const reference = `${buildPromptReference(readablePath, rootPath)}:${suffix}`;
+    if (previewState.kind === 'text' && lines.length > 0) {
+      const selected: string[] = [];
+      for (let n = lineRange.start; n <= lineRange.end; n += 1) {
+        const content = lines[n - 1] ?? '';
+        selected.push(`${n} ${content}`);
+      }
+      const lang = getFileExtension(readablePath).replace(/^\./, '');
+      const fence = '```';
+      const text = `${reference}\n${fence}${lang}\n${selected.join('\n')}\n${fence}\n`;
+      onInsertText(text, lineReferenceKey);
+      return;
+    }
     onInsertReference(`${readablePath}:${suffix}`, lineReferenceKey);
   };
 
@@ -1165,22 +3047,22 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
     // is `min-h-0 flex-1` so the bottom action bar can stick to the visible
     // bottom regardless of file length.
     <div className="flex h-full min-h-0 flex-col bg-surface text-foreground">
-      <div className="shrink-0 border-b border-border/15 px-3 py-2">
+      <div className={`shrink-0 border-b border-border/15 px-3 ${isMobile && showMarkdownPreview ? 'py-1.5' : 'py-2'}`}>
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
             {isMobile && onClose && (
               <button
                 type="button"
                 onClick={onClose}
-                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
                 aria-label={t('rightSidebar.backToFileList')}
                 title={t('common.back')}
               >
-                <RiArrowLeft size={14} />
+                <RiArrowLeft size={15} />
               </button>
             )}
             <div className="min-w-0" title={readablePath}>
-              <div className="truncate text-sm font-medium text-foreground">{display.name}</div>
+              <div className={`${isMobile ? 'max-w-[46vw]' : ''} truncate text-sm font-medium text-foreground`}>{display.name}</div>
               {display.dir && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{display.dir}</div>}
             </div>
           </div>
@@ -1189,6 +3071,7 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
               <button
                 type="button"
                 onClick={() => {
+                  if (markdownOutlineOpen) onCloseMarkdownOutline?.();
                   setMarkdownViewMode((mode) => {
                     const next = mode === 'preview' ? 'source' : 'preview';
                     writeCache(MARKDOWN_VIEW_MODE_STORAGE_KEY, next);
@@ -1196,7 +3079,7 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
                   });
                   onLineRangeChange(null);
                 }}
-                className="inline-flex h-9 items-center gap-1 rounded-full bg-surface-2 px-3 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                className="inline-flex h-9 items-center gap-1 rounded-full bg-surface-2 px-2.5 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 sm:px-3"
                 title={markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
               >
                 {markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
@@ -1228,7 +3111,7 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
             </button>
           </div>
         </div>
-        {meta && (
+        {meta && !(isMobile && showMarkdownPreview) && (
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
             {meta.size !== null && <span>{meta.size.toLocaleString()} bytes</span>}
             {'truncated' in meta && meta.truncated && <span className="text-[color:var(--warning)]">preview truncated to 1MB</span>}
@@ -1238,7 +3121,7 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
         )}
         {/* Hint row — fixed height so toggling line range doesn't shift the
             file content below. */}
-        <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
+        {!(isMobile && showMarkdownPreview) && <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
           <span className="truncate">
             {isImagePreview
               ? t('rightSidebar.imagePreviewHint')
@@ -1248,7 +3131,7 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
                 ? t('rightSidebar.selectedLineHint', { lineLabel: selectedLineLabel ?? '' })
                 : t('rightSidebar.multiLineHint')}
           </span>
-        </div>
+        </div>}
       </div>
       {previewState.kind === 'loading' ? (
         <div className="min-h-0 flex-1 overflow-auto px-3 py-8 text-center text-sm text-muted-foreground">
@@ -1279,12 +3162,25 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
           ref={scrollerRef}
           className="relative min-h-0 flex-1 overflow-auto bg-surface"
           data-sidebar-gesture-ignore
+          data-markdown-preview-scroller
+          onScroll={handleMarkdownPreviewScroll}
           style={{ touchAction: 'pan-x pan-y' }}
         >
           <MarkdownPreview
             content={previewState.content}
+            filePath={readablePath}
+            rootPath={rootPath}
             lineRange={lineRange}
             onLineRangeClick={handlePreviewLineRangeClick}
+            scrollTop={markdownPreviewScrollTop}
+            outlineOpen={markdownOutlineOpen}
+            outlineCloseSignal={markdownOutlineCloseSignal}
+            onOutlineOpen={onOpenMarkdownOutline}
+            onOutlineClose={onCloseMarkdownOutline}
+            lightboxOpen={markdownImageLightboxOpen}
+            lightboxCloseSignal={markdownImageLightboxCloseSignal}
+            onLightboxOpen={onOpenMarkdownImageLightbox}
+            onLightboxClose={onCloseMarkdownImageLightbox}
           />
           {!isMobile && lineRange && floatingInsertPos && (
             <button
@@ -1301,7 +3197,7 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
           )}
         </div>
       ) : previewState.kind === 'text' ? (
-        <div ref={scrollerRef} className="termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-surface p-2 font-mono text-[11px] leading-relaxed text-foreground">
+        <div ref={scrollerRef} onScroll={handleSourcePreviewScroll} className="termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-surface p-2 font-mono text-[11px] leading-relaxed text-foreground">
           {lines.length > 0 ? (
             <div className="min-w-full">
               {lines.map((line, index) => {
@@ -1396,7 +3292,25 @@ function FilePreview({ filePath, onInsertReference, onReferenceCopied, onClose, 
 }
 
 export function RightSidebar(
-  { isOpen, drawerWidthPx, onClose, onOpen, push }: RightSidebarProps,
+  {
+    isOpen,
+    drawerWidthPx,
+    onClose,
+    onOpen,
+    push,
+    rightSidebarFilePreviewOpen = false,
+    rightSidebarFilePreviewCloseSignal,
+    onOpenRightSidebarFilePreview,
+    onCloseRightSidebarFilePreview,
+    markdownOutlineOpen = false,
+    markdownOutlineCloseSignal,
+    onOpenMarkdownOutline,
+    onCloseMarkdownOutline,
+    markdownImageLightboxOpen = false,
+    markdownImageLightboxCloseSignal,
+    onOpenMarkdownImageLightbox,
+    onCloseMarkdownImageLightbox,
+  }: RightSidebarProps,
 ) {
   const { t } = useI18n();
   const [fileQuery, setFileQuery] = useState('');
@@ -1407,7 +3321,6 @@ export function RightSidebar(
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [insertedReferenceKey, setInsertedReferenceKey] = useState<string | null>(null);
   const [copiedReferenceKey, setCopiedReferenceKey] = useState<string | null>(null);
-  const [recentReferences, setRecentReferences] = useState<RecentReference[]>([]);
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
   const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
@@ -1469,7 +3382,6 @@ export function RightSidebar(
   const gitBundleRequestIdRef = useRef(0);
   const gitBundleAbortRef = useRef<AbortController | null>(null);
   const gitDetailsRequestIdRef = useRef(0);
-  const recentReferencesRootRef = useRef<string | null>(null);
   const lastAutoRefreshRootRef = useRef<string | null>(null);
   const fileTreeResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
 
@@ -1603,6 +3515,19 @@ export function RightSidebar(
   }, [isMobile]);
 
   useEffect(() => {
+    if (rightSidebarFilePreviewCloseSignal !== undefined) {
+      setMobileFilePreviewOpen(false);
+      setLineRange(null);
+    }
+  }, [rightSidebarFilePreviewCloseSignal]);
+
+  useEffect(() => {
+    if (!isMobile && rightSidebarFilePreviewOpen) {
+      onCloseRightSidebarFilePreview?.();
+    }
+  }, [isMobile, onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen]);
+
+  useEffect(() => {
     setFileTreeWidthPx((width) => clampFileTreeWidth(width, drawerWidthPx));
   }, [drawerWidthPx]);
 
@@ -1692,6 +3617,7 @@ export function RightSidebar(
     return () => {
       gitBundleAbortRef.current?.abort();
       flushCacheThrottled(FILE_TREE_SCROLL_STORAGE_KEY);
+      flushCacheThrottled(FILE_PREVIEW_READING_STATE_STORAGE_KEY);
       flushCacheThrottled(FILE_TREE_WIDTH_STORAGE_KEY);
     };
   }, []);
@@ -1714,12 +3640,13 @@ export function RightSidebar(
     setLineRange(null);
     if (isMobile) {
       setMobileFilePreviewOpen(true);
+      onOpenRightSidebarFilePreview?.();
       return;
     }
     // In wide mode the preview is already visible alongside the tree, so we
     // don't need to switch tabs and steal focus from the user's browse flow.
     if (!isWide) setRightTab(isMobile ? 'files' : 'file');
-  }, [isMobile, isWide, selectFile, setRightTab]);
+  }, [isMobile, isWide, onOpenRightSidebarFilePreview, selectFile, setRightTab]);
 
   // Jump straight to a content-search match: open the file and ask the preview
   // to highlight and scroll to the matched line once its content has loaded.
@@ -1728,32 +3655,11 @@ export function RightSidebar(
     setScrollToLine(line);
     if (isMobile) {
       setMobileFilePreviewOpen(true);
+      onOpenRightSidebarFilePreview?.();
       return;
     }
     if (!isWide) setRightTab('file');
-  }, [isMobile, isWide, selectFile, setRightTab]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const projectKey = getRecentReferencesProjectKey(rootPath);
-    if (!projectKey || recentReferencesRootRef.current !== projectKey) return;
-    writeRecentReferences(rootPath, recentReferences);
-  }, [recentReferences, rootPath]);
-
-  useEffect(() => {
-    const projectKey = getRecentReferencesProjectKey(rootPath);
-    recentReferencesRootRef.current = projectKey;
-    setRecentReferences(loadRecentReferences(rootPath));
-  }, [rootPath]);
-
-  const rememberReference = useCallback((absolutePath: string) => {
-    const label = buildFileReference(absolutePath, rootPath);
-    setRecentReferences((current) => [
-      { path: absolutePath, label },
-      ...current.filter((item) => item.path !== absolutePath),
-    ].slice(0, MAX_RECENT_REFERENCES));
-    return label;
-  }, [rootPath]);
+  }, [isMobile, isWide, onOpenRightSidebarFilePreview, selectFile, setRightTab]);
 
   const markReferenceInserted = useCallback((key: string) => {
     setInsertedReferenceKey(key);
@@ -1773,12 +3679,19 @@ export function RightSidebar(
 
   const insertPathReference = useCallback((path: string, key?: string) => {
     const absolutePath = rootPath && !path.startsWith('/') ? `${rootPath}/${path}` : path;
-    rememberReference(absolutePath);
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
       detail: { text: buildReferenceInputText(absolutePath, rootPath), focus: false },
     }));
     markReferenceInserted(key ?? `path:${absolutePath}`);
-  }, [markReferenceInserted, rememberReference, rootPath]);
+  }, [markReferenceInserted, rootPath]);
+
+  const insertReferenceText = useCallback((text: string, key: string) => {
+    if (!text) return;
+    window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
+      detail: { text: text.endsWith('\n') || text.endsWith(' ') ? text : `${text} `, focus: false },
+    }));
+    markReferenceInserted(key);
+  }, [markReferenceInserted]);
 
   const insertContextText = useCallback((label: string, text: string, key?: string) => {
     if (!text) return;
@@ -2276,9 +4189,13 @@ export function RightSidebar(
   }, [rootPath, runSidebarGitAction, t]);
 
   const closeFilePreview = useCallback(() => {
+    if (rightSidebarFilePreviewOpen) {
+      onCloseRightSidebarFilePreview?.();
+      return;
+    }
     setMobileFilePreviewOpen(false);
     setLineRange(null);
-  }, []);
+  }, [onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen]);
 
   const fileExplorerNavigation = (
     <div className="sticky top-0 z-10 border-b border-border/15 bg-surface/95 px-2.5 py-1.5 backdrop-blur">
@@ -2637,41 +4554,6 @@ export function RightSidebar(
           </div>
         )}
 
-        {/* Recent references — only rendered when there are entries so the
-            header stays compact (no empty placeholder slot). */}
-        {recentReferences.length > 0 && (
-          <div className="mt-2 h-6">
-            <div className="flex h-full items-center gap-1 overflow-x-auto pb-0.5">
-              <span className="shrink-0 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">{t('rightSidebar.recent')}</span>
-              {recentReferences.slice(0, MAX_RECENT_REFERENCES).map((item) => {
-                const display = getRelativeDisplayPath(item.path, rootPath);
-                const referenceKey = `path:${item.path}`;
-                return (
-                  <button
-                    key={item.path}
-                    type="button"
-                    onClick={() => insertPathReference(item.path, referenceKey)}
-                    {...getReferenceLongPressHandlers(getPathReferenceText(item.path), referenceKey)}
-                    className={`inline-flex max-w-[10rem] shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition active:scale-95 ${insertedReferenceKey === referenceKey || copiedReferenceKey === referenceKey ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
-                    title={`Insert ${item.label}`}
-                  >
-                    <RiFileText size={10} className="shrink-0 text-muted-foreground" />
-                    <span className="truncate">{copiedReferenceKey === referenceKey ? t('rightSidebar.copied') : insertedReferenceKey === referenceKey ? t('rightSidebar.inserted') : display.name}</span>
-                  </button>
-                );
-              })}
-              <button
-                type="button"
-                onClick={() => setRecentReferences([])}
-                className="ml-auto shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
-                title={t('rightSidebar.clearRecent')}
-              >
-                {t('common.clear')}
-              </button>
-            </div>
-          </div>
-        )}
-
         {/* Tab bar — non-Git workspaces drop the Git/Changes tabs. On mobile
             (overlay preview) and wide (side-by-side preview) layouts the file
             browser fills the panel with no tab bar at all; only the medium
@@ -2841,6 +4723,7 @@ export function RightSidebar(
                 <FilePreview
                   filePath={selectedFilePath}
                   onInsertReference={insertPathReference}
+                  onInsertText={insertReferenceText}
                   onReferenceCopied={markReferenceCopied}
                   isMobile={false}
                   lineRange={lineRange}
@@ -2849,6 +4732,14 @@ export function RightSidebar(
                   copiedReferenceKey={copiedReferenceKey}
                   scrollToLine={scrollToLine}
                   onScrollToLineHandled={() => setScrollToLine(null)}
+                  markdownOutlineOpen={markdownOutlineOpen}
+                  markdownOutlineCloseSignal={markdownOutlineCloseSignal}
+                  onOpenMarkdownOutline={onOpenMarkdownOutline}
+                  onCloseMarkdownOutline={onCloseMarkdownOutline}
+                  markdownImageLightboxOpen={markdownImageLightboxOpen}
+                  markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
+                  onOpenMarkdownImageLightbox={onOpenMarkdownImageLightbox}
+                  onCloseMarkdownImageLightbox={onCloseMarkdownImageLightbox}
                 />
               </div>
             </div>
@@ -2883,6 +4774,7 @@ export function RightSidebar(
                 <FilePreview
                   filePath={selectedFilePath}
                   onInsertReference={insertPathReference}
+                  onInsertText={insertReferenceText}
                   onReferenceCopied={markReferenceCopied}
                   onClose={closeFilePreview}
                   isMobile
@@ -2892,6 +4784,14 @@ export function RightSidebar(
                   copiedReferenceKey={copiedReferenceKey}
                   scrollToLine={scrollToLine}
                   onScrollToLineHandled={() => setScrollToLine(null)}
+                  markdownOutlineOpen={markdownOutlineOpen}
+                  markdownOutlineCloseSignal={markdownOutlineCloseSignal}
+                  onOpenMarkdownOutline={onOpenMarkdownOutline}
+                  onCloseMarkdownOutline={onCloseMarkdownOutline}
+                  markdownImageLightboxOpen={markdownImageLightboxOpen}
+                  markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
+                  onOpenMarkdownImageLightbox={onOpenMarkdownImageLightbox}
+                  onCloseMarkdownImageLightbox={onCloseMarkdownImageLightbox}
                 />
               </div>
             </div>
@@ -2927,6 +4827,7 @@ export function RightSidebar(
           <FilePreview
             filePath={selectedFilePath}
             onInsertReference={insertPathReference}
+            onInsertText={insertReferenceText}
             onReferenceCopied={markReferenceCopied}
             isMobile={false}
             lineRange={lineRange}
@@ -2935,6 +4836,14 @@ export function RightSidebar(
             copiedReferenceKey={copiedReferenceKey}
             scrollToLine={scrollToLine}
             onScrollToLineHandled={() => setScrollToLine(null)}
+            markdownOutlineOpen={markdownOutlineOpen}
+            markdownOutlineCloseSignal={markdownOutlineCloseSignal}
+            onOpenMarkdownOutline={onOpenMarkdownOutline}
+            onCloseMarkdownOutline={onCloseMarkdownOutline}
+            markdownImageLightboxOpen={markdownImageLightboxOpen}
+            markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
+            onOpenMarkdownImageLightbox={onOpenMarkdownImageLightbox}
+            onCloseMarkdownImageLightbox={onCloseMarkdownImageLightbox}
           />
         </Pane>
 
