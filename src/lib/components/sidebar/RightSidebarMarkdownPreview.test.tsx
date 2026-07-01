@@ -318,10 +318,8 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(left.className).toContain('text-left');
     expect(left.className).not.toContain('min-w-[10rem]');
     expect(left.className).not.toContain('max-w-[18rem]');
-    expect(left.querySelector('div')?.className).toContain('max-w-[18rem]');
-    expect(left.querySelector('div')?.className).toContain('sm:max-w-[44rem]');
-    expect(left.querySelector('div')?.className).toContain('whitespace-normal');
-    expect(left.querySelector('div')?.className).toContain('break-words');
+    expect(left.querySelector('div')?.className).toContain('max-w-none');
+    expect(left.querySelector('div')?.className).toContain('whitespace-nowrap');
     expect(center.className).toContain('text-center');
     expect(right.className).toContain('text-right');
     expect(left.closest('table')?.className).toContain('w-max');
@@ -341,6 +339,20 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(table?.className).toContain('min-w-full');
   });
 
+  it('keeps Markdown tables in a dedicated iOS-friendly horizontal scroller', () => {
+    const { container } = renderPreview([
+      '| Very long column | Another very long column | Third very long column | Fourth very long column |',
+      '| --- | --- | --- | --- |',
+      '| a long value | b long value | c long value | d long value |',
+    ].join('\n'));
+
+    const scroller = container.querySelector('[data-markdown-table-scroll]');
+    expect(scroller?.className).toContain('max-w-full');
+    expect(scroller?.className).toContain('termdock-md-table-scroll');
+    expect(scroller?.className).toContain('overflow-x-auto');
+    expect(scroller?.className).toContain('overflow-y-hidden');
+  });
+
   it('renders one-column Markdown tables with the same overflow-safe cell sizing', () => {
     const { container } = renderPreview([
       '| Only column |',
@@ -350,7 +362,8 @@ describe('right sidebar Markdown preview rendering', () => {
 
     const header = screen.getByRole('columnheader', { name: 'Only column' });
     const cell = screen.getByRole('cell');
-    expect(header.querySelector('div')?.className).toContain('max-w-[18rem]');
+    expect(header.querySelector('div')?.className).toContain('max-w-none');
+    expect(header.querySelector('div')?.className).toContain('whitespace-nowrap');
     expect(cell.textContent).toContain('A long value');
     expect(container.querySelector('table')?.className).toContain('w-max');
   });

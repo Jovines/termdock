@@ -93,9 +93,10 @@ const MOBILE_WIDTH_THRESHOLD_PX = 600;
 // back to stacked tabs even on desktop.
 const WIDE_WIDTH_THRESHOLD_PX = 720;
 const MARKDOWN_TABLE_CELL_CLASS = 'border-r px-2 py-1.5 sm:px-3 sm:py-2';
-const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'max-w-[18rem] whitespace-normal break-words sm:max-w-[27rem]';
+const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'max-w-none whitespace-nowrap';
 const MARKDOWN_TABLE_HEADER_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-b border-border/15 font-semibold last:border-r-0`;
 const MARKDOWN_TABLE_BODY_CELL_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-border/10 align-top text-muted-foreground last:border-r-0`;
+const MARKDOWN_TABLE_SCROLL_CLASS = 'termdock-md-table-scroll max-w-full overflow-x-auto overflow-y-hidden rounded-lg border border-border/20 bg-surface';
 
 type GitActionKey = GitActionRequest['action'];
 
@@ -1116,7 +1117,7 @@ function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: 
         index += 1;
       }
       nodes.push(
-        <div key={`${keyPrefix}-table-${blockStart}`} className="overflow-auto rounded-lg border border-border/20 bg-surface">
+        <div key={`${keyPrefix}-table-${blockStart}`} className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
             <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
               <thead className="bg-surface-2 text-foreground">
               <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(cell, `${keyPrefix}-th-${blockStart}-${cellIndex}`, true, context)}</div></th>)}</tr>
@@ -1171,6 +1172,7 @@ interface MarkdownPreviewBlock {
   endLine: number;
   content: ReactNode;
   heading?: MarkdownHeadingInfo;
+  interactive?: boolean;
 }
 
 interface MarkdownCodeBlockProps {
@@ -1578,8 +1580,9 @@ export function buildMarkdownPreviewRenderResult(
         key: `table-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
+        interactive: false,
         content: (
-          <div className="overflow-auto rounded-lg border border-border/20 bg-surface">
+          <div className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
             <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
               <thead className="bg-surface-2 text-foreground">
                 <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(cell, `th-${blockStart}-${cellIndex}`, true, context)}</div></th>)}</tr>
@@ -2130,6 +2133,30 @@ function MarkdownPreview({
         {blocks.map((block) => {
           const selected = Boolean(lineRange && block.startLine <= lineRange.end && block.endLine >= lineRange.start);
           const lineLabel = block.startLine === block.endLine ? String(block.startLine) : `${block.startLine}-${block.endLine}`;
+          const blockContent = (
+            <>
+              <span
+                className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)] group-hover:bg-[var(--surface-elevated)]'}`}
+                aria-hidden="true"
+              >
+                <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)] group-hover:bg-[var(--muted-foreground)]'}`} />
+              </span>
+              <div className="min-w-0">{block.content}</div>
+            </>
+          );
+          if (block.interactive === false) {
+            return (
+              <div
+                key={block.key}
+                data-markdown-preview-block-start={block.startLine}
+                className={`group grid w-full grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2 ${selected ? 'bg-[var(--surface-2)]' : ''}`}
+                title={`Line ${lineLabel}`}
+                aria-label={`Line ${lineLabel}`}
+              >
+                {blockContent}
+              </div>
+            );
+          }
           return (
             <div
               role="button"
@@ -2146,17 +2173,11 @@ function MarkdownPreview({
                 event.preventDefault();
                 onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, block.startLine, block.endLine);
               }}
-              className={`group grid w-full cursor-pointer grid-cols-[0.625rem_1fr] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition active:scale-[0.998] sm:grid-cols-[0.875rem_1fr] sm:gap-2 sm:pr-2 ${selected ? 'bg-[var(--surface-2)]' : 'hover:bg-[var(--surface-2)]'}`}
+              className={`group grid w-full cursor-pointer grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition active:scale-[0.998] sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2 ${selected ? 'bg-[var(--surface-2)]' : 'hover:bg-[var(--surface-2)]'}`}
               title={`Reference line ${lineLabel}`}
               aria-label={`Reference line ${lineLabel}`}
             >
-              <span
-                className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)] group-hover:bg-[var(--surface-elevated)]'}`}
-                aria-hidden="true"
-              >
-                <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)] group-hover:bg-[var(--muted-foreground)]'}`} />
-              </span>
-              <div className="min-w-0">{block.content}</div>
+              {blockContent}
             </div>
           );
         })}
