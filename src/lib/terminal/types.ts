@@ -2,6 +2,12 @@ export type TerminalMode = 'shell' | 'tmux';
 
 export type AgentStatus = string;
 export type AgentIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal' | 'question';
+export type TuiProgressState = 'remove' | 'set' | 'error' | 'indeterminate' | 'pause';
+
+export interface TuiProgressReport {
+  state: TuiProgressState;
+  progress: number | null;
+}
 
 export interface TmuxPane {
   id: string;
@@ -132,7 +138,7 @@ export interface TerminalSession {
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size' | 'shell-title' | 'prompt-state';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size' | 'shell-title' | 'prompt-state' | 'tui-progress';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -150,6 +156,7 @@ export interface TerminalStreamEvent {
   agentStatus?: AgentStatus | null;
   agentColor?: string | null;
   agentIndicator?: AgentIndicator | null;
+  tuiProgress?: TuiProgressReport | null;
   focusTrackingRequested?: boolean;
   // Shell-reported title (OSC 2) — the raw string the shell set, which may
   // be a cwd path (idle) or a command name (running).
@@ -292,6 +299,7 @@ export interface TerminalSessionState {
   shellTitle: string | null;     // OSC 2 title: cwd when idle, command name when running
   promptState: 'idle' | 'running' | null;  // OSC 133: 'idle' at prompt, 'running' executing
   shellExitCode: number | null;  // last reported exit code from OSC 133;D
+  tuiProgress: TuiProgressReport | null;  // OSC 9;4 progress/loading reports from TUIs
   // 已删: 之前维护 `buffer: string` 派生字段,每次 setState 都 map+join 整个
   // chunks 数组(1MB 字符串 copy)。view 端自己用 useMemo 从 bufferChunks
   // 派生,节省 store setState 时的字符串复制。

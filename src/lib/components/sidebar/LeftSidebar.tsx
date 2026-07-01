@@ -14,7 +14,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
-import type { AgentStatus } from '../../terminal/types';
+import type { AgentStatus, TuiProgressReport } from '../../terminal/types';
 import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, reorderSessionsWithinGroup, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
 import { AgentSessionDot, AgentCountBadge } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
@@ -153,6 +153,7 @@ interface LeftSidebarProps {
     agentNeedsReview?: boolean;
     shellTitle?: string | null;
     promptState?: 'idle' | 'running' | null;
+    tuiProgress?: TuiProgressReport | null;
   }>; 
   onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => void;
   onCloseSession: (sessionId: string) => void;
@@ -414,7 +415,8 @@ export function LeftSidebar(
     const cwdSecondary = cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null;
     // Shell integration (OSC 133) provides real-time running state.
     // Fall back to agentStatus for AI tools that don't emit OSC 133.
-    const isRunning = ts?.promptState === 'running' || ts?.agentStatus === 'running';
+    const tuiProgressActive = Boolean(ts?.tuiProgress && ts.tuiProgress.state !== 'remove');
+    const isRunning = ts?.promptState === 'running' || ts?.agentStatus === 'running' || tuiProgressActive;
     const accentClass = isRunning
       ? 'bg-[var(--success)]'
       : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
@@ -447,7 +449,7 @@ export function LeftSidebar(
                 ? 'bg-surface text-[rgb(var(--tmux-rgb)_/_0.80)]'
                 : 'bg-surface text-muted-foreground'
           }`}>
-            {ts?.isConnecting ? (
+            {ts?.isConnecting || (tuiProgressActive && !ts?.agentStatus) ? (
               <RiLoaderCircle size={12} className="animate-spin" />
             ) : session.mode === 'tmux' ? (
               <RiLayoutGridLine size={12} />

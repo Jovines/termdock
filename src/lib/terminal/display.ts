@@ -32,9 +32,11 @@ export function getSessionDisplayLines(
   // Shell integration (OSC 2) provides real-time title: command name when running,
   // cwd when idle. This is faster and more accurate than server-side process polling.
   if (shellTitle) {
+    const cwdLeaf = getCwdLeafName(cwd);
+    const titleLooksLikeCwd = shellTitle === cwd || shellTitle === cwdLeaf;
     // If the shell reports a running state, the title is the command name.
-    if (promptState === 'running' && !shellNames.has(shellTitle)) {
-      return { primary: shellTitle, secondary: getCwdLeafName(cwd) };
+    if (promptState === 'running' && !shellNames.has(shellTitle) && !titleLooksLikeCwd) {
+      return { primary: shellTitle, secondary: cwdLeaf };
     }
     // If idle, the title is typically the cwd — fall through to show cwd leaf.
   }
@@ -147,5 +149,3 @@ export function deriveGroupedOrder<T extends { id: string }>(
   const arranged = groups.flatMap((g) => g.sessions);
   return { arranged, groups };
 }
-
-

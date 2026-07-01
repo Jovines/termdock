@@ -4205,6 +4205,8 @@ export function RightSidebar(
         const staged = countStagedChanges(group.files.map(([, file]) => file));
         const showRepoHeader = !activeGitRepoRoot && (filteredChangedFileGroups.length > 1 || group.label !== rootName);
         const collapsed = Boolean(group.root && collapsedGitRepoGroups.has(group.root));
+        // Rounded cards with hover/expanded child backgrounds must clip their
+        // contents; otherwise collapsed headers visually cover the corner radius.
         return (
           <section key={group.root ?? group.label} className={showRepoHeader ? 'overflow-hidden rounded-lg border border-border/15 bg-surface/60' : ''}>
             {showRepoHeader && (

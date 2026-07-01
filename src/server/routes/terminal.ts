@@ -174,6 +174,7 @@ interface TerminalSession {
   lastOscCwd: string | null;
   lastOscTitle: string | null;
   lastPromptState: 'idle' | 'running' | null;
+  tuiProgress: TuiProgressReport | null;
   agentStatus: string | null;
   agentColor: string | null;
   agentIndicator: AgentIndicator | null;
@@ -187,6 +188,11 @@ interface TerminalSession {
   flowPausedClientTimers: Map<string, ReturnType<typeof setTimeout>>;
   ptyPausedForFlowControl: boolean;
 }
+
+type TuiProgressReport = {
+  state: 'remove' | 'set' | 'error' | 'indeterminate' | 'pause';
+  progress: number | null;
+};
 
 interface PersistedClientSession {
   sessionId: string;
@@ -1912,7 +1918,35 @@ export interface OscSniffResult {
   title: string | null;
   promptState: 'idle' | 'running' | null;
   exitCode: number | null;
+  tuiProgress: TuiProgressReport | null;
   remaining: string;
+}
+
+function parseConEmuProgressReport(data: string): TuiProgressReport | null {
+  if (!data.startsWith('4;') || data.length < 3) return null;
+  const stateCode = data[2];
+  const state = stateCode === '0'
+    ? 'remove'
+    : stateCode === '1'
+      ? 'set'
+      : stateCode === '2'
+        ? 'error'
+        : stateCode === '3'
+          ? 'indeterminate'
+          : stateCode === '4'
+            ? 'pause'
+            : null;
+  if (!state) return null;
+
+  let progress: number | null = null;
+  if ((state === 'set' || state === 'error' || state === 'pause') && data[3] === ';') {
+    const value = Number.parseInt(data.slice(4), 10);
+    if (Number.isFinite(value)) {
+      progress = Math.min(100, Math.max(0, value));
+    }
+  }
+
+  return { state, progress };
 }
 
 function sniffOsc(buf: string, home: string): OscSniffResult {
@@ -1921,6 +1955,7 @@ function sniffOsc(buf: string, home: string): OscSniffResult {
   let lastTitle: string | null = null;
   let promptState: 'idle' | 'running' | null = null;
   let exitCode: number | null = null;
+  let tuiProgress: TuiProgressReport | null = null;
   let lastMatchEnd = 0;
 
   OSC_ANY_PATTERN.lastIndex = 0;
@@ -1954,12 +1989,15 @@ function sniffOsc(buf: string, home: string): OscSniffResult {
       } else if (oscData.startsWith('A') || oscData.startsWith('P')) {
         promptState = 'idle';
       }
+    } else if (oscNum === '9') {
+      const progress = parseConEmuProgressReport(oscData);
+      if (progress) tuiProgress = progress;
     }
   }
 
   const remaining = buf.slice(lastMatchEnd).slice(-128);
 
-  return { cwd: lastCwd, title: lastTitle, promptState, exitCode, remaining };
+  return { cwd: lastCwd, title: lastTitle, promptState, exitCode, tuiProgress, remaining };
 }
 
 // ── end OSC sniffing ──
@@ -3286,6 +3324,14 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
           exitCode: result.exitCode,
         });
       }
+
+      if (result.tuiProgress !== null) {
+        session.tuiProgress = result.tuiProgress.state === 'remove' ? null : result.tuiProgress;
+        broadcastJsonWs(sessionId, {
+          type: 'tui-progress',
+          tuiProgress: session.tuiProgress,
+        });
+      }
     } catch { /* sniff failure should never block data */ }
 
     // Agent status content-based detection — DISABLED.
@@ -3407,6 +3453,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     lastOscCwd: null,
     lastOscTitle: null,
     lastPromptState: null,
+    tuiProgress: null,
     agentStatus: null,
     agentColor: null,
     agentIndicator: null,
@@ -4189,6 +4236,7 @@ router.get('/:sessionId/stream', async (req, res) => {
     agentStatus: session.agentStatus,
     agentColor: session.agentColor,
     agentIndicator: session.agentIndicator,
+    tuiProgress: session.tuiProgress,
   });
 
   let tmuxInterval: ReturnType<typeof setInterval> | null = null;
@@ -4860,6 +4908,7 @@ export function handleTerminalWebSocket(
       agentStatus: session.agentStatus,
       agentColor: session.agentColor,
       agentIndicator: session.agentIndicator,
+      tuiProgress: session.tuiProgress,
       focusTrackingRequested: session.focusTrackingRequested,
       // 短线重连补帧：
       // replayChunks 为补发数据；replayLastSeq 是客户端应记录的新基线；

@@ -175,6 +175,34 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const streamVersionRef = React.useRef(0);
   const isActiveRef = React.useRef(isActive);
   const isMobileRef = React.useRef(isMobile);
+  const pendingShellTitleRef = React.useRef<{ sessionId: string; title: string | null } | null>(null);
+  const shellTitleRafRef = React.useRef<number | null>(null);
+
+  const flushPendingShellTitle = React.useCallback(() => {
+    shellTitleRafRef.current = null;
+    const pending = pendingShellTitleRef.current;
+    pendingShellTitleRef.current = null;
+    if (!pending) return;
+    setSessionShellTitle(pending.sessionId, pending.title);
+  }, [setSessionShellTitle]);
+
+  const scheduleShellTitleUpdate = React.useCallback((targetSessionId: string, title: string | null) => {
+    pendingShellTitleRef.current = { sessionId: targetSessionId, title };
+    if (shellTitleRafRef.current !== null) return;
+    if (typeof window === 'undefined') {
+      flushPendingShellTitle();
+      return;
+    }
+    shellTitleRafRef.current = window.requestAnimationFrame(flushPendingShellTitle);
+  }, [flushPendingShellTitle]);
+
+  const cancelPendingShellTitle = React.useCallback(() => {
+    if (shellTitleRafRef.current !== null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(shellTitleRafRef.current);
+    }
+    shellTitleRafRef.current = null;
+    pendingShellTitleRef.current = null;
+  }, []);
 
   React.useEffect(() => {
     isActiveRef.current = isActive;
@@ -525,6 +553,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const disconnectStream = React.useCallback(() => {
     streamVersionRef.current += 1;
+    flushPendingShellTitle();
+    cancelPendingShellTitle();
     const cleanup = streamCleanupRef.current;
     streamCleanupRef.current = null;
     activeTerminalIdRef.current = null;
@@ -541,7 +571,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     lastSentFlowPausedRef.current = null;
     flowPausedBufferRef.current = [];
     cleanup?.();
-  }, []);
+  }, [cancelPendingShellTitle, flushPendingShellTitle]);
 
   const startStream = React.useCallback(
     (terminalId: string) => {
@@ -597,6 +627,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     event.agentColor ?? null,
                     event.agentIndicator ?? null,
                   );
+                }
+                if (event.tuiProgress !== undefined) {
+                  useTerminalStore.getState().setSessionTuiProgress(storeSessionId, event.tuiProgress ?? null);
                 }
 
                 const sessionState = useTerminalStore.getState().getTerminalSession(storeSessionId);
@@ -767,12 +800,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               }
               case 'shell-title': {
                 // Shell integration (OSC 2) reported title — cwd when idle, command when running.
-                setSessionShellTitle(storeSessionId, event.title ?? null);
+                scheduleShellTitleUpdate(storeSessionId, event.title ?? null);
                 break;
               }
               case 'prompt-state': {
                 // Shell integration (OSC 133) reported prompt state — 'idle' or 'running'.
                 setSessionPromptState(storeSessionId, event.state ?? 'idle', event.exitCode ?? null);
+                break;
+              }
+              case 'tui-progress': {
+                useTerminalStore.getState().setSessionTuiProgress(storeSessionId, event.tuiProgress ?? null);
                 break;
               }
               case 'exit': {
@@ -865,7 +902,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, reportFlowControl, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionShellTitle, setSessionPromptState, terminal, sessionId]
+    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, reportFlowControl, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
   );
 
   const hasInitializedRef = React.useRef(false);

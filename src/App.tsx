@@ -23,6 +23,7 @@ import {
   Folder as RiFolderLine,
   Hash as RiHashLine,
   Clock as RiClockLine,
+  LoaderCircle as RiLoaderCircle,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { useTerminalSettings } from './lib/hooks/useTerminalSettings';
@@ -314,6 +315,9 @@ type TabTerminalSessionState = Pick<
   | 'agentColor'
   | 'agentIndicator'
   | 'agentNeedsReview'
+  | 'shellTitle'
+  | 'promptState'
+  | 'tuiProgress'
 >;
 
 function pickTabTerminalSessions(
@@ -331,6 +335,9 @@ function pickTabTerminalSessions(
       agentColor: state.agentColor,
       agentIndicator: state.agentIndicator,
       agentNeedsReview: state.agentNeedsReview,
+      shellTitle: state.shellTitle,
+      promptState: state.promptState,
+      tuiProgress: state.tuiProgress,
     });
   }
   return picked;
@@ -354,7 +361,11 @@ function areTabTerminalSessionsEqual(
       currentState.agentStatus !== nextState.agentStatus ||
       currentState.agentColor !== nextState.agentColor ||
       currentState.agentIndicator !== nextState.agentIndicator ||
-      currentState.agentNeedsReview !== nextState.agentNeedsReview
+      currentState.agentNeedsReview !== nextState.agentNeedsReview ||
+      currentState.shellTitle !== nextState.shellTitle ||
+      currentState.promptState !== nextState.promptState ||
+      currentState.tuiProgress?.state !== nextState.tuiProgress?.state ||
+      currentState.tuiProgress?.progress !== nextState.tuiProgress?.progress
     ) {
       return false;
     }
@@ -1672,13 +1683,16 @@ function App() {
       ts?.activeProgram ?? null,
       ts?.cwd ?? null,
       SHELL_NAMES,
+      ts?.shellTitle ?? null,
+      ts?.promptState ?? null,
     );
     const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
     const tabDirLabel = showDir
       ? (displaySubName ?? (cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null))
       : null;
     const tooltip = ts?.cwd || session.name;
-    const accentColor = ts?.agentStatus === 'running'
+    const tuiProgressActive = Boolean(ts?.tuiProgress && ts.tuiProgress.state !== 'remove');
+    const accentColor = ts?.agentStatus === 'running' || tuiProgressActive
       ? 'var(--success)'
       : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
         ? 'var(--warning)'
@@ -1755,6 +1769,9 @@ function App() {
           <span className="inline-flex min-w-0 items-center gap-1 overflow-hidden">
             <span className="inline-flex shrink-0 items-center">
               {renderTabIcon(session.mode, ts)}
+              {tuiProgressActive && !ts?.agentStatus && (
+                <RiLoaderCircle size={compact ? 9 : 10} className="-ml-0.5 shrink-0 animate-spin text-[color:var(--success)]" />
+              )}
             </span>
             {tabDirLabel ? (
               <span className="flex min-w-0 flex-col justify-center leading-[0.82rem] sm:leading-[0.85rem]">

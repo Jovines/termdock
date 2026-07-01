@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { TerminalSession, TerminalChunk, TerminalSessionState, AgentStatus, AgentIndicator } from '../terminal';
+import type { TerminalSession, TerminalChunk, TerminalSessionState, AgentStatus, AgentIndicator, TuiProgressReport } from '../terminal';
 import { getStoredPwaAiNotificationsEnabled, showPwaNotification } from '../utils/pwaNotifications';
 
 export interface TerminalStore {
@@ -20,6 +20,7 @@ export interface TerminalStore {
   setSessionCwd: (sessionId: string, cwd: string | null) => void;
   setSessionShellTitle: (sessionId: string, title: string | null) => void;
   setSessionPromptState: (sessionId: string, state: 'idle' | 'running', exitCode?: number | null) => void;
+  setSessionTuiProgress: (sessionId: string, report: TuiProgressReport | null) => void;
   setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => void;
   setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null, agentIndicator?: AgentIndicator | null) => void;
   clearAgentNeedsReview: (sessionId: string) => void;
@@ -74,6 +75,7 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     shellTitle: null,
     promptState: null,
     shellExitCode: null,
+    tuiProgress: null,
     bufferChunks: [],
     bufferLength: 0,
     lastOutputAt: null,
@@ -277,6 +279,21 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         shellExitCode: exitCode ?? existing.shellExitCode,
         updatedAt: Date.now(),
       });
+      return { sessions: newSessions };
+    });
+  },
+
+  setSessionTuiProgress: (sessionId: string, report: TuiProgressReport | null) => {
+    set((state) => {
+      const existing = state.sessions.get(sessionId);
+      if (!existing) return state;
+      const nextReport = report?.state === 'remove' ? null : report;
+      if (
+        existing.tuiProgress?.state === nextReport?.state &&
+        existing.tuiProgress?.progress === nextReport?.progress
+      ) return state;
+      const newSessions = new Map(state.sessions);
+      newSessions.set(sessionId, { ...existing, tuiProgress: nextReport, updatedAt: Date.now() });
       return { sessions: newSessions };
     });
   },
