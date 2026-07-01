@@ -175,6 +175,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const streamVersionRef = React.useRef(0);
   const isActiveRef = React.useRef(isActive);
   const isMobileRef = React.useRef(isMobile);
+  const desktopResumeFocusTimerRef = React.useRef<number | null>(null);
   const pendingShellTitleRef = React.useRef<{ sessionId: string; title: string | null } | null>(null);
   const shellTitleRafRef = React.useRef<number | null>(null);
 
@@ -255,6 +256,51 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     terminalControllerRef.current?.focus();
   }, []);
 
+  const scheduleDesktopResumeFocus = React.useCallback((reason: string) => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+    if (!isActiveRef.current || isMobileRef.current || document.hidden) {
+      return;
+    }
+
+    if (desktopResumeFocusTimerRef.current !== null) {
+      window.clearTimeout(desktopResumeFocusTimerRef.current);
+    }
+
+    desktopResumeFocusTimerRef.current = window.setTimeout(() => {
+      desktopResumeFocusTimerRef.current = null;
+      if (!isActiveRef.current || isMobileRef.current || document.hidden) {
+        return;
+      }
+
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isTerminalInput = activeElement?.getAttribute('data-terminal-input-anchor') === 'true';
+      const isEditableElement =
+        activeElement instanceof HTMLInputElement ||
+        activeElement instanceof HTMLTextAreaElement ||
+        activeElement instanceof HTMLSelectElement ||
+        activeElement?.isContentEditable === true;
+
+      if (isEditableElement && !isTerminalInput) {
+        debugKeyboard('desktop resume focus skipped: editable active', { reason });
+        return;
+      }
+
+      debugKeyboard('desktop resume focus', { reason });
+      terminalControllerRef.current?.focus();
+    }, 50);
+  }, [debugKeyboard]);
+
+  React.useEffect(() => {
+    return () => {
+      if (desktopResumeFocusTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(desktopResumeFocusTimerRef.current);
+      }
+      desktopResumeFocusTimerRef.current = null;
+    };
+  }, []);
+
   const restartEnsureSession = React.useCallback(() => {
     hasInitializedRef.current = false;
     setRestartTrigger((token) => token + 1);
@@ -329,6 +375,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       setIsDocumentVisible(visible);
       if (visible && isActive) {
         terminalControllerRef.current?.requestRefresh('visibility');
+        scheduleDesktopResumeFocus('visibility');
         // 唤醒后立刻探测 WS 是否还活着（iOS PWA 后台返回常出现"半开连接"）。
         // probe 内部会发 ping，超时没回应就主动替换连接并重连补帧。
         probeOrRestartSession('visibility-active');
@@ -337,6 +384,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const handlePageShow = (event: PageTransitionEvent) => {
       if (!isActive) return;
       terminalControllerRef.current?.requestRefresh(event.persisted ? 'bfcache' : 'visibility');
+      scheduleDesktopResumeFocus(event.persisted ? 'bfcache' : 'pageshow');
       probeOrRestartSession(event.persisted ? 'bfcache-active' : 'pageshow-active');
     };
     const handleOnline = () => {
@@ -344,7 +392,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       terminalControllerRef.current?.requestRefresh('online');
       probeOrRestartSession('online-active');
     };
-    const handleWindowFocus = () => setIsWindowFocused(true);
+    const handleWindowFocus = () => {
+      setIsWindowFocused(true);
+      scheduleDesktopResumeFocus('window-focus');
+    };
     const handleWindowBlur = () => setIsWindowFocused(false);
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('pageshow', handlePageShow);
@@ -358,7 +409,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       window.removeEventListener('focus', handleWindowFocus);
       window.removeEventListener('blur', handleWindowBlur);
     };
-  }, [isActive, probeOrRestartSession]);
+  }, [isActive, probeOrRestartSession, scheduleDesktopResumeFocus]);
 
   // MultiTerminalView 在 visibility/pageshow/online 时会给所有 TerminalView
   // 广播这个 token。active slide 已由上面的本地 visibility/pageshow/online

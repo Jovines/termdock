@@ -404,6 +404,12 @@ function App() {
 
   useViewportHeight();
 
+  const isIOS = React.useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }, []);
+
   const [showDebug, setShowDebug] = React.useState(false);
   const [colorTheme, setColorTheme] = React.useState<TermdockColorTheme>(() =>
     readCache(COLOR_THEME_CACHE_KEY, isTermdockColorTheme) ?? 'dark',
@@ -614,14 +620,15 @@ function App() {
   }, []);
 
   const requestCloseHistoryOverlay = useCallback((overlay: HistoryOverlay) => {
-    if (typeof window !== 'undefined'
+    if (!isIOS
+      && typeof window !== 'undefined'
       && activeHistoryOverlayRef.current === overlay
       && getHistoryOverlay(window.history.state) === overlay) {
       window.history.back();
       return;
     }
     closeHistoryOverlayDirect(overlay);
-  }, [closeHistoryOverlayDirect]);
+  }, [closeHistoryOverlayDirect, isIOS]);
 
   const handleOpenLeftSidebar = useCallback(() => {
     setIsDrawerOpen(false);
@@ -664,6 +671,7 @@ function App() {
 
   const handleOpenRightSidebarFilePreview = useCallback(() => {
     if (!rightSidebarFilePreviewOpen
+      && !isIOS
       && typeof window !== 'undefined'
       && activeHistoryOverlayRef.current === 'right-sidebar'
       && getHistoryOverlay(window.history.state) === 'right-sidebar') {
@@ -671,7 +679,7 @@ function App() {
       lastHistoryOverlayRef.current = 'right-sidebar-file-preview';
     }
     setRightSidebarFilePreviewOpen(true);
-  }, [rightSidebarFilePreviewOpen]);
+  }, [rightSidebarFilePreviewOpen, isIOS]);
 
   const handleCloseRightSidebarFilePreview = useCallback(() => {
     requestCloseHistoryOverlay('right-sidebar-file-preview');
@@ -679,6 +687,7 @@ function App() {
 
   const handleOpenRightSidebarRepoPicker = useCallback(() => {
     if (!rightSidebarRepoPickerOpen
+      && !isIOS
       && typeof window !== 'undefined'
       && activeHistoryOverlayRef.current === 'right-sidebar'
       && getHistoryOverlay(window.history.state) === 'right-sidebar') {
@@ -686,7 +695,7 @@ function App() {
       lastHistoryOverlayRef.current = 'right-sidebar-repo-picker';
     }
     setRightSidebarRepoPickerOpen(true);
-  }, [rightSidebarRepoPickerOpen]);
+  }, [rightSidebarRepoPickerOpen, isIOS]);
 
   const handleCloseRightSidebarRepoPicker = useCallback(() => {
     requestCloseHistoryOverlay('right-sidebar-repo-picker');
@@ -694,6 +703,7 @@ function App() {
 
   const handleOpenMarkdownOutline = useCallback(() => {
     if (!markdownOutlineOpen
+      && !isIOS
       && typeof window !== 'undefined'
       && activeHistoryOverlayRef.current
       && getHistoryOverlay(window.history.state) === activeHistoryOverlayRef.current) {
@@ -701,28 +711,30 @@ function App() {
       lastHistoryOverlayRef.current = 'markdown-outline';
     }
     setMarkdownOutlineOpen(true);
-  }, [markdownOutlineOpen]);
+  }, [markdownOutlineOpen, isIOS]);
 
   const handleCloseMarkdownOutline = useCallback(() => {
     requestCloseHistoryOverlay('markdown-outline');
   }, [requestCloseHistoryOverlay]);
 
   const handleOpenMarkdownImageLightbox = useCallback(() => {
-    if (typeof window !== 'undefined'
+    if (!isIOS
+      && typeof window !== 'undefined'
       && activeHistoryOverlayRef.current
       && getHistoryOverlay(window.history.state) === activeHistoryOverlayRef.current) {
       pushHistoryOverlay('markdown-image-lightbox');
       lastHistoryOverlayRef.current = 'markdown-image-lightbox';
     }
     setMarkdownImageLightboxOpen(true);
-  }, []);
+  }, [isIOS]);
 
   const handleCloseMarkdownImageLightbox = useCallback(() => {
     requestCloseHistoryOverlay('markdown-image-lightbox');
   }, [requestCloseHistoryOverlay]);
 
   const handleOpenSettings = useCallback(() => {
-    if (typeof window !== 'undefined'
+    if (!isIOS
+      && typeof window !== 'undefined'
       && activeHistoryOverlayRef.current
       && getHistoryOverlay(window.history.state) === activeHistoryOverlayRef.current) {
       replaceHistoryOverlay('settings');
@@ -730,7 +742,7 @@ function App() {
     }
     useSidebarStore.getState().closeAll();
     setIsDrawerOpen(true);
-  }, []);
+  }, [isIOS]);
 
   const handleCloseSettings = useCallback(() => {
     requestCloseHistoryOverlay('settings');
@@ -763,11 +775,13 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (isIOS) return;
     ensureBaseHistoryGuard();
-  }, []);
+  }, [isIOS]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (isIOS) return;
 
     let rearmTimer: number | null = null;
     const clearRearmTimer = () => {
@@ -834,7 +848,7 @@ function App() {
       window.removeEventListener('pageshow', handlePageShow);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, []);
+  }, [isIOS]);
 
   useEffect(() => {
     activeHistoryOverlayRef.current = activeHistoryOverlay;
@@ -843,6 +857,7 @@ function App() {
 
   useEffect(() => {
     if (typeof window === 'undefined' || activeHistoryOverlay) return;
+    if (isIOS) return;
     reportHistoryGuardDebug('mainPageRearm:schedule', { activeHistoryOverlay });
     const rearmTimer = window.setTimeout(() => {
       if (!activeHistoryOverlayRef.current) {
@@ -853,10 +868,11 @@ function App() {
       }
     }, BASE_HISTORY_GUARD_REARM_DELAY_MS);
     return () => window.clearTimeout(rearmTimer);
-  }, [activeHistoryOverlay]);
+  }, [activeHistoryOverlay, isIOS]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (isIOS) return;
 
     const previousOverlay = lastHistoryOverlayRef.current;
     reportHistoryGuardDebug('overlayEffect', { activeHistoryOverlay, previousOverlay, closingFromPopState: closingFromPopStateRef.current });
@@ -870,10 +886,11 @@ function App() {
         closingFromPopStateRef.current = false;
       }, 0);
     }
-  }, [activeHistoryOverlay]);
+  }, [activeHistoryOverlay, isIOS]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (isIOS) return;
 
     const handlePopState = () => {
       const overlay = activeHistoryOverlayRef.current;
@@ -898,7 +915,7 @@ function App() {
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [closeHistoryOverlayDirect, showMainBackGuardHint]);
+  }, [closeHistoryOverlayDirect, showMainBackGuardHint, isIOS]);
 
   // Desktop keyboard shortcuts
   useEffect(() => {
@@ -3468,7 +3485,7 @@ function App() {
         onCloseMarkdownImageLightbox={handleCloseMarkdownImageLightbox}
       />
 
-      {showBackGuardHint && (
+      {showBackGuardHint && !isIOS && (
         <button
           type="button"
           onClick={handleContinueAfterBackGuard}
