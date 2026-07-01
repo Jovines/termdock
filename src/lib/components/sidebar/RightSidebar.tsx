@@ -1172,6 +1172,7 @@ interface MarkdownPreviewBlock {
   endLine: number;
   content: ReactNode;
   heading?: MarkdownHeadingInfo;
+  interactive?: boolean;
 }
 
 interface MarkdownCodeBlockProps {
@@ -1579,6 +1580,7 @@ export function buildMarkdownPreviewRenderResult(
         key: `table-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
+        interactive: false,
         content: (
           <div className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
             <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
@@ -1976,6 +1978,7 @@ function MarkdownPreview({
   const headingOutline = useMemo(() => getMarkdownHeadingOutline(blocks), [blocks]);
   const outlineResetKey = `${filePath ?? ''}\n${content}`;
   const lastOutlineResetKeyRef = useRef(outlineResetKey);
+  const tableTapRef = useRef<{ pointerId: number; startX: number; startY: number } | null>(null);
 
   useEffect(() => {
     if (lastOutlineResetKeyRef.current === outlineResetKey) return;
@@ -2026,6 +2029,35 @@ function MarkdownPreview({
     setActiveHeadingLine(heading.startLine);
     onOutlineClose?.();
   }, [onOutlineClose]);
+
+  const handleTablePointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    tableTapRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+  }, []);
+
+  const handleTablePointerUp = useCallback((
+    event: React.PointerEvent<HTMLElement>,
+    startLine: number,
+    endLine: number,
+  ) => {
+    const start = tableTapRef.current;
+    tableTapRef.current = null;
+    if (!start || start.pointerId !== event.pointerId) return;
+    const dx = Math.abs(event.clientX - start.startX);
+    const dy = Math.abs(event.clientY - start.startY);
+    if (dx > 8 || dy > 8) return;
+    const target = event.target;
+    if (target instanceof HTMLElement && target.closest('a, button, input, textarea, select, label')) return;
+    onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, startLine, endLine);
+  }, [onLineRangeClick]);
+
+  const handleTablePointerCancel = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (tableTapRef.current?.pointerId === event.pointerId) tableTapRef.current = null;
+  }, []);
 
   if (blocks.length === 0) {
     return <div className="min-w-0 max-w-full px-4 py-4 text-sm leading-6 text-foreground"><p className="text-muted-foreground">Empty file.</p></div>;
@@ -2142,6 +2174,41 @@ function MarkdownPreview({
               <div className="min-w-0">{block.content}</div>
             </>
           );
+          if (block.interactive === false) {
+            return (
+              <div
+                key={block.key}
+                data-markdown-preview-block-start={block.startLine}
+                className={`group grid w-full grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2 ${selected ? 'bg-[var(--surface-2)]' : ''}`}
+                title={`Line ${lineLabel}`}
+                aria-label={`Line ${lineLabel}`}
+              >
+                <span
+                  className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)]'}`}
+                  aria-hidden="true"
+                >
+                  <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)]'}`} />
+                </span>
+                <div
+                  className="min-w-0 cursor-pointer"
+                  role="button"
+                  tabIndex={0}
+                  onPointerDown={handleTablePointerDown}
+                  onPointerUp={(event) => handleTablePointerUp(event, block.startLine, block.endLine)}
+                  onPointerCancel={handleTablePointerCancel}
+                  onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, block.startLine, block.endLine);
+                  }}
+                  title={`Reference line ${lineLabel}`}
+                  aria-label={`Reference line ${lineLabel}`}
+                >
+                  {block.content}
+                </div>
+              </div>
+            );
+          }
           return (
             <div
               role="button"

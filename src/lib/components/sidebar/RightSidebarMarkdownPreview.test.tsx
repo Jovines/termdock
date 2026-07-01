@@ -353,7 +353,7 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(scroller?.className).toContain('overflow-y-hidden');
   });
 
-  it('keeps Markdown table preview blocks clickable for line references', () => {
+  it('keeps Markdown table preview blocks tappable for line references without wrapping the scroller in a button', () => {
     const block = buildMarkdownPreviewBlocks([
       '| Left | Right |',
       '| --- | --- |',
@@ -361,13 +361,12 @@ describe('right sidebar Markdown preview rendering', () => {
     ], '/repo/docs/table.md', '/repo').find((item) => item.key.startsWith('table-'));
 
     expect(block).toBeTruthy();
+    expect(block?.interactive).toBe(false);
     render(
-      <div
-        role="button"
-        tabIndex={0}
-        data-markdown-preview-block-start={block?.startLine}
-      >
-        {block?.content}
+      <div data-markdown-preview-block-start={block?.startLine}>
+        <div role="button" tabIndex={0}>
+          {block?.content}
+        </div>
       </div>,
     );
 
