@@ -1172,7 +1172,6 @@ interface MarkdownPreviewBlock {
   endLine: number;
   content: ReactNode;
   heading?: MarkdownHeadingInfo;
-  interactive?: boolean;
 }
 
 interface MarkdownCodeBlockProps {
@@ -1580,7 +1579,6 @@ export function buildMarkdownPreviewRenderResult(
         key: `table-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
-        interactive: false,
         content: (
           <div className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
             <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
@@ -2144,19 +2142,6 @@ function MarkdownPreview({
               <div className="min-w-0">{block.content}</div>
             </>
           );
-          if (block.interactive === false) {
-            return (
-              <div
-                key={block.key}
-                data-markdown-preview-block-start={block.startLine}
-                className={`group grid w-full grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2 ${selected ? 'bg-[var(--surface-2)]' : ''}`}
-                title={`Line ${lineLabel}`}
-                aria-label={`Line ${lineLabel}`}
-              >
-                {blockContent}
-              </div>
-            );
-          }
           return (
             <div
               role="button"

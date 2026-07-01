@@ -353,6 +353,28 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(scroller?.className).toContain('overflow-y-hidden');
   });
 
+  it('keeps Markdown table preview blocks clickable for line references', () => {
+    const block = buildMarkdownPreviewBlocks([
+      '| Left | Right |',
+      '| --- | --- |',
+      '| a | b |',
+    ], '/repo/docs/table.md', '/repo').find((item) => item.key.startsWith('table-'));
+
+    expect(block).toBeTruthy();
+    render(
+      <div
+        role="button"
+        tabIndex={0}
+        data-markdown-preview-block-start={block?.startLine}
+      >
+        {block?.content}
+      </div>,
+    );
+
+    expect(screen.getByRole('button')).toBeTruthy();
+    expect(screen.getByRole('table')).toBeTruthy();
+  });
+
   it('renders one-column Markdown tables with the same overflow-safe cell sizing', () => {
     const { container } = renderPreview([
       '| Only column |',
