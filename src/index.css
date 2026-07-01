@@ -174,7 +174,7 @@ body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: var(--background);
+  background-color: var(--background-subtle);
   color: var(--foreground);
 }
 
@@ -536,7 +536,7 @@ body {
     height: var(--app-base-vh, 100lvh);
     width: 100vw;
     touch-action: pan-y;
-    background-color: var(--background) !important;
+    background-color: var(--background-subtle) !important;
     color: var(--foreground) !important;
   }
 

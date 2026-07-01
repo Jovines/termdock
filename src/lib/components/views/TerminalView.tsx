@@ -333,14 +333,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [isActive, probeOrRestartSession]);
 
   // MultiTerminalView 在 visibility/pageshow/online 时会给所有 TerminalView
-  // 广播这个 token。注意这里不能受 isActive 限制：非活跃 SwiperSlide 的 WS
-  // 也可能在 PWA 后台期间断掉，必须一起 probe / 重建，否则切过去才发现坏了。
+  // 广播这个 token。active slide 已由上面的本地 visibility/pageshow/online
+  // 监听负责 refresh + probe；这里仅处理非活跃 SwiperSlide 的 WS 自检，避免
+  // active terminal 在同一次恢复里重复 refresh / probe。
   React.useEffect(() => {
     if (!resumeRequestToken) return;
+    if (isActiveRef.current) return;
     probeOrRestartSession('global-resume');
-    if (isActiveRef.current) {
-      terminalControllerRef.current?.requestRefresh('visibility', { force: true, resizeDebounceMs: 0 });
-    }
   }, [resumeRequestToken, probeOrRestartSession]);
 
   // 失败态自愈：session 用尽底层 10 次重试后会进入 fatal（connection failed），

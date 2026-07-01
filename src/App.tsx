@@ -160,6 +160,7 @@ const BASE_HISTORY_GUARD_REARM_DELAY_MS = 250;
 type HistoryOverlay =
   | 'left-sidebar'
   | 'right-sidebar'
+  | 'right-sidebar-repo-picker'
   | 'right-sidebar-file-preview'
   | 'settings'
   | 'markdown-outline'
@@ -199,6 +200,7 @@ function reportHistoryGuardDebug(message: string, data: Record<string, unknown> 
 function isHistoryOverlay(value: unknown): value is HistoryOverlay {
   return value === 'left-sidebar'
     || value === 'right-sidebar'
+    || value === 'right-sidebar-repo-picker'
     || value === 'right-sidebar-file-preview'
     || value === 'settings'
     || value === 'markdown-outline'
@@ -412,6 +414,8 @@ function App() {
   const [showBackGuardHint, setShowBackGuardHint] = React.useState(false);
   const [rightSidebarFilePreviewOpen, setRightSidebarFilePreviewOpen] = React.useState(false);
   const [rightSidebarFilePreviewCloseSignal, setRightSidebarFilePreviewCloseSignal] = React.useState(0);
+  const [rightSidebarRepoPickerOpen, setRightSidebarRepoPickerOpen] = React.useState(false);
+  const [rightSidebarRepoPickerCloseSignal, setRightSidebarRepoPickerCloseSignal] = React.useState(0);
   const [markdownOutlineOpen, setMarkdownOutlineOpen] = React.useState(false);
   const [markdownOutlineCloseSignal, setMarkdownOutlineCloseSignal] = React.useState(0);
   const [markdownImageLightboxOpen, setMarkdownImageLightboxOpen] = React.useState(false);
@@ -537,15 +541,17 @@ function App() {
     ? 'markdown-image-lightbox'
     : markdownOutlineOpen
       ? 'markdown-outline'
-      : rightSidebarFilePreviewOpen
-        ? 'right-sidebar-file-preview'
-        : isDrawerOpen
-          ? 'settings'
-          : sidebarRightOpen
-            ? 'right-sidebar'
-            : sidebarLeftOpen
-              ? 'left-sidebar'
-              : null;
+      : rightSidebarRepoPickerOpen
+        ? 'right-sidebar-repo-picker'
+        : rightSidebarFilePreviewOpen
+          ? 'right-sidebar-file-preview'
+          : isDrawerOpen
+            ? 'settings'
+            : sidebarRightOpen
+              ? 'right-sidebar'
+              : sidebarLeftOpen
+                ? 'left-sidebar'
+                : null;
   const activeHistoryOverlayRef = React.useRef<HistoryOverlay | null>(activeHistoryOverlay);
   const lastHistoryOverlayRef = React.useRef<HistoryOverlay | null>(activeHistoryOverlay);
   const closingFromPopStateRef = React.useRef(false);
@@ -569,6 +575,11 @@ function App() {
       setRightSidebarFilePreviewCloseSignal((value) => value + 1);
       return;
     }
+    if (overlay === 'right-sidebar-repo-picker') {
+      setRightSidebarRepoPickerOpen(false);
+      setRightSidebarRepoPickerCloseSignal((value) => value + 1);
+      return;
+    }
     if (overlay === 'settings') {
       setIsDrawerOpen(false);
       setIsToolbarPresetsOpen(false);
@@ -584,6 +595,8 @@ function App() {
     setMarkdownOutlineCloseSignal((value) => value + 1);
     setRightSidebarFilePreviewOpen(false);
     setRightSidebarFilePreviewCloseSignal((value) => value + 1);
+    setRightSidebarRepoPickerOpen(false);
+    setRightSidebarRepoPickerCloseSignal((value) => value + 1);
     setMarkdownImageLightboxOpen(false);
     setMarkdownImageLightboxCloseSignal((value) => value + 1);
     useSidebarStore.getState().closeRight();
@@ -651,6 +664,21 @@ function App() {
 
   const handleCloseRightSidebarFilePreview = useCallback(() => {
     requestCloseHistoryOverlay('right-sidebar-file-preview');
+  }, [requestCloseHistoryOverlay]);
+
+  const handleOpenRightSidebarRepoPicker = useCallback(() => {
+    if (!rightSidebarRepoPickerOpen
+      && typeof window !== 'undefined'
+      && activeHistoryOverlayRef.current === 'right-sidebar'
+      && getHistoryOverlay(window.history.state) === 'right-sidebar') {
+      pushHistoryOverlay('right-sidebar-repo-picker');
+      lastHistoryOverlayRef.current = 'right-sidebar-repo-picker';
+    }
+    setRightSidebarRepoPickerOpen(true);
+  }, [rightSidebarRepoPickerOpen]);
+
+  const handleCloseRightSidebarRepoPicker = useCallback(() => {
+    requestCloseHistoryOverlay('right-sidebar-repo-picker');
   }, [requestCloseHistoryOverlay]);
 
   const handleOpenMarkdownOutline = useCallback(() => {
@@ -1746,12 +1774,12 @@ function App() {
 
   return (
     <div
-      className="w-screen h-full flex flex-col bg-background text-foreground"
+      className="w-screen h-full flex flex-col bg-background-subtle text-foreground"
     >
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
-        <div className="flex h-full w-full min-h-0 flex-col overflow-visible bg-background">
+        <div className="flex h-full w-full min-h-0 flex-col overflow-visible bg-background-subtle">
           <div
-            className={`flex shrink-0 items-center justify-between gap-1 bg-background px-1 sm:px-1.5 ${
+            className={`flex shrink-0 items-center justify-between gap-1 bg-background-subtle px-1 sm:px-1.5 ${
               groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'
             }`}
           >
@@ -1980,7 +2008,7 @@ function App() {
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 flex overflow-hidden bg-background">
+          <div className="min-h-0 flex-1 flex overflow-hidden bg-background-subtle">
             <div className="min-h-0 flex-1 overflow-hidden">
               <MultiTerminalView
                 terminalSettings={terminalSettings}
@@ -3409,6 +3437,10 @@ function App() {
         rightSidebarFilePreviewCloseSignal={rightSidebarFilePreviewCloseSignal}
         onOpenRightSidebarFilePreview={handleOpenRightSidebarFilePreview}
         onCloseRightSidebarFilePreview={handleCloseRightSidebarFilePreview}
+        rightSidebarRepoPickerOpen={rightSidebarRepoPickerOpen}
+        rightSidebarRepoPickerCloseSignal={rightSidebarRepoPickerCloseSignal}
+        onOpenRightSidebarRepoPicker={handleOpenRightSidebarRepoPicker}
+        onCloseRightSidebarRepoPicker={handleCloseRightSidebarRepoPicker}
         markdownOutlineOpen={markdownOutlineOpen}
         markdownOutlineCloseSignal={markdownOutlineCloseSignal}
         onOpenMarkdownOutline={handleOpenMarkdownOutline}

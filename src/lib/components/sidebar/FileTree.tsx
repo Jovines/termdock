@@ -892,7 +892,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
             <RiLoader size={20} className="animate-spin text-muted-foreground" />
           </div>
         ) : contentEntries.length === 0 ? (
-          <div className="mx-1 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
+          <div className="mx-1 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
             {t('fileTree.noContentMatches')}
           </div>
         ) : (
@@ -960,7 +960,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
         ) : searchError ? (
           <div className="px-4 py-4 text-sm text-destructive">{searchError}</div>
         ) : searchEntries.length === 0 ? (
-          <div className="mx-1 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
+          <div className="mx-1 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
             {t('fileTree.noMatchingFiles')}
           </div>
         ) : (
@@ -1027,7 +1027,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
 
   if (!visibleRootEntries || visibleRootEntries.length === 0) {
     return (
-      <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
+      <div className="mx-3 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
         {t('fileTree.noMatchingFiles')}
       </div>
     );

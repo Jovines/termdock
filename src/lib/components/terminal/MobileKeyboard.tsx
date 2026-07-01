@@ -378,7 +378,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       {presetMenu}
       <div
         data-mobile-keyboard="true"
-        className={`z-20 select-none overflow-hidden bg-background transition-all duration-150 ease-out px-1 py-0 ${
+        className={`z-20 select-none overflow-hidden bg-background-subtle transition-all duration-150 ease-out px-1 py-0 ${
           visible ? (isDesktopActions ? 'max-h-24' : 'max-h-40') : 'max-h-0'
         } ${
           visible

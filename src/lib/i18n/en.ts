@@ -108,6 +108,8 @@ export const en: TranslationDictionary = {
     selectedLineFooter: ({ lineLabel }) => `Selected ${lineLabel}`,
     clearSelection: 'Clear',
     allChanges: 'All changes',
+    allRepositories: 'All repositories',
+    allRepositoriesShort: 'All',
     noChanges: 'No changes',
     noMatchingChanges: 'No matching changes',
     loadingGitChanges: 'Loading Git changes…',

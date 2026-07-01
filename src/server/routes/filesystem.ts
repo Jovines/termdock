@@ -11,6 +11,7 @@ const router = Router();
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
 const MAX_IMAGE_PREVIEW_SIZE = 20 * 1024 * 1024; // 20MB
 const GIT_TIMEOUT_MS = 5000;
+const GIT_BUNDLE_CACHE_TTL_MS = 3_000;
 const MAX_DIRECTORY_ENTRIES = 1000;
 const MAX_FALLBACK_SEARCH_VISITED = 30_000;
 // Content (full-text) search caps so a broad query can't flood the stream/UI.
@@ -607,6 +608,34 @@ async function buildGitRepositoryBundle(workspaceRoot: string, resolvedCwd: stri
   }
 }
 
+async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, includeNested: boolean): Promise<GitBundlePayload> {
+  if (!includeNested) return buildGitBundle(resolvedCwd, gitRoot);
+
+  const { repositories: nestedRepositories, truncated } = await discoverNestedGitRoots(gitRoot);
+  const repositories = await Promise.all([
+    buildGitRepositoryBundle(gitRoot, resolvedCwd, gitRoot),
+    ...nestedRepositories.map((repo) => buildGitRepositoryBundle(gitRoot, resolvedCwd, repo.root, repo.displayRoot)),
+  ]);
+  const primary = repositories[0];
+  return {
+    available: true,
+    files: repositories.flatMap((repo) => repo.files),
+    context: primary.context,
+    repositories,
+    truncatedRepositories: truncated,
+  };
+}
+
+async function getCachedGitBundle(resolvedCwd: string, gitRoot: string, includeNested: boolean, refresh: boolean): Promise<GitBundlePayload> {
+  const cacheKey = getGitBundleCacheKey(gitRoot, includeNested);
+  const now = Date.now();
+  const cached = gitBundleCache.get(cacheKey);
+  if (!refresh && cached && cached.expiresAt > now) return cached.bundle;
+  const bundle = await buildWorkspaceGitBundle(resolvedCwd, gitRoot, includeNested);
+  gitBundleCache.set(cacheKey, { bundle, expiresAt: now + GIT_BUNDLE_CACHE_TTL_MS });
+  return bundle;
+}
+
 function getSinglePath(paths: unknown): string {
   if (!Array.isArray(paths) || paths.length !== 1 || typeof paths[0] !== 'string' || !paths[0]) {
     throw new Error('Expected exactly one path');
@@ -1149,6 +1178,17 @@ function execGitNoIndex(args: string[], cwd: string): Promise<string> {
 // (open sidebar fires ~3 git fetches at once).
 const GIT_ROOT_CACHE_TTL_MS = 5_000;
 const gitRootCache = new Map<string, { root: string | null; expiresAt: number }>();
+const gitBundleCache = new Map<string, { bundle: GitBundlePayload; expiresAt: number }>();
+
+function getGitBundleCacheKey(gitRoot: string, includeNested: boolean): string {
+  return `${gitRoot}\u0000${includeNested ? 'nested' : 'single'}`;
+}
+
+function clearGitBundleCacheForRoot(root: string): void {
+  for (const key of gitBundleCache.keys()) {
+    if (key.startsWith(`${root}\u0000`)) gitBundleCache.delete(key);
+  }
+}
 
 /** Find the top-level directory of the git repo containing `cwd`, or null. */
 async function findGitRoot(cwd: string): Promise<string | null> {
@@ -1202,6 +1242,7 @@ async function discoverNestedGitRoots(workspaceRoot: string): Promise<{ reposito
       return;
     }
 
+    const childDirectories: Array<{ entry: Dirent; target: string }> = [];
     for (const entry of entries) {
       if (truncated) return;
       if (NESTED_GIT_DISCOVERY_IGNORED_NAMES.has(entry.name)) continue;
@@ -1223,7 +1264,12 @@ async function discoverNestedGitRoots(workspaceRoot: string): Promise<{ reposito
         }
         continue;
       }
-      if (!entry.isSymbolicLink()) await visit(target);
+      if (!entry.isSymbolicLink()) childDirectories.push({ entry, target });
+    }
+
+    for (const child of childDirectories) {
+      if (truncated) return;
+      await visit(child.target);
     }
   }
 
@@ -1723,6 +1769,7 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
   try {
     const cwd = req.query.cwd as string | undefined;
     const includeNested = req.query.includeNested === 'true';
+    const refresh = req.query.refresh === 'true';
     if (!cwd) {
       res.json({ available: false, files: [], context: null, error: 'No cwd provided' });
       return;
@@ -1739,24 +1786,7 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
       return;
     }
 
-    if (!includeNested) {
-      res.json(await buildGitBundle(resolvedCwd, gitRoot));
-      return;
-    }
-
-    const { repositories: nestedRepositories, truncated } = await discoverNestedGitRoots(gitRoot);
-    const repositories = await Promise.all([
-      buildGitRepositoryBundle(gitRoot, resolvedCwd, gitRoot),
-      ...nestedRepositories.map((repo) => buildGitRepositoryBundle(gitRoot, resolvedCwd, repo.root, repo.displayRoot)),
-    ]);
-    const primary = repositories[0];
-    res.json({
-      available: true,
-      files: repositories.flatMap((repo) => repo.files),
-      context: primary.context,
-      repositories,
-      truncatedRepositories: truncated,
-    });
+    res.json(await getCachedGitBundle(resolvedCwd, gitRoot, includeNested, refresh));
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     res.json({ available: false, files: [], context: null, error: message });
@@ -1839,12 +1869,13 @@ router.post('/git-action', async (req: Request, res: Response) => {
       }
     }
 
+    clearGitBundleCacheForRoot(gitRoot);
     res.json({
       ok: true,
       action,
       message: output.trim() || 'Git action completed',
       output,
-      bundle: await buildGitBundle(resolvedCwd, gitRoot),
+      bundle: await getCachedGitBundle(resolvedCwd, gitRoot, false, true),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Git action failed';

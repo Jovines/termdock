@@ -1636,10 +1636,11 @@ export interface GitActionResponse {
   bundle: GitBundleResponse;
 }
 
-export async function getGitBundle(cwd?: string, signal?: AbortSignal, options: { includeNested?: boolean } = {}): Promise<GitBundleResponse> {
+export async function getGitBundle(cwd?: string, signal?: AbortSignal, options: { includeNested?: boolean; refresh?: boolean } = {}): Promise<GitBundleResponse> {
   const params = new URLSearchParams();
   if (cwd) params.set('cwd', cwd);
   if (options.includeNested) params.set('includeNested', 'true');
+  if (options.refresh) params.set('refresh', 'true');
   const qs = params.toString();
   const response = await fetch(`/api/terminal/fs/git-bundle${qs ? `?${qs}` : ''}`, { signal });
   if (!response.ok) {

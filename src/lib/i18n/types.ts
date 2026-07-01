@@ -125,6 +125,8 @@ export type TranslationDictionary = {
     selectedLineFooter: (params: TranslatorParams) => string;
     clearSelection: string;
     allChanges: string;
+    allRepositories: string;
+    allRepositoriesShort: string;
     noChanges: string;
     noMatchingChanges: string;
     loadingGitChanges: string;

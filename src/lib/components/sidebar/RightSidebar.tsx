@@ -46,6 +46,10 @@ interface RightSidebarProps {
   rightSidebarFilePreviewCloseSignal?: number;
   onOpenRightSidebarFilePreview?: () => void;
   onCloseRightSidebarFilePreview?: () => void;
+  rightSidebarRepoPickerOpen?: boolean;
+  rightSidebarRepoPickerCloseSignal?: number;
+  onOpenRightSidebarRepoPicker?: () => void;
+  onCloseRightSidebarRepoPicker?: () => void;
   markdownOutlineOpen?: boolean;
   markdownOutlineCloseSignal?: number;
   onOpenMarkdownOutline?: () => void;
@@ -92,8 +96,6 @@ const MARKDOWN_TABLE_CELL_CLASS = 'border-r px-2 py-1.5 sm:px-3 sm:py-2';
 const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'max-w-[18rem] whitespace-normal break-words sm:max-w-[27rem]';
 const MARKDOWN_TABLE_HEADER_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-b border-border/15 font-semibold last:border-r-0`;
 const MARKDOWN_TABLE_BODY_CELL_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-border/10 align-top text-muted-foreground last:border-r-0`;
-
-const gitContextCache = new Map<string, GitContext | null>();
 
 type GitActionKey = GitActionRequest['action'];
 
@@ -1024,7 +1026,7 @@ function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: 
       }
       if (index < lines.length) index += 1;
       nodes.push(
-        <details key={`${keyPrefix}-details-${blockStart}`} className="rounded-lg border border-border/20 bg-surface px-3 py-2 text-muted-foreground">
+        <details key={`${keyPrefix}-details-${blockStart}`} className="overflow-hidden rounded-lg border border-border/20 bg-surface px-3 py-2 text-muted-foreground">
           <summary className="cursor-pointer text-sm font-semibold text-foreground">{renderMarkdownInline(summary, `${keyPrefix}-details-${blockStart}-summary`, true, context)}</summary>
           {bodyLines.length > 0 && (
             <div className="mt-2 text-sm leading-6">{renderMarkdownInlineLines(bodyLines, `${keyPrefix}-details-${blockStart}`, context)}</div>
@@ -1351,7 +1353,7 @@ export function buildMarkdownPreviewRenderResult(
         startLine: blockStart + 1,
         endLine: index,
         content: (
-          <details className="rounded-lg border border-border/20 bg-surface px-3 py-2 text-muted-foreground">
+          <details className="overflow-hidden rounded-lg border border-border/20 bg-surface px-3 py-2 text-muted-foreground">
             <summary className="cursor-pointer text-sm font-semibold text-foreground">{renderMarkdownInline(summary, `details-${blockStart}-summary`, true, context)}</summary>
             {bodyLines.length > 0 && (
               <div className="mt-2 text-sm leading-6">{renderMarkdownInlineLines(bodyLines, `details-${blockStart}`, context)}</div>
@@ -2379,7 +2381,7 @@ function Pane({ active, mounted = true, children }: { active: boolean; mounted?:
 function GitChangesLoadingState({ slow }: { slow: boolean }) {
   const { t } = useI18n();
   return (
-    <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
+    <div className="mx-3 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
       <RiLoader size={20} className="mx-auto mb-2 animate-spin text-muted-foreground/80" />
       <div>{t('rightSidebar.loadingGitChanges')}</div>
       {slow && <div className="mt-1 text-xs text-muted-foreground/75">{t('rightSidebar.loadingGitChangesSlow')}</div>}
@@ -2390,7 +2392,7 @@ function GitChangesLoadingState({ slow }: { slow: boolean }) {
 function GitChangesErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   const { t } = useI18n();
   return (
-    <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-5 text-center text-sm text-destructive">
+    <div className="mx-3 mt-3 overflow-hidden rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-5 text-center text-sm text-destructive">
       <div className="font-medium">{t('rightSidebar.gitChangesLoadFailed')}</div>
       <div className="mt-1 break-words text-xs opacity-85">{message}</div>
       <button
@@ -2400,16 +2402,6 @@ function GitChangesErrorState({ message, onRetry }: { message: string; onRetry: 
       >
         {t('rightSidebar.retryGitChanges')}
       </button>
-    </div>
-  );
-}
-
-function GitChangesRefreshingBanner() {
-  const { t } = useI18n();
-  return (
-    <div className="mb-2 flex items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-[11px] text-muted-foreground">
-      <RiLoader size={12} className="shrink-0 animate-spin" />
-      <span>{t('rightSidebar.refreshingGitChanges')}</span>
     </div>
   );
 }
@@ -2962,7 +2954,7 @@ function FilePreview({
   }, [lineRange, floatingInsertPos, previewState, markdownViewMode, filePath, rootPath, highlightedLines]);
 
   if (!filePath) {
-    return <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
+    return <div className="mx-3 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
   }
 
   const readablePath = rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
@@ -3326,6 +3318,10 @@ export function RightSidebar(
     rightSidebarFilePreviewCloseSignal,
     onOpenRightSidebarFilePreview,
     onCloseRightSidebarFilePreview,
+    rightSidebarRepoPickerOpen = false,
+    rightSidebarRepoPickerCloseSignal,
+    onOpenRightSidebarRepoPicker,
+    onCloseRightSidebarRepoPicker,
     markdownOutlineOpen = false,
     markdownOutlineCloseSignal,
     onOpenMarkdownOutline,
@@ -3344,6 +3340,7 @@ export function RightSidebar(
   const deferredFileQuery = useDeferredValue(fileQuery);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [gitRepositories, setGitRepositories] = useState<GitRepositoryBundle[]>([]);
+  const [activeGitRepoRoot, setActiveGitRepoRoot] = useState<string | null>(null);
   const [insertedReferenceKey, setInsertedReferenceKey] = useState<string | null>(null);
   const [copiedReferenceKey, setCopiedReferenceKey] = useState<string | null>(null);
   // Line-range selection lives in the sidebar so the sticky action bar and
@@ -3355,6 +3352,7 @@ export function RightSidebar(
   // On phone-sized panels the diff tab is intentionally a plain grouped list:
   // one file row, tap to expand/collapse its inline diff, no mode switcher.
   const [expandedDiffFiles, setExpandedDiffFiles] = useState<Set<string>>(() => new Set());
+  const [collapsedGitRepoGroups, setCollapsedGitRepoGroups] = useState<Set<string>>(() => new Set());
   // When on, long diff lines wrap instead of overflowing horizontally. The
   // user can opt in per-session without leaving the panel.
   const [diffWrap, setDiffWrap] = useState(true);
@@ -3409,6 +3407,7 @@ export function RightSidebar(
   const gitDetailsRequestIdRef = useRef(0);
   const lastAutoRefreshRootRef = useRef<string | null>(null);
   const fileTreeResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
+  const repoSwitcherPointerRef = useRef<{ startX: number; pointerId: number } | null>(null);
 
   const applyGitBundle = useCallback((bundle: GitBundleResponse, options: { reloadDiff?: boolean } = {}) => {
     setChangedFiles(toChangedFileMap(bundle.files));
@@ -3430,11 +3429,6 @@ export function RightSidebar(
       if (!current?.available || currentRoot !== (bundle.context.root ?? rootPath)) return bundle.context;
       return { ...current, ...bundle.context };
     });
-    const contextRoot = bundle.context?.root ?? rootPath;
-    if (contextRoot && bundle.context) {
-      const cached = gitContextCache.get(contextRoot);
-      gitContextCache.set(contextRoot, cached?.available ? { ...cached, ...bundle.context } : bundle.context);
-    }
     if (options.reloadDiff) setDiffRefreshKey((key) => key + 1);
     const current = useSidebarStore.getState().selectedFilePath;
     if (current && !current.startsWith('/') && !bundle.files.some((file) => file.path === current || file.absolutePath === current)) {
@@ -3448,6 +3442,14 @@ export function RightSidebar(
       }
       return next;
     });
+    setCollapsedGitRepoGroups((collapsed) => {
+      const valid = new Set(bundle.files.map((file) => getChangedFileRepoRoot(file, rootPath)).filter(Boolean) as string[]);
+      const next = new Set<string>();
+      for (const root of collapsed) {
+        if (valid.has(root)) next.add(root);
+      }
+      return next;
+    });
   }, [rootPath, selectFile, setChangedFiles]);
 
   useEffect(() => {
@@ -3457,7 +3459,8 @@ export function RightSidebar(
     gitBundleAbortRef.current = null;
     setGitDetailsLoading(false);
     setGitRepositories([]);
-    setGitContext(rootPath ? (gitContextCache.get(rootPath) ?? null) : null);
+    setActiveGitRepoRoot(null);
+    setGitContext(null);
   }, [rootPath]);
 
   const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; preloadDiff?: boolean } = {}) => {
@@ -3477,7 +3480,7 @@ export function RightSidebar(
     }
 
     try {
-      const bundle = await getGitBundle(cwd, controller.signal, { includeNested: true });
+      const bundle = await getGitBundle(cwd, controller.signal, { includeNested: true, refresh: options.reloadDiff ?? false });
       if (gitBundleRequestIdRef.current !== requestId) return null;
       applyGitBundle(bundle, { reloadDiff: options.reloadDiff ?? false });
       if (options.preloadDiff) {
@@ -3515,8 +3518,6 @@ export function RightSidebar(
         if (!current?.available || !context.available) return context;
         return { ...current, ...context };
       });
-      const contextRoot = context.root ?? cwd;
-      gitContextCache.set(contextRoot, context);
       return context;
     } catch (error) {
       if (gitDetailsRequestIdRef.current === requestId) {
@@ -3558,6 +3559,13 @@ export function RightSidebar(
       setLineRange(null);
     }
   }, [rightSidebarFilePreviewCloseSignal]);
+
+  useEffect(() => {
+    if (rightSidebarRepoPickerCloseSignal !== undefined) {
+      // The open state is owned by App/history. This effect exists so the
+      // component reacts consistently when Android Back closes the sheet.
+    }
+  }, [rightSidebarRepoPickerCloseSignal]);
 
   useEffect(() => {
     if (!isMobile && rightSidebarFilePreviewOpen) {
@@ -3834,6 +3842,54 @@ export function RightSidebar(
     return counts;
   }, [changedFiles]);
 
+  const gitRepositoryByRoot = useMemo(() => {
+    const map = new Map<string, GitRepositoryBundle>();
+    for (const repo of gitRepositories) map.set(repo.root, repo);
+    return map;
+  }, [gitRepositories]);
+
+  const changedRepoSummaries = useMemo(() => {
+    const summaries = new Map<string, { root: string; label: string; branch?: string | null; count: number; staged: number }>();
+    for (const file of changedFiles.values()) {
+      const repoRoot = getChangedFileRepoRoot(file, rootPath);
+      if (!repoRoot) continue;
+      const repo = gitRepositoryByRoot.get(repoRoot);
+      const label = getChangedFileRepoLabel(file) || repo?.relativeRoot || repo?.name || rootName;
+      const current = summaries.get(repoRoot) ?? { root: repoRoot, label, branch: repo?.context?.branch, count: 0, staged: 0 };
+      current.count += 1;
+      if (file.staged) current.staged += 1;
+      summaries.set(repoRoot, current);
+    }
+    return Array.from(summaries.values()).sort((a, b) => {
+      if (a.label === rootName) return -1;
+      if (b.label === rootName) return 1;
+      return a.label.localeCompare(b.label);
+    });
+  }, [changedFiles, gitRepositories, gitRepositoryByRoot, rootName, rootPath]);
+
+  const activeGitRepoSummary = useMemo(() => (
+    activeGitRepoRoot ? changedRepoSummaries.find((repo) => repo.root === activeGitRepoRoot) ?? null : null
+  ), [activeGitRepoRoot, changedRepoSummaries]);
+
+  const activeGitRepoIndex = useMemo(() => {
+    if (!activeGitRepoRoot) return 0;
+    const index = changedRepoSummaries.findIndex((repo) => repo.root === activeGitRepoRoot);
+    return index >= 0 ? index + 1 : 0;
+  }, [activeGitRepoRoot, changedRepoSummaries]);
+
+  const gitRepoSwitcherItems = useMemo(() => [
+    { root: null as string | null, label: t('rightSidebar.allRepositories'), count: changedFiles.size, branch: null as string | null },
+    ...changedRepoSummaries.map((repo) => ({ root: repo.root, label: repo.label, count: repo.count, branch: repo.branch ?? null })),
+  ], [changedFiles.size, changedRepoSummaries, t]);
+
+  const activeGitRepoSwitcherItem = gitRepoSwitcherItems[activeGitRepoIndex] ?? gitRepoSwitcherItems[0];
+
+  useEffect(() => {
+    if (activeGitRepoRoot && !changedRepoSummaries.some((repo) => repo.root === activeGitRepoRoot)) {
+      setActiveGitRepoRoot(null);
+    }
+  }, [activeGitRepoRoot, changedRepoSummaries]);
+
   const switchBranchOptions = useMemo<GitPickerOption[]>(() => {
     const values = new Set<string>();
     if (gitContext?.branch) values.add(gitContext.branch);
@@ -3894,6 +3950,130 @@ export function RightSidebar(
     }
     return { text: t('rightSidebar.pushUpToDate'), className: 'bg-surface-2 text-muted-foreground' };
   }, [gitContext?.ahead, gitContext?.behind, gitContext?.upstream, t]);
+
+  function renderGitRepoFilter() {
+    if (changedRepoSummaries.length <= 1) return null;
+    return (
+      <div className="bg-surface px-2 py-2">
+        <div className="mb-1.5 px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+          Repositories
+        </div>
+        <div className="space-y-1 pr-1">
+        <button
+          type="button"
+          onClick={() => setActiveGitRepoRoot(null)}
+          className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition active:scale-[0.99] ${
+            activeGitRepoRoot === null
+              ? 'bg-surface-elevated text-foreground shadow-sm'
+              : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+          }`}
+          title={t('rightSidebar.allRepositories')}
+        >
+          <RiGitBranch size={12} className="shrink-0" />
+          <span className="min-w-0 flex-1 truncate text-[11px] font-semibold">{t('rightSidebar.allRepositories')}</span>
+          <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{changedFiles.size}</span>
+        </button>
+        {changedRepoSummaries.map((repo) => (
+          <button
+            key={repo.root}
+            type="button"
+            onClick={() => setActiveGitRepoRoot(repo.root)}
+            className={`flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition active:scale-[0.99] ${
+              activeGitRepoRoot === repo.root
+                ? 'bg-primary/15 text-primary'
+                : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+            }`}
+            title={repo.label}
+          >
+            <RiGitBranch size={12} className="mt-0.5 shrink-0" />
+            <span className="min-w-0 flex-1">
+              <span className="block break-all text-[11px] font-semibold leading-snug">{getPathBasename(repo.label)}</span>
+              <span className="block break-all text-[10px] leading-snug text-muted-foreground/75">{repo.label}</span>
+            </span>
+            <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] ${repo.count > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>{repo.count}</span>
+          </button>
+        ))}
+        </div>
+      </div>
+    );
+  }
+
+  function renderMobileRepoSwitcher() {
+    if (!isMobile || !diffPaneActive || changedRepoSummaries.length <= 1) return null;
+    const label = activeGitRepoSwitcherItem?.label ?? t('rightSidebar.allRepositories');
+    const count = activeGitRepoSwitcherItem?.count ?? changedFiles.size;
+    return (
+      <>
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-drawer-panel px-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)]">
+          <button
+            type="button"
+            onPointerDown={handleRepoSwitcherPointerDown}
+            onPointerUp={handleRepoSwitcherPointerUp}
+            onPointerCancel={() => { repoSwitcherPointerRef.current = null; }}
+            className="pointer-events-auto flex min-h-11 w-full touch-pan-y items-center gap-2 rounded-xl border border-border/20 bg-surface-elevated px-3 py-2 text-left shadow-2xl active:scale-[0.99]"
+            title={label}
+          >
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground">
+              <RiGitBranch size={14} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[12px] font-semibold text-foreground">{getPathBasename(label) || label}</span>
+              <span className="block truncate text-[10px] text-muted-foreground">{label}</span>
+            </span>
+            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${count > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>{count}</span>
+            <span className="shrink-0 text-[10px] text-muted-foreground">{activeGitRepoIndex + 1}/{gitRepoSwitcherItems.length}</span>
+          </button>
+        </div>
+        {rightSidebarRepoPickerOpen && (
+          <div className="fixed inset-0 z-drawer-backdrop bg-[var(--app-backdrop)]" onClick={onCloseRightSidebarRepoPicker}>
+            <div
+              className="fixed inset-x-0 bottom-0 z-drawer-panel max-h-[72vh] overflow-hidden rounded-t-2xl border-t border-border/20 bg-surface-elevated shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-border/15 px-4 py-3">
+                <div className="text-sm font-semibold text-foreground">Repositories</div>
+                <button
+                  type="button"
+                  onClick={onCloseRightSidebarRepoPicker}
+                  className="rounded-full bg-surface-2 p-1.5 text-muted-foreground hover:bg-surface hover:text-foreground"
+                  aria-label={t('rightSidebar.close')}
+                >
+                  <RiCloseLine size={16} />
+                </button>
+              </div>
+              <div className="max-h-[calc(72vh-3.25rem)] overflow-y-auto overscroll-contain px-3 py-2 pb-[calc(env(safe-area-inset-bottom)+5.5rem)]">
+                {gitRepoSwitcherItems.map((repo) => {
+                  const selected = (repo.root ?? null) === activeGitRepoRoot;
+                  return (
+                    <button
+                      key={repo.root ?? 'all'}
+                      type="button"
+                      onClick={() => {
+                        selectGitRepoRoot(repo.root);
+                        onCloseRightSidebarRepoPicker?.();
+                      }}
+                      className={`mb-1 flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left transition active:scale-[0.99] ${
+                        selected ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+                      }`}
+                      title={repo.label}
+                    >
+                      <RiGitBranch size={14} className="mt-0.5 shrink-0" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block break-all text-[13px] font-semibold leading-snug">{getPathBasename(repo.label) || repo.label}</span>
+                        <span className="block break-all text-[11px] leading-snug text-muted-foreground/75">{repo.label}</span>
+                        {repo.branch && <span className="mt-1 block truncate text-[10px] text-muted-foreground/70">{repo.branch}</span>}
+                      </span>
+                      <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] ${repo.count > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>{repo.count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
 
   function renderChangeRow(entry: [string, GitChangedFile], options: { compact: boolean; expandable?: boolean }) {
     const [, file] = entry;
@@ -4023,23 +4203,35 @@ export function RightSidebar(
     <div className={options.expandable ? 'space-y-3 pt-2' : 'space-y-2'}>
       {filteredChangedFileGroups.map((group) => {
         const staged = countStagedChanges(group.files.map(([, file]) => file));
-        const showRepoHeader = filteredChangedFileGroups.length > 1 || group.label !== rootName;
+        const showRepoHeader = !activeGitRepoRoot && (filteredChangedFileGroups.length > 1 || group.label !== rootName);
+        const collapsed = Boolean(group.root && collapsedGitRepoGroups.has(group.root));
         return (
-          <section key={group.root ?? group.label} className={showRepoHeader ? 'rounded-lg border border-border/15 bg-surface/60' : ''}>
+          <section key={group.root ?? group.label} className={showRepoHeader ? 'overflow-hidden rounded-lg border border-border/15 bg-surface/60' : ''}>
             {showRepoHeader && (
-              <div className="flex items-center gap-2 border-b border-border/10 px-2 py-1.5">
+              <button
+                type="button"
+                onClick={() => toggleGitRepoGroup(group.root)}
+                aria-expanded={!collapsed}
+                className={`flex w-full items-center gap-2 px-2 py-1.5 text-left transition hover:bg-surface-2 active:scale-[0.99] ${collapsed ? 'rounded-lg' : 'rounded-t-lg border-b border-border/10'}`}
+              >
+                <span className="shrink-0 text-muted-foreground">
+                  {collapsed ? <RiChevronRight size={13} /> : <RiChevronDown size={13} />}
+                </span>
                 <RiGitBranch size={12} className="shrink-0 text-muted-foreground" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[11px] font-semibold text-foreground">{group.label}</div>
-                  {group.branch && <div className="truncate text-[10px] text-muted-foreground">{group.branch}</div>}
-                </div>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[11px] font-semibold text-foreground">{group.label}</span>
+                  {group.branch && <span className="block truncate text-[10px] text-muted-foreground">{group.branch}</span>}
+                </span>
                 <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{group.files.length}</span>
                 {staged > 0 && <span className="shrink-0 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">{staged}</span>}
                 {group.root && (
                   <>
                     <button
                       type="button"
-                      onClick={() => runRepoGitAction('stage-all', group.root, group.label)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        runRepoGitAction('stage-all', group.root, group.label);
+                      }}
                       disabled={Boolean(runningGitAction)}
                       className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
                       title={t('rightSidebar.stageAll')}
@@ -4048,7 +4240,10 @@ export function RightSidebar(
                     </button>
                     <button
                       type="button"
-                      onClick={() => runRepoGitAction('stash-all', group.root, group.label)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        runRepoGitAction('stash-all', group.root, group.label);
+                      }}
                       disabled={Boolean(runningGitAction)}
                       className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
                       title={t('rightSidebar.stashAll')}
@@ -4057,11 +4252,13 @@ export function RightSidebar(
                     </button>
                   </>
                 )}
+              </button>
+            )}
+            {!collapsed && (
+              <div className={options.expandable ? 'space-y-1.5 bg-surface/60 p-2' : showRepoHeader ? 'space-y-px bg-surface/60 p-1.5' : 'space-y-px'}>
+                {group.files.map((entry) => renderChangeRow(entry, options))}
               </div>
             )}
-            <div className={options.expandable ? 'space-y-1.5 p-2' : showRepoHeader ? 'space-y-px p-1.5' : 'space-y-px'}>
-              {group.files.map((entry) => renderChangeRow(entry, options))}
-            </div>
           </section>
         );
       })}
@@ -4075,10 +4272,12 @@ export function RightSidebar(
 
   const filteredChangedFiles = useMemo(() => {
     const query = deferredFileQuery.trim().toLowerCase();
-    const entries = Array.from(changedFiles.entries()).sort(([a], [b]) => a.localeCompare(b));
+    const entries = Array.from(changedFiles.entries())
+      .filter(([, file]) => !activeGitRepoRoot || getChangedFileRepoRoot(file, rootPath) === activeGitRepoRoot)
+      .sort(([a], [b]) => a.localeCompare(b));
     if (!query) return entries;
     return entries.filter(([path, file]) => `${path} ${file.path} ${file.status} ${file.repoRelativeRoot ?? ''} ${file.repoName ?? ''}`.toLowerCase().includes(query));
-  }, [changedFiles, deferredFileQuery]);
+  }, [activeGitRepoRoot, changedFiles, deferredFileQuery, rootPath]);
 
   const selectedChangedFile = useMemo(() => {
     if (!selectedFilePath) return null;
@@ -4086,12 +4285,6 @@ export function RightSidebar(
       file.path === selectedFilePath || file.absolutePath === selectedFilePath
     )) ?? null;
   }, [changedFiles, selectedFilePath]);
-
-  const gitRepositoryByRoot = useMemo(() => {
-    const map = new Map<string, GitRepositoryBundle>();
-    for (const repo of gitRepositories) map.set(repo.root, repo);
-    return map;
-  }, [gitRepositories]);
 
   const filteredChangedFileGroups = useMemo(() => {
     const groups = new Map<string, { root: string | null; label: string; branch?: string | null; files: Array<[string, GitChangedFile]> }>();
@@ -4160,6 +4353,16 @@ export function RightSidebar(
     setRightTab('diff');
   }, [selectFile, setRightTab]);
 
+  const toggleGitRepoGroup = useCallback((repoRoot: string | null) => {
+    if (!repoRoot) return;
+    setCollapsedGitRepoGroups((current) => {
+      const next = new Set(current);
+      if (next.has(repoRoot)) next.delete(repoRoot);
+      else next.add(repoRoot);
+      return next;
+    });
+  }, []);
+
   const runSidebarGitAction = useCallback(async (request: GitActionRequest, label: string, pathForBusy?: string): Promise<boolean> => {
     setGitActionError(null);
     setCompletedGitAction(null);
@@ -4167,7 +4370,7 @@ export function RightSidebar(
     try {
       const result = await runGitAction(request);
       const refreshedBundle = rootPath
-        ? await getGitBundle(rootPath, undefined, { includeNested: true }).catch(() => result.bundle)
+        ? await getGitBundle(rootPath, undefined, { includeNested: true, refresh: true }).catch(() => result.bundle)
         : result.bundle;
       applyGitBundle(refreshedBundle, { reloadDiff: true });
       const completedAction = { action: request.action, path: pathForBusy, label };
@@ -4194,6 +4397,40 @@ export function RightSidebar(
     }
     setConfirmGitAction({ kind: 'stash-all', repoRoot, repoLabel });
   }, [runSidebarGitAction, t]);
+
+  const selectGitRepoByIndex = useCallback((index: number) => {
+    if (gitRepoSwitcherItems.length === 0) return;
+    const wrapped = (index + gitRepoSwitcherItems.length) % gitRepoSwitcherItems.length;
+    setActiveGitRepoRoot(gitRepoSwitcherItems[wrapped]?.root ?? null);
+    selectDiffFile(null);
+  }, [gitRepoSwitcherItems, selectDiffFile]);
+
+  const selectGitRepoRoot = useCallback((repoRoot: string | null) => {
+    setActiveGitRepoRoot(repoRoot);
+    selectDiffFile(null);
+  }, [selectDiffFile]);
+
+  const handleRepoSwitcherPointerDown = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+    repoSwitcherPointerRef.current = { startX: event.clientX, pointerId: event.pointerId };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, []);
+
+  const handleRepoSwitcherPointerUp = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+    const start = repoSwitcherPointerRef.current;
+    repoSwitcherPointerRef.current = null;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture may already be released.
+    }
+    if (!start || start.pointerId !== event.pointerId) return;
+    const delta = event.clientX - start.startX;
+    if (Math.abs(delta) < 36) {
+      onOpenRightSidebarRepoPicker?.();
+      return;
+    }
+    selectGitRepoByIndex(activeGitRepoIndex + (delta < 0 ? 1 : -1));
+  }, [activeGitRepoIndex, onOpenRightSidebarRepoPicker, selectGitRepoByIndex]);
 
   const handleSwitchBranch = useCallback(async () => {
     if (!rootPath) return;
@@ -5101,9 +5338,15 @@ export function RightSidebar(
         <Pane active={diffPaneActive} mounted={hasMountedDiffPane}>
           {isWide ? (
             <div className="flex h-full min-h-0">
+              {gitContext?.available && changedRepoSummaries.length > 1 && (
+                <div className="w-[220px] min-w-[180px] shrink-0 overflow-y-auto overscroll-contain border-r border-border/15 bg-surface">
+                  {renderGitRepoFilter()}
+                </div>
+              )}
               <div className="w-[320px] min-w-[260px] shrink-0 flex flex-col overflow-hidden border-r border-border/15">
                 {gitContext?.available && (
-                  <div className="shrink-0 border-b border-border/15 px-3 py-2">
+                  <div className="shrink-0 border-b border-border/15">
+                    <div className="px-3 py-2">
                     <div className="flex items-center justify-between gap-2">
                       {changedFiles.size > 0 ? (
                         <button
@@ -5127,10 +5370,34 @@ export function RightSidebar(
                         {diffRefreshButton}
                       </div>
                     </div>
+                    {activeGitRepoSummary && (
+                      <div className="mt-2 flex items-center gap-1.5">
+                        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
+                        {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
+                        <button
+                          type="button"
+                          onClick={() => runRepoGitAction('stage-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
+                          disabled={Boolean(runningGitAction)}
+                          className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+                          title={t('rightSidebar.stageAll')}
+                        >
+                          {t('rightSidebar.stageAll')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => runRepoGitAction('stash-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
+                          disabled={Boolean(runningGitAction)}
+                          className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
+                          title={t('rightSidebar.stashAll')}
+                        >
+                          {t('rightSidebar.stashAll')}
+                        </button>
+                      </div>
+                    )}
+                    </div>
                   </div>
                 )}
                 <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
-                  {gitBundleLoading && changedFiles.size > 0 && <GitChangesRefreshingBanner />}
                   {gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
                     <GitChangesLoadingState slow={gitBundleSlow} />
                   ) : gitBundleError && changedFiles.size === 0 ? (
@@ -5153,7 +5420,8 @@ export function RightSidebar(
           ) : (
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
               {gitContext?.available && (
-                <div className="shrink-0 border-b border-border/15 px-3 py-2">
+                <div className="shrink-0 border-b border-border/15">
+                  <div className="px-3 py-2">
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
@@ -5181,10 +5449,34 @@ export function RightSidebar(
                       </button>
                     </div>
                   </div>
+                  {activeGitRepoSummary && (
+                    <div className="mt-2 flex items-center gap-1.5">
+                      <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
+                      {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
+                      <button
+                        type="button"
+                        onClick={() => runRepoGitAction('stage-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
+                        disabled={Boolean(runningGitAction)}
+                        className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+                        title={t('rightSidebar.stageAll')}
+                      >
+                        {t('rightSidebar.stageAll')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => runRepoGitAction('stash-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
+                        disabled={Boolean(runningGitAction)}
+                        className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
+                        title={t('rightSidebar.stashAll')}
+                      >
+                        {t('rightSidebar.stashAll')}
+                      </button>
+                    </div>
+                  )}
+                  </div>
                 </div>
               )}
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-2">
-                {gitBundleLoading && changedFiles.size > 0 && <GitChangesRefreshingBanner />}
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(env(safe-area-inset-bottom)+4.5rem)]">
                 {gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
                   <GitChangesLoadingState slow={gitBundleSlow} />
                 ) : gitBundleError && changedFiles.size === 0 ? (
@@ -5203,6 +5495,7 @@ export function RightSidebar(
           )}
         </Pane>
       </div>
+        {renderMobileRepoSwitcher()}
         {confirmGitAction && (
           <div className="fixed inset-0 z-modal-panel bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>
             <div

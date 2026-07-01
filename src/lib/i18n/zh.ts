@@ -108,6 +108,8 @@ export const zh: TranslationDictionary = {
     selectedLineFooter: ({ lineLabel }) => `已选 ${lineLabel}`,
     clearSelection: '清除',
     allChanges: '全部改动',
+    allRepositories: '全部仓库',
+    allRepositoriesShort: '全部',
     noChanges: '没有改动',
     noMatchingChanges: '没有匹配的改动',
     loadingGitChanges: '正在加载 Git 改动…',
