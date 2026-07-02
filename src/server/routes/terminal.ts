@@ -1444,6 +1444,22 @@ async function configureTmuxWheelBindings(): Promise<void> {
 
   await runTmux(['bind-key', '-n', 'WheelUpPane', upCmd]);
   await runTmux(['bind-key', '-n', 'WheelDownPane', downCmd]);
+  await runTmux([
+    'bind-key', '-n', 'MouseDrag1Pane',
+    "if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M }",
+  ]);
+
+  // tmux defaults MouseDragEnd1Pane in copy-mode to copy-pipe-and-cancel:
+  // selecting text with the mouse copies successfully, then immediately exits
+  // copy-mode on button release. Termdock keeps copy-mode open so users can
+  // continue inspecting scrollback after one selection.
+  for (const table of ['copy-mode', 'copy-mode-vi']) {
+    try {
+      await runTmux(['bind-key', '-T', table, 'MouseDragEnd1Pane', 'send-keys', '-X', 'copy-pipe-no-clear']);
+    } catch {
+      await runTmux(['bind-key', '-T', table, 'MouseDragEnd1Pane', 'send-keys', '-X', 'copy-selection']);
+    }
+  }
 }
 
 async function disableTmuxStatus(sessionName: string): Promise<void> {

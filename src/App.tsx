@@ -66,6 +66,8 @@ const PROGRAM_RULES_CACHE_KEY = 'termdock-program-rules-cache';
 const TOOLBAR_PRESETS_CACHE_KEY = 'termdock-toolbar-presets-cache';
 const SETTINGS_CACHE_KEY = 'termdock-settings-cache';
 const COLOR_THEME_CACHE_KEY = 'termdock-color-theme';
+const RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_ROOT_CACHE_KEY = 'termdock:right-sidebar:file-preview-open-by-root:v1';
+const MAX_RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_ROOTS = 60;
 const DESKTOP_TAB_MENU_WIDTH = 320;
 const DESKTOP_TAB_MENU_MAX_HEIGHT = 420;
 const DESKTOP_TAB_MENU_GAP = 8;
@@ -94,6 +96,25 @@ function getDesktopTabMenuPosition(anchor: { x: number; y: number } | null): Rea
 
 function isTermdockColorTheme(v: unknown): v is TermdockColorTheme {
   return v === 'dark' || v === 'light';
+}
+
+type RightSidebarFilePreviewOpenCache = Record<string, { updatedAt: number }>;
+
+function isRightSidebarFilePreviewOpenCache(value: unknown): value is RightSidebarFilePreviewOpenCache {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.entries(value as Record<string, unknown>).every(([key, entry]) => {
+    if (!key || !entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    const maybeEntry = entry as { updatedAt?: unknown };
+    return typeof maybeEntry.updatedAt === 'number' && Number.isFinite(maybeEntry.updatedAt);
+  });
+}
+
+function normalizeOpenByRootCache(cache: RightSidebarFilePreviewOpenCache): RightSidebarFilePreviewOpenCache {
+  const entries = Object.entries(cache)
+    .filter(([key, entry]) => key && Number.isFinite(entry.updatedAt))
+    .sort(([, a], [, b]) => b.updatedAt - a.updatedAt)
+    .slice(0, MAX_RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_ROOTS);
+  return Object.fromEntries(entries);
 }
 
 function isAgentRulesArray(v: unknown): v is AgentProgramConfig[] {
@@ -429,7 +450,9 @@ function App() {
   const [localAccessError, setLocalAccessError] = React.useState<string | null>(null);
   const [localAccessCopied, setLocalAccessCopied] = React.useState<string | null>(null);
   const [showBackGuardHint, setShowBackGuardHint] = React.useState(false);
-  const [rightSidebarFilePreviewOpen, setRightSidebarFilePreviewOpen] = React.useState(false);
+  const [rightSidebarFilePreviewOpenByRoot, setRightSidebarFilePreviewOpenByRoot] = React.useState<RightSidebarFilePreviewOpenCache>(() => (
+    normalizeOpenByRootCache(readCache(RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_ROOT_CACHE_KEY, isRightSidebarFilePreviewOpenCache) ?? {})
+  ));
   const [rightSidebarFilePreviewCloseSignal, setRightSidebarFilePreviewCloseSignal] = React.useState(0);
   const [rightSidebarRepoPickerOpen, setRightSidebarRepoPickerOpen] = React.useState(false);
   const [rightSidebarRepoPickerCloseSignal, setRightSidebarRepoPickerCloseSignal] = React.useState(0);
@@ -464,6 +487,13 @@ function App() {
     writeCache(COLOR_THEME_CACHE_KEY, colorTheme);
   }, [colorTheme]);
 
+  useEffect(() => {
+    writeCache(
+      RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_ROOT_CACHE_KEY,
+      normalizeOpenByRootCache(rightSidebarFilePreviewOpenByRoot),
+    );
+  }, [rightSidebarFilePreviewOpenByRoot]);
+
   // Per-session xterm scrollback + tab metadata cache 已撤回：高频写 + 多种边界
   // （clearBuffer 写空、setTerminalSession reset、auto-recreate 路径等）导致缓存
   // 经常被脏写，xterm 首帧反而经常拿到空内容。等想清楚每一种状态变迁该不该入缓存
@@ -472,6 +502,8 @@ function App() {
   // Sidebar state — only subscribe to the booleans we render, not the whole store.
   const sidebarLeftOpen = useSidebarStore((s) => s.leftOpen);
   const sidebarRightOpen = useSidebarStore((s) => s.rightOpen);
+  const sidebarRootPath = useSidebarStore((s) => s.rootPath);
+  const sidebarSelectedFilePath = useSidebarStore((s) => s.selectedFilePath);
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
@@ -554,13 +586,48 @@ function App() {
     ? Math.min(Math.max(viewportWidth * 0.22, 280), 340)
     : Math.min(viewportWidth * 0.86, 380);
 
+  const rightSidebarFilePreviewKey = sidebarRootPath ?? '';
+  const rightSidebarFilePreviewOpen = Boolean(
+    rightSidebarFilePreviewKey &&
+    sidebarSelectedFilePath &&
+    rightSidebarFilePreviewOpenByRoot[rightSidebarFilePreviewKey],
+  );
+  const setCurrentRightSidebarFilePreviewOpen = useCallback((open: boolean) => {
+    if (!rightSidebarFilePreviewKey) return;
+    if (open && !useSidebarStore.getState().selectedFilePath) return;
+    setRightSidebarFilePreviewOpenByRoot((current) => {
+      const isOpen = Boolean(current[rightSidebarFilePreviewKey]);
+      if (isOpen === open) return current;
+      if (open) {
+        return normalizeOpenByRootCache({
+          ...current,
+          [rightSidebarFilePreviewKey]: { updatedAt: Date.now() },
+        });
+      }
+      const next = { ...current };
+      delete next[rightSidebarFilePreviewKey];
+      return next;
+    });
+  }, [rightSidebarFilePreviewKey]);
+
+  useEffect(() => {
+    if (!rightSidebarFilePreviewKey || sidebarSelectedFilePath) return;
+    setRightSidebarFilePreviewOpenByRoot((current) => {
+      if (!current[rightSidebarFilePreviewKey]) return current;
+      const next = { ...current };
+      delete next[rightSidebarFilePreviewKey];
+      return next;
+    });
+  }, [rightSidebarFilePreviewKey, sidebarSelectedFilePath]);
+
+  const rightSidebarFilePreviewOverlayOpen = sidebarRightOpen && rightSidebarFilePreviewOpen;
   const activeHistoryOverlay: HistoryOverlay | null = markdownImageLightboxOpen
     ? 'markdown-image-lightbox'
     : markdownOutlineOpen
       ? 'markdown-outline'
       : rightSidebarRepoPickerOpen
         ? 'right-sidebar-repo-picker'
-        : rightSidebarFilePreviewOpen
+        : rightSidebarFilePreviewOverlayOpen
           ? 'right-sidebar-file-preview'
           : isDrawerOpen
             ? 'settings'
@@ -588,7 +655,7 @@ function App() {
     if (overlay === 'right-sidebar-file-preview') {
       setMarkdownOutlineOpen(false);
       setMarkdownOutlineCloseSignal((value) => value + 1);
-      setRightSidebarFilePreviewOpen(false);
+      setCurrentRightSidebarFilePreviewOpen(false);
       setRightSidebarFilePreviewCloseSignal((value) => value + 1);
       return;
     }
@@ -610,14 +677,12 @@ function App() {
     }
     setMarkdownOutlineOpen(false);
     setMarkdownOutlineCloseSignal((value) => value + 1);
-    setRightSidebarFilePreviewOpen(false);
-    setRightSidebarFilePreviewCloseSignal((value) => value + 1);
     setRightSidebarRepoPickerOpen(false);
     setRightSidebarRepoPickerCloseSignal((value) => value + 1);
     setMarkdownImageLightboxOpen(false);
     setMarkdownImageLightboxCloseSignal((value) => value + 1);
     useSidebarStore.getState().closeRight();
-  }, []);
+  }, [setCurrentRightSidebarFilePreviewOpen]);
 
   const requestCloseHistoryOverlay = useCallback((overlay: HistoryOverlay) => {
     if (!isIOS
@@ -678,8 +743,8 @@ function App() {
       pushHistoryOverlay('right-sidebar-file-preview');
       lastHistoryOverlayRef.current = 'right-sidebar-file-preview';
     }
-    setRightSidebarFilePreviewOpen(true);
-  }, [rightSidebarFilePreviewOpen, isIOS]);
+    setCurrentRightSidebarFilePreviewOpen(true);
+  }, [rightSidebarFilePreviewOpen, isIOS, setCurrentRightSidebarFilePreviewOpen]);
 
   const handleCloseRightSidebarFilePreview = useCallback(() => {
     requestCloseHistoryOverlay('right-sidebar-file-preview');

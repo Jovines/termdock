@@ -2,7 +2,7 @@ import React from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
-import { TerminalViewport, type TerminalController } from '../terminal/TerminalViewport';
+import { TerminalViewport, type RefreshReason, type TerminalController } from '../terminal/TerminalViewport';
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
 import { probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
@@ -19,6 +19,7 @@ import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
 const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'termdock:mobile-keyboard-preset-mode';
+const MOBILE_LONG_PRESS_MODE_STORAGE_KEY = 'termdock:mobile-long-press-mode';
 
 type Modifier = 'ctrl' | 'alt';
 
@@ -44,6 +45,7 @@ interface TerminalViewProps {
   isActive?: boolean;
   focusRequestToken?: number;
   resumeRequestToken?: number;
+  resumeRequestReason?: Extract<RefreshReason, 'visibility' | 'bfcache' | 'online'>;
   onKeyboardVisibilityChange?: (sessionId: string, isOpen: boolean) => void;
   showDebug?: boolean;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
@@ -59,6 +61,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   isActive = true,
   focusRequestToken = 0,
   resumeRequestToken = 0,
+  resumeRequestReason = 'visibility',
   onKeyboardVisibilityChange,
   showDebug: externalShowDebug,
   onStatusChange,
@@ -109,6 +112,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     const stored = window.localStorage.getItem(MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY);
     return stored && stored.length > 0 ? stored : 'auto';
+  });
+  const [mobileLongPressMode, setMobileLongPressMode] = React.useState<'arrows' | 'copy'>(() => {
+    if (typeof window === 'undefined') {
+      return 'arrows';
+    }
+
+    return window.localStorage.getItem(MOBILE_LONG_PRESS_MODE_STORAGE_KEY) === 'copy' ? 'copy' : 'arrows';
   });
 
   const terminalStore = useTerminalStore();
@@ -364,33 +374,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => document.removeEventListener('termfontchange', handleFontChange);
   }, []);
 
-  // 统一恢复入口：visibility / bfcache / online 全部走 controller.requestRefresh。
-  // 编排器在内部完成 throttle（200ms 互斥）、fit/refresh/scrollToBottom 序列、
-  // resize 推送（first-fit immediate / 90ms debounce）、renderer 按需重建。
-  // 真正"重绘"的逻辑收编到 TerminalViewport 的 refresh 编排器里，本组件不再持有
-  // rAF 句柄、throttle 时间戳、tmux sessionId 等任何同步状态。
+  // 页面可见性 / 窗口焦点只维护本组件的 focus 状态。真正的恢复刷新和 WS
+  // 探测统一由下面的 resumeRequestToken 广播处理，所有 session 走同一条路径。
   React.useEffect(() => {
     const handleVisibility = () => {
       const visible = !document.hidden;
       setIsDocumentVisible(visible);
       if (visible && isActive) {
-        terminalControllerRef.current?.requestRefresh('visibility');
         scheduleDesktopResumeFocus('visibility');
-        // 唤醒后立刻探测 WS 是否还活着（iOS PWA 后台返回常出现"半开连接"）。
-        // probe 内部会发 ping，超时没回应就主动替换连接并重连补帧。
-        probeOrRestartSession('visibility-active');
       }
     };
     const handlePageShow = (event: PageTransitionEvent) => {
       if (!isActive) return;
-      terminalControllerRef.current?.requestRefresh(event.persisted ? 'bfcache' : 'visibility');
       scheduleDesktopResumeFocus(event.persisted ? 'bfcache' : 'pageshow');
-      probeOrRestartSession(event.persisted ? 'bfcache-active' : 'pageshow-active');
-    };
-    const handleOnline = () => {
-      if (!isActive) return;
-      terminalControllerRef.current?.requestRefresh('online');
-      probeOrRestartSession('online-active');
     };
     const handleWindowFocus = () => {
       setIsWindowFocused(true);
@@ -399,27 +395,23 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const handleWindowBlur = () => setIsWindowFocused(false);
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('pageshow', handlePageShow);
-    window.addEventListener('online', handleOnline);
     window.addEventListener('focus', handleWindowFocus);
     window.addEventListener('blur', handleWindowBlur);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('pageshow', handlePageShow);
-      window.removeEventListener('online', handleOnline);
       window.removeEventListener('focus', handleWindowFocus);
       window.removeEventListener('blur', handleWindowBlur);
     };
-  }, [isActive, probeOrRestartSession, scheduleDesktopResumeFocus]);
+  }, [isActive, scheduleDesktopResumeFocus]);
 
-  // MultiTerminalView 在 visibility/pageshow/online 时会给所有 TerminalView
-  // 广播这个 token。active slide 已由上面的本地 visibility/pageshow/online
-  // 监听负责 refresh + probe；这里仅处理非活跃 SwiperSlide 的 WS 自检，避免
-  // active terminal 在同一次恢复里重复 refresh / probe。
+  // MultiTerminalView 在 visibility/pageshow/online 时给所有 TerminalView 广播。
+  // 不区分 active / non-active：每个 session 都走同一套恢复刷新和 WS 探测。
   React.useEffect(() => {
     if (!resumeRequestToken) return;
-    if (isActiveRef.current) return;
+    terminalControllerRef.current?.requestRefresh(resumeRequestReason);
     probeOrRestartSession('global-resume');
-  }, [resumeRequestToken, probeOrRestartSession]);
+  }, [resumeRequestToken, resumeRequestReason, probeOrRestartSession]);
 
   // 失败态自愈：session 用尽底层 10 次重试后会进入 fatal（connection failed），
   // 此时 wsConnections 里的 conn 已被 cleanup 删除，仅靠 visibility/focus/online
@@ -583,6 +575,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     window.localStorage.setItem(MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY, toolbarPresetMode);
   }, [toolbarPresetMode]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(MOBILE_LONG_PRESS_MODE_STORAGE_KEY, mobileLongPressMode);
+  }, [mobileLongPressMode]);
 
   React.useEffect(() => {
     const checkIsMobile = () => {
@@ -1230,7 +1230,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       // 键盘输入触发 tmux 退出 copy-mode（与移动端 onTmuxScroll 路径一致）。
       // 注意：wheel 事件本身不退出 copy-mode（连续滚动要继续生效），
       // 只是打个标记，等真正的键盘输入再退出。
-      const isMouseWheelSeq = /^\x1b\[<6[45];[0-9]+;[0-9]+M/.test(data);
+      const isSgrMouseSeq = /^(\x1b\[<[0-9]+;[0-9]+;[0-9]+[mM])+$/.test(data);
+      const isMouseWheelSeq = /^(\x1b\[<6[45];[0-9]+;[0-9]+M)+$/.test(data);
       if (isTmuxMode && isMouseWheelSeq) {
         shouldExitTmuxCopyModeOnInputRef.current = true;
       }
@@ -1270,11 +1271,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       const sendPayload = async () => {
         try {
-          // 只有非 wheel 的真键盘输入才触发退出 copy-mode；
-          // wheel 事件自身（包括首次进入 copy-mode 的那次滚轮）不退出。
+          // 只有非鼠标序列的真键盘输入才触发退出 copy-mode；
+          // wheel/drag/select 事件自身不退出。
           if (
             isTmuxMode &&
-            !isMouseWheelSeq &&
+            !isSgrMouseSeq &&
             shouldExitTmuxCopyModeOnInputRef.current &&
             terminal.tmuxAction
           ) {
@@ -1616,6 +1617,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const handlePresetSelect = React.useCallback((mode: ToolbarPresetMode) => {
     setToolbarPresetMode(mode);
   }, []);
+  const handleLongPressModeToggle = React.useCallback(() => {
+    setMobileLongPressMode((current) => current === 'copy' ? 'arrows' : 'copy');
+  }, []);
   const handleExpandedChange = React.useCallback((nextExpanded: boolean) => {
     setShowExtendedKeyboard(nextExpanded);
   }, []);
@@ -1763,6 +1767,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               terminalSettings={effectiveTerminalSettings}
               theme={xtermTheme}
               enableTouchScroll={isMobile}
+              mobileLongPressMode={mobileLongPressMode}
               autoFocus={!isMobile}
             />
           </ErrorBoundary>
@@ -1795,6 +1800,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         extraActions={runtimeToolbarActions}
         onKeyPress={handleMobileKeyPress}
         onTextPress={handleToolbarTextPress}
+        longPressMode={mobileLongPressMode}
+        onLongPressModeToggle={handleLongPressModeToggle}
         onModifierToggle={handleModifierToggle}
         onPresetSelect={handlePresetSelect}
         onExpandedChange={handleExpandedChange}

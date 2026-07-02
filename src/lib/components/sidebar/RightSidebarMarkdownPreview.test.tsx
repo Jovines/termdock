@@ -2,7 +2,7 @@
 import type { ReactNode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { __testParseMarkdownListBlock, MarkdownImageLightbox, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
+import { __testParseMarkdownListBlock, MarkdownImageLightbox, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, getNextMarkdownPreviewLineRange, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
 
 const mermaidRender = vi.fn(async () => ({ svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>Graph</text></svg>' }));
 const katexRenderToString = vi.fn((tex: string) => `<span class="katex">${tex}</span>`);
@@ -62,12 +62,24 @@ function renderPreview(markdown: string) {
     '/repo/docs/guide.md',
     '/repo',
   );
-  return render(<>{blocks.map((block) => <div key={block.key}>{block.content}</div>)}</>);
+  return render(<>{blocks.map((block) => <div key={block.key}>{renderBlockContent(block.content)}</div>)}</>);
+}
+
+function renderBlockContent(content: ReturnType<typeof buildMarkdownPreviewBlocks>[number]['content'], lineRange: { start: number; end: number } | null = null) {
+  return typeof content === 'function' ? content(lineRange) : content;
 }
 
 describe('right sidebar Markdown preview rendering', () => {
   afterEach(() => {
     cleanup();
+  });
+
+  it('extends Markdown preview line selection from a single line to a range', () => {
+    expect(getNextMarkdownPreviewLineRange(null, 5, 5)).toEqual({ start: 5, end: 5 });
+    expect(getNextMarkdownPreviewLineRange({ start: 5, end: 5 }, 9, 9)).toEqual({ start: 5, end: 9 });
+    expect(getNextMarkdownPreviewLineRange({ start: 9, end: 9 }, 5, 5)).toEqual({ start: 5, end: 9 });
+    expect(getNextMarkdownPreviewLineRange({ start: 5, end: 9 }, 7, 7)).toEqual({ start: 7, end: 7 });
+    expect(getNextMarkdownPreviewLineRange({ start: 7, end: 7 }, 7, 7)).toBeNull();
   });
 
   it('renders images, strikethrough, and autolinks in inline content', () => {
@@ -152,7 +164,7 @@ describe('right sidebar Markdown preview rendering', () => {
     ], '/repo/docs/guide.md', '/repo');
 
     expect(blocks).toHaveLength(3);
-    render(<>{blocks.map((block) => <div key={block.key}>{block.content}</div>)}</>);
+    render(<>{blocks.map((block) => <div key={block.key}>{renderBlockContent(block.content)}</div>)}</>);
     expect(document.querySelectorAll('hr')).toHaveLength(3);
   });
 
@@ -170,7 +182,7 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(blocks[0]).toMatchObject({ startLine: 1, endLine: 2 });
     expect(blocks[1]).toMatchObject({ startLine: 4, endLine: 6 });
 
-    render(<>{blocks.map((block) => <div key={block.key}>{block.content}</div>)}</>);
+    render(<>{blocks.map((block) => <div key={block.key}>{renderBlockContent(block.content)}</div>)}</>);
     expect(screen.getByRole('heading', { level: 1, name: 'Heading' })).toBeTruthy();
     expect(screen.getByText('ts')).toBeTruthy();
     expect(screen.getByText('const ok = true;')).toBeTruthy();
@@ -318,8 +330,10 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(left.className).toContain('text-left');
     expect(left.className).not.toContain('min-w-[10rem]');
     expect(left.className).not.toContain('max-w-[18rem]');
-    expect(left.querySelector('div')?.className).toContain('max-w-none');
-    expect(left.querySelector('div')?.className).toContain('whitespace-nowrap');
+    expect(left.querySelector('div')?.className).toContain('max-w-[18rem]');
+    expect(left.querySelector('div')?.className).toContain('sm:max-w-[27rem]');
+    expect(left.querySelector('div')?.className).toContain('whitespace-normal');
+    expect(left.querySelector('div')?.className).toContain('break-words');
     expect(center.className).toContain('text-center');
     expect(right.className).toContain('text-right');
     expect(left.closest('table')?.className).toContain('w-max');
@@ -365,13 +379,62 @@ describe('right sidebar Markdown preview rendering', () => {
     render(
       <div data-markdown-preview-block-start={block?.startLine}>
         <div role="button" tabIndex={0}>
-          {block?.content}
+          {block ? renderBlockContent(block.content) : null}
         </div>
       </div>,
     );
 
     expect(screen.getByRole('button')).toBeTruthy();
     expect(screen.getByRole('table')).toBeTruthy();
+  });
+
+  it('marks Markdown table rows with their source line for row-level references', () => {
+    const { container } = renderPreview([
+      'Intro',
+      '',
+      '| Left | Right |',
+      '| --- | --- |',
+      '| a | b |',
+      '| c | d |',
+    ].join('\n'));
+
+    const rows = Array.from(container.querySelectorAll<HTMLTableRowElement>('tr[data-markdown-table-row-line]'));
+    expect(rows.map((row) => row.dataset.markdownTableRowLine)).toEqual(['3', '5', '6']);
+  });
+
+  it('marks only selected Markdown table rows instead of the whole table', () => {
+    const block = buildMarkdownPreviewBlocks([
+      '| Left | Right |',
+      '| --- | --- |',
+      '| a | b |',
+      '| c | d |',
+    ], '/repo/docs/table.md', '/repo').find((item) => item.key.startsWith('table-'));
+
+    expect(block).toBeTruthy();
+    const { container } = render(<>{block ? renderBlockContent(block.content, { start: 3, end: 3 }) : null}</>);
+    const rows = Array.from(container.querySelectorAll<HTMLTableRowElement>('tr[data-markdown-table-row-line]'));
+    expect(rows.map((row) => row.dataset.selected ?? '')).toEqual(['', 'true', '']);
+    expect(container.querySelector('[data-markdown-table-scroll]')?.getAttribute('data-selected')).toBeNull();
+  });
+
+  it('keeps the Markdown table gutter available for whole-table selection without row-selection highlight', () => {
+    const block = buildMarkdownPreviewBlocks([
+      '| Left | Right |',
+      '| --- | --- |',
+      '| a | b |',
+    ], '/repo/docs/table.md', '/repo').find((item) => item.key.startsWith('table-'));
+
+    expect(block?.kind).toBe('table');
+    const tableWrapperClassName = 'group grid w-full grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2';
+    const rowRange = { start: 3, end: 3 };
+    const wholeTableRange = { start: 1, end: 3 };
+    const rowGutterSelected = Boolean(block?.kind === 'table' && rowRange.start === block.startLine && rowRange.end === block.endLine);
+    const wholeTableGutterSelected = Boolean(block?.kind === 'table' && wholeTableRange.start === block.startLine && wholeTableRange.end === block.endLine);
+
+    expect(tableWrapperClassName).toContain('grid-cols-[0.625rem_minmax(0,1fr)]');
+    expect(tableWrapperClassName).toContain('sm:grid-cols-[0.875rem_minmax(0,1fr)]');
+    expect(rowGutterSelected).toBe(false);
+    expect(wholeTableGutterSelected).toBe(true);
   });
 
   it('renders one-column Markdown tables with the same overflow-safe cell sizing', () => {
@@ -383,8 +446,9 @@ describe('right sidebar Markdown preview rendering', () => {
 
     const header = screen.getByRole('columnheader', { name: 'Only column' });
     const cell = screen.getByRole('cell');
-    expect(header.querySelector('div')?.className).toContain('max-w-none');
-    expect(header.querySelector('div')?.className).toContain('whitespace-nowrap');
+    expect(header.querySelector('div')?.className).toContain('max-w-[18rem]');
+    expect(header.querySelector('div')?.className).toContain('whitespace-normal');
+    expect(header.querySelector('div')?.className).toContain('break-words');
     expect(cell.textContent).toContain('A long value');
     expect(container.querySelector('table')?.className).toContain('w-max');
   });
@@ -523,7 +587,7 @@ describe('right sidebar Markdown preview rendering', () => {
       { src: '/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Ftwo.webp', alt: 'Second', title: undefined },
     ]);
 
-    render(<>{result.blocks.map((block) => <div key={block.key}>{block.content}</div>)}</>);
+    render(<>{result.blocks.map((block) => <div key={block.key}>{renderBlockContent(block.content)}</div>)}</>);
     const buttons = screen.getAllByRole('button');
     buttons[0].click();
     buttons[1].click();

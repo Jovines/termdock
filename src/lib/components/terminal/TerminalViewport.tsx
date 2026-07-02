@@ -265,6 +265,7 @@ export type TerminalController = {
   focus: () => void;
   blur: () => void;
   clear: () => void;
+  copySelectionOrViewport: () => Promise<boolean>;
   /** 当前 xterm 的 cols/rows；xterm 未初始化时返回 null */
   getDimensions: () => { cols: number; rows: number } | null;
   /**
@@ -312,6 +313,7 @@ interface TerminalViewportProps {
   theme: TerminalTheme;
   className?: string;
   enableTouchScroll?: boolean;
+  mobileLongPressMode?: 'arrows' | 'copy';
   autoFocus?: boolean;
 }
 
@@ -527,6 +529,78 @@ function estimateInitialDimensions(
   return { cols, rows };
 }
 
+async function writeClipboardText(text: string): Promise<boolean> {
+  if (!text) return false;
+  try {
+    if (!navigator.clipboard?.writeText) {
+      throw new Error('Clipboard API unavailable');
+    }
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.top = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      const ok = document.execCommand('copy');
+      textarea.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function getVisibleTerminalText(terminal: Terminal): string {
+  const buffer = terminal.buffer.active;
+  const start = buffer.viewportY;
+  const end = Math.min(buffer.length, start + terminal.rows);
+  const lines: string[] = [];
+  for (let index = start; index < end; index += 1) {
+    const line = buffer.getLine(index);
+    if (!line) continue;
+    lines.push(line.translateToString(true));
+  }
+  return lines.join('\n').replace(/\s+$/g, '');
+}
+
+function getTerminalCellFromPoint(terminal: Terminal, clientX: number, clientY: number): { col: number; row: number } | null {
+  const element = terminal.element;
+  if (!element || !terminal.cols || !terminal.rows) return null;
+  const rect = element.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  const rx = clientX - rect.left;
+  const ry = clientY - rect.top;
+  const charW = element.offsetWidth / terminal.cols || rect.width / terminal.cols;
+  const charH = element.offsetHeight / terminal.rows || rect.height / terminal.rows;
+  const col = Math.max(0, Math.min(terminal.cols - 1, Math.floor(rx / charW)));
+  const viewportRow = Math.max(0, Math.min(terminal.rows - 1, Math.floor(ry / charH)));
+  return {
+    col,
+    row: terminal.buffer.active.viewportY + viewportRow,
+  };
+}
+
+function selectTerminalRange(terminal: Terminal, start: { col: number; row: number }, end: { col: number; row: number }): boolean {
+  const startOffset = start.row * terminal.cols + start.col;
+  const endOffset = end.row * terminal.cols + end.col;
+  if (startOffset === endOffset) {
+    terminal.clearSelection();
+    return false;
+  }
+  const from = Math.min(startOffset, endOffset);
+  const to = Math.max(startOffset, endOffset) + 1;
+  const column = from % terminal.cols;
+  const row = Math.floor(from / terminal.cols);
+  terminal.select(column, row, to - from);
+  return true;
+}
+
 const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewportProps>(
   (
     {
@@ -543,6 +617,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       theme,
       className,
       enableTouchScroll,
+      mobileLongPressMode = 'arrows',
       autoFocus = true,
     },
     ref
@@ -565,6 +640,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
+    const desktopMouseFocusTimerRef = React.useRef<number | null>(null);
     const imageAddonLoadedRef = React.useRef(false);
     const remainderPxRef = React.useRef(0);
     const osc52RemainderRef = React.useRef('');
@@ -1668,7 +1744,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       originX: number;
       originY: number;
       holdTimer: ReturnType<typeof setTimeout> | null;
-      mode: 'idle' | 'holding' | 'arrow';
+      mode: 'idle' | 'holding' | 'arrow' | 'copy';
+      longPressMode: 'arrows' | 'copy';
+      copyStart: { col: number; row: number } | null;
+      copyDidSelect: boolean;
       joystickDir: '' | 'up' | 'down' | 'left' | 'right';
       joystickRepeatTimer: ReturnType<typeof setTimeout> | null;
       repeatIntervalMs: number;
@@ -1685,6 +1764,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       originY: 0,
       holdTimer: null,
       mode: 'idle',
+      longPressMode: 'arrows',
+      copyStart: null,
+      copyDidSelect: false,
       joystickDir: '',
       joystickRepeatTimer: null,
       repeatIntervalMs: 260,
@@ -1702,6 +1784,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     const lpContainerRef = containerForGestureRef;
     const lp_inputHandlerRef = inputHandlerRef;
+    const mobileLongPressModeRef = React.useRef(mobileLongPressMode);
+    mobileLongPressModeRef.current = mobileLongPressMode;
 
     const lp_onPointerDown = React.useCallback((e: PointerEvent): boolean => {
       if (e.pointerType !== 'touch') return false;
@@ -1715,8 +1799,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (target.closest('[data-mobile-keyboard="true"]')) return false;
 
       const s = lpStateRef.current;
+      s.longPressMode = mobileLongPressModeRef.current;
 
-      if (s.mode === 'arrow') return true;
+      if (s.mode === 'arrow' || s.mode === 'copy') return true;
 
       if (onDoubleTapRef.current) {
         const now = performance.now();
@@ -1747,6 +1832,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         s.joystickRepeatTimer = null;
       }
       s.joystickDir = '';
+      s.copyStart = null;
+      s.copyDidSelect = false;
       s.pointerId = e.pointerId;
       s.originX = e.clientX;
       s.originY = e.clientY;
@@ -1758,6 +1845,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       s.holdTimer = setTimeout(() => {
         s.holdTimer = null;
         if (s.mode === 'holding') {
+          if (s.longPressMode === 'copy') {
+            const term = terminalRef.current;
+            const start = term ? getTerminalCellFromPoint(term, s.tapStartX, s.tapStartY) : null;
+            if (!term || !start) {
+              s.mode = 'idle';
+              return;
+            }
+            s.mode = 'copy';
+            s.copyStart = start;
+            s.copyDidSelect = false;
+            term.clearSelection();
+            hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
+            notifyGestureLock(true);
+            return;
+          }
           s.mode = 'arrow';
           hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
           notifyGestureLock(true);
@@ -1768,7 +1870,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }, 350);
 
       return true;
-    }, []);
+    }, [notifyGestureLock]);
 
     const lp_onPointerMove = React.useCallback((e: PointerEvent, isClaimed: boolean): GestureAction => {
       if (e.pointerType !== 'touch') return 'neutral';
@@ -1776,8 +1878,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const s = lpStateRef.current;
 
       if (s.mode === 'arrow' && e.pointerId !== s.pointerId) return 'neutral';
+      if (s.mode === 'copy' && e.pointerId !== s.pointerId) return 'neutral';
 
-      if (s.mode !== 'arrow' && e.pointerId !== s.pointerId) return 'neutral';
+      if (s.mode !== 'arrow' && s.mode !== 'copy' && e.pointerId !== s.pointerId) return 'neutral';
 
       const totalDx = e.clientX - s.tapStartX;
       const totalDy = e.clientY - s.tapStartY;
@@ -1796,6 +1899,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }
         const dx = e.clientX - s.originX;
         const dy = e.clientY - s.originY;
+        if (s.longPressMode === 'copy' && Math.hypot(dx, dy) > 20) {
+          return 'claim';
+        }
         if (Math.hypot(dx, dy) > 20) {
           if (s.holdTimer !== null) {
             clearTimeout(s.holdTimer);
@@ -1804,6 +1910,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           s.mode = 'idle';
           return 'release';
         }
+        return 'claim';
+      }
+
+      if (s.mode === 'copy') {
+        if (!isClaimed) return 'claim';
+        const term = terminalRef.current;
+        if (!term || !s.copyStart) return 'claim';
+        const end = getTerminalCellFromPoint(term, e.clientX, e.clientY);
+        if (!end) return 'claim';
+        s.copyDidSelect = selectTerminalRange(term, s.copyStart, end) || s.copyDidSelect;
         return 'claim';
       }
 
@@ -1905,6 +2021,27 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       const s = lpStateRef.current;
 
+      if (s.mode === 'copy') {
+        notifyGestureLock(false);
+        const term = terminalRef.current;
+        if (term && s.copyStart) {
+          const end = getTerminalCellFromPoint(term, e.clientX, e.clientY);
+          if (end) {
+            s.copyDidSelect = selectTerminalRange(term, s.copyStart, end) || s.copyDidSelect;
+          }
+        }
+        if (term && s.copyDidSelect && term.hasSelection()) {
+          void writeClipboardText(term.getSelection());
+          hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
+        }
+        if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
+        s.copyStart = null;
+        s.copyDidSelect = false;
+        s.pointerId = null;
+        s.mode = 'idle';
+        return;
+      }
+
       if (s.mode === 'arrow') {
         notifyGestureLock(false);
         setArrowIndicator({ visible: false, activeDir: '' });
@@ -1931,23 +2068,27 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
       if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
       s.joystickDir = '';
+      s.copyStart = null;
+      s.copyDidSelect = false;
       s.pointerId = null;
       s.mode = 'idle';
-    }, []);
+    }, [notifyGestureLock]);
 
     const lp_onPointerCancel = React.useCallback(() => {
       const s = lpStateRef.current;
-      if (s.mode === 'arrow') {
+      if (s.mode === 'arrow' || s.mode === 'copy') {
         notifyGestureLock(false);
         setArrowIndicator({ visible: false, activeDir: '' });
       }
       if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
       if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
       s.joystickDir = '';
+      s.copyStart = null;
+      s.copyDidSelect = false;
       s.pointerId = null;
       s.tapDidMove = false;
       s.mode = 'idle';
-    }, []);
+    }, [notifyGestureLock]);
 
     useGesture({
       name: `long-press:${sessionKey}`,
@@ -2472,6 +2613,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       return () => {
         cancelAllPendingReasonRafs();
         cancelPendingResizeTimer();
+        if (desktopMouseFocusTimerRef.current !== null) {
+          window.clearTimeout(desktopMouseFocusTimerRef.current);
+          desktopMouseFocusTimerRef.current = null;
+        }
       };
     }, [sessionKey, cancelAllPendingReasonRafs, cancelPendingResizeTimer]);
 
@@ -3198,6 +3343,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // clear 走 requestRefresh 统一路径（renderer 不重建、resize 不推）
           requestRefresh('clear', { skipResizePush: true, skipScrollToBottom: true });
         },
+        copySelectionOrViewport: async () => {
+          const terminal = terminalRef.current;
+          if (!terminal) return false;
+          const text = terminal.hasSelection()
+            ? terminal.getSelection()
+            : getVisibleTerminalText(terminal);
+          return writeClipboardText(text);
+        },
         getDimensions: () => {
           const terminal = terminalRef.current;
           if (!terminal || !terminal.cols || !terminal.rows) return null;
@@ -3247,11 +3400,28 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 直接落到 xterm canvas，不需要再额外转发。
           if (enableTouchScroll) return;
           if (event.button !== 0) return;
+          if (desktopMouseFocusTimerRef.current !== null) {
+            window.clearTimeout(desktopMouseFocusTimerRef.current);
+            desktopMouseFocusTimerRef.current = null;
+          }
           requestAnimationFrame(() => {
             try {
               hiddenInputRef.current?.focus({ preventScroll: true });
             } catch { /* ignored */ }
           });
+        }}
+        onMouseUp={(event) => {
+          if (enableTouchScroll) return;
+          if (event.button !== 0) return;
+          if (desktopMouseFocusTimerRef.current !== null) {
+            window.clearTimeout(desktopMouseFocusTimerRef.current);
+          }
+          desktopMouseFocusTimerRef.current = window.setTimeout(() => {
+            desktopMouseFocusTimerRef.current = null;
+            try {
+              hiddenInputRef.current?.focus({ preventScroll: true });
+            } catch { /* ignored */ }
+          }, 0);
         }}
       >
         {/* Early initialization loading - shows before xterm.js loads */}

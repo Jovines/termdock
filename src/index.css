@@ -863,6 +863,26 @@ div.swiper {
   -webkit-overflow-scrolling: touch;
 }
 
+.termdock-md-table-scroll tr[data-selected='true'] > th,
+.termdock-md-table-scroll tr[data-selected='true'] > td {
+  background: var(--surface-elevated);
+  color: var(--foreground);
+}
+
+.termdock-md-table-scroll tr[data-selected='true'] > :first-child {
+  position: relative;
+}
+
+.termdock-md-table-scroll tr[data-selected='true'] > :first-child::before {
+  content: '';
+  position: absolute;
+  inset-block: 0.375rem;
+  inset-inline-start: 0.25rem;
+  width: 0.1875rem;
+  border-radius: 999px;
+  background: var(--muted-foreground);
+}
+
 /*
  * Wrap long diff lines instead of forcing horizontal scroll.
  * The user opts in via the "Aa" toggle in the changes tab; off by default

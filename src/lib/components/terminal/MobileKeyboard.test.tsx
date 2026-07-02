@@ -56,6 +56,15 @@ describe('MobileKeyboard interaction state', () => {
 
     expect(screen.queryByText('Claude')).toBeNull();
   });
+
+  it('toggles long-press mode from the mode button', () => {
+    const onLongPressModeToggle = vi.fn();
+    render(<MobileKeyboard {...baseProps} longPressMode="arrows" onLongPressModeToggle={onLongPressModeToggle} />);
+
+    fireEvent.click(screen.getByLabelText('Switch long press to copy selection'));
+
+    expect(onLongPressModeToggle).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('MobileKeyboard desktop actions presentation', () => {

@@ -52,6 +52,11 @@ type SyncSwiperOptions = {
   immediate?: boolean;
 };
 
+type ResumeRequest = {
+  token: number;
+  reason: 'visibility' | 'bfcache' | 'online';
+};
+
 function cancelSwiperWrapperAnimations(swiper: SwiperInstance): void {
   const wrapper = (swiper as unknown as { wrapperEl?: HTMLElement }).wrapperEl;
   if (!wrapper) return;
@@ -275,7 +280,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
-  const [resumeRequestToken, setResumeRequestToken] = useState(0);
+  const [resumeRequest, setResumeRequest] = useState<ResumeRequest>({ token: 0, reason: 'visibility' });
   const restoredRef = useRef(false);
   const swiperRef = useRef<SwiperInstance | null>(null);
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
@@ -671,7 +676,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleResume = (reason: string) => {
       if (reason !== 'online' && document.hidden) return;
-      setResumeRequestToken((token) => token + 1);
+      const refreshReason = reason === 'bfcache' || reason === 'online' ? reason : 'visibility';
+      setResumeRequest((request) => ({ token: request.token + 1, reason: refreshReason }));
 
       // 刚回前台时 visualViewport / Swiper translate 经常还没稳定，立即 +
       // 延迟各 update 一次，避免重连后 active slide 宽高/translate 短暂错位。
@@ -1239,7 +1245,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                   toolbarPresets={toolbarPresets}
                   isActive={isActive}
                   focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
-                  resumeRequestToken={resumeRequestToken}
+                  resumeRequestToken={resumeRequest.token}
+                  resumeRequestReason={resumeRequest.reason}
                   onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
                   showDebug={showDebug}
                   onStatusChange={isActive ? onStatusChange : undefined}

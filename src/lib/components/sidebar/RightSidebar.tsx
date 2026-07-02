@@ -93,7 +93,7 @@ const MOBILE_WIDTH_THRESHOLD_PX = 600;
 // back to stacked tabs even on desktop.
 const WIDE_WIDTH_THRESHOLD_PX = 720;
 const MARKDOWN_TABLE_CELL_CLASS = 'border-r px-2 py-1.5 sm:px-3 sm:py-2';
-const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'max-w-none whitespace-nowrap';
+const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'max-w-[18rem] whitespace-normal break-words sm:max-w-[27rem]';
 const MARKDOWN_TABLE_HEADER_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-b border-border/15 font-semibold last:border-r-0`;
 const MARKDOWN_TABLE_BODY_CELL_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-border/10 align-top text-muted-foreground last:border-r-0`;
 const MARKDOWN_TABLE_SCROLL_CLASS = 'termdock-md-table-scroll max-w-full overflow-x-auto overflow-y-hidden rounded-lg border border-border/20 bg-surface';
@@ -1170,9 +1170,10 @@ interface MarkdownPreviewBlock {
   key: string;
   startLine: number;
   endLine: number;
-  content: ReactNode;
+  content: ReactNode | ((lineRange: { start: number; end: number } | null) => ReactNode);
   heading?: MarkdownHeadingInfo;
   interactive?: boolean;
+  kind?: 'table';
 }
 
 interface MarkdownCodeBlockProps {
@@ -1576,27 +1577,36 @@ export function buildMarkdownPreviewRenderResult(
         rows.push(splitMarkdownTableRow(lines[index]));
         index += 1;
       }
+      const renderedHeader = header.map((cell, cellIndex) => renderMarkdownInline(cell, `th-${blockStart}-${cellIndex}`, true, context));
+      const renderedRows = rows.map((row, rowIndex) => header.map((_, cellIndex) => renderMarkdownInline(row[cellIndex] ?? '', `td-${blockStart}-${rowIndex}-${cellIndex}`, true, context)));
       blocks.push({
         key: `table-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
         interactive: false,
-        content: (
-          <div className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
-            <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
-              <thead className="bg-surface-2 text-foreground">
-                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(cell, `th-${blockStart}-${cellIndex}`, true, context)}</div></th>)}</tr>
-              </thead>
-              <tbody>
-                {rows.map((row, rowIndex) => (
-                  <tr key={`r-${rowIndex}`} className="border-t border-border/10">
-                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className={`${MARKDOWN_TABLE_BODY_CELL_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(row[cellIndex] ?? '', `td-${blockStart}-${rowIndex}-${cellIndex}`, true, context)}</div></td>)}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ),
+        kind: 'table',
+        content: (lineRange) => {
+          const isSelectedLine = (line: number) => Boolean(lineRange && line >= lineRange.start && line <= lineRange.end);
+          return (
+            <div className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
+              <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
+                <thead className="bg-surface-2 text-foreground">
+                  <tr data-markdown-table-row-line={blockStart + 1} data-selected={isSelectedLine(blockStart + 1) ? 'true' : undefined}>{renderedHeader.map((cellContent, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{cellContent}</div></th>)}</tr>
+                </thead>
+                <tbody>
+                  {renderedRows.map((row, rowIndex) => {
+                    const rowLine = blockStart + rowIndex + 3;
+                    return (
+                      <tr key={`r-${rowIndex}`} className="border-t border-border/10" data-markdown-table-row-line={rowLine} data-selected={isSelectedLine(rowLine) ? 'true' : undefined}>
+                        {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className={`${MARKDOWN_TABLE_BODY_CELL_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{row[cellIndex]}</div></td>)}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        },
       });
       continue;
     }
@@ -2052,7 +2062,11 @@ function MarkdownPreview({
     if (dx > 8 || dy > 8) return;
     const target = event.target;
     if (target instanceof HTMLElement && target.closest('a, button, input, textarea, select, label')) return;
-    onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, startLine, endLine);
+    const tableRow = target instanceof HTMLElement ? target.closest<HTMLElement>('tr[data-markdown-table-row-line]') : null;
+    const rowLine = Number(tableRow?.dataset.markdownTableRowLine);
+    const referenceStartLine = Number.isFinite(rowLine) && rowLine > 0 ? rowLine : startLine;
+    const referenceEndLine = Number.isFinite(rowLine) && rowLine > 0 ? rowLine : endLine;
+    onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, referenceStartLine, referenceEndLine);
   }, [onLineRangeClick]);
 
   const handleTablePointerCancel = useCallback((event: React.PointerEvent<HTMLElement>) => {
@@ -2162,16 +2176,19 @@ function MarkdownPreview({
         <div className="min-w-0 max-w-full space-y-1.5 overflow-x-hidden break-words px-1.5 py-3 text-[13px] leading-5 text-foreground sm:space-y-2 sm:px-2 sm:py-4 sm:text-sm sm:leading-6">
         {blocks.map((block) => {
           const selected = Boolean(lineRange && block.startLine <= lineRange.end && block.endLine >= lineRange.start);
+          const blockSelected = block.kind === 'table' ? false : selected;
+          const tableWholeSelected = Boolean(block.kind === 'table' && lineRange?.start === block.startLine && lineRange.end === block.endLine);
+          const renderedContent = typeof block.content === 'function' ? block.content(lineRange) : block.content;
           const lineLabel = block.startLine === block.endLine ? String(block.startLine) : `${block.startLine}-${block.endLine}`;
           const blockContent = (
             <>
               <span
-                className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)] group-hover:bg-[var(--surface-elevated)]'}`}
+                className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${blockSelected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)] group-hover:bg-[var(--surface-elevated)]'}`}
                 aria-hidden="true"
               >
-                <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)] group-hover:bg-[var(--muted-foreground)]'}`} />
+                <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${blockSelected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)] group-hover:bg-[var(--muted-foreground)]'}`} />
               </span>
-              <div className="min-w-0">{block.content}</div>
+              <div className="min-w-0">{renderedContent}</div>
             </>
           );
           if (block.interactive === false) {
@@ -2179,16 +2196,31 @@ function MarkdownPreview({
               <div
                 key={block.key}
                 data-markdown-preview-block-start={block.startLine}
-                className={`group grid w-full grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2 ${selected ? 'bg-[var(--surface-2)]' : ''}`}
+                className={`group grid w-full grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2 ${blockSelected ? 'bg-[var(--surface-2)]' : ''}`}
                 title={`Line ${lineLabel}`}
                 aria-label={`Line ${lineLabel}`}
               >
-                <span
-                  className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)]'}`}
-                  aria-hidden="true"
-                >
-                  <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)]'}`} />
-                </span>
+                {block.kind === 'table' ? (
+                  <button
+                    type="button"
+                    className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${tableWholeSelected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)] hover:bg-[var(--surface-elevated)]'}`}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, block.startLine, block.endLine);
+                    }}
+                    title={`Reference table lines ${lineLabel}`}
+                    aria-label={`Reference table lines ${lineLabel}`}
+                  >
+                    <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${tableWholeSelected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)] hover:bg-[var(--muted-foreground)]'}`} />
+                  </button>
+                ) : (
+                  <span
+                    className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${blockSelected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)]'}`}
+                    aria-hidden="true"
+                  >
+                    <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${blockSelected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)]'}`} />
+                  </span>
+                )}
                 <div
                   className="min-w-0 cursor-pointer"
                   role="button"
@@ -2204,7 +2236,7 @@ function MarkdownPreview({
                   title={`Reference line ${lineLabel}`}
                   aria-label={`Reference line ${lineLabel}`}
                 >
-                  {block.content}
+                  {renderedContent}
                 </div>
               </div>
             );
@@ -2535,6 +2567,23 @@ function buildLineReference(path: string, rootPath: string | null, lineRange: { 
   if (!lineRange) return buildPromptReference(path, rootPath);
   const suffix = lineRange.start === lineRange.end ? `${lineRange.start}` : `${lineRange.start}-${lineRange.end}`;
   return `${buildPromptReference(path, rootPath)}:${suffix}`;
+}
+
+export function getNextMarkdownPreviewLineRange(
+  current: { start: number; end: number } | null,
+  startLine: number,
+  endLine: number,
+): { start: number; end: number } | null {
+  const nextStart = Math.min(startLine, endLine);
+  const nextEnd = Math.max(startLine, endLine);
+  if (current?.start === nextStart && current.end === nextEnd) return null;
+  if (current && current.start === current.end) {
+    return {
+      start: Math.min(current.start, nextStart),
+      end: Math.max(current.end, nextEnd),
+    };
+  }
+  return { start: nextStart, end: nextEnd };
 }
 
 function toChangedFileMap(files: GitChangedFile[]): Map<string, GitChangedFile> {
@@ -3086,11 +3135,11 @@ function FilePreview({
   const handlePreviewLineRangeClick = (event: MouseEvent<HTMLElement>, startLine: number, endLine: number) => {
     placeFloatingInsertButton(event);
     onLineRangeChange((current) => {
-      if (current?.start === startLine && current.end === endLine) {
+      const nextRange = getNextMarkdownPreviewLineRange(current, startLine, endLine);
+      if (!nextRange) {
         setFloatingInsertPos(null);
-        return null;
       }
-      return { start: startLine, end: endLine };
+      return nextRange;
     });
   };
 
@@ -3625,6 +3674,14 @@ export function RightSidebar(
   useEffect(() => {
     if (!isMobile) setMobileFilePreviewOpen(false);
   }, [isMobile]);
+
+  useEffect(() => {
+    if (!isMobile) return;
+    setMobileFilePreviewOpen(rightSidebarFilePreviewOpen);
+    if (!rightSidebarFilePreviewOpen) {
+      setLineRange(null);
+    }
+  }, [isMobile, rightSidebarFilePreviewOpen, rootPath]);
 
   useEffect(() => {
     if (rightSidebarFilePreviewCloseSignal !== undefined) {
