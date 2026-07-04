@@ -5,7 +5,7 @@ import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout }
 import { TerminalViewport, type RefreshReason, type TerminalController } from '../terminal/TerminalViewport';
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
-import { probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
+import { openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
 import { computeTerminalLogicalFocus } from '../../terminal/focus';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
@@ -145,7 +145,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const terminalSessionRef = terminalState?.terminalSessionId ?? null;
   const sessionMode = terminalState?.mode ?? 'shell';
-  const preferredTmuxSessionName = terminalState?.tmuxSessionName || fallbackTmuxSessionName;
   const detectedActiveProgram = terminalState?.activeProgram ?? null;
   const toolbarPresets = React.useMemo(() => sanitizeToolbarPresets(configuredToolbarPresets), [configuredToolbarPresets]);
   const isTmuxMode = sessionMode === 'tmux';
@@ -214,6 +213,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     shellTitleRafRef.current = null;
     pendingShellTitleRef.current = null;
   }, []);
+
+  const openManagedBackendSession = React.useCallback(async () => {
+    const modeForNewSession = desiredSessionMode;
+    const tmuxSessionNameForNewSession = desiredTmuxSessionName || fallbackTmuxSessionName;
+    const result = await openSessionInventoryEntry({
+      preferredFrontendSessionId: sessionId,
+      mode: modeForNewSession,
+      tmuxSessionName: modeForNewSession === 'tmux' ? tmuxSessionNameForNewSession : undefined,
+      termType: 'xterm-256color',
+      requireExisting: true,
+    });
+    return result.terminalSession;
+  }, [desiredSessionMode, desiredTmuxSessionName, fallbackTmuxSessionName, sessionId]);
 
   React.useEffect(() => {
     isActiveRef.current = isActive;
@@ -1097,14 +1109,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           shouldCreateNewSession = false;
         } else {
           try {
-            const modeForNewSession = desiredSessionMode;
-            const tmuxSessionNameForNewSession = desiredTmuxSessionName || fallbackTmuxSessionName;
-            const session = await terminal.createSession({
-              mode: modeForNewSession,
-              tmuxSessionName: modeForNewSession === 'tmux' ? tmuxSessionNameForNewSession : undefined,
-              termType: 'xterm-256color',
-            });
-            debugSession(`[ensureSession] Created new session ${session.sessionId}`);
+            const session = await openManagedBackendSession();
+            debugSession(`[ensureSession] Opened managed backend session ${session.sessionId}`);
 
             if (runId !== currentRunIdRef.current) {
               // 这次 ensureSession 是 stale 的：另一个并发 run 已经接管了。
@@ -1119,12 +1125,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             }
 
             store.setTerminalSession(sessionId, session);
-            void updateSessionInventoryEntry(sessionId, {
-              backendSessionId: session.sessionId,
-              tmuxSessionName: session.tmuxSessionName ?? null,
-            }).catch((error) => {
-              console.warn('[Terminal] failed to update inventory after auto recreate', error);
-            });
             debugSession(`[ensureSession] Updated store with new session ${session.sessionId}`);
             terminalId = session.sessionId;
           } catch (error) {
@@ -1190,18 +1190,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     try {
       setConnecting(sessionId, true);
-      const session = await terminal.createSession({
-        mode: sessionMode,
-        tmuxSessionName: sessionMode === 'tmux' ? preferredTmuxSessionName : undefined,
-        termType: 'xterm-256color',
-      });
+      const session = await openManagedBackendSession();
       setTerminalSession(sessionId, session);
-      void updateSessionInventoryEntry(sessionId, {
-        backendSessionId: session.sessionId,
-        tmuxSessionName: session.tmuxSessionName ?? (sessionMode === 'tmux' ? preferredTmuxSessionName : null),
-      }).catch((error) => {
-        console.warn('[Terminal] failed to update inventory after hard restart', error);
-      });
       terminalIdRef.current = session.sessionId;
       startStream(session.sessionId);
     } catch (error) {
@@ -1213,7 +1203,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     } finally {
       setIsRestarting(false);
     }
-  }, [sessionId, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream, sessionMode, preferredTmuxSessionName]);
+  }, [sessionId, isRestarting, disconnectStream, terminal, removeTerminalSession, clearBuffer, setConnecting, setTerminalSession, startStream, openManagedBackendSession]);
 
   const handleViewportInput = React.useCallback(
     (data: string, options?: { skipModifierTransform?: boolean; consumeModifier?: boolean }) => {

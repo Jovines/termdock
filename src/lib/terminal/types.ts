@@ -108,6 +108,8 @@ export interface OpenSessionInventoryOptions {
   cols?: number;
   rows?: number;
   termType?: string;
+  createIfEmpty?: boolean;
+  requireExisting?: boolean;
 }
 
 export interface OpenSessionInventoryResult {

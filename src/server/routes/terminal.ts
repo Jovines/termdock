@@ -283,6 +283,13 @@ interface OpenInventoryResult {
   reused: boolean;
 }
 
+class HttpStatusError extends Error {
+  constructor(public statusCode: number, message: string) {
+    super(message);
+    this.name = 'HttpStatusError';
+  }
+}
+
 const terminalSessions = new Map<string, TerminalSession>();
 let globalSessionState: GlobalSessionState = { sessions: [], updatedAt: Date.now() };
 // ── 持久化 globalSessionState 到磁盘，防止服务重启后丢失 ──
@@ -304,6 +311,7 @@ let broadcastClientStateTimer: ReturnType<typeof setTimeout> | null = null;
 let broadcastClientStateInFlight = false;
 let broadcastClientStateNeedsRerun = false;
 let lastBroadcastClientStateSignature: string | null = null;
+const inventoryOpenLocks = new Map<string, Promise<OpenInventoryResult>>();
 
 const CONTROL_BROADCAST_COALESCE_MS = 50;
 
@@ -977,6 +985,55 @@ function persistAndBroadcastGlobalState(): void {
   broadcastClientState();
 }
 
+function makeInventoryOpenLockKey(input: {
+  preferredFrontendSessionId?: unknown;
+  mode?: unknown;
+  tmuxSessionName?: unknown;
+  createIfEmpty?: unknown;
+}): string {
+  const preferredFrontendSessionId = typeof input.preferredFrontendSessionId === 'string'
+    ? input.preferredFrontendSessionId.trim()
+    : '';
+  if (preferredFrontendSessionId) {
+    return `frontend:${preferredFrontendSessionId}`;
+  }
+
+  if (input.createIfEmpty === true) {
+    return 'default-if-empty';
+  }
+
+  const mode = normalizeMode(input.mode);
+  if (mode === 'tmux') {
+    const rawTmuxName = typeof input.tmuxSessionName === 'string'
+      ? input.tmuxSessionName.trim()
+      : '';
+    if (rawTmuxName) {
+      return `tmux:${rawTmuxName}`;
+    }
+  }
+
+  return `new:${randomUUID()}`;
+}
+
+async function withInventoryOpenLock(
+  key: string,
+  task: () => Promise<OpenInventoryResult>,
+): Promise<OpenInventoryResult> {
+  const previous = inventoryOpenLocks.get(key);
+  if (previous) {
+    return previous;
+  }
+
+  let pending!: Promise<OpenInventoryResult>;
+  pending = task().finally(() => {
+    if (inventoryOpenLocks.get(key) === pending) {
+      inventoryOpenLocks.delete(key);
+    }
+  });
+  inventoryOpenLocks.set(key, pending);
+  return pending;
+}
+
 function upsertGlobalSessionRecord(record: PersistedClientSession): PersistedClientSession {
   const normalized = normalizePersistedClientSession(record);
   if (!normalized) {
@@ -1019,6 +1076,31 @@ function removeGlobalSessionRecord(frontendSessionId: string): boolean {
     updatedAt: Date.now(),
   };
   return globalSessionState.sessions.length !== before;
+}
+
+async function markAllPersistedTmuxSessionsDetached(): Promise<void> {
+  const detachedAt = String(Date.now());
+  const tmuxSessionNames = new Set(
+    globalSessionState.sessions
+      .map((session) => session.mode === 'tmux' ? session.tmuxSessionName : null)
+      .filter((name): name is string => typeof name === 'string' && name.length > 0),
+  );
+  try {
+    const liveTmuxSessions = await listLiveTmuxInventorySessions();
+    for (const tmux of liveTmuxSessions) {
+      if (isTermdockManagedTmuxSession(tmux)) {
+        tmuxSessionNames.add(tmux.name);
+      }
+    }
+  } catch (error) {
+    const errorMessage = getErrorMessage(error);
+    if (!isTmuxServerMissingMessage(errorMessage)) {
+      console.warn('[session-inventory] failed to list tmux sessions for clear-all:', errorMessage);
+    }
+  }
+  await Promise.all(Array.from(tmuxSessionNames).map((tmuxSessionName) =>
+    setTmuxOption(tmuxSessionName, TERMDOCK_GUI_DETACHED_AT_OPTION, detachedAt),
+  ));
 }
 
 function getClientSessionView(inventory: SessionInventory, frontendSessionId: string): SessionInventoryClientSession {
@@ -1118,6 +1200,8 @@ async function openInventorySession(
     cols?: unknown;
     rows?: unknown;
     termType?: unknown;
+    createIfEmpty?: unknown;
+    requireExisting?: unknown;
   },
 ): Promise<OpenInventoryResult> {
   const normalizedMode = normalizeMode(input.mode);
@@ -1127,6 +1211,8 @@ async function openInventorySession(
   const preferredFrontendSessionId = typeof input.preferredFrontendSessionId === 'string'
     ? input.preferredFrontendSessionId.trim()
     : '';
+  const createIfEmpty = input.createIfEmpty === true;
+  const requireExisting = input.requireExisting === true;
   const now = Date.now();
 
   let record = preferredFrontendSessionId
@@ -1139,6 +1225,26 @@ async function openInventorySession(
       (session) => session.mode === 'tmux' && session.tmuxSessionName === normalizedTmuxName,
     ) ?? null;
     reused = !!record;
+  }
+
+  if (!record && createIfEmpty && globalSessionState.sessions.length === 0) {
+    const inventory = await buildSessionInventory();
+    latestSessionInventory = inventory;
+    if (globalSessionState.sessions.length > 0) {
+      record = [...globalSessionState.sessions]
+        .sort((a, b) => b.lastActivity - a.lastActivity)[0] ?? null;
+      reused = !!record;
+    }
+  }
+
+  if (!record && createIfEmpty && globalSessionState.sessions.length > 0) {
+    record = [...globalSessionState.sessions]
+      .sort((a, b) => b.lastActivity - a.lastActivity)[0] ?? null;
+    reused = !!record;
+  }
+
+  if (!record && requireExisting) {
+    throw new HttpStatusError(404, 'session not found');
   }
 
   if (!record) {
@@ -1383,6 +1489,14 @@ function isTmuxUnavailableMessage(errorMessage: string): boolean {
   return /no such file or directory|not found|enoent/i.test(errorMessage);
 }
 
+function isTmuxServerMissingMessage(errorMessage: string): boolean {
+  return /no server running|error connecting to .*\(No such file or directory\)/i.test(errorMessage);
+}
+
+function isTmuxSessionMissingMessage(errorMessage: string): boolean {
+  return /can't find session|session not found/i.test(errorMessage) || isTmuxServerMissingMessage(errorMessage);
+}
+
 async function getTmuxStatus(): Promise<{ available: boolean; version: string | null; reason: string | null }> {
   try {
     const raw = await runTmux(['-V']);
@@ -1518,8 +1632,12 @@ async function unsetTmuxOption(sessionName: string, key: string): Promise<void> 
   try {
     await runTmux(['set-option', '-t', sessionName, '-u', key]);
   } catch (error) {
+    const errorMessage = getErrorMessage(error);
+    if (isTmuxSessionMissingMessage(errorMessage)) {
+      return;
+    }
     console.warn(
-      `[tmux] failed to unset option ${key} on ${sessionName}: ${getErrorMessage(error)}`,
+      `[tmux] failed to unset option ${key} on ${sessionName}: ${errorMessage}`,
     );
   }
 }
@@ -1618,7 +1736,7 @@ async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
       });
   } catch (error) {
     const errorMessage = getErrorMessage(error);
-    if (/no server running/i.test(errorMessage)) {
+    if (isTmuxServerMissingMessage(errorMessage)) {
       return [];
     }
     throw error;
@@ -1633,7 +1751,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       liveTmuxSessions = await listLiveTmuxInventorySessions();
     } catch (error) {
       const errorMessage = getErrorMessage(error);
-      if (!/no server running/i.test(errorMessage)) {
+      if (!isTmuxServerMissingMessage(errorMessage)) {
         console.warn('[session-inventory] failed to list tmux sessions:', errorMessage);
       }
       liveTmuxSessions = [];
@@ -2685,20 +2803,24 @@ async function resolveTmuxClientTty(sessionName: string, preferredClientPid: num
 }
 
 async function ensureTmuxSessionExists(sessionName: string, cwd?: string): Promise<void> {
+  let serverWasMissing = false;
   try {
     await runTmux(['has-session', '-t', sessionName]);
     await ensureTmuxColorEnvironment(sessionName);
     return;
   } catch (error) {
     const errorMessage = getErrorMessage(error);
-    if (!/can't find session|no server running/i.test(errorMessage)) {
+    serverWasMissing = isTmuxServerMissingMessage(errorMessage);
+    if (!isTmuxSessionMissingMessage(errorMessage)) {
       throw error;
     }
   }
 
-  await ensureTmuxColorEnvironment();
+  if (!serverWasMissing) {
+    await ensureTmuxColorEnvironment();
+  }
 
-  const args = ['new-session', '-d', '-s', sessionName];
+  const args = ['new-session', '-d', '-s', sessionName, '-e', 'COLORTERM=truecolor', '-e', 'FORCE_COLOR=1'];
   if (cwd) {
     args.push('-c', cwd);
   }
@@ -3719,7 +3841,7 @@ router.get('/tmux/sessions', async (_req, res) => {
     return res.json({ sessions });
   } catch (error) {
     const errorMessage = getErrorMessage(error);
-    if (/no server running/i.test(errorMessage)) {
+    if (isTmuxServerMissingMessage(errorMessage)) {
       return res.json({ sessions: [] });
     }
     if (isTmuxUnavailableMessage(errorMessage)) {
@@ -3757,7 +3879,7 @@ router.delete('/tmux/sessions/:name', async (req, res) => {
     await runTmux(['kill-session', '-t', rawName]);
   } catch (error) {
     const errorMessage = getErrorMessage(error);
-    if (/can't find session|no server running|session not found/i.test(errorMessage)) {
+    if (isTmuxSessionMissingMessage(errorMessage)) {
       // Already gone; treat as success and still clean up any orphan ptys.
       for (const id of affectedSessionIds) {
         try { cleanupSession(id, { killProcess: true }); } catch {}
@@ -3839,10 +3961,15 @@ router.get('/session-inventory', async (_req, res) => {
 
 router.post('/session-inventory/open', async (req, res) => {
   try {
-    const result = await openInventorySession(req, req.body ?? {});
+    const input = req.body ?? {};
+    const lockKey = makeInventoryOpenLockKey(input);
+    const result = await withInventoryOpenLock(lockKey, () => openInventorySession(req, input));
     res.json(result);
   } catch (error) {
     const errorMessage = getErrorMessage(error);
+    if (error instanceof HttpStatusError) {
+      return res.status(error.statusCode).json({ error: errorMessage || 'Failed to open session' });
+    }
     console.error('[session-inventory] failed to open session:', errorMessage);
     res.status(500).json({ error: errorMessage || 'Failed to open session' });
   }
@@ -3938,7 +4065,8 @@ router.delete('/session-inventory/sessions/:frontendSessionId', async (req, res)
   res.status(204).send();
 });
 
-router.delete('/session-inventory/sessions', (_req, res) => {
+router.delete('/session-inventory/sessions', async (_req, res) => {
+  await markAllPersistedTmuxSessionsDetached();
   globalSessionState = { sessions: [], updatedAt: Date.now() };
   schedulePersistGlobalState();
   broadcastClientState();
@@ -3981,7 +4109,8 @@ router.put('/client-state', (req, res) => {
   res.json(state);
 });
 
-router.delete('/client-state', (_req, res) => {
+router.delete('/client-state', async (_req, res) => {
+  await markAllPersistedTmuxSessionsDetached();
   globalSessionState = { sessions: [], updatedAt: Date.now() };
   schedulePersistGlobalState();
   broadcastClientState();

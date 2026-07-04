@@ -36,6 +36,7 @@ interface NewSessionEventDetail {
   mode?: TerminalMode;
   tmuxSessionName?: string;
   cwd?: string;
+  createIfEmpty?: boolean;
 }
 
 interface CloseSessionEventDetail {
@@ -794,7 +795,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       // 没有任何 session 时，在 isRestoring=false 之前同步等待创建完成，
       // 确保外部 effect 不会同时触发创建。
       if (runtimeSessions.length === 0) {
-        await handleNewSessionRef.current?.();
+        await handleNewSessionRef.current?.({ createIfEmpty: true });
       }
       setIsRestoring(false);
       requestAnimationFrame(() => syncSwiperToActiveIndex('restore-finished', { immediate: true }));
@@ -895,6 +896,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         tmuxSessionName,
         cwd: effectiveCwd,
         termType: 'xterm-256color',
+        createIfEmpty: options?.createIfEmpty === true,
       });
       const canonical = result.session;
       const terminalSession = result.terminalSession;
@@ -1142,19 +1144,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     };
   }, [handleNewSession, handleSwitchSession, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleResetSessionName, handleReorderSessions]);
 
-  // 没有会话时创建新的
-  useEffect(() => {
-    if (!isRestoring && sessions.length === 0) {
-      handleNewSession();
-    }
-  }, [isRestoring, sessions.length, handleNewSession]);
-
   // 注意：以前这里有 `if (isRestoring) { 全屏 spinner }`，但它在两种场景下都很烦：
   // 1. PWA 从后台返回（iOS 会把页面踢出内存重新加载）：每次都看一遍全屏 loading
   // 2. 真·首次启动：也是 1-3s 蜂窝 RTT 的全屏 loading
   // 现在 useSessionPersistence 走 localStorage 缓存命中时 isRestoring 几乎是
-  // 瞬间 false，UI 直接渲染；缓存未命中时 sessions=[]，下面 useEffect 会自动
-  // 触发 handleNewSession() 创建一个新 session（瞬间空白比全屏 spinner 优雅）。
+  // 瞬间 false，UI 直接渲染；缓存未命中且服务端确实没有会话时，restore 阶段
+  // 只走一次 createIfEmpty，由服务端保证多客户端并发时只创建同一条默认会话。
 
   return (
     <div className="h-full flex flex-col">
