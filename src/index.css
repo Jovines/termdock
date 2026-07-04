@@ -47,6 +47,10 @@
   --diff-delete-rgb: 209, 77, 65;
   --diff-border-rgb: 64, 62, 60;
   --skeleton-base-rgb: 255, 255, 255;
+  --safe-top-inset: env(safe-area-inset-top, 0px);
+  --safe-right-inset: env(safe-area-inset-right, 0px);
+  --safe-bottom-inset: env(safe-area-inset-bottom, 0px);
+  --safe-left-inset: env(safe-area-inset-left, 0px);
   /*
    * z-index 单一来源 —— 所有「全屏浮层」(position: fixed 的遮罩 / 抽屉 / 弹窗 /
    * 浮窗) 的层级只在这里定义，业务组件一律用 Tailwind 语义类 (z-modal-panel
@@ -206,7 +210,19 @@ body {
   height: var(--app-vh, 100vh);
   width: 100vw;
   overscroll-behavior: none;
-  padding-top: max(0px, env(safe-area-inset-top, 0px) - 24px);
+  padding-top: var(--safe-top-inset, env(safe-area-inset-top, 0px));
+}
+
+@supports (-webkit-touch-callout: none) {
+  @media (display-mode: standalone) and (orientation: portrait) {
+    :root {
+      --safe-top-inset: max(env(safe-area-inset-top, 0px), 20px);
+    }
+
+    #root {
+      padding-top: var(--safe-top-inset, env(safe-area-inset-top, 0px));
+    }
+  }
 }
 
 /* Keep JS-driven --app-vh authoritative.
@@ -546,7 +562,7 @@ body {
     left: 0;
     right: 0;
     height: var(--app-base-vh, 100lvh);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-bottom: var(--safe-bottom-inset, env(safe-area-inset-bottom, 0px));
   }
 
   .terminal-viewport-container {

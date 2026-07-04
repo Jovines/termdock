@@ -271,11 +271,11 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
           transition: 'none',
           touchAction: 'pan-y',
           pointerEvents: isOpen ? 'auto' : 'none',
-          paddingTop: 'max(0px, env(safe-area-inset-top, 0px) - 24px)',
-          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+          paddingTop: 'var(--safe-top-inset, env(safe-area-inset-top, 0px))',
+          paddingBottom: 'var(--safe-bottom-inset, env(safe-area-inset-bottom, 0px))',
           ...(isLeft
-            ? { paddingLeft: 'env(safe-area-inset-left, 0px)' }
-            : { paddingRight: 'env(safe-area-inset-right, 0px)' }),
+            ? { paddingLeft: 'var(--safe-left-inset, env(safe-area-inset-left, 0px))' }
+            : { paddingRight: 'var(--safe-right-inset, env(safe-area-inset-right, 0px))' }),
         }}
       >
         {children}

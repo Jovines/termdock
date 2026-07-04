@@ -9,6 +9,13 @@ const KEYBOARD_OPEN_THRESHOLD_PX = 80;
 const BASE_WIDTH_CHANGE_THRESHOLD_PX = 60;
 const KEYBOARD_CHANGE_EVENT = 'termdock:viewport-keyboard-change';
 
+interface SafeAreaInsets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
 declare global {
   interface DocumentEventMap {
     [KEYBOARD_CHANGE_EVENT]: CustomEvent<ViewportKeyboardChangeDetail>;
@@ -24,6 +31,55 @@ export interface ViewportKeyboardChangeDetail {
   isOpen: boolean;
   source: string;
 }
+
+const toPx = (value: string | null | undefined) => {
+  const parsed = Number.parseFloat(value || '0');
+  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : 0;
+};
+
+const isIOSLike = () => {
+  if (typeof navigator === 'undefined') return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+};
+
+const isStandaloneDisplay = () => {
+  if (typeof window === 'undefined') return false;
+  const navigatorWithStandalone = navigator as Navigator & { standalone?: boolean };
+  return navigatorWithStandalone.standalone === true ||
+    window.matchMedia?.('(display-mode: standalone)').matches === true;
+};
+
+const getIOSStandaloneSafeAreaFallback = (): SafeAreaInsets => {
+  if (typeof window === 'undefined' || !isIOSLike() || !isStandaloneDisplay()) {
+    return { top: 0, right: 0, bottom: 0, left: 0 };
+  }
+
+  const portrait = window.innerHeight >= window.innerWidth;
+  if (!portrait) {
+    return { top: 0, right: 0, bottom: 0, left: 0 };
+  }
+
+  const screenWidth = window.screen?.width || window.innerWidth;
+  const screenHeight = window.screen?.height || window.innerHeight;
+  const logicalWidth = Math.min(screenWidth, screenHeight);
+  const logicalHeight = Math.max(screenWidth, screenHeight);
+
+  if (logicalWidth >= 700) {
+    return { top: 20, right: 0, bottom: 20, left: 0 };
+  }
+
+  if (logicalHeight < 780) {
+    return { top: 20, right: 0, bottom: 0, left: 0 };
+  }
+
+  const top = logicalHeight >= 852
+    ? 59
+    : logicalHeight >= 844
+      ? 47
+      : 44;
+  return { top, right: 0, bottom: 34, left: 0 };
+};
 
 export function useViewportHeight(options: UseViewportHeightOptions = {}): number {
   const { cssVarName = '--app-vh' } = options;
@@ -71,16 +127,69 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     }
 
     let rafId: number | null = null;
+    let safeAreaProbe: HTMLDivElement | null = null;
 
     const medianOf3 = (a: number, b: number, c: number) =>
       [a, b, c].sort((x, y) => x - y)[1];
 
-    const readSafeBottom = () => {
+    const ensureSafeAreaProbe = () => {
+      if (safeAreaProbe?.isConnected) return safeAreaProbe;
+
       try {
-        const root = document.getElementById('root');
-        if (root) return parseFloat(getComputedStyle(root).paddingBottom) || 0;
+        safeAreaProbe = document.createElement('div');
+        safeAreaProbe.setAttribute('aria-hidden', 'true');
+        safeAreaProbe.style.cssText = [
+          'position:fixed',
+          'top:0',
+          'left:0',
+          'width:0',
+          'height:0',
+          'visibility:hidden',
+          'pointer-events:none',
+          'padding-top:constant(safe-area-inset-top)',
+          'padding-top:env(safe-area-inset-top,0px)',
+          'padding-right:constant(safe-area-inset-right)',
+          'padding-right:env(safe-area-inset-right,0px)',
+          'padding-bottom:constant(safe-area-inset-bottom)',
+          'padding-bottom:env(safe-area-inset-bottom,0px)',
+          'padding-left:constant(safe-area-inset-left)',
+          'padding-left:env(safe-area-inset-left,0px)',
+        ].join(';');
+        (document.body || document.documentElement).appendChild(safeAreaProbe);
+        return safeAreaProbe;
       } catch { /* ignore */ }
-      return 0;
+      return null;
+    };
+
+    const syncSafeAreaInsets = (): SafeAreaInsets => {
+      let raw: SafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+
+      try {
+        const probe = ensureSafeAreaProbe();
+        if (probe) {
+          const style = getComputedStyle(probe);
+          raw = {
+            top: toPx(style.paddingTop),
+            right: toPx(style.paddingRight),
+            bottom: toPx(style.paddingBottom),
+            left: toPx(style.paddingLeft),
+          };
+        }
+      } catch { /* ignore */ }
+
+      const fallback = getIOSStandaloneSafeAreaFallback();
+      const insets = {
+        top: Math.max(raw.top, fallback.top),
+        right: Math.max(raw.right, fallback.right),
+        bottom: Math.max(raw.bottom, fallback.bottom),
+        left: Math.max(raw.left, fallback.left),
+      };
+
+      document.documentElement.style.setProperty('--safe-top-inset', `${insets.top}px`);
+      document.documentElement.style.setProperty('--safe-right-inset', `${insets.right}px`);
+      document.documentElement.style.setProperty('--safe-bottom-inset', `${insets.bottom}px`);
+      document.documentElement.style.setProperty('--safe-left-inset', `${insets.left}px`);
+      return insets;
     };
 
     const updateBaseHeight = (
@@ -114,7 +223,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       const innerHeight = Math.round(window.innerHeight);
       const currentWidth = Math.round(window.innerWidth);
       const visualBottom = Math.max(0, rawViewportHeight + nextOffsetTop);
-      const safeBottom = readSafeBottom();
+      const safeAreaInsets = syncSafeAreaInsets();
+      const safeBottom = safeAreaInsets.bottom;
       const previousKeyboardHeight = Math.max(0, baseHeightRef.current - visualBottom - safeBottom);
 
       updateBaseHeight(currentWidth, innerHeight, visualBottom, previousKeyboardHeight);
@@ -191,6 +301,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
           keyboardViewportHeight,
           keyboardHeight,
           isKeyboardOpen,
+          safeAreaInsets,
           filtered: filteredHeight !== nextHeight,
           source,
         });
@@ -269,6 +380,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       if (rafId !== null) {
         window.cancelAnimationFrame(rafId);
       }
+      safeAreaProbe?.remove();
     };
   }, [cssVarName, debugViewport, getViewportHeight]);
 
