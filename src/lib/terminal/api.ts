@@ -1502,14 +1502,24 @@ export async function readImagePreviewBlob(filePath: string, signal?: AbortSigna
   };
 }
 
+function isIOS(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
 // Download a file to the user's device. Works in both PWA (standalone) and
 // normal browser tabs:
 //   1. File System Access API (showSaveFilePicker) — available in desktop
 //      Chromium browsers and installed desktop PWAs; shows a native save
 //      dialog and writes the blob to the chosen location.
-//   2. <a download> blob URL fallback — used everywhere else (Firefox, Safari,
-//      iOS PWA). Triggers the browser's native download in a normal tab, and
-//      opens/shares the blob inside iOS standalone PWAs.
+//   2. Web Share API (iOS) — opens the native iOS share sheet which includes
+//      "Save to Files". Safari ignores <a download> with blob URLs (they
+//      open inline instead), and window.open is unreliable in standalone
+//      PWAs. If share is unavailable the page navigates to the server URL
+//      so Content-Disposition: attachment triggers the download prompt.
+//   3. <a download> blob URL fallback — used everywhere else (Firefox, desktop
+//      Safari). Triggers the browser's native download in a normal tab.
 export async function downloadFile(filePath: string): Promise<void> {
   const url = `/api/terminal/fs/download?path=${encodeURIComponent(filePath)}`;
   const response = await fetch(url);
@@ -1538,8 +1548,31 @@ export async function downloadFile(filePath: string): Promise<void> {
       return;
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
-      // otherwise fall through to the <a download> path
+      // otherwise fall through
     }
+  }
+
+  // On iOS, use the Web Share API to open the native share sheet
+  // ("Save to Files", AirDrop, etc.). Safari ignores <a download> with
+  // blob URLs, and window.open is unreliable in standalone PWAs.
+  if (isIOS()) {
+    const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+    const canShare = typeof navigator !== 'undefined'
+      && 'share' in navigator
+      && (!navigator.canShare || navigator.canShare({ files: [file] }));
+    if (canShare) {
+      try {
+        await navigator.share({ files: [file] });
+        return;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        // share failed — fall through to direct URL navigation
+      }
+    }
+    // Last resort: navigate to the server URL so Safari sees the
+    // Content-Disposition: attachment header and shows a download prompt.
+    window.location.href = url;
+    return;
   }
 
   // Fallback: anchor + blob URL.
