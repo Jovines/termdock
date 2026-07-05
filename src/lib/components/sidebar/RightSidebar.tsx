@@ -3415,7 +3415,7 @@ function FilePreview({
                     // Line-number gutter width tracks the file's digit count so a
                     // short file doesn't reserve room for thousands of lines and
                     // leave a big gap between the edge and the numbers.
-                    style={{ gridTemplateColumns: `0.875rem ${gutterWidthCh}ch 1fr` }}
+                    style={{ gridTemplateColumns: `${gutterWidthCh}ch 1fr` }}
                     className={`group grid w-max min-w-full gap-2 rounded-md pr-1 text-left transition active:scale-[0.998] ${
                       isSelected
                         ? 'bg-[var(--surface-2)] text-foreground'
@@ -3423,10 +3423,7 @@ function FilePreview({
                     }`}
                     title={`Tap to reference ${reference}:${lineNumber}`}
                   >
-                    <span className={getReferenceSelectionRailShellClass(isSelected)} aria-hidden="true">
-                      <span className={getReferenceSelectionRailBarClass(isSelected)} />
-                    </span>
-                    <span className={`select-none text-right text-[10px] ${isSelected ? 'text-muted-foreground' : 'text-muted-foreground/55'}`}>{lineNumber}</span>
+                    <span className={`select-none rounded text-right text-[10px] transition ${isSelected ? 'bg-[var(--surface-elevated)] text-muted-foreground' : 'text-muted-foreground/55'}`}>{lineNumber}</span>
                     <span className="whitespace-pre">{highlighted ?? (line || ' ')}</span>
                   </button>
                 );
