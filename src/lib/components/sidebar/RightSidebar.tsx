@@ -99,6 +99,7 @@ const MARKDOWN_TABLE_BODY_CELL_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-bord
 const MARKDOWN_TABLE_SCROLL_CLASS = 'termdock-md-table-scroll max-w-full overflow-x-auto overflow-y-hidden rounded-lg border border-border/20 bg-surface';
 
 type GitActionKey = GitActionRequest['action'];
+type LineRange = { start: number; end: number };
 
 type ConfirmGitAction =
   | { kind: 'restore'; file: GitChangedFile; phrase: string }
@@ -2184,10 +2185,10 @@ function MarkdownPreview({
           const blockContent = (
             <>
               <span
-                className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${blockSelected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)] group-hover:bg-[var(--surface-elevated)]'}`}
+                className={getReferenceSelectionRailShellClass(blockSelected)}
                 aria-hidden="true"
               >
-                <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${blockSelected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)] group-hover:bg-[var(--muted-foreground)]'}`} />
+                <span className={getReferenceSelectionRailBarClass(blockSelected)} />
               </span>
               <div className="min-w-0">{renderedContent}</div>
             </>
@@ -2204,7 +2205,7 @@ function MarkdownPreview({
                 {block.kind === 'table' ? (
                   <button
                     type="button"
-                    className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${tableWholeSelected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)] hover:bg-[var(--surface-elevated)]'}`}
+                    className={getReferenceSelectionRailShellClass(tableWholeSelected, 'self')}
                     onClick={(event) => {
                       event.preventDefault();
                       onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, block.startLine, block.endLine);
@@ -2212,14 +2213,14 @@ function MarkdownPreview({
                     title={`Reference table lines ${lineLabel}`}
                     aria-label={`Reference table lines ${lineLabel}`}
                   >
-                    <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${tableWholeSelected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)] hover:bg-[var(--muted-foreground)]'}`} />
+                    <span className={getReferenceSelectionRailBarClass(tableWholeSelected, 'self')} />
                   </button>
                 ) : (
                   <span
-                    className={`flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${blockSelected ? 'bg-[var(--surface-elevated)]' : 'bg-[var(--surface-2)]'}`}
+                    className={getReferenceSelectionRailShellClass(blockSelected, 'none')}
                     aria-hidden="true"
                   >
-                    <span className={`my-1 w-0.5 rounded-full transition sm:w-1 ${blockSelected ? 'bg-[var(--muted-foreground)]' : 'bg-[var(--border-strong)]'}`} />
+                    <span className={getReferenceSelectionRailBarClass(blockSelected, 'none')} />
                   </span>
                 )}
                 <div
@@ -2570,11 +2571,11 @@ function buildLineReference(path: string, rootPath: string | null, lineRange: { 
   return `${buildPromptReference(path, rootPath)}:${suffix}`;
 }
 
-export function getNextMarkdownPreviewLineRange(
-  current: { start: number; end: number } | null,
+function getNextReferenceLineRange(
+  current: LineRange | null,
   startLine: number,
   endLine: number,
-): { start: number; end: number } | null {
+): LineRange | null {
   const nextStart = Math.min(startLine, endLine);
   const nextEnd = Math.max(startLine, endLine);
   if (current?.start === nextStart && current.end === nextEnd) return null;
@@ -2585,6 +2586,36 @@ export function getNextMarkdownPreviewLineRange(
     };
   }
   return { start: nextStart, end: nextEnd };
+}
+
+export function getNextMarkdownPreviewLineRange(
+  current: LineRange | null,
+  startLine: number,
+  endLine: number,
+): LineRange | null {
+  return getNextReferenceLineRange(current, startLine, endLine);
+}
+
+function getReferenceSelectionRailShellClass(selected: boolean, hover: 'group' | 'self' | 'none' = 'group'): string {
+  const hoverClass = hover === 'group'
+    ? 'group-hover:bg-[var(--surface-elevated)]'
+    : hover === 'self' ? 'hover:bg-[var(--surface-elevated)]' : '';
+  return `flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-[var(--surface-elevated)]' : `bg-[var(--surface-2)] ${hoverClass}`}`;
+}
+
+function getReferenceSelectionRailBarClass(selected: boolean, hover: 'group' | 'self' | 'none' = 'group'): string {
+  const hoverClass = hover === 'group'
+    ? 'group-hover:bg-[var(--muted-foreground)]'
+    : hover === 'self' ? 'hover:bg-[var(--muted-foreground)]' : '';
+  return `my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-[var(--muted-foreground)]' : `bg-[var(--border-strong)] ${hoverClass}`}`;
+}
+
+function getReferenceFloatingButtonClass(isMobile: boolean, completed: boolean): string {
+  const sizeClass = isMobile ? 'h-9 px-4 text-[12px]' : 'h-7 px-3 text-[11px]';
+  const toneClass = completed
+    ? 'bg-surface-elevated text-foreground ring-border-strong/40 hover:bg-surface-2'
+    : 'bg-primary text-primary-foreground ring-primary/30 hover:bg-primary/90';
+  return `pointer-events-auto absolute z-popover inline-flex items-center gap-1 rounded-full font-semibold shadow-lg ring-1 transition active:scale-95 ${sizeClass} ${toneClass}`;
 }
 
 function toChangedFileMap(files: GitChangedFile[]): Map<string, GitChangedFile> {
@@ -3125,6 +3156,7 @@ function FilePreview({
   const lineReferenceInserted = insertedReferenceKey === lineReferenceKey;
   const fileReferenceCopied = copiedReferenceKey === fileReferenceKey;
   const lineReferenceCopied = copiedReferenceKey === lineReferenceKey;
+  const lineReferenceCompleted = lineReferenceInserted || lineReferenceCopied;
   const selectedLineLabel = lineRange
     ? (lineRange.start === lineRange.end ? `L${lineRange.start}` : `L${lineRange.start}-${lineRange.end}`)
     : null;
@@ -3137,7 +3169,8 @@ function FilePreview({
     const clientX = event.clientX || targetRect.left + targetRect.width / 2;
     const clientY = event.clientY || targetRect.top + targetRect.height / 2;
     const top = clientY - rect.top + scroller.scrollTop;
-    const maxLeft = scroller.scrollLeft + Math.max(8, scroller.clientWidth - 132);
+    const buttonWidth = isMobile ? 116 : 132;
+    const maxLeft = scroller.scrollLeft + Math.max(8, scroller.clientWidth - buttonWidth);
     const left = Math.min(
       Math.max(8, clientX - rect.left + scroller.scrollLeft + 10),
       maxLeft,
@@ -3148,21 +3181,18 @@ function FilePreview({
   const handleLineClick = (event: MouseEvent<HTMLButtonElement>, lineNumber: number) => {
     placeFloatingInsertButton(event);
     onLineRangeChange((current) => {
-      if (!current || current.start !== current.end) {
-        return { start: lineNumber, end: lineNumber };
-      }
-      if (current.start === lineNumber) {
+      const nextRange = getNextReferenceLineRange(current, lineNumber, lineNumber);
+      if (!nextRange) {
         setFloatingInsertPos(null);
-        return null;
       }
-      return { start: Math.min(current.start, lineNumber), end: Math.max(current.start, lineNumber) };
+      return nextRange;
     });
   };
 
   const handlePreviewLineRangeClick = (event: MouseEvent<HTMLElement>, startLine: number, endLine: number) => {
     placeFloatingInsertButton(event);
     onLineRangeChange((current) => {
-      const nextRange = getNextMarkdownPreviewLineRange(current, startLine, endLine);
+      const nextRange = getNextReferenceLineRange(current, startLine, endLine);
       if (!nextRange) {
         setFloatingInsertPos(null);
       }
@@ -3354,9 +3384,7 @@ function FilePreview({
               onClick={insertRangeReference}
               {...getReferenceLongPressHandlers(lineReference, lineReferenceKey)}
               style={{ top: floatingInsertPos.top, left: floatingInsertPos.left, transform: 'translateY(-50%)' }}
-              className={`pointer-events-auto absolute z-popover inline-flex items-center gap-1 rounded-full bg-surface-elevated font-semibold text-foreground shadow-lg ring-1 ring-border-strong/40 transition hover:bg-surface-2 active:scale-95 ${
-                isMobile ? 'h-9 px-4 text-[12px]' : 'h-7 px-3 text-[11px]'
-              }`}
+              className={getReferenceFloatingButtonClass(isMobile, lineReferenceCompleted)}
               title={`Insert markdown reference: ${lineReference}`}
             >
               <RiLink size={isMobile ? 13 : 11} />
@@ -3387,15 +3415,18 @@ function FilePreview({
                     // Line-number gutter width tracks the file's digit count so a
                     // short file doesn't reserve room for thousands of lines and
                     // leave a big gap between the edge and the numbers.
-                    style={{ gridTemplateColumns: `${gutterWidthCh}ch 1fr` }}
-                    className={`grid w-max min-w-full gap-2 rounded pr-1 text-left transition active:scale-[0.995] ${
+                    style={{ gridTemplateColumns: `0.875rem ${gutterWidthCh}ch 1fr` }}
+                    className={`group grid w-max min-w-full gap-2 rounded-md pr-1 text-left transition active:scale-[0.998] ${
                       isSelected
                         ? 'bg-[var(--surface-2)] text-foreground'
                         : 'hover:bg-surface-2'
                     }`}
                     title={`Tap to reference ${reference}:${lineNumber}`}
                   >
-                    <span className={`select-none rounded text-right text-[10px] transition ${isSelected ? 'bg-[var(--surface-elevated)] text-muted-foreground' : 'text-muted-foreground/55'}`}>{lineNumber}</span>
+                    <span className={getReferenceSelectionRailShellClass(isSelected)} aria-hidden="true">
+                      <span className={getReferenceSelectionRailBarClass(isSelected)} />
+                    </span>
+                    <span className={`select-none text-right text-[10px] ${isSelected ? 'text-muted-foreground' : 'text-muted-foreground/55'}`}>{lineNumber}</span>
                     <span className="whitespace-pre">{highlighted ?? (line || ' ')}</span>
                   </button>
                 );
@@ -3410,9 +3441,7 @@ function FilePreview({
               onClick={insertRangeReference}
               {...getReferenceLongPressHandlers(lineReference, lineReferenceKey)}
               style={{ top: floatingInsertPos.top, left: floatingInsertPos.left, transform: 'translateY(-50%)' }}
-              className={`pointer-events-auto absolute z-popover inline-flex items-center gap-1 rounded-full bg-primary font-semibold text-primary-foreground shadow-lg ring-1 ring-primary/30 transition hover:bg-primary/90 active:scale-95 ${
-                isMobile ? 'h-9 px-4 text-[12px]' : 'h-7 px-3 text-[11px]'
-              }`}
+              className={getReferenceFloatingButtonClass(isMobile, lineReferenceCompleted)}
               title={`Insert code reference: ${lineReference}`}
             >
               <RiLink size={isMobile ? 13 : 11} />
