@@ -8,6 +8,9 @@ interface UseViewportHeightOptions {
 const KEYBOARD_OPEN_THRESHOLD_PX = 80;
 const BASE_WIDTH_CHANGE_THRESHOLD_PX = 60;
 const KEYBOARD_CHANGE_EVENT = 'termdock:viewport-keyboard-change';
+const MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX = 240;
+const DEFAULT_BOOTSTRAP_VIEWPORT_HEIGHT_PX = 640;
+const DEFAULT_BOOTSTRAP_VIEWPORT_WIDTH_PX = 360;
 
 interface SafeAreaInsets {
   top: number;
@@ -32,6 +35,44 @@ export interface ViewportKeyboardChangeDetail {
   source: string;
 }
 
+const toPositivePx = (value: unknown): number => {
+  const parsed = typeof value === 'number'
+    ? value
+    : Number.parseFloat(typeof value === 'string' ? value : '0');
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0;
+};
+
+const firstUsableDimension = (values: unknown[], fallback: number): number => {
+  const positive = values.map(toPositivePx).filter((value) => value > 0);
+  return positive.find((value) => value >= MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX)
+    ?? positive[0]
+    ?? fallback;
+};
+
+const getBestKnownViewportHeight = (): number => {
+  if (typeof window === 'undefined') return DEFAULT_BOOTSTRAP_VIEWPORT_HEIGHT_PX;
+  return firstUsableDimension([
+    window.innerHeight,
+    document.documentElement?.clientHeight,
+    document.body?.clientHeight,
+    window.visualViewport?.height,
+    window.screen?.availHeight,
+    window.screen?.height,
+  ], DEFAULT_BOOTSTRAP_VIEWPORT_HEIGHT_PX);
+};
+
+const getBestKnownViewportWidth = (): number => {
+  if (typeof window === 'undefined') return DEFAULT_BOOTSTRAP_VIEWPORT_WIDTH_PX;
+  return firstUsableDimension([
+    window.innerWidth,
+    document.documentElement?.clientWidth,
+    document.body?.clientWidth,
+    window.visualViewport?.width,
+    window.screen?.availWidth,
+    window.screen?.width,
+  ], DEFAULT_BOOTSTRAP_VIEWPORT_WIDTH_PX);
+};
+
 const toPx = (value: string | null | undefined) => {
   const parsed = Number.parseFloat(value || '0');
   return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : 0;
@@ -55,7 +96,7 @@ const getIOSStandaloneSafeAreaFallback = (): SafeAreaInsets => {
     return { top: 0, right: 0, bottom: 0, left: 0 };
   }
 
-  const portrait = window.innerHeight >= window.innerWidth;
+  const portrait = getBestKnownViewportHeight() >= getBestKnownViewportWidth();
   if (!portrait) {
     return { top: 0, right: 0, bottom: 0, left: 0 };
   }
@@ -81,6 +122,34 @@ const getIOSStandaloneSafeAreaFallback = (): SafeAreaInsets => {
   return { top, right: 0, bottom: 34, left: 0 };
 };
 
+export function syncInitialViewportCssVars(cssVarName = '--app-vh'): void {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+
+  const visualViewportHeight = toPositivePx(window.visualViewport?.height);
+  const visualViewportOffsetTop = Math.max(0, Math.round(window.visualViewport?.offsetTop ?? 0));
+  const layoutHeight = getBestKnownViewportHeight();
+  const visualViewportHeightUsable = visualViewportHeight >= MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX;
+  const visibleHeight = visualViewportHeightUsable
+    ? Math.min(layoutHeight, visualViewportHeight + visualViewportOffsetTop)
+    : layoutHeight;
+  const baseHeight = Math.max(layoutHeight, visibleHeight);
+  const style = document.documentElement.style;
+
+  style.setProperty(cssVarName, `${Math.max(visibleHeight, MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX)}px`);
+  style.setProperty('--app-base-vh', `${Math.max(baseHeight, MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX)}px`);
+  style.setProperty('--app-visible-vh', `${Math.max(visibleHeight, MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX)}px`);
+  style.setProperty('--app-vv-offset-top', `${visualViewportOffsetTop}px`);
+  style.setProperty('--kb-translate-y', '0px');
+  style.setProperty('--kb-margin-top', '0px');
+  style.setProperty('--kb-height', '0px');
+
+  const safeAreaFallback = getIOSStandaloneSafeAreaFallback();
+  if (safeAreaFallback.top > 0) style.setProperty('--safe-top-inset', `${safeAreaFallback.top}px`);
+  if (safeAreaFallback.right > 0) style.setProperty('--safe-right-inset', `${safeAreaFallback.right}px`);
+  if (safeAreaFallback.bottom > 0) style.setProperty('--safe-bottom-inset', `${safeAreaFallback.bottom}px`);
+  if (safeAreaFallback.left > 0) style.setProperty('--safe-left-inset', `${safeAreaFallback.left}px`);
+}
+
 export function useViewportHeight(options: UseViewportHeightOptions = {}): number {
   const { cssVarName = '--app-vh' } = options;
   const debugViewport = React.useMemo(() => createDebugLogger('viewport'), []);
@@ -91,13 +160,16 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     }
 
     const visualViewport = window.visualViewport;
+    const windowHeight = getBestKnownViewportHeight();
     if (!visualViewport) {
-      return Math.round(window.innerHeight);
+      return windowHeight;
     }
 
-    const viewportHeight = visualViewport.height;
+    const viewportHeight = toPositivePx(visualViewport.height);
+    if (viewportHeight < MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX && windowHeight >= MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX) {
+      return windowHeight;
+    }
     const viewportOffsetTop = visualViewport.offsetTop;
-    const windowHeight = window.innerHeight;
 
     // iOS can report transient offsetTop while the keyboard animates.
     // Small offset values are usually browser-chrome shift and should be compensated.
@@ -111,7 +183,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       ? viewportHeight + viewportOffsetTop
       : viewportHeight;
     const clampedHeight = Math.max(0, Math.min(windowHeight, effectiveHeight));
-    return Math.round(clampedHeight);
+    return clampedHeight > 0 ? Math.round(clampedHeight) : windowHeight;
   }, []);
 
   const [viewportHeight, setViewportHeight] = React.useState(getViewportHeight);
@@ -219,9 +291,12 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       rafId = null;
       const nextHeight = getViewportHeight();
       const nextOffsetTop = Math.round(window.visualViewport?.offsetTop ?? 0);
-      const rawViewportHeight = Math.round(window.visualViewport?.height ?? window.innerHeight);
-      const innerHeight = Math.round(window.innerHeight);
-      const currentWidth = Math.round(window.innerWidth);
+      const measuredViewportHeight = toPositivePx(window.visualViewport?.height);
+      const rawViewportHeight = measuredViewportHeight >= MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX
+        ? measuredViewportHeight
+        : nextHeight;
+      const innerHeight = getBestKnownViewportHeight();
+      const currentWidth = getBestKnownViewportWidth();
       const visualBottom = Math.max(0, rawViewportHeight + nextOffsetTop);
       const safeAreaInsets = syncSafeAreaInsets();
       const safeBottom = safeAreaInsets.bottom;

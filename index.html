@@ -66,6 +66,7 @@
         margin: 0;
         width: 100%;
         height: 100%;
+        min-height: 100vh;
         background: #1C1B1A;
         color: #CECDC3;
       }
@@ -79,6 +80,39 @@
 
       html[data-theme='light'] {
         color-scheme: light;
+      }
+
+      .termdock-boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        min-height: 240px;
+        padding: 24px;
+        box-sizing: border-box;
+        background: #1C1B1A;
+        color: #878580;
+        font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+
+      .termdock-boot-spinner {
+        width: 16px;
+        height: 16px;
+        border: 2px solid rgba(206, 205, 195, 0.18);
+        border-top-color: #879A39;
+        border-radius: 9999px;
+        animation: termdock-boot-spin 0.9s linear infinite;
+      }
+
+      .termdock-boot-error {
+        max-width: 28rem;
+        text-align: center;
+      }
+
+      @keyframes termdock-boot-spin {
+        to { transform: rotate(360deg); }
       }
 
     </style>
@@ -188,7 +222,31 @@
     </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="termdock-boot">
+        <div class="termdock-boot-spinner" aria-hidden="true"></div>
+        <span>Loading Termdock</span>
+      </div>
+    </div>
+    <script>
+      function showTermdockBootError(event) {
+        var root = document.getElementById('root');
+        if (!root || root.children.length !== 1 || !root.querySelector('.termdock-boot')) return;
+        var message = event && event.message ? event.message : 'Termdock failed to start.';
+        if (!event.message && event.reason) {
+          message = event.reason && event.reason.message ? event.reason.message : String(event.reason);
+        }
+        root.textContent = '';
+        var errorBox = document.createElement('div');
+        errorBox.className = 'termdock-boot termdock-boot-error';
+        var text = document.createElement('span');
+        text.textContent = message;
+        errorBox.appendChild(text);
+        root.appendChild(errorBox);
+      }
+      window.addEventListener('error', showTermdockBootError, true);
+      window.addEventListener('unhandledrejection', showTermdockBootError);
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

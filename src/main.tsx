@@ -2,12 +2,16 @@ import React, { useCallback, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { LoginScreen } from './lib/components/auth/LoginScreen';
+import { ErrorBoundary } from './lib/components/ui/ErrorBoundary';
+import { syncInitialViewportCssVars } from './lib/hooks/useViewportHeight';
 import { I18nProvider, useI18n } from './lib/i18n';
 import {
   AUTH_UNAUTHORIZED_EVENT,
   getAuthStatus,
   type AuthStatus,
 } from './lib/terminal/api';
+
+syncInitialViewportCssVars();
 
 try {
   const storedTheme = JSON.parse(window.localStorage.getItem('termdock-color-theme') || 'null') as unknown;
@@ -71,7 +75,9 @@ function AuthGate() {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <I18nProvider>
-      <AuthGate />
+      <ErrorBoundary>
+        <AuthGate />
+      </ErrorBoundary>
     </I18nProvider>
   </React.StrictMode>
 );
