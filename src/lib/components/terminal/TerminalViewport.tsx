@@ -1,4 +1,6 @@
 import React from 'react';
+import { flushSync } from 'react-dom';
+import { Copy as CopyIcon } from 'lucide-react';
 import { Terminal, type FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
@@ -29,6 +31,17 @@ import { TerminalError } from './TerminalError';
 import { createDebugLogger } from '../../utils/debug';
 
 const TERMINAL_HAPTIC_PATTERN_MS = 8;
+const TMUX_TOUCH_AXIS_THRESHOLD_PX = 10;
+const TMUX_TOUCH_HORIZONTAL_RELEASE_RATIO = 1.08;
+const TMUX_TOUCH_VERTICAL_CLAIM_RATIO = 1.16;
+const TMUX_TOUCH_MAX_LINES_PER_FRAME = 6;
+const TMUX_TOUCH_INERTIA_DECAY = 0.94;
+const TMUX_TOUCH_INERTIA_START_THRESHOLD = 0.08;
+const TMUX_TOUCH_INERTIA_STOP_THRESHOLD = 0.12;
+const MOBILE_COPY_POPOVER_WIDTH_PX = 88;
+const MOBILE_COPY_POPOVER_HEIGHT_PX = 36;
+const MOBILE_COPY_POPOVER_MARGIN_PX = 10;
+const MOBILE_COPY_POPOVER_FINGER_GAP_PX = 14;
 
 /**
  * 清洗用户输入，处理各种特殊字符
@@ -266,6 +279,7 @@ export type TerminalController = {
   blur: () => void;
   clear: () => void;
   copySelectionOrViewport: () => Promise<boolean>;
+  pasteClipboardText: () => Promise<boolean>;
   /** 当前 xterm 的 cols/rows；xterm 未初始化时返回 null */
   getDimensions: () => { cols: number; rows: number } | null;
   /**
@@ -309,6 +323,8 @@ interface TerminalViewportProps {
   tmuxScrollSensitivity?: number;
   onDoubleTap?: () => void;
   onInputFocusChange?: (isFocused: boolean) => void;
+  onMobileLongPressCopyResult?: (ok: boolean) => void;
+  onMobilePasteResult?: (ok: boolean) => void;
   terminalSettings: TerminalSettings;
   theme: TerminalTheme;
   className?: string;
@@ -601,6 +617,42 @@ function selectTerminalRange(terminal: Terminal, start: { col: number; row: numb
   return true;
 }
 
+function readDocumentCssPx(name: string): number {
+  if (typeof document === 'undefined') return 0;
+  const value = Number.parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue(name) || '0'
+  );
+  return Number.isFinite(value) ? value : 0;
+}
+
+function getMobileCopyPopoverPosition(clientX: number, clientY: number): { left: number; top: number } {
+  if (typeof window === 'undefined') {
+    return { left: 0, top: 0 };
+  }
+
+  const visualViewport = window.visualViewport;
+  const viewportLeft = visualViewport?.offsetLeft ?? 0;
+  const viewportTop = visualViewport?.offsetTop ?? 0;
+  const viewportWidth = visualViewport?.width ?? window.innerWidth;
+  const viewportHeight = visualViewport?.height ?? window.innerHeight;
+  const safeTop = readDocumentCssPx('--safe-top-inset');
+  const safeBottom = readDocumentCssPx('--safe-bottom-inset');
+  const minLeft = viewportLeft + MOBILE_COPY_POPOVER_MARGIN_PX;
+  const maxLeft = viewportLeft + viewportWidth - MOBILE_COPY_POPOVER_WIDTH_PX - MOBILE_COPY_POPOVER_MARGIN_PX;
+  const minTop = viewportTop + safeTop + MOBILE_COPY_POPOVER_MARGIN_PX;
+  const maxTop = viewportTop + viewportHeight - safeBottom - MOBILE_COPY_POPOVER_HEIGHT_PX - MOBILE_COPY_POPOVER_MARGIN_PX;
+
+  const unclampedLeft = clientX - MOBILE_COPY_POPOVER_WIDTH_PX / 2;
+  const left = Math.max(minLeft, Math.min(unclampedLeft, Math.max(minLeft, maxLeft)));
+
+  const preferredTop = clientY - MOBILE_COPY_POPOVER_HEIGHT_PX - MOBILE_COPY_POPOVER_FINGER_GAP_PX;
+  const fallbackTop = clientY + MOBILE_COPY_POPOVER_FINGER_GAP_PX;
+  const topCandidate = preferredTop >= minTop ? preferredTop : fallbackTop;
+  const top = Math.max(minTop, Math.min(topCandidate, Math.max(minTop, maxTop)));
+
+  return { left: Math.round(left), top: Math.round(top) };
+}
+
 const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewportProps>(
   (
     {
@@ -613,6 +665,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       tmuxScrollSensitivity = 0.55,
       onDoubleTap,
       onInputFocusChange,
+      onMobileLongPressCopyResult,
+      onMobilePasteResult,
       terminalSettings,
       theme,
       className,
@@ -676,6 +730,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       startY: number;
       moved: boolean;
     } | null>(null);
+    const suppressMobileTapFocusUntilRef = React.useRef(0);
+    const longPressGestureBlocksScrollRef = React.useRef(false);
     const lastFocusHiddenInputAtRef = React.useRef(0);
     const [, forceRender] = React.useReducer((x) => x + 1, 0);
     const [terminalReadyVersion, bumpTerminalReady] = React.useReducer((x) => x + 1, 0);
@@ -692,6 +748,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       visible: boolean;
       activeDir: string; // 'up' | 'down' | 'left' | 'right' | ''
     }>({ visible: false, activeDir: '' });
+    const [mobileCopyPopover, setMobileCopyPopover] = React.useState<{ left: number; top: number } | null>(null);
+    const mobileCopyPopoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const mobileCopyPopoverPressingRef = React.useRef(false);
     // 桌面 IME 候选窗锚点：跟随 xterm 光标的 1 cell 大小区域
     // mobile（enableTouchScroll=true）下不使用，textarea 仍然 inset:0 全覆盖
     const [imeAnchor, setImeAnchor] = React.useState<{ x: number; y: number; cellW: number; cellH: number }>(
@@ -708,7 +767,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     });
     const arrowIndicatorRef = React.useRef<HTMLDivElement>(null);
     const tabIndicatorTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-
     inputHandlerRef.current = onInput;
     resizeHandlerRef.current = onResize;
     inputFocusHandlerRef.current = onInputFocusChange;
@@ -739,6 +797,47 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     } = terminalSettings;
 
     const shouldUseWebgl = rendererMode === 'webgl';
+
+    const dismissMobileCopyPopover = React.useCallback(() => {
+      if (mobileCopyPopoverTimerRef.current !== null) {
+        clearTimeout(mobileCopyPopoverTimerRef.current);
+        mobileCopyPopoverTimerRef.current = null;
+      }
+      setMobileCopyPopover(null);
+    }, []);
+
+    const showMobileCopyPopover = React.useCallback((position: { left: number; top: number }) => {
+      if (mobileCopyPopoverTimerRef.current !== null) {
+        clearTimeout(mobileCopyPopoverTimerRef.current);
+      }
+      mobileCopyPopoverPressingRef.current = false;
+      setMobileCopyPopover(position);
+      mobileCopyPopoverTimerRef.current = setTimeout(() => {
+        mobileCopyPopoverTimerRef.current = null;
+        setMobileCopyPopover(null);
+      }, 3000);
+    }, []);
+
+    React.useEffect(() => {
+      if (!mobileCopyPopover) return;
+
+      const handleDismiss = () => dismissMobileCopyPopover();
+      window.addEventListener('scroll', handleDismiss, true);
+      window.addEventListener('resize', handleDismiss);
+      document.addEventListener('visibilitychange', handleDismiss);
+      return () => {
+        window.removeEventListener('scroll', handleDismiss, true);
+        window.removeEventListener('resize', handleDismiss);
+        document.removeEventListener('visibilitychange', handleDismiss);
+      };
+    }, [dismissMobileCopyPopover, mobileCopyPopover]);
+
+    React.useEffect(() => () => {
+      if (mobileCopyPopoverTimerRef.current !== null) {
+        clearTimeout(mobileCopyPopoverTimerRef.current);
+        mobileCopyPopoverTimerRef.current = null;
+      }
+    }, []);
 
     React.useEffect(() => {
       if (enableTouchScroll) {
@@ -899,6 +998,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [enableTouchScroll]);
 
     const canNormalScrollGestureClaim = React.useCallback(() => {
+      if (longPressGestureBlocksScrollRef.current) {
+        return false;
+      }
       const snap = gestureModeSnapshotRef.current;
       if (snap.pointerId !== null) {
         return !snap.tmuxActiveAtDown;
@@ -946,6 +1048,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const nowMs = React.useCallback(() => {
       return typeof performance !== 'undefined' ? performance.now() : Date.now();
     }, []);
+
+    const suppressMobileTapFocus = React.useCallback((durationMs: number = 700) => {
+      mobileTapFocusPointerRef.current = null;
+      suppressMobileTapFocusUntilRef.current = nowMs() + durationMs;
+    }, [nowMs]);
+
+    const shouldSuppressMobileTapFocus = React.useCallback(() => {
+      return enableTouchScrollRef.current && nowMs() <= suppressMobileTapFocusUntilRef.current;
+    }, [nowMs]);
 
     const isHiddenInputFocused = React.useCallback(() => {
       const input = hiddenInputRef.current;
@@ -1109,6 +1220,26 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
       inputHandlerRef.current(seq, { skipModifierTransform: true });
     }, [clearPendingTextareaSync]);
+
+    const pasteTextIntoTerminal = React.useCallback((rawText: string, textarea?: HTMLTextAreaElement | null): boolean => {
+      const cleaned = sanitizeTerminalInput(rawText);
+      if (!cleaned) return false;
+      sendTerminalSeq(cleaned, textarea);
+      dismissMobileCopyPopover();
+      return true;
+    }, [dismissMobileCopyPopover, sendTerminalSeq]);
+
+    const readClipboardIntoTerminal = React.useCallback(async (textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
+      try {
+        if (!navigator.clipboard?.readText) {
+          return false;
+        }
+        const text = await navigator.clipboard.readText();
+        return pasteTextIntoTerminal(text, textarea);
+      } catch {
+        return false;
+      }
+    }, [pasteTextIntoTerminal]);
 
     /**
      * 桌面端：根据 xterm 当前光标位置计算 IME 候选窗锚点。
@@ -1298,6 +1429,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       hiddenInputRef.current?.removeAttribute('readonly');
     }, [enableTouchScroll]);
 
+    const isClipboardUiTarget = React.useCallback((target: EventTarget | null): boolean => {
+      return target instanceof HTMLElement && (
+        target.closest('[data-terminal-copy-popover="true"]') !== null ||
+        target.closest('[data-mobile-copy-button="true"]') !== null
+      );
+    }, []);
+
     const handleMobilePointerDownCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
       prepareMobileInputForTouch();
       extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
@@ -1305,13 +1443,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         mobileTapFocusPointerRef.current = null;
         return;
       }
+      const target = event.target;
+      if (isClipboardUiTarget(target)) {
+        suppressMobileTapFocus();
+        return;
+      }
+      if (mobileCopyPopover && !(target instanceof HTMLElement && target.closest('[data-terminal-copy-popover="true"]'))) {
+        dismissMobileCopyPopover();
+      }
       mobileTapFocusPointerRef.current = {
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
         moved: false,
       };
-    }, [enableTouchScroll, extendBlurGuard, prepareMobileInputForTouch]);
+    }, [dismissMobileCopyPopover, enableTouchScroll, extendBlurGuard, isClipboardUiTarget, mobileCopyPopover, prepareMobileInputForTouch, suppressMobileTapFocus]);
 
     const handleMobilePointerMoveCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
       extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
@@ -1334,8 +1480,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (!state || state.pointerId !== event.pointerId || state.moved) {
         return;
       }
+      if (shouldSuppressMobileTapFocus()) {
+        return;
+      }
       focusHiddenInput(event.clientX, event.clientY);
-    }, [enableTouchScroll, extendBlurGuard, focusHiddenInput]);
+    }, [enableTouchScroll, extendBlurGuard, focusHiddenInput, shouldSuppressMobileTapFocus]);
 
     const handleMobilePointerCancelCapture = React.useCallback(() => {
       mobileTapFocusPointerRef.current = null;
@@ -1360,12 +1509,33 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const onTapRef = React.useRef(focusHiddenInput);
     onTapRef.current = focusHiddenInput;
     const stableOnTap = React.useCallback((x: number, y: number) => {
+      if (shouldSuppressMobileTapFocus()) return;
       onTapRef.current(x, y);
-    }, []);
+    }, [shouldSuppressMobileTapFocus]);
 
     // Stable ref for double-tap callback, consumed by the gesture capture effect
     const onDoubleTapRef = React.useRef(onDoubleTap);
     onDoubleTapRef.current = onDoubleTap;
+    const onMobileLongPressCopyResultRef = React.useRef(onMobileLongPressCopyResult);
+    onMobileLongPressCopyResultRef.current = onMobileLongPressCopyResult;
+    const onMobilePasteResultRef = React.useRef(onMobilePasteResult);
+    onMobilePasteResultRef.current = onMobilePasteResult;
+
+    const handleMobileCopyPopoverPress = React.useCallback(() => {
+      if (mobileCopyPopoverPressingRef.current) return;
+      mobileCopyPopoverPressingRef.current = true;
+      suppressMobileTapFocus();
+      const terminal = terminalRef.current;
+      const selection = terminal?.hasSelection() ? terminal.getSelection() : '';
+      try { terminal?.clearSelection(); } catch { /* ignored */ }
+      flushSync(() => {
+        dismissMobileCopyPopover();
+      });
+      void (async () => {
+        const ok = await writeClipboardText(selection);
+        onMobileLongPressCopyResultRef.current?.(ok);
+      })();
+    }, [dismissMobileCopyPopover, suppressMobileTapFocus]);
 
     const notifyGestureLock = React.useCallback((locked: boolean) => {
       document.dispatchEvent(
@@ -1373,7 +1543,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       );
     }, []);
 
-    const { setupTouchScroll } = useTouchScroll(containerRef, {
+    const { setupTouchScroll, stopAllScroll } = useTouchScroll(containerRef, {
       ...touchScrollConfig,
       shouldCaptureTouch: noCaptureRef.current,
       canStartScrollGesture: canNormalScrollGestureClaim,
@@ -1552,11 +1722,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       let linesUp = 0;
       let linesDown = 0;
 
-      while ((linesUp + linesDown) < 8 && st.remainder >= deff) {
+      while ((linesUp + linesDown) < TMUX_TOUCH_MAX_LINES_PER_FRAME && st.remainder >= deff) {
         st.remainder -= deff;
         linesDown++;
       }
-      while ((linesUp + linesDown) < 8 && st.remainder <= -deff) {
+      while ((linesUp + linesDown) < TMUX_TOUCH_MAX_LINES_PER_FRAME && st.remainder <= -deff) {
         st.remainder += deff;
         linesUp++;
       }
@@ -1600,6 +1770,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [tmuxStopRaf]);
 
     const tmux_onPointerMove = React.useCallback((e: PointerEvent, isClaimed: boolean): GestureAction => {
+      if (longPressGestureBlocksScrollRef.current) {
+        return isClaimed ? 'release' : 'neutral';
+      }
       const st = tmuxScrollStateRef.current;
       if (e.pointerType !== 'touch' || e.pointerId !== st.pointerId) return 'neutral';
       if (st.lastY == null) return 'neutral';
@@ -1607,12 +1780,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (st.gestureAxis === null && st.startX !== null && st.startY !== null) {
         const absDx = Math.abs(e.clientX - st.startX);
         const absDy = Math.abs(e.clientY - st.startY);
-        const axisThreshold = 8;
-        if (absDx > axisThreshold || absDy > axisThreshold) {
-          if (absDx > absDy * 1.06) {
+        if (absDx > TMUX_TOUCH_AXIS_THRESHOLD_PX || absDy > TMUX_TOUCH_AXIS_THRESHOLD_PX) {
+          if (absDx > absDy * TMUX_TOUCH_HORIZONTAL_RELEASE_RATIO) {
             st.gestureAxis = 'x';
             return 'release';
-          } else if (absDy > absDx * 1.06) {
+          } else if (absDy > absDx * TMUX_TOUCH_VERTICAL_CLAIM_RATIO) {
             st.gestureAxis = 'y';
           }
         }
@@ -1671,13 +1843,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const lineHeightPx = getMeasuredLineHeightPx(terminalRef.current, fontSize, lineHeight);
       const eff = lineHeightPx / Math.max(0.1, tmuxScrollSensitivity);
 
-      if (st.didScroll && Math.abs(st.velocity) > eff * 0.05) {
+      if (st.didScroll && Math.abs(st.velocity) > eff * TMUX_TOUCH_INERTIA_START_THRESHOLD) {
         const decay = () => {
-          st.velocity *= 0.96;
+          st.velocity *= TMUX_TOUCH_INERTIA_DECAY;
           st.remainder += st.velocity;
           const factor = 1 + Math.abs(st.velocity) * 0.10;
           const deff = eff / Math.min(6, factor);
-          if (Math.abs(st.velocity) < eff * 0.08) {
+          if (Math.abs(st.velocity) < eff * TMUX_TOUCH_INERTIA_STOP_THRESHOLD) {
             if (Math.abs(st.remainder) >= deff / 3) {
               const dir = st.remainder > 0 ? 'down' : 'up';
               tmuxSendSgrScroll(dir, 1);
@@ -1689,11 +1861,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
           let linesUp = 0;
           let linesDown = 0;
-          while ((linesUp + linesDown) < 8 && st.remainder >= deff) {
+          while ((linesUp + linesDown) < TMUX_TOUCH_MAX_LINES_PER_FRAME && st.remainder >= deff) {
             st.remainder -= deff;
             linesDown++;
           }
-          while ((linesUp + linesDown) < 8 && st.remainder <= -deff) {
+          while ((linesUp + linesDown) < TMUX_TOUCH_MAX_LINES_PER_FRAME && st.remainder <= -deff) {
             st.remainder += deff;
             linesUp++;
           }
@@ -1802,6 +1974,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       s.longPressMode = mobileLongPressModeRef.current;
 
       if (s.mode === 'arrow' || s.mode === 'copy') return true;
+      longPressGestureBlocksScrollRef.current = false;
 
       if (onDoubleTapRef.current) {
         const now = performance.now();
@@ -1853,14 +2026,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               return;
             }
             s.mode = 'copy';
+            longPressGestureBlocksScrollRef.current = true;
+            suppressMobileTapFocus(1800);
             s.copyStart = start;
             s.copyDidSelect = false;
+            stopAllScroll();
+            tmuxStopRaf();
             term.clearSelection();
             hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
-            notifyGestureLock(true);
             return;
           }
           s.mode = 'arrow';
+          longPressGestureBlocksScrollRef.current = true;
+          suppressMobileTapFocus(1000);
+          stopAllScroll();
+          tmuxStopRaf();
           hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
           notifyGestureLock(true);
           requestAnimationFrame(() => {
@@ -1894,13 +2074,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             clearTimeout(s.holdTimer);
             s.holdTimer = null;
           }
+          longPressGestureBlocksScrollRef.current = false;
           s.mode = 'idle';
           return 'neutral';
         }
         const dx = e.clientX - s.originX;
         const dy = e.clientY - s.originY;
         if (s.longPressMode === 'copy' && Math.hypot(dx, dy) > 20) {
-          return 'claim';
+          if (s.holdTimer !== null) {
+            clearTimeout(s.holdTimer);
+            s.holdTimer = null;
+          }
+          longPressGestureBlocksScrollRef.current = false;
+          s.mode = 'idle';
+          return 'release';
         }
         if (Math.hypot(dx, dy) > 20) {
           if (s.holdTimer !== null) {
@@ -1915,6 +2102,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       if (s.mode === 'copy') {
         if (!isClaimed) return 'claim';
+        stopAllScroll();
         const term = terminalRef.current;
         if (!term || !s.copyStart) return 'claim';
         const end = getTerminalCellFromPoint(term, e.clientX, e.clientY);
@@ -2022,7 +2210,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const s = lpStateRef.current;
 
       if (s.mode === 'copy') {
-        notifyGestureLock(false);
+        stopAllScroll();
+        tmuxStopRaf();
         const term = terminalRef.current;
         if (term && s.copyStart) {
           const end = getTerminalCellFromPoint(term, e.clientX, e.clientY);
@@ -2031,18 +2220,24 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
         }
         if (term && s.copyDidSelect && term.hasSelection()) {
-          void writeClipboardText(term.getSelection());
+          showMobileCopyPopover(getMobileCopyPopoverPosition(e.clientX, e.clientY));
+          suppressMobileTapFocus(1800);
           hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
+        } else {
+          onMobileLongPressCopyResultRef.current?.(false);
         }
         if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
         s.copyStart = null;
         s.copyDidSelect = false;
         s.pointerId = null;
         s.mode = 'idle';
+        longPressGestureBlocksScrollRef.current = false;
         return;
       }
 
       if (s.mode === 'arrow') {
+        stopAllScroll();
+        tmuxStopRaf();
         notifyGestureLock(false);
         setArrowIndicator({ visible: false, activeDir: '' });
         if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
@@ -2050,6 +2245,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         s.joystickDir = '';
         s.pointerId = null;
         s.mode = 'idle';
+        longPressGestureBlocksScrollRef.current = false;
         return;
       }
 
@@ -2068,21 +2264,23 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
       if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
       s.joystickDir = '';
+      longPressGestureBlocksScrollRef.current = false;
       s.copyStart = null;
       s.copyDidSelect = false;
       s.pointerId = null;
       s.mode = 'idle';
-    }, [notifyGestureLock]);
+    }, [notifyGestureLock, stopAllScroll, suppressMobileTapFocus]);
 
     const lp_onPointerCancel = React.useCallback(() => {
       const s = lpStateRef.current;
-      if (s.mode === 'arrow' || s.mode === 'copy') {
+      if (s.mode === 'arrow') {
         notifyGestureLock(false);
         setArrowIndicator({ visible: false, activeDir: '' });
       }
       if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
       if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
       s.joystickDir = '';
+      longPressGestureBlocksScrollRef.current = false;
       s.copyStart = null;
       s.copyDidSelect = false;
       s.pointerId = null;
@@ -3349,7 +3547,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           const text = terminal.hasSelection()
             ? terminal.getSelection()
             : getVisibleTerminalText(terminal);
-          return writeClipboardText(text);
+          const ok = await writeClipboardText(text);
+          if (ok && terminal.hasSelection()) {
+            dismissMobileCopyPopover();
+          }
+          return ok;
+        },
+        pasteClipboardText: async () => {
+          suppressMobileTapFocus();
+          const ok = await readClipboardIntoTerminal(hiddenInputRef.current);
+          onMobilePasteResultRef.current?.(ok);
+          return ok;
         },
         getDimensions: () => {
           const terminal = terminalRef.current;
@@ -3367,6 +3575,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         enableTouchScroll,
         focusHiddenInput,
         resetWriteState,
+        readClipboardIntoTerminal,
         requestRefresh,
         notifyServerSize,
         ensureSizeMatches,
@@ -3387,7 +3596,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         onPointerMoveCapture={handleMobilePointerMoveCapture}
         onPointerUpCapture={handleMobilePointerUpCapture}
         onPointerCancelCapture={handleMobilePointerCancelCapture}
-        onTouchStartCapture={() => {
+        onTouchStartCapture={(event) => {
+          if (isClipboardUiTarget(event.target)) {
+            suppressMobileTapFocus();
+            extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
+            return;
+          }
           prepareMobileInputForTouch();
           extendBlurGuard(INPUT_BLUR_GUARD_ACTIVE_MS);
         }}
@@ -3424,6 +3638,44 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }, 0);
         }}
       >
+        {mobileCopyPopover && (
+          <button
+            type="button"
+            data-terminal-copy-popover="true"
+            className="fixed z-popover inline-flex h-9 w-[88px] select-none items-center justify-center gap-1.5 rounded-full border border-white/15 bg-[rgb(28_28_30_/_0.92)] px-3 text-[13px] font-semibold text-white shadow-[0_10px_28px_rgb(0_0_0_/_0.32),0_2px_8px_rgb(0_0_0_/_0.18)] backdrop-blur-xl transition-transform duration-100 ease-out active:scale-[0.96]"
+            style={{
+              left: mobileCopyPopover.left,
+              top: mobileCopyPopover.top,
+              WebkitBackdropFilter: 'blur(18px)',
+            }}
+            onPointerDown={(event) => {
+              suppressMobileTapFocus();
+              event.stopPropagation();
+            }}
+            onPointerUp={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              handleMobileCopyPopoverPress();
+            }}
+            onTouchStart={(event) => {
+              suppressMobileTapFocus();
+              event.stopPropagation();
+            }}
+            onTouchEnd={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              handleMobileCopyPopoverPress();
+            }}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              handleMobileCopyPopoverPress();
+            }}
+          >
+            <CopyIcon size={14} strokeWidth={2.4} />
+            <span>Copy</span>
+          </button>
+        )}
         {/* Early initialization loading - shows before xterm.js loads */}
         {isInitializing && <TerminalInitializing />}
 
@@ -3626,6 +3878,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 }
                 syncTextareaToPty(event.currentTarget);
               }}
+              onPaste={(event) => {
+                const text = event.clipboardData.getData('text/plain');
+                if (!text) return;
+                event.preventDefault();
+                const ok = pasteTextIntoTerminal(text, event.currentTarget);
+                if (enableTouchScroll) {
+                  onMobilePasteResultRef.current?.(ok);
+                }
+              }}
               onKeyDown={(event) => {
                 const isImeComposingKey = isImeComposingKeyEvent(event);
                 // ===== 桌面端独有：先处理 Cmd/Ctrl/Alt 修饰组合 =====
@@ -3637,14 +3898,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   const shift = event.shiftKey;
                   const key = event.key;
 
+                  // ---- Cmd + Enter：AI CLI 常用的多行输入提交/换行 ----
+                  if (cmd && !ctrl && !alt && !shift && key === 'Enter') {
+                    event.preventDefault();
+                    flushAndSendEnter(event.currentTarget);
+                    return;
+                  }
+
                   // ---- Cmd/Ctrl + V：粘贴 ----
                   if ((cmd || ctrl) && !alt && !shift && (key === 'v' || key === 'V')) {
                     event.preventDefault();
-                    navigator.clipboard?.readText().then((text) => {
-                      if (!text) return;
-                      const cleaned = sanitizeTerminalInput(text);
-                      if (cleaned) sendTerminalSeq(cleaned, event.currentTarget);
-                    }).catch(() => { /* ignored */ });
+                    void readClipboardIntoTerminal(event.currentTarget);
                     return;
                   }
 

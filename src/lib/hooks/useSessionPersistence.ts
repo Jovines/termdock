@@ -8,7 +8,6 @@ import {
   updateSessionInventoryEntry,
   type OpenSessionInventoryOptions,
   type OpenSessionInventoryResult,
-  type PersistedTerminalClientSession,
   type SessionInventory,
   type SessionInventoryClientSession,
 } from '../terminal';
@@ -102,7 +101,9 @@ interface UseSessionPersistenceReturn {
   restoreSessions: () => Promise<PersistedSession[]>;
 }
 
-function normalizeSessionList(sessionList: PersistedTerminalClientSession[]): PersistedSession[] {
+type NormalizableSession = Omit<PersistedSession, 'customName'> & { customName?: boolean };
+
+function normalizeSessionList(sessionList: NormalizableSession[]): PersistedSession[] {
   return sessionList.map((session) => ({
     ...session,
     mode: session.mode === 'tmux' ? 'tmux' : 'shell',
@@ -167,7 +168,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     applySessionList(normalizeInventorySessionList(nextInventory.clientSessions));
   }, [applySessionList]);
 
-  const migrateLegacyLocalState = useCallback(async (): Promise<PersistedSession[]> => {
+  const discardLegacyLocalState = useCallback((): PersistedSession[] => {
     if (typeof window === 'undefined') {
       return [];
     }
@@ -177,36 +178,14 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
       return [];
     }
 
-    const data = JSON.parse(stored);
-    const sessionList = normalizeSessionList((data.sessions || []) as PersistedTerminalClientSession[]);
-    const storedActiveSessionId = typeof data.activeSessionId === 'string' && data.activeSessionId.trim().length > 0
-      ? data.activeSessionId
-      : null;
-
-    setSessions(sessionList);
-    if (storedActiveSessionId) {
-      setActiveSessionIdState(storedActiveSessionId);
-      writeActiveSessionId(storedActiveSessionId);
-    }
-
-    for (const session of sessionList) {
-      try {
-        const result = await openSessionInventoryEntry({
-          preferredFrontendSessionId: session.sessionId,
-          name: session.name,
-          customName: session.customName,
-          mode: session.mode,
-          tmuxSessionName: session.tmuxSessionName,
-        });
-        applyInventory(result.inventory);
-      } catch (error) {
-        console.error('Failed to migrate legacy session:', error);
-      }
-    }
-
     localStorage.removeItem(LEGACY_STORAGE_KEY);
-    return sessionList;
-  }, [applyInventory]);
+    clearSessionsCache();
+    writeActiveSessionId(null);
+    setSessions([]);
+    setActiveSessionIdState(null);
+    console.info('[session-persist] discarded legacy local session cache');
+    return [];
+  }, []);
 
   // 从服务端 inventory 读取会话；activeSessionId 从 localStorage 读取（不再从服务器）。
   const restoreSessions = useCallback(async (): Promise<PersistedSession[]> => {
@@ -227,21 +206,21 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
         return sessionList;
       }
 
-      return await migrateLegacyLocalState();
+      return discardLegacyLocalState();
     } catch (error) {
       console.error('Failed to restore sessions from server:', error);
 
       try {
-        return await migrateLegacyLocalState();
+        return discardLegacyLocalState();
       } catch (migrationError) {
-        console.error('Failed to migrate legacy local sessions:', migrationError);
+        console.error('Failed to discard legacy local sessions:', migrationError);
       }
     } finally {
       setIsLoading(false);
     }
 
     return [];
-  }, [applyInventory, migrateLegacyLocalState]);
+  }, [applyInventory, discardLegacyLocalState]);
 
   const openSession = useCallback(async (options: OpenSessionInventoryOptions): Promise<OpenSessionInventoryResult> => {
     const result = await openSessionInventoryEntry(options);
@@ -396,6 +375,7 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   // 服务器推送的 session inventory 同步：通过 control WebSocket 实时接收。
   useEffect(() => {
     const unsubscribe = subscribeClientState((snapshot) => {
+      if (snapshot.type !== 'client-state') return;
       if (isLoadingRef.current) return;
       const snapshotSeq = typeof snapshot.seq === 'number' ? snapshot.seq : null;
       if (snapshotSeq !== null) {

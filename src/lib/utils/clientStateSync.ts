@@ -19,12 +19,25 @@ export interface ClientStateSnapshot {
 }
 
 export interface ControlSnapshot {
+  type: 'client-state';
   clientState: ClientStateSnapshot;
   inventory?: SessionInventory;
   seq?: number;
 }
 
-type Listener = (state: ControlSnapshot) => void;
+export type ControlConfigKey = 'toolbar-presets' | 'agent-rules' | 'program-detection';
+
+export interface ControlConfigUpdatedEvent {
+  type: 'config-updated';
+  key: ControlConfigKey;
+  updatedAt?: number;
+}
+
+export type ControlEvent =
+  | ControlSnapshot
+  | ControlConfigUpdatedEvent;
+
+type Listener = (state: ControlEvent) => void;
 
 interface SyncState {
   ws: WebSocket | null;
@@ -145,14 +158,32 @@ function connect(): void {
 
   ws.onmessage = (event) => {
     lastServerPingAt = Date.now();
-    let msg: { type?: string; state?: ClientStateSnapshot; inventory?: SessionInventory; seq?: number } | null = null;
+    let msg: { type?: string; state?: ClientStateSnapshot; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number } | null = null;
     try {
       msg = JSON.parse(event.data as string);
     } catch {
       return;
     }
-    if (!msg || msg.type !== 'client-state' || !msg.state) return;
+    if (!msg) return;
+    if (msg.type === 'config-updated') {
+      if (msg.key !== 'toolbar-presets' && msg.key !== 'agent-rules' && msg.key !== 'program-detection') {
+        return;
+      }
+      const configEvent: ControlConfigUpdatedEvent = {
+        type: 'config-updated',
+        key: msg.key,
+        updatedAt: typeof msg.updatedAt === 'number' ? msg.updatedAt : undefined,
+      };
+      for (const listener of sync.listeners) {
+        try { listener(configEvent); } catch (error) {
+          console.error('[clientStateSync] listener threw:', error);
+        }
+      }
+      return;
+    }
+    if (msg.type !== 'client-state' || !msg.state) return;
     const snapshot: ControlSnapshot = {
+      type: 'client-state',
       clientState: {
         sessions: Array.isArray(msg.state.sessions) ? msg.state.sessions : [],
         updatedAt: typeof msg.state.updatedAt === 'number' ? msg.state.updatedAt : Date.now(),

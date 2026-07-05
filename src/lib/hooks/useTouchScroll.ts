@@ -269,6 +269,7 @@ const {
       onPointerUp: (event: PointerEvent) => {
         if (event.pointerType !== 'touch' || state.pointerId !== event.pointerId) return;
 
+        const wasScrolling = state.isCurrentlyScrolling;
         state.isCurrentlyScrolling = false;
         setClaimingState(false);
 
@@ -287,7 +288,7 @@ const {
         const endedHorizontalGesture = state.gestureAxis === 'x';
         state.gestureAxis = null;
 
-        if (enableKinetic && !endedHorizontalGesture && Math.abs(state.velocity) > minVelocity && state.didMove) {
+        if (enableKinetic && wasScrolling && !endedHorizontalGesture && Math.abs(state.velocity) > minVelocity && state.didMove) {
           const animate = () => {
             const cTime = nowMs();
             const dt = cTime - (state.lastTime || cTime);
@@ -443,6 +444,7 @@ const {
       const point = event.changedTouches?.[0];
       if (!point) return;
 
+      const wasScrolling = state.isCurrentlyScrolling;
       state.isCurrentlyScrolling = false;
 
       const isScrolling = state.rafId !== null || rafIdRef.current !== null;
@@ -459,7 +461,7 @@ const {
       const endedHorizontalGesture = state.gestureAxis === 'x';
       state.gestureAxis = null;
 
-      if (enableKinetic && !endedHorizontalGesture && state.didMove && Math.abs(state.velocity) > minVelocity) {
+      if (enableKinetic && wasScrolling && !endedHorizontalGesture && state.didMove && Math.abs(state.velocity) > minVelocity) {
         const animate = () => {
           const dt = 16;
           state.velocity *= (1 - deceleration * dt);
@@ -539,8 +541,16 @@ const {
 
   const stopAllScroll = React.useCallback(() => {
     stopKinetic();
-    stateRef.current.isCurrentlyScrolling = false;
-    stateRef.current.velocity = 0;
+    const state = stateRef.current;
+    state.isCurrentlyScrolling = false;
+    state.velocity = 0;
+    state.lastY = null;
+    state.lastTime = null;
+    state.startX = null;
+    state.startY = null;
+    state.pointerId = null;
+    state.didMove = false;
+    state.gestureAxis = null;
   }, [stopKinetic]);
 
   return {

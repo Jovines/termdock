@@ -65,6 +65,15 @@ describe('MobileKeyboard interaction state', () => {
 
     expect(onLongPressModeToggle).toHaveBeenCalledTimes(1);
   });
+
+  it('shows copy feedback on the long-press mode button', () => {
+    const { rerender } = render(<MobileKeyboard {...baseProps} longPressMode="copy" copyFeedback="copied" />);
+    expect(screen.getByTitle('Copied')).toBeTruthy();
+
+    rerender(<MobileKeyboard {...baseProps} longPressMode="copy" copyFeedback="failed" />);
+    expect(screen.getByTitle('Copy failed')).toBeTruthy();
+  });
+
 });
 
 describe('MobileKeyboard desktop actions presentation', () => {

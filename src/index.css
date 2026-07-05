@@ -533,6 +533,58 @@ body {
   -webkit-touch-callout: none;
 }
 
+/*
+ * The app disables text selection globally so terminal gestures and mobile
+ * chrome stay predictable. The right sidebar is a reading/copying surface,
+ * though: file previews, Markdown, search results and diffs should keep the
+ * browser's native long-press selection/copy handles on phones.
+ */
+.termdock-native-select,
+.termdock-native-select :where(
+  p,
+  span,
+  mark,
+  pre,
+  code,
+  td,
+  th,
+  li,
+  blockquote,
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6,
+  .diff-code,
+  .diff-code *,
+  .diff-decoration-content,
+  .diff-decoration-content *
+) {
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.termdock-native-select :where(
+  button,
+  button *,
+  svg,
+  .select-none,
+  .select-none *,
+  [data-sidebar-nonselectable],
+  [data-sidebar-nonselectable] *
+) {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.termdock-native-select ::selection {
+  background: rgb(var(--accent-rgb) / 0.28);
+  color: var(--foreground);
+}
+
 /* Mobile-specific styles — use fixed base height so keyboard never resizes the terminal.
    --app-base-vh is set by JS to window.innerHeight at startup / orientation change,
    and does NOT shrink when the soft-keyboard opens.  The terminal area stays the same
@@ -769,13 +821,27 @@ div.swiper {
 }
 
 .diff-gutter {
-  padding: 0 6px;
-  min-width: 34px;
+  padding: 0 3px;
+  min-width: 0;
   text-align: right;
+  white-space: nowrap;
   user-select: none;
   opacity: 0.58;
-  font-size: 10px;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
   border-right: 1px solid rgba(var(--diff-border-rgb), 0.32);
+}
+
+.termdock-diff .diff {
+  table-layout: auto;
+}
+
+.termdock-diff .diff-gutter-col {
+  width: 1%;
+}
+
+.termdock-diff .diff-gutter-omit::before {
+  margin-left: 50%;
 }
 
 .diff-code {
@@ -1327,12 +1393,21 @@ html[data-theme='light'] .termdock-code .token.important {
 }
 
 .termdock-diff-card-mobile .diff-gutter {
-  padding: 0 8px;
-  min-width: 38px;
+  padding: 0 2px;
+  min-width: 0;
+  font-size: 8.5px;
+}
+
+.termdock-diff-card-mobile .diff-gutter-col {
+  width: 1%;
+}
+
+.termdock-diff-card-mobile .diff-gutter-omit::before {
+  margin-left: 50%;
 }
 
 .termdock-diff-card-mobile .diff-code {
-  padding: 0 12px;
+  padding: 0 7px;
 }
 
 /*

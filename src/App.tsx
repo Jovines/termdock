@@ -50,6 +50,7 @@ import {
 } from './lib/utils/pwaNotifications';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
+import { subscribeClientState } from './lib/utils/clientStateSync';
 import { useI18n } from './lib/i18n';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
@@ -141,11 +142,53 @@ function isProgramRulesArray(v: unknown): v is ProgramLabelRule[] {
 interface ToolbarPresetsCacheDoc {
   version: number;
   presets: ToolbarPresetDefinition[];
+  updatedAt?: number;
 }
 function isToolbarPresetsCacheDoc(v: unknown): v is ToolbarPresetsCacheDoc {
   return typeof v === 'object' && v !== null &&
     typeof (v as { version?: unknown }).version === 'number' &&
     Array.isArray((v as { presets?: unknown }).presets);
+}
+
+function materializeToolbarPresets(rawPresets: unknown[], storedVersion: number): ToolbarPresetDefinition[] {
+  const defaults = createDefaultToolbarPresets();
+  const builtinIds = new Set(getBuiltinToolbarPresetIds());
+  const rawStoredPresets = Array.isArray(rawPresets) ? (rawPresets as Partial<ToolbarPresetDefinition>[]) : [];
+  const stored = sanitizeToolbarPresets(rawStoredPresets);
+  const versionMismatch = storedVersion < BUILTIN_TOOLBAR_PRESETS_VERSION;
+
+  if (stored.length === 0) {
+    return defaults;
+  }
+
+  if (versionMismatch) {
+    // Replace built-in presets with the latest definitions, but preserve user-customized rowLayout.
+    const storedMap = new Map(stored.map((preset) => [preset.id, preset]));
+    const rawStoredMap = new Map(rawStoredPresets.map((preset) => [
+      typeof preset.id === 'string' ? preset.id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-') : '',
+      preset,
+    ]));
+    const customPresets = stored.filter((preset) => !builtinIds.has(preset.id));
+    const updatedDefaults = defaults.map((preset) => {
+      const existing = storedMap.get(preset.id);
+      const rawExisting = rawStoredMap.get(preset.id);
+      if (!existing) return preset;
+      return {
+        ...preset,
+        rowLayout: existing.rowLayout,
+        showOnDesktop: typeof rawExisting?.showOnDesktop === 'boolean'
+          ? rawExisting.showOnDesktop
+          : preset.showOnDesktop,
+      };
+    });
+    return [...updatedDefaults, ...customPresets];
+  }
+
+  const storedIds = new Set(stored.map((preset) => preset.id));
+  return [
+    ...stored,
+    ...defaults.filter((preset) => !storedIds.has(preset.id)),
+  ];
 }
 
 interface SettingsCacheDoc {
@@ -1143,6 +1186,10 @@ function App() {
   });
   const [toolbarPresetsLoaded, setToolbarPresetsLoaded] = React.useState(false);
   const [selectedToolbarPresetId, setSelectedToolbarPresetId] = React.useState<string>('default');
+  const toolbarPresetsBaseUpdatedAtRef = React.useRef<number | null>(
+    typeof cachedToolbarPresets?.updatedAt === 'number' ? cachedToolbarPresets.updatedAt : null
+  );
+  const skipNextToolbarPresetSaveRef = React.useRef(false);
 
   // Agent detection rules — owned by server (~/.termdock/agent-rules.json)
   // 同样缓存到 localStorage，让 agent 检测在冷启动后立即生效。
@@ -1160,6 +1207,22 @@ function App() {
   const [programRules, setProgramRules] = React.useState<ProgramLabelRule[]>(cachedProgramRules ?? []);
   const [programRulesLoaded, setProgramRulesLoaded] = React.useState(cachedProgramRules !== null);
   const [programRulesSaving, setProgramRulesSaving] = React.useState(false);
+
+  const applyToolbarPresetsDoc = React.useCallback((doc: { version?: unknown; presets?: unknown; updatedAt?: unknown }) => {
+    const storedVersion = typeof doc.version === 'number' ? doc.version : 0;
+    const next = materializeToolbarPresets(Array.isArray(doc.presets) ? doc.presets : [], storedVersion);
+    toolbarPresetsBaseUpdatedAtRef.current = typeof doc.updatedAt === 'number' ? doc.updatedAt : null;
+    setToolbarPresets((current) => {
+      if (shallowJsonEqual(current, next)) return current;
+      skipNextToolbarPresetSaveRef.current = true;
+      return next;
+    });
+    writeCache(TOOLBAR_PRESETS_CACHE_KEY, {
+      version: BUILTIN_TOOLBAR_PRESETS_VERSION,
+      presets: next,
+      updatedAt: toolbarPresetsBaseUpdatedAtRef.current ?? undefined,
+    });
+  }, []);
 
   // 全局 ESC：按"返回键"语义，从最里层往外依次关闭浮层。
   // 顺序：通知/工具栏/AI 规则 二级 modal → tab 长按菜单 → settings drawer → 侧边栏。
@@ -1217,17 +1280,6 @@ function App() {
   ]);
 
   useEffect(() => {
-    getAgentRules()
-      .then((rules) => {
-        // 写缓存；diff 后只在不同才 setState，避免无谓 re-render。
-        writeCache(AGENT_RULES_CACHE_KEY, rules);
-        setAgentRules((current) => (shallowJsonEqual(current, rules) ? current : rules));
-        setAgentRulesLoaded(true);
-      })
-      .catch(() => { /* use empty state */ });
-  }, []);
-
-  useEffect(() => {
     getProgramRules()
       .then((rules) => {
         writeCache(PROGRAM_RULES_CACHE_KEY, rules);
@@ -1246,8 +1298,22 @@ function App() {
   });
   const [, setProgramDetectionLoaded] = React.useState(false);
 
+  const refreshAgentRulesFromServer = React.useCallback(() => {
+    return getAgentRules()
+      .then((rules) => {
+        writeCache(AGENT_RULES_CACHE_KEY, rules);
+        setAgentRules((current) => (shallowJsonEqual(current, rules) ? current : rules));
+        setAgentRulesLoaded(true);
+      })
+      .catch(() => { /* use empty state */ });
+  }, []);
+
   useEffect(() => {
-    getProgramDetection()
+    void refreshAgentRulesFromServer();
+  }, [refreshAgentRulesFromServer]);
+
+  const refreshProgramDetectionFromServer = React.useCallback(() => {
+    return getProgramDetection()
       .then((config) => {
         setProgramDetection(config);
         SHELL_NAMES = new Set(config.shellNames);
@@ -1255,6 +1321,31 @@ function App() {
       })
       .catch(() => { /* use defaults */ });
   }, []);
+
+  useEffect(() => {
+    void refreshProgramDetectionFromServer();
+  }, [refreshProgramDetectionFromServer]);
+
+  useEffect(() => {
+    return subscribeClientState((event) => {
+      if (event.type !== 'config-updated') return;
+      if (event.key === 'toolbar-presets') {
+        void getToolbarPresetsDoc()
+          .then((doc) => applyToolbarPresetsDoc(doc))
+          .catch((error) => {
+            console.warn('[toolbar-presets] Failed to refresh after remote update:', error);
+          });
+        return;
+      }
+      if (event.key === 'agent-rules') {
+        void refreshAgentRulesFromServer();
+        return;
+      }
+      if (event.key === 'program-detection') {
+        void refreshProgramDetectionFromServer();
+      }
+    });
+  }, [applyToolbarPresetsDoc, refreshAgentRulesFromServer, refreshProgramDetectionFromServer]);
 
   // Initial load from server: merge any stored custom presets with the latest
   // built-ins, force-overwriting built-in ids when the server's stored version
@@ -1265,53 +1356,7 @@ function App() {
       try {
         const doc = await getToolbarPresetsDoc();
         if (cancelled) return;
-        const defaults = createDefaultToolbarPresets();
-        const builtinIds = new Set(getBuiltinToolbarPresetIds());
-        const rawStoredPresets = Array.isArray(doc.presets) ? (doc.presets as Partial<ToolbarPresetDefinition>[]) : [];
-        const stored = sanitizeToolbarPresets(rawStoredPresets);
-        const storedVersion = typeof doc.version === 'number' ? doc.version : 0;
-        const versionMismatch = storedVersion < BUILTIN_TOOLBAR_PRESETS_VERSION;
-
-        let next: ToolbarPresetDefinition[];
-        if (stored.length === 0) {
-          next = defaults;
-        } else if (versionMismatch) {
-          // Replace built-in presets with the latest definitions, but
-          // preserve user-customized rowLayout from stored presets.
-          const storedMap = new Map(stored.map((p) => [p.id, p]));
-          const rawStoredMap = new Map(rawStoredPresets.map((p) => [typeof p.id === 'string' ? p.id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-') : '', p]));
-          const customPresets = stored.filter((preset) => !builtinIds.has(preset.id));
-          const updatedDefaults = defaults.map((preset) => {
-            const existing = storedMap.get(preset.id);
-            const rawExisting = rawStoredMap.get(preset.id);
-            if (existing) {
-              return {
-                ...preset,
-                rowLayout: existing.rowLayout,
-                showOnDesktop: typeof rawExisting?.showOnDesktop === 'boolean'
-                  ? rawExisting.showOnDesktop
-                  : preset.showOnDesktop,
-              };
-            }
-            return preset;
-          });
-          next = [...updatedDefaults, ...customPresets];
-        } else {
-          const storedIds = new Set(stored.map((p) => p.id));
-          next = [...stored];
-          for (const preset of defaults) {
-            if (!storedIds.has(preset.id)) next.push(preset);
-          }
-        }
-        setToolbarPresets((current) => {
-          if (shallowJsonEqual(current, next)) return current;
-          return next;
-        });
-        // 缓存最新合成结果，下次冷启动直接 hydrate。
-        writeCache(TOOLBAR_PRESETS_CACHE_KEY, {
-          version: BUILTIN_TOOLBAR_PRESETS_VERSION,
-          presets: next,
-        });
+        applyToolbarPresetsDoc(doc);
       } catch (error) {
         console.warn('[toolbar-presets] Failed to load from server:', error);
       } finally {
@@ -1321,25 +1366,44 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [applyToolbarPresetsDoc]);
 
   // Persist to the server whenever the in-memory presets change. Skip the
   // initial render before the server load has resolved to avoid clobbering
   // the server doc with the temporary defaults seed.
   useEffect(() => {
     if (!toolbarPresetsLoaded) return;
+    if (skipNextToolbarPresetSaveRef.current) {
+      skipNextToolbarPresetSaveRef.current = false;
+      return;
+    }
     // 同步写本地缓存
     writeCache(TOOLBAR_PRESETS_CACHE_KEY, {
       version: BUILTIN_TOOLBAR_PRESETS_VERSION,
       presets: toolbarPresets,
+      updatedAt: toolbarPresetsBaseUpdatedAtRef.current ?? undefined,
     });
     void replaceToolbarPresetsDoc({
       version: BUILTIN_TOOLBAR_PRESETS_VERSION,
       presets: toolbarPresets,
+      baseUpdatedAt: toolbarPresetsBaseUpdatedAtRef.current ?? undefined,
+    }).then((doc) => {
+      toolbarPresetsBaseUpdatedAtRef.current = typeof doc.updatedAt === 'number' ? doc.updatedAt : null;
+      writeCache(TOOLBAR_PRESETS_CACHE_KEY, {
+        version: BUILTIN_TOOLBAR_PRESETS_VERSION,
+        presets: toolbarPresets,
+        updatedAt: toolbarPresetsBaseUpdatedAtRef.current ?? undefined,
+      });
     }).catch((error) => {
+      const conflictDoc = error instanceof Error && 'current' in error
+        ? (error as Error & { current?: unknown }).current
+        : null;
+      if (conflictDoc && typeof conflictDoc === 'object') {
+        applyToolbarPresetsDoc(conflictDoc as { version?: unknown; presets?: unknown; updatedAt?: unknown });
+      }
       console.warn('[toolbar-presets] Failed to save to server:', error);
     });
-  }, [toolbarPresets, toolbarPresetsLoaded]);
+  }, [applyToolbarPresetsDoc, toolbarPresets, toolbarPresetsLoaded]);
 
   // Load settings (prevent sleep) from server on mount
   useEffect(() => {
@@ -2534,11 +2598,10 @@ function App() {
                           const existingSession = boundFrontendSessionId
                             ? sessions.find((session) => session.id === boundFrontendSessionId) ?? null
                             : null;
-                          const rawTmuxLabel = `tmux:${tmux.name}`;
                           const friendlyTitle = tmux.friendlyName?.trim() || null;
-                          const existingTitle = existingSession?.customName ? existingSession.name : null;
                           const labelTitle = tmux.label && tmux.label !== tmux.name ? tmux.label : null;
-                          const title = friendlyTitle || existingTitle || labelTitle || rawTmuxLabel;
+                          const title = friendlyTitle || labelTitle || tmux.name;
+                          const subtitle = friendlyTitle || labelTitle ? `tmux:${tmux.name}` : null;
                           const termdockClientLabel = tmux.clientCount && tmux.clientCount > 0
                             ? (locale === 'zh' ? `网页连接 ${tmux.clientCount}` : `Web clients ${tmux.clientCount}`)
                             : null;
@@ -2546,7 +2609,7 @@ function App() {
                             ? (locale === 'zh' ? `原生 tmux ${tmux.attached}` : `Native tmux ${tmux.attached}`)
                             : null;
                           const subtitleParts = [
-                            title !== rawTmuxLabel ? rawTmuxLabel : null,
+                            subtitle,
                             connected ? (tmux.restorable ? t('settings.restorable') : t('settings.attached')) : null,
                             termdockClientLabel,
                             nativeTmuxClientLabel,

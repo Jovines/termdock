@@ -127,6 +127,16 @@ export type TranslationDictionary = {
     allChanges: string;
     allRepositories: string;
     allRepositoriesShort: string;
+    repositories: string;
+    gitRepositorySectionTitle: string;
+    gitRepositoryLabel: string;
+    gitRepositoryPlaceholder: string;
+    gitRepositorySearchPlaceholder: string;
+    gitRepositoryEmpty: string;
+    selectRepositoryForGitActions: string;
+    selectRepositoryForDiff: string;
+    repoChangedCount: (params: TranslatorParams) => string;
+    repoStagedCount: (params: TranslatorParams) => string;
     noChanges: string;
     noMatchingChanges: string;
     loadingGitChanges: string;
@@ -157,6 +167,7 @@ export type TranslationDictionary = {
     switchBranch: string;
     noStagedChangesShort: string;
     stagedCount: (params: TranslatorParams) => string;
+    stagedCountShort: (params: TranslatorParams) => string;
     commitSectionTitle: string;
     commitReadyHint: (params: TranslatorParams) => string;
     commitMessagePlaceholder: string;

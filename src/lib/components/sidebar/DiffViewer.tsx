@@ -443,7 +443,7 @@ export function DiffViewer({ filePath, repoRoot, changedFile, onInsertDiffRefere
               {t('diffViewer.binaryOrEmpty')}
             </div>
           ) : (
-            <div className={`overflow-x-auto termdock-diff-scroll ${wrap ? 'termdock-diff-wrap' : ''}`}>
+            <div className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${wrap ? 'termdock-diff-wrap' : ''}`} data-sidebar-gesture-ignore>
               <Diff
                 viewType="unified"
                 diffType={file.type}
@@ -552,11 +552,12 @@ export function DiffViewer({ filePath, repoRoot, changedFile, onInsertDiffRefere
     );
 
     if (embedded) {
-      return <div className="overflow-hidden bg-surface">{body}</div>;
+      return <div className="termdock-native-select overflow-hidden bg-surface">{getReferenceLongPressHandlers.popoverNode}{body}</div>;
     }
 
     return (
       <div className="termdock-diff px-3 py-2">
+        {getReferenceLongPressHandlers.popoverNode}
         <div className="border-b border-border/15 px-1 pb-2">
           <div className="truncate text-sm font-medium text-foreground" title={filePath ?? undefined}>{titleParts.name}</div>
           <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
@@ -590,7 +591,8 @@ export function DiffViewer({ filePath, repoRoot, changedFile, onInsertDiffRefere
 
   if (embedded) {
     return (
-      <div className="termdock-diff termdock-diff-card-mobile overflow-hidden rounded-b-xl">
+      <div className="termdock-diff termdock-native-select termdock-diff-card-mobile overflow-hidden rounded-b-xl">
+        {getReferenceLongPressHandlers.popoverNode}
         {diffNoticeBanner}
         {renderFileDiffs(true)}
       </div>
@@ -600,7 +602,8 @@ export function DiffViewer({ filePath, repoRoot, changedFile, onInsertDiffRefere
   const wholeDiffReferenceActive = insertedReferenceKey === wholeDiffReferenceKey || copiedReferenceKey === wholeDiffReferenceKey;
 
   return (
-    <div className="termdock-diff px-3 py-2">
+    <div className="termdock-diff termdock-native-select px-3 py-2">
+      {getReferenceLongPressHandlers.popoverNode}
       <div className="border-b border-border/15 px-1 pb-2">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">

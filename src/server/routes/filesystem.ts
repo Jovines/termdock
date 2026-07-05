@@ -22,6 +22,7 @@ const MAX_GIT_CONTEXT_CHANGED_FILES = 200;
 const MAX_DIFF_BYTES = 2 * 1024 * 1024; // 2MB
 const MAX_UNTRACKED_DIFF_FILE_BYTES = 1024 * 1024; // 1MB
 const MAX_NESTED_GIT_REPOS = 32;
+const NESTED_GIT_DISCOVERY_TIMEOUT_MS = 1_000;
 const RESTORE_CONFIRM_PHRASES = new Set(['丢弃改动', 'discard changes']);
 
 type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted' | 'unknown';
@@ -337,115 +338,6 @@ function finalizeChangedFiles(files: Map<string, GitChangedFile>): GitChangedFil
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
-function parsePorcelainStatusCode(code: string | undefined): GitChangeStatus {
-  if (!code || code === '.') return 'unknown';
-  return normalizeNameStatus(code);
-}
-
-function applyPorcelainStatus(file: GitChangedFile, xy: string): void {
-  const indexStatus = xy[0] && xy[0] !== '.' ? xy[0] : undefined;
-  const worktreeStatus = xy[1] && xy[1] !== '.' ? xy[1] : undefined;
-  file.indexStatus = indexStatus;
-  file.worktreeStatus = worktreeStatus;
-  file.staged = Boolean(indexStatus);
-  file.unstaged = Boolean(worktreeStatus);
-  file.status = combineChangeStatus({
-    ...file,
-    indexStatus,
-    worktreeStatus,
-  });
-}
-
-function parseGitStatusPorcelainV2(gitRoot: string, output: string): {
-  branch: string | null;
-  upstream: string | null;
-  ahead: number | null;
-  behind: number | null;
-  files: GitChangedFile[];
-} {
-  let branch: string | null = null;
-  let upstream: string | null = null;
-  let ahead: number | null = null;
-  let behind: number | null = null;
-  const files = new Map<string, GitChangedFile>();
-  const records = output.split('\0').filter(Boolean);
-
-  for (let i = 0; i < records.length; i += 1) {
-    const record = records[i];
-    if (record.startsWith('# branch.head ')) {
-      const value = record.slice('# branch.head '.length).trim();
-      branch = value && value !== '(detached)' ? value : null;
-      continue;
-    }
-    if (record.startsWith('# branch.upstream ')) {
-      upstream = record.slice('# branch.upstream '.length).trim() || null;
-      continue;
-    }
-    if (record.startsWith('# branch.ab ')) {
-      const match = record.match(/^# branch\.ab \+(-?\d+) -(-?\d+)$/);
-      if (match) {
-        ahead = Number.parseInt(match[1], 10);
-        behind = Number.parseInt(match[2], 10);
-      }
-      continue;
-    }
-    if (record.startsWith('? ')) {
-      const filePath = record.slice(2);
-      const file = emptyChangedFile(gitRoot, filePath);
-      file.status = 'untracked';
-      file.untracked = true;
-      file.unstaged = true;
-      file.tracked = false;
-      files.set(filePath, file);
-      continue;
-    }
-    if (record.startsWith('! ')) {
-      continue;
-    }
-
-    const parts = record.split(' ');
-    const kind = parts[0];
-    const xy = parts[1] ?? '';
-    if (kind === '1') {
-      const filePath = parts.slice(8).join(' ');
-      if (!filePath) continue;
-      const file = emptyChangedFile(gitRoot, filePath);
-      applyPorcelainStatus(file, xy);
-      files.set(filePath, file);
-      continue;
-    }
-    if (kind === '2') {
-      const filePath = parts.slice(9).join(' ');
-      const oldPath = records[i + 1];
-      if (!filePath) continue;
-      const file = emptyChangedFile(gitRoot, filePath);
-      applyPorcelainStatus(file, xy);
-      file.status = parsePorcelainStatusCode(xy[0]) === 'renamed' || parsePorcelainStatusCode(xy[1]) === 'renamed'
-        ? 'renamed'
-        : file.status;
-      if (oldPath) {
-        file.oldPath = oldPath;
-        i += 1;
-      }
-      files.set(filePath, file);
-      continue;
-    }
-    if (kind === 'u') {
-      const filePath = parts.slice(10).join(' ');
-      if (!filePath) continue;
-      const file = emptyChangedFile(gitRoot, filePath);
-      file.status = 'conflicted';
-      file.staged = true;
-      file.unstaged = true;
-      file.indexStatus = xy[0] && xy[0] !== '.' ? xy[0] : 'U';
-      file.worktreeStatus = xy[1] && xy[1] !== '.' ? xy[1] : 'U';
-      files.set(filePath, file);
-    }
-  }
-
-  return { branch, upstream, ahead, behind, files: finalizeChangedFiles(files) };
-}
-
 async function getChangedFiles(gitRoot: string): Promise<GitChangedFile[]> {
   const [stagedOutput, unstagedOutput, untrackedOutput] = await Promise.all([
     execGit(['diff', '--cached', '--name-status', '-M', '-z'], gitRoot).catch(() => ''),
@@ -542,9 +434,18 @@ function annotateRepoFiles(files: GitChangedFile[], workspaceRoot: string, repoR
   }));
 }
 
+function isNestedRepoPlaceholderFile(file: GitChangedFile, nestedDisplayRoots: Set<string>): boolean {
+  if (!file.untracked || file.tracked) return false;
+  const normalizedPath = file.path.replace(/\/+$/, '');
+  return nestedDisplayRoots.has(normalizedPath);
+}
+
 async function buildGitBundle(resolvedCwd: string, gitRoot: string): Promise<GitBundlePayload> {
-  const statusOutput = await execGit(['status', '--porcelain=v2', '-z', '--branch'], gitRoot).catch(() => '');
-  const { files, branch, upstream, ahead, behind } = parseGitStatusPorcelainV2(gitRoot, statusOutput);
+  const [branchOutput, pushTargets, files] = await Promise.all([
+    execGit(['branch', '--show-current'], gitRoot).catch(() => ''),
+    getGitPushTargets(gitRoot),
+    getChangedFiles(gitRoot),
+  ]);
   const annotatedFiles = annotateRepoFiles(files, gitRoot, gitRoot);
   const changedFiles = toContextFiles(annotatedFiles);
 
@@ -555,11 +456,11 @@ async function buildGitBundle(resolvedCwd: string, gitRoot: string): Promise<Git
       available: true,
       cwd: resolvedCwd,
       root: gitRoot,
-      branch,
-      upstream,
-      ahead,
-      behind,
-      status: statusOutput.trim(),
+      branch: branchOutput.trim() || null,
+      upstream: pushTargets.upstream,
+      ahead: pushTargets.ahead,
+      behind: pushTargets.behind,
+      status: '',
       changedFiles,
       truncated: changedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES,
     },
@@ -612,11 +513,25 @@ async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, inc
   if (!includeNested) return buildGitBundle(resolvedCwd, gitRoot);
 
   const { repositories: nestedRepositories, truncated } = await discoverNestedGitRoots(gitRoot);
+  const nestedDisplayRoots = new Set(nestedRepositories.map((repo) => (
+    path.relative(gitRoot, repo.displayRoot).split(path.sep).join('/').replace(/\/+$/, '')
+  )));
   const repositories = await Promise.all([
     buildGitRepositoryBundle(gitRoot, resolvedCwd, gitRoot),
     ...nestedRepositories.map((repo) => buildGitRepositoryBundle(gitRoot, resolvedCwd, repo.root, repo.displayRoot)),
   ]);
   const primary = repositories[0];
+  if (primary) {
+    primary.files = primary.files.filter((file) => !isNestedRepoPlaceholderFile(file, nestedDisplayRoots));
+    if (primary.context) {
+      const changedFiles = toContextFiles(primary.files);
+      primary.context = {
+        ...primary.context,
+        changedFiles,
+        truncated: changedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES,
+      };
+    }
+  }
   return {
     available: true,
     files: repositories.flatMap((repo) => repo.files),
@@ -1231,10 +1146,15 @@ async function getDirectoryTarget(candidate: string, entry: Dirent): Promise<str
 async function discoverNestedGitRoots(workspaceRoot: string): Promise<{ repositories: DiscoveredGitRepository[]; truncated: boolean }> {
   const repositories: DiscoveredGitRepository[] = [];
   const seen = new Set<string>([workspaceRoot]);
+  const deadline = Date.now() + NESTED_GIT_DISCOVERY_TIMEOUT_MS;
   let truncated = false;
 
   async function visit(dir: string): Promise<void> {
     if (truncated) return;
+    if (Date.now() > deadline) {
+      truncated = true;
+      return;
+    }
     let entries: Dirent[];
     try {
       entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -1245,6 +1165,10 @@ async function discoverNestedGitRoots(workspaceRoot: string): Promise<{ reposito
     const childDirectories: Array<{ entry: Dirent; target: string }> = [];
     for (const entry of entries) {
       if (truncated) return;
+      if (Date.now() > deadline) {
+        truncated = true;
+        return;
+      }
       if (NESTED_GIT_DISCOVERY_IGNORED_NAMES.has(entry.name)) continue;
       const candidate = path.join(dir, entry.name);
       const target = await getDirectoryTarget(candidate, entry);

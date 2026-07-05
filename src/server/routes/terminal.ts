@@ -203,6 +203,7 @@ interface PersistedClientSession {
   tmuxSessionName: string | null;
   createdAt: number;
   lastActivity: number;
+  cwd?: string | null;
 }
 
 interface GlobalSessionState {
@@ -284,7 +285,7 @@ interface OpenInventoryResult {
 }
 
 class HttpStatusError extends Error {
-  constructor(public statusCode: number, message: string) {
+  constructor(public statusCode: number, message: string, public code?: string) {
     super(message);
     this.name = 'HttpStatusError';
   }
@@ -375,6 +376,10 @@ function sendClientStatePayload(payload: string): void {
       controlClients.delete(clientId);
     }
   }
+}
+
+function broadcastControlEvent(payload: unknown): void {
+  sendClientStatePayload(JSON.stringify(payload));
 }
 
 async function flushClientStateBroadcast(): Promise<void> {
@@ -733,6 +738,10 @@ const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10)
 const ACTIVE_PROGRAM_POLL_INTERVAL = parseInt(process.env.TERMINAL_ACTIVE_PROGRAM_POLL_INTERVAL || '1200', 10);
 const FLOW_CONTROL_PAUSE_LEASE_MS = parseInt(process.env.TERMINAL_FLOW_CONTROL_PAUSE_LEASE_MS || '15000', 10);
 const TMUX_DELIMITER = '\x1f';
+const parsedTmuxHistoryLimit = Number.parseInt(process.env.TERMDOCK_TMUX_HISTORY_LIMIT || '10000', 10);
+const TERMDOCK_TMUX_HISTORY_LIMIT = Number.isFinite(parsedTmuxHistoryLimit) && parsedTmuxHistoryLimit > 0
+  ? parsedTmuxHistoryLimit
+  : 10000;
 // 输出历史缓冲区（限制大小）
 const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
 // 给每个 chunk 加单调递增 seq，用于短线重连时按需补发增量。
@@ -849,24 +858,9 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
     lastActivity: typeof candidate.lastActivity === 'number' && Number.isFinite(candidate.lastActivity)
       ? Math.floor(candidate.lastActivity)
       : Date.now(),
-  };
-}
-
-function normalizeGlobalSessionState(input: unknown): GlobalSessionState {
-  if (!input || typeof input !== 'object') {
-    return { sessions: [], updatedAt: Date.now() };
-  }
-
-  const candidate = input as Partial<GlobalSessionState> & { sessions?: unknown[] };
-  const sessions = Array.isArray(candidate.sessions)
-    ? candidate.sessions
-      .map((session) => normalizePersistedClientSession(session))
-      .filter((session): session is PersistedClientSession => session !== null)
-    : [];
-
-  return {
-    sessions,
-    updatedAt: Date.now(),
+    cwd: typeof candidate.cwd === 'string' && candidate.cwd.trim().length > 0
+      ? candidate.cwd
+      : null,
   };
 }
 
@@ -1078,6 +1072,12 @@ function removeGlobalSessionRecord(frontendSessionId: string): boolean {
   return globalSessionState.sessions.length !== before;
 }
 
+function getTrustedCwdFromRecord(record: PersistedClientSession): string | undefined {
+  return typeof record.cwd === 'string' && record.cwd.trim().length > 0
+    ? record.cwd
+    : undefined;
+}
+
 async function markAllPersistedTmuxSessionsDetached(): Promise<void> {
   const detachedAt = String(Date.now());
   const tmuxSessionNames = new Set(
@@ -1114,11 +1114,12 @@ function getClientSessionView(inventory: SessionInventory, frontendSessionId: st
 async function ensureBackendSessionForRecord(
   req: express.Request,
   record: PersistedClientSession,
-  options: { cwd?: string; cols?: number; rows?: number; termType?: string } = {},
+  options: { cwd?: string; cols?: number; rows?: number; termType?: string; allowDefaultCwd?: boolean } = {},
 ): Promise<{ backendSessionId: string; session: TerminalSession; cols: number; rows: number; changed: boolean }> {
   if (record.backendSessionId) {
     const existing = terminalSessions.get(record.backendSessionId);
     if (existing) {
+      record.cwd = existing.cwd ?? record.cwd ?? null;
       return {
         backendSessionId: record.backendSessionId,
         session: existing,
@@ -1136,6 +1137,7 @@ async function ensureBackendSessionForRecord(
       const [backendSessionId, session] = existingTmuxBackend;
       await prepareManagedTmuxSession(record.tmuxSessionName, options.cwd);
       record.backendSessionId = backendSessionId;
+      record.cwd = session.cwd ?? record.cwd ?? null;
       record.lastActivity = Date.now();
       return {
         backendSessionId,
@@ -1147,8 +1149,33 @@ async function ensureBackendSessionForRecord(
     }
   }
 
+  let spawnCwd = options.cwd ?? getTrustedCwdFromRecord(record);
+  if (!spawnCwd && record.mode === 'tmux' && record.tmuxSessionName) {
+    try {
+      const metadata = await resolveLiveTmuxMetadata(record.tmuxSessionName);
+      spawnCwd = metadata?.cwd ?? undefined;
+      if (spawnCwd) {
+        record.cwd = spawnCwd;
+      }
+    } catch {
+      // If the tmux target is gone and no cwd was remembered, the persisted
+      // record is stale. Avoid silently recreating it in the user's home dir.
+    }
+  }
+
+  if (!spawnCwd && options.allowDefaultCwd !== true) {
+    if (removeGlobalSessionRecord(record.sessionId)) {
+      persistAndBroadcastGlobalState();
+    }
+    throw new HttpStatusError(
+      410,
+      'session can no longer be restored without a working directory',
+      'STALE_SESSION_RESTORE_REJECTED',
+    );
+  }
+
   const spawned = await spawnTerminalSession(req, {
-    cwd: options.cwd,
+    cwd: spawnCwd,
     cols: options.cols,
     rows: options.rows,
     mode: record.mode,
@@ -1158,6 +1185,7 @@ async function ensureBackendSessionForRecord(
   record.backendSessionId = spawned.sessionId;
   record.mode = spawned.session.mode;
   record.tmuxSessionName = spawned.session.tmuxSessionName;
+  record.cwd = spawned.session.cwd ?? spawnCwd ?? record.cwd ?? null;
   record.lastActivity = Date.now();
   return {
     backendSessionId: spawned.sessionId,
@@ -1170,7 +1198,7 @@ async function ensureBackendSessionForRecord(
 
 function updateGlobalBindingForBackendSession(
   backendSessionId: string,
-  patch: Partial<Pick<PersistedClientSession, 'backendSessionId' | 'tmuxSessionName' | 'mode' | 'lastActivity'>>,
+  patch: Partial<Pick<PersistedClientSession, 'backendSessionId' | 'tmuxSessionName' | 'mode' | 'lastActivity' | 'cwd'>>,
 ): boolean {
   const idx = globalSessionState.sessions.findIndex((session) => session.backendSessionId === backendSessionId);
   if (idx < 0) return false;
@@ -1182,6 +1210,7 @@ function updateGlobalBindingForBackendSession(
     backendSessionId: patch.backendSessionId === undefined ? current.backendSessionId : patch.backendSessionId,
     tmuxSessionName: patch.tmuxSessionName === undefined ? current.tmuxSessionName : patch.tmuxSessionName,
     mode: patch.mode ?? current.mode,
+    cwd: patch.cwd === undefined ? current.cwd : patch.cwd,
     lastActivity: patch.lastActivity ?? Date.now(),
   };
   upsertGlobalSessionRecord(updated);
@@ -1279,7 +1308,8 @@ async function openInventorySession(
   const cols = typeof input.cols === 'number' && Number.isFinite(input.cols) ? Math.floor(input.cols) : undefined;
   const rows = typeof input.rows === 'number' && Number.isFinite(input.rows) ? Math.floor(input.rows) : undefined;
   const termType = typeof input.termType === 'string' ? input.termType : undefined;
-  const backend = await ensureBackendSessionForRecord(req, record, { cwd: requestedCwd, cols, rows, termType });
+  const allowDefaultCwd = !reused && preferredFrontendSessionId.length === 0;
+  const backend = await ensureBackendSessionForRecord(req, record, { cwd: requestedCwd, cols, rows, termType, allowDefaultCwd });
   const savedRecord = upsertGlobalSessionRecord(record);
   persistAndBroadcastGlobalState();
 
@@ -1576,6 +1606,42 @@ async function configureTmuxWheelBindings(): Promise<void> {
   }
 }
 
+async function applyTmuxScrollbackProfile(sessionName?: string): Promise<void> {
+  const commands: string[][] = [
+    ['set-option', '-g', 'history-limit', String(TERMDOCK_TMUX_HISTORY_LIMIT)],
+    ['set-option', '-gw', 'scroll-on-clear', 'off'],
+  ];
+  if (sessionName) {
+    commands.push(
+      ['set-option', '-t', sessionName, 'history-limit', String(TERMDOCK_TMUX_HISTORY_LIMIT)],
+    );
+  }
+
+  for (const args of commands) {
+    try {
+      await runTmux(args);
+    } catch (error) {
+      console.warn(`[tmux] failed to apply scrollback profile (${args.join(' ')}): ${getErrorMessage(error)}`);
+    }
+  }
+
+  if (!sessionName) return;
+
+  try {
+    const windowsRaw = await runTmux(['list-windows', '-t', sessionName, '-F', '#{window_id}']);
+    const windowIds = windowsRaw.split('\n').map((line) => line.trim()).filter(Boolean);
+    for (const windowId of windowIds) {
+      try {
+        await runTmux(['set-option', '-w', '-t', windowId, 'scroll-on-clear', 'off']);
+      } catch (error) {
+        console.warn(`[tmux] failed to disable scroll-on-clear for ${windowId}: ${getErrorMessage(error)}`);
+      }
+    }
+  } catch (error) {
+    console.warn(`[tmux] failed to list windows for scrollback profile on ${sessionName}: ${getErrorMessage(error)}`);
+  }
+}
+
 async function disableTmuxStatus(sessionName: string): Promise<void> {
   let lastError: unknown;
 
@@ -1661,13 +1727,23 @@ async function tmuxSessionExists(sessionName: string): Promise<boolean> {
 }
 
 async function ensureTmuxColorEnvironment(sessionName?: string): Promise<void> {
+  const forceColor = process.env.TERMDOCK_FORCE_COLOR === '1';
   await runTmux(['set-environment', '-g', 'COLORTERM', 'truecolor']);
-  await runTmux(['set-environment', '-g', 'FORCE_COLOR', '1']);
-  await runTmux(['set-environment', '-g', '-u', 'NO_COLOR']);
+  if (forceColor) {
+    await runTmux(['set-environment', '-g', 'FORCE_COLOR', '1']);
+    await runTmux(['set-environment', '-g', '-u', 'NO_COLOR']);
+  } else {
+    // Clear the legacy Termdock override so tmux sessions can respect user color prefs.
+    await runTmux(['set-environment', '-g', '-u', 'FORCE_COLOR']);
+  }
   if (sessionName) {
     await runTmux(['set-environment', '-t', sessionName, 'COLORTERM', 'truecolor']);
-    await runTmux(['set-environment', '-t', sessionName, 'FORCE_COLOR', '1']);
-    await runTmux(['set-environment', '-t', sessionName, '-u', 'NO_COLOR']);
+    if (forceColor) {
+      await runTmux(['set-environment', '-t', sessionName, 'FORCE_COLOR', '1']);
+      await runTmux(['set-environment', '-t', sessionName, '-u', 'NO_COLOR']);
+    } else {
+      await runTmux(['set-environment', '-t', sessionName, '-u', 'FORCE_COLOR']);
+    }
   }
 }
 
@@ -2820,7 +2896,10 @@ async function ensureTmuxSessionExists(sessionName: string, cwd?: string): Promi
     await ensureTmuxColorEnvironment();
   }
 
-  const args = ['new-session', '-d', '-s', sessionName, '-e', 'COLORTERM=truecolor', '-e', 'FORCE_COLOR=1'];
+  const args = ['new-session', '-d', '-s', sessionName, '-e', 'COLORTERM=truecolor'];
+  if (process.env.TERMDOCK_FORCE_COLOR === '1') {
+    args.push('-e', 'FORCE_COLOR=1');
+  }
   if (cwd) {
     args.push('-c', cwd);
   }
@@ -2895,6 +2974,7 @@ async function enableTmuxFocusEvents(): Promise<void> {
 
 async function ensureSharedTmuxServerReady(): Promise<void> {
   await ensureTmuxColorEnvironment();
+  await applyTmuxScrollbackProfile();
   await enableTmuxFocusEvents();
   await configureTmuxWheelBindings();
 }
@@ -2931,6 +3011,7 @@ async function ensureManagedTmuxSessionReady(sessionName: string): Promise<void>
     console.warn(`Failed to enable tmux mouse for ${sessionName}: ${getErrorMessage(error)}`);
   }
 
+  await applyTmuxScrollbackProfile(sessionName);
   await stampTmuxMetadata(sessionName);
 }
 
@@ -3350,12 +3431,49 @@ function applyPtyFlowControl(sessionId: string, session: TerminalSession, paused
   }
 }
 
+function closeFlowControlledWsClient(sessionId: string, clientId: string, reason: string): void {
+  const clients = wsClients.get(sessionId);
+  const ws = clients?.get(clientId);
+  if (!ws) return;
+
+  try {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'reconnecting',
+        reason: 'flow-control',
+        detail: reason,
+      }));
+    }
+  } catch {
+    // The close path below will clean up the client map.
+  }
+
+  try {
+    if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) {
+      ws.close(1013, 'Client output backlog');
+    }
+  } catch {
+    clients?.delete(clientId);
+    const session = terminalSessions.get(sessionId);
+    if (session) {
+      removeClientFocus(sessionId, session, clientId);
+      removeClientFlowPaused(sessionId, session, clientId, 'flow-control-close-failed');
+    }
+    if (clients?.size === 0) {
+      wsClients.delete(sessionId);
+    }
+    syncClientCountToTmux(sessionId);
+  }
+}
+
 function setClientFlowPaused(sessionId: string, session: TerminalSession, clientId: string, paused: boolean, reason: string): void {
   const clients = getFlowPausedClients(session);
   const wasPaused = clients.has(clientId);
   if (paused) {
     clients.add(clientId);
     refreshFlowPauseLease(sessionId, session, clientId);
+    console.warn(`[flow-control] disconnecting slow client session=${sessionId} client=${clientId} reason=${reason}`);
+    closeFlowControlledWsClient(sessionId, clientId, reason);
   } else {
     clients.delete(clientId);
     clearFlowPauseLease(session, clientId);
@@ -3363,14 +3481,18 @@ function setClientFlowPaused(sessionId: string, session: TerminalSession, client
   if (wasPaused === paused) {
     return;
   }
-  applyPtyFlowControl(sessionId, session, clients.size > 0, reason);
+  if (!paused && session.ptyPausedForFlowControl && clients.size === 0) {
+    applyPtyFlowControl(sessionId, session, false, reason);
+  }
 }
 
 function removeClientFlowPaused(sessionId: string, session: TerminalSession, clientId: string, reason: string): void {
   clearFlowPauseLease(session, clientId);
   const clients = getFlowPausedClients(session);
   if (!clients.delete(clientId)) return;
-  applyPtyFlowControl(sessionId, session, clients.size > 0, reason);
+  if (session.ptyPausedForFlowControl && clients.size === 0) {
+    applyPtyFlowControl(sessionId, session, false, reason);
+  }
 }
 
 function emitFocusSequenceIfNeeded(sessionId: string, session: TerminalSession, focused: boolean, reason: string): void {
@@ -3444,6 +3566,9 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
       if (result.cwd && result.cwd !== session.lastOscCwd) {
         session.lastOscCwd = result.cwd;
         session.cwd = result.cwd;
+        if (updateGlobalBindingForBackendSession(sessionId, { cwd: result.cwd, lastActivity: session.lastActivity })) {
+          schedulePersistGlobalState();
+        }
         broadcastEvent(sessionId, { type: 'cwd', cwd: result.cwd });
       }
 
@@ -3968,7 +4093,10 @@ router.post('/session-inventory/open', async (req, res) => {
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     if (error instanceof HttpStatusError) {
-      return res.status(error.statusCode).json({ error: errorMessage || 'Failed to open session' });
+      return res.status(error.statusCode).json({
+        error: errorMessage || 'Failed to open session',
+        code: error.code,
+      });
     }
     console.error('[session-inventory] failed to open session:', errorMessage);
     res.status(500).json({ error: errorMessage || 'Failed to open session' });
@@ -4073,40 +4201,11 @@ router.delete('/session-inventory/sessions', async (_req, res) => {
   res.status(204).send();
 });
 
-router.put('/client-state', (req, res) => {
-  const previousState = { ...globalSessionState };
-  const state = normalizeGlobalSessionState(req.body);
-  globalSessionState = state;
-  schedulePersistGlobalState();
-  broadcastClientState();
-
-  // Sync friendly-name to tmux user options for any tmux session whose
-  // customName flag flipped, or whose name changed while customName=true.
-  // Only fires for tmux-mode sessions; shell sessions have no tmux to write to.
-  void (async () => {
-    const previousByTmux = new Map<string, PersistedClientSession>();
-    for (const s of previousState.sessions) {
-      if (s.mode === 'tmux' && s.tmuxSessionName) {
-        previousByTmux.set(s.tmuxSessionName, s);
-      }
-    }
-
-    for (const session of state.sessions) {
-      if (session.mode !== 'tmux' || !session.tmuxSessionName) continue;
-      const prev = previousByTmux.get(session.tmuxSessionName);
-      const wasCustom = prev?.customName === true;
-      const isCustom = session.customName === true;
-      const nameChanged = prev?.name !== session.name;
-
-      if (isCustom && (!wasCustom || nameChanged)) {
-        await setTmuxOption(session.tmuxSessionName, '@termdock-friendly-name', session.name);
-      } else if (!isCustom && wasCustom) {
-        await unsetTmuxOption(session.tmuxSessionName, '@termdock-friendly-name');
-      }
-    }
-  })();
-
-  res.json(state);
+router.put('/client-state', (_req, res) => {
+  res.status(410).json({
+    error: 'client-state replacement is no longer supported; use session-inventory endpoints',
+    code: 'CLIENT_STATE_REPLACE_DISABLED',
+  });
 });
 
 router.delete('/client-state', async (_req, res) => {
@@ -4123,10 +4222,27 @@ router.get('/toolbar-presets', (_req, res) => {
 
 router.put('/toolbar-presets', (req, res) => {
   const body = (req.body ?? {}) as Partial<ToolbarPresetsDoc>;
+  const baseUpdatedAt = typeof (body as { baseUpdatedAt?: unknown }).baseUpdatedAt === 'number'
+    ? (body as { baseUpdatedAt: number }).baseUpdatedAt
+    : null;
+  const currentUpdatedAt = toolbarPresetsDoc?.updatedAt ?? 0;
+  if (baseUpdatedAt !== null && currentUpdatedAt > 0 && currentUpdatedAt !== baseUpdatedAt) {
+    res.status(409).json({
+      error: 'Toolbar presets changed on another client',
+      code: 'TOOLBAR_PRESETS_CONFLICT',
+      current: toolbarPresetsDoc ?? { version: 0, presets: [], updatedAt: 0 },
+    });
+    return;
+  }
   const version = typeof body.version === 'number' ? body.version : 0;
   const presets = Array.isArray(body.presets) ? body.presets : [];
   toolbarPresetsDoc = { version, presets, updatedAt: Date.now() };
   schedulePersistToolbarPresets();
+  broadcastControlEvent({
+    type: 'config-updated',
+    key: 'toolbar-presets',
+    updatedAt: toolbarPresetsDoc.updatedAt,
+  });
   res.json(toolbarPresetsDoc);
 });
 
@@ -4229,6 +4345,11 @@ router.put('/agent-rules', async (req, res) => {
     }
   }
   await saveAgentRulesToDisk(rules);
+  broadcastControlEvent({
+    type: 'config-updated',
+    key: 'agent-rules',
+    updatedAt: Date.now(),
+  });
   res.json(rules);
 });
 
@@ -4236,6 +4357,11 @@ router.delete('/agent-rules', async (_req, res) => {
   // Remove custom rules file so builtins take effect again
   await fs.promises.unlink(AGENT_RULES_FILE).catch(() => undefined);
   compileAgentRules(BUILTIN_AGENT_RULES);
+  broadcastControlEvent({
+    type: 'config-updated',
+    key: 'agent-rules',
+    updatedAt: Date.now(),
+  });
   res.json(BUILTIN_AGENT_RULES);
 });
 
@@ -4263,12 +4389,22 @@ router.put('/program-detection', async (req, res) => {
       : DEFAULT_PROGRAM_DETECTION.shellNames,
   };
   await saveProgramDetectionToDisk(validated);
+  broadcastControlEvent({
+    type: 'config-updated',
+    key: 'program-detection',
+    updatedAt: Date.now(),
+  });
   res.json(validated);
 });
 
 router.delete('/program-detection', async (_req, res) => {
   await fs.promises.unlink(PROGRAM_DETECTION_FILE).catch(() => undefined);
   applyProgramDetectionConfig({ ...DEFAULT_PROGRAM_DETECTION });
+  broadcastControlEvent({
+    type: 'config-updated',
+    key: 'program-detection',
+    updatedAt: Date.now(),
+  });
   res.json(DEFAULT_PROGRAM_DETECTION);
 });
 
@@ -4361,7 +4497,7 @@ router.get('/:sessionId/stream', async (req, res) => {
   session.clients.set(clientId, res);
   session.lastActivity = Date.now();
   syncClientCountToTmux(sessionId);
-  if (updateGlobalBindingForBackendSession(sessionId, { lastActivity: session.lastActivity })) {
+  if (updateGlobalBindingForBackendSession(sessionId, { cwd: session.cwd, lastActivity: session.lastActivity })) {
     persistAndBroadcastGlobalState();
   }
 
@@ -4444,6 +4580,9 @@ router.get('/:sessionId/stream', async (req, res) => {
       if (newCwd && newCwd !== session.cwd) {
         session.cwd = newCwd;
         console.log(`[tmux-cwd][sse] session=${sessionId} cwd=${newCwd}`);
+        if (updateGlobalBindingForBackendSession(sessionId, { cwd: newCwd, lastActivity: session.lastActivity })) {
+          schedulePersistGlobalState();
+        }
         writeSse(res, { type: 'cwd', cwd: newCwd });
       }
       // tmux 消费了 inner shell 发的 OSC 2/133，不透传到外层 PTY。
@@ -4690,6 +4829,7 @@ router.post('/:sessionId/tmux', async (req, res) => {
       if (updateGlobalBindingForBackendSession(sessionId, {
         mode: 'tmux',
         tmuxSessionName: targetSessionName,
+        cwd: session.cwd,
         lastActivity: session.lastActivity,
       })) {
         persistAndBroadcastGlobalState();
@@ -4770,6 +4910,7 @@ router.post('/:sessionId/restart', async (req, res) => {
       backendSessionId: newSessionId,
       mode: session.mode,
       tmuxSessionName: session.tmuxSessionName,
+      cwd: session.cwd,
       lastActivity: session.lastActivity,
     })) {
       persistAndBroadcastGlobalState();
@@ -4989,7 +5130,7 @@ export function handleTerminalWebSocket(
   clients.set(clientId, ws);
   session.lastActivity = Date.now();
   syncClientCountToTmux(sessionId);
-  if (updateGlobalBindingForBackendSession(sessionId, { lastActivity: session.lastActivity })) {
+  if (updateGlobalBindingForBackendSession(sessionId, { cwd: session.cwd, lastActivity: session.lastActivity })) {
     persistAndBroadcastGlobalState();
   }
 
@@ -5114,6 +5255,9 @@ export function handleTerminalWebSocket(
         if (newCwd && newCwd !== session.cwd) {
           session.cwd = newCwd;
           console.log(`[tmux-cwd][ws] session=${sessionId} cwd=${newCwd}`);
+          if (updateGlobalBindingForBackendSession(sessionId, { cwd: newCwd, lastActivity: session.lastActivity })) {
+            schedulePersistGlobalState();
+          }
           ws.send(JSON.stringify({ type: 'cwd', cwd: newCwd }));
         }
         // tmux 消费了 inner shell 发的 OSC 2（存入 pane_title）和 OSC 133，

@@ -88,6 +88,12 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
+function hasNativeTextSelection(): boolean {
+  if (typeof window === 'undefined') return false;
+  const selection = window.getSelection();
+  return Boolean(selection && !selection.isCollapsed && selection.toString().trim());
+}
+
 function nodeMatchesQuery(node: FileTreeNode, queryLower: string): boolean {
   if (!queryLower) return true;
   return `${node.name} ${node.path}`.toLowerCase().includes(queryLower);
@@ -272,10 +278,20 @@ const FileTreeItem = memo(function FileTreeItem({
 
   return (
     <div ref={actionMenuRef} className="relative">
-      <button
-        type="button"
-        onClick={handleToggle}
-        className={`group flex w-full items-center gap-1 rounded px-2 py-1 text-[13px] ${
+      {getReferenceLongPressHandlers.popoverNode}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => {
+          if (hasNativeTextSelection()) return;
+          void handleToggle();
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          void handleToggle();
+        }}
+        className={`group flex w-full cursor-pointer items-center gap-1 rounded px-2 py-1 text-[13px] ${
           isSelected
             ? 'bg-surface-elevated text-foreground'
             : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
@@ -296,7 +312,7 @@ const FileTreeItem = memo(function FileTreeItem({
             </span>
           </>
         )}
-        <span className={`min-w-0 flex-1 whitespace-normal break-all text-left leading-snug ${isSelected ? 'font-medium' : ''}`}>
+        <span className={`min-w-0 flex-1 select-text whitespace-normal break-all text-left leading-snug ${isSelected ? 'font-medium' : ''}`} data-sidebar-gesture-ignore>
           {node.name}
           {node.isSymlink && (
             <span className="ml-1 inline-flex align-middle text-muted-foreground/70" title="Symbolic link">
@@ -309,7 +325,7 @@ const FileTreeItem = memo(function FileTreeItem({
         {node.type === 'directory' && (onDirectoryRoot || onDirectoryPinToggle) && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(directoryActionsOpen)} ${directoryActionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(directoryActionsOpen)} ${directoryActionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
@@ -318,7 +334,7 @@ const FileTreeItem = memo(function FileTreeItem({
         {canPinFile && (
           <span
             onClick={handleFilePinClick}
-            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${iconActionVisibilityClass(isPinned)} ${isPinned ? 'bg-primary/15 text-primary' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full transition active:scale-95 ${iconActionVisibilityClass(isPinned)} ${isPinned ? 'bg-primary/15 text-primary' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={isPinned ? t('fileTree.unpinFileTitle') : t('fileTree.pinFileTitle')}
           >
             {isPinned ? <RiPinOff size={12} /> : <RiPin size={12} />}
@@ -328,13 +344,13 @@ const FileTreeItem = memo(function FileTreeItem({
           <span
             onClick={handleReferenceClick}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             title={t('fileTree.insertRefTitle')}
           >
             {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
           </span>
         )}
-      </button>
+      </div>
 
       {node.type === 'directory' && directoryActionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
         <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
@@ -435,6 +451,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
 
   const handleClick = useCallback(() => {
+    if (hasNativeTextSelection()) return;
     if (node.type === 'directory') onDirectoryRoot?.(node.path);
     else onFileSelect(node.path);
   }, [node.path, node.type, onDirectoryRoot, onFileSelect]);
@@ -480,10 +497,17 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
 
   return (
     <div ref={actionMenuRef} className="relative">
-      <button
-        type="button"
+      {getReferenceLongPressHandlers.popoverNode}
+      <div
+        role="button"
+        tabIndex={0}
         onClick={handleClick}
-        className={`group flex w-full items-center gap-1 rounded px-2 py-1.5 text-left text-[13px] ${
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          handleClick();
+        }}
+        className={`group flex w-full cursor-pointer items-center gap-1 rounded px-2 py-1.5 text-left text-[13px] ${
           isSelected
             ? 'bg-surface-elevated text-foreground'
             : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
@@ -501,7 +525,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
             <span className={isSelected ? 'text-primary' : 'text-muted-foreground/80'}>{getFileIcon(node.name, node.type)}</span>
           </>
         )}
-        <span className="min-w-0 flex-1">
+        <span className="min-w-0 flex-1 select-text" data-sidebar-gesture-ignore>
           <span className={`block whitespace-normal break-all leading-snug ${isSelected ? 'font-medium' : ''}`}>
             {node.name}
             {node.isSymlink && (
@@ -516,7 +540,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {node.type === 'directory' && onDirectoryPinToggle && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(directoryActionsOpen)} ${directoryActionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(directoryActionsOpen)} ${directoryActionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
@@ -525,7 +549,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {canPinFile && (
           <span
             onClick={handleFilePinClick}
-            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${iconActionVisibilityClass(isPinned)} ${isPinned ? 'bg-primary/15 text-primary' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full transition active:scale-95 ${iconActionVisibilityClass(isPinned)} ${isPinned ? 'bg-primary/15 text-primary' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={isPinned ? t('fileTree.unpinFileTitle') : t('fileTree.pinFileTitle')}
           >
             {isPinned ? <RiPinOff size={12} /> : <RiPin size={12} />}
@@ -535,13 +559,13 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           <span
             onClick={handleReferenceClick}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             title={t('fileTree.insertRefTitle')}
           >
             {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
           </span>
         )}
-      </button>
+      </div>
       {node.type === 'directory' && directoryActionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
         <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {onDirectoryRoot && (
@@ -638,21 +662,31 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
 
   return (
     <div className="rounded">
-      <button
-        type="button"
-        onClick={() => setExpanded((open) => !open)}
-        className={`group flex w-full items-center gap-1 rounded px-2 py-1.5 text-left text-[13px] ${
+      {getReferenceLongPressHandlers.popoverNode}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => {
+          if (hasNativeTextSelection()) return;
+          setExpanded((open) => !open);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          setExpanded((open) => !open);
+        }}
+        className={`group flex w-full cursor-pointer items-center gap-1 rounded px-2 py-1.5 text-left text-[13px] ${
           isSelected ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
         }`}
         title={entry.path}
       >
         {expanded ? <RiChevronDown size={14} className="shrink-0 text-muted-foreground/80" /> : <RiChevronRight size={14} className="shrink-0 text-muted-foreground/80" />}
         <span className={isSelected ? 'text-primary' : 'text-muted-foreground/80'}>{getFileIcon(entry.name, 'file')}</span>
-        <span className="min-w-0 flex-1">
+        <span className="min-w-0 flex-1 select-text" data-sidebar-gesture-ignore>
           <span className="block whitespace-normal break-all font-medium leading-snug">{entry.name}</span>
           <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, entry.path)}</span>
         </span>
-        <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.matches.length}</span>
+        <span className="shrink-0 select-none rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.matches.length}</span>
         {onPathReference && (
           <span
             onClick={(event) => {
@@ -660,27 +694,36 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
               onPathReference(entry.path, referenceKey);
             }}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
-            className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
             title={t('fileTree.insertRefTitle')}
           >
             {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
           </span>
         )}
-      </button>
+      </div>
       {expanded && (
         <div className="ml-3 border-l border-border/15 pl-1">
           {visibleMatches.map((match, matchIndex) => (
-            <button
+            <div
               // eslint-disable-next-line react/no-array-index-key
               key={`${match.line}-${matchIndex}`}
-              type="button"
-              onClick={() => onContentMatchSelect?.(entry.path, match.line)}
-              className="flex w-full items-start gap-2 rounded px-2 py-1 text-left font-mono text-[11px] text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-[0.997]"
+              role="button"
+              tabIndex={0}
+              onClick={() => {
+                if (hasNativeTextSelection()) return;
+                onContentMatchSelect?.(entry.path, match.line);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                onContentMatchSelect?.(entry.path, match.line);
+              }}
+              className="flex w-full cursor-pointer items-start gap-2 rounded px-2 py-1 text-left font-mono text-[11px] text-muted-foreground transition hover:bg-surface-2 hover:text-foreground"
               title={`${getRelativePath(rootPath, entry.path)}:${match.line}`}
             >
               <span className="shrink-0 select-none tabular-nums text-muted-foreground/60">{match.line}</span>
-              <span className="min-w-0 flex-1 truncate whitespace-pre">{highlightMatch(match.text, query)}</span>
-            </button>
+              <span className="min-w-0 flex-1 truncate whitespace-pre select-text" data-sidebar-gesture-ignore>{highlightMatch(match.text, query)}</span>
+            </div>
           ))}
           {hiddenCount > 0 && (
             <div className="px-2 py-1 text-[10px] text-muted-foreground/70">
@@ -872,7 +915,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
     const displayedEntries = contentEntries.slice(0, visibleSearchCount);
     const hasBufferedMore = visibleSearchCount < contentEntries.length;
     return (
-      <div className="space-y-px px-2 py-2">
+      <div className="termdock-native-select space-y-px px-2 py-2">
         <div className="mb-2 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
           <span>{searchLoading ? t('fileTree.searchingWithCount', { count: foundCount }) : t('fileTree.contentMatchesCount', { count: foundCount })}</span>
           {searchMeta && (
@@ -943,7 +986,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
     const displayedSearchEntries = searchEntries.slice(0, visibleSearchCount);
     const hasBufferedMore = visibleSearchCount < searchEntries.length;
     return (
-      <div className="space-y-px px-2 py-2">
+      <div className="termdock-native-select space-y-px px-2 py-2">
         <div className="mb-2 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
           <span>{searchLoading ? t('fileTree.searchingWithCount', { count: foundCount }) : t('fileTree.searchResults', { count: foundCount })}</span>
           {searchMeta && (
@@ -1034,7 +1077,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
   }
 
   return (
-    <div className="space-y-px px-2 py-2">
+    <div className="termdock-native-select space-y-px px-2 py-2">
       {rootTruncated && (
         <div className="mb-2 rounded-xl bg-[rgb(var(--warning-rgb)_/_0.12)] px-3 py-2 text-[11px] text-[color:var(--warning)]">
           {t('fileTree.truncatedHint')}

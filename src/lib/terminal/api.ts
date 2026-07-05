@@ -27,6 +27,13 @@ export const AUTH_UNAUTHORIZED_EVENT = 'auth:unauthorized';
 
 let csrfToken: string | null = null;
 
+export class TerminalApiError extends Error {
+  constructor(message: string, public status?: number, public code?: string) {
+    super(message);
+    this.name = 'TerminalApiError';
+  }
+}
+
 if (typeof window !== 'undefined' && !(window as any).__termdockFetchPatched) {
   (window as any).__termdockFetchPatched = true;
   const originalFetch = window.fetch.bind(window);
@@ -873,7 +880,7 @@ export async function killTmuxSession(name: string): Promise<{ cleanedSessions: 
 export interface PersistedTerminalClientSession {
   sessionId: string; name: string; customName?: boolean; backendSessionId: string | null;
   mode: 'shell' | 'tmux'; tmuxSessionName: string | null;
-  createdAt: number; lastActivity: number;
+  createdAt: number; lastActivity: number; cwd?: string | null;
 }
 
 export interface TerminalClientState {
@@ -902,7 +909,11 @@ export async function openSessionInventoryEntry(
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to open session' }));
-    throw new Error(error.error || 'Failed to open session');
+    throw new TerminalApiError(
+      error.error || 'Failed to open session',
+      response.status,
+      typeof error.code === 'string' ? error.code : undefined,
+    );
   }
   return response.json() as Promise<OpenSessionInventoryResult>;
 }
@@ -1001,6 +1012,7 @@ export interface ToolbarPresetsDoc {
   version: number;
   presets: unknown[];
   updatedAt?: number;
+  baseUpdatedAt?: number;
 }
 
 export async function getToolbarPresetsDoc(): Promise<ToolbarPresetsDoc> {
@@ -1021,7 +1033,10 @@ export async function replaceToolbarPresetsDoc(doc: ToolbarPresetsDoc): Promise<
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to save toolbar presets' }));
-    throw new Error(error.error || 'Failed to save toolbar presets');
+    const err = new Error(error.error || 'Failed to save toolbar presets') as Error & { current?: unknown; code?: unknown };
+    err.current = (error as { current?: unknown }).current;
+    err.code = (error as { code?: unknown }).code;
+    throw err;
   }
   return response.json();
 }

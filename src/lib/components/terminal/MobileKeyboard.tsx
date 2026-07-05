@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronUp, Clipboard, CornerDownLeft as RiArrowGoBackLine, Move } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, Clipboard, CornerDownLeft as RiArrowGoBackLine, Move, X } from 'lucide-react';
 import { vibrate as hapticVibrate } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from './PresetModeButton';
@@ -59,6 +59,7 @@ interface MobileKeyboardProps {
   onKeyPress: (key: MobileKey) => void;
   onTextPress: (sequence: string) => void;
   longPressMode?: 'arrows' | 'copy';
+  copyFeedback?: 'idle' | 'copied' | 'failed';
   onLongPressModeToggle?: () => void;
   onModifierToggle: (modifier: Modifier) => void;
   onPresetSelect: (mode: ToolbarPresetMode) => void;
@@ -83,6 +84,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   onKeyPress,
   onTextPress,
   longPressMode = 'arrows',
+  copyFeedback = 'idle',
   onLongPressModeToggle,
   onModifierToggle,
   onPresetSelect,
@@ -113,7 +115,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       const button = target.closest('button');
-      if (button && !button.hasAttribute('data-mobile-copy-button')) {
+      const isClipboardButton = button?.hasAttribute('data-mobile-copy-button') === true;
+      if (button && !isClipboardButton) {
         event.preventDefault();
         hapticVibrate(TOOLBAR_HAPTIC_PATTERN_MS);
       } else if (button) {
@@ -306,6 +309,16 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     [onLongPressModeToggle, toolbarDisabled],
   );
 
+  const stopClipboardButtonPointer = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement> | React.TouchEvent<HTMLButtonElement>) => {
+      if (toolbarDisabled) {
+        return;
+      }
+      event.stopPropagation();
+    },
+    [toolbarDisabled],
+  );
+
   const handlePresetCyclePointerDown = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>) => {
       if (toolbarDisabled) {
@@ -486,18 +499,28 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         <button
           type="button"
           data-mobile-copy-button="true"
+          onPointerDown={stopClipboardButtonPointer}
+          onTouchStart={stopClipboardButtonPointer}
           onClick={handleLongPressModeClick}
           tabIndex={-1}
           disabled={buttonDisabled}
-          title={longPressMode === 'copy' ? 'Long press copies selection' : 'Long press sends arrows'}
+          title={copyFeedback === 'copied' ? 'Copied' : copyFeedback === 'failed' ? 'Copy failed' : longPressMode === 'copy' ? 'Long press selects text' : 'Long press sends arrows'}
           aria-label={longPressMode === 'copy' ? 'Switch long press to arrow keys' : 'Switch long press to copy selection'}
           className={`h-7 w-full rounded-full shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center ${
-            longPressMode === 'copy'
+            copyFeedback === 'copied'
+              ? 'bg-primary/15 text-primary'
+              : copyFeedback === 'failed'
+                ? 'bg-destructive/15 text-destructive'
+                : longPressMode === 'copy'
               ? 'bg-primary/15 text-primary'
               : 'bg-surface-2'
           }`}
         >
-          {longPressMode === 'copy' ? <Clipboard size={15} /> : <Move size={15} />}
+          {copyFeedback === 'copied'
+            ? <Check size={15} />
+            : copyFeedback === 'failed'
+              ? <X size={15} />
+              : longPressMode === 'copy' ? <Clipboard size={15} /> : <Move size={15} />}
         </button>
         <button
           type="button"

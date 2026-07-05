@@ -38,6 +38,10 @@ const TERMDOCK_VERSION: string = (() => {
 })();
 const TERMDOCK_HOST = os.hostname();
 const TERMDOCK_PID = String(process.pid);
+const parsedTmuxHistoryLimit = Number.parseInt(process.env.TERMDOCK_TMUX_HISTORY_LIMIT || '10000', 10);
+const TERMDOCK_TMUX_HISTORY_LIMIT = Number.isFinite(parsedTmuxHistoryLimit) && parsedTmuxHistoryLimit > 0
+  ? parsedTmuxHistoryLimit
+  : 10000;
 
 const stateDir = path.join(os.homedir(), '.termdock');
 const stateFilePath = path.join(stateDir, 'server.json');
@@ -149,11 +153,12 @@ Options:
   --clear-password   Remove the access password and disable authentication
   --tls              List termdock-managed tmux sessions (reads tmux directly,
                      no server connection required)
-  -a, --all          With --tls: include tmux sessions not stamped by termdock
+  -a, --all          With --tls/--attach-tmux: include tmux sessions not stamped by termdock
   --json             With --tls: emit JSON instead of a table
   --attach-tmux [n]  Attach to a termdock-managed tmux session.
                      With no name: interactive picker.
                      With name: attach directly (e.g. --attach-tmux wt-foo).
+                     Add --all to include unmanaged tmux sessions in matching.
   --new-tmux [name]  Create (or ensure) and attach to a tmux session for termdock.
                      New sessions start in the directory where td was invoked.
                      With no name: auto-generate a wt-* name and enter it directly.
@@ -636,6 +641,17 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (!arg.startsWith('-')) {
+      if (attachTmux && !attachTmuxName) {
+        attachTmuxName = arg;
+        continue;
+      }
+      if (newTmux && !newTmuxName) {
+        newTmuxName = arg;
+        continue;
+      }
+    }
+
     console.error(`${ICON.err} ${c.red(`Unknown argument: ${arg}`)}`);
     printHelp();
     process.exit(1);
@@ -822,6 +838,7 @@ function warnIfAuthDisabled(host: string): void {
 
 interface TlsRow {
   name: string;
+  attachedCount: string;
   friendlyName: string;
   program: string;
   cwd: string;
@@ -875,6 +892,36 @@ async function ensureTmuxFocusEvents(): Promise<void> {
   });
 }
 
+async function ensureTmuxScrollbackProfile(sessionName: string): Promise<void> {
+  await execFileAsync('tmux', ['set-option', '-g', 'history-limit', String(TERMDOCK_TMUX_HISTORY_LIMIT)], {
+    timeout: 5000,
+    maxBuffer: 64 * 1024,
+  });
+  await execFileAsync('tmux', ['set-option', '-t', sessionName, 'history-limit', String(TERMDOCK_TMUX_HISTORY_LIMIT)], {
+    timeout: 5000,
+    maxBuffer: 64 * 1024,
+  });
+  try {
+    await execFileAsync('tmux', ['set-option', '-gw', 'scroll-on-clear', 'off'], {
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+    const { stdout } = await execFileAsync('tmux', ['list-windows', '-t', sessionName, '-F', '#{window_id}'], {
+      timeout: 5000,
+      maxBuffer: 256 * 1024,
+    });
+    const windowIds = stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+    for (const windowId of windowIds) {
+      await execFileAsync('tmux', ['set-option', '-w', '-t', windowId, 'scroll-on-clear', 'off'], {
+        timeout: 5000,
+        maxBuffer: 64 * 1024,
+      });
+    }
+  } catch {
+    // Older tmux versions do not have scroll-on-clear; keep CLI session creation working.
+  }
+}
+
 async function ensureTmuxCliSessionOptions(sessionName: string): Promise<void> {
   await execFileAsync('tmux', ['set-option', '-t', sessionName, 'status', 'off'], {
     timeout: 5000,
@@ -884,6 +931,50 @@ async function ensureTmuxCliSessionOptions(sessionName: string): Promise<void> {
     timeout: 5000,
     maxBuffer: 64 * 1024,
   });
+  await ensureTmuxScrollbackProfile(sessionName);
+}
+
+async function ensureTmuxColorEnvironment(sessionName?: string): Promise<void> {
+  const forceColor = process.env.TERMDOCK_FORCE_COLOR === '1';
+  await execFileAsync('tmux', ['set-environment', '-g', 'COLORTERM', 'truecolor'], {
+    timeout: 5000,
+    maxBuffer: 64 * 1024,
+  });
+  if (forceColor) {
+    await execFileAsync('tmux', ['set-environment', '-g', 'FORCE_COLOR', '1'], {
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+    await execFileAsync('tmux', ['set-environment', '-g', '-u', 'NO_COLOR'], {
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+  } else {
+    await execFileAsync('tmux', ['set-environment', '-g', '-u', 'FORCE_COLOR'], {
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+  }
+  if (!sessionName) return;
+  await execFileAsync('tmux', ['set-environment', '-t', sessionName, 'COLORTERM', 'truecolor'], {
+    timeout: 5000,
+    maxBuffer: 64 * 1024,
+  });
+  if (forceColor) {
+    await execFileAsync('tmux', ['set-environment', '-t', sessionName, 'FORCE_COLOR', '1'], {
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+    await execFileAsync('tmux', ['set-environment', '-t', sessionName, '-u', 'NO_COLOR'], {
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+  } else {
+    await execFileAsync('tmux', ['set-environment', '-t', sessionName, '-u', 'FORCE_COLOR'], {
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+  }
 }
 
 async function getTmuxOption(sessionName: string, key: string): Promise<string | null> {
@@ -935,7 +1026,10 @@ async function ensureStampedTmuxSession(
 ): Promise<{ sessionName: string; created: boolean }> {
   const exists = await tmuxSessionExists(sessionName);
   if (!exists) {
-    const args = ['new-session', '-d', '-s', sessionName];
+    const args = ['new-session', '-d', '-s', sessionName, '-e', 'COLORTERM=truecolor'];
+    if (process.env.TERMDOCK_FORCE_COLOR === '1') {
+      args.push('-e', 'FORCE_COLOR=1');
+    }
     if (cwd) {
       args.push('-c', cwd);
     }
@@ -949,6 +1043,7 @@ async function ensureStampedTmuxSession(
   }
 
   await ensureTmuxFocusEvents();
+  await ensureTmuxColorEnvironment(sessionName);
   await ensureTmuxCliSessionOptions(sessionName);
   await setTmuxOption(sessionName, '@termdock-version', TERMDOCK_VERSION);
   await setTmuxOption(sessionName, '@termdock-host', TERMDOCK_HOST);
@@ -967,6 +1062,7 @@ async function ensureStampedTmuxSession(
 
 const TLS_FIELDS: Array<keyof TlsRow | 'name'> = [
   'name',
+  'attachedCount',
   'friendlyName',
   'program',
   'cwd',
@@ -981,6 +1077,7 @@ const TLS_FIELDS: Array<keyof TlsRow | 'name'> = [
 
 const TLS_FORMAT = [
   '#{session_name}',
+  '#{session_attached}',
   '#{@termdock-friendly-name}',
   '#{@termdock-program}',
   '#{@termdock-cwd}',
@@ -1167,18 +1264,102 @@ function compareTmuxRowsByPersistedOrder(order: Map<string, number>): (a: TlsRow
   };
 }
 
+function getTmuxDisplayTitle(row: TlsRow): string {
+  return row.friendlyName || row.label || row.name || '(unnamed)';
+}
+
+function getTmuxDisplaySubtitle(row: TlsRow): string | null {
+  if (!row.friendlyName && !row.label) return null;
+  return `tmux:${row.name}`;
+}
+
+function formatTmuxConnectionLabels(row: TlsRow): string[] {
+  const labels: string[] = [];
+  if (row.clientCount && row.clientCount !== '0') {
+    labels.push(`Web clients ${row.clientCount}`);
+  }
+  if (row.attachedCount && row.attachedCount !== '0') {
+    labels.push(`Native tmux ${row.attachedCount}`);
+  }
+  return labels;
+}
+
+function normalizeMatchText(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function tmuxRowAliases(row: TlsRow): string[] {
+  return [row.name, row.friendlyName, row.label]
+    .map((value) => value.trim())
+    .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+}
+
+function currentCwdTmuxRows(rows: TlsRow[]): TlsRow[] {
+  const cwd = resolveInvocationCwd();
+  return rows.filter((row) => row.cwd === cwd);
+}
+
+function resolveTmuxAttachTarget(input: string, candidates: TlsRow[]): {
+  row: TlsRow | null;
+  ambiguous: TlsRow[];
+  suggestions: TlsRow[];
+} {
+  const query = normalizeMatchText(input);
+  if (!query) return { row: null, ambiguous: [], suggestions: [] };
+
+  if (input.trim() === '.') {
+    const cwdMatches = currentCwdTmuxRows(candidates);
+    if (cwdMatches.length === 1) {
+      return { row: cwdMatches[0], ambiguous: [], suggestions: [] };
+    }
+    if (cwdMatches.length > 1) {
+      return { row: null, ambiguous: cwdMatches, suggestions: [] };
+    }
+  }
+
+  const exactMatches = candidates.filter((row) =>
+    tmuxRowAliases(row).some((alias) => normalizeMatchText(alias) === query),
+  );
+  if (exactMatches.length === 1) {
+    return { row: exactMatches[0], ambiguous: [], suggestions: [] };
+  }
+  if (exactMatches.length > 1) {
+    return { row: null, ambiguous: exactMatches, suggestions: [] };
+  }
+
+  const partialMatches = candidates.filter((row) =>
+    tmuxRowAliases(row).some((alias) => normalizeMatchText(alias).includes(query)),
+  );
+  if (partialMatches.length === 1) {
+    return { row: partialMatches[0], ambiguous: [], suggestions: [] };
+  }
+  if (partialMatches.length > 1) {
+    return { row: null, ambiguous: partialMatches, suggestions: [] };
+  }
+
+  return { row: null, ambiguous: [], suggestions: candidates.slice(0, 6) };
+}
+
+function buildAttachCandidates(rows: TlsRow[], includeAll: boolean): TlsRow[] {
+  const managed = rows.filter((row) => row.version.length > 0);
+  const selected = includeAll || managed.length === 0 ? rows : managed;
+  const tmuxOrder = readPersistedTmuxOrder();
+  return selected.slice().sort(compareTmuxRowsByPersistedOrder(tmuxOrder));
+}
+
 function renderBlocks(rows: TlsRow[]): string {
   const blocks: string[] = [];
   for (const row of rows) {
-    const heading = row.label || row.friendlyName || row.name || '(unnamed)';
+    const heading = getTmuxDisplayTitle(row);
+    const subtitle = getTmuxDisplaySubtitle(row);
     const lines: string[] = [];
-    lines.push(`${c.bold(c.cyan('●'))} ${c.bold(heading)}  ${c.dim(`(${row.name})`)}`);
+    lines.push(`${c.bold(c.cyan('●'))} ${c.bold(heading)}${subtitle ? `  ${c.dim(`(${subtitle})`)}` : ''}`);
 
     const kv: Array<[string, string]> = [];
     if (row.program) kv.push(['Program', row.program]);
     if (row.cwd) kv.push(['CWD', row.cwd]);
     const meta: string[] = [];
-    meta.push(`clients=${row.clientCount || '0'}`);
+    meta.push(...formatTmuxConnectionLabels(row));
     meta.push(`idle=${formatIdle(row.lastActiveAt)}`);
     if (row.host) meta.push(`host=${row.host}`);
     if (row.version) meta.push(`v${row.version}`);
@@ -1191,6 +1372,18 @@ function renderBlocks(rows: TlsRow[]): string {
     blocks.push(lines.join('\n'));
   }
   return blocks.join('\n\n');
+}
+
+function renderCompactTmuxRows(rows: TlsRow[], indent = '  '): string {
+  return rows.map((row) => {
+    const title = getTmuxDisplayTitle(row);
+    const subtitle = getTmuxDisplaySubtitle(row);
+    const bits: string[] = [];
+    if (row.cwd) bits.push(row.cwd);
+    bits.push(...formatTmuxConnectionLabels(row));
+    const suffix = bits.length > 0 ? c.dim(`  ${bits.join(' · ')}`) : '';
+    return `${indent}${c.cyan(row.name)}${title !== row.name ? ` ${c.dim(`(${title})`)}` : ''}${subtitle && title === row.name ? ` ${c.dim(`(${subtitle})`)}` : ''}${suffix}`;
+  }).join('\n');
 }
 
 // Fetch tmux sessions with termdock metadata. Returns null if tmux is not
@@ -1251,6 +1444,7 @@ async function runTls(opts: { all: boolean; json: boolean }): Promise<void> {
   if (opts.json) {
     const json = rows.map((row) => ({
       sessionName: row.name,
+      attachedCount: row.attachedCount ? Number(row.attachedCount) : null,
       friendlyName: row.friendlyName || null,
       program: row.program || null,
       cwd: row.cwd || null,
@@ -1337,12 +1531,13 @@ async function pickTmuxSession(rows: TlsRow[]): Promise<string | null> {
     for (const row of group.sessions) {
       optionIndex += 1;
       const num = c.cyan(String(optionIndex).padStart(indexWidth));
-      const heading = row.label || row.friendlyName || row.name;
+      const heading = getTmuxDisplayTitle(row);
+      const subtitle = getTmuxDisplaySubtitle(row);
       const meta: string[] = [];
       if (row.cwd) meta.push(row.cwd);
-      if (row.clientCount && row.clientCount !== '0') meta.push(`${row.clientCount} client(s)`);
+      meta.push(...formatTmuxConnectionLabels(row));
       const tail = meta.length > 0 ? c.dim(`  ${meta.join(' · ')}`) : '';
-      console.log(`    ${num}. ${heading} ${c.dim(`(${row.name})`)}${tail}`);
+      console.log(`    ${num}. ${heading}${subtitle ? ` ${c.dim(`(${subtitle})`)}` : ''}${tail}`);
     }
   }
 
@@ -1363,30 +1558,51 @@ async function pickTmuxSession(rows: TlsRow[]): Promise<string | null> {
   return orderedRows[choice - 1]?.name ?? null;
 }
 
-async function runAttachTmux(opts: { name?: string }): Promise<void> {
-  // Direct attach when caller already knows the name.
-  if (opts.name) {
-    await ensureTmuxFocusEvents();
-    execTmuxAttach(opts.name);
-    return;
-  }
-
+async function runAttachTmux(opts: { name?: string; all?: boolean }): Promise<void> {
   const allRows = await fetchTlsRows();
   if (allRows === null) {
     console.log(`${ICON.info} ${c.dim('No tmux server running on this host.')}`);
     process.exit(0);
   }
 
-  // Prefer termdock-managed sessions; fall back to all tmux sessions if
-  // none are stamped (better than refusing to attach).
-  const managed = allRows.filter((row) => row.version.length > 0);
-  const tmuxOrder = readPersistedTmuxOrder();
-  const candidates = (managed.length > 0 ? managed : allRows)
-    .slice()
-    .sort(compareTmuxRowsByPersistedOrder(tmuxOrder));
+  const candidates = buildAttachCandidates(allRows, opts.all === true);
+
+  // Direct attach when caller already knows the name.
+  if (opts.name) {
+    const exactRaw = allRows.find((row) => row.name === opts.name);
+    const target = exactRaw ?? resolveTmuxAttachTarget(opts.name, candidates).row;
+    if (!target) {
+      const resolved = resolveTmuxAttachTarget(opts.name, candidates);
+      if (resolved.ambiguous.length > 0) {
+        console.error(`${ICON.err} ${c.red(`Ambiguous tmux session: ${opts.name}`)}`);
+        console.error(renderCompactTmuxRows(resolved.ambiguous));
+        console.error(`  ${c.dim('Use the raw tmux session name, or run')} ${c.cyan(opts.all ? 'td a --all' : 'td a')} ${c.dim('for the picker.')}`);
+        process.exit(1);
+      }
+      console.error(`${ICON.err} ${c.red(`No matching tmux session: ${opts.name}`)}`);
+      if (!opts.all && allRows.some((row) => row.version.length === 0)) {
+        console.error(`  ${c.dim('Use')} ${c.cyan('td a --all')} ${c.dim('to include unmanaged tmux sessions.')}`);
+      }
+      const suggestions = resolved.suggestions.length > 0 ? resolved.suggestions : candidates.slice(0, 6);
+      if (suggestions.length > 0) {
+        console.error(`  ${c.dim('Available sessions:')}`);
+        console.error(renderCompactTmuxRows(suggestions, '    '));
+      }
+      process.exit(1);
+    }
+    await ensureTmuxFocusEvents();
+    if (target.version.length > 0) {
+      registerGuiTmuxSession(target.name);
+    }
+    execTmuxAttach(target.name);
+    return;
+  }
 
   if (candidates.length === 0) {
-    console.log(`${ICON.info} ${c.dim('No tmux sessions on this host.')}`);
+    console.log(`${ICON.info} ${c.dim(opts.all ? 'No tmux sessions on this host.' : 'No termdock-managed tmux sessions on this host.')}`);
+    if (!opts.all) {
+      console.log(`  ${c.dim('Use')} ${c.cyan('td a --all')} ${c.dim('to include unmanaged tmux sessions.')}`);
+    }
     process.exit(0);
   }
 
@@ -1397,6 +1613,10 @@ async function runAttachTmux(opts: { name?: string }): Promise<void> {
   }
 
   await ensureTmuxFocusEvents();
+  const pickedRow = candidates.find((row) => row.name === picked);
+  if (pickedRow?.version) {
+    registerGuiTmuxSession(pickedRow.name);
+  }
   execTmuxAttach(picked);
 }
 
@@ -1512,7 +1732,7 @@ async function main(): Promise<void> {
   }
 
   if (options.attachTmux) {
-    await runAttachTmux({ name: options.attachTmuxName });
+    await runAttachTmux({ name: options.attachTmuxName, all: options.tlsAll });
     return; // execTmuxAttach handles process exit
   }
 

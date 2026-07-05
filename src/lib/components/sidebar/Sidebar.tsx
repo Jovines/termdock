@@ -58,6 +58,8 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   const panelRef = useRef<HTMLElement | null>(null);
   const backdropRef = useRef<HTMLDivElement | null>(null);
   const currentXRef = useRef(isOpen ? 0 : closedX);
+  const pendingXRef = useRef<number | null>(null);
+  const positionFrameRef = useRef<number | null>(null);
   const dragStartXRef = useRef(0);
   const isOpenRef = useRef(isOpen);
   isOpenRef.current = isOpen;
@@ -71,28 +73,56 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     }
   }, [forwardedRef]);
 
+  const cancelPendingPositionFrame = useCallback(() => {
+    if (positionFrameRef.current !== null) {
+      window.cancelAnimationFrame(positionFrameRef.current);
+      positionFrameRef.current = null;
+    }
+    pendingXRef.current = null;
+  }, []);
+
   const setBackdropOpacity = useCallback((x: number) => {
     const backdrop = backdropRef.current;
     if (!backdrop) return;
     const progress = isLeft
       ? (x + drawerWidthPx) / drawerWidthPx
       : (drawerWidthPx - x) / drawerWidthPx;
-    backdrop.getAnimations().forEach((animation) => animation.cancel());
-    backdrop.style.transition = 'none';
     backdrop.style.opacity = String(clamp(progress, 0, 1));
   }, [drawerWidthPx, isLeft]);
 
-  const setPosition = useCallback((nextX: number) => {
+  const applyPosition = useCallback((nextX: number) => {
     const panel = panelRef.current;
-    currentXRef.current = nextX;
     if (!panel) return;
-    panel.getAnimations().forEach((animation) => animation.cancel());
-    panel.style.transition = 'none';
     panel.style.transform = `translateX(${nextX}px)`;
     setBackdropOpacity(nextX);
   }, [setBackdropOpacity]);
 
+  const setPosition = useCallback((nextX: number) => {
+    currentXRef.current = nextX;
+    pendingXRef.current = nextX;
+    if (positionFrameRef.current !== null) return;
+    positionFrameRef.current = window.requestAnimationFrame(() => {
+      positionFrameRef.current = null;
+      const pendingX = pendingXRef.current;
+      pendingXRef.current = null;
+      if (pendingX !== null) {
+        applyPosition(pendingX);
+      }
+    });
+  }, [applyPosition]);
+
+  const prepareInstantPositioning = useCallback(() => {
+    cancelPendingPositionFrame();
+    const panel = panelRef.current;
+    const backdrop = backdropRef.current;
+    panel?.getAnimations().forEach((animation) => animation.cancel());
+    if (panel) panel.style.transition = 'none';
+    backdrop?.getAnimations().forEach((animation) => animation.cancel());
+    if (backdrop) backdrop.style.transition = 'none';
+  }, [cancelPendingPositionFrame]);
+
   const animateToState = useCallback((open: boolean) => {
+    cancelPendingPositionFrame();
     const panel = panelRef.current;
     const backdrop = backdropRef.current;
     const targetX = open ? 0 : closedX;
@@ -116,7 +146,9 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     };
     panel?.addEventListener('transitionend', cleanup, { once: true });
     setTimeout(cleanup, SNAP_DURATION_MS + 50);
-  }, [closedX, drawerWidthPx, isLeft]);
+  }, [cancelPendingPositionFrame, closedX, drawerWidthPx, isLeft]);
+
+  useEffect(() => cancelPendingPositionFrame, [cancelPendingPositionFrame]);
 
   useEffect(() => {
     animateToState(isOpen);
@@ -124,8 +156,9 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
 
   // Keep the drawer aligned when viewport-derived width changes.
   useEffect(() => {
+    prepareInstantPositioning();
     setPosition(isOpenRef.current ? 0 : closedX);
-  }, [closedX, setPosition]);
+  }, [closedX, prepareInstantPositioning, setPosition]);
 
   // ESC 由 App 顶层统一处理（按层级关闭 modal/drawer/sidebar，并走 history overlay）。
   // 这里不再单独监听，避免和全局 handler 同时触发 history.back() 两次。
@@ -168,6 +201,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       }
       if (first) {
         dragStartXRef.current = currentXRef.current;
+        prepareInstantPositioning();
       }
       if (!active) {
         decideSnap(vx, dx);
@@ -188,7 +222,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   );
 
   const bindEdge = useDrag(
-    ({ active, cancel, movement: [mx], velocity: [vx], direction: [dx], event }) => {
+    ({ active, cancel, first, movement: [mx], velocity: [vx], direction: [dx], event }) => {
       if (!isTouchLikePointer(event)) {
         cancel();
         return;
@@ -200,6 +234,9 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       if (!active) {
         decideSnap(vx, dx);
         return;
+      }
+      if (first) {
+        prepareInstantPositioning();
       }
       const min = isLeft ? closedX : 0;
       const max = isLeft ? 0 : drawerWidthPx;
@@ -246,11 +283,12 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       <div
         ref={backdropRef}
         data-sidebar-backdrop={side}
-        className="fixed inset-0 z-sidebar-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm cursor-default"
+        className="fixed inset-0 z-sidebar-backdrop bg-[var(--app-backdrop)] cursor-default"
         style={{
           opacity: isOpen ? 1 : 0,
           pointerEvents: isOpen ? 'auto' : 'none',
           transition: 'none',
+          willChange: 'opacity',
         }}
         onClick={onClose}
         aria-label="Close sidebar"

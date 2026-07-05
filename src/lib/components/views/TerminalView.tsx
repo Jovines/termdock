@@ -5,7 +5,7 @@ import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout }
 import { TerminalViewport, type RefreshReason, type TerminalController } from '../terminal/TerminalViewport';
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
-import { openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
+import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
 import { computeTerminalLogicalFocus } from '../../terminal/focus';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
@@ -120,6 +120,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     return window.localStorage.getItem(MOBILE_LONG_PRESS_MODE_STORAGE_KEY) === 'copy' ? 'copy' : 'arrows';
   });
+  const [mobileCopyFeedback, setMobileCopyFeedback] = React.useState<'idle' | 'copied' | 'failed'>('idle');
 
   const terminalStore = useTerminalStore();
   const terminalSessions = terminalStore.sessions;
@@ -187,6 +188,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const desktopResumeFocusTimerRef = React.useRef<number | null>(null);
   const pendingShellTitleRef = React.useRef<{ sessionId: string; title: string | null } | null>(null);
   const shellTitleRafRef = React.useRef<number | null>(null);
+  const mobileCopyFeedbackTimerRef = React.useRef<number | null>(null);
 
   const flushPendingShellTitle = React.useCallback(() => {
     shellTitleRafRef.current = null;
@@ -320,6 +322,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         window.clearTimeout(desktopResumeFocusTimerRef.current);
       }
       desktopResumeFocusTimerRef.current = null;
+      if (mobileCopyFeedbackTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(mobileCopyFeedbackTimerRef.current);
+      }
+      mobileCopyFeedbackTimerRef.current = null;
     };
   }, []);
 
@@ -1132,6 +1138,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               debugSession(`[ensureSession] Stale run after session creation failed, skipping error handling`);
               return;
             }
+            if (error instanceof TerminalApiError && error.code === 'STALE_SESSION_RESTORE_REJECTED') {
+              debugSession('[ensureSession] Dropping stale persisted session:', { sessionId, error: error.message });
+              store.clearTerminalSession(sessionId);
+              window.dispatchEvent(new CustomEvent('close-terminal-session', {
+                detail: { sessionId, closeMode: 'detach' },
+              }));
+              return;
+            }
             setConnectionError(
               error instanceof Error
                 ? error.message
@@ -1609,7 +1623,26 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, []);
   const handleLongPressModeToggle = React.useCallback(() => {
     setMobileLongPressMode((current) => current === 'copy' ? 'arrows' : 'copy');
+    setMobileCopyFeedback('idle');
   }, []);
+  const resetMobileCopyFeedbackSoon = React.useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (mobileCopyFeedbackTimerRef.current !== null) {
+      window.clearTimeout(mobileCopyFeedbackTimerRef.current);
+    }
+    mobileCopyFeedbackTimerRef.current = window.setTimeout(() => {
+      mobileCopyFeedbackTimerRef.current = null;
+      setMobileCopyFeedback('idle');
+    }, 1200);
+  }, []);
+  const handleMobileLongPressCopyResult = React.useCallback((ok: boolean) => {
+    if (mobileCopyFeedbackTimerRef.current !== null && typeof window !== 'undefined') {
+      window.clearTimeout(mobileCopyFeedbackTimerRef.current);
+      mobileCopyFeedbackTimerRef.current = null;
+    }
+    setMobileCopyFeedback(ok ? 'copied' : 'failed');
+    resetMobileCopyFeedbackSoon();
+  }, [resetMobileCopyFeedbackSoon]);
   const handleExpandedChange = React.useCallback((nextExpanded: boolean) => {
     setShowExtendedKeyboard(nextExpanded);
   }, []);
@@ -1754,6 +1787,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 handleViewportInput('\t', { skipModifierTransform: true });
               } : undefined}
               onInputFocusChange={handleInputFocusChange}
+              onMobileLongPressCopyResult={handleMobileLongPressCopyResult}
               terminalSettings={effectiveTerminalSettings}
               theme={xtermTheme}
               enableTouchScroll={isMobile}
@@ -1791,6 +1825,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         onKeyPress={handleMobileKeyPress}
         onTextPress={handleToolbarTextPress}
         longPressMode={mobileLongPressMode}
+        copyFeedback={mobileCopyFeedback}
         onLongPressModeToggle={handleLongPressModeToggle}
         onModifierToggle={handleModifierToggle}
         onPresetSelect={handlePresetSelect}
