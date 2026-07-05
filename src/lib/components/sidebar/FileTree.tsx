@@ -11,9 +11,10 @@ import {
   PinOff as RiPinOff,
   MoreHorizontal as RiMoreHorizontal,
   Link2 as RiLink,
+  Download as RiDownload,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
-import { listDirectory, searchFilesStream, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
+import { listDirectory, searchFilesStream, downloadFile, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 
@@ -82,6 +83,53 @@ function iconActionVisibilityClass(visible: boolean): string {
 function textActionVisibilityClass(visible: boolean): string {
   if (visible) return 'ml-1 min-w-8 px-2 opacity-100';
   return 'ml-1 min-w-8 px-2 opacity-100 sm:ml-0 sm:w-0 sm:min-w-0 sm:overflow-hidden sm:px-0 sm:opacity-0 sm:group-hover:ml-1 sm:group-hover:w-auto sm:group-hover:min-w-8 sm:group-hover:px-2 sm:group-hover:opacity-100';
+}
+
+const FileDownloadAction = memo(function FileDownloadAction({ path }: { path: string }) {
+  const { t } = useI18n();
+  const [status, setStatus] = useState<'idle' | 'pending' | 'error'>('idle');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const handleClick = useCallback(async (event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (status === 'pending') return;
+    setStatus('pending');
+    setErrorMsg(null);
+    try {
+      await downloadFile(path);
+      setStatus('idle');
+    } catch (err) {
+      setStatus('error');
+      setErrorMsg(err instanceof Error ? err.message : t('rightSidebar.downloadFailed'));
+    }
+  }, [path, status, t]);
+
+  return (
+    <span
+      role="button"
+      tabIndex={-1}
+      onClick={(e) => void handleClick(e)}
+      className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(status === 'pending')} ${status === 'pending' ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+      title={status === 'error' ? errorMsg ?? t('rightSidebar.downloadFailed') : t('rightSidebar.downloadFile')}
+    >
+      {status === 'pending' ? <RiLoader size={12} className="animate-spin" /> : <RiDownload size={12} />}
+    </span>
+  );
+});
+
+function useFileDownloadAction() {
+  const { t } = useI18n();
+  const [state, setState] = useState<{ status: 'idle' | 'pending' | 'error'; message?: string }>({ status: 'idle' });
+  const run = useCallback(async (path: string) => {
+    setState({ status: 'pending' });
+    try {
+      await downloadFile(path);
+      setState({ status: 'idle' });
+    } catch (err) {
+      setState({ status: 'error', message: err instanceof Error ? err.message : t('rightSidebar.downloadFailed') });
+    }
+  }, [t]);
+  return { state, run };
 }
 
 function isAbortError(error: unknown): boolean {
@@ -165,7 +213,7 @@ const FileTreeItem = memo(function FileTreeItem({
   const toggleExpanded = useSidebarStore((s) => s.toggleExpanded);
   const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
   const [loading, setLoading] = useState(false);
-  const [directoryActionsOpen, setDirectoryActionsOpen] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const loadAbortRef = useRef<AbortController | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const isSelected = node.path === selectedFilePath;
@@ -178,6 +226,7 @@ const FileTreeItem = memo(function FileTreeItem({
   const referenceCopied = copiedReferenceKey === referenceKey;
   const referenceText = getReferenceText?.(node.path) ?? node.path;
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
+  const { state: fileDownloadState, run: runFileDownload } = useFileDownloadAction();
 
   const visibleChildren = useMemo(() => {
     if (!children) return undefined;
@@ -235,34 +284,41 @@ const FileTreeItem = memo(function FileTreeItem({
   const handleDirectoryRootClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     onDirectoryRoot?.(node.path);
-    setDirectoryActionsOpen(false);
+    setActionsOpen(false);
   }, [node.path, onDirectoryRoot]);
 
   const handleDirectoryPinClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     onDirectoryPinToggle?.(node.path);
-    setDirectoryActionsOpen(false);
+    setActionsOpen(false);
   }, [node.path, onDirectoryPinToggle]);
 
   const handleFilePinClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     onFilePinToggle?.(node.path);
+    setActionsOpen(false);
   }, [node.path, onFilePinToggle]);
+
+  const handleFileDownload = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    setActionsOpen(false);
+    void runFileDownload(node.path);
+  }, [node.path, runFileDownload]);
 
   const handleDirectoryMoreClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
-    setDirectoryActionsOpen((open) => !open);
+    setActionsOpen((open) => !open);
   }, []);
 
   useEffect(() => {
-    if (!directoryActionsOpen) return;
+    if (!actionsOpen) return;
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (target instanceof Node && actionMenuRef.current?.contains(target)) return;
-      setDirectoryActionsOpen(false);
+      setActionsOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setDirectoryActionsOpen(false);
+      if (event.key === 'Escape') setActionsOpen(false);
     };
     document.addEventListener('pointerdown', closeOnPointerDown);
     document.addEventListener('keydown', closeOnEscape);
@@ -270,7 +326,7 @@ const FileTreeItem = memo(function FileTreeItem({
       document.removeEventListener('pointerdown', closeOnPointerDown);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [directoryActionsOpen]);
+  }, [actionsOpen]);
 
   useEffect(() => () => {
     loadAbortRef.current?.abort();
@@ -325,19 +381,19 @@ const FileTreeItem = memo(function FileTreeItem({
         {node.type === 'directory' && (onDirectoryRoot || onDirectoryPinToggle) && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(directoryActionsOpen)} ${directoryActionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
           </span>
         )}
-        {canPinFile && (
+        {!isDirectory && (
           <span
-            onClick={handleFilePinClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full transition active:scale-95 ${iconActionVisibilityClass(isPinned)} ${isPinned ? 'bg-primary/15 text-primary' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
-            title={isPinned ? t('fileTree.unpinFileTitle') : t('fileTree.pinFileTitle')}
+            onClick={handleDirectoryMoreClick}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            title={fileDownloadState.status === 'error' ? fileDownloadState.message ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
           >
-            {isPinned ? <RiPinOff size={12} /> : <RiPin size={12} />}
+            {fileDownloadState.status === 'pending' ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
           </span>
         )}
         {onPathReference && (
@@ -352,7 +408,7 @@ const FileTreeItem = memo(function FileTreeItem({
         )}
       </div>
 
-      {node.type === 'directory' && directoryActionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
+      {node.type === 'directory' && actionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
         <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {onDirectoryRoot && (
             <button
@@ -374,6 +430,31 @@ const FileTreeItem = memo(function FileTreeItem({
             >
               {isPinned ? <RiPinOff size={13} className="shrink-0" /> : <RiPin size={13} className="shrink-0" />}
               <span className="min-w-0 flex-1 truncate">{isPinned ? t('fileTree.unpinDir') : t('fileTree.pinDir')}</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {!isDirectory && actionsOpen && (
+        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+          <button
+            type="button"
+            onClick={handleFileDownload}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
+            title={t('rightSidebar.downloadFile')}
+          >
+            <RiDownload size={13} className="shrink-0" />
+            <span className="min-w-0 flex-1 truncate">{t('rightSidebar.downloadFile')}</span>
+          </button>
+          {canPinFile && (
+            <button
+              type="button"
+              onClick={handleFilePinClick}
+              className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium transition active:scale-[0.99] ${isPinned ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}
+              title={isPinned ? t('fileTree.unpinFileTitle') : t('fileTree.pinFileTitle')}
+            >
+              {isPinned ? <RiPinOff size={13} className="shrink-0" /> : <RiPin size={13} className="shrink-0" />}
+              <span className="min-w-0 flex-1 truncate">{isPinned ? t('fileTree.unpinFile') : t('fileTree.pinFile')}</span>
             </button>
           )}
         </div>
@@ -447,7 +528,8 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const referenceCopied = copiedReferenceKey === referenceKey;
   const referenceText = getReferenceText?.(node.path) ?? node.path;
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
-  const [directoryActionsOpen, setDirectoryActionsOpen] = useState(false);
+  const { state: fileDownloadState, run: runFileDownload } = useFileDownloadAction();
+  const [actionsOpen, setActionsOpen] = useState(false);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
 
   const handleClick = useCallback(() => {
@@ -464,28 +546,35 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const handleDirectoryPinClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     onDirectoryPinToggle?.(node.path);
-    setDirectoryActionsOpen(false);
+    setActionsOpen(false);
   }, [node.path, onDirectoryPinToggle]);
 
   const handleFilePinClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     onFilePinToggle?.(node.path);
+    setActionsOpen(false);
   }, [node.path, onFilePinToggle]);
+
+  const handleFileDownload = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    setActionsOpen(false);
+    void runFileDownload(node.path);
+  }, [node.path, runFileDownload]);
 
   const handleDirectoryMoreClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
-    setDirectoryActionsOpen((open) => !open);
+    setActionsOpen((open) => !open);
   }, []);
 
   useEffect(() => {
-    if (!directoryActionsOpen) return;
+    if (!actionsOpen) return;
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (target instanceof Node && actionMenuRef.current?.contains(target)) return;
-      setDirectoryActionsOpen(false);
+      setActionsOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setDirectoryActionsOpen(false);
+      if (event.key === 'Escape') setActionsOpen(false);
     };
     document.addEventListener('pointerdown', closeOnPointerDown);
     document.addEventListener('keydown', closeOnEscape);
@@ -493,7 +582,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
       document.removeEventListener('pointerdown', closeOnPointerDown);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [directoryActionsOpen]);
+  }, [actionsOpen]);
 
   return (
     <div ref={actionMenuRef} className="relative">
@@ -540,19 +629,19 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {node.type === 'directory' && onDirectoryPinToggle && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(directoryActionsOpen)} ${directoryActionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={t('fileTree.moreDirActions')}
           >
             <RiMoreHorizontal size={13} />
           </span>
         )}
-        {canPinFile && (
+        {!isDirectory && (
           <span
-            onClick={handleFilePinClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full transition active:scale-95 ${iconActionVisibilityClass(isPinned)} ${isPinned ? 'bg-primary/15 text-primary' : 'text-muted-foreground bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
-            title={isPinned ? t('fileTree.unpinFileTitle') : t('fileTree.pinFileTitle')}
+            onClick={handleDirectoryMoreClick}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            title={fileDownloadState.status === 'error' ? fileDownloadState.message ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
           >
-            {isPinned ? <RiPinOff size={12} /> : <RiPin size={12} />}
+            {fileDownloadState.status === 'pending' ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
           </span>
         )}
         {onPathReference && (
@@ -566,7 +655,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           </span>
         )}
       </div>
-      {node.type === 'directory' && directoryActionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
+      {node.type === 'directory' && actionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
         <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {onDirectoryRoot && (
             <button
@@ -574,7 +663,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
               onClick={(event) => {
                 event.stopPropagation();
                 onDirectoryRoot(node.path);
-                setDirectoryActionsOpen(false);
+                setActionsOpen(false);
               }}
               className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
               title={t('fileTree.openDirRootTitle')}
@@ -592,6 +681,31 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
             {isPinned ? <RiPinOff size={13} className="shrink-0" /> : <RiPin size={13} className="shrink-0" />}
             <span className="min-w-0 flex-1 truncate">{isPinned ? t('fileTree.unpinDir') : t('fileTree.pinDir')}</span>
           </button>
+        </div>
+      )}
+
+      {!isDirectory && actionsOpen && (
+        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+          <button
+            type="button"
+            onClick={handleFileDownload}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
+            title={t('rightSidebar.downloadFile')}
+          >
+            <RiDownload size={13} className="shrink-0" />
+            <span className="min-w-0 flex-1 truncate">{t('rightSidebar.downloadFile')}</span>
+          </button>
+          {canPinFile && (
+            <button
+              type="button"
+              onClick={handleFilePinClick}
+              className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium transition active:scale-[0.99] ${isPinned ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}
+              title={isPinned ? t('fileTree.unpinFileTitle') : t('fileTree.pinFileTitle')}
+            >
+              {isPinned ? <RiPinOff size={13} className="shrink-0" /> : <RiPin size={13} className="shrink-0" />}
+              <span className="min-w-0 flex-1 truncate">{isPinned ? t('fileTree.unpinFile') : t('fileTree.pinFile')}</span>
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -687,6 +801,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
           <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, entry.path)}</span>
         </span>
         <span className="shrink-0 select-none rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.matches.length}</span>
+        <FileDownloadAction path={entry.path} />
         {onPathReference && (
           <span
             onClick={(event) => {

@@ -16,6 +16,7 @@ import {
   Search as RiSearch,
   FileText as RiFileText,
   Copy as RiCopy,
+  Download as RiDownload,
   RefreshCw as RiRefresh,
   GitBranch as RiGitBranch,
   Loader2 as RiLoader,
@@ -30,7 +31,7 @@ import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { DiffViewer, preloadSidebarDiff } from './DiffViewer';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { getGitBundle, getGitContext, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitRepositoryBundle, type FileSearchMode } from '../../terminal/api';
+import { getGitBundle, getGitContext, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitRepositoryBundle, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, refractorNodesToReact, type RefractorLike } from '../../utils/syntaxHighlight';
@@ -2897,6 +2898,7 @@ type FilePreviewState =
   | { kind: 'loading'; mode: 'text' | 'image' }
   | { kind: 'text'; content: string; meta: { size: number; truncated?: boolean } }
   | { kind: 'image'; objectUrl: string; meta: { size: number | null; mimeType: string; modified: string | null }; dimensions?: { width: number; height: number } }
+  | { kind: 'binary' }
   | { kind: 'error'; message: string };
 
 function FilePreview({
@@ -2936,6 +2938,7 @@ function FilePreview({
   // content. `null` means "render plain text" (unknown language, too large, or
   // refractor not loaded yet).
   const [highlightedLines, setHighlightedLines] = useState<ReactNode[][] | null>(null);
+  const [downloadState, setDownloadState] = useState<{ status: 'idle' | 'pending' | 'error'; message?: string }>({ status: 'idle' });
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
 
   const readingStateKey = getFilePreviewReadingStateKey(rootPath, filePath);
@@ -2973,6 +2976,7 @@ function FilePreview({
     lastFullPathRef.current = fullPath;
 
     if (isPathChange) {
+      setDownloadState({ status: 'idle' });
       setPreviewState({ kind: 'loading', mode: isImage ? 'image' : 'text' });
       restoredReadingStateKeyRef.current = null;
       const savedReadingState = readFilePreviewReadingState(rootPath, filePath);
@@ -2997,6 +3001,10 @@ function FilePreview({
     } else {
       readFileContent(fullPath, controller.signal)
         .then((result) => {
+          if (result.binary) {
+            setPreviewState({ kind: 'binary' });
+            return;
+          }
           setPreviewState({ kind: 'text', content: result.content, meta: { size: result.size, truncated: result.truncated } });
         })
         .catch((err) => {
@@ -3237,6 +3245,18 @@ function FilePreview({
     onInsertReference(`${readablePath}:${suffix}`, lineReferenceKey);
   };
 
+  const handleDownload = async () => {
+    if (!readablePath || downloadState.status === 'pending') return;
+    if (previewState.kind === 'loading' || previewState.kind === 'error') return;
+    setDownloadState({ status: 'pending' });
+    try {
+      await downloadFile(readablePath);
+      setDownloadState({ status: 'idle' });
+    } catch (err) {
+      setDownloadState({ status: 'error', message: err instanceof Error ? err.message : t('rightSidebar.downloadFailed') });
+    }
+  };
+
   return (
     // The container is a flex column that fills the panel. The middle scroller
     // is `min-h-0 flex-1` so the bottom action bar can stick to the visible
@@ -3305,6 +3325,16 @@ function FilePreview({
             >
               <RiCopy size={13} />
             </button>
+            <button
+              type="button"
+              onClick={() => void handleDownload()}
+              disabled={downloadState.status === 'pending' || previewState.kind === 'loading' || previewState.kind === 'error'}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 disabled:opacity-50 disabled:active:scale-100"
+              title={downloadState.status === 'error' ? downloadState.message ?? t('rightSidebar.downloadFailed') : t('rightSidebar.downloadFile')}
+              aria-label={t('rightSidebar.downloadFile')}
+            >
+              {downloadState.status === 'pending' ? <RiLoader size={13} className="animate-spin" /> : <RiDownload size={14} />}
+            </button>
           </div>
         </div>
         {meta && !(isMobile && showMarkdownPreview) && (
@@ -3317,7 +3347,7 @@ function FilePreview({
         )}
         {/* Hint row — fixed height so toggling line range doesn't shift the
             file content below. */}
-        {!(isMobile && showMarkdownPreview) && <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
+        {!(isMobile && showMarkdownPreview) && previewState.kind !== 'binary' && <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
           <span className="truncate">
             {isImagePreview
               ? t('rightSidebar.imagePreviewHint')
@@ -3336,6 +3366,12 @@ function FilePreview({
       ) : previewState.kind === 'error' ? (
         <div className="min-h-0 flex-1 overflow-auto">
           <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">{previewState.message}</div>
+        </div>
+      ) : previewState.kind === 'binary' ? (
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-3 mt-3 rounded-xl border border-border/15 bg-surface-2 px-4 py-6 text-center text-sm text-muted-foreground">
+            {t('rightSidebar.binaryPreviewHint')}
+          </div>
         </div>
       ) : previewState.kind === 'image' ? (
         <div className="min-h-0 flex-1 overflow-hidden bg-surface p-3" data-sidebar-gesture-ignore>

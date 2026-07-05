@@ -1474,7 +1474,7 @@ export async function watchFileSystem(
 }
 
 export async function readFileContent(filePath: string, signal?: AbortSignal): Promise<{
-  path: string; content: string; size: number; modified: string; truncated?: boolean;
+  path: string; content: string; size: number; modified: string; truncated?: boolean; binary?: boolean;
 }> {
   const response = await fetch(`/api/terminal/fs/read?path=${encodeURIComponent(filePath)}`, { signal });
   if (!response.ok) {
@@ -1500,6 +1500,67 @@ export async function readImagePreviewBlob(filePath: string, signal?: AbortSigna
     modified: response.headers.get('Last-Modified'),
     mimeType: response.headers.get('Content-Type') || blob.type || getImageMimeTypeForPath(filePath) || 'application/octet-stream',
   };
+}
+
+// Download a file to the user's device. Works in both PWA (standalone) and
+// normal browser tabs:
+//   1. File System Access API (showSaveFilePicker) — available in desktop
+//      Chromium browsers and installed desktop PWAs; shows a native save
+//      dialog and writes the blob to the chosen location.
+//   2. <a download> blob URL fallback — used everywhere else (Firefox, Safari,
+//      iOS PWA). Triggers the browser's native download in a normal tab, and
+//      opens/shares the blob inside iOS standalone PWAs.
+export async function downloadFile(filePath: string): Promise<void> {
+  const url = `/api/terminal/fs/download?path=${encodeURIComponent(filePath)}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to download file' }));
+    throw new Error(error.error || 'Failed to download file');
+  }
+
+  const blob = await response.blob();
+  const filename = parseFilenameFromContentDisposition(response.headers.get('Content-Disposition') || '')
+    ?? filePath.split('/').pop()?.split('\\').pop()
+    ?? 'download';
+
+  // Prefer the File System Access API when available.
+  const showSaveFilePicker = (window as unknown as {
+    showSaveFilePicker?: (options: { suggestedName?: string }) => Promise<{
+      createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+    }>;
+  }).showSaveFilePicker;
+  if (typeof showSaveFilePicker === 'function') {
+    try {
+      const handle = await showSaveFilePicker({ suggestedName: filename });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      // otherwise fall through to the <a download> path
+    }
+  }
+
+  // Fallback: anchor + blob URL.
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  anchor.rel = 'noopener';
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+    anchor.remove();
+  }, 4000);
+}
+
+function parseFilenameFromContentDisposition(disposition: string): string | null {
+  if (!disposition) return null;
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
 export interface FileDiffSkippedFile {
