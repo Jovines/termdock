@@ -13,7 +13,7 @@ import {
   Link2 as RiLink,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
-import { listDirectory, searchFilesStream, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, listDirectory, searchFilesStream, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 
@@ -191,12 +191,14 @@ const FileTreeItem = memo(function FileTreeItem({
   const loadChildren = useCallback(async () => {
     const cached = useSidebarStore.getState().directoryCache.has(node.path);
     if (!cached && !loading) {
+      const requestSlotId = `file-tree:${node.path}`;
       loadAbortRef.current?.abort();
+      cancelIoSlot(requestSlotId);
       const controller = new AbortController();
       loadAbortRef.current = controller;
       setLoading(true);
       try {
-        const result = await listDirectory(node.path, controller.signal, showHiddenFiles);
+        const result = await listDirectory(node.path, controller.signal, showHiddenFiles, 'expand_directory', requestSlotId);
         const treeNodes = toTreeNodes(result.entries);
         setDirectoryCache(node.path, treeNodes);
       } catch (error) {
@@ -772,7 +774,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
     setLoading(true);
     setError(null);
 
-    listDirectory(rootPath, controller.signal, showHiddenFiles)
+    listDirectory(rootPath, controller.signal, showHiddenFiles, 'load_file_tree_root', `file-tree-root:${rootPath}`)
       .then((result) => {
         if (cancelled) return;
         const treeNodes = toTreeNodes(result.entries);
@@ -790,6 +792,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
     return () => {
       cancelled = true;
       controller.abort();
+      cancelIoSlot(`file-tree-root:${rootPath}`);
     };
   }, [queryLower, rootEntries, rootPath, setDirectoryCache, showHiddenFiles]);
 
@@ -813,6 +816,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
     setVisibleSearchCount(isContentMode ? SEARCH_INITIAL_VISIBLE_CONTENT : SEARCH_INITIAL_VISIBLE);
     setSearchMeta({ truncated: false, total: 0, engine: 'rg', limited: false, done: false });
 
+    const requestSlotId = `file-search:${rootPath}`;
     searchFilesStream(rootPath, query.trim(), (progress) => {
       if (cancelled) return;
       if (progress.engine) {
@@ -855,7 +859,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
           done: true,
         }));
       }
-    }, controller.signal, showHiddenFiles, searchMode)
+    }, controller.signal, showHiddenFiles, searchMode, requestSlotId)
       .catch((err) => {
         if (cancelled || isAbortError(err)) return;
         setSearchError(err instanceof Error ? err.message : 'Failed to search files');
@@ -870,6 +874,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
     return () => {
       cancelled = true;
       controller.abort();
+      cancelIoSlot(requestSlotId);
     };
   }, [query, queryLower, rootPath, showHiddenFiles, searchMode, isContentMode]);
 

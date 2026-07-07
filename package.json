@@ -27,6 +27,8 @@
     "preview": "vite preview",
     "start": "node dist/server/cli.js",
     "lint": "tsc --noEmit",
+    "trace:diff": "node scripts/inspect-diff-trace.mjs",
+    "trace:fsio": "node scripts/inspect-fs-io.mjs",
     "test": "vitest --passWithNoTests",
     "test:ui": "vitest --ui",
     "prepublishOnly": "npm run build"

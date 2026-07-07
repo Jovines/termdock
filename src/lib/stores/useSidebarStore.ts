@@ -63,6 +63,7 @@ interface ProjectSidebarState {
   changedFiles: Map<string, GitChangedFile>;
   gitBundleError: string | null;
   gitBundleLastLoadedAt: number | null;
+  gitBundleCacheInfo?: { cached?: boolean; stale?: boolean; cacheAgeMs?: number; nestedDeferred?: boolean; untrackedDeferred?: boolean } | null;
 }
 
 function isRightSidebarTab(value: unknown): value is RightSidebarTab {
@@ -245,6 +246,7 @@ interface SidebarState {
   gitBundleSlow: boolean;
   gitBundleError: string | null;
   gitBundleLastLoadedAt: number | null;
+  gitBundleCacheInfo: { cached?: boolean; stale?: boolean; cacheAgeMs?: number; nestedDeferred?: boolean; untrackedDeferred?: boolean } | null;
   projectStateCache: Map<string, ProjectSidebarState>;
 
   // Actions
@@ -277,7 +279,7 @@ interface SidebarState {
   setGitBundleLoading: (loading: boolean) => void;
   setGitBundleSlow: (slow: boolean) => void;
   setGitBundleError: (error: string | null) => void;
-  markGitBundleLoaded: () => void;
+  markGitBundleLoaded: (info?: { cached?: boolean; stale?: boolean; cacheAgeMs?: number; nestedDeferred?: boolean; untrackedDeferred?: boolean } | null) => void;
 }
 
 export const useSidebarStore = create<SidebarState>((set) => ({
@@ -301,6 +303,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   gitBundleSlow: false,
   gitBundleError: null,
   gitBundleLastLoadedAt: null,
+  gitBundleCacheInfo: null,
   projectStateCache: new Map(),
 
   openLeft: () => set({ leftOpen: true }),
@@ -542,5 +545,5 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   setGitBundleLoading: (loading) => set({ gitBundleLoading: loading }),
   setGitBundleSlow: (slow) => set({ gitBundleSlow: slow }),
   setGitBundleError: (error) => set({ gitBundleError: error }),
-  markGitBundleLoaded: () => set({ gitBundleLastLoadedAt: Date.now(), gitBundleLoading: false, gitBundleSlow: false }),
+  markGitBundleLoaded: (info = null) => set({ gitBundleLastLoadedAt: Date.now(), gitBundleCacheInfo: info, gitBundleLoading: false, gitBundleSlow: false }),
 }));

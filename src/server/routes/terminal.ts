@@ -1589,8 +1589,12 @@ async function configureTmuxWheelBindings(): Promise<void> {
   await runTmux(['bind-key', '-n', 'WheelUpPane', upCmd]);
   await runTmux(['bind-key', '-n', 'WheelDownPane', downCmd]);
   await runTmux([
+    'bind-key', '-n', 'MouseDown1Pane',
+    "select-pane -t= ; set-option -p -F @termdock-mouse-down-x '#{mouse_x}' ; set-option -p -F @termdock-mouse-down-y '#{mouse_y}' ; if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' 'send-keys -M'",
+  ]);
+  await runTmux([
     'bind-key', '-n', 'MouseDrag1Pane',
-    "if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M }",
+    "if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' 'send-keys -M' 'if-shell -F \"#{||:#{e|>=:#{e|-:#{mouse_x},#{@termdock-mouse-down-x}},1},#{e|>=:#{e|-:#{@termdock-mouse-down-x},#{mouse_x}},1},#{e|>=:#{e|-:#{mouse_y},#{@termdock-mouse-down-y}},1},#{e|>=:#{e|-:#{@termdock-mouse-down-y},#{mouse_y}},1}}\" \"copy-mode -M\"'",
   ]);
 
   // tmux defaults MouseDragEnd1Pane in copy-mode to copy-pipe-and-cancel:

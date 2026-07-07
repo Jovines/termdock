@@ -27,16 +27,34 @@ import {
 import { getCookieSecurityOptions, setSecureCookieMode } from './utils/cookieSecurity.js';
 import { startOnboardingServer, stopOnboardingServer, getOnboardingServerUrl } from './onboardingServer.js';
 import { CertificateWatcher } from './certificateWatcher.js';
+import { writeDiffTraceLog, writeErrorLog, writeJsonLog, writeTextLog } from './utils/serverLogger.js';
 
 import { PORT, DEFAULT_HOST } from './config.js';
 
 const CLIENT_STATE_COOKIE = 'termdock-client';
 export const DEFAULT_PORT = PORT.backend;
+const CLIENT_LOG_DEDUP_WINDOW_MS = 5_000;
+const CLIENT_LOG_RATE_WINDOW_MS = 10_000;
+const CLIENT_LOG_RATE_LIMIT = 120;
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDirPath = path.dirname(currentFilePath);
 const clientDistPath = path.resolve(currentDirPath, '../client');
 const clientIndexPath = path.join(clientDistPath, 'index.html');
+const clientLogRecent = new Map<string, number>();
+let clientLogWindowStartedAt = 0;
+let clientLogWindowCount = 0;
+let clientLogSuppressedCount = 0;
+
+function getRouteFamily(pathname: string): string {
+  if (pathname.startsWith('/api/terminal/fs/')) return 'fs';
+  if (pathname.startsWith('/api/terminal/')) return 'terminal';
+  if (pathname.startsWith('/api/auth')) return 'auth';
+  if (pathname.startsWith('/api/client-log')) return 'client-log';
+  if (pathname === '/health') return 'health';
+  if (pathname.startsWith('/assets/')) return 'asset';
+  return 'page';
+}
 
 export interface CertificateRefreshResult {
   reloaded: boolean;
@@ -65,6 +83,64 @@ export interface AppOptions {
   httpsCaPath?: string;
 }
 
+function shouldWriteClientLog(level: unknown, message: unknown): boolean {
+  const now = Date.now();
+  const importantClientLog = typeof message === 'string' && (
+    message.startsWith('DIFF_VIEWER ')
+    || message.startsWith('DIFF_LOADING ')
+    || message.startsWith('FILE_PREVIEW_LOADING ')
+    || message.startsWith('GIT_BUNDLE ')
+    || message.startsWith('DIFF_INTERACTION ')
+    || message.startsWith('DIFF_API ')
+  );
+  if (!clientLogWindowStartedAt || now - clientLogWindowStartedAt > CLIENT_LOG_RATE_WINDOW_MS) {
+    if (clientLogSuppressedCount > 0) {
+      writeTextLog('client.log', `[client-log ${new Date().toISOString()}] [warn] suppressed ${clientLogSuppressedCount} noisy client log(s)`);
+    }
+    clientLogWindowStartedAt = now;
+    clientLogWindowCount = 0;
+    clientLogSuppressedCount = 0;
+    clientLogRecent.clear();
+  }
+
+  if (importantClientLog) {
+    return true;
+  }
+
+  clientLogWindowCount += 1;
+  if (clientLogWindowCount > CLIENT_LOG_RATE_LIMIT) {
+    clientLogSuppressedCount += 1;
+    return false;
+  }
+
+  const key = `${String(level ?? 'info')}\u0000${String(message ?? '')}`;
+  const last = clientLogRecent.get(key);
+  if (last && now - last < CLIENT_LOG_DEDUP_WINDOW_MS) {
+    clientLogSuppressedCount += 1;
+    return false;
+  }
+  clientLogRecent.set(key, now);
+  return true;
+}
+
+function getDiffTraceSource(message: unknown): string | null {
+  if (typeof message !== 'string') return null;
+  if (message.startsWith('DIFF_INTERACTION ')) return 'client.interaction';
+  if (message.startsWith('DIFF_LOADING ')) return 'client.loading';
+  if (message.startsWith('DIFF_VIEWER ')) return 'client.viewer';
+  if (message.startsWith('DIFF_API ')) return 'client.api';
+  if (message.startsWith('FILE_PREVIEW_LOADING ')) return 'client.file-preview';
+  if (message.startsWith('GIT_BUNDLE ')) return 'client.git-bundle';
+  return null;
+}
+
+function getDiffTraceEvent(message: unknown): string | null {
+  if (typeof message !== 'string') return null;
+  const spaceIndex = message.indexOf(' ');
+  if (spaceIndex < 0) return message;
+  return message.slice(spaceIndex + 1);
+}
+
 // 静态资源压缩中间件（零依赖，用 Node 内置 zlib）。
 // 动机：跨城/弱网首刷（或 PWA SW 更新后）要下载未压缩的 JS/CSS bundle，
 // express.static 默认不压缩。这里对文本类资源做 br/gzip 压缩，跨城下能把
@@ -89,6 +165,33 @@ const CONTENT_TYPE_BY_EXT: Record<string, string> = {
   '.map': 'application/json; charset=utf-8',
   '.txt': 'text/plain; charset=utf-8',
 };
+
+function setStaticCacheHeaders(req: express.Request, res: express.Response): void {
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+  } catch {
+    pathname = req.path || req.url || '';
+  }
+
+  if (
+    pathname === '/'
+    || pathname.endsWith('/index.html')
+    || pathname === '/sw.js'
+    || pathname === '/registerSW.js'
+    || pathname === '/manifest.webmanifest'
+  ) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return;
+  }
+
+  if (pathname.startsWith('/assets/')) {
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  }
+}
+
 function createStaticCompressionMiddleware(rootDir: string): express.RequestHandler {
   const resolvedRoot = path.resolve(rootDir);
   const cache = new Map<string, { encoding: 'br' | 'gzip'; body: Buffer; mtimeMs: number }>();
@@ -148,6 +251,7 @@ function createStaticCompressionMiddleware(rootDir: string): express.RequestHand
     res.setHeader('Vary', 'Accept-Encoding');
     const type = CONTENT_TYPE_BY_EXT[ext];
     if (type) res.setHeader('Content-Type', type);
+    setStaticCacheHeaders(req, res);
     res.setHeader('Content-Length', entry.body.length);
     if (req.method === 'HEAD') {
       res.end();
@@ -186,6 +290,63 @@ export function createApp(options: AppOptions = {}): express.Express {
     next();
   });
 
+  app.use((req, res, next) => {
+    const startedAt = process.hrtime.bigint();
+    const pathname = (() => {
+      try {
+        return new URL(req.originalUrl || req.url, 'http://localhost').pathname;
+      } catch {
+        return req.path || req.url || '';
+      }
+    })();
+    const routeFamily = getRouteFamily(pathname);
+    let logged = false;
+    const log = (event: 'finish' | 'close') => {
+      if (logged) return;
+      logged = true;
+      const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      writeJsonLog('access.log', {
+        event,
+        method: req.method,
+        path: pathname,
+        routeFamily,
+        statusCode: res.statusCode,
+        durationMs: Math.round(durationMs * 100) / 100,
+        contentLength: res.getHeader('Content-Length') ?? null,
+        clientId: req.clientId,
+        closedBeforeFinish: event === 'close' && !res.writableEnded,
+      });
+      if (res.statusCode >= 400 || (event === 'close' && !res.writableEnded)) {
+        writeErrorLog({
+          source: 'access',
+          event,
+          method: req.method,
+          path: pathname,
+          routeFamily,
+          statusCode: res.statusCode,
+          durationMs: Math.round(durationMs * 100) / 100,
+          clientId: req.clientId,
+          closedBeforeFinish: event === 'close' && !res.writableEnded,
+        });
+      }
+    };
+    res.on('finish', () => log('finish'));
+    res.on('close', () => {
+      if (!res.writableEnded) log('close');
+    });
+    next();
+  });
+
+  app.use('/api', (req, res, next) => {
+    // JSON/API responses must never hit browser conditional caching. A 304 with
+    // an empty body breaks fetch().json() callers and looks like random IO
+    // failures in the sidebar.
+    delete req.headers['if-none-match'];
+    delete req.headers['if-modified-since'];
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
+
   // 安全中间件：CSRF令牌生成（在所有路由之前）
   app.use(csrfProtection.tokenMiddleware());
 
@@ -205,9 +366,28 @@ export function createApp(options: AppOptions = {}): express.Express {
   // on the server, critical for debugging mobile Safari / PWA issues.
   app.post('/api/client-log', (req, res) => {
     const { level, message, data } = req.body ?? {};
+    if (!shouldWriteClientLog(level, message)) {
+      res.json({ ok: true, suppressed: true });
+      return;
+    }
     const ts = new Date().toISOString();
     const line = `[client-log ${ts}] [${level ?? 'info'}] ${message ?? ''} ${data ? JSON.stringify(data) : ''}`;
-    console.log(line);
+    writeTextLog('client.log', line);
+    const diffTraceSource = getDiffTraceSource(message);
+    if (diffTraceSource) {
+      writeDiffTraceLog({
+        source: diffTraceSource,
+        event: getDiffTraceEvent(message),
+        level: level ?? 'info',
+        traceId: data?.traceId,
+        interactionId: data?.interactionId,
+        filePath: data?.filePath ?? data?.selectedFilePath ?? data?.requestedPath,
+        requestPath: data?.requestPath,
+        cwd: data?.cwd,
+        gitRoot: data?.gitRoot,
+        data,
+      });
+    }
     res.json({ ok: true });
   });
 
@@ -250,8 +430,15 @@ export function createApp(options: AppOptions = {}): express.Express {
 
   if (fs.existsSync(clientIndexPath)) {
     app.use(createStaticCompressionMiddleware(clientDistPath));
-    app.use(express.static(clientDistPath));
-    app.get(/^(?!\/api(?:\/|$)|\/health$|\/onboarding(?:\/|$)|\/ca(?:\/|$)).*/, (_req, res) => {
+    app.use(express.static(clientDistPath, {
+      setHeaders: (res, filePath, stat) => {
+        void stat;
+        const relativePath = `/${path.relative(clientDistPath, filePath).split(path.sep).join('/')}`;
+        setStaticCacheHeaders({ url: relativePath, path: relativePath } as express.Request, res);
+      },
+    }));
+    app.get(/^(?!\/api(?:\/|$)|\/health$|\/onboarding(?:\/|$)|\/ca(?:\/|$)).*/, (req, res) => {
+      setStaticCacheHeaders(req, res);
       res.sendFile(clientIndexPath);
     });
   }

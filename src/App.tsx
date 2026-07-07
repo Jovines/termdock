@@ -32,7 +32,7 @@ import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, getProgramRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
 import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import {
@@ -222,6 +222,7 @@ const HISTORY_BASE_ANCHOR_STATE_KEY = '__termdockBaseAnchor';
 const HISTORY_BASE_GUARD_STATE_KEY = '__termdockBaseGuard';
 const BASE_HISTORY_GUARD_BUFFER_SIZE = 3;
 const BASE_HISTORY_GUARD_REARM_DELAY_MS = 250;
+const HISTORY_GUARD_DEBUG_ENABLED = false;
 type HistoryOverlay =
   | 'left-sidebar'
   | 'right-sidebar'
@@ -232,6 +233,7 @@ type HistoryOverlay =
   | 'markdown-image-lightbox';
 
 function reportHistoryGuardDebug(message: string, data: Record<string, unknown> = {}): void {
+  if (!HISTORY_GUARD_DEBUG_ENABLED) return;
   if (typeof window === 'undefined') return;
   const payload = JSON.stringify({
     level: 'info',
@@ -1280,13 +1282,7 @@ function App() {
   ]);
 
   useEffect(() => {
-    getProgramRules()
-      .then((rules) => {
-        writeCache(PROGRAM_RULES_CACHE_KEY, rules);
-        setProgramRules((current) => (shallowJsonEqual(current, rules) ? current : rules));
-        setProgramRulesLoaded(true);
-      })
-      .catch(() => { /* use empty state */ });
+    setProgramRulesLoaded(true);
   }, []);
 
   // Program detection config — single source of truth is the backend;

@@ -34,6 +34,99 @@ export class TerminalApiError extends Error {
   }
 }
 
+const FS_REQUEST_TIMEOUT_MS = 8_000;
+const GIT_REQUEST_TIMEOUT_MS = 10_000;
+const GIT_FILE_DIFF_REQUEST_TIMEOUT_MS = 45_000;
+let diffApiLogSeq = 0;
+const diffApiLogQueue: string[] = [];
+let diffApiLogFlushing = false;
+
+function logDiffApiEvent(event: string, data: Record<string, unknown> = {}): void {
+  if (typeof window === 'undefined') return;
+  const payload = JSON.stringify({
+    level: event === 'error' || event === 'timeout_or_abort' || event === 'response_body_timeout' || event === 'response_body_parse_error' ? 'warn' : 'info',
+    message: `DIFF_API ${event}`,
+    data: {
+      seq: ++diffApiLogSeq,
+      ts: Date.now(),
+      ...data,
+    },
+  });
+  diffApiLogQueue.push(payload);
+  void flushDiffApiLogQueue();
+}
+
+async function flushDiffApiLogQueue(): Promise<void> {
+  if (diffApiLogFlushing) return;
+  diffApiLogFlushing = true;
+  try {
+    while (diffApiLogQueue.length > 0) {
+      const payload = diffApiLogQueue[0];
+      try {
+        await fetch('/api/client-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+          keepalive: true,
+        });
+        diffApiLogQueue.shift();
+      } catch {
+        break;
+      }
+    }
+  } finally {
+    diffApiLogFlushing = false;
+  }
+}
+
+function withRequestTimeout(signal: AbortSignal | undefined, timeoutMs: number, message: string): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    controller.abort(new DOMException(message, 'TimeoutError'));
+  }, timeoutMs);
+  const abortFromParent = () => controller.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) abortFromParent();
+    else signal.addEventListener('abort', abortFromParent, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      signal?.removeEventListener('abort', abortFromParent);
+    },
+  };
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit | undefined, timeoutMs: number, timeoutMessage: string): Promise<Response> {
+  const { signal, cleanup } = withRequestTimeout(init?.signal ?? undefined, timeoutMs, timeoutMessage);
+  try {
+    return await fetch(input, { ...init, signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      throw new Error(timeoutMessage);
+    }
+    throw error;
+  } finally {
+    cleanup();
+  }
+}
+
+async function readResponseTextWithTimeout(response: Response, timeoutMs: number, timeoutMessage: string): Promise<string> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+  });
+  try {
+    return await Promise.race([response.text(), timeoutPromise]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 if (typeof window !== 'undefined' && !(window as any).__termdockFetchPatched) {
   (window as any).__termdockFetchPatched = true;
   const originalFetch = window.fetch.bind(window);
@@ -889,6 +982,20 @@ export interface TerminalClientState {
   updatedAt?: number;
 }
 
+const openSessionInventoryPending = new Map<string, Promise<OpenSessionInventoryResult>>();
+
+function getOpenSessionInventoryKey(options: OpenSessionInventoryOptions): string {
+  return JSON.stringify({
+    preferredFrontendSessionId: options.preferredFrontendSessionId ?? null,
+    mode: options.mode ?? null,
+    tmuxSessionName: options.tmuxSessionName ?? null,
+    cwd: options.cwd ?? null,
+    termType: options.termType ?? null,
+    createIfEmpty: options.createIfEmpty === true,
+    requireExisting: options.requireExisting === true,
+  });
+}
+
 export async function getSessionInventory(): Promise<SessionInventory> {
   const response = await fetch('/api/terminal/session-inventory', { method: 'GET' });
   if (!response.ok) {
@@ -901,21 +1008,30 @@ export async function getSessionInventory(): Promise<SessionInventory> {
 export async function openSessionInventoryEntry(
   options: OpenSessionInventoryOptions,
 ): Promise<OpenSessionInventoryResult> {
+  const key = getOpenSessionInventoryKey(options);
+  const pending = openSessionInventoryPending.get(key);
+  if (pending) return pending;
+
   const csrfTokenHeader = await getCsrfToken();
-  const response = await fetch('/api/terminal/session-inventory/open', {
+  const request = fetch('/api/terminal/session-inventory/open', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
     body: JSON.stringify(options),
+  }).then(async (response) => {
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Failed to open session' }));
+      throw new TerminalApiError(
+        error.error || 'Failed to open session',
+        response.status,
+        typeof error.code === 'string' ? error.code : undefined,
+      );
+    }
+    return response.json() as Promise<OpenSessionInventoryResult>;
+  }).finally(() => {
+    if (openSessionInventoryPending.get(key) === request) openSessionInventoryPending.delete(key);
   });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to open session' }));
-    throw new TerminalApiError(
-      error.error || 'Failed to open session',
-      response.status,
-      typeof error.code === 'string' ? error.code : undefined,
-    );
-  }
-  return response.json() as Promise<OpenSessionInventoryResult>;
+  openSessionInventoryPending.set(key, request);
+  return request;
 }
 
 export async function updateSessionInventoryEntry(
@@ -1364,10 +1480,17 @@ export interface FileWatchEvent {
   reason?: string;
 }
 
-export async function listDirectory(dirPath: string, signal?: AbortSignal, showHidden?: boolean): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
+export async function listDirectory(dirPath: string, signal?: AbortSignal, showHidden?: boolean, action = 'list_directory', requestSlotId?: string): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
   const params = new URLSearchParams({ path: dirPath });
   if (showHidden) params.set('showHidden', 'true');
-  const response = await fetch(`/api/terminal/fs/list?${params}`, { signal });
+  params.set('action', action);
+  if (requestSlotId) params.set('requestSlotId', requestSlotId);
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/list?${params}`,
+    { signal },
+    FS_REQUEST_TIMEOUT_MS,
+    'Directory listing took too long. The folder may be on slow storage or blocked by another process.',
+  );
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list directory' }));
     throw new Error(error.error || 'Failed to list directory');
@@ -1392,10 +1515,12 @@ export async function searchFilesStream(
   signal?: AbortSignal,
   showHidden?: boolean,
   mode: FileSearchMode = 'name',
+  requestSlotId?: string,
 ): Promise<void> {
   const params = new URLSearchParams({ path: dirPath, query, stream: 'true' });
   if (showHidden) params.set('showHidden', 'true');
   if (mode === 'content') params.set('mode', 'content');
+  if (requestSlotId) params.set('requestSlotId', requestSlotId);
   const response = await fetch(`/api/terminal/fs/search?${params}`, { signal });
   if (!response.ok || !response.body) {
     const error = await response.json().catch(() => ({ error: 'Failed to search files' }));
@@ -1473,10 +1598,23 @@ export async function watchFileSystem(
   consumeLine(buffer);
 }
 
-export async function readFileContent(filePath: string, signal?: AbortSignal): Promise<{
+export function cancelIoSlot(requestSlotId: string | null | undefined): void {
+  if (!requestSlotId) return;
+  const params = new URLSearchParams({ requestSlotId, action: 'cancel_io_slot' });
+  void fetch(`/api/terminal/fs/cancel-slot?${params}`, { method: 'GET', keepalive: true }).catch(() => undefined);
+}
+
+export async function readFileContent(filePath: string, signal?: AbortSignal, action = 'view_file', requestSlotId?: string): Promise<{
   path: string; content: string; size: number; modified: string; truncated?: boolean;
 }> {
-  const response = await fetch(`/api/terminal/fs/read?path=${encodeURIComponent(filePath)}`, { signal });
+  const params = new URLSearchParams({ path: filePath, action });
+  if (requestSlotId) params.set('requestSlotId', requestSlotId);
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/read?${params}`,
+    { signal },
+    FS_REQUEST_TIMEOUT_MS,
+    'File preview took too long. The file may be on slow storage or blocked by another process.',
+  );
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to read file' }));
     throw new Error(error.error || 'Failed to read file');
@@ -1484,8 +1622,15 @@ export async function readFileContent(filePath: string, signal?: AbortSignal): P
   return response.json();
 }
 
-export async function readImagePreviewBlob(filePath: string, signal?: AbortSignal): Promise<ImagePreviewBlob> {
-  const response = await fetch(`/api/terminal/fs/blob?path=${encodeURIComponent(filePath)}`, { signal });
+export async function readImagePreviewBlob(filePath: string, signal?: AbortSignal, action = 'view_file', requestSlotId?: string): Promise<ImagePreviewBlob> {
+  const params = new URLSearchParams({ path: filePath, action });
+  if (requestSlotId) params.set('requestSlotId', requestSlotId);
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/blob?${params}`,
+    { signal },
+    FS_REQUEST_TIMEOUT_MS,
+    'Image preview took too long. The file may be on slow storage or blocked by another process.',
+  );
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to load image preview' }));
     throw new Error(error.error || 'Failed to load image preview');
@@ -1520,27 +1665,156 @@ export interface FileDiffResponse {
   skippedFiles?: FileDiffSkippedFile[];
 }
 
-export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: string, signal?: AbortSignal): Promise<FileDiffResponse> {
+export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: string, signal?: AbortSignal, action = filePath ? 'view_diff' : 'view_all_changes', traceId?: string, interactionId?: string, requestSlotId?: string): Promise<FileDiffResponse> {
   const params = new URLSearchParams();
   if (filePath) params.set('path', filePath);
   if (cached) params.set('cached', 'true');
   if (cwd) params.set('cwd', cwd);
-  const response = await fetch(`/api/terminal/fs/diff?${params}`, { signal });
+  params.set('action', action);
+  if (traceId) params.set('traceId', traceId);
+  if (interactionId) params.set('interactionId', interactionId);
+  if (requestSlotId) params.set('requestSlotId', requestSlotId);
+  const isConcreteVisibleFileDiff = Boolean(filePath) && action === 'view_diff';
+  const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  logDiffApiEvent('request_start', {
+    traceId,
+    interactionId,
+    requestSlotId,
+    filePath,
+    cwd,
+    action,
+    cached: Boolean(cached),
+    timeoutMs: isConcreteVisibleFileDiff ? GIT_FILE_DIFF_REQUEST_TIMEOUT_MS : GIT_REQUEST_TIMEOUT_MS,
+  });
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/diff?${params}`,
+    { signal },
+    isConcreteVisibleFileDiff ? GIT_FILE_DIFF_REQUEST_TIMEOUT_MS : GIT_REQUEST_TIMEOUT_MS,
+    isConcreteVisibleFileDiff
+      ? 'Git diff is still running for this file. It may be blocked by repository IO or another Git process.'
+      : 'Git diff took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+  ).catch((error) => {
+    logDiffApiEvent('timeout_or_abort', {
+      traceId,
+      interactionId,
+      requestSlotId,
+      filePath,
+      cwd,
+      action,
+      durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+      message: error instanceof Error ? error.message : String(error),
+      signalAborted: Boolean(signal?.aborted),
+      signalReason: signal?.aborted ? String(signal.reason ?? '') : undefined,
+    });
+    throw error;
+  });
+  logDiffApiEvent('response_headers', {
+    traceId,
+    interactionId,
+    requestSlotId,
+    filePath,
+    cwd,
+    action,
+    status: response.status,
+    ok: response.ok,
+    durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+  });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get diff' }));
+    logDiffApiEvent('error', {
+      traceId,
+      interactionId,
+      requestSlotId,
+      filePath,
+      cwd,
+      action,
+      status: response.status,
+      message: error.error || 'Failed to get diff',
+    });
     throw new Error(error.error || 'Failed to get diff');
   }
-  return response.json();
+  logDiffApiEvent('response_body_start', {
+    traceId,
+    interactionId,
+    requestSlotId,
+    filePath,
+    cwd,
+    action,
+    durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+    contentLength: response.headers.get('Content-Length'),
+  });
+  let rawText: string;
+  try {
+    rawText = await readResponseTextWithTimeout(
+      response,
+      isConcreteVisibleFileDiff ? GIT_FILE_DIFF_REQUEST_TIMEOUT_MS : GIT_REQUEST_TIMEOUT_MS,
+      isConcreteVisibleFileDiff
+        ? 'Git diff response body is still loading for this file.'
+        : 'Git diff response body took too long.',
+    );
+  } catch (error) {
+    logDiffApiEvent('response_body_timeout', {
+      traceId,
+      interactionId,
+      requestSlotId,
+      filePath,
+      cwd,
+      action,
+      durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+      message: error instanceof Error ? error.message : String(error),
+      signalAborted: Boolean(signal?.aborted),
+      signalReason: signal?.aborted ? String(signal.reason ?? '') : undefined,
+    });
+    throw error;
+  }
+  let data: FileDiffResponse;
+  try {
+    data = JSON.parse(rawText) as FileDiffResponse;
+  } catch (error) {
+    logDiffApiEvent('response_body_parse_error', {
+      traceId,
+      interactionId,
+      requestSlotId,
+      filePath,
+      cwd,
+      action,
+      durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+      bytes: rawText.length,
+      snippet: rawText.slice(0, 160),
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  logDiffApiEvent('response_body', {
+    traceId,
+    interactionId,
+    requestSlotId,
+    filePath,
+    cwd,
+    action,
+    durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+    bytes: data.diff?.length ?? 0,
+    error: data.error ?? null,
+    truncated: Boolean(data.truncated),
+    tooLarge: Boolean(data.tooLarge),
+  });
+  return data;
 }
 
-export async function getDiffFileList(cwd?: string): Promise<{
+export async function getDiffFileList(cwd?: string, signal?: AbortSignal, requestSlotId?: string): Promise<{
   files: GitChangedFile[];
   error?: string;
 }> {
   const params = new URLSearchParams();
   if (cwd) params.set('cwd', cwd);
+  if (requestSlotId) params.set('requestSlotId', requestSlotId);
   const qs = params.toString();
-  const response = await fetch(`/api/terminal/fs/diff-files${qs ? `?${qs}` : ''}`);
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/diff-files${qs ? `?${qs}` : ''}`,
+    { signal },
+    GIT_REQUEST_TIMEOUT_MS,
+    'Git file list took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+  );
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get diff file list' }));
     throw new Error(error.error || 'Failed to get diff file list');
@@ -1595,11 +1869,18 @@ export interface GitContext {
   error?: string;
 }
 
-export async function getGitContext(cwd?: string): Promise<GitContext> {
+export async function getGitContext(cwd?: string, signal?: AbortSignal, action = 'load_git_details', requestSlotId?: string): Promise<GitContext> {
   const params = new URLSearchParams();
   if (cwd) params.set('cwd', cwd);
+  params.set('action', action);
+  if (requestSlotId) params.set('requestSlotId', requestSlotId);
   const qs = params.toString();
-  const response = await fetch(`/api/terminal/fs/git-context${qs ? `?${qs}` : ''}`);
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/git-context${qs ? `?${qs}` : ''}`,
+    { signal },
+    GIT_REQUEST_TIMEOUT_MS,
+    'Git details took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+  );
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get git context' }));
     throw new Error(error.error || 'Failed to get git context');
@@ -1613,8 +1894,22 @@ export interface GitBundleResponse {
   files: GitChangedFile[];
   context: GitContext | null;
   repositories?: GitRepositoryBundle[];
+  repoFilters?: GitRepositoryFilter[];
   truncatedRepositories?: boolean;
+  cached?: boolean;
+  stale?: boolean;
+  cacheAgeMs?: number;
+  nestedDeferred?: boolean;
+  untrackedDeferred?: boolean;
   error?: string;
+}
+
+export interface GitRepositoryFilter {
+  root: string;
+  label: string;
+  branch?: string | null;
+  count: number;
+  staged: number;
 }
 
 export interface GitRepositoryBundle {
@@ -1628,7 +1923,30 @@ export interface GitRepositoryBundle {
   available: boolean;
   files: GitChangedFile[];
   context: GitContext | null;
+  untrackedDeferred?: boolean;
   error?: string;
+}
+
+export async function getUntrackedFiles(cwd?: string, signal?: AbortSignal, requestSlotId?: string): Promise<{
+  status: 'running' | 'done' | 'error';
+  files: GitChangedFile[];
+  error?: string;
+  code?: string;
+  startedAt?: number;
+  finishedAt?: number;
+}> {
+  const params = new URLSearchParams();
+  if (cwd) params.set('cwd', cwd);
+  params.set('action', 'load_untracked_files');
+  if (requestSlotId) params.set('requestSlotId', requestSlotId);
+  const qs = params.toString();
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/untracked-files${qs ? `?${qs}` : ''}`,
+    { signal },
+    GIT_FILE_DIFF_REQUEST_TIMEOUT_MS,
+    'Untracked file scan took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+  );
+  return response.json();
 }
 
 export type GitActionRequest =
@@ -1651,13 +1969,20 @@ export interface GitActionResponse {
   bundle: GitBundleResponse;
 }
 
-export async function getGitBundle(cwd?: string, signal?: AbortSignal, options: { includeNested?: boolean; refresh?: boolean } = {}): Promise<GitBundleResponse> {
+export async function getGitBundle(cwd?: string, signal?: AbortSignal, options: { includeNested?: boolean; refresh?: boolean; action?: string; requestSlotId?: string } = {}): Promise<GitBundleResponse> {
   const params = new URLSearchParams();
   if (cwd) params.set('cwd', cwd);
   if (options.includeNested) params.set('includeNested', 'true');
   if (options.refresh) params.set('refresh', 'true');
+  params.set('action', options.action ?? (options.refresh ? 'manual_git_refresh' : 'open_sidebar_git_refresh'));
+  if (options.requestSlotId) params.set('requestSlotId', options.requestSlotId);
   const qs = params.toString();
-  const response = await fetch(`/api/terminal/fs/git-bundle${qs ? `?${qs}` : ''}`, { signal });
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/git-bundle${qs ? `?${qs}` : ''}`,
+    { signal },
+    GIT_REQUEST_TIMEOUT_MS,
+    'Git status refresh took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+  );
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get git bundle' }));
     throw new Error(error.error || 'Failed to get git bundle');
