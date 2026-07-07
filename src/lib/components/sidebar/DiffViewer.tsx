@@ -1,6 +1,6 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMoveHorizontal } from 'lucide-react';
-import { parseDiff, Diff, Hunk, Decoration, tokenize, markEdits, type HunkData, type HunkTokens } from 'react-diff-view';
+import { parseDiff, Diff, Hunk, tokenize, markEdits, type HunkData, type HunkTokens } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { cancelIoSlot, getFileDiff, isPreviewableImagePath, readImagePreviewBlob, type ChangeAuditRecord, type FileDiffResponse, type GitChangedFile } from '../../terminal/api';
@@ -211,6 +211,7 @@ interface DiffViewerProps {
   /** Keep mounted panes from issuing background diff requests while hidden. */
   active?: boolean;
   auditRecords?: ChangeAuditRecord[];
+  onSummaryChange?: (summary: { files: number; additions: number; deletions: number } | null) => void;
 }
 
 interface HunkAuditView {
@@ -353,7 +354,7 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, auditRecords }: DiffViewerProps) {
+export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, auditRecords, onSummaryChange }: DiffViewerProps) {
   const { t } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
@@ -667,6 +668,11 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
     return { additions, deletions };
   }, [files]);
 
+  useEffect(() => {
+    if (!onSummaryChange) return;
+    onSummaryChange(files.length > 0 ? { files: files.length, ...totalChanges } : null);
+  }, [files.length, onSummaryChange, totalChanges]);
+
   const fileStats = useMemo(() => {
     const stats = new Map<string, { additions: number; deletions: number }>();
     for (const file of files) {
@@ -763,14 +769,8 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
             </div>
           ) : (
             <div className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${wrap ? 'termdock-diff-wrap' : ''}`} data-sidebar-gesture-ignore>
-              <Diff
-                viewType="unified"
-                diffType={file.type}
-                hunks={file.hunks}
-                tokens={fileTokens.get(key)}
-              >
-                {(hunks) =>
-                  hunks.map((hunk, index) => {
+              <div className="min-w-full">
+                {file.hunks.map((hunk, index) => {
                     const hunkDiffText = formatDiffReference([
                       `diff --git a/${file.oldPath || displayPath} b/${file.newPath || displayPath}`,
                       hunk.content,
@@ -781,45 +781,48 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
                     const hunkReferenceKey = `diff:hunk:${displayPath}:${index}`;
                     const hunkReferenceActive = insertedReferenceKey === hunkReferenceKey || copiedReferenceKey === hunkReferenceKey;
                     return (
-                    <Fragment key={hunk.content}>
-                      <Decoration>
-                        <span />
-                        <div className={wrap ? 'min-w-0 max-w-full overflow-hidden' : 'min-w-0'}>
-                          <span className={`diff-hunk-header flex min-w-0 items-center gap-2 ${wrap ? 'max-w-full flex-wrap overflow-hidden' : 'w-max whitespace-nowrap'}`}>
-                            {onInsertDiffReference && (
-                              <button
-                                type="button"
-                                onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, hunkDiffText, hunkReferenceKey)}
-                                {...getReferenceLongPressHandlers(hunkDiffText, hunkReferenceKey)}
-                                className={`inline-flex h-6 shrink-0 items-center rounded-full px-2 text-[10px] font-semibold active:scale-95 ${hunkReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
-                                title={t('diffViewer.insertHunkDiff')}
-                              >
-                                {copiedReferenceKey === hunkReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === hunkReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertHunkShort')}
-                              </button>
-                            )}
-                            <span className="min-w-0 flex-1 truncate">{hunk.content}</span>
-                          </span>
-                          {(hunkAudit.current || hunkAudit.stale) && (
-                            <div className={`mt-1 min-w-0 rounded-md border px-2 py-1.5 text-[11px] leading-relaxed ${wrap ? 'max-w-full overflow-hidden' : 'w-max'} ${
-                              hunkAudit.current
-                                ? 'border-primary/20 bg-primary/10 text-foreground'
-                                : 'border-[rgb(var(--warning-rgb)_/_0.26)] bg-[rgb(var(--warning-rgb)_/_0.12)] text-muted-foreground'
-                            }`}>
-                              <div className="mb-0.5 flex min-w-0 items-center gap-1.5">
-                                <span className="font-semibold text-foreground">{hunkAudit.current ? t('diffViewer.auditExplanation') : t('diffViewer.auditStale')}</span>
-                                <span className="font-mono text-[10px] text-muted-foreground">{hunkAudit.fingerprint}</span>
-                              </div>
-                              <div className="termdock-diff-audit-explanation min-w-0">{hunkAudit.current?.explanation ?? hunkAudit.stale?.explanation}</div>
+                      <div key={hunk.content} className="diff-hunk">
+                        <div className="diff-decoration diff-hunk-meta-row bg-[rgba(var(--diff-accent-rgb),0.035)] px-2 py-1">
+                          <div className={`diff-hunk-header flex min-w-0 items-center gap-2 ${wrap ? 'max-w-full flex-wrap overflow-hidden' : 'w-max whitespace-nowrap'}`}>
+                              {onInsertDiffReference && (
+                                <button
+                                  type="button"
+                                  onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, hunkDiffText, hunkReferenceKey)}
+                                  {...getReferenceLongPressHandlers(hunkDiffText, hunkReferenceKey)}
+                                  className={`inline-flex h-6 shrink-0 items-center rounded-full px-2 text-[10px] font-semibold active:scale-95 ${hunkReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
+                                  title={t('diffViewer.insertHunkDiff')}
+                                >
+                                  {copiedReferenceKey === hunkReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === hunkReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertHunkShort')}
+                                </button>
+                              )}
+                              <span className="min-w-0 flex-1 truncate">{hunk.content}</span>
                             </div>
-                          )}
+                            {(hunkAudit.current || hunkAudit.stale) && (
+                              <div className={`mt-1 min-w-0 rounded-md border px-2 py-1.5 text-[11px] leading-relaxed ${wrap ? 'max-w-full overflow-hidden' : 'w-max'} ${
+                                hunkAudit.current
+                                  ? 'border-primary/20 bg-primary/10 text-foreground'
+                                  : 'border-[rgb(var(--warning-rgb)_/_0.26)] bg-[rgb(var(--warning-rgb)_/_0.12)] text-muted-foreground'
+                              }`}>
+                                <div className="mb-0.5 flex min-w-0 items-center gap-1.5">
+                                  <span className="font-semibold text-foreground">{hunkAudit.current ? t('diffViewer.auditExplanation') : t('diffViewer.auditStale')}</span>
+                                  <span className="font-mono text-[10px] text-muted-foreground">{hunkAudit.fingerprint}</span>
+                                </div>
+                                <div className="termdock-diff-audit-explanation min-w-0">{hunkAudit.current?.explanation ?? hunkAudit.stale?.explanation}</div>
+                              </div>
+                            )}
                         </div>
-                      </Decoration>
-                      <Hunk hunk={hunk} />
-                    </Fragment>
+                        <Diff
+                          viewType="unified"
+                          diffType={file.type}
+                          hunks={[hunk]}
+                          tokens={fileTokens.get(key)}
+                        >
+                          {(hunks) => hunks.map((singleHunk) => <Hunk key={singleHunk.content} hunk={singleHunk} />)}
+                        </Diff>
+                      </div>
                     );
-                  })
-                }
-              </Diff>
+                  })}
+              </div>
             </div>
           )}
         </div>

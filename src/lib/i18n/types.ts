@@ -106,6 +106,8 @@ export type TranslationDictionary = {
     clearChangeAudit: string;
     clearChangeAuditTitle: string;
     changeAuditClearFailed: (params: TranslatorParams) => string;
+    changeAuditScopeAll: string;
+    changeAuditScopeLabel: string;
     insertPreset: (params: TranslatorParams) => string;
     tabChanges: string;
     tabGit: string;
@@ -136,6 +138,7 @@ export type TranslationDictionary = {
     selectedLineFooter: (params: TranslatorParams) => string;
     clearSelection: string;
     allChanges: string;
+    backToChangeList: string;
     allRepositories: string;
     allRepositoriesShort: string;
     repositories: string;
@@ -157,6 +160,9 @@ export type TranslationDictionary = {
     retryGitChanges: string;
     insertThisFile: string;
     viewDiff: string;
+    diffViewMode: string;
+    diffViewModeList: string;
+    diffViewModeTree: string;
     gitInfo: string;
     wrapLongLines: string;
     wrapOn: string;
