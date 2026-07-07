@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import { promisify } from 'util';
 import type { WebSocket } from 'ws';
 import { caffeinateManager } from '../utils/caffeinate.js';
+import { pathValidator } from '../utils/pathValidator.js';
 import { localAccessManager } from '../utils/localAccess.js';
 import { normalizeLocalAccessName } from '../utils/settings.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
@@ -1174,6 +1175,12 @@ async function ensureBackendSessionForRecord(
     );
   }
 
+  // 记录里的 cwd 是服务端自己从 OSC 跟踪写入的（受信任）。服务重启后
+  // 白名单会重置为默认值，恢复一个 cwd 在白名单外的会话（例如 Windows
+  // 其它盘符）会被 resolveWorkingDirectory 拒绝——先放行再 spawn。
+  if (spawnCwd) {
+    await pathValidator.allowSessionCwd(spawnCwd);
+  }
   const spawned = await spawnTerminalSession(req, {
     cwd: spawnCwd,
     cols: options.cols,
@@ -2092,6 +2099,15 @@ const OSC_SNIFF_CAP = 32768; // 32 KB rolling buffer
 const OSC_ANY_PATTERN = /\x1b\](\d+);([^\x07\x1b]*)(\x07|\x1b\\)/g;
 
 function parseTitleCwd(title: string, home: string): string | null {
+  const parsePathPart = (pathPart: string): string | null => {
+    const trimmedPath = pathPart.trim();
+    if (!trimmedPath) return null;
+    if (trimmedPath.startsWith('~/') || trimmedPath.startsWith('~\\')) return home + trimmedPath.slice(1);
+    if (trimmedPath === '~') return home;
+    if (trimmedPath.startsWith('/') || isWindowsAbsolutePath(trimmedPath)) return trimmedPath;
+    return null;
+  };
+
   // Format: user@host:/path/to/dir
   const atIdx = title.lastIndexOf('@');
   if (atIdx >= 0) {
@@ -2099,21 +2115,33 @@ function parseTitleCwd(title: string, home: string): string | null {
     const colonIdx = afterAt.indexOf(':');
     if (colonIdx >= 0) {
       const pathPart = afterAt.slice(colonIdx + 1).trim();
-      if (!pathPart) return null;
-      if (pathPart.startsWith('~/')) return home + pathPart.slice(1);
-      if (pathPart === '~') return home;
-      if (pathPart.startsWith('/')) return pathPart;
+      const parsed = parsePathPart(pathPart);
+      if (parsed) return parsed;
       return home + '/' + pathPart;
     }
   }
 
   // Direct path format
-  const trimmed = title.trim();
-  if (trimmed.startsWith('/')) return trimmed;
-  if (trimmed.startsWith('~/')) return home + trimmed.slice(1);
-  if (trimmed === '~') return home;
+  const directPath = parsePathPart(title);
+  if (directPath) return directPath;
 
   return null;
+}
+
+function isWindowsAbsolutePath(value: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(value) || /^[/\\]{2}[^/\\]+[/\\][^/\\]+/.test(value);
+}
+
+// Git-Bash/MSYS 环境上报的 cwd 是 "/c/foo" 形式，Windows 的 fs API 无法使用，
+// 转换成 "C:/foo"。单字母首段才视为盘符（"/usr" 这类不受影响）。
+function normalizeReportedCwdPath(p: string): string {
+  if (process.platform === 'win32') {
+    const msys = /^\/([a-zA-Z])(?=\/|$)(.*)$/.exec(p);
+    if (msys) {
+      return `${msys[1].toUpperCase()}:${msys[2] || '/'}`;
+    }
+  }
+  return p;
 }
 
 function parseOsc7Cwd(data: string, home: string): string | null {
@@ -2183,11 +2211,11 @@ function sniffOsc(buf: string, home: string): OscSniffResult {
       // Title — could be cwd or command name
       lastTitle = oscData;
       const cwd = parseTitleCwd(oscData, home);
-      if (cwd) lastCwd = cwd;
+      if (cwd) lastCwd = normalizeReportedCwdPath(cwd);
     } else if (oscNum === '7') {
       // CWD report
       const cwd = parseOsc7Cwd(oscData, home);
-      if (cwd) lastCwd = cwd;
+      if (cwd) lastCwd = normalizeReportedCwdPath(cwd);
     } else if (oscNum === '133') {
       // Semantic prompt marks
       if (oscData.startsWith('C')) {
@@ -3570,6 +3598,9 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
       if (result.cwd && result.cwd !== session.lastOscCwd) {
         session.lastOscCwd = result.cwd;
         session.cwd = result.cwd;
+        // 用户在终端里 cd 到白名单外目录（如 Windows 其它盘符）时，动态放行，
+        // 否则侧边栏目录树/文件 API 会报 "Access denied: path not allowed"。
+        void pathValidator.allowSessionCwd(result.cwd);
         if (updateGlobalBindingForBackendSession(sessionId, { cwd: result.cwd, lastActivity: session.lastActivity })) {
           schedulePersistGlobalState();
         }
@@ -3648,7 +3679,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     : (process.platform === 'win32' ? 'powershell.exe' : resolveShellCandidates()[0]);
   const args = mode === 'tmux' && tmuxSessionName
     ? ['attach-session', '-t', tmuxSessionName]
-    : [];
+    : (process.platform === 'win32' ? buildPowerShellCwdHookArgs() : []);
 
   const envPath = buildAugmentedPath();
   const resolvedEnv = { ...process.env, PATH: envPath };
@@ -3696,6 +3727,10 @@ async function spawnTerminalSession(req: express.Request, input: {
       rows,
       cwd,
       env: baseEnv,
+      // Windows: 用 node-pty 自带的新版 conpty.dll（Windows Terminal 同源），
+      // 系统内置 conhost 的 ConPTY 差分在「输出中 resize/宽字符」场景下会与
+      // 终端真实状态分叉，表现为滚动 TUI（如 claude code）时行首 CJK 残影。
+      ...(process.platform === 'win32' ? { useConptyDll: true } : {}),
     });
   }
 
@@ -3877,6 +3912,26 @@ async function injectShellIntegration(shellPath: string, baseEnv: Record<string,
   }
 
   return env;
+}
+
+function buildPowerShellCwdHookArgs(): string[] {
+  const script = `
+$script:__TermdockOriginalPrompt = if (Test-Path Function:\\prompt) {
+  (Get-Command prompt -CommandType Function).ScriptBlock
+} else {
+  { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " }
+}
+function global:prompt {
+  try {
+    $location = Get-Location
+    $path = if ($location.Provider.Name -eq 'FileSystem') { $location.ProviderPath } else { $location.Path }
+    [Console]::Write("$([char]27)]0;$path$([char]7)")
+  } catch {}
+  & $script:__TermdockOriginalPrompt
+}
+`.trim();
+
+  return ['-NoLogo', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', script];
 }
 
 function buildAugmentedPath(): string {
