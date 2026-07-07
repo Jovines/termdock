@@ -2,7 +2,10 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { VitePWA } from 'vite-plugin-pwa';
+import { config as loadDotenv } from 'dotenv';
 import { PORT, DEFAULT_HOST } from './src/server/config';
+
+loadDotenv();
 
 export default defineConfig({
   plugins: [
@@ -97,6 +100,12 @@ export default defineConfig({
     port: PORT.frontend,
     strictPort: true,
     host: DEFAULT_HOST,
+    // 与后端 TERMDOCK_ALLOWED_HOSTS 共用同一变量：公网域名/反代域名访问 dev
+    // 服务器时，Vite 自身的 host 检查也要放行，否则在后端校验之前就被 403。
+    allowedHosts: (process.env.TERMDOCK_ALLOWED_HOSTS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     proxy: {
       '/api': {
         target: `http://localhost:${PORT.devBackend}`,

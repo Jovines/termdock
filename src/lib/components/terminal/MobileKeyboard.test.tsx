@@ -21,6 +21,7 @@ const baseProps = {
   extraActions: [{ id: 'undo', label: '/undo', sequence: '/undo' }],
   onKeyPress: vi.fn(),
   onTextPress: vi.fn(),
+  onPastePress: vi.fn(),
   onModifierToggle: vi.fn(),
   onPresetSelect: vi.fn(),
 };
@@ -33,7 +34,8 @@ describe('MobileKeyboard interaction state', () => {
   it('keeps the toolbar visible without firing actions when non-interactive', () => {
     const onKeyPress = vi.fn();
     const onTextPress = vi.fn();
-    render(<MobileKeyboard {...baseProps} interactive={false} onKeyPress={onKeyPress} onTextPress={onTextPress} />);
+    const onPastePress = vi.fn();
+    render(<MobileKeyboard {...baseProps} interactive={false} onKeyPress={onKeyPress} onTextPress={onTextPress} onPastePress={onPastePress} />);
 
     const toolbar = screen.getByText('Esc').closest('[data-mobile-keyboard="true"]');
     expect(toolbar?.className).toContain('opacity-100');
@@ -44,6 +46,16 @@ describe('MobileKeyboard interaction state', () => {
 
     expect(onKeyPress).not.toHaveBeenCalled();
     expect(onTextPress).not.toHaveBeenCalled();
+    expect(onPastePress).not.toHaveBeenCalled();
+  });
+
+  it('fires the paste callback from the mobile toolbar', () => {
+    const onPastePress = vi.fn();
+    render(<MobileKeyboard {...baseProps} onPastePress={onPastePress} />);
+
+    fireEvent.pointerDown(screen.getByLabelText('Paste'));
+
+    expect(onPastePress).toHaveBeenCalledTimes(1);
   });
 
   it('closes the preset menu when it becomes non-interactive', () => {

@@ -22,8 +22,9 @@ export class PathValidator {
     
     this.allowedPaths = new Set(this.defaultAllowedPaths);
     
-    // 从环境变量读取额外的允许路径
-    const extraPaths = process.env.ALLOWED_PATHS?.split(':').filter(Boolean) || [];
+    // 从环境变量读取额外的允许路径（平台分隔符：Windows 为 ";"，POSIX 为 ":"，
+    // 不能用 ":" 硬拆，否则 "C:\foo" 这类盘符路径会被拆碎）
+    const extraPaths = process.env.ALLOWED_PATHS?.split(path.delimiter).filter(Boolean) || [];
     extraPaths.forEach(p => {
       try {
         this.allowedPaths.add(this.normalizeAllowedPath(p));
@@ -256,6 +257,24 @@ export class PathValidator {
   addAllowedPath(pathToAdd: string): void {
     const resolved = this.normalizeAllowedPath(pathToAdd);
     this.allowedPaths.add(resolved);
+  }
+
+  /**
+   * 将终端会话的 cwd 动态加入白名单（静默失败）。
+   * 终端里的 shell 本身不受路径限制，用户 cd 到哪，侧边栏/文件 API 就应能
+   * 浏览哪（默认白名单只有 HOME/cwd，Windows 上切到其它盘符会全部拒绝）。
+   * 仅在路径真实存在且是目录时放行。
+   */
+  async allowSessionCwd(cwdPath: string | null | undefined): Promise<void> {
+    if (!cwdPath || typeof cwdPath !== 'string') return;
+    try {
+      const stat = await fs.promises.stat(cwdPath);
+      if (stat.isDirectory()) {
+        this.addAllowedPath(cwdPath);
+      }
+    } catch {
+      // 路径不存在或不可读——不放行
+    }
   }
   
   /**

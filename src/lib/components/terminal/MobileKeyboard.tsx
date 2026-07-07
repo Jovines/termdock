@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronUp, Clipboard, CornerDownLeft as RiArrowGoBackLine, Move, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, Move, X } from 'lucide-react';
 import { vibrate as hapticVibrate } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from './PresetModeButton';
@@ -58,6 +58,7 @@ interface MobileKeyboardProps {
   extraActions: MobileToolbarAction[];
   onKeyPress: (key: MobileKey) => void;
   onTextPress: (sequence: string) => void;
+  onPastePress?: () => void;
   longPressMode?: 'arrows' | 'copy';
   copyFeedback?: 'idle' | 'copied' | 'failed';
   onLongPressModeToggle?: () => void;
@@ -83,6 +84,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   extraActions,
   onKeyPress,
   onTextPress,
+  onPastePress,
   longPressMode = 'arrows',
   copyFeedback = 'idle',
   onLongPressModeToggle,
@@ -248,6 +250,17 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       });
     },
     [toolbarDisabled]
+  );
+
+  const handlePastePointerDown = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (toolbarDisabled) {
+        return;
+      }
+      event.preventDefault();
+      onPastePress?.();
+    },
+    [onPastePress, toolbarDisabled]
   );
 
   const DOUBLE_TAP_WINDOW_MS = 250;
@@ -426,7 +439,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       >
       <div className="rounded-2xl bg-surface-elevated p-0.5 space-y-0.5">
       {!isDesktopActions && (
-        <div className="grid grid-cols-9 gap-1">
+        <div className="grid grid-cols-10 gap-1">
         <button
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'esc')}
@@ -521,6 +534,17 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
             : copyFeedback === 'failed'
               ? <X size={15} />
               : longPressMode === 'copy' ? <Clipboard size={15} /> : <Move size={15} />}
+        </button>
+        <button
+          type="button"
+          onPointerDown={handlePastePointerDown}
+          tabIndex={-1}
+          disabled={buttonDisabled}
+          title="Paste"
+          aria-label="Paste"
+          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
+        >
+          <ClipboardPaste size={15} />
         </button>
         <button
           type="button"
