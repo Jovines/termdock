@@ -110,6 +110,9 @@ export type TranslationDictionary = {
     insertLineRef: (params: TranslatorParams) => string;
     insertFileRef: string;
     copyFileRef: string;
+    downloadFile: string;
+    downloadFailed: string;
+    binaryPreviewHint: string;
     selectedLineHint: (params: TranslatorParams) => string;
     multiLineHint: string;
     loadingImage: string;
@@ -213,6 +216,9 @@ export type TranslationDictionary = {
     unpinDirTitle: string;
     pinFileTitle: string;
     unpinFileTitle: string;
+    pinFile: string;
+    unpinFile: string;
+    moreFileActions: string;
     noWorkingDir: string;
     emptyDir: string;
     noMatchingFiles: string;

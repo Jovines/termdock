@@ -1605,7 +1605,7 @@ export function cancelIoSlot(requestSlotId: string | null | undefined): void {
 }
 
 export async function readFileContent(filePath: string, signal?: AbortSignal, action = 'view_file', requestSlotId?: string): Promise<{
-  path: string; content: string; size: number; modified: string; truncated?: boolean;
+  path: string; content: string; size: number; modified: string; truncated?: boolean; binary?: boolean;
 }> {
   const params = new URLSearchParams({ path: filePath, action });
   if (requestSlotId) params.set('requestSlotId', requestSlotId);
@@ -1645,6 +1645,100 @@ export async function readImagePreviewBlob(filePath: string, signal?: AbortSigna
     modified: response.headers.get('Last-Modified'),
     mimeType: response.headers.get('Content-Type') || blob.type || getImageMimeTypeForPath(filePath) || 'application/octet-stream',
   };
+}
+
+function isIOS(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+// Download a file to the user's device. Works in both PWA (standalone) and
+// normal browser tabs:
+//   1. File System Access API (showSaveFilePicker) — available in desktop
+//      Chromium browsers and installed desktop PWAs; shows a native save
+//      dialog and writes the blob to the chosen location.
+//   2. Web Share API (iOS) — opens the native iOS share sheet which includes
+//      "Save to Files". Safari ignores <a download> with blob URLs (they
+//      open inline instead), and window.open is unreliable in standalone
+//      PWAs. If share is unavailable the page navigates to the server URL
+//      so Content-Disposition: attachment triggers the download prompt.
+//   3. <a download> blob URL fallback — used everywhere else (Firefox, desktop
+//      Safari). Triggers the browser's native download in a normal tab.
+export async function downloadFile(filePath: string): Promise<void> {
+  const url = `/api/terminal/fs/download?path=${encodeURIComponent(filePath)}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to download file' }));
+    throw new Error(error.error || 'Failed to download file');
+  }
+
+  const blob = await response.blob();
+  const filename = parseFilenameFromContentDisposition(response.headers.get('Content-Disposition') || '')
+    ?? filePath.split('/').pop()?.split('\\').pop()
+    ?? 'download';
+
+  // Prefer the File System Access API when available.
+  const showSaveFilePicker = (window as unknown as {
+    showSaveFilePicker?: (options: { suggestedName?: string }) => Promise<{
+      createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+    }>;
+  }).showSaveFilePicker;
+  if (typeof showSaveFilePicker === 'function') {
+    try {
+      const handle = await showSaveFilePicker({ suggestedName: filename });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      // otherwise fall through
+    }
+  }
+
+  // On iOS, use the Web Share API to open the native share sheet
+  // ("Save to Files", AirDrop, etc.). Safari ignores <a download> with
+  // blob URLs, and window.open is unreliable in standalone PWAs.
+  if (isIOS()) {
+    const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+    const canShare = typeof navigator !== 'undefined'
+      && 'share' in navigator
+      && (!navigator.canShare || navigator.canShare({ files: [file] }));
+    if (canShare) {
+      try {
+        await navigator.share({ files: [file] });
+        return;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        // share failed — fall through to direct URL navigation
+      }
+    }
+    // Last resort: navigate to the server URL so Safari sees the
+    // Content-Disposition: attachment header and shows a download prompt.
+    window.location.href = url;
+    return;
+  }
+
+  // Fallback: anchor + blob URL.
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  anchor.rel = 'noopener';
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+    anchor.remove();
+  }, 4000);
+}
+
+function parseFilenameFromContentDisposition(disposition: string): string | null {
+  if (!disposition) return null;
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
 export interface FileDiffSkippedFile {

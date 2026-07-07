@@ -11,6 +11,7 @@ const router = Router();
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
 const MAX_IMAGE_PREVIEW_SIZE = 20 * 1024 * 1024; // 20MB
+const MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024; // 200MB
 const GIT_TIMEOUT_MS = 5000;
 const GIT_UNTRACKED_TIMEOUT_MS = 800;
 const GIT_UNTRACKED_BACKGROUND_TIMEOUT_MS = 120_000;
@@ -1047,14 +1048,14 @@ function getBranchName(branch: unknown): string | undefined {
   return normalized;
 }
 
-async function readFilePrefix(filePath: string, bytesToRead: number): Promise<string> {
-  if (bytesToRead <= 0) return '';
+async function readBytesPrefix(filePath: string, bytesToRead: number): Promise<Buffer> {
+  if (bytesToRead <= 0) return Buffer.alloc(0);
 
   const handle = await fs.promises.open(filePath, 'r');
   try {
     const buffer = Buffer.allocUnsafe(bytesToRead);
     const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0);
-    return buffer.subarray(0, bytesRead).toString('utf-8');
+    return buffer.subarray(0, bytesRead);
   } finally {
     await handle.close();
   }
@@ -2121,18 +2122,23 @@ router.get('/read', async (req: Request, res: Response) => {
 
       const bytesToRead = Math.min(stat.size, MAX_FILE_SIZE);
       const truncated = stat.size > bytesToRead;
-      const content = await readFilePrefix(resolvedPath, bytesToRead);
+      const buffer = await readBytesPrefix(resolvedPath, bytesToRead);
+      // NUL-byte heuristic on the first 8KB: binary files (zip/elf/class/...)
+      // contain a 0x00 byte very early, text files never do. This lets the
+      // frontend show a "cannot preview" state instead of dumping garbled bytes.
+      const binary = buffer.subarray(0, Math.min(buffer.length, 8192)).includes(0);
       throwIfAborted(controller.signal, 'fs.read');
-      return { resolvedPath, stat, content, truncated };
+      return { resolvedPath, stat, buffer, binary, truncated };
     })(), FS_ROUTE_TIMEOUT_MS, 'File preview took too long. The file may be on slow storage or currently blocked by another process.', 'FS_READ_TIMEOUT');
 
     logFsIo({ id: requestId, action, op: 'fs.read', startedAt, status: 'ok', path: result.resolvedPath, bytes: Math.min(result.stat.size, MAX_FILE_SIZE), total: result.stat.size, truncated: result.truncated, extra: { requestSlotId } });
     res.json({
       path: result.resolvedPath,
-      content: result.content,
+      content: result.binary ? '' : result.buffer.toString('utf-8'),
       size: result.stat.size,
       modified: result.stat.mtime.toISOString(),
-      truncated: result.truncated,
+      truncated: result.binary ? false : result.truncated,
+      binary: result.binary,
     });
   } catch (error) {
     const payload = getErrorPayload(error);
@@ -2238,6 +2244,59 @@ router.get('/blob', async (req: Request, res: Response) => {
     const code = payload.code ?? (typeof (error as { code?: unknown })?.code === 'string' ? (error as { code: string }).code : undefined);
     logOnce('error', { code, error: payload.error });
     res.status(status).json({ ...payload, code });
+  }
+});
+
+// Download any file as an attachment. Works in both PWA and normal browser
+// contexts — the frontend fetches this as a blob and either pipes it through
+// the File System Access API (showSaveFilePicker, desktop PWA/Chromium) or
+// falls back to an <a download> blob URL.
+router.get('/download', async (req: Request, res: Response) => {
+  try {
+    const requestedPath = req.query.path as string;
+    if (!requestedPath) {
+      res.status(400).json({ error: 'Missing path parameter' });
+      return;
+    }
+
+    const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
+    const stat = await fs.promises.stat(resolvedPath);
+
+    if (!stat.isFile()) {
+      res.status(400).json({ error: 'Path is not a file' });
+      return;
+    }
+
+    if (stat.size > MAX_DOWNLOAD_SIZE) {
+      res.status(413).json({
+        error: 'File is too large to download',
+        code: 'FILE_TOO_LARGE',
+        size: stat.size,
+        maxSize: MAX_DOWNLOAD_SIZE,
+      });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', stat.size.toString());
+    res.setHeader('Last-Modified', stat.mtime.toUTCString());
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', `attachment; filename="${toInlineFilename(path.basename(resolvedPath))}"`);
+
+    const stream = fs.createReadStream(resolvedPath);
+    stream.on('error', (error) => {
+      if (!res.headersSent) {
+        const message = error instanceof Error ? error.message : 'Failed to download file';
+        res.status(500).json({ error: message });
+        return;
+      }
+      res.destroy(error instanceof Error ? error : undefined);
+    });
+    stream.pipe(res);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(403).json({ error: message });
   }
 });
 
