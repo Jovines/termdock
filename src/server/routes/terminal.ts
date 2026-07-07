@@ -3723,6 +3723,10 @@ async function spawnTerminalSession(req: express.Request, input: {
       rows,
       cwd,
       env: baseEnv,
+      // Windows: 用 node-pty 自带的新版 conpty.dll（Windows Terminal 同源），
+      // 系统内置 conhost 的 ConPTY 差分在「输出中 resize/宽字符」场景下会与
+      // 终端真实状态分叉，表现为滚动 TUI（如 claude code）时行首 CJK 残影。
+      ...(process.platform === 'win32' ? { useConptyDll: true } : {}),
     });
   }
 
