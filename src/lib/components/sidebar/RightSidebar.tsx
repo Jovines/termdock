@@ -26,12 +26,13 @@ import {
   Link2 as RiLink,
   Eye as RiEye,
   EyeOff as RiEyeOff,
+  Sparkles as RiSparkles,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { DiffViewer } from './DiffViewer';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { cancelIoSlot, getGitBundle, getGitContext, getUntrackedFiles, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, clearChangeAuditRecords, getChangeAuditRecords, getGitBundle, getGitContext, getUntrackedFiles, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, type ChangeAuditRecord, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, refractorNodesToReact, type RefractorLike } from '../../utils/syntaxHighlight';
@@ -2705,6 +2706,11 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
+function isGitBundleCancellation(bundle: GitBundleResponse): boolean {
+  const error = bundle.error ?? bundle.context?.error ?? '';
+  return error.includes('request was cancelled') || error.includes('IO_REQUEST_CANCELLED');
+}
+
 function hasNativeTextSelection(): boolean {
   if (typeof window === 'undefined') return false;
   const selection = window.getSelection();
@@ -3702,6 +3708,10 @@ export function RightSidebar(
   const [diffWrap, setDiffWrap] = useState(true);
   const [diffRefreshKey, setDiffRefreshKey] = useState(0);
   const [diffInteractionId, setDiffInteractionId] = useState<string | null>(null);
+  const [changeAuditRecords, setChangeAuditRecords] = useState<ChangeAuditRecord[]>([]);
+  const [changeAuditLoading, setChangeAuditLoading] = useState(false);
+  const [changeAuditError, setChangeAuditError] = useState<string | null>(null);
+  const [changeAuditClearing, setChangeAuditClearing] = useState(false);
   const [mobileFilePreviewOpen, setMobileFilePreviewOpen] = useState(false);
   const [hasMountedDiffPane, setHasMountedDiffPane] = useState(false);
   const [hasMountedPreviewPane, setHasMountedPreviewPane] = useState(false);
@@ -3754,6 +3764,8 @@ export function RightSidebar(
   const untrackedAbortRef = useRef<AbortController | null>(null);
   const gitDetailsRequestIdRef = useRef(0);
   const gitDetailsAbortRef = useRef<AbortController | null>(null);
+  const changeAuditRequestIdRef = useRef(0);
+  const changeAuditAbortRef = useRef<AbortController | null>(null);
   const lastAutoRefreshRootRef = useRef<string | null>(null);
   const fileTreeResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
   const repoSwitcherPointerRef = useRef<{ startX: number; pointerId: number } | null>(null);
@@ -3839,6 +3851,35 @@ export function RightSidebar(
     }
   }, [rootPath, setChangedFiles]);
 
+  const loadChangeAuditRecords = useCallback(async () => {
+    if (!rootPath) {
+      setChangeAuditRecords([]);
+      return;
+    }
+    // Auxiliary data must stay out of per-file/per-hunk render paths. Load
+    // audit explanations once at the sidebar level, then pass the snapshot to
+    // DiffViewer. Do not fetch this from every DiffViewer instance; concurrent
+    // helper I/O can starve Git bundle, file tree and diff requests.
+    const requestId = changeAuditRequestIdRef.current + 1;
+    changeAuditRequestIdRef.current = requestId;
+    changeAuditAbortRef.current?.abort();
+    const controller = new AbortController();
+    changeAuditAbortRef.current = controller;
+    setChangeAuditLoading(changeAuditRecords.length === 0);
+    setChangeAuditError(null);
+    try {
+      const result = await getChangeAuditRecords({ repoRoot: activeGitRepoRoot }, controller.signal);
+      if (changeAuditRequestIdRef.current !== requestId) return;
+      setChangeAuditRecords(result.records);
+    } catch (error) {
+      if (changeAuditRequestIdRef.current !== requestId || isAbortError(error)) return;
+      setChangeAuditError(error instanceof Error ? error.message : 'Failed to load change audit explanations');
+    } finally {
+      if (changeAuditAbortRef.current === controller) changeAuditAbortRef.current = null;
+      if (changeAuditRequestIdRef.current === requestId) setChangeAuditLoading(false);
+    }
+  }, [activeGitRepoRoot, changeAuditRecords.length, rootPath]);
+
   const applyGitBundle = useCallback((bundle: GitBundleResponse, options: { reloadDiff?: boolean } = {}) => {
     logGitBundleClientEvent(bundle.files.length === 0 ? 'empty_bundle' : 'apply', {
       rootPath,
@@ -3906,7 +3947,8 @@ export function RightSidebar(
     if (bundle.untrackedDeferred && bundle.context?.root) {
       void loadUntrackedFiles(bundle.context.root);
     }
-  }, [loadUntrackedFiles, rootPath, selectFile, setChangedFiles]);
+    void loadChangeAuditRecords();
+  }, [loadChangeAuditRecords, loadUntrackedFiles, rootPath, selectFile, setChangedFiles]);
 
   useEffect(() => {
     gitBundleRequestIdRef.current += 1;
@@ -3921,8 +3963,14 @@ export function RightSidebar(
     untrackedAbortRef.current?.abort();
     cancelIoSlot('right-sidebar-git-untracked');
     untrackedAbortRef.current = null;
+    changeAuditRequestIdRef.current += 1;
+    changeAuditAbortRef.current?.abort();
+    changeAuditAbortRef.current = null;
     setUntrackedLoading(false);
     setUntrackedError(null);
+    setChangeAuditRecords([]);
+    setChangeAuditLoading(false);
+    setChangeAuditError(null);
     setGitDetailsLoading(false);
     setActiveGitRepoRoot(null);
     const cached = rootPath ? useSidebarStore.getState().projectStateCache.get(rootPath) : undefined;
@@ -3968,6 +4016,16 @@ export function RightSidebar(
         requestSlotId: 'right-sidebar-git-bundle',
       });
       loadedBundle = bundle;
+      if (isGitBundleCancellation(bundle)) {
+        loadedBundle = null;
+        logGitBundleClientEvent('cancelled_result_ignored', {
+          requestId,
+          activeRequestId: gitBundleRequestIdRef.current,
+          cwd,
+          error: bundle.error ?? bundle.context?.error,
+        });
+        return null;
+      }
       if (gitBundleRequestIdRef.current !== requestId) {
         logGitBundleClientEvent('stale_result', {
           requestId,
@@ -4001,7 +4059,7 @@ export function RightSidebar(
     } finally {
       if (slowTimer !== null) window.clearTimeout(slowTimer);
       if (gitBundleAbortRef.current === controller) gitBundleAbortRef.current = null;
-      if (gitBundleRequestIdRef.current === requestId) {
+      if (gitBundleRequestIdRef.current === requestId && loadedBundle) {
         markGitBundleLoaded({
           cached: loadedBundle?.cached,
           stale: loadedBundle?.stale,
@@ -4009,6 +4067,9 @@ export function RightSidebar(
           nestedDeferred: loadedBundle?.nestedDeferred,
           untrackedDeferred: loadedBundle?.untrackedDeferred,
         });
+      } else if (gitBundleRequestIdRef.current === requestId) {
+        setGitBundleLoading(false);
+        setGitBundleSlow(false);
       }
     }
   }, [applyGitBundle, changedFiles.size, gitBundleLastLoadedAt, markGitBundleLoaded, rootPath, setGitBundleError, setGitBundleLoading, setGitBundleSlow]);
@@ -4301,6 +4362,7 @@ export function RightSidebar(
   const browsingOutsideProject = Boolean(rootPath && explorerRoot && explorerRoot !== rootPath);
   const fileTreeRootReferenceKey = fileTreeRoot ? `path:${fileTreeRoot}` : null;
   const gitContextReferenceKey = 'context:git';
+  const changeAuditPromptKey = 'context:change-audit';
 
   const goToExplorerParent = useCallback(() => {
     if (explorerParentPath) setExplorerRoot(explorerParentPath);
@@ -4454,6 +4516,11 @@ export function RightSidebar(
     if (!activeGitActionRepoRoot || !gitContext?.available || !gitPaneActive || gitDetailsLoaded || gitDetailsLoading || requiresGitActionRepoSelection) return;
     void loadGitDetails(activeGitActionRepoRoot);
   }, [activeGitActionRepoRoot, gitContext?.available, gitDetailsLoaded, gitDetailsLoading, gitPaneActive, loadGitDetails, requiresGitActionRepoSelection]);
+
+  useEffect(() => {
+    if (!isOpen || !diffPaneActive || !rootPath) return;
+    void loadChangeAuditRecords();
+  }, [diffPaneActive, isOpen, loadChangeAuditRecords, rootPath]);
 
   const activeGitRepoIndex = useMemo(() => {
     if (!activeGitRepoRoot) return 0;
@@ -5028,6 +5095,7 @@ export function RightSidebar(
               showScrollHint={!diffWrap}
               reloadKey={diffRefreshKey}
               embedded
+              auditRecords={changeAuditRecords}
               onInsertDiffReference={insertContextText}
               onReferenceCopied={markReferenceCopied}
               insertedReferenceKey={insertedReferenceKey}
@@ -5201,6 +5269,64 @@ export function RightSidebar(
     insertContextText(t('rightSidebar.gitInfo'), gitContextInputText, gitContextReferenceKey);
     if (!push) onClose();
   }, [gitContextInputText, insertContextText, onClose, push, t]);
+
+  const changeAuditPromptText = useMemo(() => {
+    const repoOptions = (activeGitRepoRoot
+      ? gitRepositories.filter((repo) => repo.root === activeGitRepoRoot)
+      : gitRepositories.filter((repo) => repo.files.length > 0)
+    );
+    const repoList = repoOptions.length > 0
+      ? repoOptions.map((repo) => {
+        const workspacePath = repo.relativeRoot === '.' ? '.' : repo.relativeRoot;
+        return `- ${workspacePath}`;
+      }).join('\n')
+      : `- ${rootPath ? '.' : ''}`;
+    return [
+      '为当前工作区的 Git 更改 hunk 生成审计解释，并通过 Termdock CLI 注入。',
+      '',
+      `当前工作区：${rootPath ?? ''}`,
+      '目标仓库：',
+      repoList,
+      '',
+      '操作指令：',
+      `1. 先执行：td audit-export ${rootPath ?? ''}`,
+      '2. 读取 audit-export 输出中的所有 hunk 完整 diff。通读整批改动，建立整体目标、主要行为变化和跨文件关系的理解。',
+      '3. 使用 audit-export 中已有的 diff 进行分析。不要为了通读而对每个 hunk 循环执行 td audit-show。仅当某个 hunk 的导出信息不足以判断时，再执行：td audit-show <hunkId>',
+      '4. 结合整批改动上下文，逐个写出需要解释的 hunk 意义，并执行：',
+      '   printf "%s\\n" "这里写该 hunk 的改动意义" | td audit-explain <hunkId>',
+      '',
+      '解释内容指令：结合整批改动的上下文，说明该 hunk 为什么要改、解决什么问题、和其它改动的关系、行为变化或风险。不要只复述代码字面变化，不要只看单个 hunk 孤立解释。',
+      '完成后汇报已注入多少个 hunk 解释。',
+    ].join('\n');
+  }, [activeGitRepoRoot, gitRepositories, rootPath]);
+
+  const insertChangeAuditPrompt = useCallback(() => {
+    logGitBundleClientEvent('insert_change_audit_prompt', {
+      rootPath,
+      activeGitRepoRoot,
+      hasAuditListCommand: changeAuditPromptText.includes('td audit-list'),
+      promptLength: changeAuditPromptText.length,
+    });
+    insertContextText(t('rightSidebar.insertChangeAuditPrompt'), changeAuditPromptText, changeAuditPromptKey);
+    void loadChangeAuditRecords();
+    if (!push) onClose();
+  }, [activeGitRepoRoot, changeAuditPromptText, insertContextText, loadChangeAuditRecords, onClose, push, rootPath, t]);
+
+  const clearLoadedChangeAudit = useCallback(async () => {
+    if (changeAuditRecords.length === 0) return;
+    const ids = changeAuditRecords.map((record) => record.id);
+    setChangeAuditClearing(true);
+    setChangeAuditError(null);
+    try {
+      await clearChangeAuditRecords({ ids, repoRoot: activeGitRepoRoot });
+      setChangeAuditRecords([]);
+      void loadChangeAuditRecords();
+    } catch (error) {
+      setChangeAuditError(t('rightSidebar.changeAuditClearFailed', { message: error instanceof Error ? error.message : 'Unknown error' }));
+    } finally {
+      setChangeAuditClearing(false);
+    }
+  }, [activeGitRepoRoot, changeAuditRecords, loadChangeAuditRecords, t]);
 
   const selectDiffFile = useCallback((path: string | null) => {
     const state = useSidebarStore.getState();
@@ -5785,7 +5911,7 @@ export function RightSidebar(
     </div>
   );
 
-  const diffRefreshButton = gitContext?.available ? (
+  const diffRefreshButton = rootPath ? (
     <button
       type="button"
       onClick={() => void refreshGitState()}
@@ -5795,6 +5921,24 @@ export function RightSidebar(
       title={t('rightSidebar.refreshGit')}
     >
       <RiRefresh size={13} className={gitBundleLoading ? 'animate-spin' : ''} />
+    </button>
+  ) : null;
+
+  const changeAuditButton = rootPath ? (
+    <button
+      type="button"
+      onClick={insertChangeAuditPrompt}
+      disabled={!rootPath}
+      className={`inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-[11px] font-medium transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
+        insertedReferenceKey === changeAuditPromptKey
+          ? 'bg-surface-elevated text-foreground'
+          : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+      }`}
+      aria-label={t('rightSidebar.insertChangeAuditPrompt')}
+      title={t('rightSidebar.insertChangeAuditPromptTitle')}
+    >
+      <RiSparkles size={13} />
+      <span>{insertedReferenceKey === changeAuditPromptKey ? t('rightSidebar.inserted') : t('rightSidebar.changeAuditShort')}</span>
     </button>
   ) : null;
 
@@ -6319,7 +6463,7 @@ export function RightSidebar(
                 </div>
               )}
               <div className="w-[320px] min-w-[260px] shrink-0 flex flex-col overflow-hidden border-r border-border/15">
-                {gitContext?.available && (
+                {rootPath && (
                   <div className="shrink-0 border-b border-border/15">
                     <div className="px-3 py-2">
                     <div className="flex items-center justify-between gap-2">
@@ -6342,6 +6486,7 @@ export function RightSidebar(
                       )}
                       <div className="flex items-center gap-1.5">
                         <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                        {changeAuditButton}
                         {diffRefreshButton}
                       </div>
                     </div>
@@ -6367,6 +6512,24 @@ export function RightSidebar(
                         >
                           {t('rightSidebar.stashAll')}
                         </button>
+                      </div>
+                    )}
+                    {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
+                      <div className="mt-2 flex min-w-0 items-center gap-2">
+                        <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
+                          {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
+                        </div>
+                        {changeAuditRecords.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => void clearLoadedChangeAudit()}
+                            disabled={changeAuditClearing}
+                            className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+                            title={t('rightSidebar.clearChangeAuditTitle')}
+                          >
+                            {changeAuditClearing ? <RiLoader size={11} className="animate-spin" /> : t('rightSidebar.clearChangeAudit')}
+                          </button>
+                        )}
                       </div>
                     )}
                     {!activeGitRepoSummary && showGitRepoFilter && (
@@ -6407,13 +6570,13 @@ export function RightSidebar(
                     {t('rightSidebar.selectRepositoryForDiff')}
                   </div>
                 ) : (
-                  <DiffViewer active={diffPaneActive} repoRoot={selectedDiffRepoRoot} interactionId={diffInteractionId} requestSlotId="right-sidebar-main-diff" filePath={selectedChangedFile?.path ?? selectedFilePath} changedFile={selectedChangedFile} reloadKey={diffRefreshKey} onInsertDiffReference={insertContextText} onReferenceCopied={markReferenceCopied} insertedReferenceKey={insertedReferenceKey} copiedReferenceKey={copiedReferenceKey} />
+                  <DiffViewer active={diffPaneActive} repoRoot={selectedDiffRepoRoot} interactionId={diffInteractionId} requestSlotId="right-sidebar-main-diff" filePath={selectedChangedFile?.path ?? selectedFilePath} changedFile={selectedChangedFile} wrap={diffWrap} showScrollHint={!diffWrap} reloadKey={diffRefreshKey} auditRecords={changeAuditRecords} onInsertDiffReference={insertContextText} onReferenceCopied={markReferenceCopied} insertedReferenceKey={insertedReferenceKey} copiedReferenceKey={copiedReferenceKey} />
                 )}
               </div>
             </div>
           ) : (
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
-              {gitContext?.available && (
+              {rootPath && (
                 <div className="shrink-0 border-b border-border/15">
                   <div className="px-3 py-2">
                   <div className="flex items-center justify-between gap-2">
@@ -6426,6 +6589,7 @@ export function RightSidebar(
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
+                      {changeAuditButton}
                       {diffRefreshButton}
                       <button
                         type="button"
@@ -6465,6 +6629,24 @@ export function RightSidebar(
                       >
                         {t('rightSidebar.stashAll')}
                       </button>
+                    </div>
+                  )}
+                  {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
+                    <div className="mt-2 flex min-w-0 items-center gap-2">
+                      <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
+                        {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
+                      </div>
+                      {changeAuditRecords.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => void clearLoadedChangeAudit()}
+                          disabled={changeAuditClearing}
+                          className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+                          title={t('rightSidebar.clearChangeAuditTitle')}
+                        >
+                          {changeAuditClearing ? <RiLoader size={11} className="animate-spin" /> : t('rightSidebar.clearChangeAudit')}
+                        </button>
+                      )}
                     </div>
                   )}
                   {!activeGitRepoSummary && showGitRepoFilter && (

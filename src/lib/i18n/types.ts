@@ -98,6 +98,14 @@ export type TranslationDictionary = {
     clearSearch: string;
     insertGitContext: string;
     copyGitContext: string;
+    insertChangeAuditPrompt: string;
+    insertChangeAuditPromptTitle: string;
+    changeAuditShort: string;
+    changeAuditLoading: string;
+    changeAuditLoaded: (params: TranslatorParams) => string;
+    clearChangeAudit: string;
+    clearChangeAuditTitle: string;
+    changeAuditClearFailed: (params: TranslatorParams) => string;
     insertPreset: (params: TranslatorParams) => string;
     tabChanges: string;
     tabGit: string;
@@ -246,6 +254,8 @@ export type TranslationDictionary = {
     insertHunkShort: string;
     insertFileShort: string;
     insertAllShort: string;
+    auditExplanation: string;
+    auditStale: string;
     allDiffLabel: string;
     allChangesLabel: string;
     workingTree: string;

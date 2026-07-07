@@ -6,6 +6,7 @@ import { execFile, spawn } from 'child_process';
 import watcher from '@parcel/watcher';
 import { pathValidator } from '../utils/pathValidator.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog } from '../utils/serverLogger.js';
+import { clearChangeAuditRecords, listChangeAuditRecords } from '../utils/changeAuditStore.js';
 
 const router = Router();
 
@@ -2803,6 +2804,26 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
     updateInflight('git.bundle', -1);
     logFsIoEvent({ id: requestId, action, op: 'git.bundle', event: 'request-end', cwd, repoRoot: gitRootForLog, extra: { requestSlotId } });
   }
+});
+
+router.get('/change-audit', (req: Request, res: Response) => {
+  const workspaceRoot = typeof req.query.workspaceRoot === 'string' ? req.query.workspaceRoot : null;
+  const repoRoot = typeof req.query.repoRoot === 'string' ? req.query.repoRoot : null;
+  res.json(listChangeAuditRecords({ workspaceRoot, repoRoot }));
+});
+
+router.delete('/change-audit', (req: Request, res: Response) => {
+  const body = req.body as { ids?: unknown; workspaceRoot?: unknown; repoRoot?: unknown };
+  const ids = Array.isArray(body.ids)
+    ? body.ids.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : undefined;
+  const workspaceRoot = typeof body.workspaceRoot === 'string' ? body.workspaceRoot : null;
+  const repoRoot = typeof body.repoRoot === 'string' ? body.repoRoot : null;
+  if ((!ids || ids.length === 0) && !workspaceRoot && !repoRoot) {
+    res.status(400).json({ error: 'Expected ids, workspaceRoot, or repoRoot to clear change audit explanations' });
+    return;
+  }
+  res.json({ ok: true, ...clearChangeAuditRecords({ ids, workspaceRoot, repoRoot }) });
 });
 
 // Mutating Git actions for the right sidebar diff list. Keep this API as a

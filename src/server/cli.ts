@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import fs from 'fs';
+import http from 'http';
+import https from 'https';
 import os from 'os';
 import path from 'path';
 import readline from 'readline';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { Writable } from 'stream';
@@ -47,6 +49,7 @@ const stateDir = path.join(os.homedir(), '.termdock');
 const stateFilePath = path.join(stateDir, 'server.json');
 const logFilePath = path.join(stateDir, 'server.log');
 const globalSessionStateFilePath = path.join(stateDir, 'global-session-state.json');
+const localApiTokenPath = path.join(stateDir, 'local-api-token');
 const certDir = path.join(stateDir, 'certs');
 const defaultHttpsCertPath = path.join(certDir, 'termdock-local.pem');
 const defaultHttpsKeyPath = path.join(certDir, 'termdock-local-key.pem');
@@ -101,6 +104,11 @@ interface CliOptions {
   newTmux: boolean;
   newTmuxName?: string;
   newTmuxAttach: boolean;
+  injectChangeAudit?: string | true;
+  changeAuditExport?: string | true;
+  changeAuditList?: string | true;
+  changeAuditShow?: { id: string; cwd?: string };
+  injectChangeAuditHunk?: { id: string; cwd?: string };
 }
 
 interface ServerState {
@@ -115,6 +123,7 @@ interface ServerState {
   localAccessReason?: string | null;
   logFile: string;
   startedAt: string;
+  localApiToken?: string;
 }
 
 interface PersistedCliSession {
@@ -165,6 +174,18 @@ Options:
                      Use --tls to inspect sessions without attaching.
   --new-tmux-detached [name]
                      Create (or ensure) a tmux session and leave it detached.
+  --inject-change-audit [file]
+                     Inject AI-generated hunk explanations into the running
+                     Termdock server. Reads JSON from file or stdin.
+  --change-audit-list [cwd]
+                     List current Git diff hunks with stable Termdock hunk IDs.
+  --change-audit-export [cwd]
+                     Export current Git diff hunks with full diff text for one-pass review.
+  --change-audit-show <id> [cwd]
+                     Print one hunk's diff/context by Termdock hunk ID.
+  --change-audit-explain <id> [cwd]
+                     Read a natural-language explanation from stdin and inject
+                     it for the specified Termdock hunk ID.
   -h, --help         Show this help message
 
 Short commands:
@@ -180,6 +201,13 @@ Short commands:
   n [name]           Same as --new-tmux [name]
   nt [name]          Same as --new-tmux [name]
   nd [name]          Same as --new-tmux-detached [name]
+  audit [file]       Same as --inject-change-audit [file]
+  audit-list [cwd]   Same as --change-audit-list [cwd]
+  audit-export [cwd] Same as --change-audit-export [cwd]
+  audit-show <id> [cwd]
+                     Same as --change-audit-show <id> [cwd]
+  audit-explain <id> [cwd]
+                     Same as --change-audit-explain <id> [cwd]
   p                  Same as --set-password
   pw                 Same as --set-password
   pc                 Same as --clear-password
@@ -247,11 +275,25 @@ function writeState(state: ServerState) {
   fs.writeFileSync(stateFilePath, JSON.stringify(state, null, 2));
 }
 
+function getOrCreateLocalApiToken(): string {
+  ensureStateDir();
+  try {
+    const existing = fs.readFileSync(localApiTokenPath, 'utf8').trim();
+    if (existing.length >= 24) return existing;
+  } catch {
+    // Create a token below.
+  }
+  const token = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
+  fs.writeFileSync(localApiTokenPath, `${token}\n`, { mode: 0o600 });
+  return token;
+}
+
 function buildServerState(params: {
   pid: number;
   host: string;
   port: number;
   scheme: 'http' | 'https';
+  localApiToken?: string;
   localAccessReason?: string | null;
 }): ServerState {
   return {
@@ -263,6 +305,7 @@ function buildServerState(params: {
     localAccessReason: params.localAccessReason,
     logFile: logFilePath,
     startedAt: new Date().toISOString(),
+    localApiToken: params.localApiToken,
   };
 }
 
@@ -463,6 +506,11 @@ function parseArgs(argv: string[]): CliOptions {
   let newTmux = false;
   let newTmuxName: string | undefined;
   let newTmuxAttach = true;
+  let injectChangeAudit: string | true | undefined;
+  let changeAuditExport: string | true | undefined;
+  let changeAuditList: string | true | undefined;
+  let changeAuditShow: { id: string; cwd?: string } | undefined;
+  let injectChangeAuditHunk: { id: string; cwd?: string } | undefined;
 
   // Short command aliases for the common path. Keep these positional-only so
   // long-form flags remain the single source of truth for option semantics.
@@ -517,6 +565,20 @@ function parseArgs(argv: string[]): CliOptions {
       } else {
         argv = argv.slice(1);
       }
+    } else if (command === 'audit') {
+      injectChangeAudit = next && !next.startsWith('-') ? next : true;
+      argv = argv.slice(injectChangeAudit === true ? 1 : 2);
+    } else if (command === 'audit-list') {
+      changeAuditList = next && !next.startsWith('-') ? next : true;
+      argv = argv.slice(changeAuditList === true ? 1 : 2);
+    } else if (command === 'audit-export') {
+      changeAuditExport = next && !next.startsWith('-') ? next : true;
+      argv = argv.slice(changeAuditExport === true ? 1 : 2);
+    } else if ((command === 'audit-show' || command === 'audit-explain') && next && !next.startsWith('-')) {
+      const cwd = argv[2] && !argv[2].startsWith('-') ? argv[2] : undefined;
+      if (command === 'audit-show') changeAuditShow = { id: next, cwd };
+      else injectChangeAuditHunk = { id: next, cwd };
+      argv = argv.slice(cwd ? 3 : 2);
     }
   }
 
@@ -641,6 +703,52 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === '--inject-change-audit') {
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        injectChangeAudit = next;
+        index += 1;
+      } else {
+        injectChangeAudit = true;
+      }
+      continue;
+    }
+
+    if (arg === '--change-audit-list') {
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        changeAuditList = next;
+        index += 1;
+      } else {
+        changeAuditList = true;
+      }
+      continue;
+    }
+
+    if (arg === '--change-audit-export') {
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        changeAuditExport = next;
+        index += 1;
+      } else {
+        changeAuditExport = true;
+      }
+      continue;
+    }
+
+    if (arg === '--change-audit-show' || arg === '--change-audit-explain') {
+      const id = argv[index + 1];
+      if (!id || id.startsWith('-')) {
+        console.error(`${ICON.err} ${c.red(`${arg} requires a hunk id`)}`);
+        process.exit(1);
+      }
+      const cwd = argv[index + 2] && !argv[index + 2].startsWith('-') ? argv[index + 2] : undefined;
+      if (arg === '--change-audit-show') changeAuditShow = { id, cwd };
+      else injectChangeAuditHunk = { id, cwd };
+      index += cwd ? 2 : 1;
+      continue;
+    }
+
     if (!arg.startsWith('-')) {
       if (attachTmux && !attachTmuxName) {
         attachTmuxName = arg;
@@ -677,6 +785,11 @@ function parseArgs(argv: string[]): CliOptions {
     newTmux,
     newTmuxName,
     newTmuxAttach,
+    injectChangeAudit,
+    changeAuditExport,
+    changeAuditList,
+    changeAuditShow,
+    injectChangeAuditHunk,
   };
 }
 
@@ -800,6 +913,379 @@ function runClearPassword(): void {
     console.log(`${ICON.info} ${c.yellow('Termdock is currently running — restart it so the change takes effect:')}`);
     console.log(`     ${c.cyan('td --stop && td')}`);
   }
+}
+
+async function readStdinText(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let value = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => { value += chunk; });
+    process.stdin.on('end', () => resolve(value));
+    process.stdin.on('error', reject);
+  });
+}
+
+async function postLocalJson(baseUrl: string, token: string, payload: unknown): Promise<{ statusCode: number; body: string }> {
+  const url = new URL('/api/local/change-audit', baseUrl);
+  const body = JSON.stringify(payload);
+  const isHttps = url.protocol === 'https:';
+  const requestImpl = isHttps ? https.request : http.request;
+  const ca = isHttps && fs.existsSync(defaultHttpsCaPath) ? fs.readFileSync(defaultHttpsCaPath) : undefined;
+
+  return new Promise((resolve, reject) => {
+    const req = requestImpl({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port,
+      path: `${url.pathname}${url.search}`,
+      method: 'POST',
+      ca,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        'X-Termdock-Local-Token': token,
+      },
+    }, (res) => {
+      let responseBody = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { responseBody += chunk; });
+      res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: responseBody }));
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+async function runInjectChangeAudit(source: string | true): Promise<void> {
+  const runningState = getRunningState();
+  if (!runningState) {
+    console.error(`${ICON.err} ${c.red('Termdock is not running. Start it before injecting change audit explanations.')}`);
+    process.exit(1);
+  }
+  const token = runningState.localApiToken;
+  if (!token) {
+    console.error(`${ICON.err} ${c.red('Running Termdock server does not expose a local injection token. Restart Termdock first.')}`);
+    process.exit(1);
+  }
+
+  const raw = source === true
+    ? await readStdinText()
+    : fs.readFileSync(path.resolve(source), 'utf8');
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`${ICON.err} ${c.red(`Invalid change audit JSON: ${message}`)}`);
+    process.exit(1);
+  }
+
+  const baseUrl = runningState.localUrl ?? `${runningState.scheme ?? 'http'}://${runningState.host === '0.0.0.0' ? 'localhost' : runningState.host}:${runningState.port}`;
+  const response = await postLocalJson(baseUrl, token, payload);
+  const body = JSON.parse(response.body || '{}') as { inserted?: number; total?: number; error?: string };
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    console.error(`${ICON.err} ${c.red(body.error || 'Failed to inject change audit explanations')}`);
+    process.exit(1);
+  }
+  console.log(`${ICON.ok} ${c.green('Injected change audit explanations.')}`);
+  console.log(`  ${c.dim('Inserted:')} ${body.inserted ?? 0}`);
+  console.log(`  ${c.dim('Total:')}    ${body.total ?? 0}`);
+}
+
+interface ChangeAuditCliHunk {
+  id: string;
+  workspaceRoot: string;
+  repoRoot: string;
+  displayRoot: string;
+  relativeRoot: string;
+  filePath: string;
+  displayPath: string;
+  oldPath: string | null;
+  newPath: string | null;
+  hunkHeader: string;
+  hunkIndex: number;
+  fingerprint: string;
+  additions: number;
+  deletions: number;
+  diff: string;
+}
+
+interface AuditRepositoryTarget {
+  workspaceRoot: string;
+  repoRoot: string;
+  displayRoot: string;
+  relativeRoot: string;
+}
+
+function fnv1a32(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function normalizeDiffPath(value: string): string | null {
+  if (!value || value === '/dev/null') return null;
+  return value.startsWith('a/') || value.startsWith('b/') ? value.slice(2) : value;
+}
+
+function buildHunkChangeFingerprint(lines: string[]): string {
+  const changedLines = lines
+    .filter((line) => line.startsWith('+') || line.startsWith('-'))
+    .filter((line) => !line.startsWith('+++') && !line.startsWith('---'))
+    .map((line) => `${line.startsWith('+') ? 'insert' : 'delete'}:${line.slice(1)}`);
+  const text = changedLines.length > 0
+    ? changedLines.join('\n')
+    : lines.map((line) => line.slice(1)).join('\n');
+  return fnv1a32(text);
+}
+
+async function getGitRoot(cwd: string): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
+    cwd,
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+  });
+  return stdout.trim();
+}
+
+async function hasGitMetadata(candidate: string): Promise<boolean> {
+  return fs.promises.stat(path.join(candidate, '.git')).then(() => true).catch(() => false);
+}
+
+async function getDirectoryTarget(candidate: string): Promise<string | null> {
+  try {
+    const stat = await fs.promises.lstat(candidate);
+    if (stat.isDirectory()) return candidate;
+    if (!stat.isSymbolicLink()) return null;
+    const realPath = await fs.promises.realpath(candidate);
+    return (await fs.promises.stat(realPath)).isDirectory() ? realPath : null;
+  } catch {
+    return null;
+  }
+}
+
+const AUDIT_NESTED_IGNORED_NAMES = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'build',
+  'out',
+  '.next',
+  '.vite',
+  '.turbo',
+  '.cache',
+  'coverage',
+  'Pods',
+  'DerivedData',
+]);
+
+async function discoverAuditRepositories(workspaceRoot: string): Promise<AuditRepositoryTarget[]> {
+  const workspaceGitRoot = await getGitRoot(workspaceRoot);
+  const targets: AuditRepositoryTarget[] = [{
+    workspaceRoot,
+    repoRoot: workspaceGitRoot,
+    displayRoot: workspaceRoot,
+    relativeRoot: '.',
+  }];
+  const seen = new Set([workspaceGitRoot]);
+  const deadline = Date.now() + 1_000;
+
+  async function visit(dir: string): Promise<void> {
+    if (Date.now() > deadline) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (Date.now() > deadline) return;
+      if (AUDIT_NESTED_IGNORED_NAMES.has(entry.name)) continue;
+      const candidate = path.join(dir, entry.name);
+      const target = await getDirectoryTarget(candidate);
+      if (!target) continue;
+      if (await hasGitMetadata(candidate) || await hasGitMetadata(target)) {
+        const repoRoot = await getGitRoot(target).catch(() => null);
+        if (repoRoot && !seen.has(repoRoot)) {
+          seen.add(repoRoot);
+          const relativeRoot = path.relative(workspaceRoot, candidate).split(path.sep).join('/') || '.';
+          targets.push({ workspaceRoot, repoRoot, displayRoot: candidate, relativeRoot });
+        }
+        continue;
+      }
+      if (!entry.isSymbolicLink()) await visit(target);
+    }
+  }
+
+  await visit(workspaceRoot);
+  return targets.sort((a, b) => a.relativeRoot.localeCompare(b.relativeRoot));
+}
+
+async function readWorkingTreeDiff(repoRoot: string): Promise<string> {
+  const [cached, worktree, untracked] = await Promise.all([
+    execFileAsync('git', ['diff', '-M', '--cached'], { cwd: repoRoot, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout).catch(() => ''),
+    execFileAsync('git', ['diff', '-M'], { cwd: repoRoot, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout).catch(() => ''),
+    execFileAsync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: repoRoot, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }).then(async ({ stdout }) => {
+      const pieces: string[] = [];
+      for (const filePath of stdout.split('\0').filter(Boolean)) {
+        try {
+          const { stdout: diff } = await execFileAsync('git', ['diff', '--no-index', '--', '/dev/null', filePath], {
+            cwd: repoRoot,
+            timeout: 30_000,
+            maxBuffer: 2 * 1024 * 1024,
+          });
+          if (diff) pieces.push(diff);
+        } catch (error) {
+          const maybe = error as { stdout?: string };
+          if (maybe.stdout) pieces.push(maybe.stdout);
+        }
+      }
+      return pieces.join('\n');
+    }).catch(() => ''),
+  ]);
+  return [cached, worktree, untracked].filter(Boolean).join('\n');
+}
+
+function parseAuditHunks(target: AuditRepositoryTarget, diffText: string): ChangeAuditCliHunk[] {
+  const hunks: ChangeAuditCliHunk[] = [];
+  const lines = diffText.split('\n');
+  let oldPath: string | null = null;
+  let newPath: string | null = null;
+  let currentHeader: string | null = null;
+  let currentLines: string[] = [];
+  let hunkIndexByFile = 0;
+
+  const flush = () => {
+    if (!currentHeader || (!oldPath && !newPath)) return;
+    const filePath = newPath ?? oldPath ?? '';
+    const displayPath = target.relativeRoot === '.' ? filePath : `${target.relativeRoot}/${filePath}`;
+    const hunkDiff = [`diff --git a/${oldPath ?? filePath} b/${newPath ?? filePath}`, currentHeader, ...currentLines].join('\n');
+    const fingerprint = buildHunkChangeFingerprint(currentLines);
+    const id = createHash('sha256')
+      .update(`${target.repoRoot}\0${filePath}\0${currentHeader}\0${hunkIndexByFile}\0${fingerprint}`, 'utf8')
+      .digest('hex')
+      .slice(0, 16);
+    hunks.push({
+      id,
+      workspaceRoot: target.workspaceRoot,
+      repoRoot: target.repoRoot,
+      displayRoot: target.displayRoot,
+      relativeRoot: target.relativeRoot,
+      filePath,
+      displayPath,
+      oldPath,
+      newPath,
+      hunkHeader: currentHeader,
+      hunkIndex: hunkIndexByFile,
+      fingerprint,
+      additions: currentLines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length,
+      deletions: currentLines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length,
+      diff: hunkDiff,
+    });
+    hunkIndexByFile += 1;
+  };
+
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      flush();
+      currentHeader = null;
+      currentLines = [];
+      hunkIndexByFile = 0;
+      const match = /^diff --git (.+) (.+)$/.exec(line);
+      oldPath = normalizeDiffPath(match?.[1] ?? '');
+      newPath = normalizeDiffPath(match?.[2] ?? '');
+      continue;
+    }
+    if (line.startsWith('--- ')) {
+      oldPath = normalizeDiffPath(line.slice(4).trim());
+      continue;
+    }
+    if (line.startsWith('+++ ')) {
+      newPath = normalizeDiffPath(line.slice(4).trim());
+      continue;
+    }
+    if (line.startsWith('@@ ')) {
+      flush();
+      currentHeader = line;
+      currentLines = [];
+      continue;
+    }
+    if (currentHeader) currentLines.push(line);
+  }
+  flush();
+  return hunks;
+}
+
+async function getAuditHunks(cwdInput?: string | true): Promise<ChangeAuditCliHunk[]> {
+  const workspaceRoot = typeof cwdInput === 'string' ? path.resolve(cwdInput) : process.cwd();
+  const targets = await discoverAuditRepositories(workspaceRoot);
+  const hunksByRepo = await Promise.all(targets.map(async (target) => (
+    parseAuditHunks(target, await readWorkingTreeDiff(target.repoRoot).catch(() => ''))
+  )));
+  return hunksByRepo.flat();
+}
+
+async function runChangeAuditList(source: string | true | undefined): Promise<void> {
+  const hunks = await getAuditHunks(source);
+  console.log(JSON.stringify({
+    version: 1,
+    count: hunks.length,
+    hunks: hunks.map(({ diff, ...hunk }) => hunk),
+  }, null, 2));
+}
+
+async function runChangeAuditExport(source: string | true | undefined): Promise<void> {
+  const hunks = await getAuditHunks(source);
+  console.log(JSON.stringify({
+    version: 1,
+    count: hunks.length,
+    hunks,
+  }, null, 2));
+}
+
+async function runChangeAuditShow(request: { id: string; cwd?: string }): Promise<void> {
+  const hunk = (await getAuditHunks(request.cwd)).find((candidate) => candidate.id === request.id);
+  if (!hunk) {
+    console.error(`${ICON.err} ${c.red(`No current diff hunk found for id ${request.id}`)}`);
+    process.exit(1);
+  }
+  console.log(JSON.stringify(hunk, null, 2));
+}
+
+async function runInjectChangeAuditHunk(request: { id: string; cwd?: string }): Promise<void> {
+  const explanation = (await readStdinText()).trim();
+  if (!explanation) {
+    console.error(`${ICON.err} ${c.red('Explanation is empty. Pipe explanation text into this command.')}`);
+    process.exit(1);
+  }
+  const hunk = (await getAuditHunks(request.cwd)).find((candidate) => candidate.id === request.id);
+  if (!hunk) {
+    console.error(`${ICON.err} ${c.red(`No current diff hunk found for id ${request.id}`)}`);
+    process.exit(1);
+  }
+  const payload = {
+    workspaceRoot: hunk.workspaceRoot,
+    repoRoot: hunk.repoRoot,
+    generatedBy: 'ai-cli',
+    records: [{
+      repoRoot: hunk.repoRoot,
+      filePath: hunk.filePath,
+      oldPath: hunk.oldPath,
+      newPath: hunk.newPath,
+      hunkHeader: hunk.hunkHeader,
+      hunkIndex: hunk.hunkIndex,
+      fingerprint: hunk.fingerprint,
+      summary: explanation.split('\n')[0]?.slice(0, 120) || null,
+      explanation,
+    }],
+  };
+  const tmpPath = path.join(os.tmpdir(), `termdock-change-audit-${hunk.id}.json`);
+  fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2));
+  await runInjectChangeAudit(tmpPath);
 }
 
 const options = parseArgs(process.argv.slice(2));
@@ -1736,6 +2222,31 @@ async function main(): Promise<void> {
     return; // execTmuxAttach handles process exit
   }
 
+  if (options.injectChangeAudit) {
+    await runInjectChangeAudit(options.injectChangeAudit);
+    process.exit(0);
+  }
+
+  if (options.changeAuditList) {
+    await runChangeAuditList(options.changeAuditList);
+    process.exit(0);
+  }
+
+  if (options.changeAuditExport) {
+    await runChangeAuditExport(options.changeAuditExport);
+    process.exit(0);
+  }
+
+  if (options.changeAuditShow) {
+    await runChangeAuditShow(options.changeAuditShow);
+    process.exit(0);
+  }
+
+  if (options.injectChangeAuditHunk) {
+    await runInjectChangeAuditHunk(options.injectChangeAuditHunk);
+    process.exit(0);
+  }
+
   if (options.setPassword) {
     await runSetPassword();
     process.exit(0);
@@ -1746,6 +2257,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  const localApiToken = getOrCreateLocalApiToken();
   const https = resolveHttpsOptions(options);
   const isManagedDefaultHttps = Boolean(https.cert === defaultHttpsCertPath && https.key === defaultHttpsKeyPath);
 
@@ -1784,6 +2296,7 @@ async function main(): Promise<void> {
       httpsCertPath: https.cert,
       httpsKeyPath: https.key,
       httpsCaPath: https.ca,
+      localApiToken,
       onCertificateRefreshNeeded: isManagedDefaultHttps
         ? async (): Promise<CertificateRefreshResult> => {
             console.log(`${ICON.info} ${c.dim('Termdock detected network/certificate changes; regenerating certificate and reloading TLS context...')}`);
@@ -1808,6 +2321,7 @@ async function main(): Promise<void> {
               localAccessReason: state.reason,
               logFile: logFilePath,
               startedAt: new Date().toISOString(),
+              localApiToken,
             });
             return { reloaded: false, localAccessState: state };
           }
@@ -1835,6 +2349,7 @@ async function main(): Promise<void> {
       localAccessReason: metadata.reason,
       logFile: logFilePath,
       startedAt: new Date().toISOString(),
+      localApiToken,
     });
     return;
   }
@@ -1895,6 +2410,7 @@ async function main(): Promise<void> {
     port: childPort,
     scheme,
     localAccessReason,
+    localApiToken,
   }));
 
   console.log(`${ICON.ok} ${c.green('Termdock started in background.')}`);

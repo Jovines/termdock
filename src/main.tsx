@@ -10,8 +10,10 @@ import {
   getAuthStatus,
   type AuthStatus,
 } from './lib/terminal/api';
+import { setupPwaUpdateReload } from './lib/utils/pwaUpdate';
 
 syncInitialViewportCssVars();
+setupPwaUpdateReload();
 
 try {
   const storedTheme = JSON.parse(window.localStorage.getItem('termdock-color-theme') || 'null') as unknown;

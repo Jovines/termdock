@@ -1,9 +1,9 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMoveHorizontal } from 'lucide-react';
-import { parseDiff, Diff, Hunk, Decoration, tokenize, type HunkData, type HunkTokens } from 'react-diff-view';
+import { parseDiff, Diff, Hunk, Decoration, tokenize, markEdits, type HunkData, type HunkTokens } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
-import { cancelIoSlot, getFileDiff, isPreviewableImagePath, readImagePreviewBlob, type FileDiffResponse, type GitChangedFile } from '../../terminal/api';
+import { cancelIoSlot, getFileDiff, isPreviewableImagePath, readImagePreviewBlob, type ChangeAuditRecord, type FileDiffResponse, type GitChangedFile } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { loadRefractor, resolveLanguage, MAX_HIGHLIGHT_BYTES, MAX_HIGHLIGHT_LINE_LENGTH, type RefractorLike } from '../../utils/syntaxHighlight';
 import { useReferenceLongPressCopy } from './referenceLongPress';
@@ -210,6 +210,13 @@ interface DiffViewerProps {
   embedded?: boolean;
   /** Keep mounted panes from issuing background diff requests while hidden. */
   active?: boolean;
+  auditRecords?: ChangeAuditRecord[];
+}
+
+interface HunkAuditView {
+  current?: ChangeAuditRecord;
+  stale?: ChangeAuditRecord;
+  fingerprint: string;
 }
 
 function shouldPreferImagePreview(readablePath: string | null, changedFile: Pick<GitChangedFile, 'status'> | null | undefined): boolean {
@@ -231,6 +238,59 @@ function getPathParts(path: string | null, fallback: { name: string; dir: string
 
 function formatDiffReference(diffText: string): string {
   return `${diffText.trimEnd()}\n`;
+}
+
+function buildHunkFingerprint(hunk: HunkData): string {
+  const changedLines = hunk.changes
+    .filter((change) => change.type === 'insert' || change.type === 'delete')
+    .map((change) => `${change.type}:${change.content}`);
+  const text = changedLines.length > 0
+    ? changedLines.join('\n')
+    : hunk.changes.map((change) => change.content).join('\n');
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function buildAuditLookupKey(repoRoot: string | null | undefined, filePath: string): string {
+  return `${repoRoot ?? ''}\u0000${filePath}`;
+}
+
+function auditPathMatches(pathValue: string, filePath: string): boolean {
+  return pathValue === filePath
+    || filePath.endsWith(`/${pathValue}`)
+    || pathValue.endsWith(`/${filePath}`);
+}
+
+function getHunkAudit(records: ChangeAuditRecord[] | undefined, repoRoot: string | null | undefined, filePath: string, hunkHeader: string, fingerprint: string): HunkAuditView {
+  if (!records || records.length === 0) return { fingerprint };
+  const lookupKey = buildAuditLookupKey(repoRoot, filePath);
+  let stale: ChangeAuditRecord | undefined;
+  for (const record of records) {
+    const paths = [record.filePath, record.newPath, record.oldPath].filter((value): value is string => typeof value === 'string' && value.length > 0);
+    const exactRepoPathMatches = paths.some((pathValue) => buildAuditLookupKey(record.repoRoot, pathValue) === lookupKey);
+    const fallbackPathMatches = paths.some((pathValue) => auditPathMatches(pathValue, filePath));
+    const pathMatches = exactRepoPathMatches || fallbackPathMatches;
+    if (!pathMatches) continue;
+    if (record.fingerprint === fingerprint) return { current: record, fingerprint };
+    if (!stale && record.hunkHeader === hunkHeader) stale = record;
+  }
+  return { stale, fingerprint };
+}
+
+function getDiffGutterWidthCh(hunks: HunkData[]): number {
+  let maxLineNumber = 0;
+  for (const hunk of hunks) {
+    maxLineNumber = Math.max(
+      maxLineNumber,
+      hunk.oldStart + Math.max(0, hunk.oldLines - 1),
+      hunk.newStart + Math.max(0, hunk.newLines - 1),
+    );
+  }
+  return Math.max(3, String(maxLineNumber).length + 0.5);
 }
 
 function isAbortError(error: unknown): boolean {
@@ -293,7 +353,7 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true }: DiffViewerProps) {
+export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, auditRecords }: DiffViewerProps) {
   const { t } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
@@ -313,6 +373,7 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
   const changedFileRepoRoot = changedFile?.repoRoot ?? null;
   const changedFileStatus = changedFile?.status ?? null;
+  const auditRepoRoot = changedFileRepoRoot ?? repoRoot ?? rootPath;
 
   useEffect(() => {
     if (!active) {
@@ -543,6 +604,8 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
     }
   }, [diffContent]);
 
+  const effectiveAuditRecords = auditRecords ?? [];
+
   // Lazily-loaded refractor singleton, shared with the file preview. Loading is
   // deferred until a diff actually renders so it never weighs on first paint.
   const [refractor, setRefractor] = useState<RefractorLike | null>(null);
@@ -555,17 +618,15 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
     return () => { cancelled = true; };
   }, [files.length, refractor]);
 
-  // Per-file syntax tokens keyed by the same identity used to render each file.
-  // Computed only when refractor is ready and the file is a known, reasonably
-  // sized text language — large/binary diffs stay plain to protect the main thread.
+  // Per-file tokens keyed by the same identity used to render each file.
+  // Inline edit marks are always enabled for text diffs; syntax highlighting is
+  // layered on only when refractor knows the language and the file is small enough.
   const fileTokens = useMemo(() => {
     const map = new Map<string, HunkTokens>();
-    if (!refractor) return map;
     const startedAt = performance.now();
     for (const file of files) {
       if (file.hunks.length === 0) continue;
       const language = resolveLanguage(file.newPath || file.oldPath);
-      if (!language || !refractor.registered(language)) continue;
       let bytes = 0;
       let tooLong = false;
       for (const hunk of file.hunks) {
@@ -575,8 +636,13 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
         }
       }
       if (tooLong || bytes > MAX_HIGHLIGHT_BYTES) continue;
+      const canHighlight = Boolean(language && refractor?.registered(language));
       try {
-        const tokens = tokenize(file.hunks as HunkData[], { highlight: true, refractor, language });
+        const hunkData = file.hunks as HunkData[];
+        const editEnhancers = [markEdits(hunkData, { type: 'line' })];
+        const tokens = canHighlight
+          ? tokenize(hunkData, { highlight: true, refractor: refractor!, language: language!, enhancers: editEnhancers })
+          : tokenize(hunkData, { enhancers: editEnhancers });
         map.set(`${file.oldRevision}-${file.newRevision}-${file.newPath}`, tokens);
       } catch {
         // A single bad file shouldn't break the whole diff view.
@@ -640,6 +706,7 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
         const fileDiffText = formatDiffReference(fileDiffReferenceText);
         const fileDiffReferenceKey = `diff:file:${displayPath}`;
         const fileDiffReferenceActive = insertedReferenceKey === fileDiffReferenceKey || copiedReferenceKey === fileDiffReferenceKey;
+        const diffGutterStyle = { '--termdock-diff-gutter-width': `${getDiffGutterWidthCh(file.hunks)}ch` } as React.CSSProperties;
         return (
         // Keep a stable file anchor on each parsed diff block. It is useful for
         // deep links/debugging and preserves the previous DOM contract even when
@@ -648,6 +715,7 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
           key={key}
           data-diff-file-anchor={displayPath}
           className={embedded ? 'overflow-hidden bg-surface' : 'mt-3 overflow-hidden border border-border/20 bg-surface'}
+          style={diffGutterStyle}
         >
           {showFileHeader && (
             <div className="flex items-center justify-between gap-3 border-b border-border/15 bg-surface-2 px-2 py-1.5">
@@ -708,25 +776,43 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
                       hunk.content,
                       ...hunk.changes.map((change) => change.content),
                     ].join('\n'));
+                    const hunkFingerprint = buildHunkFingerprint(hunk);
+                    const hunkAudit = getHunkAudit(effectiveAuditRecords, auditRepoRoot, displayPath, hunk.content, hunkFingerprint);
                     const hunkReferenceKey = `diff:hunk:${displayPath}:${index}`;
                     const hunkReferenceActive = insertedReferenceKey === hunkReferenceKey || copiedReferenceKey === hunkReferenceKey;
                     return (
                     <Fragment key={hunk.content}>
                       <Decoration>
-                        <span className="diff-hunk-header flex min-w-0 flex-wrap items-center gap-2">
-                          {onInsertDiffReference && (
-                            <button
-                              type="button"
-                              onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, hunkDiffText, hunkReferenceKey)}
-                              {...getReferenceLongPressHandlers(hunkDiffText, hunkReferenceKey)}
-                              className={`inline-flex h-6 shrink-0 items-center rounded-full px-2 text-[10px] font-semibold active:scale-95 ${hunkReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
-                              title={t('diffViewer.insertHunkDiff')}
-                            >
-                              {copiedReferenceKey === hunkReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === hunkReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertHunkShort')}
-                            </button>
+                        <span />
+                        <div className={wrap ? 'min-w-0 max-w-full overflow-hidden' : 'min-w-0'}>
+                          <span className={`diff-hunk-header flex min-w-0 items-center gap-2 ${wrap ? 'max-w-full flex-wrap overflow-hidden' : 'w-max whitespace-nowrap'}`}>
+                            {onInsertDiffReference && (
+                              <button
+                                type="button"
+                                onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}`, hunkDiffText, hunkReferenceKey)}
+                                {...getReferenceLongPressHandlers(hunkDiffText, hunkReferenceKey)}
+                                className={`inline-flex h-6 shrink-0 items-center rounded-full px-2 text-[10px] font-semibold active:scale-95 ${hunkReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
+                                title={t('diffViewer.insertHunkDiff')}
+                              >
+                                {copiedReferenceKey === hunkReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === hunkReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertHunkShort')}
+                              </button>
+                            )}
+                            <span className="min-w-0 flex-1 truncate">{hunk.content}</span>
+                          </span>
+                          {(hunkAudit.current || hunkAudit.stale) && (
+                            <div className={`mt-1 min-w-0 rounded-md border px-2 py-1.5 text-[11px] leading-relaxed ${wrap ? 'max-w-full overflow-hidden' : 'w-max'} ${
+                              hunkAudit.current
+                                ? 'border-primary/20 bg-primary/10 text-foreground'
+                                : 'border-[rgb(var(--warning-rgb)_/_0.26)] bg-[rgb(var(--warning-rgb)_/_0.12)] text-muted-foreground'
+                            }`}>
+                              <div className="mb-0.5 flex min-w-0 items-center gap-1.5">
+                                <span className="font-semibold text-foreground">{hunkAudit.current ? t('diffViewer.auditExplanation') : t('diffViewer.auditStale')}</span>
+                                <span className="font-mono text-[10px] text-muted-foreground">{hunkAudit.fingerprint}</span>
+                              </div>
+                              <div className="termdock-diff-audit-explanation min-w-0">{hunkAudit.current?.explanation ?? hunkAudit.stale?.explanation}</div>
+                            </div>
                           )}
-                          <span className="min-w-0 flex-1 truncate">{hunk.content}</span>
-                        </span>
+                        </div>
                       </Decoration>
                       <Hunk hunk={hunk} />
                     </Fragment>

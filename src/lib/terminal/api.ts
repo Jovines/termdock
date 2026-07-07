@@ -2021,6 +2021,62 @@ export interface GitRepositoryBundle {
   error?: string;
 }
 
+export interface ChangeAuditRecord {
+  id: string;
+  repoRoot: string;
+  filePath: string;
+  oldPath?: string | null;
+  newPath?: string | null;
+  hunkHeader: string;
+  hunkIndex?: number | null;
+  fingerprint: string;
+  explanation: string;
+  summary?: string | null;
+  workspaceRoot?: string | null;
+  generatedBy?: string | null;
+  injectedAt: number;
+}
+
+export async function getChangeAuditRecords(options: { workspaceRoot?: string | null; repoRoot?: string | null } = {}, signal?: AbortSignal): Promise<{ records: ChangeAuditRecord[]; loading?: boolean }> {
+  const params = new URLSearchParams();
+  if (options.workspaceRoot) params.set('workspaceRoot', options.workspaceRoot);
+  if (options.repoRoot) params.set('repoRoot', options.repoRoot);
+  const qs = params.toString();
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/change-audit${qs ? `?${qs}` : ''}`,
+    { signal },
+    GIT_REQUEST_TIMEOUT_MS,
+    'Change audit explanations took too long to load.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get change audit explanations' }));
+    throw new Error(error.error || 'Failed to get change audit explanations');
+  }
+  return response.json();
+}
+
+export async function clearChangeAuditRecords(options: { ids?: string[]; workspaceRoot?: string | null; repoRoot?: string | null } = {}): Promise<{ deleted: number; total: number }> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetchWithTimeout(
+    '/api/terminal/fs/change-audit',
+    {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-XSRF-TOKEN': csrfTokenHeader,
+      },
+      body: JSON.stringify(options),
+    },
+    GIT_REQUEST_TIMEOUT_MS,
+    'Change audit explanations took too long to clear.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to clear change audit explanations' }));
+    throw new Error(error.error || 'Failed to clear change audit explanations');
+  }
+  return response.json();
+}
+
 export async function getUntrackedFiles(cwd?: string, signal?: AbortSignal, requestSlotId?: string): Promise<{
   status: 'running' | 'done' | 'error';
   files: GitChangedFile[];

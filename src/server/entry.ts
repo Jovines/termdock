@@ -15,6 +15,7 @@ import terminalRoutes, { handleTerminalWebSocket, handleControlWebSocket } from 
 import filesystemRoutes from './routes/filesystem.js';
 import authRoutes from './routes/auth.js';
 import { createOnboardingRouter } from './routes/onboarding.js';
+import { createLocalRouter } from './routes/local.js';
 import { csrfProtection } from './utils/csrfProtection.js';
 import { pathValidator } from './utils/pathValidator.js';
 import { isUpgradeRequestAuthenticated, requireAuth } from './utils/authProtection.js';
@@ -68,6 +69,7 @@ export interface ServerOptions {
   httpsKeyPath?: string;
   httpsCaPath?: string;
   onboardingPort?: number;
+  localApiToken?: string;
   onCertificateRefreshNeeded?: (missingNames: string[]) => CertificateRefreshResult | Promise<CertificateRefreshResult>;
 }
 
@@ -81,6 +83,7 @@ export interface StartServerResult {
 export interface AppOptions {
   port?: number;
   httpsCaPath?: string;
+  localApiToken?: string;
 }
 
 function shouldWriteClientLog(level: unknown, message: unknown): boolean {
@@ -391,6 +394,8 @@ export function createApp(options: AppOptions = {}): express.Express {
     res.json({ ok: true });
   });
 
+  app.use('/api/local', createLocalRouter({ token: options.localApiToken }));
+
   // 手机首次接入引导（未信任 CA 前需要从 HTTP 内网页面下载证书）
   app.use('/onboarding', createOnboardingRouter({ port: options.port, caCertPath: options.httpsCaPath }));
   app.get('/ca', (_req, res) => {
@@ -468,7 +473,7 @@ function reloadHttpsCertificate(server: HttpServer, options: ServerOptions): boo
 export function startServer(options: ServerOptions = {}): StartServerResult {
   const port = options.port ?? Number(process.env.PORT || DEFAULT_PORT);
   const host = options.host ?? (process.env.HOST || DEFAULT_HOST);
-  const app = createApp({ port: options.onboardingPort ?? port, httpsCaPath: options.httpsCaPath });
+  const app = createApp({ port: options.onboardingPort ?? port, httpsCaPath: options.httpsCaPath, localApiToken: options.localApiToken });
   const { server, scheme } = createServerForApp(app, options);
   setSecureCookieMode(scheme === 'https');
   const certWatcher = new CertificateWatcher({
