@@ -307,6 +307,8 @@ let globalSessionStateReloadTimer: ReturnType<typeof setTimeout> | null = null;
 const controlClients = new Map<string, WebSocket>();
 
 let latestSessionInventory: SessionInventory | null = null;
+let latestSessionInventoryAt = 0;
+let sessionInventoryBuildPromise: Promise<SessionInventory> | null = null;
 let broadcastInventorySeq = 0;
 let broadcastClientStateTimer: ReturnType<typeof setTimeout> | null = null;
 let broadcastClientStateInFlight = false;
@@ -315,6 +317,28 @@ let lastBroadcastClientStateSignature: string | null = null;
 const inventoryOpenLocks = new Map<string, Promise<OpenInventoryResult>>();
 
 const CONTROL_BROADCAST_COALESCE_MS = 50;
+const SESSION_INVENTORY_CACHE_TTL_MS = 1500;
+
+async function getSessionInventorySnapshot(options: { refresh?: boolean } = {}): Promise<SessionInventory> {
+  const now = Date.now();
+  if (!options.refresh && latestSessionInventory && now - latestSessionInventoryAt < SESSION_INVENTORY_CACHE_TTL_MS) {
+    return latestSessionInventory;
+  }
+  if (!options.refresh && sessionInventoryBuildPromise) {
+    return sessionInventoryBuildPromise;
+  }
+  const promise = buildSessionInventory()
+    .then((inventory) => {
+      latestSessionInventory = inventory;
+      latestSessionInventoryAt = Date.now();
+      return inventory;
+    })
+    .finally(() => {
+      if (sessionInventoryBuildPromise === promise) sessionInventoryBuildPromise = null;
+    });
+  sessionInventoryBuildPromise = promise;
+  return promise;
+}
 
 function getClientStateSemanticSignature(state: GlobalSessionState, inventory: SessionInventory | null | undefined): string {
   return JSON.stringify({
@@ -390,14 +414,10 @@ async function flushClientStateBroadcast(): Promise<void> {
 
   broadcastClientStateInFlight = true;
   try {
-    const inventory = await buildSessionInventory().catch((error) => {
+    const inventory = await getSessionInventorySnapshot().catch((error) => {
       console.warn('[session-inventory] failed to build snapshot for broadcast:', getErrorMessage(error));
       return latestSessionInventory;
     });
-
-    if (inventory) {
-      latestSessionInventory = inventory;
-    }
 
     const effectiveInventory = inventory ?? latestSessionInventory;
     const signature = getClientStateSemanticSignature(globalSessionState, effectiveInventory);
@@ -1257,8 +1277,7 @@ async function openInventorySession(
   }
 
   if (!record && createIfEmpty && globalSessionState.sessions.length === 0) {
-    const inventory = await buildSessionInventory();
-    latestSessionInventory = inventory;
+    await getSessionInventorySnapshot({ refresh: true });
     if (globalSessionState.sessions.length > 0) {
       record = [...globalSessionState.sessions]
         .sort((a, b) => b.lastActivity - a.lastActivity)[0] ?? null;
@@ -1321,8 +1340,7 @@ async function openInventorySession(
     });
   }
 
-  const inventory = await buildSessionInventory();
-  latestSessionInventory = inventory;
+  const inventory = await getSessionInventorySnapshot({ refresh: true });
   return {
     session: getClientSessionView(inventory, savedRecord.sessionId),
     terminalSession: makeTerminalSessionPayload(backend.backendSessionId, backend.session, backend.cols, backend.rows),
@@ -3948,8 +3966,7 @@ setInterval(() => {
 
 router.get('/tmux/sessions', async (_req, res) => {
   try {
-    const inventory = await buildSessionInventory();
-    latestSessionInventory = inventory;
+    const inventory = await getSessionInventorySnapshot();
     const sessions = inventory.tmuxSessions.map((session) => ({
       name: session.name,
       windows: session.windows,
@@ -4072,15 +4089,13 @@ router.post('/serialize-state', async (req, res) => {
 });
 
 router.get('/client-state', async (_req, res) => {
-  const inventory = await buildSessionInventory().catch(() => null);
-  if (inventory) latestSessionInventory = inventory;
+  const inventory = await getSessionInventorySnapshot().catch(() => null);
   res.json({ ...globalSessionState, inventory: inventory ?? latestSessionInventory });
 });
 
 router.get('/session-inventory', async (_req, res) => {
   try {
-    const inventory = await buildSessionInventory();
-    latestSessionInventory = inventory;
+    const inventory = await getSessionInventorySnapshot();
     res.json(inventory);
   } catch (error) {
     const errorMessage = getErrorMessage(error);
@@ -4150,8 +4165,7 @@ router.patch('/session-inventory/sessions/:frontendSessionId', async (req, res) 
   await persistGlobalStateNow();
   broadcastClientState();
 
-  const inventory = await buildSessionInventory();
-  latestSessionInventory = inventory;
+  const inventory = await getSessionInventorySnapshot({ refresh: true });
   res.json(inventory);
 });
 
@@ -4171,8 +4185,7 @@ router.post('/session-inventory/reorder', async (req, res) => {
   };
   schedulePersistGlobalState();
   broadcastClientState();
-  const inventory = await buildSessionInventory();
-  latestSessionInventory = inventory;
+  const inventory = await getSessionInventorySnapshot({ refresh: true });
   res.json(inventory);
 });
 
@@ -5450,7 +5463,7 @@ export function handleControlWebSocket(ws: WebSocket, clientId: string): void {
   // projection when tmux/backend state can be queried immediately.
   void (async () => {
     const initialSeq = broadcastInventorySeq;
-    const inventory = await buildSessionInventory().catch((error) => {
+    const inventory = await getSessionInventorySnapshot().catch((error) => {
       console.warn('[session-inventory] failed to build initial control snapshot:', getErrorMessage(error));
       return latestSessionInventory;
     });
@@ -5461,7 +5474,6 @@ export function handleControlWebSocket(ws: WebSocket, clientId: string): void {
       // fresh baseline.
       return;
     }
-    if (inventory) latestSessionInventory = inventory;
     try {
       ws.send(JSON.stringify({ type: 'client-state', seq: initialSeq, state: globalSessionState, inventory: inventory ?? latestSessionInventory }));
     } catch {

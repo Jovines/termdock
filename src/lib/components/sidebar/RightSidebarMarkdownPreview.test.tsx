@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
+import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { __testParseMarkdownListBlock, MarkdownImageLightbox, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, getNextMarkdownPreviewLineRange, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
+import { __testParseMarkdownListBlock, MarkdownImageLightbox, MarkdownPreview, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, getNextMarkdownPreviewLineRange, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
 
-const mermaidRender = vi.fn(async () => ({ svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>Graph</text></svg>' }));
+const mermaidRender = vi.fn(async () => ({ svg: '<svg xmlns="http://www.w3.org/2000/svg" width="100%" style="max-width: 100%;" viewBox="0 0 96 48"><text>Graph</text></svg>' }));
+const mermaidInitialize = vi.fn();
 const katexRenderToString = vi.fn((tex: string) => `<span class="katex">${tex}</span>`);
 const domPurifySanitize = vi.fn((html: string) => (
   html
@@ -15,7 +17,7 @@ const domPurifySanitize = vi.fn((html: string) => (
 
 vi.mock('mermaid', () => ({
   default: {
-    initialize: vi.fn(),
+    initialize: mermaidInitialize,
     render: mermaidRender,
   },
 }));
@@ -70,8 +72,22 @@ function renderBlockContent(content: ReturnType<typeof buildMarkdownPreviewBlock
 }
 
 describe('right sidebar Markdown preview rendering', () => {
+  const svgElementPrototype = SVGElement.prototype as {
+    getBBox?: () => DOMRect;
+  };
+  const originalGetBBox = svgElementPrototype.getBBox;
+  const originalResizeObserver = globalThis.ResizeObserver;
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+  const originalClientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
+
   afterEach(() => {
+    svgElementPrototype.getBBox = originalGetBBox;
+    globalThis.ResizeObserver = originalResizeObserver;
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth);
+    if (originalClientHeight) Object.defineProperty(HTMLElement.prototype, 'clientHeight', originalClientHeight);
     cleanup();
+    mermaidInitialize.mockClear();
+    mermaidRender.mockClear();
   });
 
   it('extends Markdown preview line selection from a single line to a range', () => {
@@ -283,7 +299,14 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(screen.getByText('const quoted = true;').closest('pre')?.className).toContain('termdock-code');
   });
 
-  it('renders Mermaid fences as image-backed diagrams', async () => {
+  it('renders Mermaid fences as bounded inline SVG diagrams', async () => {
+    svgElementPrototype.getBBox = vi.fn(() => ({
+      x: 8,
+      y: 4,
+      width: 96,
+      height: 48,
+    } as DOMRect));
+
     renderPreview([
       '```mermaid',
       'graph TD',
@@ -293,7 +316,36 @@ describe('right sidebar Markdown preview rendering', () => {
 
     expect(screen.getByText('Rendering diagram...')).toBeTruthy();
     await waitFor(() => expect(screen.getByRole('img', { name: 'Mermaid diagram' })).toBeTruthy());
+    const svg = screen.getByText('Graph').closest('svg');
+    expect(svg).toBeTruthy();
+    expect(svg?.getAttribute('viewBox')).toBe('-8 -12 128 80');
+    expect(svg?.getAttribute('width')).toBe('192');
+    expect(svg?.getAttribute('height')).toBe('120');
+    expect(svg?.getAttribute('style')).toBeNull();
+    expect(svg?.parentElement?.className).toContain('[&_svg]:max-w-full');
+    expect(svg?.parentElement?.className).toContain('max-h-[70vh]');
+    expect(svg?.parentElement?.className).toContain('overflow-auto');
+    expect(mermaidInitialize).toHaveBeenCalledWith(expect.objectContaining({ theme: 'neutral' }));
     expect(mermaidRender).toHaveBeenCalledWith(expect.stringContaining('termdock-md-mermaid-code-0'), 'graph TD\n  A-->B');
+  });
+
+  it('passes Mermaid flowcharts with HTML line breaks through to Mermaid', async () => {
+    const code = [
+      'flowchart TD',
+      '    A[点击中间页右上搜低价] --> B[SearchResultActivity / POI tab]',
+      '    B --> C[PoiRequestLocationModule<br/>监听结果页 REFRESH 完成]',
+      '    C --> D{当前定位已开启?}',
+      '    D -- 是 --> E[不展示授权提示<br/>不发起定位请求]',
+    ].join('\n');
+
+    renderPreview([
+      '```mermaid',
+      code,
+      '```',
+    ].join('\n'));
+
+    await waitFor(() => expect(screen.getByRole('img', { name: 'Mermaid diagram' })).toBeTruthy());
+    expect(mermaidRender).toHaveBeenCalledWith(expect.stringContaining('termdock-md-mermaid-code-0'), code);
   });
 
   it('renders inline and block math with KaTeX', async () => {
@@ -583,8 +635,8 @@ describe('right sidebar Markdown preview rendering', () => {
     ], '/repo/docs/guide.md', '/repo', onImageOpen);
 
     expect(result.images).toEqual([
-      { src: '/api/terminal/fs/blob?path=%2Frepo%2Fassets%2Fone.png', alt: 'First', title: undefined },
-      { src: '/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Ftwo.webp', alt: 'Second', title: undefined },
+      { kind: 'image', src: '/api/terminal/fs/blob?path=%2Frepo%2Fassets%2Fone.png', alt: 'First', title: undefined },
+      { kind: 'image', src: '/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Ftwo.webp', alt: 'Second', title: undefined },
     ]);
 
     render(<>{result.blocks.map((block) => <div key={block.key}>{renderBlockContent(block.content)}</div>)}</>);
@@ -603,8 +655,8 @@ describe('right sidebar Markdown preview rendering', () => {
     const { container } = render(
       <MarkdownImageLightbox
         images={[
-          { src: '/one.png', alt: 'One' },
-          { src: '/two.png', alt: 'Two' },
+          { kind: 'image', src: '/one.png', alt: 'One' },
+          { kind: 'image', src: '/two.png', alt: 'Two' },
         ]}
         index={0}
         onChange={onChange}
@@ -635,6 +687,120 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(screen.getByRole('button', { name: 'Previous image' }).closest('.flex')?.contains(image)).toBe(false);
 
     vi.useRealTimers();
+  });
+
+  it('renders Mermaid diagrams in the Markdown image lightbox with zoom support', () => {
+    vi.useFakeTimers();
+    const observed: Element[] = [];
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observed.push(element);
+        this.callback([], this as unknown as ResizeObserver);
+      }
+      disconnect() {}
+      unobserve() {}
+    };
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 400 });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 200 });
+    const onChange = vi.fn();
+    const onClose = vi.fn();
+
+    render(
+      <MarkdownImageLightbox
+        images={[
+          {
+            kind: 'mermaid',
+            svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800"><text>Flow</text></svg>',
+            alt: 'Mermaid diagram',
+            title: 'Mermaid diagram',
+          },
+        ]}
+        index={0}
+        onChange={onChange}
+        onClose={onClose}
+      />,
+    );
+
+    const diagram = screen.getByRole('img', { name: 'Mermaid diagram' });
+    expect(within(diagram).getByText('Flow')).toBeTruthy();
+    expect(diagram.className).toContain('h-full');
+    expect(diagram.className).toContain('w-full');
+    expect(diagram.className).toContain('overflow-hidden');
+    expect(diagram.className).toContain('[&_svg]:max-h-full');
+    expect(diagram.className).toContain('[&_svg]:max-w-full');
+    expect(diagram.className).not.toContain('max-w-none');
+    const svg = within(diagram).getByText('Flow').closest('svg');
+    expect(svg?.style.width).toBe('264px');
+    expect(svg?.style.height).toBe('176px');
+    expect(observed).toContain(diagram);
+    expect(screen.getByRole('button', { name: 'Close image preview' }).closest('.flex')?.contains(diagram)).toBe(false);
+
+    fireEvent.doubleClick(diagram, { clientX: 100, clientY: 100 });
+    vi.advanceTimersByTime(250);
+    expect(diagram.getAttribute('style') ?? '').toContain('scale(2.5)');
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it('opens rendered Mermaid diagrams from Markdown preview into the lightbox', async () => {
+    const markdown = [
+      '```mermaid',
+      'graph TD',
+      '  A-->B',
+      '```',
+    ].join('\n');
+
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      const [closeSignal, setCloseSignal] = useState(0);
+      return (
+        <MarkdownPreview
+          content={markdown}
+          filePath="/repo/docs/guide.md"
+          rootPath="/repo"
+          lineRange={null}
+          onLineRangeClick={() => undefined}
+          scrollTop={0}
+          outlineOpen={false}
+          lightboxOpen={open}
+          lightboxCloseSignal={closeSignal}
+          onLightboxOpen={() => setOpen(true)}
+          onLightboxClose={() => {
+            setOpen(false);
+            setCloseSignal((value) => value + 1);
+          }}
+        />
+      );
+    }
+
+    render(<Harness />);
+    const inlineDiagram = await screen.findByRole('img', { name: 'Mermaid diagram' });
+    fireEvent.click(inlineDiagram.closest('button') as Element);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Close image preview' })).toBeTruthy());
+    expect(screen.getAllByRole('img', { name: 'Mermaid diagram' })).toHaveLength(2);
+  });
+
+  it('keeps the sticky Markdown heading below modal overlays', () => {
+    render(
+      <MarkdownPreview
+        content={['# Title', '', '## Section', '', 'Body'].join('\n')}
+        filePath="/repo/docs/guide.md"
+        rootPath="/repo"
+        lineRange={null}
+        onLineRangeClick={() => undefined}
+        scrollTop={0}
+        outlineOpen={false}
+        lightboxOpen={false}
+      />,
+    );
+
+    const sticky = document.querySelector('[data-markdown-heading-sticky]');
+    expect(sticky?.className).toContain('z-menu-panel');
+    expect(sticky?.className).not.toContain('z-popover');
   });
 
   it('uses iOS-like downward swipe thresholds for closing the Markdown image lightbox', () => {

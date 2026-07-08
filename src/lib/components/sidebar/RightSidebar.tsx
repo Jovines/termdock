@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, type CSSProperties, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { useGesture } from '@use-gesture/react';
 import { Swiper, SwiperSlide } from 'swiper/react';
 import type { Swiper as SwiperInstance } from 'swiper';
@@ -87,6 +87,7 @@ const FILE_PREVIEW_READING_STATE_WRITE_MS = 250;
 const FILE_TREE_WIDTH_WRITE_MS = 120;
 const GIT_BUNDLE_SLOW_MS = 700;
 const SIDEBAR_BACKGROUND_IO_DELAY_MS = 600;
+const FILE_PREVIEW_STUCK_TIMEOUT_MS = 12_000;
 const DEFAULT_FILE_TREE_WIDTH_PX = 300;
 const MIN_FILE_TREE_WIDTH_PX = 240;
 const MAX_FILE_TREE_WIDTH_PX = 560;
@@ -198,11 +199,19 @@ interface MarkdownFootnoteDefinition {
 
 type MarkdownFootnoteDefinitions = Map<string, MarkdownFootnoteDefinition>;
 
-interface MarkdownPreviewImage {
+type MarkdownPreviewImage = {
+  kind: 'image';
   src: string;
   alt: string;
   title?: string;
-}
+} | {
+  kind: 'mermaid';
+  svg: string;
+  alt: string;
+  title?: string;
+};
+
+const MarkdownMermaidOpenContext = createContext<((svg: string) => void) | null>(null);
 
 interface MarkdownRenderContext {
   markdownFilePath: string | null;
@@ -428,7 +437,7 @@ function renderMarkdownImage(
   if (!imageSrc) return `![${alt}](${src})`;
 
   const imageIndex = context.images.length;
-  context.images.push({ src: imageSrc, alt, title });
+  context.images.push({ kind: 'image', src: imageSrc, alt, title });
   const image = (
       <img
         src={imageSrc}
@@ -1204,6 +1213,8 @@ interface MermaidLike {
 
 let mermaidPromise: Promise<MermaidLike> | null = null;
 let mermaidInitialized = false;
+const MERMAID_SVG_PADDING = 16;
+const MERMAID_SVG_MIN_WIDTH = 192;
 
 function loadMermaid(): Promise<MermaidLike> {
   if (!mermaidPromise) {
@@ -1222,9 +1233,53 @@ function initializeMermaid(mermaid: MermaidLike): void {
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: 'strict',
-    theme: 'dark',
+    theme: 'neutral',
   });
   mermaidInitialized = true;
+}
+
+function normalizeMermaidSvgSize(svg: string): string {
+  const viewBoxMatch = svg.match(/\sviewBox=(["'])([^"']+)\1/i);
+  if (!viewBoxMatch) return svg;
+  const [, , viewBox] = viewBoxMatch;
+  const values = viewBox.trim().split(/[\s,]+/).map(Number);
+  const [, , width, height] = values;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return svg;
+
+  const displayWidth = Math.max(MERMAID_SVG_MIN_WIDTH, Math.ceil(width));
+  const displayHeight = Math.ceil((displayWidth / width) * height);
+  return svg.replace(/<svg\b([^>]*)>/i, (_match, attrs: string) => {
+    const cleanedAttrs = attrs
+      .replace(/\s(?:width|height)=(["']).*?\1/gi, '')
+      .replace(/\sstyle=(["']).*?\1/gi, '');
+    return `<svg${cleanedAttrs} width="${displayWidth}" height="${displayHeight}">`;
+  });
+}
+
+function fitMermaidSvgToContent(root: HTMLElement | null): void {
+  const svg = root?.querySelector<SVGSVGElement>('svg');
+  if (!svg) return;
+
+  let box: DOMRect | SVGRect;
+  try {
+    box = svg.getBBox();
+  } catch {
+    return;
+  }
+
+  if (!Number.isFinite(box.width) || !Number.isFinite(box.height) || box.width <= 0 || box.height <= 0) return;
+
+  const viewX = box.x - MERMAID_SVG_PADDING;
+  const viewY = box.y - MERMAID_SVG_PADDING;
+  const viewWidth = box.width + MERMAID_SVG_PADDING * 2;
+  const viewHeight = box.height + MERMAID_SVG_PADDING * 2;
+  const displayWidth = Math.max(MERMAID_SVG_MIN_WIDTH, Math.ceil(viewWidth));
+  const displayHeight = Math.ceil((displayWidth / viewWidth) * viewHeight);
+
+  svg.setAttribute('viewBox', `${viewX} ${viewY} ${viewWidth} ${viewHeight}`);
+  svg.setAttribute('width', String(displayWidth));
+  svg.setAttribute('height', String(displayHeight));
+  svg.removeAttribute('style');
 }
 
 function normalizeMarkdownFenceLanguage(lang: string): string | null {
@@ -1234,25 +1289,30 @@ function normalizeMarkdownFenceLanguage(lang: string): string | null {
   return resolveLanguage(`code.${normalized}`) ?? normalized;
 }
 
-function MarkdownMermaidBlock({ code, blockKey }: { code: string; blockKey: string }) {
-  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+function MarkdownMermaidBlock({
+  code,
+  blockKey,
+}: {
+  code: string;
+  blockKey: string;
+}) {
+  const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const diagramRef = useRef<HTMLDivElement | null>(null);
+  const onOpen = useContext(MarkdownMermaidOpenContext);
 
   useEffect(() => {
     let cancelled = false;
-    let url: string | null = null;
-    setObjectUrl(null);
+    setSvg(null);
     setFailed(false);
 
     loadMermaid()
       .then(async (mermaid) => {
         initializeMermaid(mermaid);
         const id = `termdock-md-mermaid-${blockKey.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
-        const { svg } = await mermaid.render(id, code);
+        const { svg: renderedSvg } = await mermaid.render(id, code);
         if (cancelled) return;
-        const blob = new Blob([svg], { type: 'image/svg+xml' });
-        url = URL.createObjectURL(blob);
-        setObjectUrl(url);
+        setSvg(normalizeMermaidSvgSize(renderedSvg));
       })
       .catch(() => {
         if (!cancelled) setFailed(true);
@@ -1260,9 +1320,18 @@ function MarkdownMermaidBlock({ code, blockKey }: { code: string; blockKey: stri
 
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
     };
   }, [blockKey, code]);
+
+  useLayoutEffect(() => {
+    if (!svg) return;
+    fitMermaidSvgToContent(diagramRef.current);
+  }, [svg]);
+
+  const handleOpen = useCallback(() => {
+    const currentSvg = diagramRef.current?.querySelector('svg')?.outerHTML ?? svg;
+    if (currentSvg) onOpen?.(currentSvg);
+  }, [onOpen, svg]);
 
   if (failed) {
     return <MarkdownCodeBlock code={code} lang="mermaid" blockKey={`${blockKey}-fallback`} />;
@@ -1271,9 +1340,25 @@ function MarkdownMermaidBlock({ code, blockKey }: { code: string; blockKey: stri
   return (
     <div className="overflow-hidden rounded-lg border border-border/20 bg-surface shadow-sm">
       <div className="border-b border-border/15 bg-surface-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">mermaid</div>
-      <div className="overflow-auto bg-surface p-3">
-        {objectUrl ? (
-          <img src={objectUrl} alt="Mermaid diagram" className="max-w-full rounded bg-white p-2" />
+      <div className="bg-surface p-3">
+        {svg ? (
+          <button
+            type="button"
+            className="block max-w-full rounded text-left focus:outline-none focus:ring-2 focus:ring-ring/45"
+            title="Open Mermaid diagram"
+            onClick={(event) => {
+              event.stopPropagation();
+              handleOpen();
+            }}
+          >
+            <span
+              ref={diagramRef}
+              role="img"
+              aria-label="Mermaid diagram"
+              className="block max-h-[70vh] max-w-full overflow-auto rounded bg-white p-2 text-slate-900 [&_svg]:block [&_svg]:h-auto [&_svg]:max-w-full"
+              dangerouslySetInnerHTML={{ __html: svg }}
+            />
+          </button>
         ) : (
           <div className="py-6 text-center text-xs text-muted-foreground">Rendering diagram...</div>
         )}
@@ -1837,6 +1922,7 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
   );
 
   if (!active) return null;
+  const activeTitle = active.title || active.alt || (active.kind === 'mermaid' ? 'Mermaid diagram' : 'Image');
 
   return (
     <>
@@ -1844,7 +1930,7 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
       <div className="fixed inset-0 z-modal-panel flex flex-col bg-background-subtle/95 text-foreground" data-sidebar-gesture-ignore>
         <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border/20 bg-surface/80 px-3">
           <div className="min-w-0">
-            <div className="truncate text-sm font-medium">{active.title || active.alt || 'Image'}</div>
+            <div className="truncate text-sm font-medium">{activeTitle}</div>
             <div className="text-[10px] text-muted-foreground">{index + 1} / {images.length}</div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
@@ -1885,6 +1971,11 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
           ref={lightboxDragRef}
           className="relative min-h-0 flex-1 overflow-hidden"
           data-markdown-image-lightbox-stage
+          data-sidebar-gesture-ignore
+          onPointerDown={(event) => event.stopPropagation()}
+          onPointerMove={(event) => event.stopPropagation()}
+          onTouchStart={(event) => event.stopPropagation()}
+          onTouchMove={(event) => event.stopPropagation()}
           onClick={scheduleTapClose}
         >
           <div
@@ -1915,17 +2006,26 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
               simulateTouch={false}
               className="h-full"
             >
-              {images.map((image) => (
-                <SwiperSlide key={`${image.src}-${image.alt}`} className="h-full">
+              {images.map((image, imageIndex) => (
+                <SwiperSlide key={`${image.kind}-${imageIndex}-${image.alt}`} className="h-full">
                   <div className="h-full w-full px-3 py-4 sm:px-6 sm:py-6">
-                    <ZoomableImage
-                      src={image.src}
-                      alt={image.alt || image.title || 'Markdown image'}
-                      onLoad={() => undefined}
-                      onError={() => undefined}
-                      onZoomChange={setImageZoomed}
-                      onDoubleTap={clearTapCloseTimer}
-                    />
+                    {image.kind === 'image' ? (
+                      <ZoomableImage
+                        src={image.src}
+                        alt={image.alt || image.title || 'Markdown image'}
+                        onLoad={() => undefined}
+                        onError={() => undefined}
+                        onZoomChange={setImageZoomed}
+                        onDoubleTap={clearTapCloseTimer}
+                      />
+                    ) : (
+                      <ZoomableMermaidDiagram
+                        svg={image.svg}
+                        title={image.title || image.alt || 'Mermaid diagram'}
+                        onZoomChange={setImageZoomed}
+                        onDoubleTap={clearTapCloseTimer}
+                      />
+                    )}
                   </div>
                 </SwiperSlide>
               ))}
@@ -1937,7 +2037,7 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
   );
 }
 
-function MarkdownPreview({
+export function MarkdownPreview({
   content,
   filePath,
   rootPath,
@@ -1955,28 +2055,50 @@ function MarkdownPreview({
 }: MarkdownPreviewProps) {
   const { t } = useI18n();
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [mermaidLightboxImage, setMermaidLightboxImage] = useState<MarkdownPreviewImage | null>(null);
   const [activeHeadingLine, setActiveHeadingLine] = useState<number>(1);
   const [outlineDesktopPos, setOutlineDesktopPos] = useState<{ top: number; right: number } | null>(null);
   const previewRootRef = useRef<HTMLDivElement | null>(null);
   const outlineToggleRef = useRef<HTMLButtonElement | null>(null);
   const { blocks, images } = useMemo(
     () => buildMarkdownPreviewRenderResult(content.split('\n'), filePath, rootPath, (index) => {
+      setMermaidLightboxImage(null);
       setLightboxIndex(index);
       onLightboxOpen?.();
     }),
     [content, filePath, rootPath, onLightboxOpen],
   );
+  const lightboxImages = useMemo(
+    () => mermaidLightboxImage ? [...images, mermaidLightboxImage] : images,
+    [images, mermaidLightboxImage],
+  );
+  const handleOpenMermaidLightbox = useCallback((svg: string) => {
+    const image: MarkdownPreviewImage = {
+      kind: 'mermaid',
+      svg,
+      alt: 'Mermaid diagram',
+      title: 'Mermaid diagram',
+    };
+    setMermaidLightboxImage(image);
+    setLightboxIndex(images.length);
+    onLightboxOpen?.();
+  }, [images.length, onLightboxOpen]);
 
   useEffect(() => {
     setLightboxIndex(null);
+    setMermaidLightboxImage(null);
   }, [content, filePath]);
 
   useEffect(() => {
     setLightboxIndex(null);
+    setMermaidLightboxImage(null);
   }, [lightboxCloseSignal]);
 
   useEffect(() => {
-    if (!lightboxOpen) setLightboxIndex(null);
+    if (!lightboxOpen) {
+      setLightboxIndex(null);
+      setMermaidLightboxImage(null);
+    }
   }, [lightboxOpen]);
 
   useEffect(() => {
@@ -2097,7 +2219,7 @@ function MarkdownPreview({
     <>
       <div ref={previewRootRef} className="relative min-w-0 max-w-full">
         {activeHeadingPath.length > 0 && (
-          <div className="sticky top-0 z-popover border-b border-border/15 bg-surface px-2 py-1 shadow-sm sm:px-3" data-markdown-heading-sticky>
+          <div className="sticky top-0 z-menu-panel border-b border-border/15 bg-surface px-2 py-1 shadow-sm sm:px-3" data-markdown-heading-sticky>
             <div className="flex min-w-0 items-center gap-2 overflow-hidden" title={activeHeadingPath.map((heading) => heading.text).join(' / ')}>
               <span className="h-4 w-0.5 shrink-0 rounded-full bg-primary/70" aria-hidden="true" />
               <span className="min-w-0 flex-1 truncate text-[12px] font-semibold leading-5 text-foreground sm:text-[13px]" data-markdown-heading-current>
@@ -2190,6 +2312,7 @@ function MarkdownPreview({
           </>
         )}
         <div className="min-w-0 max-w-full space-y-1.5 overflow-x-hidden break-words px-1.5 py-3 text-[13px] leading-5 text-foreground sm:space-y-2 sm:px-2 sm:py-4 sm:text-sm sm:leading-6">
+        <MarkdownMermaidOpenContext.Provider value={handleOpenMermaidLightbox}>
         {blocks.map((block) => {
           const selected = Boolean(lineRange && block.startLine <= lineRange.end && block.endLine >= lineRange.start);
           const blockSelected = block.kind === 'table' ? false : selected;
@@ -2281,15 +2404,17 @@ function MarkdownPreview({
             </div>
           );
         })}
+        </MarkdownMermaidOpenContext.Provider>
         </div>
       </div>
-      {lightboxOpen && lightboxIndex !== null && images[lightboxIndex] && (
+      {lightboxOpen && lightboxIndex !== null && lightboxImages[lightboxIndex] && (
         <MarkdownImageLightbox
-          images={images}
+          images={lightboxImages}
           index={lightboxIndex}
           onChange={setLightboxIndex}
           onClose={() => {
             setLightboxIndex(null);
+            setMermaidLightboxImage(null);
             onLightboxClose?.();
           }}
         />
@@ -2754,6 +2879,15 @@ function buildDiffChangeTree(files: Array<[string, GitChangedFile]>): DiffChange
   return Array.from(rootDirectories.values()).map(sortDirectory).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function flattenDiffChangeTree(directories: DiffChangeTreeDirectory[]): Array<[string, GitChangedFile]> {
+  const result: Array<[string, GitChangedFile]> = [];
+  for (const directory of directories) {
+    result.push(...flattenDiffChangeTree(directory.directories));
+    result.push(...directory.files);
+  }
+  return result;
+}
+
 function countStagedChanges(files: GitChangedFile[]): number {
   return files.reduce((count, file) => count + (file.staged ? 1 : 0), 0);
 }
@@ -2961,6 +3095,117 @@ function ChangeTreeRowShell({
   );
 }
 
+function LazyDiffStreamItem({
+  file,
+  repoRoot,
+  activePane,
+  selected,
+  eager = false,
+  wrap,
+  showScrollHint,
+  reloadKey,
+  auditRecords,
+  onInsertDiffReference,
+  onReferenceCopied,
+  insertedReferenceKey,
+  copiedReferenceKey,
+  onVisibleChange,
+}: {
+  file: GitChangedFile;
+  repoRoot: string | null;
+  activePane: boolean;
+  selected: boolean;
+  eager?: boolean;
+  wrap: boolean;
+  showScrollHint: boolean;
+  reloadKey: number;
+  auditRecords: ChangeAuditRecord[];
+  onInsertDiffReference?: (label: string, text: string, key?: string) => void;
+  onReferenceCopied?: (key: string) => void;
+  insertedReferenceKey?: string | null;
+  copiedReferenceKey?: string | null;
+  onVisibleChange?: (visible: boolean) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [visible, setVisible] = useState(eager);
+  const selectionPath = getChangedFileSelectionPath(file);
+  const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
+  const display = getRelativeDisplayPath(absolutePath, repoRoot);
+
+  useEffect(() => {
+    if (eager) {
+      setVisible(true);
+      return;
+    }
+    const node = containerRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      const isVisible = entries.some((entry) => entry.isIntersecting);
+      setVisible((current) => current || isVisible);
+      onVisibleChange?.(isVisible);
+    }, { root: null, rootMargin: '720px 0px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [eager, onVisibleChange]);
+
+  return (
+    <div
+      ref={containerRef}
+      data-diff-stream-item={selectionPath}
+      data-diff-selection-path={selectionPath}
+      data-diff-file-path={file.path}
+      data-diff-absolute-path={absolutePath}
+      className={`scroll-mt-3 border-b border-border/15 last:border-b-0 ${selected ? 'bg-surface-elevated/35' : ''}`}
+    >
+      <div className={`sticky top-0 z-menu-panel flex min-w-0 items-center gap-2 border-b border-border/15 px-3 py-2 backdrop-blur ${
+        selected ? 'bg-surface-elevated/95' : 'bg-surface/95'
+      }`}>
+        <ChangeBadge status={file.status} />
+        <div className="min-w-0 flex-1" title={absolutePath}>
+          <div className="truncate text-xs font-semibold text-foreground">{display.name}</div>
+          {display.dir && <div className="truncate text-[10px] text-muted-foreground">{display.dir}</div>}
+        </div>
+      </div>
+      {visible ? (
+        <DiffViewer
+          active={activePane && visible}
+          repoRoot={repoRoot}
+          filePath={file.path}
+          changedFile={file}
+          wrap={wrap}
+          showScrollHint={showScrollHint}
+          reloadKey={reloadKey}
+          embedded
+          auditRecords={auditRecords}
+          onInsertDiffReference={onInsertDiffReference}
+          onReferenceCopied={onReferenceCopied}
+          insertedReferenceKey={insertedReferenceKey}
+          copiedReferenceKey={copiedReferenceKey}
+        />
+      ) : (
+        <div className="bg-surface px-3 py-6 text-center text-xs text-muted-foreground">
+          {file.path}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function scrollDiffStreamItemIntoView(path: string): void {
+  const target = document.querySelector<HTMLElement>(`[data-diff-stream-item="${CSS.escape(path)}"]`);
+  if (!target) return;
+  const scroller = target.closest<HTMLElement>('.termdock-diff-stream-scroller');
+  if (!scroller) {
+    target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    return;
+  }
+  const targetTop = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+  scroller.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+}
+
 const IMAGE_MIN_SCALE = 1;
 const IMAGE_MAX_SCALE = 8;
 
@@ -2977,21 +3222,33 @@ interface ZoomableImageProps {
   onDoubleTap?: () => void;
 }
 
-// Pinch-to-zoom image viewer. Supports touch pinch (mobile), trackpad pinch and
+interface ZoomableViewportProps {
+  resetKey: string;
+  onZoomChange?: (zoomed: boolean) => void;
+  onDoubleTap?: () => void;
+  children: (state: {
+    transformStyle: CSSProperties;
+    zoomed: boolean;
+    animateTransform: boolean;
+  }) => ReactNode;
+}
+
+// Pinch-to-zoom viewer. Supports touch pinch (mobile), trackpad pinch and
 // ctrl/⌘ + wheel (desktop), and double-tap / double-click to toggle zoom. The
 // container carries `data-sidebar-gesture-ignore` so the drawer's swipe-to-close
-// gesture never hijacks a pan while the image is zoomed in.
-function ZoomableImage({ src, alt, onLoad, onError, onZoomChange, onDoubleTap }: ZoomableImageProps) {
+// gesture never hijacks a pan while content is zoomed in.
+function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: ZoomableViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
   const [animateTransform, setAnimateTransform] = useState(false);
+  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
   const transformRef = useRef(transform);
   transformRef.current = transform;
 
-  // Reset when the image source changes (a new file was selected).
+  // Reset when the active content changes (a new file/diagram was selected).
   useEffect(() => {
     setTransform({ scale: 1, x: 0, y: 0 });
-  }, [src]);
+  }, [resetKey]);
 
   // Clamp the pan offset so the (scaled) image can't be dragged completely out
   // of the viewport. Bounds grow with the scale factor.
@@ -3035,20 +3292,72 @@ function ZoomableImage({ src, alt, onLoad, onError, onZoomChange, onDoubleTap }:
     window.setTimeout(() => setAnimateTransform(false), 220);
   }, [applyZoom]);
 
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const handlePointerDown = (event: globalThis.PointerEvent) => {
+      event.stopPropagation();
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      if (transformRef.current.scale <= 1) return;
+      event.preventDefault();
+      dragRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        originX: transformRef.current.x,
+        originY: transformRef.current.y,
+      };
+      try {
+        el.setPointerCapture?.(event.pointerId);
+      } catch {
+        // Pointer capture can fail for synthetic or already-captured pointers;
+        // window-level move/up listeners still keep panning functional.
+      }
+      setAnimateTransform(false);
+    };
+
+    const handlePointerMove = (event: globalThis.PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      event.stopPropagation();
+      event.preventDefault();
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      setTransform((prev) => ({
+        ...prev,
+        ...clampOffset(prev.scale, drag.originX + dx, drag.originY + dy),
+      }));
+    };
+
+    const handlePointerEnd = (event: globalThis.PointerEvent) => {
+      if (dragRef.current?.pointerId !== event.pointerId) return;
+      event.stopPropagation();
+      dragRef.current = null;
+      try {
+        el.releasePointerCapture?.(event.pointerId);
+      } catch {
+        // Best effort only; a missing capture should not break pan cleanup.
+      }
+    };
+
+    el.addEventListener('pointerdown', handlePointerDown, { capture: true, passive: false });
+    window.addEventListener('pointermove', handlePointerMove, { capture: true, passive: false });
+    window.addEventListener('pointerup', handlePointerEnd, { capture: true });
+    window.addEventListener('pointercancel', handlePointerEnd, { capture: true });
+    return () => {
+      el.removeEventListener('pointerdown', handlePointerDown, { capture: true });
+      window.removeEventListener('pointermove', handlePointerMove, { capture: true });
+      window.removeEventListener('pointerup', handlePointerEnd, { capture: true });
+      window.removeEventListener('pointercancel', handlePointerEnd, { capture: true });
+    };
+  }, [clampOffset]);
+
   useGesture(
     {
       onPinch: ({ offset: [scale], origin: [ox, oy] }) => {
         setAnimateTransform(false);
         applyZoom(scale, ox, oy);
-      },
-      onDrag: ({ offset: [x, y], pinching, cancel }) => {
-        if (pinching) {
-          cancel();
-          return;
-        }
-        if (transformRef.current.scale <= 1) return;
-        setAnimateTransform(false);
-        setTransform((prev) => ({ ...prev, ...clampOffset(prev.scale, x, y) }));
       },
       onWheel: ({ event, delta: [, dy], ctrlKey }) => {
         // Trackpad pinch surfaces as a wheel event with ctrlKey on most
@@ -3063,11 +3372,6 @@ function ZoomableImage({ src, alt, onLoad, onError, onZoomChange, onDoubleTap }:
     {
       target: containerRef,
       eventOptions: { passive: false },
-      drag: {
-        from: () => [transformRef.current.x, transformRef.current.y],
-        filterTaps: true,
-        pointer: { touch: true },
-      },
       pinch: {
         scaleBounds: { min: IMAGE_MIN_SCALE, max: IMAGE_MAX_SCALE },
         from: () => [transformRef.current.scale, 0],
@@ -3094,21 +3398,88 @@ function ZoomableImage({ src, alt, onLoad, onError, onZoomChange, onDoubleTap }:
         toggleZoom(event.clientX, event.clientY);
       }}
     >
+      {children({
+        zoomed,
+        animateTransform,
+        transformStyle: {
+          transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
+          transformOrigin: 'center center',
+          transition: animateTransform ? 'transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none',
+          willChange: 'transform',
+        },
+      })}
+    </div>
+  );
+}
+
+function ZoomableImage({ src, alt, onLoad, onError, onZoomChange, onDoubleTap }: ZoomableImageProps) {
+  return (
+    <ZoomableViewport resetKey={src} onZoomChange={onZoomChange} onDoubleTap={onDoubleTap}>
+      {({ transformStyle }) => (
       <img
         src={src}
         alt={alt}
         draggable={false}
         className="max-h-full max-w-full touch-none select-none rounded border border-border/15 bg-surface object-contain shadow-sm"
-        style={{
-          transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
-          transformOrigin: 'center center',
-          transition: animateTransform ? 'transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none',
-          willChange: 'transform',
-        }}
+        style={transformStyle}
         onLoad={onLoad}
         onError={onError}
       />
-    </div>
+      )}
+    </ZoomableViewport>
+  );
+}
+
+function ZoomableMermaidDiagram({ svg, title, onZoomChange, onDoubleTap }: {
+  svg: string;
+  title: string;
+  onZoomChange?: (zoomed: boolean) => void;
+  onDoubleTap?: () => void;
+}) {
+  const diagramRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    const root = diagramRef.current;
+    const svgNode = root?.querySelector<SVGSVGElement>('svg');
+    if (!root || !svgNode) return;
+
+    const fitSvg = () => {
+      const viewBox = svgNode.getAttribute('viewBox');
+      const values = viewBox?.trim().split(/[\s,]+/).map(Number) ?? [];
+      let width = values[2];
+      let height = values[3];
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+        width = Number(svgNode.getAttribute('width'));
+        height = Number(svgNode.getAttribute('height'));
+      }
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+
+      const availableWidth = Math.max(1, root.clientWidth - 24);
+      const availableHeight = Math.max(1, root.clientHeight - 24);
+      const scale = Math.min(availableWidth / width, availableHeight / height, 1);
+      svgNode.style.width = `${Math.max(1, Math.floor(width * scale))}px`;
+      svgNode.style.height = `${Math.max(1, Math.floor(height * scale))}px`;
+    };
+
+    fitSvg();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(fitSvg);
+    observer?.observe(root);
+    return () => observer?.disconnect();
+  }, [svg]);
+
+  return (
+    <ZoomableViewport resetKey={svg} onZoomChange={onZoomChange} onDoubleTap={onDoubleTap}>
+      {({ transformStyle }) => (
+        <div
+          ref={diagramRef}
+          role="img"
+          aria-label={title}
+          className="flex h-full w-full touch-none select-none items-center justify-center overflow-hidden rounded border border-border/15 bg-white p-3 text-slate-900 shadow-sm [&_svg]:block [&_svg]:max-h-full [&_svg]:max-w-full"
+          style={transformStyle}
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      )}
+    </ZoomableViewport>
   );
 }
 
@@ -3305,6 +3676,7 @@ function FilePreview({
     const fullPath = rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
     const controller = new AbortController();
     const loadingId = ++filePreviewLoadingSeq;
+    const requestSlotId = `right-sidebar-file-preview:${loadingId}`;
     const startedAt = performance.now();
     let loadingEnded = false;
     const endLoading = (reason: string, extra: Record<string, unknown> = {}) => {
@@ -3347,9 +3719,16 @@ function FilePreview({
         isPathChange,
       });
     }, 3_000);
+    const stuckTimer = window.setTimeout(() => {
+      if (loadingEnded || controller.signal.aborted) return;
+      const message = 'File preview is still waiting on disk I/O. Try the file again or refresh the directory.';
+      controller.abort(new DOMException(message, 'TimeoutError'));
+      setPreviewState({ kind: 'error', message });
+      endLoading('stuck_timeout', { error: message });
+    }, FILE_PREVIEW_STUCK_TIMEOUT_MS);
 
     if (isImage) {
-      readImagePreviewBlob(fullPath, controller.signal, 'view_file', 'right-sidebar-file-preview')
+      readImagePreviewBlob(fullPath, controller.signal, 'view_file', requestSlotId)
         .then((result) => {
           objectUrl = URL.createObjectURL(result.blob);
           setPreviewState({
@@ -3365,7 +3744,7 @@ function FilePreview({
           endLoading('error', { error: err instanceof Error ? err.message : String(err) });
         });
     } else {
-      readFileContent(fullPath, controller.signal, 'view_file', 'right-sidebar-file-preview')
+      readFileContent(fullPath, controller.signal, 'view_file', requestSlotId)
         .then((result) => {
           if (result.binary) {
             setPreviewState({ kind: 'binary' });
@@ -3383,8 +3762,9 @@ function FilePreview({
 
     return () => {
       controller.abort();
-      cancelIoSlot('right-sidebar-file-preview');
+      cancelIoSlot(requestSlotId);
       window.clearTimeout(watchdog);
+      window.clearTimeout(stuckTimer);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       endLoading('cleanup');
     };
@@ -3901,18 +4281,14 @@ export function RightSidebar(
   // A pending "scroll to this line" request from content search. Cleared by the
   // preview once it has highlighted and scrolled to the matched line.
   const [scrollToLine, setScrollToLine] = useState<number | null>(null);
-  // On phone-sized panels each changed file can expand inline. The list/tree
-  // mode only changes how the changed files are organized.
-  const [expandedDiffFiles, setExpandedDiffFiles] = useState<Set<string>>(() => new Set());
   const [collapsedGitRepoGroups, setCollapsedGitRepoGroups] = useState<Set<string>>(() => new Set());
   const [collapsedDiffDirectories, setCollapsedDiffDirectories] = useState<Set<string>>(() => new Set());
+  const [eagerDiffStreamPaths, setEagerDiffStreamPaths] = useState<Set<string>>(() => new Set());
   const [diffChangeListMode, setDiffChangeListMode] = useState<DiffChangeListMode>(() => readDiffChangeListMode());
   // When on, long diff lines wrap instead of overflowing horizontally. The
   // user can opt in per-session without leaving the panel.
   const [diffWrap, setDiffWrap] = useState(true);
   const [diffRefreshKey, setDiffRefreshKey] = useState(0);
-  const [diffInteractionId, setDiffInteractionId] = useState<string | null>(null);
-  const [mobileDiffSummary, setMobileDiffSummary] = useState<{ files: number; additions: number; deletions: number } | null>(null);
   const [changeAuditRecords, setChangeAuditRecords] = useState<ChangeAuditRecord[]>([]);
   const [changeAuditLoading, setChangeAuditLoading] = useState(false);
   const [changeAuditError, setChangeAuditError] = useState<string | null>(null);
@@ -3976,6 +4352,7 @@ export function RightSidebar(
   const gitDetailsAbortRef = useRef<AbortController | null>(null);
   const changeAuditRequestIdRef = useRef(0);
   const changeAuditAbortRef = useRef<AbortController | null>(null);
+  const diffStreamSyncedPathRef = useRef<string | null>(null);
   const lastAutoRefreshRootRef = useRef<string | null>(null);
   const fileTreeResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
   const repoSwitcherPointerRef = useRef<{ startX: number; pointerId: number } | null>(null);
@@ -4159,10 +4536,10 @@ export function RightSidebar(
     if (current && !current.startsWith('/') && !bundle.files.some((file) => file.path === current || file.absolutePath === current)) {
       selectFile(null);
     }
-    setExpandedDiffFiles((expanded) => {
+    setEagerDiffStreamPaths((currentPaths) => {
       const valid = new Set(bundle.files.map((file) => getChangedFileSelectionPath(file)));
       const next = new Set<string>();
-      for (const path of expanded) {
+      for (const path of currentPaths) {
         if (valid.has(path)) next.add(path);
       }
       return next;
@@ -4401,6 +4778,18 @@ export function RightSidebar(
     if (!isMobile) setMobileFilePreviewOpen(false);
   }, [isMobile]);
 
+  const slideMobileDiffTo = useCallback((index: number) => {
+    setMobileDiffSlideIndex(index);
+    const swiper = mobileDiffSwiperRef.current;
+    if (!swiper) return;
+    swiper.update();
+    swiper.slideTo(index, 0);
+    window.requestAnimationFrame(() => {
+      swiper.update();
+      swiper.slideTo(index, 0);
+    });
+  }, []);
+
   useEffect(() => {
     if (!isMobile) return;
     setMobileFilePreviewOpen(rightSidebarFilePreviewOpen);
@@ -4475,6 +4864,18 @@ export function RightSidebar(
   const filesPaneActive = effectiveRightTab === 'files';
   const diffPaneActive = effectiveRightTab === 'diff';
   const previewPaneActive = effectiveRightTab === 'file' && !isMobile && !isWide;
+
+  useEffect(() => {
+    if (!isMobile || !diffPaneActive) return;
+    const swiper = mobileDiffSwiperRef.current;
+    if (!swiper) return;
+    const frame = window.requestAnimationFrame(() => {
+      swiper.update();
+      swiper.slideTo(mobileDiffSlideIndex, 0);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [diffPaneActive, isMobile, mobileDiffSlideIndex]);
+
   // Load Git state only when the Git/Changes panes are actually used. On large
   // repositories, even a delayed status probe can compete with file browsing
   // for disk I/O, so Files stays isolated from Git unless the user asks for it.
@@ -4650,13 +5051,13 @@ export function RightSidebar(
     else pinExplorerRoot(path, 'file');
   }, [pinExplorerRoot, pinnedExplorerRootSet, rootPath, unpinExplorerRoot]);
 
-  const watchedFileRoots = useMemo(() => {
-    if (!filesPaneActive && !previewPaneActive) return [];
-    if (!rootPath || !selectedFilePath) return [];
+  const watchedFileRootKey = useMemo(() => {
+    if (!filesPaneActive && !previewPaneActive) return null;
+    if (!rootPath || !selectedFilePath) return null;
     const selectedAbsolutePath = selectedFilePath.startsWith('/') ? selectedFilePath : `${rootPath}/${selectedFilePath}`;
-    const selectedParent = getParentPath(selectedAbsolutePath);
-    return selectedParent ? [selectedParent] : [];
+    return getParentPath(selectedAbsolutePath);
   }, [filesPaneActive, previewPaneActive, rootPath, selectedFilePath]);
+  const watchedFileRoots = useMemo(() => (watchedFileRootKey ? [watchedFileRootKey] : []), [watchedFileRootKey]);
 
   useEffect(() => {
     if (!isOpen || watchedFileRoots.length === 0) return;
@@ -4996,7 +5397,6 @@ export function RightSidebar(
     const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
     const display = getRelativeDisplayPath(absolutePath, repoRoot ?? rootPath);
     const selectionPath = getChangedFileSelectionPath(file);
-    const isExpanded = expandedDiffFiles.has(selectionPath);
     const isSelected = selectedFilePath === file.path || selectedFilePath === absolutePath;
     const showFileDirectoryHint = diffChangeListMode !== 'tree';
     const referenceKey = `path:${absolutePath}`;
@@ -5154,7 +5554,7 @@ export function RightSidebar(
             selectDiffFile(selectionPath);
           }}
           leading={<ChangeBadge status={file.status} />}
-          depth={diffChangeListMode === 'tree' ? Math.min(options.depth ?? 0, 2) : options.depth ?? 0}
+          depth={options.depth ?? 0}
           trailing={(
             <span className="flex shrink-0 items-center gap-1">
               <GitActionMenu actions={actions} running={runningGitAction} completed={completedGitAction?.path === busyPath ? completedGitAction : null} />
@@ -5183,14 +5583,14 @@ export function RightSidebar(
       <section
         key={getChangedFileKey(file)}
         className={`relative scroll-mt-2 overflow-hidden rounded-xl border transition ${
-          isExpanded
+          isSelected
             ? 'border-primary/25 bg-surface-elevated shadow-sm'
             : 'border-border/15 bg-surface hover:border-border/30'
         }`}
       >
         <div
           className={`sticky -top-px z-20 flex w-full items-center gap-1 rounded-t-xl ${
-            isExpanded ? 'border-b border-border/15 bg-surface-elevated shadow-sm' : ''
+            isSelected ? 'border-b border-border/15 bg-surface-elevated shadow-sm' : ''
           }`}
         >
           <div
@@ -5213,7 +5613,6 @@ export function RightSidebar(
                 activeGitRepoRoot,
                 selectedFilePath,
                 isSelected,
-                isExpanded,
                 filteredChangedFiles: filteredChangedFiles.length,
                 changedFiles: changedFiles.size,
                 compact: options.compact,
@@ -5231,7 +5630,6 @@ export function RightSidebar(
                   filePath: file.path,
                   absolutePath,
                   repoRoot,
-                  isExpanded,
                 });
                 return;
               }
@@ -5245,7 +5643,6 @@ export function RightSidebar(
                 activeGitRepoRoot,
                 selectedFilePath,
                 isSelected,
-                isExpanded,
                 hasSelection: hasNativeTextSelection(),
                 filteredChangedFiles: filteredChangedFiles.length,
                 changedFiles: changedFiles.size,
@@ -5259,7 +5656,6 @@ export function RightSidebar(
                   absolutePath,
                   repoRoot,
                   selectedFilePath,
-                  isExpanded,
                 });
                 return;
               }
@@ -5272,7 +5668,6 @@ export function RightSidebar(
                 activeGitRepoRoot,
                 selectedFilePath,
                 isSelected,
-                isExpanded,
                 filteredChangedFiles: filteredChangedFiles.length,
                 changedFiles: changedFiles.size,
                 compact: options.compact,
@@ -5293,7 +5688,6 @@ export function RightSidebar(
                 activeGitRepoRoot,
                 selectedFilePath,
                 isSelected,
-                isExpanded,
                 filteredChangedFiles: filteredChangedFiles.length,
                 changedFiles: changedFiles.size,
                 compact: options.compact,
@@ -5301,17 +5695,17 @@ export function RightSidebar(
               });
               toggleDiffFile(selectionPath);
             }}
-            aria-expanded={isExpanded}
+            aria-current={isSelected ? 'true' : undefined}
             className="group flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-2.5 py-2.5 text-left transition"
             title={absolutePath}
           >
-            <span className="shrink-0 text-muted-foreground transition-transform">
-              {isExpanded ? <RiChevronDown size={15} /> : <RiChevronRight size={15} />}
+            <span className="shrink-0 text-muted-foreground">
+              <RiArrowRight size={15} />
             </span>
             <ChangeBadge status={file.status} />
             <span className="min-w-0 flex-1 select-text" data-sidebar-gesture-ignore>
               <span className="flex min-w-0 items-center gap-1">
-                <span className={`min-w-0 flex-1 truncate text-[13px] ${isSelected || isExpanded ? 'font-semibold text-foreground' : 'font-medium text-foreground'}`}>{display.name}</span>
+                <span className={`min-w-0 flex-1 truncate text-[13px] ${isSelected ? 'font-semibold text-foreground' : 'font-medium text-foreground'}`}>{display.name}</span>
                 <GitActionMenu actions={actions} running={runningGitAction} completed={completedGitAction?.path === busyPath ? completedGitAction : null} />
                 <button
                   type="button"
@@ -5331,25 +5725,6 @@ export function RightSidebar(
             </span>
           </div>
         </div>
-        {isExpanded && (
-          <div>
-            <DiffViewer
-              active={diffPaneActive}
-              repoRoot={repoRoot}
-              filePath={file.path}
-              changedFile={file}
-              wrap={diffWrap}
-              showScrollHint={!diffWrap}
-              reloadKey={diffRefreshKey}
-              embedded
-              auditRecords={changeAuditRecords}
-              onInsertDiffReference={insertContextText}
-              onReferenceCopied={markReferenceCopied}
-              insertedReferenceKey={insertedReferenceKey}
-              copiedReferenceKey={copiedReferenceKey}
-            />
-          </div>
-        )}
       </section>
     );
   }
@@ -5406,7 +5781,7 @@ export function RightSidebar(
     const displayPath = displayDirectory.path;
     const directoryKey = `${groupKey}:${displayPath}`;
     const collapsed = collapsedDiffDirectories.has(directoryKey);
-    const shellDepth = shouldCompressDirectory ? Math.min(depth, 2) : depth;
+    const shellDepth = depth;
     return (
       <div key={directoryKey} className="space-y-px">
         <ChangeTreeRowShell
@@ -5540,6 +5915,69 @@ export function RightSidebar(
     );
   }
 
+  function renderDiffStream(active: boolean) {
+    if (changedFiles.size === 0) {
+      return (
+        <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
+          <RiGitCompare size={24} className="mx-auto mb-2 text-muted-foreground/80" />
+          {t('rightSidebar.noChanges')}
+        </div>
+      );
+    }
+    return (
+      <div className="termdock-diff-stream divide-y divide-border/15 bg-surface">
+        {orderedChangedFilesForDiff.map(([key, file], index) => {
+          const repoRoot = getChangedFileRepoRoot(file, rootPath);
+          const selectionPath = getChangedFileSelectionPath(file);
+          const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
+          const selected = selectedFilePath === file.path || selectedFilePath === absolutePath || selectedFilePath === selectionPath;
+          return (
+            <LazyDiffStreamItem
+              key={key}
+              file={file}
+              repoRoot={repoRoot}
+              activePane={active}
+              selected={selected}
+              eager={index < 3 || eagerDiffStreamPaths.has(selectionPath)}
+              wrap={diffWrap}
+              showScrollHint={!diffWrap}
+              reloadKey={diffRefreshKey}
+              auditRecords={changeAuditRecords}
+              onInsertDiffReference={insertContextText}
+              onReferenceCopied={markReferenceCopied}
+              insertedReferenceKey={insertedReferenceKey}
+              copiedReferenceKey={copiedReferenceKey}
+            />
+          );
+        })}
+      </div>
+    );
+  }
+
+  const syncSelectionFromDiffStream = useCallback((container: HTMLDivElement): string | null => {
+    const items = Array.from(container.querySelectorAll<HTMLElement>('[data-diff-stream-item]'));
+    if (items.length === 0) return null;
+    const containerTop = container.getBoundingClientRect().top;
+    const anchorY = containerTop + 48;
+    let best: HTMLElement | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const item of items) {
+      const rect = item.getBoundingClientRect();
+      if (rect.bottom < anchorY) continue;
+      const distance = Math.abs(rect.top - anchorY);
+      if (distance < bestDistance) {
+        best = item;
+        bestDistance = distance;
+      }
+    }
+    const path = best?.dataset.diffSelectionPath ?? best?.dataset.diffStreamItem ?? null;
+    if (!path) return null;
+    if (diffStreamSyncedPathRef.current === path && useSidebarStore.getState().selectedFilePath === path) return path;
+    diffStreamSyncedPathRef.current = path;
+    selectFile(path);
+    return path;
+  }, [selectFile]);
+
   const canPull = Boolean(!runningGitAction && activeGitActionRepoRoot && !requiresGitActionRepoSelection && (activeGitActionContext?.upstream || (pushRemote.trim() && pushBranch.trim())));
   const canPush = Boolean(!runningGitAction && activeGitActionRepoRoot && !requiresGitActionRepoSelection && (activeGitActionContext?.upstream || (pushRemote.trim() && pushBranch.trim())));
   const canSwitchBranch = Boolean(!runningGitAction && activeGitActionRepoRoot && !requiresGitActionRepoSelection && switchBranch.trim() && switchBranch.trim() !== activeGitActionContext?.branch);
@@ -5571,9 +6009,6 @@ export function RightSidebar(
     });
   }, [activeGitRepoRoot, changedFiles.size, diffPaneActive, effectiveRightTab, filteredChangedFiles.length, gitBundleLastLoadedAt, gitBundleLoading, rightTab, rootPath, selectedChangedFile?.absolutePath, selectedChangedFile?.path, selectedChangedFile?.repoRoot, selectedFilePath]);
 
-  const selectedDiffRepoRoot = selectedChangedFile?.repoRoot ?? activeGitRepoRoot ?? (gitRepoFilters.length === 1 ? gitRepoFilters[0].root : null);
-  const showMultiRepoDiffPrompt = diffPaneActive && showGitRepoFilter && !selectedChangedFile && !activeGitRepoRoot;
-
   const filteredChangedFileGroups = useMemo(() => {
     const groups = new Map<string, { root: string | null; label: string; branch?: string | null; files: Array<[string, GitChangedFile]> }>();
     for (const entry of filteredChangedFiles) {
@@ -5592,6 +6027,49 @@ export function RightSidebar(
       return a.label.localeCompare(b.label);
     });
   }, [filteredChangedFiles, gitRepositoryByRoot, rootName, rootPath]);
+
+  const orderedChangedFilesForDiff = useMemo(() => {
+    const ordered: Array<[string, GitChangedFile]> = [];
+    for (const group of filteredChangedFileGroups) {
+      if (group.root && collapsedGitRepoGroups.has(group.root)) continue;
+      if (diffChangeListMode !== 'tree') {
+        ordered.push(...group.files);
+        continue;
+      }
+      const rootFiles = group.files.filter(([, file]) => getChangedFileTreePath(file).split('/').filter(Boolean).length <= 1);
+      ordered.push(...flattenDiffChangeTree(buildDiffChangeTree(group.files)));
+      ordered.push(...rootFiles);
+    }
+    return ordered;
+  }, [collapsedGitRepoGroups, diffChangeListMode, filteredChangedFileGroups]);
+
+  useEffect(() => {
+    if (!diffPaneActive || orderedChangedFilesForDiff.length === 0) return;
+    const handles: number[] = [];
+    const syncInitial = () => {
+      const scroller = document.querySelector<HTMLDivElement>('.termdock-diff-stream-scroller');
+      if (scroller) {
+        const synced = syncSelectionFromDiffStream(scroller);
+        if (synced) return;
+      }
+      const firstItem = document.querySelector<HTMLElement>('[data-diff-stream-item]');
+      const visiblePath = firstItem?.dataset.diffSelectionPath ?? firstItem?.dataset.diffStreamItem ?? null;
+      if (visiblePath) {
+        diffStreamSyncedPathRef.current = visiblePath;
+        selectFile(visiblePath);
+        return;
+      }
+      const first = orderedChangedFilesForDiff[0]?.[1];
+      if (!first) return;
+      const path = getChangedFileSelectionPath(first);
+      diffStreamSyncedPathRef.current = path;
+      selectFile(path);
+    };
+    for (const delay of [80, 240, 600, 1200]) {
+      handles.push(window.setTimeout(syncInitial, delay));
+    }
+    return () => handles.forEach((handle) => window.clearTimeout(handle));
+  }, [diffPaneActive, orderedChangedFilesForDiff, selectFile, syncSelectionFromDiffStream]);
 
   const gitContextText = useMemo(() => {
     const context = activeGitActionContext?.available ? activeGitActionContext : gitContext;
@@ -5628,33 +6106,47 @@ export function RightSidebar(
   }, [gitContextInputText, insertContextText, onClose, push, t]);
 
   const changeAuditPromptText = useMemo(() => {
+    const quoteShellArg = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
     const repoOptions = changeAuditTargetRepoRoots.length > 0
       ? changeAuditTargetRepos
       : gitRepositories.filter((repo) => repo.files.length > 0);
-    const repoList = repoOptions.length > 0
-      ? repoOptions.map((repo) => {
+    const targetRepos = repoOptions.length > 0
+      ? repoOptions
+      : rootPath
+        ? [{
+          root: rootPath,
+          relativeRoot: '.',
+          name: rootName,
+        }]
+        : [];
+    const repoList = targetRepos.length > 0
+      ? targetRepos.map((repo) => {
         const workspacePath = repo.relativeRoot === '.' ? '.' : repo.relativeRoot;
-        return `- ${workspacePath}`;
+        return `- ${workspacePath} (${repo.root})`;
       }).join('\n')
       : `- ${rootPath ? '.' : ''}`;
+    const exportCommands = targetRepos.length > 0
+      ? targetRepos.map((repo) => `   td audit-export ${quoteShellArg(repo.root)}`).join('\n')
+      : '   td audit-export';
     return [
-      '为当前工作区的 Git 更改 hunk 生成审计解释，并通过 Termdock CLI 注入。',
+      '为目标仓库的 Git 更改 hunk 生成审计解释，并通过 Termdock CLI 注入。',
       '',
       `当前工作区：${rootPath ?? ''}`,
       '目标仓库：',
       repoList,
       '',
       '操作指令：',
-      `1. 先执行：td audit-export ${rootPath ?? ''}`,
+      '1. 只针对上面列出的目标仓库执行 audit-export；如果目标是嵌套子仓，必须使用该子仓括号里的绝对路径，不要改用当前工作区根目录。示例：',
+      exportCommands,
       '2. 读取 audit-export 输出中的所有 hunk 完整 diff。通读整批改动，建立整体目标、主要行为变化和跨文件关系的理解。',
-      '3. 使用 audit-export 中已有的 diff 进行分析。不要为了通读而对每个 hunk 循环执行 td audit-show。仅当某个 hunk 的导出信息不足以判断时，再执行：td audit-show <hunkId>',
+      '3. 使用 audit-export 中已有的 diff 进行分析。不要为了通读而对每个 hunk 循环执行 td audit-show。仅当某个 hunk 的导出信息不足以判断时，再执行：td audit-show <hunkId> <对应仓库绝对路径>',
       '4. 结合整批改动上下文，逐个写出需要解释的 hunk 意义，并执行：',
-      '   printf "%s\\n" "这里写该 hunk 的改动意义" | td audit-explain <hunkId>',
+      '   printf "%s\\n" "这里写该 hunk 的改动意义" | td audit-explain <hunkId> <对应仓库绝对路径>',
       '',
-      '解释内容指令：结合整批改动的上下文，说明该 hunk 为什么要改、解决什么问题、和其它改动的关系、行为变化或风险。不要只复述代码字面变化，不要只看单个 hunk 孤立解释。',
+      '解释内容指令：每条解释用清晰直白的话说明该 hunk 的更改意义、解决的问题、以及它和其它改动的关系。只写有信息量的结论，不写铺垫、套话、流程说明或泛泛风险；不要复述代码字面变化，不要孤立解释单个 hunk。',
       '完成后汇报已注入多少个 hunk 解释。',
     ].join('\n');
-  }, [changeAuditTargetRepoRoots.length, changeAuditTargetRepos, gitRepositories, rootPath]);
+  }, [changeAuditTargetRepoRoots.length, changeAuditTargetRepos, gitRepositories, rootName, rootPath]);
 
   const insertChangeAuditPrompt = useCallback(() => {
     logGitBundleClientEvent('insert_change_audit_prompt', {
@@ -5698,7 +6190,6 @@ export function RightSidebar(
   const selectDiffFile = useCallback((path: string | null) => {
     const state = useSidebarStore.getState();
     const interactionId = createDiffInteractionId();
-    setDiffInteractionId(interactionId);
     logDiffInteractionEvent('select_diff_file', {
       interactionId,
       path,
@@ -5712,11 +6203,21 @@ export function RightSidebar(
     });
     selectFile(path);
     setRightTab('diff');
-    if (isMobile) {
-      const nextSlide = path ? 1 : 0;
-      setMobileDiffSummary(null);
-      setMobileDiffSlideIndex(nextSlide);
-      mobileDiffSwiperRef.current?.slideTo(nextSlide);
+    if (isMobile && path) {
+      slideMobileDiffTo(1);
+    }
+    if (path) {
+      setEagerDiffStreamPaths((current) => {
+        if (current.has(path)) return current;
+        const next = new Set(current);
+        next.add(path);
+        return next;
+      });
+      const scrollToTarget = () => scrollDiffStreamItemIntoView(path);
+      window.setTimeout(scrollToTarget, 60);
+      window.setTimeout(scrollToTarget, 260);
+      window.setTimeout(scrollToTarget, 700);
+      window.setTimeout(scrollToTarget, 1100);
     }
     queueMicrotask(() => {
       const next = useSidebarStore.getState();
@@ -5730,17 +6231,10 @@ export function RightSidebar(
         activeGitRepoRoot,
       });
     });
-  }, [activeGitRepoRoot, isMobile, selectFile, setRightTab]);
+  }, [activeGitRepoRoot, isMobile, selectFile, setRightTab, slideMobileDiffTo]);
 
   const toggleDiffFile = useCallback((path: string) => {
     const interactionId = createDiffInteractionId();
-    setDiffInteractionId(interactionId);
-    setExpandedDiffFiles((current) => {
-      const next = new Set(current);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
     const state = useSidebarStore.getState();
     logDiffInteractionEvent('toggle_diff_file', {
       interactionId,
@@ -5752,13 +6246,7 @@ export function RightSidebar(
       gitBundleLoading: state.gitBundleLoading,
       rightTab: state.rightTab,
     });
-    selectFile(path);
-    setRightTab('diff');
-    if (isMobile) {
-      setMobileDiffSummary(null);
-      setMobileDiffSlideIndex(1);
-      mobileDiffSwiperRef.current?.slideTo(1);
-    }
+    selectDiffFile(path);
     queueMicrotask(() => {
       const next = useSidebarStore.getState();
       logDiffInteractionEvent('toggle_diff_file_after', {
@@ -5771,7 +6259,7 @@ export function RightSidebar(
         activeGitRepoRoot,
       });
     });
-  }, [activeGitRepoRoot, isMobile, selectFile, setRightTab]);
+  }, [activeGitRepoRoot, selectDiffFile]);
 
   const toggleGitRepoGroup = useCallback((repoRoot: string | null) => {
     if (!repoRoot) return;
@@ -6054,6 +6542,30 @@ export function RightSidebar(
               className="w-full rounded-md border border-border/15 bg-surface-2 px-2.5 py-1.5 text-[12px] text-foreground outline-none transition placeholder:text-muted-foreground/70 focus:border-primary/35 focus:ring-1 focus:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-60"
               maxLength={300}
             />
+          </div>
+          <div className="border-b border-border/10 px-1 py-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.recentCommitsTitle')}</div>
+              {gitDetailsLoading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
+            </div>
+            {(activeGitActionContext?.recentCommits?.length ?? 0) > 0 ? (
+              <div className="space-y-1">
+                {activeGitActionContext?.recentCommits?.slice(0, 8).map((commit) => {
+                  const [hash, ...messageParts] = commit.split(/\s+/);
+                  const message = messageParts.join(' ') || commit;
+                  return (
+                    <div key={commit} className="flex min-w-0 items-start gap-2 rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[10px]">
+                      <span className="shrink-0 text-[color:var(--diff-hunk-accent)]">{hash}</span>
+                      <span className="min-w-0 flex-1 truncate text-muted-foreground" title={message}>{message}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
+                {t('rightSidebar.recentCommitsEmpty')}
+              </div>
+            )}
           </div>
           <div className="px-1 py-3">
             <div className="mb-2 flex items-center justify-between gap-2">
@@ -6346,7 +6858,7 @@ export function RightSidebar(
         {showGitRepoFilter && <RiChevronDown size={11} className={`shrink-0 transition ${changeAuditScopeOpen ? 'rotate-180' : ''}`} />}
       </button>
       {showGitRepoFilter && changeAuditScopeOpen && (
-        <div className="absolute right-0 top-[calc(100%+4px)] z-menu-panel w-60 overflow-hidden rounded-lg border border-border/15 bg-surface/98 p-1 text-[10px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+        <div className="absolute left-0 top-[calc(100%+4px)] z-menu-panel w-60 overflow-hidden rounded-lg border border-border/15 bg-surface/98 p-1 text-[10px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
             {t('rightSidebar.changeAuditScopeLabel')}
           </div>
@@ -6948,29 +7460,17 @@ export function RightSidebar(
                   <div className="shrink-0 border-b border-border/15">
                     <div className="px-3 py-2">
                     <div className="flex items-center justify-between gap-2">
-                      {changedFiles.size > 0 ? (
-                        <button
-                          type="button"
-                          onClick={() => selectDiffFile(null)}
-                          className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-                            selectedFilePath === null
-                              ? 'bg-surface-elevated text-foreground'
-                              : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-                          }`}
-                        >
-                          {t('rightSidebar.allChanges')}
-                        </button>
-                      ) : (
-                        <span className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                          {t('rightSidebar.allChanges')}
-                        </span>
-                      )}
+                      <span className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                        {t('rightSidebar.allChanges')}
+                      </span>
                       <div className="flex items-center gap-1.5">
                         <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
-                        {renderDiffChangeModeToggle()}
-                        {changeAuditButton}
-                        {diffRefreshButton}
                       </div>
+                    </div>
+                    <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+                      {renderDiffChangeModeToggle()}
+                      {changeAuditButton}
+                      {diffRefreshButton}
                     </div>
                     {activeGitRepoSummary && (
                       <div className="mt-2 flex items-center gap-1.5">
@@ -7040,20 +7540,11 @@ export function RightSidebar(
                   ) : renderChangeGroups({ compact: true })}
                 </div>
               </div>
-              <div className="termdock-native-select min-w-0 flex-1 overflow-y-auto overscroll-contain">
-                {changedFiles.size === 0 ? (
-                  <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
-                    <RiGitCompare size={24} className="mx-auto mb-2 text-muted-foreground/80" />
-                    {t('rightSidebar.noChanges')}
-                  </div>
-                ) : showMultiRepoDiffPrompt ? (
-                  <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
-                    <RiGitCompare size={24} className="mx-auto mb-2 text-muted-foreground/80" />
-                    {t('rightSidebar.selectRepositoryForDiff')}
-                  </div>
-                ) : (
-                  <DiffViewer active={diffPaneActive} repoRoot={selectedDiffRepoRoot} interactionId={diffInteractionId} requestSlotId="right-sidebar-main-diff" filePath={selectedChangedFile?.path ?? selectedFilePath} changedFile={selectedChangedFile} wrap={diffWrap} showScrollHint={!diffWrap} reloadKey={diffRefreshKey} auditRecords={changeAuditRecords} onInsertDiffReference={insertContextText} onReferenceCopied={markReferenceCopied} insertedReferenceKey={insertedReferenceKey} copiedReferenceKey={copiedReferenceKey} />
-                )}
+              <div
+                className="termdock-native-select termdock-diff-stream-scroller min-w-0 flex-1 overflow-y-auto overscroll-contain"
+                onScroll={(event) => syncSelectionFromDiffStream(event.currentTarget)}
+              >
+                {renderDiffStream(diffPaneActive)}
               </div>
             </div>
           ) : (
@@ -7070,25 +7561,26 @@ export function RightSidebar(
                         {filteredChangedFiles.length}/{changedFiles.size}
                       </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      {renderDiffChangeModeToggle()}
-                      {changeAuditButton}
-                      {diffRefreshButton}
-                      <button
-                        type="button"
-                        onClick={() => setDiffWrap((prev) => !prev)}
-                        aria-pressed={diffWrap}
-                        title={t('rightSidebar.wrapLongLines')}
-                        className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
-                          diffWrap
-                            ? 'bg-primary/15 text-primary'
-                            : 'bg-surface-2 text-muted-foreground hover:text-foreground'
-                        }`}
-                      >
-                        <span className="font-mono text-[12px] leading-none">Aa</span>
-                        <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
-                      </button>
-                    </div>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                  </div>
+                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+                    {renderDiffChangeModeToggle()}
+                    {changeAuditButton}
+                    {diffRefreshButton}
+                    <button
+                      type="button"
+                      onClick={() => setDiffWrap((prev) => !prev)}
+                      aria-pressed={diffWrap}
+                      title={t('rightSidebar.wrapLongLines')}
+                      className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
+                        diffWrap
+                          ? 'bg-primary/15 text-primary'
+                          : 'bg-surface-2 text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      <span className="font-mono text-[12px] leading-none">Aa</span>
+                      <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
+                    </button>
                   </div>
                   {activeGitRepoSummary && (
                     <div className="mt-2 flex items-center gap-1.5">
@@ -7146,12 +7638,14 @@ export function RightSidebar(
                   className="h-full min-h-0 w-full"
                   slidesPerView={1}
                   resistanceRatio={0.45}
-                  {...(mobileDiffSlideIndex === 1 ? { 'data-sidebar-gesture-ignore': true } : {})}
                   onSwiper={(instance) => {
                     mobileDiffSwiperRef.current = instance;
+                    instance.update();
                     instance.slideTo(mobileDiffSlideIndex, 0);
                   }}
-                  onSlideChange={(instance) => setMobileDiffSlideIndex(instance.activeIndex)}
+                  onSlideChange={(instance) => {
+                    setMobileDiffSlideIndex(instance.activeIndex);
+                  }}
                 >
                   <SwiperSlide className="h-full min-h-0">
                     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -7163,15 +7657,13 @@ export function RightSidebar(
                                 <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
                                   {t('rightSidebar.allChanges')}
                                 </div>
-                                <div className="mt-0.5 text-[11px] text-muted-foreground">
-                                  {filteredChangedFiles.length}/{changedFiles.size}
-                                </div>
                               </div>
-                              <div className="flex shrink-0 items-center gap-1.5">
-                                {renderDiffChangeModeToggle()}
-                                {changeAuditButton}
-                                {diffRefreshButton}
-                              </div>
+                              <span className="shrink-0 text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                            </div>
+                            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+                              {renderDiffChangeModeToggle()}
+                              {changeAuditButton}
+                              {diffRefreshButton}
                             </div>
                             {activeGitRepoSummary && (
                               <div className="mt-2 flex items-center gap-1.5">
@@ -7195,7 +7687,9 @@ export function RightSidebar(
                           </div>
                         </div>
                       )}
-                      <div className="termdock-native-select min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(env(safe-area-inset-bottom)+4.5rem)]">
+                      <div
+                        className="termdock-native-select min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(env(safe-area-inset-bottom)+4.5rem)]"
+                      >
                         <UntrackedScanState loading={untrackedLoading} error={untrackedError} />
                         {gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
                           <GitChangesLoadingState slow={gitBundleSlow} />
@@ -7209,7 +7703,9 @@ export function RightSidebar(
                           <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
                             {t('rightSidebar.noMatchingChanges')}
                           </div>
-                        ) : renderChangeGroups({ compact: false })}
+                        ) : (
+                          renderChangeGroups({ compact: false })
+                        )}
                       </div>
                     </div>
                   </SwiperSlide>
@@ -7219,10 +7715,7 @@ export function RightSidebar(
                         <div className="flex items-center justify-between gap-2">
                           <button
                             type="button"
-                            onClick={() => {
-                              setMobileDiffSlideIndex(0);
-                              mobileDiffSwiperRef.current?.slideTo(0);
-                            }}
+                            onClick={() => slideMobileDiffTo(0)}
                             className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-surface-2 px-3 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
                             title={t('rightSidebar.backToChangeList')}
                           >
@@ -7244,45 +7737,22 @@ export function RightSidebar(
                             <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
                           </button>
                         </div>
-                        {selectedChangedFile && (() => {
-                          const path = selectedChangedFile.absolutePath || selectedChangedFile.path;
-                          const display = getRelativeDisplayPath(path, selectedDiffRepoRoot);
-                          return (
-                            <div className="mt-2 flex min-w-0 items-end justify-between gap-2" title={path}>
-                              <div className="min-w-0 flex-1">
-                                <div className="truncate text-sm font-semibold text-foreground">{display.name}</div>
-                                {display.dir && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{display.dir}</div>}
-                              </div>
-                              <div className="flex shrink-0 items-center gap-1 text-[10px] font-medium">
-                                {mobileDiffSummary && <span className="rounded bg-surface-2 px-1.5 py-0.5 text-muted-foreground">{mobileDiffSummary.files}</span>}
-                                {mobileDiffSummary && <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">+{mobileDiffSummary.additions}</span>}
-                                {mobileDiffSummary && <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-delete-strong)]">-{mobileDiffSummary.deletions}</span>}
-                                <ChangeBadge status={selectedChangedFile.status} />
-                              </div>
-                            </div>
-                          );
-                        })()}
                       </div>
-                      <div className="termdock-native-select min-h-0 flex-1 overflow-y-auto overscroll-contain">
-                        {changedFiles.size === 0 ? (
-                          <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
-                            <RiGitCompare size={24} className="mx-auto mb-2 text-muted-foreground/80" />
-                            {t('rightSidebar.noChanges')}
-                          </div>
-                        ) : showMultiRepoDiffPrompt ? (
-                          <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
-                            <RiGitCompare size={24} className="mx-auto mb-2 text-muted-foreground/80" />
-                            {t('rightSidebar.selectRepositoryForDiff')}
-                          </div>
-                        ) : (
-                          <DiffViewer active={diffPaneActive && mobileDiffSlideIndex === 1} repoRoot={selectedDiffRepoRoot} interactionId={diffInteractionId} requestSlotId="right-sidebar-mobile-diff" filePath={selectedChangedFile?.path ?? selectedFilePath} changedFile={selectedChangedFile} wrap={diffWrap} showScrollHint={!diffWrap} reloadKey={diffRefreshKey} embedded auditRecords={changeAuditRecords} onSummaryChange={setMobileDiffSummary} onInsertDiffReference={insertContextText} onReferenceCopied={markReferenceCopied} insertedReferenceKey={insertedReferenceKey} copiedReferenceKey={copiedReferenceKey} />
-                        )}
+                      <div
+                        className="termdock-native-select termdock-diff-stream-scroller min-h-0 flex-1 overflow-y-auto overscroll-contain"
+                        data-sidebar-gesture-ignore
+                        onScroll={(event) => syncSelectionFromDiffStream(event.currentTarget)}
+                      >
+                        {renderDiffStream(diffPaneActive)}
                       </div>
                     </div>
                   </SwiperSlide>
                 </Swiper>
               ) : (
-                <div className="termdock-native-select min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(env(safe-area-inset-bottom)+4.5rem)]">
+                <div
+                  className="termdock-native-select termdock-diff-stream-scroller min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(env(safe-area-inset-bottom)+4.5rem)]"
+                  onScroll={(event) => syncSelectionFromDiffStream(event.currentTarget)}
+                >
                   <UntrackedScanState loading={untrackedLoading} error={untrackedError} />
                   {gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
                     <GitChangesLoadingState slow={gitBundleSlow} />
@@ -7296,7 +7766,14 @@ export function RightSidebar(
                     <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
                       {t('rightSidebar.noMatchingChanges')}
                     </div>
-                  ) : renderChangeGroups({ compact: false, expandable: true })}
+                  ) : (
+                    <>
+                      {renderChangeGroups({ compact: false })}
+                      <div className="mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface">
+                        {renderDiffStream(diffPaneActive)}
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
             </div>

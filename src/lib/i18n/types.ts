@@ -190,6 +190,8 @@ export type TranslationDictionary = {
     commitMessagePlaceholder: string;
     commitChanges: string;
     commitNeedsStaged: string;
+    recentCommitsTitle: string;
+    recentCommitsEmpty: string;
     pushSectionTitle: string;
     pushRemoteLabel: string;
     pushRemotePlaceholder: string;

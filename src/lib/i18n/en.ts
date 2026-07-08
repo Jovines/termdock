@@ -173,6 +173,8 @@ export const en: TranslationDictionary = {
     commitMessagePlaceholder: 'Commit message',
     commitChanges: 'Commit',
     commitNeedsStaged: 'Stage changes before committing',
+    recentCommitsTitle: 'Recent commits',
+    recentCommitsEmpty: 'No commit history',
     pushSectionTitle: 'Remote sync',
     pushRemoteLabel: 'Remote',
     pushRemotePlaceholder: 'origin',

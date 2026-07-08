@@ -173,6 +173,8 @@ export const zh: TranslationDictionary = {
     commitMessagePlaceholder: '提交信息',
     commitChanges: '提交',
     commitNeedsStaged: '请先暂存要提交的改动',
+    recentCommitsTitle: '近期提交',
+    recentCommitsEmpty: '暂无提交历史',
     pushSectionTitle: '同步远端',
     pushRemoteLabel: 'Remote',
     pushRemotePlaceholder: 'origin',

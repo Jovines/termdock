@@ -28,6 +28,7 @@ const MAX_DIFF_BYTES = 1024 * 1024; // 1MB
 const MAX_UNTRACKED_DIFF_FILE_BYTES = 1024 * 1024; // 1MB
 const MAX_NESTED_GIT_REPOS = 32;
 const NESTED_GIT_DISCOVERY_TIMEOUT_MS = 1_000;
+const NESTED_GIT_DISCOVERY_CACHE_TTL_MS = 60_000;
 const FS_ROUTE_TIMEOUT_MS = 6_000;
 const GIT_ROUTE_TIMEOUT_MS = 8_000;
 const GIT_FILE_DIFF_ROUTE_TIMEOUT_MS = 45_000;
@@ -43,6 +44,11 @@ const untrackedJobs = new Map<string, {
   error?: string;
   code?: string;
   promise?: Promise<void>;
+}>();
+const nestedGitRootsCache = new Map<string, {
+  result: { repositories: DiscoveredGitRepository[]; truncated: boolean };
+  expiresAt: number;
+  promise?: Promise<{ repositories: DiscoveredGitRepository[]; truncated: boolean }>;
 }>();
 
 type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted' | 'unknown';
@@ -704,7 +710,7 @@ function normalizeGitTimeoutError(error: unknown, message: string, code: string)
   return error;
 }
 
-function buildUntrackedFiles(gitRoot: string, output: string): GitChangedFile[] {
+function buildUntrackedFiles(gitRoot: string, output: string, nestedDisplayRoots: Set<string> = new Set()): GitChangedFile[] {
   return finalizeChangedFiles(new Map(output.split('\0').filter(Boolean).map((p) => {
     const file = emptyChangedFile(gitRoot, p);
     file.status = 'untracked';
@@ -712,11 +718,14 @@ function buildUntrackedFiles(gitRoot: string, output: string): GitChangedFile[] 
     file.unstaged = true;
     file.tracked = false;
     return [p, file] as const;
-  })));
+  }).filter(([, file]) => !isNestedRepoPlaceholderFile(file, nestedDisplayRoots))));
 }
 
-function startUntrackedJob(gitRoot: string): UntrackedFilesPayload {
-  const current = untrackedJobs.get(gitRoot);
+function startUntrackedJob(gitRoot: string, nestedDisplayRoots: Set<string> = new Set()): UntrackedFilesPayload {
+  const cacheKey = nestedDisplayRoots.size > 0
+    ? `${gitRoot}\0${Array.from(nestedDisplayRoots).sort().join('\0')}`
+    : gitRoot;
+  const current = untrackedJobs.get(cacheKey);
   if (current?.status === 'running') {
     return { status: 'running', files: [], startedAt: current.startedAt };
   }
@@ -742,7 +751,7 @@ function startUntrackedJob(gitRoot: string): UntrackedFilesPayload {
   const promise = execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot, undefined, GIT_UNTRACKED_BACKGROUND_TIMEOUT_MS)
     .then((output) => {
       job.status = 'done';
-      job.files = buildUntrackedFiles(gitRoot, output);
+      job.files = buildUntrackedFiles(gitRoot, output, nestedDisplayRoots);
       job.finishedAt = Date.now();
     })
     .catch((error) => {
@@ -756,9 +765,9 @@ function startUntrackedJob(gitRoot: string): UntrackedFilesPayload {
       job.code = payload.code;
       job.files = [];
       job.finishedAt = Date.now();
-    });
+  });
   job.promise = promise;
-  untrackedJobs.set(gitRoot, job);
+  untrackedJobs.set(cacheKey, job);
   void promise;
   return { status: 'running', files: [], startedAt };
 }
@@ -805,6 +814,12 @@ function isNestedRepoPlaceholderFile(file: GitChangedFile, nestedDisplayRoots: S
   if (!file.untracked || file.tracked) return false;
   const normalizedPath = file.path.replace(/\/+$/, '');
   return nestedDisplayRoots.has(normalizedPath);
+}
+
+function buildNestedRepoDisplayRootSet(workspaceRoot: string, repositories: DiscoveredGitRepository[]): Set<string> {
+  return new Set(repositories.map((repo) => (
+    path.relative(workspaceRoot, repo.displayRoot).split(path.sep).join('/').replace(/\/+$/, '')
+  )));
 }
 
 async function buildGitBundle(resolvedCwd: string, gitRoot: string, signal?: AbortSignal): Promise<GitBundlePayload> {
@@ -931,11 +946,9 @@ async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, inc
   }
 
   if (signal) throwIfAborted(signal, 'git.bundle');
-  const { repositories: nestedRepositories, truncated } = await discoverNestedGitRoots(gitRoot, signal);
+  const { repositories: nestedRepositories, truncated } = await getCachedNestedGitRoots(gitRoot, { refresh: true, signal });
   if (signal) throwIfAborted(signal, 'git.bundle');
-  const nestedDisplayRoots = new Set(nestedRepositories.map((repo) => (
-    path.relative(gitRoot, repo.displayRoot).split(path.sep).join('/').replace(/\/+$/, '')
-  )));
+  const nestedDisplayRoots = buildNestedRepoDisplayRootSet(gitRoot, nestedRepositories);
   const repositories = await Promise.all([
     buildGitRepositoryBundle(gitRoot, resolvedCwd, gitRoot, gitRoot, signal),
     ...nestedRepositories.map((repo) => buildGitRepositoryBundle(gitRoot, resolvedCwd, repo.root, repo.displayRoot, signal)),
@@ -1759,6 +1772,43 @@ async function discoverNestedGitRoots(workspaceRoot: string, signal?: AbortSigna
   if (signal) throwIfAborted(signal, 'git.bundle');
   repositories.sort((a, b) => a.displayRoot.localeCompare(b.displayRoot));
   return { repositories, truncated };
+}
+
+async function getCachedNestedGitRoots(workspaceRoot: string, options: { refresh?: boolean; signal?: AbortSignal } = {}): Promise<{ repositories: DiscoveredGitRepository[]; truncated: boolean }> {
+  if (options.signal) throwIfAborted(options.signal, 'git.bundle');
+  const now = Date.now();
+  const cached = nestedGitRootsCache.get(workspaceRoot);
+  if (!options.refresh && cached) {
+    if (cached.expiresAt > now) return cached.result;
+    if (cached.promise) return cached.promise;
+  }
+  const promise = discoverNestedGitRoots(workspaceRoot, options.signal)
+    .then((result) => {
+      nestedGitRootsCache.set(workspaceRoot, {
+        result,
+        expiresAt: Date.now() + NESTED_GIT_DISCOVERY_CACHE_TTL_MS,
+      });
+      return result;
+    })
+    .finally(() => {
+      const current = nestedGitRootsCache.get(workspaceRoot);
+      if (current?.promise === promise) {
+        nestedGitRootsCache.set(workspaceRoot, {
+          result: current.result,
+          expiresAt: current.expiresAt,
+        });
+      }
+    });
+  if (cached?.result) {
+    nestedGitRootsCache.set(workspaceRoot, { ...cached, promise });
+  } else {
+    nestedGitRootsCache.set(workspaceRoot, {
+      result: { repositories: [], truncated: false },
+      expiresAt: 0,
+      promise,
+    });
+  }
+  return promise;
 }
 
 // Directory listing
@@ -2633,7 +2683,15 @@ router.get('/untracked-files', async (req: Request, res: Response) => {
       return;
     }
 
-    const payload = startUntrackedJob(gitRoot);
+    let nestedDisplayRoots = new Set<string>();
+    try {
+      const discovered = await getCachedNestedGitRoots(gitRoot);
+      nestedDisplayRoots = buildNestedRepoDisplayRootSet(gitRoot, discovered.repositories);
+    } catch {
+      // Best-effort only. The untracked scan should still return useful data
+      // even if nested repository discovery is cancelled or times out.
+    }
+    const payload = startUntrackedJob(gitRoot, nestedDisplayRoots);
     logFsIo({
       id: requestId,
       action,

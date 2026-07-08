@@ -604,11 +604,26 @@ function App() {
     return () => media.removeEventListener('change', updateOrientation);
   }, []);
 
-  // Sync active session's cwd to sidebar store
+  // Sync the active session's cwd to the sidebar from the live terminal store.
+  // The tab metadata snapshot can lag during session switches, which otherwise
+  // leaves Git/files browsing pointed at the previously active workspace.
   useEffect(() => {
-    const ts = activeSessionId ? terminalSessions.get(activeSessionId) : null;
-    useSidebarStore.getState().setRootPath(ts?.cwd ?? null);
-  }, [activeSessionId, terminalSessions]);
+    const syncRootPath = () => {
+      const cwd = activeSessionId
+        ? useTerminalStore.getState().sessions.get(activeSessionId)?.cwd ?? null
+        : null;
+      useSidebarStore.getState().setRootPath(cwd);
+    };
+
+    syncRootPath();
+    return useTerminalStore.subscribe((state, previous) => {
+      const current = activeSessionId ? state.sessions.get(activeSessionId)?.cwd ?? null : null;
+      const prev = activeSessionId ? previous.sessions.get(activeSessionId)?.cwd ?? null : null;
+      if (current !== prev) {
+        useSidebarStore.getState().setRootPath(current);
+      }
+    });
+  }, [activeSessionId]);
 
   // Sidebar drawer dimensions — overlays on both mobile & desktop, so we
   // never cause the terminal column to resize when toggling the sidebar.
