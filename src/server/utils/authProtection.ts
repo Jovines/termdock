@@ -112,7 +112,34 @@ function verifyPasswordAgainstHash(password: string, stored: string): boolean {
   return crypto.timingSafeEqual(derived, expected);
 }
 
+// ── Env-provided password ──
+// TERMDOCK_PASSWORD enables auth without touching ~/.termdock/auth.json and
+// takes precedence over the stored hash. The plaintext is hashed once (lazily)
+// so verification goes through the same scrypt + timingSafeEqual path as the
+// file-based password.
+const ENV_PASSWORD_VAR = 'TERMDOCK_PASSWORD';
+
+function getEnvPassword(): string | null {
+  const value = process.env[ENV_PASSWORD_VAR];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+let cachedEnvHash: { password: string; hash: string } | null = null;
+function getEnvPasswordHash(): string | null {
+  const password = getEnvPassword();
+  if (!password) return null;
+  if (!cachedEnvHash || cachedEnvHash.password !== password) {
+    cachedEnvHash = { password, hash: hashPassword(password) };
+  }
+  return cachedEnvHash.hash;
+}
+
+export function isEnvPasswordSet(): boolean {
+  return getEnvPassword() !== null;
+}
+
 export function isAuthEnabled(): boolean {
+  if (getEnvPassword()) return true;
   try {
     return fs.existsSync(AUTH_FILE);
   } catch {
@@ -326,11 +353,11 @@ export function clearSessionCookie(res: Response): void {
 }
 
 export function verifyPassword(password: string): boolean {
+  if (typeof password !== 'string' || password.length === 0) return false;
+  // Env-provided password takes precedence over the stored hash.
+  const envHash = getEnvPasswordHash();
+  if (envHash) return verifyPasswordAgainstHash(password, envHash);
   const auth = readAuthFile();
   if (!auth) return false;
-  // Always run the scrypt comparison even if the password is empty so that
-  // attackers cannot distinguish "auth disabled" from "wrong password" via
-  // timing. (isAuthEnabled is a separate, deliberately public check.)
-  if (typeof password !== 'string' || password.length === 0) return false;
   return verifyPasswordAgainstHash(password, auth.passwordHash);
 }

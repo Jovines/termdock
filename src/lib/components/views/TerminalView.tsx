@@ -1601,6 +1601,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [activeModifier, handleViewportInput]);
 
+  const handleMobilePastePress = React.useCallback(() => {
+    navigator.clipboard?.readText().then((text) => {
+      if (!text) return;
+      handleViewportInput(text, {
+        skipModifierTransform: true,
+        consumeModifier: false,
+      });
+      focusTerminalIfActive();
+    }).catch(() => {
+      focusTerminalIfActive();
+    });
+  }, [focusTerminalIfActive, handleViewportInput]);
+
   // 重连抖动修复：auto-recreate / 短线重连过渡期 activeProgram 会被清成 null
   // （clearTerminalSession），随后 connected 事件再写回。若直接用它推导 preset，
   // 桌面工具条 showOnDesktop 会 true→false→true 跳变（max-h-24↔max-h-0 塌陷/撑开），
@@ -1847,6 +1860,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         extraActions={runtimeToolbarActions}
         onKeyPress={handleMobileKeyPress}
         onTextPress={handleToolbarTextPress}
+        onPastePress={isMobile ? handleMobilePastePress : undefined}
         longPressMode={mobileLongPressMode}
         copyFeedback={mobileCopyFeedback}
         onLongPressModeToggle={handleLongPressModeToggle}

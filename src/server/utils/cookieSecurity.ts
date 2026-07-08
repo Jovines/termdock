@@ -11,6 +11,6 @@ export function shouldUseSecureCookies(): boolean {
 export function getCookieSecurityOptions() {
   return {
     secure: secureCookies,
-    sameSite: 'strict' as const,
+    sameSite: 'lax' as const,
   };
 }

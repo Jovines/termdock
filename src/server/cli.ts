@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+import { config as loadDotenv } from 'dotenv';
+import { resolve } from 'path';
+
+// 从项目根目录（或 CWD）加载 .env，在其他模块读取 process.env 之前执行
+loadDotenv({ path: resolve(process.cwd(), '.env') });
+
 import fs from 'fs';
 import http from 'http';
 import https from 'https';
@@ -20,6 +26,7 @@ import {
   destroyAllSessions,
   hashPassword,
   isAuthEnabled,
+  isEnvPasswordSet,
   writeAuthFile,
 } from './utils/authProtection.js';
 
@@ -923,6 +930,9 @@ async function runSetPassword(): Promise<void> {
   console.log(`${ICON.ok} ${c.green(wasEnabled ? 'Password updated.' : 'Password set. Authentication enabled.')}`);
   console.log(`  ${c.dim('Stored at:')}      ${c.cyan(path.join('~', '.termdock', 'auth.json'))} ${c.dim('(mode 0600, scrypt hash)')}`);
   console.log(`  ${c.dim('Sessions:')}       ${c.dim('all existing browsers were signed out')}`);
+  if (isEnvPasswordSet()) {
+    console.log(`${ICON.warn} ${c.yellow('TERMDOCK_PASSWORD is set in the environment — it takes precedence over the stored password.')}`);
+  }
 
   // If the server is running, nudge the user to restart so the in-memory
   // auth state reloads from disk.
@@ -946,11 +956,19 @@ function runClearPassword(): void {
   clearAuthFile();
   destroyAllSessions();
 
-  console.log(`${ICON.ok} ${c.green('Password cleared. Authentication is now disabled.')}`);
-  console.log(`  ${c.dim('All existing sessions have been invalidated.')}`);
-  console.log('');
-  console.log(`${ICON.warn} ${c.yellow('Warning:')} ${c.dim('the server is now reachable by anyone who can reach the host/port.')}`);
-  console.log(`  ${c.dim('Re-enable auth at any time with:')} ${c.cyan('td --set-password')}`);
+  if (isEnvPasswordSet()) {
+    console.log(`${ICON.ok} ${c.green('Stored password cleared.')}`);
+    console.log(`  ${c.dim('All existing sessions have been invalidated.')}`);
+    console.log('');
+    console.log(`${ICON.info} ${c.yellow('TERMDOCK_PASSWORD is set in the environment — authentication stays enabled.')}`);
+    console.log(`  ${c.dim('Unset the variable to fully disable authentication.')}`);
+  } else {
+    console.log(`${ICON.ok} ${c.green('Password cleared. Authentication is now disabled.')}`);
+    console.log(`  ${c.dim('All existing sessions have been invalidated.')}`);
+    console.log('');
+    console.log(`${ICON.warn} ${c.yellow('Warning:')} ${c.dim('the server is now reachable by anyone who can reach the host/port.')}`);
+    console.log(`  ${c.dim('Re-enable auth at any time with:')} ${c.cyan('td --set-password')}`);
+  }
 
   const running = getRunningState();
   if (running) {
