@@ -55,6 +55,7 @@
     "@xterm/addon-webgl": "^0.20.0-beta.286",
     "@xterm/xterm": "^6.1.0-beta.287",
     "browser-haptic": "^1.0.13",
+    "busboy": "^1.6.0",
     "cookie-parser": "^1.4.7",
     "dompurify": "^3.4.11",
     "express": "^5.2.1",
@@ -78,6 +79,7 @@
   "devDependencies": {
     "@testing-library/react": "^14.1.0",
     "@testing-library/user-event": "^14.5.0",
+    "@types/busboy": "^1.5.4",
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.0",

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import {
   ChevronRight as RiChevronRight,
   ChevronDown as RiChevronDown,
@@ -29,11 +29,14 @@ interface FileTreeProps {
   onDirectoryRoot?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
+  onOpenInFileBrowser?: (path: string) => void;
+  canOpenInFileBrowser?: boolean;
   pinnedPaths?: Set<string>;
   selectedFilePath: string | null;
   query?: string;
   searchMode?: FileSearchMode;
   onContentMatchSelect?: (path: string, line: number) => void;
+  onDirectoryDropFiles?: (path: string, files: File[]) => void;
 }
 
 const CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.rb', '.php', '.swift', '.kt', '.sh', '.css', '.scss', '.html', '.json', '.yaml', '.yml', '.toml', '.md']);
@@ -184,9 +187,12 @@ interface FileTreeItemProps {
   onDirectoryRoot?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
+  onOpenInFileBrowser?: (path: string) => void;
+  canOpenInFileBrowser?: boolean;
   pinnedPaths: Set<string>;
   selectedFilePath: string | null;
   queryLower: string;
+  onDirectoryDropFiles?: (path: string, files: File[]) => void;
 }
 
 const FileTreeItem = memo(function FileTreeItem({
@@ -201,9 +207,12 @@ const FileTreeItem = memo(function FileTreeItem({
   onDirectoryRoot,
   onDirectoryPinToggle,
   onFilePinToggle,
+  onOpenInFileBrowser,
+  canOpenInFileBrowser,
   pinnedPaths,
   selectedFilePath,
   queryLower,
+  onDirectoryDropFiles,
 }: FileTreeItemProps) {
   const { t } = useI18n();
   // 精确订阅：每个节点只关心和自己相关的字段
@@ -214,6 +223,8 @@ const FileTreeItem = memo(function FileTreeItem({
   const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
   const [loading, setLoading] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
+  const [dropTarget, setDropTarget] = useState(false);
+  const dropDepthRef = useRef(0);
   const loadAbortRef = useRef<AbortController | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const isSelected = node.path === selectedFilePath;
@@ -221,6 +232,7 @@ const FileTreeItem = memo(function FileTreeItem({
   const isDirectory = node.type === 'directory';
   const isPinned = pinnedPaths.has(node.path);
   const canPinFile = !isDirectory && Boolean(onFilePinToggle);
+  const canOpenLocal = Boolean(canOpenInFileBrowser && onOpenInFileBrowser);
   const referenceKey = `path:${node.path}`;
   const referenceInserted = insertedReferenceKey === referenceKey;
   const referenceCopied = copiedReferenceKey === referenceKey;
@@ -307,6 +319,49 @@ const FileTreeItem = memo(function FileTreeItem({
     void runFileDownload(node.path);
   }, [node.path, runFileDownload]);
 
+  const handleOpenInFileBrowser = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    onOpenInFileBrowser?.(node.path);
+    setActionsOpen(false);
+  }, [node.path, onOpenInFileBrowser]);
+
+  const handleDirectoryDragEnter = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!isDirectory || !onDirectoryDropFiles || !event.dataTransfer.types.includes('Files')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dropDepthRef.current += 1;
+    setDropTarget(true);
+  }, [isDirectory, onDirectoryDropFiles]);
+
+  const handleDirectoryDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!isDirectory || !onDirectoryDropFiles || !event.dataTransfer.types.includes('Files')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    setDropTarget(true);
+  }, [isDirectory, onDirectoryDropFiles]);
+
+  const handleDirectoryDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!isDirectory || !onDirectoryDropFiles) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dropDepthRef.current -= 1;
+    if (dropDepthRef.current <= 0) {
+      dropDepthRef.current = 0;
+      setDropTarget(false);
+    }
+  }, [isDirectory, onDirectoryDropFiles]);
+
+  const handleDirectoryDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!isDirectory || !onDirectoryDropFiles) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dropDepthRef.current = 0;
+    setDropTarget(false);
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length > 0) onDirectoryDropFiles(node.path, files);
+  }, [isDirectory, node.path, onDirectoryDropFiles]);
+
   const handleDirectoryMoreClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     setActionsOpen((open) => !open);
@@ -349,14 +404,25 @@ const FileTreeItem = memo(function FileTreeItem({
           event.preventDefault();
           void handleToggle();
         }}
-        className={`group flex w-full cursor-pointer items-center gap-1 rounded px-2 py-1 text-[13px] ${
-          isSelected
-            ? 'bg-surface-elevated text-foreground'
-            : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+        onDragEnter={handleDirectoryDragEnter}
+        onDragOver={handleDirectoryDragOver}
+        onDragLeave={handleDirectoryDragLeave}
+        onDrop={handleDirectoryDrop}
+        className={`group relative flex w-full cursor-pointer items-center gap-1 rounded px-2 py-1 text-[13px] transition ${
+          dropTarget
+            ? 'scale-[1.015] bg-primary/15 text-foreground shadow-[0_0_0_1px_rgb(var(--primary-rgb)_/_0.45)]'
+            : isSelected
+              ? 'bg-surface-elevated text-foreground'
+              : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
         }`}
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
         title={node.path}
       >
+        {dropTarget && (
+          <span className="pointer-events-none absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground shadow-md">
+            {t('fileTree.dropToUploadHere')}
+          </span>
+        )}
         {node.type === 'directory' ? (
           <>
             {showChildren ? <RiChevronDown size={14} className="shrink-0 text-muted-foreground/80" /> : <RiChevronRight size={14} className="shrink-0 text-muted-foreground/80" />}
@@ -380,7 +446,7 @@ const FileTreeItem = memo(function FileTreeItem({
         </span>
         {loading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
         <ChangeBadge path={node.path} />
-        {node.type === 'directory' && (onDirectoryRoot || onDirectoryPinToggle) && (
+        {node.type === 'directory' && (onDirectoryRoot || onDirectoryPinToggle || canOpenLocal) && (
           <span
             onClick={handleDirectoryMoreClick}
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
@@ -410,8 +476,19 @@ const FileTreeItem = memo(function FileTreeItem({
         )}
       </div>
 
-      {node.type === 'directory' && actionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
+      {node.type === 'directory' && actionsOpen && (onDirectoryRoot || onDirectoryPinToggle || canOpenLocal) && (
         <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+          {canOpenLocal && (
+            <button
+              type="button"
+              onClick={handleOpenInFileBrowser}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
+              title={t('fileTree.openInFileBrowserTitle')}
+            >
+              <RiFolderOpen size={13} className="shrink-0 text-[color:var(--folder)]" />
+              <span className="min-w-0 flex-1 truncate">{t('fileTree.openInFileBrowser')}</span>
+            </button>
+          )}
           {onDirectoryRoot && (
             <button
               type="button"
@@ -439,6 +516,17 @@ const FileTreeItem = memo(function FileTreeItem({
 
       {!isDirectory && actionsOpen && (
         <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+          {canOpenLocal && (
+            <button
+              type="button"
+              onClick={handleOpenInFileBrowser}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
+              title={t('fileTree.openInFileBrowserTitle')}
+            >
+              <RiFile size={13} className="shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{t('fileTree.openInFileBrowser')}</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={handleFileDownload}
@@ -476,11 +564,14 @@ const FileTreeItem = memo(function FileTreeItem({
               onDirectoryRoot={onDirectoryRoot}
               onDirectoryPinToggle={onDirectoryPinToggle}
               onFilePinToggle={onFilePinToggle}
+              onOpenInFileBrowser={onOpenInFileBrowser}
+              canOpenInFileBrowser={canOpenInFileBrowser}
               pinnedPaths={pinnedPaths}
               selectedFilePath={selectedFilePath}
               queryLower={queryLower}
               insertedReferenceKey={insertedReferenceKey}
               copiedReferenceKey={copiedReferenceKey}
+              onDirectoryDropFiles={onDirectoryDropFiles}
             />
           ))}
         </div>
@@ -853,7 +944,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   );
 });
 
-export function FileTree({ rootPath, onFileSelect, onPathReference, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect }: FileTreeProps) {
+export function FileTree({ rootPath, onFileSelect, onPathReference, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles }: FileTreeProps) {
   const { t } = useI18n();
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
@@ -1215,11 +1306,14 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
           onDirectoryRoot={onDirectoryRoot}
           onDirectoryPinToggle={onDirectoryPinToggle}
           onFilePinToggle={onFilePinToggle}
+          onOpenInFileBrowser={onOpenInFileBrowser}
+          canOpenInFileBrowser={canOpenInFileBrowser}
           pinnedPaths={pinnedPaths}
           selectedFilePath={selectedFilePath}
           queryLower={queryLower}
           insertedReferenceKey={insertedReferenceKey}
           copiedReferenceKey={copiedReferenceKey}
+          onDirectoryDropFiles={onDirectoryDropFiles}
         />
       ))}
     </div>

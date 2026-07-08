@@ -211,6 +211,7 @@ interface DiffViewerProps {
   /** Keep mounted panes from issuing background diff requests while hidden. */
   active?: boolean;
   auditRecords?: ChangeAuditRecord[];
+  diffOverride?: string | null;
   onSummaryChange?: (summary: { files: number; additions: number; deletions: number } | null) => void;
 }
 
@@ -235,6 +236,10 @@ function getPathParts(path: string | null, fallback: { name: string; dir: string
     name: parts.pop() || path,
     dir: parts.join('/'),
   };
+}
+
+function isDiffNullPath(path: string | null | undefined): boolean {
+  return path === '/dev/null' || path === 'dev/null';
 }
 
 function formatDiffReference(diffText: string): string {
@@ -354,7 +359,7 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, auditRecords, onSummaryChange }: DiffViewerProps) {
+export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, auditRecords, diffOverride, onSummaryChange }: DiffViewerProps) {
   const { t } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
@@ -377,6 +382,14 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
   const auditRepoRoot = changedFileRepoRoot ?? repoRoot ?? rootPath;
 
   useEffect(() => {
+    if (diffOverride !== undefined) {
+      setDiffContent(diffOverride);
+      setDiffNotice(null);
+      setDiffError(null);
+      setDiffLoading(false);
+      setImagePreview(null);
+      return;
+    }
     if (!active) {
       setDiffLoading(false);
       logDiffViewerEvent('effect_skip_inactive', { interactionId, requestSlotId, filePath, repoRoot, changedFileRepoRoot, rootPath });
@@ -590,7 +603,7 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
         promiseSize: diffPromiseCache.size,
       });
     };
-  }, [active, changedFileRepoRoot, changedFileStatus, filePath, interactionId, reloadKey, repoRoot, requestSlotId, rootPath]);
+  }, [active, changedFileRepoRoot, changedFileStatus, diffOverride, filePath, interactionId, reloadKey, repoRoot, requestSlotId, rootPath]);
 
   const files = useMemo(() => {
     if (!diffContent || diffContent.trim() === '') return [];
@@ -702,8 +715,10 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
       {files.map((file) => {
         const key = `${file.oldRevision}-${file.newRevision}-${file.newPath}`;
         const stats = fileStats.get(key) ?? { additions: 0, deletions: 0 };
-        const pathParts = getPathParts(file.newPath || file.oldPath, { name: 'unknown file', dir: '' });
-        const displayPath = file.newPath || file.oldPath || 'unknown file';
+        const displayPath = file.newPath && !isDiffNullPath(file.newPath)
+          ? file.newPath
+          : file.oldPath && !isDiffNullPath(file.oldPath) ? file.oldPath : 'unknown file';
+        const pathParts = getPathParts(displayPath, { name: 'unknown file', dir: '' });
         const showFileHeader = !hideSingleFileHeader || files.length > 1;
         const fileDiffReferenceText = [
           `diff --git a/${file.oldPath || displayPath} b/${file.newPath || displayPath}`,
@@ -720,11 +735,11 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
         <div
           key={key}
           data-diff-file-anchor={displayPath}
-          className={embedded ? 'overflow-hidden bg-surface' : 'mt-3 overflow-hidden border border-border/20 bg-surface'}
+          className={embedded ? 'overflow-hidden bg-surface' : 'mt-3 border border-border/20 bg-surface'}
           style={diffGutterStyle}
         >
           {showFileHeader && (
-            <div className="flex items-center justify-between gap-3 border-b border-border/15 bg-surface-2 px-2 py-1.5">
+            <div className="sticky top-0 z-menu-panel flex items-center justify-between gap-3 border-b border-border/15 bg-surface-2/95 px-2 py-1.5 backdrop-blur">
               <div className="min-w-0" title={file.newPath || file.oldPath}>
                 <div className="truncate font-mono text-[11px] text-foreground">{pathParts.name}</div>
                 {pathParts.dir && <div className="truncate font-mono text-[10px] text-muted-foreground/70">{pathParts.dir}</div>}
@@ -948,7 +963,7 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
   return (
     <div className="termdock-diff termdock-native-select px-3 py-2">
       {getReferenceLongPressHandlers.popoverNode}
-      <div className="border-b border-border/15 px-1 pb-2">
+      <div className="sticky top-0 z-menu-panel border-b border-border/15 bg-surface/95 px-1 pb-2 pt-0 backdrop-blur">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="truncate text-sm font-medium text-foreground" title={filePath ?? undefined}>

@@ -1735,6 +1735,55 @@ export async function downloadFile(filePath: string): Promise<void> {
   }, 4000);
 }
 
+export async function uploadFiles(dir: string, files: File[], signal?: AbortSignal): Promise<{ files: { name: string; path: string; size: number }[] }> {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append('files', file);
+  }
+  const url = `/api/terminal/fs/upload?dir=${encodeURIComponent(dir)}`;
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetchWithTimeout(
+    url,
+    { method: 'POST', headers: { 'X-XSRF-TOKEN': csrfTokenHeader }, body: formData, signal },
+    120_000,
+    'Upload timed out',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Upload failed' }));
+    throw new Error(error.error || 'Upload failed');
+  }
+  return response.json();
+}
+
+export async function getLocalFileBrowserAvailability(signal?: AbortSignal): Promise<{ available: boolean; platform?: string }> {
+  const response = await fetchWithTimeout(
+    '/api/terminal/fs/local-open-availability',
+    { signal },
+    FS_REQUEST_TIMEOUT_MS,
+    'Local file browser availability check timed out',
+  );
+  if (!response.ok) return { available: false };
+  return response.json();
+}
+
+export async function openInFileBrowser(filePath: string): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetchWithTimeout(
+    '/api/terminal/fs/open-in-file-browser',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+      body: JSON.stringify({ path: filePath }),
+    },
+    FS_REQUEST_TIMEOUT_MS,
+    'Opening file browser timed out',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to open file browser' }));
+    throw new Error(error.error || 'Failed to open file browser');
+  }
+}
+
 function parseFilenameFromContentDisposition(disposition: string): string | null {
   if (!disposition) return null;
   const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
@@ -1951,6 +2000,7 @@ export interface GitContext {
   branch?: string | null;
   remotes?: string[];
   branches?: string[];
+  remoteBranches?: string[];
   upstream?: string | null;
   upstreamRemote?: string | null;
   upstreamBranch?: string | null;
@@ -2037,6 +2087,60 @@ export interface ChangeAuditRecord {
   injectedAt: number;
 }
 
+export interface BranchDiffResponse {
+  available: boolean;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  baseRef?: string;
+  baseBranch?: string;
+  currentBranch?: string | null;
+  headRef?: string | null;
+  diffFingerprint?: string;
+  stat?: string;
+  files?: string[];
+  hunks?: BranchDiffHunk[];
+  commits?: string[];
+  commitCount?: number;
+  diff?: string;
+  truncated?: boolean;
+  error?: string;
+}
+
+export interface BranchDiffHunk {
+  filePath: string;
+  oldPath?: string | null;
+  newPath?: string | null;
+  hunkHeader: string;
+  hunkIndex: number;
+  fingerprint: string;
+  additions: number;
+  deletions: number;
+  diff: string;
+  source?: 'committed' | 'uncommitted' | 'unknown';
+  commit?: string | null;
+}
+
+export interface BranchAuditRecord {
+  id: string;
+  workspaceRoot?: string | null;
+  repoRoot: string;
+  baseRef: string;
+  branchName?: string | null;
+  headRef?: string | null;
+  diffFingerprint?: string | null;
+  filePath: string;
+  oldPath?: string | null;
+  newPath?: string | null;
+  hunkHeader: string;
+  hunkIndex?: number | null;
+  fingerprint: string;
+  diff?: string | null;
+  explanation: string;
+  summary?: string | null;
+  generatedBy?: string | null;
+  injectedAt: number;
+}
+
 export async function getChangeAuditRecords(options: { workspaceRoot?: string | null; repoRoot?: string | null } = {}, signal?: AbortSignal): Promise<{ records: ChangeAuditRecord[]; loading?: boolean }> {
   const params = new URLSearchParams();
   if (options.workspaceRoot) params.set('workspaceRoot', options.workspaceRoot);
@@ -2051,6 +2155,46 @@ export async function getChangeAuditRecords(options: { workspaceRoot?: string | 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get change audit explanations' }));
     throw new Error(error.error || 'Failed to get change audit explanations');
+  }
+  return response.json();
+}
+
+export async function getBranchDiff(options: { cwd?: string | null; repoRoot?: string | null; base: string; requestSlotId?: string }, signal?: AbortSignal): Promise<BranchDiffResponse> {
+  const params = new URLSearchParams();
+  if (options.cwd) params.set('cwd', options.cwd);
+  if (options.repoRoot) params.set('repoRoot', options.repoRoot);
+  params.set('base', options.base);
+  params.set('action', 'load_branch_diff');
+  if (options.requestSlotId) params.set('requestSlotId', options.requestSlotId);
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/branch-diff?${params}`,
+    { signal },
+    GIT_FILE_DIFF_REQUEST_TIMEOUT_MS,
+    'Branch diff took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get branch diff' }));
+    throw new Error(error.error || 'Failed to get branch diff');
+  }
+  return response.json();
+}
+
+export async function getBranchAuditRecords(options: { workspaceRoot?: string | null; repoRoot?: string | null; baseRef?: string | null; branchName?: string | null } = {}, signal?: AbortSignal): Promise<{ records: BranchAuditRecord[]; loading?: boolean }> {
+  const params = new URLSearchParams();
+  if (options.workspaceRoot) params.set('workspaceRoot', options.workspaceRoot);
+  if (options.repoRoot) params.set('repoRoot', options.repoRoot);
+  if (options.baseRef) params.set('baseRef', options.baseRef);
+  if (options.branchName) params.set('branchName', options.branchName);
+  const qs = params.toString();
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/branch-audit${qs ? `?${qs}` : ''}`,
+    { signal },
+    GIT_REQUEST_TIMEOUT_MS,
+    'Branch explanations took too long to load.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get branch explanations' }));
+    throw new Error(error.error || 'Failed to get branch explanations');
   }
   return response.json();
 }
@@ -2073,6 +2217,28 @@ export async function clearChangeAuditRecords(options: { ids?: string[]; workspa
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to clear change audit explanations' }));
     throw new Error(error.error || 'Failed to clear change audit explanations');
+  }
+  return response.json();
+}
+
+export async function clearBranchAuditRecords(options: { ids?: string[]; workspaceRoot?: string | null; repoRoot?: string | null; baseRef?: string | null; branchName?: string | null } = {}): Promise<{ deleted: number; total: number }> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetchWithTimeout(
+    '/api/terminal/fs/branch-audit',
+    {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-XSRF-TOKEN': csrfTokenHeader,
+      },
+      body: JSON.stringify(options),
+    },
+    GIT_REQUEST_TIMEOUT_MS,
+    'Branch explanations took too long to clear.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to clear branch explanations' }));
+    throw new Error(error.error || 'Failed to clear branch explanations');
   }
   return response.json();
 }

@@ -4,15 +4,19 @@ import type { Dirent } from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
 import watcher from '@parcel/watcher';
+import busboy from 'busboy';
 import { pathValidator } from '../utils/pathValidator.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog } from '../utils/serverLogger.js';
-import { clearChangeAuditRecords, listChangeAuditRecords } from '../utils/changeAuditStore.js';
+import { clearBranchAuditRecords, clearChangeAuditRecords, listBranchAuditRecords, listChangeAuditRecords, buildChangeAuditFingerprint } from '../utils/changeAuditStore.js';
+import { getLanIPv4Addresses } from '../utils/localAccess.js';
 
 const router = Router();
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
 const MAX_IMAGE_PREVIEW_SIZE = 20 * 1024 * 1024; // 20MB
 const MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024; // 200MB
+const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100MB per file
+const MAX_UPLOAD_FILES = 50; // max 50 files per upload
 const GIT_TIMEOUT_MS = 5000;
 const GIT_UNTRACKED_TIMEOUT_MS = 800;
 const GIT_UNTRACKED_BACKGROUND_TIMEOUT_MS = 120_000;
@@ -25,6 +29,10 @@ const MAX_CONTENT_MATCHES_PER_FILE = 50;
 const MAX_CONTENT_MATCH_LINE_LENGTH = 400;
 const MAX_GIT_CONTEXT_CHANGED_FILES = 200;
 const MAX_DIFF_BYTES = 1024 * 1024; // 1MB
+const MAX_BRANCH_DIFF_BYTES = 2 * 1024 * 1024; // 2MB
+const MAX_BRANCH_DIFF_STAT_BYTES = 128 * 1024;
+const MAX_BRANCH_DIFF_NAME_BYTES = 256 * 1024;
+const MAX_BRANCH_DIFF_LOG_BYTES = 256 * 1024;
 const MAX_UNTRACKED_DIFF_FILE_BYTES = 1024 * 1024; // 1MB
 const MAX_NESTED_GIT_REPOS = 32;
 const NESTED_GIT_DISCOVERY_TIMEOUT_MS = 1_000;
@@ -54,6 +62,8 @@ const nestedGitRootsCache = new Map<string, {
 type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted' | 'unknown';
 
 type GitAction = 'stage-file' | 'stage-all' | 'unstage-file' | 'stash-file' | 'stash-all' | 'restore-worktree-file' | 'commit' | 'push' | 'pull' | 'switch-branch';
+
+const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
 interface GitChangedFile {
   path: string;
@@ -85,6 +95,7 @@ interface GitBundlePayload {
     branch?: string | null;
     remotes?: string[];
     branches?: string[];
+    remoteBranches?: string[];
     upstream?: string | null;
     upstreamRemote?: string | null;
     upstreamBranch?: string | null;
@@ -170,6 +181,40 @@ interface UntrackedFilesPayload {
   code?: string;
   startedAt?: number;
   finishedAt?: number;
+}
+
+interface BranchDiffPayload {
+  available: boolean;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  baseRef?: string;
+  baseBranch?: string;
+  currentBranch?: string | null;
+  headRef?: string | null;
+  diffFingerprint?: string;
+  stat?: string;
+  files?: string[];
+  skippedFiles?: DiffSkippedFile[];
+  hunks?: BranchDiffHunk[];
+  commits?: string[];
+  commitCount?: number;
+  diff?: string;
+  truncated?: boolean;
+  error?: string;
+}
+
+interface BranchDiffHunk {
+  filePath: string;
+  oldPath?: string | null;
+  newPath?: string | null;
+  hunkHeader: string;
+  hunkIndex: number;
+  fingerprint: string;
+  additions: number;
+  deletions: number;
+  diff: string;
+  source?: 'committed' | 'uncommitted' | 'unknown';
+  commit?: string | null;
 }
 
 let fsIoRequestSeq = 0;
@@ -534,6 +579,42 @@ function makeSkippedUntracked(pathspec: string, size: number | null): DiffSkippe
   };
 }
 
+async function appendUntrackedDiffs(
+  gitRoot: string,
+  baseDiff: string,
+  signal: AbortSignal,
+  options: { maxBytes: number; perFileMaxBytes: number },
+): Promise<{ diff: string; files: string[]; skippedFiles: DiffSkippedFile[]; truncated: boolean }> {
+  const output = await execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError);
+  const files = output.split('\0').filter(Boolean);
+  const skippedFiles: DiffSkippedFile[] = [];
+  let diff = baseDiff;
+  let truncated = false;
+  for (const filePath of files) {
+    const size = await getRelativeFileSize(gitRoot, filePath);
+    if (size !== null && size > options.perFileMaxBytes) {
+      skippedFiles.push(makeSkippedUntracked(filePath, size));
+      truncated = true;
+      continue;
+    }
+    const partial = await execGitLimited(['diff', '--no-index', '--', '/dev/null', filePath], gitRoot, options.perFileMaxBytes, true, signal)
+      .then((result) => {
+        if (result.truncated) truncated = true;
+        return result.stdout;
+      })
+      .catch(emptyOnNonAbortGitError);
+    if (!partial) continue;
+    const nextDiff = diff ? `${diff}\n${partial}` : partial;
+    if (getDiffByteLength(nextDiff) > options.maxBytes) {
+      skippedFiles.push({ path: filePath, reason: 'diff-byte-limit-exceeded', size: getDiffByteLength(partial), maxBytes: options.maxBytes });
+      truncated = true;
+      continue;
+    }
+    diff = nextDiff;
+  }
+  return { diff, files, skippedFiles, truncated };
+}
+
 function normalizeNameStatus(status: string): GitChangeStatus {
   if (status.startsWith('R')) return 'renamed';
   if (status.startsWith('C')) return 'copied';
@@ -773,18 +854,21 @@ function startUntrackedJob(gitRoot: string, nestedDisplayRoots: Set<string> = ne
 }
 
 async function getGitPushTargets(gitRoot: string, signal?: AbortSignal) {
-  const [remotesOutput, branchesOutput, upstreamOutput, aheadBehindOutput] = await Promise.all([
+  const [remotesOutput, branchesOutput, remoteBranchesOutput, upstreamOutput, aheadBehindOutput] = await Promise.all([
     execGit(['remote'], gitRoot, signal).catch(emptyOnNonAbortGitError),
     execGit(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], gitRoot, signal).catch(emptyOnNonAbortGitError),
+    execGit(['for-each-ref', '--format=%(refname:short)', 'refs/remotes'], gitRoot, signal).catch(emptyOnNonAbortGitError),
     execGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], gitRoot, signal).catch(emptyOnNonAbortGitError),
     execGit(['rev-list', '--left-right', '--count', '@{u}...HEAD'], gitRoot, signal).catch(emptyOnNonAbortGitError),
   ]);
   const remotes = uniqueSortedLines(remotesOutput);
   const branches = uniqueSortedLines(branchesOutput);
+  const remoteBranches = uniqueSortedLines(remoteBranchesOutput)
+    .filter((branch) => !branch.endsWith('/HEAD'));
   const upstream = upstreamOutput.trim() || null;
   const { remote: upstreamRemote, branch: upstreamBranch } = splitUpstream(upstream, remotes);
   const { ahead, behind } = parseAheadBehind(aheadBehindOutput, Boolean(upstream));
-  return { remotes, branches, upstream, upstreamRemote, upstreamBranch, ahead, behind };
+  return { remotes, branches, remoteBranches, upstream, upstreamRemote, upstreamBranch, ahead, behind };
 }
 
 function getRepoRelativeRoot(workspaceRoot: string, repoRoot: string, displayRoot: string = repoRoot): string {
@@ -1648,6 +1732,201 @@ function execGitLimited(
       });
     });
   });
+}
+
+function isSafeGitRefName(ref: string): boolean {
+  if (!ref || ref.length > 240) return false;
+  if (ref.startsWith('-') || ref.startsWith('/') || ref.endsWith('/') || ref.endsWith('.')) return false;
+  if (ref.includes('..') || ref.includes('@{') || ref.includes('\\') || ref.includes('//')) return false;
+  if (/[\s~^:?*[\\\]\0-\x1f\x7f]/.test(ref)) return false;
+  return true;
+}
+
+function normalizeDiffPath(value: string): string | null {
+  if (!value || value === '/dev/null') return null;
+  return value.startsWith('a/') || value.startsWith('b/') ? value.slice(2) : value;
+}
+
+function buildHunkFingerprint(lines: string[]): string {
+  const changedLines = lines
+    .filter((line) => (line.startsWith('+') && !line.startsWith('+++')) || (line.startsWith('-') && !line.startsWith('---')))
+    .map((line) => `${line.startsWith('+') ? 'insert' : 'delete'}:${line.slice(1)}`);
+  const text = changedLines.length > 0
+    ? changedLines.join('\n')
+    : lines.map((line) => line.slice(1)).join('\n');
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function parseBranchDiffHunks(diffText: string): BranchDiffHunk[] {
+  const hunks: BranchDiffHunk[] = [];
+  const lines = diffText.split('\n');
+  let oldPath: string | null = null;
+  let newPath: string | null = null;
+  let currentHeader: string | null = null;
+  let currentLines: string[] = [];
+  let hunkIndexByFile = 0;
+
+  const flush = () => {
+    if (!currentHeader || (!oldPath && !newPath)) return;
+    const filePath = newPath ?? oldPath ?? '';
+    const oldDiffPath = oldPath ? `a/${oldPath}` : '/dev/null';
+    const newDiffPath = newPath ? `b/${newPath}` : '/dev/null';
+    const hunkDiff = [
+      `diff --git a/${oldPath ?? filePath} b/${newPath ?? filePath}`,
+      `--- ${oldDiffPath}`,
+      `+++ ${newDiffPath}`,
+      currentHeader,
+      ...currentLines,
+    ].join('\n');
+    hunks.push({
+      filePath,
+      oldPath,
+      newPath,
+      hunkHeader: currentHeader,
+      hunkIndex: hunkIndexByFile,
+      fingerprint: buildHunkFingerprint(currentLines),
+      additions: currentLines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length,
+      deletions: currentLines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length,
+      diff: hunkDiff,
+    });
+    hunkIndexByFile += 1;
+  };
+
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      flush();
+      currentHeader = null;
+      currentLines = [];
+      hunkIndexByFile = 0;
+      const match = /^diff --git (.+) (.+)$/.exec(line);
+      oldPath = normalizeDiffPath(match?.[1] ?? '');
+      newPath = normalizeDiffPath(match?.[2] ?? '');
+      continue;
+    }
+    if (line.startsWith('--- ')) {
+      oldPath = normalizeDiffPath(line.slice(4).trim());
+      continue;
+    }
+    if (line.startsWith('+++ ')) {
+      newPath = normalizeDiffPath(line.slice(4).trim());
+      continue;
+    }
+    if (line.startsWith('@@ ')) {
+      flush();
+      currentHeader = line;
+      currentLines = [];
+      continue;
+    }
+    if (currentHeader) currentLines.push(line);
+  }
+  flush();
+  return hunks;
+}
+
+async function annotateBranchDiffHunks(
+  repoRoot: string,
+  baseRef: string,
+  hunks: BranchDiffHunk[],
+  signal: AbortSignal,
+): Promise<BranchDiffHunk[]> {
+  if (hunks.length === 0) return hunks;
+  const workingDiff = await execGitLimited(['diff', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal)
+    .then((result) => result.stdout)
+    .catch(emptyOnNonAbortGitError);
+  const workingFingerprints = new Set(parseBranchDiffHunks(workingDiff).map((hunk) => `${hunk.filePath}\0${hunk.hunkHeader}\0${hunk.fingerprint}`));
+  const commitByFile = new Map<string, string | null>();
+  await Promise.all(Array.from(new Set(hunks.map((hunk) => hunk.filePath))).map(async (filePath) => {
+    const commit = await execGit(['log', '-1', '--format=%h', `${baseRef}..HEAD`, '--', filePath], repoRoot, signal)
+      .then((result) => result.trim() || null)
+      .catch(() => null);
+    commitByFile.set(filePath, commit);
+  }));
+  return hunks.map((hunk) => {
+    const key = `${hunk.filePath}\0${hunk.hunkHeader}\0${hunk.fingerprint}`;
+    if (workingFingerprints.has(key)) return { ...hunk, source: 'uncommitted' as const, commit: null };
+    const commit = commitByFile.get(hunk.filePath) ?? null;
+    return { ...hunk, source: commit ? 'committed' as const : 'unknown' as const, commit };
+  });
+}
+
+async function getBranchDiffPayload(
+  workspaceRoot: string,
+  repoRoot: string,
+  baseBranch: string,
+  signal: AbortSignal,
+): Promise<BranchDiffPayload> {
+  const trimmedBase = baseBranch.trim();
+  if (!isSafeGitRefName(trimmedBase)) {
+    return { available: false, workspaceRoot, repoRoot, baseBranch: trimmedBase, error: 'Invalid base branch name' };
+  }
+
+  let baseRef = trimmedBase.includes('/') ? trimmedBase : `origin/${trimmedBase}`;
+  if (trimmedBase.includes('/')) {
+    await execGit(['rev-parse', '--verify', '--quiet', baseRef], repoRoot, signal);
+  } else {
+    try {
+      await execGit(['fetch', 'origin', trimmedBase, '--no-tags'], repoRoot, signal, GIT_ROUTE_TIMEOUT_MS);
+    } catch (error) {
+      const localRef = await execGit(['rev-parse', '--verify', '--quiet', trimmedBase], repoRoot, signal)
+        .then(() => trimmedBase)
+        .catch(() => null);
+      if (!localRef) throw error;
+      baseRef = localRef;
+    }
+  }
+  const [currentBranch, headRef, statResult, nameResult, logResult, diffResult] = await Promise.all([
+    execGit(['branch', '--show-current'], repoRoot, signal).catch(emptyOnNonAbortGitError),
+    execGit(['rev-parse', '--short=12', 'HEAD'], repoRoot, signal).catch(emptyOnNonAbortGitError),
+    execGitLimited(['diff', baseRef, '--stat'], repoRoot, MAX_BRANCH_DIFF_STAT_BYTES, false, signal),
+    execGitLimited(['diff', '--name-only', baseRef], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
+    execGitLimited(['log', `${baseRef}..HEAD`, '--oneline', '--no-merges'], repoRoot, MAX_BRANCH_DIFF_LOG_BYTES, false, signal),
+    execGitLimited(['diff', baseRef], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
+  ]);
+  const untrackedResult = await appendUntrackedDiffs(repoRoot, diffResult.stdout, signal, {
+    maxBytes: MAX_BRANCH_DIFF_BYTES,
+    perFileMaxBytes: MAX_UNTRACKED_DIFF_FILE_BYTES,
+  });
+  const diff = untrackedResult.diff;
+  const stat = statResult.stdout.trim();
+  const files = Array.from(new Set([
+    ...nameResult.stdout.split('\n').map((line) => line.trim()).filter(Boolean),
+    ...untrackedResult.files,
+  ]));
+  const hunks = await annotateBranchDiffHunks(repoRoot, baseRef, parseBranchDiffHunks(diff), signal);
+  const commits = logResult.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  const fingerprint = buildChangeAuditFingerprint([
+    repoRoot,
+    baseRef,
+    currentBranch.trim(),
+    headRef.trim(),
+    stat,
+    files.join('\n'),
+    commits.join('\n'),
+    diff,
+  ]);
+  return {
+    available: true,
+    workspaceRoot,
+    repoRoot,
+    baseRef,
+    baseBranch: trimmedBase,
+    currentBranch: currentBranch.trim() || null,
+    headRef: headRef.trim() || null,
+    diffFingerprint: fingerprint,
+    stat,
+    files,
+    skippedFiles: untrackedResult.skippedFiles.length > 0 ? untrackedResult.skippedFiles : undefined,
+    hunks,
+    commits,
+    commitCount: commits.length,
+    diff,
+    truncated: statResult.truncated || nameResult.truncated || logResult.truncated || diffResult.truncated || untrackedResult.truncated,
+  };
 }
 
 // In-memory cache for `git rev-parse --show-toplevel` results.
@@ -2884,6 +3163,100 @@ router.delete('/change-audit', (req: Request, res: Response) => {
   res.json({ ok: true, ...clearChangeAuditRecords({ ids, workspaceRoot, repoRoot }) });
 });
 
+router.get('/branch-diff', async (req: Request, res: Response) => {
+  const requestId = ++fsIoRequestSeq;
+  const startedAt = Date.now();
+  const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined;
+  const requestedRepoRoot = typeof req.query.repoRoot === 'string' ? req.query.repoRoot : undefined;
+  const baseBranch = typeof req.query.base === 'string' ? req.query.base : '';
+  const action = getRequestAction(req, 'load_branch_diff');
+  const requestSlotId = typeof req.query.requestSlotId === 'string' ? req.query.requestSlotId : undefined;
+  const controller = new AbortController();
+  const abortRequest = () => {
+    if (!res.writableEnded) controller.abort(new SupersededRequestError('git.branch-diff'));
+  };
+  req.on('aborted', abortRequest);
+  res.on('close', abortRequest);
+  let repoRootForLog: string | null = null;
+  registerIoSlot({ requestId, op: 'git.branch-diff', action, slotId: requestSlotId, controller, cwd: requestedRepoRoot ?? cwd });
+  try {
+    if (!cwd && !requestedRepoRoot) {
+      res.json({ available: false, error: 'No cwd provided' });
+      return;
+    }
+    const resolvedCwd = await pathValidator.validatePathAsync(cwd ?? requestedRepoRoot ?? '');
+    throwIfAborted(controller.signal, 'git.branch-diff');
+    const workspaceGitRoot = await findGitRoot(resolvedCwd);
+    throwIfAborted(controller.signal, 'git.branch-diff');
+    if (!workspaceGitRoot) {
+      res.json({ available: false, workspaceRoot: resolvedCwd, error: 'Not a git repository' });
+      return;
+    }
+    const repoRoot = requestedRepoRoot ? await pathValidator.validatePathAsync(requestedRepoRoot) : workspaceGitRoot;
+    if (!isPathInside(workspaceGitRoot, repoRoot)) {
+      res.status(400).json({ available: false, error: 'Repository is outside current workspace' });
+      return;
+    }
+    const actualRepoRoot = await findGitRoot(repoRoot);
+    if (!actualRepoRoot || actualRepoRoot !== repoRoot) {
+      res.status(400).json({ available: false, error: 'Repository root is invalid' });
+      return;
+    }
+    repoRootForLog = repoRoot;
+    const payload = await withTimeout(
+      getBranchDiffPayload(workspaceGitRoot, repoRoot, baseBranch, controller.signal),
+      GIT_FILE_DIFF_ROUTE_TIMEOUT_MS,
+      'Branch diff took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+      'GIT_BRANCH_DIFF_TIMEOUT',
+      () => controller.abort(new OperationTimeoutError('Branch diff took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_BRANCH_DIFF_TIMEOUT')),
+    );
+    logFsIo({
+      id: requestId,
+      action,
+      op: 'git.branch-diff',
+      startedAt,
+      status: payload.available ? 'ok' : 'error',
+      cwd: resolvedCwd,
+      repoRoot,
+      count: payload.files?.length ?? 0,
+      error: payload.error,
+      truncated: payload.truncated,
+      extra: { baseBranch, requestSlotId, commits: payload.commitCount },
+    });
+    res.json(payload);
+  } catch (error) {
+    const payload = getErrorPayload(error);
+    logFsIo({ id: requestId, action, op: 'git.branch-diff', startedAt, status: 'error', cwd, repoRoot: repoRootForLog, code: payload.code, error: payload.error, extra: { baseBranch, requestSlotId } });
+    res.status(error instanceof OperationTimeoutError ? 504 : 200).json({ available: false, ...payload });
+  } finally {
+    releaseIoSlot(requestSlotId, requestId);
+  }
+});
+
+router.get('/branch-audit', (req: Request, res: Response) => {
+  const workspaceRoot = typeof req.query.workspaceRoot === 'string' ? req.query.workspaceRoot : null;
+  const repoRoot = typeof req.query.repoRoot === 'string' ? req.query.repoRoot : null;
+  const baseRef = typeof req.query.baseRef === 'string' ? req.query.baseRef : null;
+  const branchName = typeof req.query.branchName === 'string' ? req.query.branchName : null;
+  res.json(listBranchAuditRecords({ workspaceRoot, repoRoot, baseRef, branchName }));
+});
+
+router.delete('/branch-audit', (req: Request, res: Response) => {
+  const body = req.body as { ids?: unknown; workspaceRoot?: unknown; repoRoot?: unknown; baseRef?: unknown; branchName?: unknown };
+  const ids = Array.isArray(body.ids)
+    ? body.ids.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : undefined;
+  const workspaceRoot = typeof body.workspaceRoot === 'string' ? body.workspaceRoot : null;
+  const repoRoot = typeof body.repoRoot === 'string' ? body.repoRoot : null;
+  const baseRef = typeof body.baseRef === 'string' ? body.baseRef : null;
+  const branchName = typeof body.branchName === 'string' ? body.branchName : null;
+  if ((!ids || ids.length === 0) && !workspaceRoot && !repoRoot && !baseRef && !branchName) {
+    res.status(400).json({ error: 'Expected ids, workspaceRoot, repoRoot, baseRef, or branchName to clear branch audit explanations' });
+    return;
+  }
+  res.json({ ok: true, ...clearBranchAuditRecords({ ids, workspaceRoot, repoRoot, baseRef, branchName }) });
+});
+
 // Mutating Git actions for the right sidebar diff list. Keep this API as a
 // strict allowlist — never accept arbitrary git arguments from the browser.
 router.post('/git-action', async (req: Request, res: Response) => {
@@ -2973,5 +3346,230 @@ router.post('/git-action', async (req: Request, res: Response) => {
     res.status(500).json({ error: message, code: 'GIT_ACTION_FAILED' });
   }
 });
+
+// ---- File upload ----
+
+interface UploadedFile {
+  name: string;
+  path: string;
+  size: number;
+}
+
+function sanitizeUploadFilename(filename: string | undefined, fallback: string): string {
+  const normalized = (filename ?? '').replace(/\\/g, '/');
+  const basename = path.basename(normalized).trim();
+  if (!basename || basename === '.' || basename === '..') return fallback;
+  return basename;
+}
+
+function normalizeRemoteAddress(address: string | undefined): string {
+  if (!address) return '';
+  return address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
+}
+
+function isLocalBrowserRequest(req: Request): boolean {
+  const remoteAddress = normalizeRemoteAddress(req.socket.remoteAddress);
+  if (LOOPBACK_ADDRESSES.has(req.socket.remoteAddress ?? '') || LOOPBACK_ADDRESSES.has(remoteAddress) || remoteAddress.startsWith('127.')) {
+    return true;
+  }
+  return getLanIPv4Addresses().includes(remoteAddress);
+}
+
+function getOpenCommand(targetPath: string, isDirectory: boolean): { command: string; args: string[] } | null {
+  if (process.platform === 'darwin') {
+    return isDirectory
+      ? { command: 'open', args: [targetPath] }
+      : { command: 'open', args: ['-R', targetPath] };
+  }
+  if (process.platform === 'win32') {
+    return isDirectory
+      ? { command: 'explorer.exe', args: [targetPath] }
+      : { command: 'explorer.exe', args: ['/select,', targetPath] };
+  }
+  return isDirectory
+    ? { command: 'xdg-open', args: [targetPath] }
+    : { command: 'xdg-open', args: [path.dirname(targetPath)] };
+}
+
+router.get('/local-open-availability', (req: Request, res: Response) => {
+  const available = isLocalBrowserRequest(req);
+  res.json({ available, platform: process.platform });
+});
+
+router.post('/open-in-file-browser', async (req: Request, res: Response) => {
+  try {
+    if (!isLocalBrowserRequest(req)) {
+      res.status(403).json({ error: 'Only available from the Termdock host machine', code: 'NOT_LOCAL_BROWSER' });
+      return;
+    }
+    const requestedPath = typeof req.body?.path === 'string' ? req.body.path : '';
+    if (!requestedPath) {
+      res.status(400).json({ error: 'Missing path', code: 'MISSING_PATH' });
+      return;
+    }
+
+    const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
+    const stat = await fs.promises.stat(resolvedPath);
+    const openCommand = getOpenCommand(resolvedPath, stat.isDirectory());
+    if (!openCommand) {
+      res.status(501).json({ error: 'Opening file browser is not supported on this platform', code: 'UNSUPPORTED_PLATFORM' });
+      return;
+    }
+
+    const child = spawn(openCommand.command, openCommand.args, {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    res.json({ ok: true });
+  } catch (error) {
+    if (error instanceof Error && (error as any).code === 'PATH_NOT_ALLOWED') {
+      res.status(403).json({ error: 'Path not allowed', code: 'PATH_NOT_ALLOWED' });
+      return;
+    }
+    const message = error instanceof Error ? error.message : 'Failed to open file browser';
+    res.status(500).json({ error: message, code: 'OPEN_FILE_BROWSER_FAILED' });
+  }
+});
+
+router.post('/upload', async (req: Request, res: Response) => {
+  try {
+    const dir = typeof req.query.dir === 'string' ? req.query.dir : '';
+    if (!dir) {
+      res.status(400).json({ error: 'Missing dir query parameter', code: 'MISSING_DIR' });
+      return;
+    }
+
+    const resolvedDir = await pathValidator.validatePathAsync(dir);
+    const stat = await fs.promises.stat(resolvedDir);
+    if (!stat.isDirectory()) {
+      res.status(400).json({ error: 'Target is not a directory', code: 'NOT_A_DIRECTORY' });
+      return;
+    }
+
+    const files: UploadedFile[] = [];
+    let fileCount = 0;
+    let aborted = false;
+    let totalSize = 0;
+
+    const bb = busboy({
+      headers: req.headers,
+      limits: { fileSize: MAX_UPLOAD_SIZE, files: MAX_UPLOAD_FILES },
+    });
+
+    const writePromises: Promise<void>[] = [];
+
+    bb.on('file', (_fieldname: string, fileStream: NodeJS.ReadableStream, info: { filename: string; encoding: string; mimeType: string }) => {
+      if (aborted) {
+        fileStream.resume();
+        return;
+      }
+
+      fileCount++;
+      if (fileCount > MAX_UPLOAD_FILES) {
+        aborted = true;
+        fileStream.resume();
+        return;
+      }
+
+      const { filename } = info;
+      const destName = sanitizeUploadFilename(filename, `file_${fileCount}`);
+      const baseDestPath = path.join(resolvedDir, destName);
+
+      // Resolve unique path asynchronously inside the write promise
+      const writePromise = (async () => {
+        const destPath = await uniquePath(baseDestPath);
+        return new Promise<void>((resolve, reject) => {
+          const writeStream = fs.createWriteStream(destPath);
+          let fileSize = 0;
+
+          fileStream.on('data', (chunk: Buffer) => {
+            fileSize += chunk.length;
+            totalSize += chunk.length;
+            if (totalSize > MAX_UPLOAD_SIZE) {
+              aborted = true;
+              (fileStream as any).destroy?.(new Error('File too large'));
+              writeStream.destroy();
+              return;
+            }
+          });
+
+          fileStream.pipe(writeStream);
+
+          writeStream.on('finish', () => {
+            files.push({ name: destName, path: destPath, size: fileSize });
+            resolve();
+          });
+
+          writeStream.on('error', (err) => {
+            fs.promises.unlink(destPath).catch(() => {});
+            reject(err);
+          });
+        });
+      })();
+
+      writePromises.push(writePromise);
+    });
+
+    bb.on('error', (_err: Error) => {
+      // Will be handled by the promise rejection below
+    });
+
+    bb.on('filesLimit', () => {
+      aborted = true;
+    });
+
+    bb.on('finish', async () => {
+      try {
+        await Promise.all(writePromises);
+        if (aborted && files.length === 0) {
+          res.status(413).json({ error: 'Upload limit exceeded', code: 'UPLOAD_LIMIT' });
+          return;
+        }
+        res.status(200).json({ files });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Upload failed';
+        res.status(500).json({ error: message, code: 'UPLOAD_FAILED' });
+      }
+    });
+
+    req.pipe(bb);
+  } catch (error) {
+    if (error instanceof Error && (error as any).code === 'PATH_NOT_ALLOWED') {
+      res.status(403).json({ error: 'Path not allowed', code: 'PATH_NOT_ALLOWED' });
+      return;
+    }
+    const message = error instanceof Error ? error.message : 'Upload failed';
+    res.status(500).json({ error: message, code: 'UPLOAD_FAILED' });
+  }
+});
+
+async function uniquePath(filePath: string): Promise<string> {
+  try {
+    await fs.promises.access(filePath);
+    // File exists — find a unique name
+    const ext = path.extname(filePath);
+    const base = filePath.slice(0, filePath.length - ext.length);
+    let counter = 1;
+    let candidate: string;
+    do {
+      candidate = `${base}_${counter}${ext}`;
+      counter++;
+    } while (await exists(candidate));
+    return candidate;
+  } catch {
+    // File doesn't exist — use as-is
+    return filePath;
+  }
+}
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await fs.promises.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export default router;

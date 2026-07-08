@@ -103,11 +103,36 @@ export type TranslationDictionary = {
     changeAuditShort: string;
     changeAuditLoading: string;
     changeAuditLoaded: (params: TranslatorParams) => string;
+    changeAuditRegenerate: string;
+    changeAuditRefreshStale: string;
+    changeAuditRefreshStaleTitle: string;
     clearChangeAudit: string;
     clearChangeAuditTitle: string;
     changeAuditClearFailed: (params: TranslatorParams) => string;
     changeAuditScopeAll: string;
     changeAuditScopeLabel: string;
+    branchAuditTitle: string;
+    branchAuditShort: string;
+    branchAuditBaseLabel: string;
+    branchAuditBasePlaceholder: string;
+    branchAuditBaseSearchPlaceholder: string;
+    branchAuditBaseEmpty: string;
+    branchAuditGenerate: string;
+    branchAuditRegenerate: string;
+    branchAuditGenerateTitle: string;
+    branchAuditRefreshDiff: string;
+    branchAuditRefreshStale: string;
+    branchAuditRefreshStaleTitle: string;
+    branchAuditClearTitle: string;
+    branchAuditClearFailed: (params: TranslatorParams) => string;
+    branchAuditCommitCount: (params: TranslatorParams) => string;
+    branchAuditFileCount: (params: TranslatorParams) => string;
+    branchAuditTruncated: string;
+    branchAuditCurrent: string;
+    branchAuditStale: string;
+    branchAuditEmpty: string;
+    branchAuditView: string;
+    branchAuditSaved: (params: TranslatorParams) => string;
     insertPreset: (params: TranslatorParams) => string;
     tabChanges: string;
     tabGit: string;
@@ -122,6 +147,12 @@ export type TranslationDictionary = {
     copyFileRef: string;
     downloadFile: string;
     downloadFailed: string;
+    uploadFile: string;
+    uploadFiles: string;
+    dropToUpload: string;
+    uploading: string;
+    uploadSuccess: (params: TranslatorParams) => string;
+    uploadFailed: string;
     binaryPreviewHint: string;
     selectedLineHint: (params: TranslatorParams) => string;
     multiLineHint: string;
@@ -225,6 +256,9 @@ export type TranslationDictionary = {
     insertRefTitle: string;
     openDirRoot: string;
     openDirRootTitle: string;
+    openInFileBrowser: string;
+    openInFileBrowserTitle: string;
+    openInFileBrowserFailed: string;
     moreDirActions: string;
     pinDir: string;
     pinDirTitle: string;
@@ -250,6 +284,7 @@ export type TranslationDictionary = {
     noContentMatches: string;
     contentSearchNeedsRipgrep: string;
     truncatedHint: string;
+    dropToUploadHere: string;
   };
   diffViewer: {
     noFileChanges: string;
@@ -467,6 +502,7 @@ export type TranslationDictionary = {
   terminal: {
     input: string;
     error: string;
+    dropFilesToPastePaths: string;
   };
   errorBoundary: {
     title: string;

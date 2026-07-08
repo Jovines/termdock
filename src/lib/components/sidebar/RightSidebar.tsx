@@ -29,12 +29,15 @@ import {
   Eye as RiEye,
   EyeOff as RiEyeOff,
   Sparkles as RiSparkles,
+  Upload as RiUpload,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
-import { DiffViewer } from './DiffViewer';
+import { DiffReviewPanel } from './DiffReviewPanel';
+import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
+import { ChangeDiffReview } from './ChangeDiffReview';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { cancelIoSlot, clearChangeAuditRecords, getChangeAuditRecords, getGitBundle, getGitContext, getUntrackedFiles, isPreviewableImagePath, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, type ChangeAuditRecord, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getUntrackedFiles, isPreviewableImagePath, openInFileBrowser, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, refractorNodesToReact, type RefractorLike } from '../../utils/syntaxHighlight';
@@ -80,6 +83,7 @@ const FILE_PREVIEW_READING_STATE_STORAGE_KEY = 'termdock:right-sidebar:file-prev
 const FILE_TREE_WIDTH_STORAGE_KEY = 'termdock:right-sidebar:file-tree-width:v1';
 const MARKDOWN_VIEW_MODE_STORAGE_KEY = 'termdock:right-sidebar:markdown-view-mode:v1';
 const DIFF_CHANGE_LIST_MODE_STORAGE_KEY = 'termdock:right-sidebar:diff-change-list-mode:v1';
+const BRANCH_AUDIT_BASE_STORAGE_KEY = 'termdock:right-sidebar:branch-audit-base:v1';
 const MAX_FILE_TREE_SCROLL_ROOTS = 20;
 const MAX_FILE_PREVIEW_READING_STATE_FILES = 120;
 const FILE_TREE_SCROLL_WRITE_MS = 250;
@@ -137,6 +141,21 @@ function readMarkdownViewMode(): MarkdownViewMode {
 
 function readDiffChangeListMode(): DiffChangeListMode {
   return readCache(DIFF_CHANGE_LIST_MODE_STORAGE_KEY, isDiffChangeListMode) ?? 'list';
+}
+
+function isBranchAuditBaseCache(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((entry) => typeof entry === 'string');
+}
+
+function readBranchAuditBaseCache(): Record<string, string> {
+  return readCache(BRANCH_AUDIT_BASE_STORAGE_KEY, isBranchAuditBaseCache) ?? {};
+}
+
+function writeBranchAuditBase(root: string | null, base: string): void {
+  if (!root) return;
+  const cache = { ...readBranchAuditBaseCache(), [root]: base };
+  writeCache(BRANCH_AUDIT_BASE_STORAGE_KEY, cache);
 }
 
 function clampFileTreeWidth(width: number, drawerWidthPx: number): number {
@@ -2809,85 +2828,6 @@ function getChangedFileRepoLabel(file: GitChangedFile): string {
   return file.repoRelativeRoot && file.repoRelativeRoot !== '.' ? file.repoRelativeRoot : (file.repoName ?? '');
 }
 
-interface DiffChangeTreeDirectory {
-  kind: 'directory';
-  path: string;
-  name: string;
-  childCount: number;
-  directories: DiffChangeTreeDirectory[];
-  files: Array<[string, GitChangedFile]>;
-}
-
-function getChangedFileTreePath(file: GitChangedFile): string {
-  return file.path.replace(/^\/+/, '');
-}
-
-function buildDiffChangeTree(files: Array<[string, GitChangedFile]>): DiffChangeTreeDirectory[] {
-  const rootDirectories = new Map<string, DiffChangeTreeDirectory>();
-
-  const ensureDirectory = (
-    directories: Map<string, DiffChangeTreeDirectory>,
-    name: string,
-    path: string,
-    parent: DiffChangeTreeDirectory | null,
-  ): DiffChangeTreeDirectory => {
-    const existing = directories.get(name);
-    if (existing) return existing;
-    const directory: DiffChangeTreeDirectory = {
-      kind: 'directory',
-      path,
-      name,
-      childCount: 0,
-      directories: [],
-      files: [],
-    };
-    directories.set(name, directory);
-    parent?.directories.push(directory);
-    return directory;
-  };
-
-  for (const entry of files) {
-    const [, file] = entry;
-    const parts = getChangedFileTreePath(file).split('/').filter(Boolean);
-    if (parts.length <= 1) continue;
-    let currentDirectories = rootDirectories;
-    let parent: DiffChangeTreeDirectory | null = null;
-    let currentPath: string = '';
-    const directoryParts = parts.slice(0, -1);
-    for (const directoryName of directoryParts) {
-      currentPath = currentPath ? `${currentPath}/${directoryName}` : directoryName;
-      const directory = ensureDirectory(currentDirectories, directoryName, currentPath, parent);
-      parent = directory;
-      currentDirectories = new Map(directory.directories.map((child) => [child.name, child]));
-    }
-    parent?.files.push(entry);
-  }
-
-  const sortDirectory = (directory: DiffChangeTreeDirectory): DiffChangeTreeDirectory => {
-    const directories = directory.directories
-      .map(sortDirectory)
-      .sort((a, b) => a.name.localeCompare(b.name));
-    const filesInDirectory = directory.files.sort(([, a], [, b]) => a.path.localeCompare(b.path));
-    return {
-      ...directory,
-      directories,
-      files: filesInDirectory,
-      childCount: directories.reduce((count, child) => count + child.childCount, 0) + filesInDirectory.length,
-    };
-  };
-
-  return Array.from(rootDirectories.values()).map(sortDirectory).sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function flattenDiffChangeTree(directories: DiffChangeTreeDirectory[]): Array<[string, GitChangedFile]> {
-  const result: Array<[string, GitChangedFile]> = [];
-  for (const directory of directories) {
-    result.push(...flattenDiffChangeTree(directory.directories));
-    result.push(...directory.files);
-  }
-  return result;
-}
-
 function countStagedChanges(files: GitChangedFile[]): number {
   return files.reduce((count, file) => count + (file.staged ? 1 : 0), 0);
 }
@@ -3026,168 +2966,6 @@ function GitActionMenu({ actions, running, completed }: {
               </button>
             );
           })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ChangeTreeRowShell({
-  selected,
-  depth = 0,
-  title,
-  leading,
-  children,
-  trailing,
-  role,
-  tabIndex,
-  ariaExpanded,
-  onClick,
-  onKeyDown,
-  onPointerDown,
-  onPointerUp,
-  onPointerCancel,
-  dataAttributes,
-}: {
-  selected?: boolean;
-  depth?: number;
-  title?: string;
-  leading: ReactNode;
-  children: ReactNode;
-  trailing?: ReactNode;
-  role?: string;
-  tabIndex?: number;
-  ariaExpanded?: boolean;
-  onClick?: (event: MouseEvent<HTMLDivElement>) => void;
-  onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
-  onPointerDown?: (event: PointerEvent<HTMLDivElement>) => void;
-  onPointerUp?: (event: PointerEvent<HTMLDivElement>) => void;
-  onPointerCancel?: (event: PointerEvent<HTMLDivElement>) => void;
-  dataAttributes?: Record<string, string>;
-}) {
-  return (
-    <div
-      role={role}
-      tabIndex={tabIndex}
-      aria-expanded={ariaExpanded}
-      title={title}
-      onClick={onClick}
-      onKeyDown={onKeyDown}
-      onPointerDown={onPointerDown}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerCancel}
-      {...dataAttributes}
-      className={`group flex w-full cursor-pointer items-center gap-1 rounded px-2 py-1.5 text-left text-[13px] transition active:scale-[0.99] ${
-        selected
-          ? 'bg-surface-elevated text-foreground'
-          : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
-      }`}
-      style={{ paddingLeft: `${depth * 14 + 8}px` }}
-    >
-      <span className="flex w-[14px] shrink-0 items-center justify-center text-muted-foreground/80">
-        {leading}
-      </span>
-      <span className="min-w-0 flex-1">
-        {children}
-      </span>
-      {trailing}
-    </div>
-  );
-}
-
-function LazyDiffStreamItem({
-  file,
-  repoRoot,
-  activePane,
-  selected,
-  eager = false,
-  wrap,
-  showScrollHint,
-  reloadKey,
-  auditRecords,
-  onInsertDiffReference,
-  onReferenceCopied,
-  insertedReferenceKey,
-  copiedReferenceKey,
-  onVisibleChange,
-}: {
-  file: GitChangedFile;
-  repoRoot: string | null;
-  activePane: boolean;
-  selected: boolean;
-  eager?: boolean;
-  wrap: boolean;
-  showScrollHint: boolean;
-  reloadKey: number;
-  auditRecords: ChangeAuditRecord[];
-  onInsertDiffReference?: (label: string, text: string, key?: string) => void;
-  onReferenceCopied?: (key: string) => void;
-  insertedReferenceKey?: string | null;
-  copiedReferenceKey?: string | null;
-  onVisibleChange?: (visible: boolean) => void;
-}) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const [visible, setVisible] = useState(eager);
-  const selectionPath = getChangedFileSelectionPath(file);
-  const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
-  const display = getRelativeDisplayPath(absolutePath, repoRoot);
-
-  useEffect(() => {
-    if (eager) {
-      setVisible(true);
-      return;
-    }
-    const node = containerRef.current;
-    if (!node || typeof IntersectionObserver === 'undefined') {
-      setVisible(true);
-      return;
-    }
-    const observer = new IntersectionObserver((entries) => {
-      const isVisible = entries.some((entry) => entry.isIntersecting);
-      setVisible((current) => current || isVisible);
-      onVisibleChange?.(isVisible);
-    }, { root: null, rootMargin: '720px 0px' });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [eager, onVisibleChange]);
-
-  return (
-    <div
-      ref={containerRef}
-      data-diff-stream-item={selectionPath}
-      data-diff-selection-path={selectionPath}
-      data-diff-file-path={file.path}
-      data-diff-absolute-path={absolutePath}
-      className={`scroll-mt-3 border-b border-border/15 last:border-b-0 ${selected ? 'bg-surface-elevated/35' : ''}`}
-    >
-      <div className={`sticky top-0 z-menu-panel flex min-w-0 items-center gap-2 border-b border-border/15 px-3 py-2 backdrop-blur ${
-        selected ? 'bg-surface-elevated/95' : 'bg-surface/95'
-      }`}>
-        <ChangeBadge status={file.status} />
-        <div className="min-w-0 flex-1" title={absolutePath}>
-          <div className="truncate text-xs font-semibold text-foreground">{display.name}</div>
-          {display.dir && <div className="truncate text-[10px] text-muted-foreground">{display.dir}</div>}
-        </div>
-      </div>
-      {visible ? (
-        <DiffViewer
-          active={activePane && visible}
-          repoRoot={repoRoot}
-          filePath={file.path}
-          changedFile={file}
-          wrap={wrap}
-          showScrollHint={showScrollHint}
-          reloadKey={reloadKey}
-          embedded
-          auditRecords={auditRecords}
-          onInsertDiffReference={onInsertDiffReference}
-          onReferenceCopied={onReferenceCopied}
-          insertedReferenceKey={insertedReferenceKey}
-          copiedReferenceKey={copiedReferenceKey}
-        />
-      ) : (
-        <div className="bg-surface px-3 py-6 text-center text-xs text-muted-foreground">
-          {file.path}
         </div>
       )}
     </div>
@@ -3577,18 +3355,6 @@ function logDiffInteractionEvent(event: string, data: Record<string, unknown> = 
 
 function createDiffInteractionId(): string {
   return `diff-ui-${Date.now().toString(36)}-${(++diffInteractionIdSeq).toString(36)}`;
-}
-
-function getPointerLogData(event: PointerEvent<HTMLElement> | MouseEvent<HTMLElement>): Record<string, unknown> {
-  const target = event.target as HTMLElement | null;
-  return {
-    eventType: event.type,
-    button: 'button' in event ? event.button : undefined,
-    pointerType: 'pointerType' in event ? event.pointerType : undefined,
-    targetTag: target?.tagName,
-    targetClass: target?.className,
-    targetText: target?.textContent?.slice(0, 80),
-  };
 }
 
 function getDiffRowElement(target: EventTarget | null): HTMLElement | null {
@@ -4295,6 +4061,16 @@ export function RightSidebar(
   const [changeAuditClearing, setChangeAuditClearing] = useState(false);
   const [changeAuditRepoRoots, setChangeAuditRepoRoots] = useState<string[]>([]);
   const [changeAuditScopeOpen, setChangeAuditScopeOpen] = useState(false);
+  const [branchAuditBase, setBranchAuditBase] = useState('');
+  const [branchDiff, setBranchDiff] = useState<BranchDiffResponse | null>(null);
+  const [branchDiffLoading, setBranchDiffLoading] = useState(false);
+  const [branchDiffError, setBranchDiffError] = useState<string | null>(null);
+  const [branchAuditRecords, setBranchAuditRecords] = useState<BranchAuditRecord[]>([]);
+  const [branchAuditLoading, setBranchAuditLoading] = useState(false);
+  const [branchAuditError, setBranchAuditError] = useState<string | null>(null);
+  const [branchAuditClearing, setBranchAuditClearing] = useState(false);
+  const [branchAuditDetailOpen, setBranchAuditDetailOpen] = useState(false);
+  const [selectedBranchAuditFileKey, setSelectedBranchAuditFileKey] = useState<string | null>(null);
   const [mobileFilePreviewOpen, setMobileFilePreviewOpen] = useState(false);
   const [mobileFileSlideIndex, setMobileFileSlideIndex] = useState(0);
   const [mobileDiffSlideIndex, setMobileDiffSlideIndex] = useState(0);
@@ -4311,6 +4087,10 @@ export function RightSidebar(
   const [pushRemote, setPushRemote] = useState('');
   const [pushBranch, setPushBranch] = useState('');
   const [fileWatchError, setFileWatchError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [canOpenInFileBrowser, setCanOpenInFileBrowser] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
   const isWide = !isMobile && drawerWidthPx >= WIDE_WIDTH_THRESHOLD_PX;
   const [fileTreeWidthPx, setFileTreeWidthPx] = useState(() => readFileTreeWidth(drawerWidthPx));
@@ -4352,12 +4132,15 @@ export function RightSidebar(
   const gitDetailsAbortRef = useRef<AbortController | null>(null);
   const changeAuditRequestIdRef = useRef(0);
   const changeAuditAbortRef = useRef<AbortController | null>(null);
+  const branchDiffRequestIdRef = useRef(0);
+  const branchDiffAbortRef = useRef<AbortController | null>(null);
+  const branchAuditRequestIdRef = useRef(0);
+  const branchAuditAbortRef = useRef<AbortController | null>(null);
+  const branchAuditRepoRootRef = useRef<string | null>(null);
   const diffStreamSyncedPathRef = useRef<string | null>(null);
   const lastAutoRefreshRootRef = useRef<string | null>(null);
   const fileTreeResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
   const repoSwitcherPointerRef = useRef<{ startX: number; pointerId: number } | null>(null);
-  const diffRowPointerRef = useRef<{ pointerId: number; x: number; y: number; selectionPath: string } | null>(null);
-  const diffRowPointerSelectedRef = useRef<{ selectionPath: string; at: number } | null>(null);
   const mobileFileSwiperRef = useRef<SwiperInstance | null>(null);
   const mobileDiffSwiperRef = useRef<SwiperInstance | null>(null);
   const [untrackedLoading, setUntrackedLoading] = useState(false);
@@ -4488,6 +4271,36 @@ export function RightSidebar(
     }
   }, [changeAuditRecords.length, changeAuditTargetRepoRoots, rootPath]);
 
+  const loadBranchAuditRecords = useCallback(async (repoRoot: string | null, baseRef?: string | null, branchName?: string | null) => {
+    if (!repoRoot) {
+      setBranchAuditRecords([]);
+      return;
+    }
+    const requestId = branchAuditRequestIdRef.current + 1;
+    branchAuditRequestIdRef.current = requestId;
+    branchAuditAbortRef.current?.abort();
+    const controller = new AbortController();
+    branchAuditAbortRef.current = controller;
+    setBranchAuditLoading(branchAuditRecords.length === 0);
+    setBranchAuditError(null);
+    try {
+      const result = await getBranchAuditRecords({
+        workspaceRoot: rootPath,
+        repoRoot,
+        baseRef,
+        branchName,
+      }, controller.signal);
+      if (branchAuditRequestIdRef.current !== requestId) return;
+      setBranchAuditRecords(result.records);
+    } catch (error) {
+      if (branchAuditRequestIdRef.current !== requestId || isAbortError(error)) return;
+      setBranchAuditError(error instanceof Error ? error.message : 'Failed to load branch explanations');
+    } finally {
+      if (branchAuditAbortRef.current === controller) branchAuditAbortRef.current = null;
+      if (branchAuditRequestIdRef.current === requestId) setBranchAuditLoading(false);
+    }
+  }, [branchAuditRecords.length, rootPath]);
+
   const applyGitBundle = useCallback((bundle: GitBundleResponse, options: { reloadDiff?: boolean } = {}) => {
     logGitBundleClientEvent(bundle.files.length === 0 ? 'empty_bundle' : 'apply', {
       rootPath,
@@ -4575,6 +4388,13 @@ export function RightSidebar(
     changeAuditRequestIdRef.current += 1;
     changeAuditAbortRef.current?.abort();
     changeAuditAbortRef.current = null;
+    branchDiffRequestIdRef.current += 1;
+    branchDiffAbortRef.current?.abort();
+    cancelIoSlot('right-sidebar-branch-diff');
+    branchDiffAbortRef.current = null;
+    branchAuditRequestIdRef.current += 1;
+    branchAuditAbortRef.current?.abort();
+    branchAuditAbortRef.current = null;
     setUntrackedLoading(false);
     setUntrackedError(null);
     setChangeAuditRecords([]);
@@ -4582,6 +4402,14 @@ export function RightSidebar(
     setChangeAuditError(null);
     setChangeAuditRepoRoots([]);
     setChangeAuditScopeOpen(false);
+    setBranchDiff(null);
+    setBranchDiffLoading(false);
+    setBranchDiffError(null);
+    setBranchAuditRecords([]);
+    setBranchAuditLoading(false);
+    setBranchAuditError(null);
+    setBranchAuditDetailOpen(false);
+    setSelectedBranchAuditFileKey(null);
     setGitDetailsLoading(false);
     setActiveGitRepoRoot(null);
     const cached = rootPath ? useSidebarStore.getState().projectStateCache.get(rootPath) : undefined;
@@ -4929,6 +4757,15 @@ export function RightSidebar(
     return () => window.cancelAnimationFrame(frame);
   }, [fileTreeRoot, rootEntriesLoaded]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const controller = new AbortController();
+    getLocalFileBrowserAvailability(controller.signal)
+      .then((result) => setCanOpenInFileBrowser(Boolean(result.available)))
+      .catch(() => setCanOpenInFileBrowser(false));
+    return () => controller.abort();
+  }, [isOpen]);
+
   const handleFileSelect = useCallback((path: string) => {
     selectFile(path);
     setLineRange(null);
@@ -4958,6 +4795,54 @@ export function RightSidebar(
     }
     if (!isWide) setRightTab('file');
   }, [isMobile, isWide, onOpenRightSidebarFilePreview, selectFile, setRightTab]);
+
+  const handleUploadFiles = useCallback(async (files: File[], directoryPath?: string) => {
+    const targetDir = directoryPath || explorerRoot || rootPath;
+    if (!targetDir || files.length === 0) return;
+    setUploading(true);
+    try {
+      await uploadFiles(targetDir, files);
+      invalidateDirectoryCache(targetDir, false);
+    } catch (err) {
+      setGitActionError(err instanceof Error ? err.message : t('rightSidebar.uploadFailed'));
+      window.setTimeout(() => setGitActionError(null), 4000);
+    } finally {
+      setUploading(false);
+    }
+  }, [explorerRoot, rootPath, invalidateDirectoryCache, t]);
+
+  const handleOpenInFileBrowser = useCallback(async (path: string) => {
+    try {
+      await openInFileBrowser(path);
+    } catch (err) {
+      setGitActionError(err instanceof Error ? err.message : t('fileTree.openInFileBrowserFailed'));
+      window.setTimeout(() => setGitActionError(null), 4000);
+    }
+  }, [t]);
+
+  const handleFileTreeDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.types.includes('Files')) {
+      setDragOver(true);
+    }
+  }, []);
+
+  const handleFileTreeDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+  }, []);
+
+  const handleFileTreeDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      void handleUploadFiles(Array.from(files));
+    }
+  }, [handleUploadFiles]);
 
   const markReferenceInserted = useCallback((key: string) => {
     setInsertedReferenceKey(key);
@@ -5161,7 +5046,52 @@ export function RightSidebar(
   const activeGitActionRepoLabel = activeGitActionRepoRoot
     ? gitActionRepoOptions.find((repo) => repo.value === activeGitActionRepoRoot)?.label ?? getPathBasename(activeGitActionRepoRoot)
     : t('rightSidebar.allRepositories');
+  const branchAuditRepoRoot = activeGitActionRepoRoot ?? activeGitActionContext?.root ?? gitContext?.root ?? rootPath ?? null;
+  const branchAuditRepoLabel = branchAuditRepoRoot === activeGitActionRepoRoot
+    ? activeGitActionRepoLabel
+    : branchAuditRepoRoot ? getPathBasename(branchAuditRepoRoot) : rootName;
+  const branchAuditRepo = branchAuditRepoRoot ? gitRepositoryByRoot.get(branchAuditRepoRoot) ?? null : null;
+  const branchAuditContext = activeGitActionContext?.available
+    ? activeGitActionContext
+    : branchAuditRepo?.context?.available
+      ? branchAuditRepo.context
+      : branchAuditRepoRoot === gitContext?.root && gitContext?.available ? gitContext : null;
   const gitDetailsLoaded = Boolean(activeGitActionContext?.available && activeGitActionContext.branches && activeGitActionContext.remotes && activeGitActionContext.recentCommits);
+
+  const loadBranchDiff = useCallback(async () => {
+    const repoRoot = branchAuditRepoRoot;
+    const base = branchAuditBase.trim();
+    if (!rootPath || !repoRoot || !base) return null;
+    const requestId = branchDiffRequestIdRef.current + 1;
+    branchDiffRequestIdRef.current = requestId;
+    branchDiffAbortRef.current?.abort();
+    cancelIoSlot('right-sidebar-branch-diff');
+    const controller = new AbortController();
+    branchDiffAbortRef.current = controller;
+    setBranchDiffLoading(true);
+    setBranchDiffError(null);
+    try {
+      const result = await getBranchDiff({ cwd: rootPath, repoRoot, base, requestSlotId: 'right-sidebar-branch-diff' }, controller.signal);
+      if (branchDiffRequestIdRef.current !== requestId) return null;
+      if (!result.available) {
+        setBranchDiff(null);
+        setBranchDiffError(result.error ?? 'Branch diff is unavailable');
+        return result;
+      }
+      setBranchDiff(result);
+      writeBranchAuditBase(repoRoot, base);
+      void loadBranchAuditRecords(repoRoot, result.baseRef, result.currentBranch);
+      return result;
+    } catch (error) {
+      if (branchDiffRequestIdRef.current !== requestId || isAbortError(error)) return null;
+      setBranchDiff(null);
+      setBranchDiffError(error instanceof Error ? error.message : 'Failed to load branch diff');
+      return null;
+    } finally {
+      if (branchDiffAbortRef.current === controller) branchDiffAbortRef.current = null;
+      if (branchDiffRequestIdRef.current === requestId) setBranchDiffLoading(false);
+    }
+  }, [branchAuditBase, branchAuditRepoRoot, loadBranchAuditRecords, rootPath]);
 
   useEffect(() => {
     if (!activeGitActionRepoRoot || !gitContext?.available || !gitPaneActive || gitDetailsLoaded || gitDetailsLoading || requiresGitActionRepoSelection) return;
@@ -5169,9 +5099,20 @@ export function RightSidebar(
   }, [activeGitActionRepoRoot, gitContext?.available, gitDetailsLoaded, gitDetailsLoading, gitPaneActive, loadGitDetails, requiresGitActionRepoSelection]);
 
   useEffect(() => {
+    if (!branchAuditRepoRoot || !gitContext?.available || !gitPaneActive || gitDetailsLoading) return;
+    if (branchAuditContext?.branches && branchAuditContext.remotes && branchAuditContext.recentCommits) return;
+    void loadGitDetails(branchAuditRepoRoot);
+  }, [branchAuditContext?.branches, branchAuditContext?.recentCommits, branchAuditContext?.remotes, branchAuditRepoRoot, gitContext?.available, gitDetailsLoading, gitPaneActive, loadGitDetails]);
+
+  useEffect(() => {
     if (!isOpen || !diffPaneActive || !rootPath) return;
     void loadChangeAuditRecords();
   }, [diffPaneActive, isOpen, loadChangeAuditRecords, rootPath]);
+
+  useEffect(() => {
+    if (!isOpen || !gitPaneActive || !branchAuditRepoRoot) return;
+    void loadBranchAuditRecords(branchAuditRepoRoot, branchAuditBase.trim() || undefined, branchAuditContext?.branch ?? undefined);
+  }, [branchAuditBase, branchAuditContext?.branch, branchAuditRepoRoot, gitPaneActive, isOpen, loadBranchAuditRecords]);
 
   const activeGitRepoIndex = useMemo(() => {
     if (!activeGitRepoRoot) return 0;
@@ -5226,18 +5167,55 @@ export function RightSidebar(
   }, [activeGitActionContext?.remotes, activeGitActionContext?.upstreamRemote, t]);
 
   const pushBranchOptions = useMemo<GitPickerOption[]>(() => {
-    const values = new Set<string>();
-    if (activeGitActionContext?.upstreamBranch) values.add(activeGitActionContext.upstreamBranch);
-    if (activeGitActionContext?.branch) values.add(activeGitActionContext.branch);
-    for (const branch of activeGitActionContext?.branches ?? []) values.add(branch);
-    return Array.from(values).map((branch) => ({
-      value: branch,
-      label: branch,
-      meta: branch === activeGitActionContext?.upstreamBranch
-        ? t('rightSidebar.pushUpstreamBadge')
-        : branch === activeGitActionContext?.branch ? t('rightSidebar.pushCurrentBranchBadge') : undefined,
-    }));
-  }, [activeGitActionContext?.branch, activeGitActionContext?.branches, activeGitActionContext?.upstreamBranch, t]);
+    const options: GitPickerOption[] = [];
+    const seen = new Set<string>();
+    const addOption = (branch: string | null | undefined, meta?: string) => {
+      if (!branch || seen.has(branch)) return;
+      seen.add(branch);
+      options.push({ value: branch, label: branch, meta });
+    };
+    addOption(activeGitActionContext?.upstreamBranch, activeGitActionContext?.upstreamBranch ? t('rightSidebar.pushUpstreamBadge') : undefined);
+    addOption(activeGitActionContext?.branch, activeGitActionContext?.branch ? t('rightSidebar.pushCurrentBranchBadge') : undefined);
+    for (const branch of activeGitActionContext?.branches ?? []) addOption(branch, branch === activeGitActionContext?.branch ? t('rightSidebar.pushCurrentBranchBadge') : 'local');
+    const upstreamRemote = activeGitActionContext?.upstreamRemote;
+    for (const remoteBranch of activeGitActionContext?.remoteBranches ?? []) {
+      const slashIndex = remoteBranch.indexOf('/');
+      const remote = slashIndex >= 0 ? remoteBranch.slice(0, slashIndex) : null;
+      const branch = slashIndex >= 0 ? remoteBranch.slice(slashIndex + 1) : remoteBranch;
+      if (!upstreamRemote || remote === upstreamRemote) addOption(branch, 'remote');
+    }
+    return options;
+  }, [activeGitActionContext?.branch, activeGitActionContext?.branches, activeGitActionContext?.remoteBranches, activeGitActionContext?.upstreamBranch, activeGitActionContext?.upstreamRemote, t]);
+
+  const branchAuditBaseOptions = useMemo<GitPickerOption[]>(() => {
+    const options: GitPickerOption[] = [];
+    const seen = new Set<string>();
+    const addOption = (branch: string | null | undefined, meta?: string) => {
+      if (!branch || seen.has(branch)) return;
+      seen.add(branch);
+      options.push({ value: branch, label: branch, meta });
+    };
+    addOption(branchAuditContext?.upstream, branchAuditContext?.upstream ? t('rightSidebar.pushUpstreamBadge') : undefined);
+    for (const branch of branchAuditContext?.remoteBranches ?? []) addOption(branch, 'remote');
+    for (const branch of branchAuditContext?.branches ?? []) addOption(branch, branch === branchAuditContext?.branch ? t('rightSidebar.pushCurrentBranchBadge') : 'local');
+    return options;
+  }, [branchAuditContext?.branch, branchAuditContext?.branches, branchAuditContext?.remoteBranches, branchAuditContext?.upstream, t]);
+
+  useEffect(() => {
+    if (!branchAuditRepoRoot) return;
+    const repoChanged = branchAuditRepoRootRef.current !== branchAuditRepoRoot;
+    if (repoChanged) branchAuditRepoRootRef.current = branchAuditRepoRoot;
+    const cached = repoChanged ? readBranchAuditBaseCache()[branchAuditRepoRoot] : null;
+    const fallbackBranch = branchAuditBaseOptions[0]?.value ?? '';
+    const nextBase = cached || (!branchAuditBase.trim() ? fallbackBranch : '');
+    if (!repoChanged && !nextBase) return;
+    if (nextBase) setBranchAuditBase(nextBase);
+    setBranchDiff(null);
+    setBranchDiffError(null);
+    setBranchAuditRecords([]);
+    setBranchAuditError(null);
+    if (nextBase) void loadBranchAuditRecords(branchAuditRepoRoot, nextBase, branchAuditContext?.branch ?? undefined);
+  }, [branchAuditBase, branchAuditBaseOptions, branchAuditContext?.branch, branchAuditRepoRoot, loadBranchAuditRecords]);
 
   useEffect(() => {
     if (!activeGitActionContext?.available || !activeGitActionRepoRoot) return;
@@ -5391,341 +5369,55 @@ export function RightSidebar(
     );
   }
 
-  function renderChangeRow(entry: [string, GitChangedFile], options: { compact: boolean; expandable?: boolean; depth?: number }) {
-    const [, file] = entry;
+  function toDiffNavigatorFile(file: GitChangedFile): DiffNavigatorFile {
     const repoRoot = getChangedFileRepoRoot(file, rootPath);
     const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
     const display = getRelativeDisplayPath(absolutePath, repoRoot ?? rootPath);
     const selectionPath = getChangedFileSelectionPath(file);
-    const isSelected = selectedFilePath === file.path || selectedFilePath === absolutePath;
-    const showFileDirectoryHint = diffChangeListMode !== 'tree';
+    return {
+      key: selectionPath,
+      path: file.path,
+      absolutePath,
+      displayName: display.name,
+      displayDir: display.dir,
+      oldPath: file.oldPath,
+      status: file.status,
+      title: absolutePath,
+    };
+  }
+
+  function renderChangeNavigatorSubtitle(file: GitChangedFile) {
+    return file.oldPath ? (
+      <span className="block truncate text-[10px] text-muted-foreground/60">
+        {t('rightSidebar.changedFromPath', { path: file.oldPath })}
+      </span>
+    ) : null;
+  }
+
+  function renderChangeNavigatorTrailing(file: GitChangedFile) {
+    const repoRoot = getChangedFileRepoRoot(file, rootPath);
+    const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
     const referenceKey = `path:${absolutePath}`;
     const referenceInserted = insertedReferenceKey === referenceKey;
     const referenceCopied = copiedReferenceKey === referenceKey;
     const actions = buildGitActionButtons(file);
     const busyPath = getChangedFileBusyPath(file);
-    const beginPointerSelect = (event: PointerEvent<HTMLElement>) => {
-      diffRowPointerRef.current = {
-        pointerId: event.pointerId,
-        x: event.clientX,
-        y: event.clientY,
-        selectionPath,
-      };
-    };
-    const finishPointerSelect = (event: PointerEvent<HTMLElement>, select: () => void) => {
-      const start = diffRowPointerRef.current;
-      diffRowPointerRef.current = null;
-      if (!start || start.pointerId !== event.pointerId || start.selectionPath !== selectionPath) return;
-      if (Math.abs(event.clientX - start.x) > 6 || Math.abs(event.clientY - start.y) > 6) {
-        logDiffInteractionEvent('change_row_pointer_up_ignored_move', {
-          ...getPointerLogData(event),
-          selectionPath,
-          filePath: file.path,
-          absolutePath,
-          repoRoot,
-        });
-        return;
-      }
-      logDiffInteractionEvent('change_row_pointer_up_select', {
-        ...getPointerLogData(event),
-        selectionPath,
-        filePath: file.path,
-        absolutePath,
-        repoRoot,
-        status: file.status,
-        activeGitRepoRoot,
-        selectedFilePath,
-        isSelected,
-        hasSelection: hasNativeTextSelection(),
-        compact: options.compact,
-        expandable: Boolean(options.expandable),
-      });
-      if (hasNativeTextSelection()) return;
-      diffRowPointerSelectedRef.current = { selectionPath, at: Date.now() };
-      select();
-    };
-    if (!options.expandable) {
-      return (
-        <ChangeTreeRowShell
-          key={getChangedFileKey(file)}
-          selected={isSelected}
-          role="button"
-          tabIndex={0}
-          title={absolutePath}
-          dataAttributes={{
-            'data-diff-selection-path': selectionPath,
-            'data-diff-file-path': file.path,
-            'data-diff-absolute-path': absolutePath,
-            'data-diff-repo-root': repoRoot ?? '',
-            'data-diff-status': file.status,
-          }}
-          onPointerDown={(event) => {
-            beginPointerSelect(event);
-            logDiffInteractionEvent('change_row_pointer_down', {
-              ...getPointerLogData(event),
-              selectionPath,
-              filePath: file.path,
-              absolutePath,
-              repoRoot,
-              status: file.status,
-              activeGitRepoRoot,
-              selectedFilePath,
-              isSelected,
-              filteredChangedFiles: filteredChangedFiles.length,
-              changedFiles: changedFiles.size,
-              compact: options.compact,
-              expandable: Boolean(options.expandable),
-            });
-          }}
-          onPointerUp={(event) => finishPointerSelect(event, () => selectDiffFile(selectionPath))}
-          onPointerCancel={() => { diffRowPointerRef.current = null; }}
-          onClick={(event) => {
-            const pointerSelected = diffRowPointerSelectedRef.current;
-            if (pointerSelected?.selectionPath === selectionPath && Date.now() - pointerSelected.at < 800) {
-              logDiffInteractionEvent('change_row_click_skipped_after_pointer_up', {
-                ...getPointerLogData(event),
-                selectionPath,
-                filePath: file.path,
-                absolutePath,
-                repoRoot,
-              });
-              return;
-            }
-            logDiffInteractionEvent('change_row_click_handler_enter', {
-              ...getPointerLogData(event),
-              selectionPath,
-              filePath: file.path,
-              absolutePath,
-              repoRoot,
-              status: file.status,
-              activeGitRepoRoot,
-              selectedFilePath,
-              isSelected,
-              hasSelection: hasNativeTextSelection(),
-              filteredChangedFiles: filteredChangedFiles.length,
-              changedFiles: changedFiles.size,
-              compact: options.compact,
-              expandable: Boolean(options.expandable),
-            });
-            if (hasNativeTextSelection()) {
-              logDiffInteractionEvent('change_row_click_blocked_selection', {
-                selectionPath,
-                filePath: file.path,
-                absolutePath,
-                repoRoot,
-                selectedFilePath,
-              });
-              return;
-            }
-            logDiffInteractionEvent('change_row_click', {
-              selectionPath,
-              filePath: file.path,
-              absolutePath,
-              repoRoot,
-              status: file.status,
-              activeGitRepoRoot,
-              selectedFilePath,
-              isSelected,
-              filteredChangedFiles: filteredChangedFiles.length,
-              changedFiles: changedFiles.size,
-              compact: options.compact,
-              expandable: Boolean(options.expandable),
-            });
-            selectDiffFile(selectionPath);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== 'Enter' && event.key !== ' ') return;
-            event.preventDefault();
-            logDiffInteractionEvent('change_row_key_select', {
-              key: event.key,
-              selectionPath,
-              filePath: file.path,
-              absolutePath,
-              repoRoot,
-              status: file.status,
-              activeGitRepoRoot,
-              selectedFilePath,
-              isSelected,
-              filteredChangedFiles: filteredChangedFiles.length,
-              changedFiles: changedFiles.size,
-              compact: options.compact,
-              expandable: Boolean(options.expandable),
-            });
-            selectDiffFile(selectionPath);
-          }}
-          leading={<ChangeBadge status={file.status} />}
-          depth={options.depth ?? 0}
-          trailing={(
-            <span className="flex shrink-0 items-center gap-1">
-              <GitActionMenu actions={actions} running={runningGitAction} completed={completedGitAction?.path === busyPath ? completedGitAction : null} />
-              <button
-                type="button"
-                onClick={() => insertPathReference(absolutePath, referenceKey)}
-                {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
-                className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-                title={t('rightSidebar.insertThisFile')}
-              >
-                {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
-              </button>
-            </span>
-          )}
-        >
-          <span className="select-text" data-sidebar-gesture-ignore>
-            <span className={`block truncate leading-snug ${isSelected ? 'font-medium' : ''}`}>{display.name}</span>
-            {showFileDirectoryHint && display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
-            {file.oldPath && <span className="block truncate text-[10px] text-muted-foreground/60">{t('rightSidebar.changedFromPath', { path: file.oldPath })}</span>}
-          </span>
-        </ChangeTreeRowShell>
-      );
-    }
-
     return (
-      <section
-        key={getChangedFileKey(file)}
-        className={`relative scroll-mt-2 overflow-hidden rounded-xl border transition ${
-          isSelected
-            ? 'border-primary/25 bg-surface-elevated shadow-sm'
-            : 'border-border/15 bg-surface hover:border-border/30'
-        }`}
-      >
-        <div
-          className={`sticky -top-px z-20 flex w-full items-center gap-1 rounded-t-xl ${
-            isSelected ? 'border-b border-border/15 bg-surface-elevated shadow-sm' : ''
-          }`}
+      <span className="flex shrink-0 items-center gap-1">
+        <GitActionMenu actions={actions} running={runningGitAction} completed={completedGitAction?.path === busyPath ? completedGitAction : null} />
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            insertPathReference(absolutePath, referenceKey);
+          }}
+          {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
+          className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+          title={t('rightSidebar.insertThisFile')}
         >
-          <div
-            role="button"
-            tabIndex={0}
-            data-diff-selection-path={selectionPath}
-            data-diff-file-path={file.path}
-            data-diff-absolute-path={absolutePath}
-            data-diff-repo-root={repoRoot ?? ''}
-            data-diff-status={file.status}
-            onPointerDown={(event) => {
-              beginPointerSelect(event);
-              logDiffInteractionEvent('change_row_pointer_down', {
-                ...getPointerLogData(event),
-                selectionPath,
-                filePath: file.path,
-                absolutePath,
-                repoRoot,
-                status: file.status,
-                activeGitRepoRoot,
-                selectedFilePath,
-                isSelected,
-                filteredChangedFiles: filteredChangedFiles.length,
-                changedFiles: changedFiles.size,
-                compact: options.compact,
-                expandable: Boolean(options.expandable),
-              });
-            }}
-            onPointerUp={(event) => finishPointerSelect(event, () => toggleDiffFile(selectionPath))}
-            onPointerCancel={() => { diffRowPointerRef.current = null; }}
-            onClick={(event) => {
-              const pointerSelected = diffRowPointerSelectedRef.current;
-              if (pointerSelected?.selectionPath === selectionPath && Date.now() - pointerSelected.at < 800) {
-                logDiffInteractionEvent('change_row_click_skipped_after_pointer_up', {
-                  ...getPointerLogData(event),
-                  selectionPath,
-                  filePath: file.path,
-                  absolutePath,
-                  repoRoot,
-                });
-                return;
-              }
-              logDiffInteractionEvent('change_row_click_handler_enter', {
-                ...getPointerLogData(event),
-                selectionPath,
-                filePath: file.path,
-                absolutePath,
-                repoRoot,
-                status: file.status,
-                activeGitRepoRoot,
-                selectedFilePath,
-                isSelected,
-                hasSelection: hasNativeTextSelection(),
-                filteredChangedFiles: filteredChangedFiles.length,
-                changedFiles: changedFiles.size,
-                compact: options.compact,
-                expandable: Boolean(options.expandable),
-              });
-              if (hasNativeTextSelection()) {
-                logDiffInteractionEvent('change_row_click_blocked_selection', {
-                  selectionPath,
-                  filePath: file.path,
-                  absolutePath,
-                  repoRoot,
-                  selectedFilePath,
-                });
-                return;
-              }
-              logDiffInteractionEvent('change_row_click', {
-                selectionPath,
-                filePath: file.path,
-                absolutePath,
-                repoRoot,
-                status: file.status,
-                activeGitRepoRoot,
-                selectedFilePath,
-                isSelected,
-                filteredChangedFiles: filteredChangedFiles.length,
-                changedFiles: changedFiles.size,
-                compact: options.compact,
-                expandable: Boolean(options.expandable),
-              });
-              toggleDiffFile(selectionPath);
-            }}
-            onKeyDown={(event) => {
-              if (event.key !== 'Enter' && event.key !== ' ') return;
-              event.preventDefault();
-              logDiffInteractionEvent('change_row_key_select', {
-                key: event.key,
-                selectionPath,
-                filePath: file.path,
-                absolutePath,
-                repoRoot,
-                status: file.status,
-                activeGitRepoRoot,
-                selectedFilePath,
-                isSelected,
-                filteredChangedFiles: filteredChangedFiles.length,
-                changedFiles: changedFiles.size,
-                compact: options.compact,
-                expandable: Boolean(options.expandable),
-              });
-              toggleDiffFile(selectionPath);
-            }}
-            aria-current={isSelected ? 'true' : undefined}
-            className="group flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-2.5 py-2.5 text-left transition"
-            title={absolutePath}
-          >
-            <span className="shrink-0 text-muted-foreground">
-              <RiArrowRight size={15} />
-            </span>
-            <ChangeBadge status={file.status} />
-            <span className="min-w-0 flex-1 select-text" data-sidebar-gesture-ignore>
-              <span className="flex min-w-0 items-center gap-1">
-                <span className={`min-w-0 flex-1 truncate text-[13px] ${isSelected ? 'font-semibold text-foreground' : 'font-medium text-foreground'}`}>{display.name}</span>
-                <GitActionMenu actions={actions} running={runningGitAction} completed={completedGitAction?.path === busyPath ? completedGitAction : null} />
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    insertPathReference(absolutePath, referenceKey);
-                  }}
-                  {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
-                  className={`inline-flex h-6 min-w-8 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold transition active:scale-95 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-                  title={t('rightSidebar.insertThisFile')}
-                >
-                  {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
-                </button>
-              </span>
-              {showFileDirectoryHint && display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
-              {file.oldPath && <span className="block truncate text-[10px] text-muted-foreground/60">{t('rightSidebar.changedFromPath', { path: file.oldPath })}</span>}
-            </span>
-          </div>
-        </div>
-      </section>
+          {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
+        </button>
+      </span>
     );
   }
 
@@ -5762,196 +5454,107 @@ export function RightSidebar(
     );
   }
 
-  function renderChangeTreeDirectory(
-    directory: DiffChangeTreeDirectory,
-    groupKey: string,
-    options: { compact: boolean; expandable?: boolean },
-    depth: number,
-  ): ReactNode {
-    const shouldCompressDirectory = isMobile || options.compact;
-    let displayDirectory = directory;
-    const displayNames = [directory.name];
-    if (shouldCompressDirectory) {
-      while (displayDirectory.files.length === 0 && displayDirectory.directories.length === 1) {
-        displayDirectory = displayDirectory.directories[0];
-        displayNames.push(displayDirectory.name);
-      }
-    }
-    const displayName = displayNames.join('/');
-    const displayPath = displayDirectory.path;
-    const directoryKey = `${groupKey}:${displayPath}`;
-    const collapsed = collapsedDiffDirectories.has(directoryKey);
-    const shellDepth = depth;
-    return (
-      <div key={directoryKey} className="space-y-px">
-        <ChangeTreeRowShell
-          role="button"
-          tabIndex={0}
-          onClick={() => toggleDiffDirectory(directoryKey)}
-          onKeyDown={(event) => {
-            if (event.key !== 'Enter' && event.key !== ' ') return;
-            event.preventDefault();
-            toggleDiffDirectory(directoryKey);
-          }}
-          ariaExpanded={!collapsed}
-          depth={shellDepth}
-          title={displayPath}
-          leading={collapsed ? <RiChevronRight size={13} /> : <RiChevronDown size={13} />}
-          trailing={<span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground/60 transition group-hover:text-muted-foreground">{displayDirectory.childCount}</span>}
-        >
-          <span className="flex min-w-0 items-center gap-1">
-            <RiFolder size={14} className="shrink-0 text-[color:var(--folder)]" />
-            <span className="min-w-0 flex-1 truncate leading-snug">{displayName}</span>
-          </span>
-        </ChangeTreeRowShell>
-        {!collapsed && (
-          <div className="space-y-px">
-            {displayDirectory.directories.map((child) => renderChangeTreeDirectory(child, groupKey, options, depth + 1))}
-            {displayDirectory.files.length > 0 && (
-              <div className="space-y-px">
-                {displayDirectory.files.map((entry) => renderChangeRow(entry, { ...options, depth: depth + 1 }))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  function renderChangeTreeGroup(
-    group: { root: string | null; label: string; files: Array<[string, GitChangedFile]> },
-    options: { compact: boolean; expandable?: boolean },
-  ) {
-    const rootFiles = group.files.filter(([, file]) => getChangedFileTreePath(file).split('/').filter(Boolean).length <= 1);
-    const directories = buildDiffChangeTree(group.files);
-    const groupKey = group.root ?? group.label;
-    return (
-      <div className="space-y-px">
-        {directories.map((directory) => renderChangeTreeDirectory(directory, groupKey, options, 0))}
-        {rootFiles.length > 0 && (
-          <div className="space-y-px">
-            {rootFiles.map((entry) => renderChangeRow(entry, options))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  function renderChangeGroups(options: { compact: boolean; expandable?: boolean }) {
-    return (
-    <div className={diffChangeListMode === 'tree' ? 'space-y-px pt-1' : options.expandable ? 'space-y-3 pt-2' : 'space-y-2'}>
-      {filteredChangedFileGroups.map((group) => {
-        const staged = countStagedChanges(group.files.map(([, file]) => file));
-        const showRepoHeader = !activeGitRepoRoot && (filteredChangedFileGroups.length > 1 || group.label !== rootName);
-        const collapsed = Boolean(group.root && collapsedGitRepoGroups.has(group.root));
-        // Rounded cards with hover/expanded child backgrounds must clip their
-        // contents; otherwise collapsed headers visually cover the corner radius.
-        return (
-          <section key={group.root ?? group.label} className={showRepoHeader ? 'overflow-hidden rounded-lg border border-border/15 bg-surface/60' : ''}>
-            {showRepoHeader && (
-              <div
-                className={`flex w-full items-center gap-1.5 px-2 py-1.5 transition hover:bg-surface-2 ${
-                  collapsed ? 'rounded-lg' : 'rounded-t-lg border-b border-border/10'
-                }`}
-              >
+  function buildDiffNavigatorGroups(): DiffNavigatorGroup[] {
+    return filteredChangedFileGroups.map((group) => {
+      const staged = countStagedChanges(group.files.map(([, file]) => file));
+      const showRepoHeader = !activeGitRepoRoot && (filteredChangedFileGroups.length > 1 || group.label !== rootName);
+      const collapsed = Boolean(group.root && collapsedGitRepoGroups.has(group.root));
+      const groupKey = group.root ?? group.label;
+      return {
+        key: groupKey,
+        root: group.root,
+        label: group.label,
+        branch: group.branch,
+        collapsed,
+        files: group.files.map(([, file]) => toDiffNavigatorFile(file)),
+        header: showRepoHeader ? (
+          <div
+            className={`flex w-full items-center gap-1.5 px-2 py-1.5 transition hover:bg-surface-2 ${
+              collapsed ? 'rounded-lg' : 'rounded-t-lg border-b border-border/10'
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => toggleGitRepoGroup(group.root)}
+              aria-expanded={!collapsed}
+              className="flex min-w-0 flex-1 items-center gap-2 text-left active:scale-[0.99]"
+            >
+              <span className="shrink-0 text-muted-foreground">
+                {collapsed ? <RiChevronRight size={13} /> : <RiChevronDown size={13} />}
+              </span>
+              <RiGitBranch size={12} className="shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[11px] font-semibold text-foreground">{group.label}</span>
+                {group.branch && <span className="block truncate text-[10px] text-muted-foreground">{group.branch}</span>}
+              </span>
+              <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{group.files.length}</span>
+              {staged > 0 && <span className="shrink-0 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">{staged}</span>}
+            </button>
+            {group.root && (
+              <>
                 <button
                   type="button"
-                  onClick={() => toggleGitRepoGroup(group.root)}
-                  aria-expanded={!collapsed}
-                  className="flex min-w-0 flex-1 items-center gap-2 text-left active:scale-[0.99]"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    runRepoGitAction('stage-all', group.root, group.label);
+                  }}
+                  disabled={Boolean(runningGitAction)}
+                  className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+                  title={t('rightSidebar.stageAll')}
                 >
-                  <span className="shrink-0 text-muted-foreground">
-                    {collapsed ? <RiChevronRight size={13} /> : <RiChevronDown size={13} />}
-                  </span>
-                  <RiGitBranch size={12} className="shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[11px] font-semibold text-foreground">{group.label}</span>
-                    {group.branch && <span className="block truncate text-[10px] text-muted-foreground">{group.branch}</span>}
-                  </span>
-                  <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{group.files.length}</span>
-                  {staged > 0 && <span className="shrink-0 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">{staged}</span>}
+                  {t('rightSidebar.stageAll')}
                 </button>
-                {group.root && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        runRepoGitAction('stage-all', group.root, group.label);
-                      }}
-                      disabled={Boolean(runningGitAction)}
-                      className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
-                      title={t('rightSidebar.stageAll')}
-                    >
-                      {t('rightSidebar.stageAll')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        runRepoGitAction('stash-all', group.root, group.label);
-                      }}
-                      disabled={Boolean(runningGitAction)}
-                      className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
-                      title={t('rightSidebar.stashAll')}
-                    >
-                      {t('rightSidebar.stashAll')}
-                    </button>
-                  </>
-                )}
-              </div>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    runRepoGitAction('stash-all', group.root, group.label);
+                  }}
+                  disabled={Boolean(runningGitAction)}
+                  className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
+                  title={t('rightSidebar.stashAll')}
+                >
+                  {t('rightSidebar.stashAll')}
+                </button>
+              </>
             )}
-            {!collapsed && (
-              <div className={diffChangeListMode === 'tree' ? (showRepoHeader ? 'space-y-px bg-surface/60 p-1' : 'space-y-px') : options.expandable ? 'space-y-1.5 bg-surface/60 p-2' : showRepoHeader ? 'space-y-px bg-surface/60 p-1.5' : 'space-y-px'}>
-                {diffChangeListMode === 'tree'
-                  ? renderChangeTreeGroup(group, options)
-                  : group.files.map((entry) => renderChangeRow(entry, options))}
-              </div>
-            )}
-          </section>
-        );
-      })}
-    </div>
-    );
+          </div>
+        ) : null,
+      };
+    });
   }
 
-  function renderDiffStream(active: boolean) {
+  function buildChangeDiffStreamItems() {
     if (changedFiles.size === 0) {
-      return (
-        <div className="mx-3 mt-3 border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">
-          <RiGitCompare size={24} className="mx-auto mb-2 text-muted-foreground/80" />
-          {t('rightSidebar.noChanges')}
-        </div>
-      );
+      return [{
+        key: 'empty',
+        file: { path: '', status: 'unknown' },
+        repoRoot: null,
+        selectionPath: 'empty',
+        displayName: t('rightSidebar.noChanges'),
+        selected: false,
+        eager: true,
+        auditRecords: [],
+        diffOverride: '',
+      }];
     }
-    return (
-      <div className="termdock-diff-stream divide-y divide-border/15 bg-surface">
-        {orderedChangedFilesForDiff.map(([key, file], index) => {
-          const repoRoot = getChangedFileRepoRoot(file, rootPath);
-          const selectionPath = getChangedFileSelectionPath(file);
-          const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
-          const selected = selectedFilePath === file.path || selectedFilePath === absolutePath || selectedFilePath === selectionPath;
-          return (
-            <LazyDiffStreamItem
-              key={key}
-              file={file}
-              repoRoot={repoRoot}
-              activePane={active}
-              selected={selected}
-              eager={index < 3 || eagerDiffStreamPaths.has(selectionPath)}
-              wrap={diffWrap}
-              showScrollHint={!diffWrap}
-              reloadKey={diffRefreshKey}
-              auditRecords={changeAuditRecords}
-              onInsertDiffReference={insertContextText}
-              onReferenceCopied={markReferenceCopied}
-              insertedReferenceKey={insertedReferenceKey}
-              copiedReferenceKey={copiedReferenceKey}
-            />
-          );
-        })}
-      </div>
-    );
+    return orderedChangedFilesForDiff.map(([key, file], index) => {
+      const repoRoot = getChangedFileRepoRoot(file, rootPath);
+      const selectionPath = getChangedFileSelectionPath(file);
+      const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
+      const selected = selectedFilePath === file.path || selectedFilePath === absolutePath || selectedFilePath === selectionPath;
+      return {
+        key,
+        file,
+        repoRoot,
+        selectionPath,
+        displayName: getRelativeDisplayPath(absolutePath, repoRoot).name,
+        displayDir: getRelativeDisplayPath(absolutePath, repoRoot).dir,
+        selected,
+        eager: index < 3 || eagerDiffStreamPaths.has(selectionPath),
+        auditRecords: changeAuditRecords,
+      };
+    });
   }
 
   const syncSelectionFromDiffStream = useCallback((container: HTMLDivElement): string | null => {
@@ -6030,18 +5633,24 @@ export function RightSidebar(
 
   const orderedChangedFilesForDiff = useMemo(() => {
     const ordered: Array<[string, GitChangedFile]> = [];
+    const fileBySelectionPath = new Map<string, [string, GitChangedFile]>();
+    for (const entry of filteredChangedFiles) {
+      fileBySelectionPath.set(getChangedFileSelectionPath(entry[1]), entry);
+    }
     for (const group of filteredChangedFileGroups) {
       if (group.root && collapsedGitRepoGroups.has(group.root)) continue;
       if (diffChangeListMode !== 'tree') {
         ordered.push(...group.files);
         continue;
       }
-      const rootFiles = group.files.filter(([, file]) => getChangedFileTreePath(file).split('/').filter(Boolean).length <= 1);
-      ordered.push(...flattenDiffChangeTree(buildDiffChangeTree(group.files)));
-      ordered.push(...rootFiles);
+      const navigatorFiles = group.files.map(([, file]) => toDiffNavigatorFile(file));
+      for (const navigatorFile of flattenDiffNavigatorTree(navigatorFiles)) {
+        const entry = fileBySelectionPath.get(navigatorFile.key);
+        if (entry) ordered.push(entry);
+      }
     }
     return ordered;
-  }, [collapsedGitRepoGroups, diffChangeListMode, filteredChangedFileGroups]);
+  }, [collapsedGitRepoGroups, diffChangeListMode, filteredChangedFileGroups, filteredChangedFiles]);
 
   useEffect(() => {
     if (!diffPaneActive || orderedChangedFilesForDiff.length === 0) return;
@@ -6148,14 +5757,24 @@ export function RightSidebar(
     ].join('\n');
   }, [changeAuditTargetRepoRoots.length, changeAuditTargetRepos, gitRepositories, rootName, rootPath]);
 
-  const insertChangeAuditPrompt = useCallback(() => {
+  const insertChangeAuditPrompt = useCallback((mode: 'generate' | 'regenerate' | 'refresh-stale' = 'generate') => {
+    const promptText = mode === 'generate'
+      ? changeAuditPromptText
+      : [
+        mode === 'regenerate'
+          ? '模式：重新生成。请基于当前 audit-export 重新生成全部 hunk 解释并覆盖写回。'
+          : '模式：补充失效。请基于当前 audit-export 只补充新增、变更或已失效的 hunk 解释，仍有效的解释不要重复写回。',
+        '',
+        changeAuditPromptText,
+      ].join('\n');
     logGitBundleClientEvent('insert_change_audit_prompt', {
       rootPath,
       activeGitRepoRoots: changeAuditTargetRepoRoots,
-      hasAuditListCommand: changeAuditPromptText.includes('td audit-list'),
-      promptLength: changeAuditPromptText.length,
+      mode,
+      hasAuditListCommand: promptText.includes('td audit-list'),
+      promptLength: promptText.length,
     });
-    insertContextText(t('rightSidebar.insertChangeAuditPrompt'), changeAuditPromptText, changeAuditPromptKey);
+    insertContextText(t('rightSidebar.insertChangeAuditPrompt'), promptText, `${changeAuditPromptKey}:${mode}`);
     void loadChangeAuditRecords();
     if (!push) onClose();
   }, [changeAuditPromptText, changeAuditTargetRepoRoots, insertContextText, loadChangeAuditRecords, onClose, push, rootPath, t]);
@@ -6186,6 +5805,156 @@ export function RightSidebar(
         : [...current, repoRoot];
     });
   }, []);
+
+  const branchAuditReviewItems = useMemo(() => {
+    const buildRecordHunk = (record: BranchAuditRecord): BranchDiffHunk => {
+      const diff = record.diff ?? '';
+      let additions = 0;
+      let deletions = 0;
+      for (const line of diff.split('\n')) {
+        if (line.startsWith('+++') || line.startsWith('---')) continue;
+        if (line.startsWith('+')) additions += 1;
+        if (line.startsWith('-')) deletions += 1;
+      }
+      return {
+        filePath: record.filePath,
+        oldPath: record.oldPath,
+        newPath: record.newPath,
+        hunkHeader: record.hunkHeader,
+        hunkIndex: record.hunkIndex ?? 0,
+        fingerprint: record.fingerprint,
+        additions,
+        deletions,
+        diff,
+      };
+    };
+    const seen = new Set<string>();
+    const items = (branchDiff?.hunks ?? []).map((hunk) => {
+      const matchingRecords = branchAuditRecords.filter((record) => (
+        record.repoRoot === branchAuditRepoRoot
+        && record.baseRef === branchDiff?.baseRef
+        && (!branchDiff?.currentBranch || record.branchName === branchDiff.currentBranch)
+        && record.filePath === hunk.filePath
+        && record.hunkHeader === hunk.hunkHeader
+      ));
+      const current = matchingRecords.find((record) => record.fingerprint === hunk.fingerprint) ?? null;
+      const stale = current ? null : matchingRecords[0] ?? null;
+      const key = `${hunk.filePath}\u0000${hunk.hunkHeader}\u0000${hunk.hunkIndex}`;
+      seen.add(`${hunk.filePath}\u0000${hunk.hunkHeader}`);
+      return { key, hunk, current, stale };
+    });
+    const cachedOnly = branchAuditRecords
+      .filter((record) => (
+        record.repoRoot === branchAuditRepoRoot
+        && (!branchDiff?.baseRef || record.baseRef === branchDiff.baseRef)
+        && (!branchDiff?.currentBranch || record.branchName === branchDiff.currentBranch)
+        && !seen.has(`${record.filePath}\u0000${record.hunkHeader}`)
+      ))
+      .map((record) => {
+        const hunk = buildRecordHunk(record);
+        return {
+          key: `${record.filePath}\u0000${record.hunkHeader}\u0000${record.hunkIndex ?? 0}`,
+          hunk,
+          current: record,
+          stale: null,
+        };
+      });
+    return [...items, ...cachedOnly];
+  }, [branchAuditRecords, branchAuditRepoRoot, branchDiff?.baseRef, branchDiff?.currentBranch, branchDiff?.hunks]);
+
+  const branchAuditCurrentCount = branchAuditReviewItems.filter((view) => view.current).length;
+  const branchAuditStaleCount = branchAuditReviewItems.filter((view) => view.stale).length;
+  const hasBranchAuditRecords = branchAuditRecords.length > 0;
+  const hasViewableBranchAudit = branchAuditCurrentCount > 0 || branchAuditStaleCount > 0;
+
+  const buildBranchAuditPrompt = useCallback((diffPayload: BranchDiffResponse, mode: 'generate' | 'regenerate' | 'refresh-stale') => {
+    const instruction = mode === 'regenerate'
+      ? '重新生成已有解释'
+      : mode === 'refresh-stale'
+        ? '补充生成已经失效的解释'
+        : '生成解释';
+    return [
+      '解释当前分支相对于基线分支的改动，并把解释写回 Termdock。',
+      `模式：${instruction}`,
+      `- 工作区：${rootPath ?? ''}`,
+      `- 仓库：${diffPayload.repoRoot ?? branchAuditRepoRoot ?? ''}`,
+      `- 当前分支：${diffPayload.currentBranch ?? '(detached or unknown)'}`,
+      `- 基线分支：${diffPayload.baseRef ?? ''}`,
+      `- fingerprint：${diffPayload.diffFingerprint ?? ''}`,
+      '',
+      '请先导出分支 hunk：',
+      `td branch-audit-export ${JSON.stringify(diffPayload.baseRef ?? '')} ${JSON.stringify(diffPayload.repoRoot ?? branchAuditRepoRoot ?? '')} > branch-audit-export.json`,
+      '',
+      '读取 branch-audit-export.json 中的 hunks[]，不要把整份 JSON 粘贴回输入框。',
+      '逐 hunk 写解释。解释要说明该 hunk 的意图、解决的问题、影响、风险，以及它和其它 hunk 的关系；不要逐行复述 diff。',
+      '',
+      'payload.json 必须是 records[]，每条 record 对应导出结果里的一个 hunk；diff 字段必须从对应 hunk.diff 原样复制，用作 Termdock 查看解释时的缓存，不要省略。',
+      '把解释写入 payload.json 后执行：td branch-audit payload.json',
+      '```json',
+      JSON.stringify({
+        workspaceRoot: rootPath ?? null,
+        repoRoot: diffPayload.repoRoot ?? branchAuditRepoRoot ?? null,
+        baseRef: diffPayload.baseRef ?? null,
+        branchName: diffPayload.currentBranch ?? null,
+        headRef: diffPayload.headRef ?? null,
+        diffFingerprint: diffPayload.diffFingerprint ?? null,
+        generatedBy: 'termdock-branch-audit',
+        records: [
+          {
+            filePath: '<from hunk.filePath>',
+            oldPath: '<from hunk.oldPath or null>',
+            newPath: '<from hunk.newPath or null>',
+            hunkHeader: '<from hunk.hunkHeader>',
+            hunkIndex: 0,
+            fingerprint: '<from hunk.fingerprint>',
+            diff: '<copy from hunk.diff exactly>',
+            explanation: '<replace with hunk explanation>',
+            summary: '',
+          },
+        ],
+      }, null, 2),
+      '```',
+    ].filter((line) => line !== '').join('\n');
+  }, [branchAuditRepoRoot, rootPath]);
+
+  const insertBranchAuditPrompt = useCallback(async (mode: 'generate' | 'regenerate' | 'refresh-stale' = 'generate') => {
+    const diffPayload = await loadBranchDiff();
+    if (!diffPayload?.available) return;
+    const prompt = buildBranchAuditPrompt(diffPayload, mode);
+    insertContextText(t('rightSidebar.branchAuditShort'), prompt, `context:branch-audit:${diffPayload.repoRoot}:${diffPayload.baseRef}`);
+    if (!push) onClose();
+  }, [buildBranchAuditPrompt, insertContextText, loadBranchDiff, onClose, push, t]);
+
+  const openBranchAuditDetail = useCallback(() => {
+    setSelectedBranchAuditFileKey(
+      branchAuditReviewItems.find((item) => item.current || item.stale)?.hunk.filePath
+      ?? branchAuditReviewItems[0]?.hunk.filePath
+      ?? null,
+    );
+    setBranchAuditDetailOpen(true);
+    if (!branchDiff?.available && branchAuditRepoRoot && branchAuditBase.trim()) {
+      void loadBranchDiff();
+    }
+  }, [branchAuditBase, branchAuditRepoRoot, branchAuditReviewItems, branchDiff?.available, loadBranchDiff]);
+
+  const clearLoadedBranchAudit = useCallback(async () => {
+    if (!branchAuditRepoRoot) return;
+    setBranchAuditClearing(true);
+    setBranchAuditError(null);
+    try {
+      await clearBranchAuditRecords({
+        repoRoot: branchAuditRepoRoot,
+        baseRef: branchDiff?.baseRef,
+        branchName: branchDiff?.currentBranch ?? undefined,
+      });
+      setBranchAuditRecords([]);
+      void loadBranchAuditRecords(branchAuditRepoRoot, branchDiff?.baseRef, branchDiff?.currentBranch);
+    } catch (error) {
+      setBranchAuditError(t('rightSidebar.branchAuditClearFailed', { message: error instanceof Error ? error.message : 'Unknown error' }));
+    } finally {
+      setBranchAuditClearing(false);
+    }
+  }, [branchAuditRepoRoot, branchDiff?.baseRef, branchDiff?.currentBranch, loadBranchAuditRecords, t]);
 
   const selectDiffFile = useCallback((path: string | null) => {
     const state = useSidebarStore.getState();
@@ -6232,34 +6001,6 @@ export function RightSidebar(
       });
     });
   }, [activeGitRepoRoot, isMobile, selectFile, setRightTab, slideMobileDiffTo]);
-
-  const toggleDiffFile = useCallback((path: string) => {
-    const interactionId = createDiffInteractionId();
-    const state = useSidebarStore.getState();
-    logDiffInteractionEvent('toggle_diff_file', {
-      interactionId,
-      path,
-      previousSelectedFilePath: state.selectedFilePath,
-      rootPath: state.rootPath,
-      activeGitRepoRoot,
-      changedFiles: state.changedFiles.size,
-      gitBundleLoading: state.gitBundleLoading,
-      rightTab: state.rightTab,
-    });
-    selectDiffFile(path);
-    queueMicrotask(() => {
-      const next = useSidebarStore.getState();
-      logDiffInteractionEvent('toggle_diff_file_after', {
-        interactionId,
-        requestedPath: path,
-        selectedFilePath: next.selectedFilePath,
-        rootPath: next.rootPath,
-        rightTab: next.rightTab,
-        changedFiles: next.changedFiles.size,
-        activeGitRepoRoot,
-      });
-    });
-  }, [activeGitRepoRoot, selectDiffFile]);
 
   const toggleGitRepoGroup = useCallback((repoRoot: string | null) => {
     if (!repoRoot) return;
@@ -6477,6 +6218,119 @@ export function RightSidebar(
               )}
             </div>
           )}
+          <div className="border-b border-border/10 px-1 py-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.branchAuditTitle')}</div>
+                <div className="mt-0.5 truncate text-[10px] text-muted-foreground" title={branchAuditRepoRoot ?? undefined}>
+                  {branchAuditRepoLabel}
+                </div>
+              </div>
+              {(branchDiffLoading || branchAuditLoading) && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
+            </div>
+            <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-1.5">
+              <GitTargetPicker
+                label={t('rightSidebar.branchAuditBaseLabel')}
+                value={branchAuditBase}
+                options={branchAuditBaseOptions}
+                placeholder={t('rightSidebar.branchAuditBasePlaceholder')}
+                searchPlaceholder={t('rightSidebar.branchAuditBaseSearchPlaceholder')}
+                emptyText={t('rightSidebar.branchAuditBaseEmpty')}
+                disabled={branchDiffLoading}
+                onChange={(value) => {
+                  setBranchAuditBase(value);
+                  setBranchDiff(null);
+                  setBranchDiffError(null);
+                  setBranchAuditRecords([]);
+                  setBranchAuditDetailOpen(false);
+                  if (branchAuditRepoRoot) void loadBranchAuditRecords(branchAuditRepoRoot, value, branchAuditContext?.branch ?? undefined);
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => void insertBranchAuditPrompt(hasBranchAuditRecords ? 'regenerate' : 'generate')}
+                disabled={!branchAuditRepoRoot || !branchAuditBase.trim() || branchDiffLoading}
+                className="inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded-md bg-primary px-2.5 text-[11px] font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted-foreground active:scale-95"
+                title={t('rightSidebar.branchAuditGenerateTitle')}
+              >
+                {branchDiffLoading ? <RiLoader size={12} className="animate-spin" /> : <RiSparkles size={12} />}
+                {hasBranchAuditRecords ? t('rightSidebar.branchAuditRegenerate') : t('rightSidebar.branchAuditGenerate')}
+              </button>
+            </div>
+            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => void loadBranchDiff()}
+                disabled={!branchAuditRepoRoot || !branchAuditBase.trim() || branchDiffLoading}
+                className="inline-flex h-7 items-center gap-1 rounded-full bg-surface-2 px-2 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
+                title={t('rightSidebar.branchAuditRefreshDiff')}
+              >
+                {branchDiffLoading ? <RiLoader size={11} className="animate-spin" /> : <RiRefresh size={11} />}
+                {t('rightSidebar.branchAuditRefreshDiff')}
+              </button>
+              {branchAuditStaleCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void insertBranchAuditPrompt('refresh-stale')}
+                  disabled={branchDiffLoading}
+                  className="inline-flex h-7 items-center gap-1 rounded-full bg-[rgb(var(--warning-rgb)_/_0.12)] px-2 text-[10px] font-semibold text-[color:var(--warning)] transition hover:bg-[rgb(var(--warning-rgb)_/_0.18)] disabled:opacity-50 active:scale-95"
+                  title={t('rightSidebar.branchAuditRefreshStaleTitle')}
+                >
+                  <RiSparkles size={11} />
+                  {t('rightSidebar.branchAuditRefreshStale')}
+                </button>
+              )}
+              {hasBranchAuditRecords && (
+                <button
+                  type="button"
+                  onClick={() => void openBranchAuditDetail()}
+                  className="inline-flex h-7 items-center gap-1 rounded-full bg-primary/15 px-2 text-[10px] font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
+                  title={t('rightSidebar.branchAuditCurrent')}
+                >
+                  <RiFileText size={11} />
+                  {t('rightSidebar.branchAuditView')}
+                </button>
+              )}
+              {hasBranchAuditRecords && (
+                <button
+                  type="button"
+                  onClick={() => void clearLoadedBranchAudit()}
+                  disabled={branchAuditClearing}
+                  className="inline-flex h-7 items-center gap-1 rounded-full bg-surface-2 px-2 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50 active:scale-95"
+                  title={t('rightSidebar.branchAuditClearTitle')}
+                >
+                  {branchAuditClearing ? <RiLoader size={11} className="animate-spin" /> : null}
+                  {t('rightSidebar.clearChangeAudit')}
+                </button>
+              )}
+            </div>
+            {(branchDiffError || branchAuditError) && (
+              <div className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">
+                {branchDiffError ?? branchAuditError}
+              </div>
+            )}
+            {branchDiff?.available && (
+              <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                <span className="rounded bg-surface-2 px-1.5 py-0.5">{branchDiff.baseRef}</span>
+                <span className="rounded bg-surface-2 px-1.5 py-0.5">{t('rightSidebar.branchAuditCommitCount', { count: branchDiff.commitCount ?? 0 })}</span>
+                <span className="rounded bg-surface-2 px-1.5 py-0.5">{t('rightSidebar.branchAuditFileCount', { count: branchDiff.files?.length ?? 0 })}</span>
+                {branchDiff.truncated && <span className="rounded bg-[rgb(var(--warning-rgb)_/_0.12)] px-1.5 py-0.5 text-[color:var(--warning)]">{t('rightSidebar.branchAuditTruncated')}</span>}
+              </div>
+            )}
+            {hasViewableBranchAudit ? (
+              <div className="mt-2 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
+                {branchAuditCurrentCount} hunk explained{branchAuditStaleCount > 0 ? ` · ${branchAuditStaleCount} stale` : ''}
+              </div>
+            ) : hasBranchAuditRecords ? (
+              <div className="mt-2 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
+                {t('rightSidebar.branchAuditSaved', { count: branchAuditRecords.length })}
+              </div>
+            ) : (
+              <div className="mt-2 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
+                {t('rightSidebar.branchAuditEmpty')}
+              </div>
+            )}
+          </div>
           <div className="border-b border-border/10 px-1 py-3">
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="min-w-0">
@@ -6976,6 +6830,28 @@ export function RightSidebar(
           </button>
           <button
             type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 disabled:opacity-50"
+            aria-label={t('rightSidebar.uploadFiles')}
+            title={t('rightSidebar.uploadFiles')}
+          >
+            {uploading ? <RiLoader size={14} className="animate-spin" /> : <RiUpload size={14} />}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const files = e.target.files;
+              if (!files || files.length === 0) return;
+              void handleUploadFiles(Array.from(files));
+              e.target.value = '';
+            }}
+          />
+          <button
+            type="button"
             onClick={onClose}
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive active:scale-95"
             aria-label={t('rightSidebar.close')}
@@ -7239,6 +7115,38 @@ export function RightSidebar(
       {/* Content */}
       <div className="min-h-0 flex-1 overflow-hidden bg-surface">
         <Pane active={gitPaneActive}>
+          {branchAuditDetailOpen ? (
+            <div className="flex h-full min-h-0 flex-col overflow-hidden">
+              <DiffReviewPanel
+                items={branchAuditReviewItems}
+                selectedKey={selectedBranchAuditFileKey}
+                onSelect={setSelectedBranchAuditFileKey}
+                emptyText={t('rightSidebar.branchAuditEmpty')}
+                mobile={isMobile}
+                backLabel={t('rightSidebar.backToChangeList')}
+                headerTitle={t('rightSidebar.branchAuditTitle')}
+                headerMeta={`${branchDiff?.currentBranch ?? 'HEAD'} → ${branchDiff?.baseRef ?? branchAuditBase}`}
+                onClose={() => setBranchAuditDetailOpen(false)}
+                closeLabel={t('common.back')}
+                wrap={diffWrap}
+                onToggleWrap={isWide ? undefined : () => setDiffWrap((prev) => !prev)}
+                wrapTitle={t('rightSidebar.wrapLongLines')}
+                wrapOnLabel={t('rightSidebar.wrapOn')}
+                wrapOffLabel={t('rightSidebar.wrapOff')}
+                desktopLayout={isWide ? 'split' : 'stacked'}
+                onInsertDiffReference={insertContextText}
+                onReferenceCopied={markReferenceCopied}
+                insertedReferenceKey={insertedReferenceKey}
+                copiedReferenceKey={copiedReferenceKey}
+                referenceContext={{
+                  repoRoot: branchAuditRepoRoot,
+                  baseRef: branchDiff?.baseRef ?? branchAuditBase,
+                  branchName: branchDiff?.currentBranch ?? branchAuditContext?.branch,
+                  headRef: branchDiff?.headRef,
+                }}
+              />
+            </div>
+          ) : (
           <div className="h-full overflow-y-auto overscroll-contain px-2 py-2">
             {gitQuickActionsPanel ? (
               gitQuickActionsPanel
@@ -7252,6 +7160,7 @@ export function RightSidebar(
               </div>
             )}
           </div>
+          )}
         </Pane>
 
         <Pane active={filesPaneActive}>
@@ -7260,9 +7169,20 @@ export function RightSidebar(
               <div
                 ref={fileTreeScrollRef}
                 onScroll={handleFileTreeScroll}
-                className="shrink-0 overflow-y-auto overscroll-contain bg-surface"
+                onDragOver={handleFileTreeDragOver}
+                onDragEnter={handleFileTreeDragOver}
+                onDragLeave={handleFileTreeDragLeave}
+                onDrop={handleFileTreeDrop}
+                className="shrink-0 overflow-y-auto overscroll-contain bg-surface relative"
                 style={{ width: fileTreeWidthPx }}
               >
+                {dragOver && (
+                  <div className="pointer-events-none absolute left-3 right-3 top-3 z-10 flex justify-center">
+                    <div className="rounded-xl bg-surface-elevated px-4 py-2 text-sm font-semibold text-foreground shadow-lg">
+                      {t('rightSidebar.dropToUpload')}
+                    </div>
+                  </div>
+                )}
                 {fileExplorerNavigation}
                 <FileTree
                   rootPath={fileTreeRoot ?? ''}
@@ -7280,6 +7200,9 @@ export function RightSidebar(
                   query={deferredFileQuery}
                   searchMode={searchMode}
                   onContentMatchSelect={handleContentMatchSelect}
+                  onDirectoryDropFiles={(path, files) => handleUploadFiles(files, path)}
+                  canOpenInFileBrowser={canOpenInFileBrowser}
+                  onOpenInFileBrowser={handleOpenInFileBrowser}
                 />
               </div>
               <div
@@ -7346,8 +7269,19 @@ export function RightSidebar(
                 <div
                   ref={fileTreeScrollRef}
                   onScroll={handleFileTreeScroll}
-                  className="h-full overflow-y-auto overscroll-contain bg-surface"
+                  onDragOver={handleFileTreeDragOver}
+                  onDragEnter={handleFileTreeDragOver}
+                  onDragLeave={handleFileTreeDragLeave}
+                  onDrop={handleFileTreeDrop}
+                  className="h-full overflow-y-auto overscroll-contain bg-surface relative"
                 >
+                  {dragOver && (
+                    <div className="pointer-events-none absolute left-3 right-3 top-3 z-10 flex justify-center">
+                      <div className="rounded-xl bg-surface-elevated px-4 py-2 text-sm font-semibold text-foreground shadow-lg">
+                        {t('rightSidebar.dropToUpload')}
+                      </div>
+                    </div>
+                  )}
                   {fileExplorerNavigation}
                   <FileTree
                     rootPath={fileTreeRoot ?? ''}
@@ -7365,6 +7299,9 @@ export function RightSidebar(
                     query={deferredFileQuery}
                     searchMode={searchMode}
                     onContentMatchSelect={handleContentMatchSelect}
+                    onDirectoryDropFiles={(path, files) => handleUploadFiles(files, path)}
+                    canOpenInFileBrowser={canOpenInFileBrowser}
+                    onOpenInFileBrowser={handleOpenInFileBrowser}
                   />
                 </div>
               </SwiperSlide>
@@ -7399,8 +7336,19 @@ export function RightSidebar(
             <div
               ref={fileTreeScrollRef}
               onScroll={handleFileTreeScroll}
-              className="h-full overflow-y-auto overscroll-contain"
+              onDragOver={handleFileTreeDragOver}
+              onDragEnter={handleFileTreeDragOver}
+              onDragLeave={handleFileTreeDragLeave}
+              onDrop={handleFileTreeDrop}
+              className="h-full overflow-y-auto overscroll-contain relative"
             >
+              {dragOver && (
+                <div className="pointer-events-none absolute left-3 right-3 top-3 z-10 flex justify-center">
+                  <div className="rounded-xl bg-surface-elevated px-4 py-2 text-sm font-semibold text-foreground shadow-lg">
+                    {t('rightSidebar.dropToUpload')}
+                  </div>
+                </div>
+              )}
               {fileExplorerNavigation}
               <FileTree
                 rootPath={fileTreeRoot ?? ''}
@@ -7418,6 +7366,9 @@ export function RightSidebar(
                 query={deferredFileQuery}
                 searchMode={searchMode}
                 onContentMatchSelect={handleContentMatchSelect}
+                onDirectoryDropFiles={(path, files) => handleUploadFiles(files, path)}
+                canOpenInFileBrowser={canOpenInFileBrowser}
+                onOpenInFileBrowser={handleOpenInFileBrowser}
               />
             </div>
           )}
@@ -7449,104 +7400,140 @@ export function RightSidebar(
 
         <Pane active={diffPaneActive} mounted={hasMountedDiffPane}>
           {isWide ? (
-            <div className="flex h-full min-h-0">
-              {gitContext?.available && showGitRepoFilter && (
+            <ChangeDiffReview
+              mobile={false}
+              desktopLayout="split"
+              desktopSidePanel={gitContext?.available && showGitRepoFilter ? (
                 <div className="w-[220px] min-w-[180px] shrink-0 overflow-y-auto overscroll-contain border-r border-border/15 bg-surface">
                   {renderGitRepoFilter()}
                 </div>
+              ) : null}
+              desktopListClassName="w-[320px] min-w-[260px] shrink-0 overflow-y-auto overscroll-contain border-r border-border/15 bg-surface"
+              backLabel={t('rightSidebar.backToChangeList')}
+              groups={filteredChangedFiles.length > 0 ? buildDiffNavigatorGroups() : []}
+              mode={diffChangeListMode}
+              onModeChange={setDiffChangeMode}
+              selectedKey={selectedFilePath}
+              compact
+              collapsedDirectoryKeys={collapsedDiffDirectories}
+              onToggleDirectory={toggleDiffDirectory}
+              onSelectFile={(navigatorFile) => {
+                const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
+                if (!file) return;
+                selectDiffFile(getChangedFileSelectionPath(file));
+              }}
+              renderLeading={(navigatorFile) => <ChangeBadge status={navigatorFile.status} />}
+              renderTrailing={(navigatorFile) => {
+                const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
+                return file ? renderChangeNavigatorTrailing(file) : null;
+              }}
+              renderSubtitle={(navigatorFile) => {
+                const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
+                return file ? renderChangeNavigatorSubtitle(file) : null;
+              }}
+              listPrefix={<UntrackedScanState loading={untrackedLoading} error={untrackedError} />}
+              emptyContent={(
+                gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
+                  <GitChangesLoadingState slow={gitBundleSlow} />
+                ) : gitBundleError && changedFiles.size === 0 ? (
+                  <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
+                ) : changedFiles.size === 0 ? (
+                  <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                    {t('rightSidebar.noChanges')}
+                  </div>
+                ) : filteredChangedFiles.length === 0 ? (
+                  <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
+                    {t('rightSidebar.noMatchingChanges')}
+                  </div>
+                ) : null
               )}
-              <div className="w-[320px] min-w-[260px] shrink-0 flex flex-col overflow-hidden border-r border-border/15">
-                {rootPath && (
-                  <div className="shrink-0 border-b border-border/15">
-                    <div className="px-3 py-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                        {t('rightSidebar.allChanges')}
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
-                      </div>
-                    </div>
-                    <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-                      {renderDiffChangeModeToggle()}
-                      {changeAuditButton}
-                      {diffRefreshButton}
-                    </div>
-                    {activeGitRepoSummary && (
-                      <div className="mt-2 flex items-center gap-1.5">
-                        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
-                        {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
-                        <button
-                          type="button"
-                          onClick={() => runRepoGitAction('stage-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
-                          disabled={Boolean(runningGitAction)}
-                          className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
-                          title={t('rightSidebar.stageAll')}
-                        >
-                          {t('rightSidebar.stageAll')}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => runRepoGitAction('stash-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
-                          disabled={Boolean(runningGitAction)}
-                          className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
-                          title={t('rightSidebar.stashAll')}
-                        >
-                          {t('rightSidebar.stashAll')}
-                        </button>
-                      </div>
-                    )}
-                    {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
-                      <div className="mt-2 flex min-w-0 items-center gap-2">
-                        <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
-                          {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
-                        </div>
-                        {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
-                          <button
-                            type="button"
-                            onClick={() => void clearLoadedChangeAudit()}
-                            disabled={changeAuditClearing}
-                            className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
-                            title={t('rightSidebar.clearChangeAuditTitle')}
-                          >
-                            {changeAuditClearing ? <RiLoader size={11} className="animate-spin" /> : t('rightSidebar.clearChangeAudit')}
-                          </button>
-                        )}
-                      </div>
-                    )}
-                    {!activeGitRepoSummary && showGitRepoFilter && (
-                      <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
-                        <RiGitBranch size={12} className="shrink-0" />
-                        <span className="min-w-0 flex-1 truncate">{t('rightSidebar.selectRepositoryForDiff')}</span>
-                      </div>
-                    )}
+              renderListHeader={(modeToggle) => rootPath && (
+                <div className="px-0 py-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                      {t('rightSidebar.allChanges')}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
                     </div>
                   </div>
-                )}
-                <div className="termdock-native-select min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
-                  <UntrackedScanState loading={untrackedLoading} error={untrackedError} />
-                  {gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
-                    <GitChangesLoadingState slow={gitBundleSlow} />
-                  ) : gitBundleError && changedFiles.size === 0 ? (
-                    <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
-                  ) : changedFiles.size === 0 ? (
-                    <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-                      {t('rightSidebar.noChanges')}
+                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+                    {modeToggle}
+                    {changeAuditButton}
+                    {diffRefreshButton}
+                  </div>
+                  {activeGitRepoSummary && (
+                    <div className="mt-2 flex items-center gap-1.5">
+                      <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
+                      {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
+                      <button
+                        type="button"
+                        onClick={() => runRepoGitAction('stage-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
+                        disabled={Boolean(runningGitAction)}
+                        className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+                        title={t('rightSidebar.stageAll')}
+                      >
+                        {t('rightSidebar.stageAll')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => runRepoGitAction('stash-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
+                        disabled={Boolean(runningGitAction)}
+                        className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
+                        title={t('rightSidebar.stashAll')}
+                      >
+                        {t('rightSidebar.stashAll')}
+                      </button>
                     </div>
-                  ) : filteredChangedFiles.length === 0 ? (
-                    <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
-                      {t('rightSidebar.noMatchingChanges')}
+                  )}
+                  {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
+                    <div className="mt-2 flex min-w-0 items-center gap-2">
+                      <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
+                        {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
+                      </div>
+                      {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
+                        <button
+                          type="button"
+                          onClick={() => insertChangeAuditPrompt('regenerate')}
+                          className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                          title={t('rightSidebar.changeAuditRegenerate')}
+                        >
+                          {t('rightSidebar.changeAuditRegenerate')}
+                        </button>
+                      )}
+                      {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
+                        <button
+                          type="button"
+                          onClick={() => void clearLoadedChangeAudit()}
+                          disabled={changeAuditClearing}
+                          className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+                          title={t('rightSidebar.clearChangeAuditTitle')}
+                        >
+                          {changeAuditClearing ? <RiLoader size={11} className="animate-spin" /> : t('rightSidebar.clearChangeAudit')}
+                        </button>
+                      )}
                     </div>
-                  ) : renderChangeGroups({ compact: true })}
+                  )}
+                  {!activeGitRepoSummary && showGitRepoFilter && (
+                    <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
+                      <RiGitBranch size={12} className="shrink-0" />
+                      <span className="min-w-0 flex-1 truncate">{t('rightSidebar.selectRepositoryForDiff')}</span>
+                    </div>
+                  )}
                 </div>
-              </div>
-              <div
-                className="termdock-native-select termdock-diff-stream-scroller min-w-0 flex-1 overflow-y-auto overscroll-contain"
-                onScroll={(event) => syncSelectionFromDiffStream(event.currentTarget)}
-              >
-                {renderDiffStream(diffPaneActive)}
-              </div>
-            </div>
+              )}
+              streamItems={buildChangeDiffStreamItems()}
+              activePane={diffPaneActive}
+              wrap={diffWrap}
+              showScrollHint={!diffWrap}
+              reloadKey={diffRefreshKey}
+              renderStreamBadge={(status) => <ChangeBadge status={status} />}
+              onInsertDiffReference={insertContextText}
+              onReferenceCopied={markReferenceCopied}
+              insertedReferenceKey={insertedReferenceKey}
+              copiedReferenceKey={copiedReferenceKey}
+              onDetailScroll={syncSelectionFromDiffStream}
+            />
           ) : (
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
               {rootPath && !isMobile && (
@@ -7614,6 +7601,16 @@ export function RightSidebar(
                       {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
                         <button
                           type="button"
+                          onClick={() => insertChangeAuditPrompt('regenerate')}
+                          className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                          title={t('rightSidebar.changeAuditRegenerate')}
+                        >
+                          {t('rightSidebar.changeAuditRegenerate')}
+                        </button>
+                      )}
+                      {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
+                        <button
+                          type="button"
                           onClick={() => void clearLoadedChangeAudit()}
                           disabled={changeAuditClearing}
                           className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
@@ -7634,147 +7631,281 @@ export function RightSidebar(
                 </div>
               )}
               {isMobile ? (
-                <Swiper
-                  className="h-full min-h-0 w-full"
-                  slidesPerView={1}
-                  resistanceRatio={0.45}
-                  onSwiper={(instance) => {
-                    mobileDiffSwiperRef.current = instance;
-                    instance.update();
-                    instance.slideTo(mobileDiffSlideIndex, 0);
+                <ChangeDiffReview
+                  mobile
+                  backLabel={t('rightSidebar.backToChangeList')}
+                  externalSwiperRef={mobileDiffSwiperRef}
+                  onMobileSlideChange={setMobileDiffSlideIndex}
+                  groups={filteredChangedFiles.length > 0 ? buildDiffNavigatorGroups() : []}
+                  mode={diffChangeListMode}
+                  onModeChange={setDiffChangeMode}
+                  selectedKey={selectedFilePath}
+                  compact={false}
+                  collapsedDirectoryKeys={collapsedDiffDirectories}
+                  onToggleDirectory={toggleDiffDirectory}
+                  onSelectFile={(navigatorFile) => {
+                    const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
+                    if (!file) return;
+                    selectDiffFile(getChangedFileSelectionPath(file));
                   }}
-                  onSlideChange={(instance) => {
-                    setMobileDiffSlideIndex(instance.activeIndex);
+                  renderLeading={(navigatorFile) => <ChangeBadge status={navigatorFile.status} />}
+                  renderTrailing={(navigatorFile) => {
+                    const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
+                    return file ? renderChangeNavigatorTrailing(file) : null;
                   }}
-                >
-                  <SwiperSlide className="h-full min-h-0">
-                    <div className="flex h-full min-h-0 flex-col overflow-hidden">
-                      {rootPath && (
-                        <div className="shrink-0 border-b border-border/15">
-                          <div className="px-3 py-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                                  {t('rightSidebar.allChanges')}
-                                </div>
-                              </div>
-                              <span className="shrink-0 text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
-                            </div>
-                            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-                              {renderDiffChangeModeToggle()}
-                              {changeAuditButton}
-                              {diffRefreshButton}
-                            </div>
-                            {activeGitRepoSummary && (
-                              <div className="mt-2 flex items-center gap-1.5">
-                                <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
-                                {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
-                              </div>
-                            )}
-                            {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
-                              <div className="mt-2 flex min-w-0 items-center gap-2">
-                                <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
-                                  {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
-                                </div>
-                              </div>
-                            )}
-                            {!activeGitRepoSummary && showGitRepoFilter && (
-                              <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
-                                <RiGitBranch size={12} className="shrink-0" />
-                                <span className="min-w-0 flex-1 truncate">{t('rightSidebar.selectRepositoryForDiff')}</span>
-                              </div>
-                            )}
+                  renderSubtitle={(navigatorFile) => {
+                    const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
+                    return file ? renderChangeNavigatorSubtitle(file) : null;
+                  }}
+                  listContainerClassName="termdock-native-select min-h-0 px-2 pb-[calc(env(safe-area-inset-bottom)+4.5rem)]"
+                  renderListHeader={(modeToggle) => rootPath && (
+                    <div className="px-0 py-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                            {t('rightSidebar.allChanges')}
                           </div>
+                        </div>
+                        <span className="shrink-0 text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                      </div>
+                      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+                        {modeToggle}
+                        {changeAuditButton}
+                        {diffRefreshButton}
+                      </div>
+                      {activeGitRepoSummary && (
+                        <div className="mt-2 flex items-center gap-1.5">
+                          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
+                          {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
                         </div>
                       )}
-                      <div
-                        className="termdock-native-select min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(env(safe-area-inset-bottom)+4.5rem)]"
-                      >
-                        <UntrackedScanState loading={untrackedLoading} error={untrackedError} />
-                        {gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
-                          <GitChangesLoadingState slow={gitBundleSlow} />
-                        ) : gitBundleError && changedFiles.size === 0 ? (
-                          <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
-                        ) : changedFiles.size === 0 ? (
-                          <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-                            {t('rightSidebar.noChanges')}
+                      {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
+                        <div className="mt-2 flex min-w-0 items-center gap-2">
+                          <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
+                            {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
                           </div>
-                        ) : filteredChangedFiles.length === 0 ? (
-                          <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
-                            {t('rightSidebar.noMatchingChanges')}
-                          </div>
-                        ) : (
-                          renderChangeGroups({ compact: false })
-                        )}
-                      </div>
+                          {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
+                            <button
+                              type="button"
+                              onClick={() => insertChangeAuditPrompt('regenerate')}
+                              className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                              title={t('rightSidebar.changeAuditRegenerate')}
+                            >
+                              {t('rightSidebar.changeAuditRegenerate')}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {!activeGitRepoSummary && showGitRepoFilter && (
+                        <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
+                          <RiGitBranch size={12} className="shrink-0" />
+                          <span className="min-w-0 flex-1 truncate">{t('rightSidebar.selectRepositoryForDiff')}</span>
+                        </div>
+                      )}
                     </div>
-                  </SwiperSlide>
-                  <SwiperSlide className="h-full min-h-0" data-sidebar-gesture-ignore>
-                    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface" data-sidebar-gesture-ignore>
-                      <div className="shrink-0 border-b border-border/15 px-3 py-2">
-                        <div className="flex items-center justify-between gap-2">
+                  )}
+                  listPrefix={<UntrackedScanState loading={untrackedLoading} error={untrackedError} />}
+                  emptyContent={(
+                    gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
+                      <GitChangesLoadingState slow={gitBundleSlow} />
+                    ) : gitBundleError && changedFiles.size === 0 ? (
+                      <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
+                    ) : changedFiles.size === 0 ? (
+                      <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                        {t('rightSidebar.noChanges')}
+                      </div>
+                    ) : filteredChangedFiles.length === 0 ? (
+                      <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
+                        {t('rightSidebar.noMatchingChanges')}
+                      </div>
+                    ) : null
+                  )}
+                  renderMobileDetailHeader={(
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => slideMobileDiffTo(0)}
+                        className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-surface-2 px-3 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                        title={t('rightSidebar.backToChangeList')}
+                      >
+                        <RiArrowLeft size={14} />
+                        {t('rightSidebar.backToChangeList')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDiffWrap((prev) => !prev)}
+                        aria-pressed={diffWrap}
+                        title={t('rightSidebar.wrapLongLines')}
+                        className={`inline-flex h-9 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-medium transition active:scale-95 ${
+                          diffWrap
+                            ? 'bg-primary/15 text-primary'
+                            : 'bg-surface-2 text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        <span className="font-mono text-[12px] leading-none">Aa</span>
+                        <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
+                      </button>
+                    </div>
+                  )}
+                  detailContainerClassName="termdock-native-select termdock-diff-stream-scroller min-h-0"
+                  streamItems={buildChangeDiffStreamItems()}
+                  activePane={diffPaneActive}
+                  wrap={diffWrap}
+                  showScrollHint={!diffWrap}
+                  reloadKey={diffRefreshKey}
+                  renderStreamBadge={(status) => <ChangeBadge status={status} />}
+                  onInsertDiffReference={insertContextText}
+                  onReferenceCopied={markReferenceCopied}
+                  insertedReferenceKey={insertedReferenceKey}
+                  copiedReferenceKey={copiedReferenceKey}
+                  onDetailScroll={syncSelectionFromDiffStream}
+                />
+              ) : (
+                <ChangeDiffReview
+                  mobile={false}
+                  desktopLayout="stacked"
+                  backLabel={t('rightSidebar.backToChangeList')}
+                  groups={filteredChangedFiles.length > 0 ? buildDiffNavigatorGroups() : []}
+                  mode={diffChangeListMode}
+                  onModeChange={setDiffChangeMode}
+                  selectedKey={selectedFilePath}
+                  compact={false}
+                  collapsedDirectoryKeys={collapsedDiffDirectories}
+                  onToggleDirectory={toggleDiffDirectory}
+                  onSelectFile={(navigatorFile) => {
+                    const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
+                    if (!file) return;
+                    selectDiffFile(getChangedFileSelectionPath(file));
+                  }}
+                  renderLeading={(navigatorFile) => <ChangeBadge status={navigatorFile.status} />}
+                  renderTrailing={(navigatorFile) => {
+                    const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
+                    return file ? renderChangeNavigatorTrailing(file) : null;
+                  }}
+                  renderSubtitle={(navigatorFile) => {
+                    const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
+                    return file ? renderChangeNavigatorSubtitle(file) : null;
+                  }}
+                  listPrefix={<UntrackedScanState loading={untrackedLoading} error={untrackedError} />}
+                  emptyContent={(
+                    gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
+                      <GitChangesLoadingState slow={gitBundleSlow} />
+                    ) : gitBundleError && changedFiles.size === 0 ? (
+                      <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
+                    ) : changedFiles.size === 0 ? (
+                      <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                        {t('rightSidebar.noChanges')}
+                      </div>
+                    ) : filteredChangedFiles.length === 0 ? (
+                      <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
+                        {t('rightSidebar.noMatchingChanges')}
+                      </div>
+                    ) : null
+                  )}
+                  renderListHeader={(modeToggle) => rootPath && (
+                    <div className="px-0 py-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                            {t('rightSidebar.allChanges')}
+                          </div>
+                          <div className="mt-0.5 text-[11px] text-muted-foreground">
+                            {filteredChangedFiles.length}/{changedFiles.size}
+                          </div>
+                        </div>
+                        <span className="shrink-0 text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
+                      </div>
+                      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+                        {modeToggle}
+                        {changeAuditButton}
+                        {diffRefreshButton}
+                        <button
+                          type="button"
+                          onClick={() => setDiffWrap((prev) => !prev)}
+                          aria-pressed={diffWrap}
+                          title={t('rightSidebar.wrapLongLines')}
+                          className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
+                            diffWrap
+                              ? 'bg-primary/15 text-primary'
+                              : 'bg-surface-2 text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          <span className="font-mono text-[12px] leading-none">Aa</span>
+                          <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
+                        </button>
+                      </div>
+                      {activeGitRepoSummary && (
+                        <div className="mt-2 flex items-center gap-1.5">
+                          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
+                          {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
                           <button
                             type="button"
-                            onClick={() => slideMobileDiffTo(0)}
-                            className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-surface-2 px-3 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-                            title={t('rightSidebar.backToChangeList')}
+                            onClick={() => runRepoGitAction('stage-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
+                            disabled={Boolean(runningGitAction)}
+                            className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+                            title={t('rightSidebar.stageAll')}
                           >
-                            <RiArrowLeft size={14} />
-                            {t('rightSidebar.backToChangeList')}
+                            {t('rightSidebar.stageAll')}
                           </button>
                           <button
                             type="button"
-                            onClick={() => setDiffWrap((prev) => !prev)}
-                            aria-pressed={diffWrap}
-                            title={t('rightSidebar.wrapLongLines')}
-                            className={`inline-flex h-9 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-medium transition active:scale-95 ${
-                              diffWrap
-                                ? 'bg-primary/15 text-primary'
-                                : 'bg-surface-2 text-muted-foreground hover:text-foreground'
-                            }`}
+                            onClick={() => runRepoGitAction('stash-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
+                            disabled={Boolean(runningGitAction)}
+                            className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
+                            title={t('rightSidebar.stashAll')}
                           >
-                            <span className="font-mono text-[12px] leading-none">Aa</span>
-                            <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
+                            {t('rightSidebar.stashAll')}
                           </button>
                         </div>
-                      </div>
-                      <div
-                        className="termdock-native-select termdock-diff-stream-scroller min-h-0 flex-1 overflow-y-auto overscroll-contain"
-                        data-sidebar-gesture-ignore
-                        onScroll={(event) => syncSelectionFromDiffStream(event.currentTarget)}
-                      >
-                        {renderDiffStream(diffPaneActive)}
-                      </div>
+                      )}
+                      {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
+                        <div className="mt-2 flex min-w-0 items-center gap-2">
+                          <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
+                            {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
+                          </div>
+                          {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
+                            <button
+                              type="button"
+                              onClick={() => insertChangeAuditPrompt('regenerate')}
+                              className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                              title={t('rightSidebar.changeAuditRegenerate')}
+                            >
+                              {t('rightSidebar.changeAuditRegenerate')}
+                            </button>
+                          )}
+                          {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
+                            <button
+                              type="button"
+                              onClick={() => void clearLoadedChangeAudit()}
+                              disabled={changeAuditClearing}
+                              className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+                              title={t('rightSidebar.clearChangeAuditTitle')}
+                            >
+                              {changeAuditClearing ? <RiLoader size={11} className="animate-spin" /> : t('rightSidebar.clearChangeAudit')}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {!activeGitRepoSummary && showGitRepoFilter && (
+                        <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
+                          <RiGitBranch size={12} className="shrink-0" />
+                          <span className="min-w-0 flex-1 truncate">{t('rightSidebar.selectRepositoryForDiff')}</span>
+                        </div>
+                      )}
                     </div>
-                  </SwiperSlide>
-                </Swiper>
-              ) : (
-                <div
-                  className="termdock-native-select termdock-diff-stream-scroller min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(env(safe-area-inset-bottom)+4.5rem)]"
-                  onScroll={(event) => syncSelectionFromDiffStream(event.currentTarget)}
-                >
-                  <UntrackedScanState loading={untrackedLoading} error={untrackedError} />
-                  {gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
-                    <GitChangesLoadingState slow={gitBundleSlow} />
-                  ) : gitBundleError && changedFiles.size === 0 ? (
-                    <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
-                  ) : changedFiles.size === 0 ? (
-                    <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-                      {t('rightSidebar.noChanges')}
-                    </div>
-                  ) : filteredChangedFiles.length === 0 ? (
-                    <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
-                      {t('rightSidebar.noMatchingChanges')}
-                    </div>
-                  ) : (
-                    <>
-                      {renderChangeGroups({ compact: false })}
-                      <div className="mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface">
-                        {renderDiffStream(diffPaneActive)}
-                      </div>
-                    </>
                   )}
-                </div>
+                  streamItems={buildChangeDiffStreamItems()}
+                  activePane={diffPaneActive}
+                  wrap={diffWrap}
+                  showScrollHint={!diffWrap}
+                  reloadKey={diffRefreshKey}
+                  renderStreamBadge={(status) => <ChangeBadge status={status} />}
+                  onInsertDiffReference={insertContextText}
+                  onReferenceCopied={markReferenceCopied}
+                  insertedReferenceKey={insertedReferenceKey}
+                  copiedReferenceKey={copiedReferenceKey}
+                  onDetailScroll={syncSelectionFromDiffStream}
+                />
               )}
             </div>
           )}

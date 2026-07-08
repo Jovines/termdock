@@ -37,6 +37,57 @@ export interface StoredChangeAuditRecord extends ChangeAuditHunkExplanation {
 interface PersistedChangeAuditState {
   version: 1;
   records: StoredChangeAuditRecord[];
+  branchRecords?: StoredBranchAuditRecord[];
+}
+
+export interface BranchAuditPayload {
+  workspaceRoot?: string | null;
+  repoRoot?: string | null;
+  baseRef?: string | null;
+  branchName?: string | null;
+  headRef?: string | null;
+  diffFingerprint?: string | null;
+  explanation?: string | null;
+  summary?: string | null;
+  generatedBy?: string | null;
+  records?: BranchAuditHunkExplanation[];
+}
+
+export interface BranchAuditHunkExplanation {
+  repoRoot?: string | null;
+  baseRef?: string | null;
+  branchName?: string | null;
+  headRef?: string | null;
+  filePath: string;
+  oldPath?: string | null;
+  newPath?: string | null;
+  hunkHeader: string;
+  hunkIndex?: number | null;
+  fingerprint: string;
+  diff?: string | null;
+  explanation: string;
+  summary?: string | null;
+}
+
+export interface StoredBranchAuditRecord {
+  id: string;
+  workspaceRoot?: string | null;
+  repoRoot: string;
+  baseRef: string;
+  branchName?: string | null;
+  headRef?: string | null;
+  diffFingerprint?: string | null;
+  filePath: string;
+  oldPath?: string | null;
+  newPath?: string | null;
+  hunkHeader: string;
+  hunkIndex?: number | null;
+  fingerprint: string;
+  diff?: string | null;
+  explanation: string;
+  summary?: string | null;
+  generatedBy?: string | null;
+  injectedAt: number;
 }
 
 let cachedState: PersistedChangeAuditState = { version: 1, records: [] };
@@ -57,6 +108,7 @@ function parseState(raw: string): PersistedChangeAuditState {
     return {
       version: 1,
       records: Array.isArray(parsed.records) ? parsed.records.filter(isStoredRecord) : [],
+      branchRecords: Array.isArray(parsed.branchRecords) ? parsed.branchRecords.filter(isStoredBranchRecord) : [],
     };
   } catch {
     return { version: 1, records: [] };
@@ -122,6 +174,20 @@ function isStoredRecord(value: unknown): value is StoredChangeAuditRecord {
     && typeof record.injectedAt === 'number';
 }
 
+function isStoredBranchRecord(value: unknown): value is StoredBranchAuditRecord {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Partial<StoredBranchAuditRecord>;
+  return typeof record.id === 'string'
+    && typeof record.repoRoot === 'string'
+    && typeof record.baseRef === 'string'
+    && typeof record.filePath === 'string'
+    && typeof record.hunkHeader === 'string'
+    && typeof record.fingerprint === 'string'
+    && (record.diff === undefined || record.diff === null || typeof record.diff === 'string')
+    && typeof record.explanation === 'string'
+    && typeof record.injectedAt === 'number';
+}
+
 function normalizeString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
@@ -169,6 +235,13 @@ export function buildChangeAuditRecordId(input: Pick<ChangeAuditHunkExplanation,
     .slice(0, 24);
 }
 
+export function buildBranchAuditRecordId(input: Pick<StoredBranchAuditRecord, 'repoRoot' | 'baseRef' | 'filePath' | 'hunkHeader' | 'fingerprint'> & { branchName?: string | null }): string {
+  return createHash('sha256')
+    .update(`${input.repoRoot}\0${input.baseRef}\0${input.branchName ?? ''}\0${input.filePath}\0${input.hunkHeader}\0${input.fingerprint}`, 'utf8')
+    .digest('hex')
+    .slice(0, 24);
+}
+
 export function injectChangeAudit(payload: ChangeAuditPayload): { inserted: number; total: number; records: StoredChangeAuditRecord[] } {
   const injectedAt = Date.now();
   const normalized = (Array.isArray(payload.records) ? payload.records : [])
@@ -182,7 +255,7 @@ export function injectChangeAudit(payload: ChangeAuditPayload): { inserted: numb
   const records = Array.from(nextById.values())
     .sort((a, b) => b.injectedAt - a.injectedAt)
     .slice(0, MAX_RECORDS);
-  writeState({ version: 1, records });
+  writeState({ ...state, records });
   return { inserted: normalized.length, total: records.length, records: normalized };
 }
 
@@ -199,8 +272,82 @@ export function clearChangeAuditRecords(filter: { ids?: string[]; workspaceRoot?
   };
   const records = state.records.filter((record) => !shouldDelete(record));
   const deleted = state.records.length - records.length;
-  if (deleted > 0) writeState({ version: 1, records });
+  if (deleted > 0) writeState({ ...state, records });
   return { deleted, total: records.length };
+}
+
+function normalizeBranchRecord(record: BranchAuditHunkExplanation, fallback: BranchAuditPayload, injectedAt: number): StoredBranchAuditRecord | null {
+  const repoRoot = normalizeString(record.repoRoot) ?? normalizeString(fallback.repoRoot);
+  const baseRef = normalizeString(record.baseRef) ?? normalizeString(fallback.baseRef);
+  const filePath = normalizeString(record.filePath);
+  const hunkHeader = normalizeString(record.hunkHeader);
+  const fingerprint = normalizeString(record.fingerprint);
+  const explanation = normalizeString(record.explanation);
+  if (!repoRoot || !baseRef || !filePath || !hunkHeader || !fingerprint || !explanation) return null;
+  const branchName = normalizeString(record.branchName) ?? normalizeString(fallback.branchName);
+  const hunkIndex = typeof record.hunkIndex === 'number' && Number.isFinite(record.hunkIndex)
+    ? Math.max(0, Math.floor(record.hunkIndex))
+    : null;
+  return {
+    id: buildBranchAuditRecordId({ repoRoot, baseRef, branchName, filePath, hunkHeader, fingerprint }),
+    workspaceRoot: normalizeString(fallback.workspaceRoot),
+    repoRoot,
+    baseRef,
+    branchName,
+    headRef: normalizeString(record.headRef) ?? normalizeString(fallback.headRef),
+    diffFingerprint: normalizeString(fallback.diffFingerprint),
+    filePath,
+    oldPath: normalizeString(record.oldPath),
+    newPath: normalizeString(record.newPath),
+    hunkHeader,
+    hunkIndex,
+    fingerprint,
+    diff: normalizeString(record.diff),
+    explanation,
+    summary: normalizeString(record.summary),
+    generatedBy: normalizeString(fallback.generatedBy),
+    injectedAt,
+  };
+}
+
+export function injectBranchAudit(payload: BranchAuditPayload): { inserted: number; total: number; records: StoredBranchAuditRecord[] } {
+  const injectedAt = Date.now();
+  const sourceRecords = Array.isArray(payload.records) ? payload.records : [];
+  const normalized = sourceRecords
+    .map((record) => normalizeBranchRecord(record, payload, injectedAt))
+    .filter((record): record is StoredBranchAuditRecord => record !== null);
+  if (normalized.length === 0) return { inserted: 0, total: cachedState.branchRecords?.length ?? 0, records: [] };
+
+  const state = readStateForMutation();
+  const nextById = new Map((state.branchRecords ?? []).map((entry) => [entry.id, entry]));
+  for (const record of normalized) nextById.set(record.id, record);
+  const branchRecords = Array.from(nextById.values())
+    .sort((a, b) => b.injectedAt - a.injectedAt)
+    .slice(0, MAX_RECORDS);
+  writeState({ ...state, branchRecords });
+  return { inserted: normalized.length, total: branchRecords.length, records: normalized };
+}
+
+export function clearBranchAuditRecords(filter: { ids?: string[]; workspaceRoot?: string | null; repoRoot?: string | null; baseRef?: string | null; branchName?: string | null } = {}): { deleted: number; total: number } {
+  const state = readStateForMutation();
+  const ids = new Set((Array.isArray(filter.ids) ? filter.ids : []).filter((id) => typeof id === 'string' && id.length > 0));
+  const workspaceRoot = normalizeString(filter.workspaceRoot);
+  const repoRoot = normalizeString(filter.repoRoot);
+  const baseRef = normalizeString(filter.baseRef);
+  const branchName = normalizeString(filter.branchName);
+  const current = state.branchRecords ?? [];
+  const shouldDelete = (record: StoredBranchAuditRecord) => {
+    if (ids.size > 0) return ids.has(record.id);
+    if (repoRoot && record.repoRoot !== repoRoot) return false;
+    if (workspaceRoot && record.workspaceRoot && record.workspaceRoot !== workspaceRoot) return false;
+    if (baseRef && record.baseRef !== baseRef) return false;
+    if (branchName && record.branchName !== branchName) return false;
+    return Boolean(repoRoot || workspaceRoot || baseRef || branchName);
+  };
+  const branchRecords = current.filter((record) => !shouldDelete(record));
+  const deleted = current.length - branchRecords.length;
+  if (deleted > 0) writeState({ ...state, branchRecords });
+  return { deleted, total: branchRecords.length };
 }
 
 export function listChangeAuditRecords(filter: { workspaceRoot?: string | null; repoRoot?: string | null } = {}): { records: StoredChangeAuditRecord[]; loading: boolean } {
@@ -210,6 +357,22 @@ export function listChangeAuditRecords(filter: { workspaceRoot?: string | null; 
   const records = cachedState.records.filter((record) => {
     if (repoRoot && record.repoRoot !== repoRoot) return false;
     if (workspaceRoot && record.workspaceRoot && record.workspaceRoot !== workspaceRoot) return false;
+    return true;
+  });
+  return { records, loading: reloadInFlight };
+}
+
+export function listBranchAuditRecords(filter: { workspaceRoot?: string | null; repoRoot?: string | null; baseRef?: string | null; branchName?: string | null } = {}): { records: StoredBranchAuditRecord[]; loading: boolean } {
+  refreshChangeAuditCache();
+  const workspaceRoot = normalizeString(filter.workspaceRoot);
+  const repoRoot = normalizeString(filter.repoRoot);
+  const baseRef = normalizeString(filter.baseRef);
+  const branchName = normalizeString(filter.branchName);
+  const records = (cachedState.branchRecords ?? []).filter((record) => {
+    if (repoRoot && record.repoRoot !== repoRoot) return false;
+    if (workspaceRoot && record.workspaceRoot && record.workspaceRoot !== workspaceRoot) return false;
+    if (baseRef && record.baseRef !== baseRef) return false;
+    if (branchName && record.branchName !== branchName) return false;
     return true;
   });
   return { records, loading: reloadInFlight };

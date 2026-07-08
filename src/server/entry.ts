@@ -270,7 +270,7 @@ export function createApp(options: AppOptions = {}): express.Express {
   app.use(validateHostMiddleware);
 
   // 基础中间件
-  app.use(express.json());
+  app.use(express.json({ limit: '5mb' }));
   app.use(cookieParser());
 
   // Note: clientId cookie is no longer used for session persistence (sessions are global).

@@ -105,6 +105,8 @@ interface CliOptions {
   newTmuxName?: string;
   newTmuxAttach: boolean;
   injectChangeAudit?: string | true;
+  injectBranchAudit?: string | true;
+  branchAuditExport?: { base: string; cwd?: string };
   changeAuditExport?: string | true;
   changeAuditList?: string | true;
   changeAuditShow?: { id: string; cwd?: string };
@@ -177,6 +179,11 @@ Options:
   --inject-change-audit [file]
                      Inject AI-generated hunk explanations into the running
                      Termdock server. Reads JSON from file or stdin.
+  --inject-branch-audit [file]
+                     Inject AI-generated branch hunk explanations into the
+                     running Termdock server. Reads JSON from file or stdin.
+  --branch-audit-export <base> [cwd]
+                     Export branch-vs-base diff hunks for branch audit.
   --change-audit-list [cwd]
                      List current Git diff hunks with stable Termdock hunk IDs.
   --change-audit-export [cwd]
@@ -202,6 +209,10 @@ Short commands:
   nt [name]          Same as --new-tmux [name]
   nd [name]          Same as --new-tmux-detached [name]
   audit [file]       Same as --inject-change-audit [file]
+  branch-audit [file]
+                     Same as --inject-branch-audit [file]
+  branch-audit-export <base> [cwd]
+                     Same as --branch-audit-export <base> [cwd]
   audit-list [cwd]   Same as --change-audit-list [cwd]
   audit-export [cwd] Same as --change-audit-export [cwd]
   audit-show <id> [cwd]
@@ -507,6 +518,8 @@ function parseArgs(argv: string[]): CliOptions {
   let newTmuxName: string | undefined;
   let newTmuxAttach = true;
   let injectChangeAudit: string | true | undefined;
+  let injectBranchAudit: string | true | undefined;
+  let branchAuditExport: { base: string; cwd?: string } | undefined;
   let changeAuditExport: string | true | undefined;
   let changeAuditList: string | true | undefined;
   let changeAuditShow: { id: string; cwd?: string } | undefined;
@@ -568,6 +581,13 @@ function parseArgs(argv: string[]): CliOptions {
     } else if (command === 'audit') {
       injectChangeAudit = next && !next.startsWith('-') ? next : true;
       argv = argv.slice(injectChangeAudit === true ? 1 : 2);
+    } else if (command === 'branch-audit') {
+      injectBranchAudit = next && !next.startsWith('-') ? next : true;
+      argv = argv.slice(injectBranchAudit === true ? 1 : 2);
+    } else if (command === 'branch-audit-export' && next && !next.startsWith('-')) {
+      const cwd = argv[2] && !argv[2].startsWith('-') ? argv[2] : undefined;
+      branchAuditExport = { base: next, cwd };
+      argv = argv.slice(cwd ? 3 : 2);
     } else if (command === 'audit-list') {
       changeAuditList = next && !next.startsWith('-') ? next : true;
       argv = argv.slice(changeAuditList === true ? 1 : 2);
@@ -714,6 +734,29 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === '--inject-branch-audit') {
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        injectBranchAudit = next;
+        index += 1;
+      } else {
+        injectBranchAudit = true;
+      }
+      continue;
+    }
+
+    if (arg === '--branch-audit-export') {
+      const base = argv[index + 1];
+      if (!base || base.startsWith('-')) {
+        console.error(`${ICON.err} ${c.red('--branch-audit-export requires a base branch/ref')}`);
+        process.exit(1);
+      }
+      const cwd = argv[index + 2] && !argv[index + 2].startsWith('-') ? argv[index + 2] : undefined;
+      branchAuditExport = { base, cwd };
+      index += cwd ? 2 : 1;
+      continue;
+    }
+
     if (arg === '--change-audit-list') {
       const next = argv[index + 1];
       if (next && !next.startsWith('-')) {
@@ -786,6 +829,8 @@ function parseArgs(argv: string[]): CliOptions {
     newTmuxName,
     newTmuxAttach,
     injectChangeAudit,
+    injectBranchAudit,
+    branchAuditExport,
     changeAuditExport,
     changeAuditList,
     changeAuditShow,
@@ -925,8 +970,8 @@ async function readStdinText(): Promise<string> {
   });
 }
 
-async function postLocalJson(baseUrl: string, token: string, payload: unknown): Promise<{ statusCode: number; body: string }> {
-  const url = new URL('/api/local/change-audit', baseUrl);
+async function postLocalJson(baseUrl: string, token: string, endpoint: string, payload: unknown): Promise<{ statusCode: number; body: string }> {
+  const url = new URL(endpoint, baseUrl);
   const body = JSON.stringify(payload);
   const isHttps = url.protocol === 'https:';
   const requestImpl = isHttps ? https.request : http.request;
@@ -982,13 +1027,49 @@ async function runInjectChangeAudit(source: string | true): Promise<void> {
   }
 
   const baseUrl = runningState.localUrl ?? `${runningState.scheme ?? 'http'}://${runningState.host === '0.0.0.0' ? 'localhost' : runningState.host}:${runningState.port}`;
-  const response = await postLocalJson(baseUrl, token, payload);
+  const response = await postLocalJson(baseUrl, token, '/api/local/change-audit', payload);
   const body = JSON.parse(response.body || '{}') as { inserted?: number; total?: number; error?: string };
   if (response.statusCode < 200 || response.statusCode >= 300) {
     console.error(`${ICON.err} ${c.red(body.error || 'Failed to inject change audit explanations')}`);
     process.exit(1);
   }
   console.log(`${ICON.ok} ${c.green('Injected change audit explanations.')}`);
+  console.log(`  ${c.dim('Inserted:')} ${body.inserted ?? 0}`);
+  console.log(`  ${c.dim('Total:')}    ${body.total ?? 0}`);
+}
+
+async function runInjectBranchAudit(source: string | true): Promise<void> {
+  const runningState = getRunningState();
+  if (!runningState) {
+    console.error(`${ICON.err} ${c.red('Termdock is not running. Start it before injecting branch explanations.')}`);
+    process.exit(1);
+  }
+  const token = runningState.localApiToken;
+  if (!token) {
+    console.error(`${ICON.err} ${c.red('Running Termdock server does not expose a local injection token. Restart Termdock first.')}`);
+    process.exit(1);
+  }
+
+  const raw = source === true
+    ? await readStdinText()
+    : fs.readFileSync(path.resolve(source), 'utf8');
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`${ICON.err} ${c.red(`Invalid branch audit JSON: ${message}`)}`);
+    process.exit(1);
+  }
+
+  const baseUrl = runningState.localUrl ?? `${runningState.scheme ?? 'http'}://${runningState.host === '0.0.0.0' ? 'localhost' : runningState.host}:${runningState.port}`;
+  const response = await postLocalJson(baseUrl, token, '/api/local/branch-audit', payload);
+  const body = JSON.parse(response.body || '{}') as { inserted?: number; total?: number; error?: string };
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    console.error(`${ICON.err} ${c.red(body.error || 'Failed to inject branch explanation')}`);
+    process.exit(1);
+  }
+  console.log(`${ICON.ok} ${c.green('Injected branch explanation.')}`);
   console.log(`  ${c.dim('Inserted:')} ${body.inserted ?? 0}`);
   console.log(`  ${c.dim('Total:')}    ${body.total ?? 0}`);
 }
@@ -1163,7 +1244,15 @@ function parseAuditHunks(target: AuditRepositoryTarget, diffText: string): Chang
     if (!currentHeader || (!oldPath && !newPath)) return;
     const filePath = newPath ?? oldPath ?? '';
     const displayPath = target.relativeRoot === '.' ? filePath : `${target.relativeRoot}/${filePath}`;
-    const hunkDiff = [`diff --git a/${oldPath ?? filePath} b/${newPath ?? filePath}`, currentHeader, ...currentLines].join('\n');
+    const oldDiffPath = oldPath ? `a/${oldPath}` : '/dev/null';
+    const newDiffPath = newPath ? `b/${newPath}` : '/dev/null';
+    const hunkDiff = [
+      `diff --git a/${oldPath ?? filePath} b/${newPath ?? filePath}`,
+      `--- ${oldDiffPath}`,
+      `+++ ${newDiffPath}`,
+      currentHeader,
+      ...currentLines,
+    ].join('\n');
     const fingerprint = buildHunkChangeFingerprint(currentLines);
     const id = createHash('sha256')
       .update(`${target.repoRoot}\0${filePath}\0${currentHeader}\0${hunkIndexByFile}\0${fingerprint}`, 'utf8')
@@ -1227,6 +1316,71 @@ async function getAuditHunks(cwdInput?: string | true): Promise<ChangeAuditCliHu
     parseAuditHunks(target, await readWorkingTreeDiff(target.repoRoot).catch(() => ''))
   )));
   return hunksByRepo.flat();
+}
+
+async function readBranchDiff(repoRoot: string, baseInput: string): Promise<{ baseRef: string; branchName: string | null; headRef: string | null; diff: string; diffFingerprint: string }> {
+  const base = baseInput.trim();
+  let baseRef = base.includes('/') ? base : `origin/${base}`;
+  if (base.includes('/')) {
+    await execFileAsync('git', ['rev-parse', '--verify', '--quiet', baseRef], { cwd: repoRoot, timeout: 10_000, maxBuffer: 128 * 1024 });
+  } else {
+    try {
+      await execFileAsync('git', ['fetch', 'origin', base, '--no-tags'], { cwd: repoRoot, timeout: 30_000, maxBuffer: 512 * 1024 });
+    } catch {
+      await execFileAsync('git', ['rev-parse', '--verify', '--quiet', base], { cwd: repoRoot, timeout: 10_000, maxBuffer: 128 * 1024 });
+      baseRef = base;
+    }
+  }
+  const [branchName, headRef, trackedDiff, untrackedDiff] = await Promise.all([
+    execFileAsync('git', ['branch', '--show-current'], { cwd: repoRoot, timeout: 10_000, maxBuffer: 128 * 1024 }).then((r) => r.stdout.trim() || null).catch(() => null),
+    execFileAsync('git', ['rev-parse', '--short=12', 'HEAD'], { cwd: repoRoot, timeout: 10_000, maxBuffer: 128 * 1024 }).then((r) => r.stdout.trim() || null).catch(() => null),
+    execFileAsync('git', ['diff', baseRef], { cwd: repoRoot, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout).catch(() => ''),
+    execFileAsync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: repoRoot, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }).then(async ({ stdout }) => {
+      const pieces: string[] = [];
+      for (const filePath of stdout.split('\0').filter(Boolean)) {
+        try {
+          const { stdout: diff } = await execFileAsync('git', ['diff', '--no-index', '--', '/dev/null', filePath], {
+            cwd: repoRoot,
+            timeout: 30_000,
+            maxBuffer: 2 * 1024 * 1024,
+          });
+          if (diff) pieces.push(diff);
+        } catch (error) {
+          const maybe = error as { stdout?: string };
+          if (maybe.stdout) pieces.push(maybe.stdout);
+        }
+      }
+      return pieces.join('\n');
+    }).catch(() => ''),
+  ]);
+  const diff = [trackedDiff, untrackedDiff].filter(Boolean).join('\n');
+  const diffFingerprint = createHash('sha256').update([repoRoot, baseRef, branchName ?? '', headRef ?? '', diff].join('\n'), 'utf8').digest('hex').slice(0, 16);
+  return { baseRef, branchName, headRef, diff, diffFingerprint };
+}
+
+async function runBranchAuditExport(request: { base: string; cwd?: string }): Promise<void> {
+  const workspaceRoot = path.resolve(request.cwd ?? process.cwd());
+  const repoRoot = await getGitRoot(workspaceRoot);
+  const target: AuditRepositoryTarget = {
+    workspaceRoot,
+    repoRoot,
+    displayRoot: workspaceRoot,
+    relativeRoot: '.',
+  };
+  const branchDiff = await readBranchDiff(repoRoot, request.base);
+  const hunks = parseAuditHunks(target, branchDiff.diff);
+  console.log(JSON.stringify({
+    version: 1,
+    scope: 'branch',
+    workspaceRoot,
+    repoRoot,
+    baseRef: branchDiff.baseRef,
+    branchName: branchDiff.branchName,
+    headRef: branchDiff.headRef,
+    diffFingerprint: branchDiff.diffFingerprint,
+    count: hunks.length,
+    hunks,
+  }, null, 2));
 }
 
 async function runChangeAuditList(source: string | true | undefined): Promise<void> {
@@ -2224,6 +2378,16 @@ async function main(): Promise<void> {
 
   if (options.injectChangeAudit) {
     await runInjectChangeAudit(options.injectChangeAudit);
+    process.exit(0);
+  }
+
+  if (options.injectBranchAudit) {
+    await runInjectBranchAudit(options.injectBranchAudit);
+    process.exit(0);
+  }
+
+  if (options.branchAuditExport) {
+    await runBranchAuditExport(options.branchAuditExport);
     process.exit(0);
   }
 

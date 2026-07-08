@@ -331,6 +331,8 @@ interface TerminalViewportProps {
   enableTouchScroll?: boolean;
   mobileLongPressMode?: 'arrows' | 'copy';
   autoFocus?: boolean;
+  dropFilesHint?: string;
+  onDropFiles?: (files: File[]) => void;
 }
 
 type LoadingState = 'loading' | 'ready' | 'error';
@@ -673,6 +675,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       enableTouchScroll,
       mobileLongPressMode = 'arrows',
       autoFocus = true,
+      dropFilesHint = 'Drop files to paste paths',
+      onDropFiles,
     },
     ref
   ) => {
@@ -767,6 +771,47 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     });
     const arrowIndicatorRef = React.useRef<HTMLDivElement>(null);
     const tabIndicatorTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const [dragOver, setDragOver] = React.useState(false);
+    const dragCounterRef = React.useRef(0);
+
+    const handleDragOver = React.useCallback((e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer.types.includes('Files')) {
+        setDragOver(true);
+      }
+    }, []);
+
+    const handleDragEnter = React.useCallback((e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounterRef.current++;
+      if (e.dataTransfer.types.includes('Files')) {
+        setDragOver(true);
+      }
+    }, []);
+
+    const handleDragLeave = React.useCallback((e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounterRef.current--;
+      if (dragCounterRef.current <= 0) {
+        dragCounterRef.current = 0;
+        setDragOver(false);
+      }
+    }, []);
+
+    const handleDrop = React.useCallback((e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDragOver(false);
+      dragCounterRef.current = 0;
+      const files = e.dataTransfer.files;
+      if (files.length > 0 && onDropFiles) {
+        onDropFiles(Array.from(files));
+      }
+    }, [onDropFiles]);
     inputHandlerRef.current = onInput;
     resizeHandlerRef.current = onResize;
     inputFocusHandlerRef.current = onInputFocusChange;
@@ -3592,6 +3637,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }}
         role="button"
         tabIndex={-1}
+        onDragOver={handleDragOver}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
         onPointerDownCapture={handleMobilePointerDownCapture}
         onPointerMoveCapture={handleMobilePointerMoveCapture}
         onPointerUpCapture={handleMobilePointerUpCapture}
@@ -3638,6 +3687,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }, 0);
         }}
       >
+        {dragOver && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-primary/10 backdrop-blur-sm">
+            <div className="rounded-xl bg-surface-elevated px-4 py-2 text-sm font-semibold text-foreground shadow-lg">
+              {dropFilesHint}
+            </div>
+          </div>
+        )}
         {mobileCopyPopover && (
           <button
             type="button"
