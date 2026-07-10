@@ -229,14 +229,11 @@ function renderDirectory(
   props: DiffFileNavigatorProps,
   depth: number,
 ): ReactNode {
-  const shouldCompressDirectory = Boolean(props.mobile || props.compact);
   let displayDirectory = directory;
   const displayNames = [directory.name];
-  if (shouldCompressDirectory) {
-    while (displayDirectory.files.length === 0 && displayDirectory.directories.length === 1) {
-      displayDirectory = displayDirectory.directories[0];
-      displayNames.push(displayDirectory.name);
-    }
+  while (displayDirectory.files.length === 0 && displayDirectory.directories.length === 1) {
+    displayDirectory = displayDirectory.directories[0];
+    displayNames.push(displayDirectory.name);
   }
   const displayName = displayNames.join('/');
   const directoryKey = `${groupKey}:${displayDirectory.path}`;

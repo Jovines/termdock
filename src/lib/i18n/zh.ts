@@ -282,6 +282,7 @@ export const zh: TranslationDictionary = {
     insertAllShort: '全部',
     auditExplanation: '更改意义',
     auditStale: '解释已失效',
+    auditClear: '清除解释',
     allDiffLabel: '全部 diff',
     allChangesLabel: '全部改动',
     workingTree: '工作区改动',

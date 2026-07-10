@@ -3,8 +3,9 @@
 import { config as loadDotenv } from 'dotenv';
 import { resolve } from 'path';
 
-// 从项目根目录（或 CWD）加载 .env，在其他模块读取 process.env 之前执行
-loadDotenv({ path: resolve(process.cwd(), '.env') });
+// 从项目根目录（或 CWD）加载 .env，在其他模块读取 process.env 之前执行。
+// CLI 子命令经常输出机器可读 JSON，dotenv 的运行提示不能混入 stdout。
+loadDotenv({ path: resolve(process.cwd(), '.env'), quiet: true });
 
 import fs from 'fs';
 import http from 'http';
@@ -57,6 +58,7 @@ const stateFilePath = path.join(stateDir, 'server.json');
 const logFilePath = path.join(stateDir, 'server.log');
 const globalSessionStateFilePath = path.join(stateDir, 'global-session-state.json');
 const localApiTokenPath = path.join(stateDir, 'local-api-token');
+const changeAuditSnapshotPath = path.join(stateDir, 'change-audit-snapshot.json');
 const certDir = path.join(stateDir, 'certs');
 const defaultHttpsCertPath = path.join(certDir, 'termdock-local.pem');
 const defaultHttpsKeyPath = path.join(certDir, 'termdock-local-key.pem');
@@ -1021,17 +1023,6 @@ async function postLocalJson(baseUrl: string, token: string, endpoint: string, p
 }
 
 async function runInjectChangeAudit(source: string | true): Promise<void> {
-  const runningState = getRunningState();
-  if (!runningState) {
-    console.error(`${ICON.err} ${c.red('Termdock is not running. Start it before injecting change audit explanations.')}`);
-    process.exit(1);
-  }
-  const token = runningState.localApiToken;
-  if (!token) {
-    console.error(`${ICON.err} ${c.red('Running Termdock server does not expose a local injection token. Restart Termdock first.')}`);
-    process.exit(1);
-  }
-
   const raw = source === true
     ? await readStdinText()
     : fs.readFileSync(path.resolve(source), 'utf8');
@@ -1041,6 +1032,21 @@ async function runInjectChangeAudit(source: string | true): Promise<void> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`${ICON.err} ${c.red(`Invalid change audit JSON: ${message}`)}`);
+    process.exit(1);
+  }
+
+  await postChangeAuditPayload(payload);
+}
+
+async function postChangeAuditPayload(payload: unknown): Promise<void> {
+  const runningState = getRunningState();
+  if (!runningState) {
+    console.error(`${ICON.err} ${c.red('Termdock is not running. Start it before injecting change audit explanations.')}`);
+    process.exit(1);
+  }
+  const token = runningState.localApiToken;
+  if (!token) {
+    console.error(`${ICON.err} ${c.red('Running Termdock server does not expose a local injection token. Restart Termdock first.')}`);
     process.exit(1);
   }
 
@@ -1116,6 +1122,15 @@ interface AuditRepositoryTarget {
   displayRoot: string;
   relativeRoot: string;
 }
+
+interface ChangeAuditCliSnapshot {
+  version: 1;
+  createdAt: number;
+  sourceRoot: string;
+  hunks: ChangeAuditCliHunk[];
+}
+
+const CHANGE_AUDIT_SNAPSHOT_MAX_AGE_MS = 10 * 60 * 1000;
 
 function fnv1a32(text: string): string {
   let hash = 0x811c9dc5;
@@ -1336,6 +1351,57 @@ async function getAuditHunks(cwdInput?: string | true): Promise<ChangeAuditCliHu
   return hunksByRepo.flat();
 }
 
+function normalizeAuditSourceRoot(cwdInput?: string | true): string {
+  return typeof cwdInput === 'string' ? path.resolve(cwdInput) : process.cwd();
+}
+
+function isChangeAuditCliHunk(value: unknown): value is ChangeAuditCliHunk {
+  if (!value || typeof value !== 'object') return false;
+  const hunk = value as Partial<ChangeAuditCliHunk>;
+  return typeof hunk.id === 'string'
+    && typeof hunk.workspaceRoot === 'string'
+    && typeof hunk.repoRoot === 'string'
+    && typeof hunk.filePath === 'string'
+    && typeof hunk.hunkHeader === 'string'
+    && typeof hunk.fingerprint === 'string';
+}
+
+function readChangeAuditSnapshot(source: string | true | undefined): ChangeAuditCliSnapshot | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(changeAuditSnapshotPath, 'utf8')) as Partial<ChangeAuditCliSnapshot>;
+    if (parsed.version !== 1 || !Array.isArray(parsed.hunks) || typeof parsed.createdAt !== 'number') return null;
+    if (Date.now() - parsed.createdAt > CHANGE_AUDIT_SNAPSHOT_MAX_AGE_MS) return null;
+    const sourceRoot = normalizeAuditSourceRoot(source);
+    if (typeof parsed.sourceRoot !== 'string' || path.resolve(parsed.sourceRoot) !== sourceRoot) return null;
+    const hunks = parsed.hunks.filter(isChangeAuditCliHunk);
+    return { version: 1, createdAt: parsed.createdAt, sourceRoot: parsed.sourceRoot, hunks };
+  } catch {
+    return null;
+  }
+}
+
+function writeChangeAuditSnapshot(source: string | true | undefined, hunks: ChangeAuditCliHunk[]): void {
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const payload: ChangeAuditCliSnapshot = {
+      version: 1,
+      createdAt: Date.now(),
+      sourceRoot: normalizeAuditSourceRoot(source),
+      hunks,
+    };
+    fs.writeFileSync(changeAuditSnapshotPath, JSON.stringify(payload), { mode: 0o600 });
+  } catch {
+    // Snapshot writes are best-effort; the CLI can always fall back to live git diff.
+  }
+}
+
+async function getAuditHunkById(id: string, cwdInput?: string): Promise<ChangeAuditCliHunk | null> {
+  const snapshot = readChangeAuditSnapshot(cwdInput);
+  const cached = snapshot?.hunks.find((candidate) => candidate.id === id);
+  if (cached) return cached;
+  return (await getAuditHunks(cwdInput)).find((candidate) => candidate.id === id) ?? null;
+}
+
 async function readBranchDiff(repoRoot: string, baseInput: string): Promise<{ baseRef: string; branchName: string | null; headRef: string | null; diff: string; diffFingerprint: string }> {
   const base = baseInput.trim();
   let baseRef = base.includes('/') ? base : `origin/${base}`;
@@ -1403,6 +1469,7 @@ async function runBranchAuditExport(request: { base: string; cwd?: string }): Pr
 
 async function runChangeAuditList(source: string | true | undefined): Promise<void> {
   const hunks = await getAuditHunks(source);
+  writeChangeAuditSnapshot(source, hunks);
   console.log(JSON.stringify({
     version: 1,
     count: hunks.length,
@@ -1412,6 +1479,7 @@ async function runChangeAuditList(source: string | true | undefined): Promise<vo
 
 async function runChangeAuditExport(source: string | true | undefined): Promise<void> {
   const hunks = await getAuditHunks(source);
+  writeChangeAuditSnapshot(source, hunks);
   console.log(JSON.stringify({
     version: 1,
     count: hunks.length,
@@ -1420,7 +1488,7 @@ async function runChangeAuditExport(source: string | true | undefined): Promise<
 }
 
 async function runChangeAuditShow(request: { id: string; cwd?: string }): Promise<void> {
-  const hunk = (await getAuditHunks(request.cwd)).find((candidate) => candidate.id === request.id);
+  const hunk = await getAuditHunkById(request.id, request.cwd);
   if (!hunk) {
     console.error(`${ICON.err} ${c.red(`No current diff hunk found for id ${request.id}`)}`);
     process.exit(1);
@@ -1434,7 +1502,7 @@ async function runInjectChangeAuditHunk(request: { id: string; cwd?: string }): 
     console.error(`${ICON.err} ${c.red('Explanation is empty. Pipe explanation text into this command.')}`);
     process.exit(1);
   }
-  const hunk = (await getAuditHunks(request.cwd)).find((candidate) => candidate.id === request.id);
+  const hunk = await getAuditHunkById(request.id, request.cwd);
   if (!hunk) {
     console.error(`${ICON.err} ${c.red(`No current diff hunk found for id ${request.id}`)}`);
     process.exit(1);
@@ -1455,9 +1523,7 @@ async function runInjectChangeAuditHunk(request: { id: string; cwd?: string }): 
       explanation,
     }],
   };
-  const tmpPath = path.join(os.tmpdir(), `termdock-change-audit-${hunk.id}.json`);
-  fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2));
-  await runInjectChangeAudit(tmpPath);
+  await postChangeAuditPayload(payload);
 }
 
 const options = parseArgs(process.argv.slice(2));

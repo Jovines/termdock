@@ -299,6 +299,7 @@ export type TranslationDictionary = {
     insertAllShort: string;
     auditExplanation: string;
     auditStale: string;
+    auditClear: string;
     allDiffLabel: string;
     allChangesLabel: string;
     workingTree: string;

@@ -1784,10 +1784,21 @@ export async function openInFileBrowser(filePath: string): Promise<void> {
   }
 }
 
-function parseFilenameFromContentDisposition(disposition: string): string | null {
+export function parseFilenameFromContentDisposition(disposition: string): string | null {
   if (!disposition) return null;
-  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
-  return match ? decodeURIComponent(match[1]) : null;
+
+  const extendedMatch = /(?:^|;)\s*filename\*=\s*(?:UTF-8'')?([^;]+)/i.exec(disposition);
+  if (extendedMatch) {
+    const value = extendedMatch[1].trim().replace(/^"|"$/g, '');
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+
+  const plainMatch = /(?:^|;)\s*filename=\s*(?:"([^"]*)"|([^;]+))/i.exec(disposition);
+  return plainMatch ? (plainMatch[1] ?? plainMatch[2]).trim() : null;
 }
 
 export interface FileDiffSkippedFile {
@@ -2175,6 +2186,26 @@ export async function getBranchDiff(options: { cwd?: string | null; repoRoot?: s
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get branch diff' }));
     throw new Error(error.error || 'Failed to get branch diff');
+  }
+  return response.json();
+}
+
+export async function getCommitDiff(options: { cwd?: string | null; repoRoot?: string | null; commit: string; requestSlotId?: string }, signal?: AbortSignal): Promise<BranchDiffResponse> {
+  const params = new URLSearchParams();
+  if (options.cwd) params.set('cwd', options.cwd);
+  if (options.repoRoot) params.set('repoRoot', options.repoRoot);
+  params.set('commit', options.commit);
+  params.set('action', 'load_commit_diff');
+  if (options.requestSlotId) params.set('requestSlotId', options.requestSlotId);
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/commit-diff?${params}`,
+    { signal },
+    GIT_FILE_DIFF_REQUEST_TIMEOUT_MS,
+    'Commit diff took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get commit diff' }));
+    throw new Error(error.error || 'Failed to get commit diff');
   }
   return response.json();
 }

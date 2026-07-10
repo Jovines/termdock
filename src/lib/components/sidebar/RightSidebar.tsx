@@ -33,11 +33,12 @@ import {
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
-import { DiffReviewPanel } from './DiffReviewPanel';
+import { UniversalDiffReview } from './DiffReviewPanel';
 import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
-import { ChangeDiffReview } from './ChangeDiffReview';
+import { DiffReview, type DiffReviewFile, ChangeBadge } from './DiffReview';
+import type { DiffViewType } from './DiffViewer';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getUntrackedFiles, isPreviewableImagePath, openInFileBrowser, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, clearChangeAuditRecords, getBranchAuditRecords, getChangeAuditRecords, getCommitDiff, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getUntrackedFiles, isPreviewableImagePath, openInFileBrowser, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, refractorNodesToReact, type RefractorLike } from '../../utils/syntaxHighlight';
@@ -67,23 +68,18 @@ interface RightSidebarProps {
   onCloseMarkdownImageLightbox?: () => void;
 }
 
-const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; title: string }> = {
-  added: { label: 'A', className: 'text-[color:var(--diff-insert-strong)]', title: 'Added' },
-  modified: { label: 'M', className: 'text-[color:var(--diff-hunk-accent)]', title: 'Modified' },
-  deleted: { label: 'D', className: 'text-[color:var(--diff-delete-strong)]', title: 'Deleted' },
-  renamed: { label: 'R', className: 'text-muted-foreground', title: 'Renamed' },
-  copied: { label: 'C', className: 'text-[color:var(--diff-insert-strong)]', title: 'Copied' },
-  untracked: { label: 'U', className: 'text-[color:var(--diff-insert-strong)]', title: 'Untracked (new file)' },
-  conflicted: { label: '!', className: 'text-destructive', title: 'Conflicted' },
-  unknown: { label: '?', className: 'text-muted-foreground', title: 'Unknown' },
-};
-
 const FILE_TREE_SCROLL_STORAGE_KEY = 'termdock:right-sidebar:file-tree-scroll:v1';
 const FILE_PREVIEW_READING_STATE_STORAGE_KEY = 'termdock:right-sidebar:file-preview-reading-state:v1';
 const FILE_TREE_WIDTH_STORAGE_KEY = 'termdock:right-sidebar:file-tree-width:v1';
 const MARKDOWN_VIEW_MODE_STORAGE_KEY = 'termdock:right-sidebar:markdown-view-mode:v1';
 const DIFF_CHANGE_LIST_MODE_STORAGE_KEY = 'termdock:right-sidebar:diff-change-list-mode:v1';
-const BRANCH_AUDIT_BASE_STORAGE_KEY = 'termdock:right-sidebar:branch-audit-base:v1';
+const DIFF_WRAP_STORAGE_KEY = 'termdock:right-sidebar:diff-wrap:v1';
+const DIFF_VIEW_TYPE_STORAGE_KEY = 'termdock:diff-viewer:view-type:v1';
+const FILE_SEARCH_MODE_STORAGE_KEY = 'termdock:right-sidebar:file-search-mode:v1';
+const COLLAPSED_GIT_REPO_GROUPS_STORAGE_KEY = 'termdock:right-sidebar:collapsed-git-repo-groups:v1';
+const COLLAPSED_DIFF_DIRECTORIES_STORAGE_KEY = 'termdock:right-sidebar:collapsed-diff-directories:v1';
+const BRANCH_AUDIT_MODULE_OPEN_STORAGE_KEY = 'termdock:right-sidebar:branch-audit-module-open:v1';
+const BRANCH_AUDIT_MODULE_STORAGE_KEY = 'termdock:right-sidebar:branch-audit-module:v1';
 const MAX_FILE_TREE_SCROLL_ROOTS = 20;
 const MAX_FILE_PREVIEW_READING_STATE_FILES = 120;
 const FILE_TREE_SCROLL_WRITE_MS = 250;
@@ -143,19 +139,83 @@ function readDiffChangeListMode(): DiffChangeListMode {
   return readCache(DIFF_CHANGE_LIST_MODE_STORAGE_KEY, isDiffChangeListMode) ?? 'list';
 }
 
-function isBranchAuditBaseCache(value: unknown): value is Record<string, string> {
+function isDiffWrap(value: unknown): value is boolean {
+  return typeof value === 'boolean';
+}
+
+function readDiffWrap(): boolean {
+  return readCache(DIFF_WRAP_STORAGE_KEY, isDiffWrap) ?? true;
+}
+
+function isDiffViewType(value: unknown): value is DiffViewType {
+  return value === 'unified' || value === 'split';
+}
+
+function readDiffViewType(): DiffViewType {
+  return readCache(DIFF_VIEW_TYPE_STORAGE_KEY, isDiffViewType) ?? 'unified';
+}
+
+function isFileSearchMode(value: unknown): value is FileSearchMode {
+  return value === 'name' || value === 'content' || value === 'regex';
+}
+
+function readFileSearchMode(): FileSearchMode {
+  return readCache(FILE_SEARCH_MODE_STORAGE_KEY, isFileSearchMode) ?? 'name';
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function readCollapsedSet(key: string): Set<string> {
+  const arr = readCache(key, isStringArray);
+  return arr ? new Set(arr) : new Set();
+}
+
+function writeCollapsedSet(key: string, set: Set<string>): void {
+  writeCache(key, [...set]);
+}
+
+interface BranchAuditModuleState {
+  selectedRepoRoots: string[];
+  repoTargetBranches: Record<string, string>;
+  repoBaseBranches?: Record<string, string>;
+  includeUncommitted?: boolean;
+  updatedAt: number;
+}
+
+function isBranchAuditModuleCache(value: unknown): value is Record<string, BranchAuditModuleState> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  return Object.values(value as Record<string, unknown>).every((entry) => typeof entry === 'string');
+  return Object.values(value as Record<string, unknown>).every((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    const maybe = entry as Partial<BranchAuditModuleState>;
+    return Array.isArray(maybe.selectedRepoRoots)
+      && maybe.selectedRepoRoots.every((repoRoot) => typeof repoRoot === 'string')
+      && Boolean(maybe.repoTargetBranches)
+      && typeof maybe.repoTargetBranches === 'object'
+      && !Array.isArray(maybe.repoTargetBranches)
+      && Object.values(maybe.repoTargetBranches as Record<string, unknown>).every((branch) => typeof branch === 'string')
+      && (maybe.repoBaseBranches === undefined || (
+        Boolean(maybe.repoBaseBranches)
+        && typeof maybe.repoBaseBranches === 'object'
+        && !Array.isArray(maybe.repoBaseBranches)
+        && Object.values(maybe.repoBaseBranches as Record<string, unknown>).every((branch) => typeof branch === 'string')
+      ))
+      && (maybe.includeUncommitted === undefined || typeof maybe.includeUncommitted === 'boolean')
+      && typeof maybe.updatedAt === 'number';
+  });
 }
 
-function readBranchAuditBaseCache(): Record<string, string> {
-  return readCache(BRANCH_AUDIT_BASE_STORAGE_KEY, isBranchAuditBaseCache) ?? {};
+function readBranchAuditModuleCache(): Record<string, BranchAuditModuleState> {
+  return readCache(BRANCH_AUDIT_MODULE_STORAGE_KEY, isBranchAuditModuleCache) ?? {};
 }
 
-function writeBranchAuditBase(root: string | null, base: string): void {
-  if (!root) return;
-  const cache = { ...readBranchAuditBaseCache(), [root]: base };
-  writeCache(BRANCH_AUDIT_BASE_STORAGE_KEY, cache);
+function getBranchAuditHistoryKey(record: Pick<BranchAuditRecord, 'repoRoot' | 'baseRef'> & {
+  branchName?: string | null;
+  headRef?: string | null;
+  diffFingerprint?: string | null;
+}): string {
+  return [record.repoRoot, record.baseRef, record.branchName ?? '', record.headRef ?? '', record.diffFingerprint ?? ''].join('\0');
 }
 
 function clampFileTreeWidth(width: number, drawerWidthPx: number): number {
@@ -2482,6 +2542,13 @@ function GitTargetPicker({ label, value, options, placeholder, searchPlaceholder
   }, [normalizedQuery, options]);
 
   const current = options.find((option) => option.value === value);
+  const commitQuery = () => {
+    const next = query.trim();
+    if (!next) return;
+    onChange(next);
+    setOpen(false);
+    setQuery('');
+  };
 
   return (
     <div className="relative min-w-0">
@@ -2517,7 +2584,16 @@ function GitTargetPicker({ label, value, options, placeholder, searchPlaceholder
                   if (event.key === 'Escape') {
                     event.preventDefault();
                     setOpen(false);
+                    setQuery('');
+                    return;
                   }
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    commitQuery();
+                  }
+                }}
+                onBlur={() => {
+                  if (query.trim() && filteredOptions.length === 0) commitQuery();
                 }}
                 placeholder={searchPlaceholder}
                 className="min-w-0 flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted-foreground/70"
@@ -2525,6 +2601,17 @@ function GitTargetPicker({ label, value, options, placeholder, searchPlaceholder
             </div>
           </div>
           <div className="max-h-40 overflow-y-auto p-1">
+            {query.trim() && !options.some((option) => option.value === query.trim()) && (
+              <button
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={commitQuery}
+                className="mb-1 flex w-full items-center justify-between gap-2 rounded-md bg-primary/10 px-2 py-1.5 text-left text-[12px] font-medium text-primary transition hover:bg-primary/15"
+              >
+                <span className="min-w-0 truncate">{query.trim()}</span>
+                <span className="shrink-0 text-[10px] text-primary/75">Use</span>
+              </button>
+            )}
             {filteredOptions.length > 0 ? filteredOptions.map((option) => (
               <button
                 key={option.value}
@@ -2542,6 +2629,165 @@ function GitTargetPicker({ label, value, options, placeholder, searchPlaceholder
             )) : (
               <div className="px-2 py-2 text-[11px] text-muted-foreground">{emptyText}</div>
             )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface AuditPromptScopeRepoOption {
+  root: string;
+  label: string;
+  branch?: string | null;
+}
+
+interface AuditPromptScopeButtonProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  showScopePicker: boolean;
+  selectedAll: boolean;
+  repos: AuditPromptScopeRepoOption[];
+  selectedRoots: string[];
+  onToggleRepo: (repoRoot: string | null) => void;
+  onGenerate: () => void;
+  disabled?: boolean;
+  inserted?: boolean;
+  buttonLabel: string;
+  insertedLabel: string;
+  title: string;
+  ariaLabel: string;
+  scopeTitle: string;
+  scopeLabel: string;
+  allLabel: string;
+  generateLabel: string;
+  extraContent?: ReactNode;
+  renderRepoExtra?: (repo: AuditPromptScopeRepoOption) => ReactNode;
+}
+
+function AuditPromptScopeButton({
+  open,
+  onOpenChange,
+  showScopePicker,
+  selectedAll,
+  repos,
+  selectedRoots,
+  onToggleRepo,
+  onGenerate,
+  disabled,
+  inserted,
+  buttonLabel,
+  insertedLabel,
+  title,
+  ariaLabel,
+  scopeTitle,
+  scopeLabel,
+  allLabel,
+  generateLabel,
+  extraContent,
+  renderRepoExtra,
+}: AuditPromptScopeButtonProps) {
+  return (
+    <div className="relative inline-flex shrink-0">
+      <button
+        type="button"
+        onClick={() => {
+          if (showScopePicker) onOpenChange(!open);
+          else onGenerate();
+        }}
+        disabled={disabled}
+        className={`inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-[11px] font-medium transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
+          inserted
+            ? 'bg-surface-elevated text-foreground'
+            : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+        }`}
+        aria-label={ariaLabel}
+        title={showScopePicker ? `${scopeTitle}: ${scopeLabel}` : title}
+      >
+        <RiSparkles size={13} />
+        <span>{inserted ? insertedLabel : buttonLabel}</span>
+        {showScopePicker && <RiChevronDown size={11} className={`shrink-0 transition ${open ? 'rotate-180' : ''}`} />}
+      </button>
+      {showScopePicker && open && (
+        <div
+          className="fixed inset-0 z-modal-backdrop flex items-center justify-center bg-[var(--app-backdrop)] px-3 py-6 backdrop-blur-sm animate-fade-in"
+          onClick={() => onOpenChange(false)}
+        >
+          <div
+            className="flex max-h-[min(82vh,36rem)] w-full max-w-[42rem] flex-col overflow-hidden rounded-xl border border-border/20 bg-surface text-[11px] shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-border/15 px-3 py-2">
+              <div className="min-w-0">
+                <div className="text-[12px] font-semibold text-foreground">{scopeTitle}</div>
+                <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{scopeLabel}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => onOpenChange(false)}
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                aria-label="Close"
+              >
+                <RiCloseLine size={14} />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {extraContent}
+              <button
+                type="button"
+                onClick={() => onToggleRepo(null)}
+                className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left font-medium transition ${
+                  selectedAll
+                    ? 'bg-primary/15 text-primary'
+                    : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+                }`}
+              >
+                <span className="truncate">{allLabel}</span>
+                {selectedAll && <span className="text-[10px]">✓</span>}
+              </button>
+              {repos.map((repo) => {
+                const selected = selectedRoots.includes(repo.root);
+                return (
+                  <div key={repo.root} className={`mt-1 rounded-md transition ${selected ? 'bg-primary/15 text-primary' : ''}`}>
+                    <button
+                      type="button"
+                      onClick={() => onToggleRepo(repo.root)}
+                      className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left font-medium transition ${
+                        selected
+                          ? 'text-primary'
+                          : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+                      }`}
+                      title={repo.root}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate">{repo.label}</span>
+                        {repo.branch && <span className="block truncate text-[9px] opacity-70">{repo.branch}</span>}
+                      </span>
+                      {selected && <span className="text-[10px]">✓</span>}
+                    </button>
+                    {renderRepoExtra && (selectedAll || selected) && (
+                      <div className="px-2 pb-2">
+                        {renderRepoExtra(repo)}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="border-t border-border/15 p-2">
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenChange(false);
+                  onGenerate();
+                }}
+                className="flex h-7 w-full items-center justify-center gap-1 rounded-md bg-primary/15 px-2 text-[11px] font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
+                title={title}
+              >
+                <RiSparkles size={12} />
+                {generateLabel}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2708,15 +2954,6 @@ function getParentPath(path: string | null): string | null {
   if (normalized === '/') return null;
   const parent = normalized.slice(0, normalized.lastIndexOf('/')) || '/';
   return parent === normalized ? null : parent;
-}
-
-function ChangeBadge({ status }: { status: string }) {
-  const style = CHANGE_BADGE_STYLES[status] ?? { label: '?', className: 'text-muted-foreground', title: status };
-  return (
-    <span className={`w-4 shrink-0 text-center text-[10px] font-mono font-bold ${style.className}`} title={style.title}>
-      {style.label}
-    </span>
-  );
 }
 
 function buildFileReference(path: string, rootPath: string | null): string {
@@ -2972,16 +3209,53 @@ function GitActionMenu({ actions, running, completed }: {
   );
 }
 
+function canScrollVertically(element: HTMLElement): boolean {
+  const overflowY = window.getComputedStyle(element).overflowY;
+  return (overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight + 1;
+}
+
+function findDiffStreamScroller(target: HTMLElement): HTMLElement | null {
+  let current: HTMLElement | null = target;
+  while (current) {
+    if (current.classList.contains('termdock-diff-stream-scroller') && canScrollVertically(current)) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return target.closest<HTMLElement>('.termdock-diff-stream-scroller');
+}
+
+function isVisibleElement(element: HTMLElement): boolean {
+  return element.getClientRects().length > 0 && window.getComputedStyle(element).visibility !== 'hidden';
+}
+
 function scrollDiffStreamItemIntoView(path: string): void {
-  const target = document.querySelector<HTMLElement>(`[data-diff-stream-item="${CSS.escape(path)}"]`);
+  const escapedPath = CSS.escape(path);
+  const selector = [
+    `[data-diff-stream-item="${escapedPath}"]`,
+    `[data-diff-selection-path="${escapedPath}"]`,
+    `[data-diff-absolute-path="${escapedPath}"]`,
+    `[data-diff-file-path="${escapedPath}"]`,
+  ].join(',');
+  const scrollers = Array.from(document.querySelectorAll<HTMLElement>('.termdock-diff-stream-scroller'));
+  let target: HTMLElement | null = null;
+  for (const scroller of scrollers) {
+    if (!isVisibleElement(scroller)) continue;
+    const candidate = scroller.querySelector<HTMLElement>(selector);
+    if (candidate && isVisibleElement(candidate)) {
+      target = candidate;
+      break;
+    }
+  }
+  target ??= Array.from(document.querySelectorAll<HTMLElement>(selector)).find(isVisibleElement) ?? null;
   if (!target) return;
-  const scroller = target.closest<HTMLElement>('.termdock-diff-stream-scroller');
+  const scroller = findDiffStreamScroller(target);
   if (!scroller) {
     target.scrollIntoView({ block: 'start', behavior: 'smooth' });
     return;
   }
   const targetTop = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
-  scroller.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+  scroller.scrollTo({ top: Math.max(0, targetTop), behavior: 'instant' });
 }
 
 const IMAGE_MIN_SCALE = 1;
@@ -4033,7 +4307,7 @@ export function RightSidebar(
   const [fileQuery, setFileQuery] = useState('');
   const searchOpen = useSidebarStore((s) => s.rightSearchOpen);
   const setRightSearchOpen = useSidebarStore((s) => s.setRightSearchOpen);
-  const [searchMode, setSearchMode] = useState<FileSearchMode>('name');
+  const [searchMode, setSearchMode] = useState<FileSearchMode>(() => readFileSearchMode());
   const deferredFileQuery = useDeferredValue(fileQuery);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [gitRepositories, setGitRepositories] = useState<GitRepositoryBundle[]>([]);
@@ -4047,29 +4321,32 @@ export function RightSidebar(
   // A pending "scroll to this line" request from content search. Cleared by the
   // preview once it has highlighted and scrolled to the matched line.
   const [scrollToLine, setScrollToLine] = useState<number | null>(null);
-  const [collapsedGitRepoGroups, setCollapsedGitRepoGroups] = useState<Set<string>>(() => new Set());
-  const [collapsedDiffDirectories, setCollapsedDiffDirectories] = useState<Set<string>>(() => new Set());
-  const [eagerDiffStreamPaths, setEagerDiffStreamPaths] = useState<Set<string>>(() => new Set());
+  const [collapsedGitRepoGroups, setCollapsedGitRepoGroups] = useState<Set<string>>(() => readCollapsedSet(COLLAPSED_GIT_REPO_GROUPS_STORAGE_KEY));
+  const [collapsedDiffDirectories, setCollapsedDiffDirectories] = useState<Set<string>>(() => readCollapsedSet(COLLAPSED_DIFF_DIRECTORIES_STORAGE_KEY));
   const [diffChangeListMode, setDiffChangeListMode] = useState<DiffChangeListMode>(() => readDiffChangeListMode());
   // When on, long diff lines wrap instead of overflowing horizontally. The
   // user can opt in per-session without leaving the panel.
-  const [diffWrap, setDiffWrap] = useState(true);
+  const [diffWrap, setDiffWrap] = useState(() => readDiffWrap());
+  const [diffViewType, setDiffViewType] = useState<DiffViewType>(() => readDiffViewType());
   const [diffRefreshKey, setDiffRefreshKey] = useState(0);
   const [changeAuditRecords, setChangeAuditRecords] = useState<ChangeAuditRecord[]>([]);
   const [changeAuditLoading, setChangeAuditLoading] = useState(false);
   const [changeAuditError, setChangeAuditError] = useState<string | null>(null);
-  const [changeAuditClearing, setChangeAuditClearing] = useState(false);
   const [changeAuditRepoRoots, setChangeAuditRepoRoots] = useState<string[]>([]);
   const [changeAuditScopeOpen, setChangeAuditScopeOpen] = useState(false);
-  const [branchAuditBase, setBranchAuditBase] = useState('');
-  const [branchDiff, setBranchDiff] = useState<BranchDiffResponse | null>(null);
-  const [branchDiffLoading, setBranchDiffLoading] = useState(false);
-  const [branchDiffError, setBranchDiffError] = useState<string | null>(null);
   const [branchAuditRecords, setBranchAuditRecords] = useState<BranchAuditRecord[]>([]);
-  const [branchAuditLoading, setBranchAuditLoading] = useState(false);
-  const [branchAuditError, setBranchAuditError] = useState<string | null>(null);
-  const [branchAuditClearing, setBranchAuditClearing] = useState(false);
   const [branchAuditDetailOpen, setBranchAuditDetailOpen] = useState(false);
+  const [commitDiff, setCommitDiff] = useState<BranchDiffResponse | null>(null);
+  const [commitDiffLoading, setCommitDiffLoading] = useState<string | null>(null);
+  const [commitDiffError, setCommitDiffError] = useState<string | null>(null);
+  const [selectedCommitDiffFileKey, setSelectedCommitDiffFileKey] = useState<string | null>(null);
+  const [branchAuditModuleOpen, setBranchAuditModuleOpen] = useState(() => readCache(BRANCH_AUDIT_MODULE_OPEN_STORAGE_KEY, isDiffWrap) ?? false);
+  const [branchAuditScopeOpen, setBranchAuditScopeOpen] = useState(false);
+  const [branchAuditRepoRoots, setBranchAuditRepoRoots] = useState<string[]>([]);
+  const [branchAuditRepoBranches, setBranchAuditRepoBranches] = useState<Record<string, string>>({});
+  const [branchAuditRepoBaseBranches, setBranchAuditRepoBaseBranches] = useState<Record<string, string>>({});
+  const [branchAuditIncludeUncommitted, setBranchAuditIncludeUncommitted] = useState(true);
+  const [selectedBranchAuditHistoryKey, setSelectedBranchAuditHistoryKey] = useState<string | null>(null);
   const [selectedBranchAuditFileKey, setSelectedBranchAuditFileKey] = useState<string | null>(null);
   const [mobileFilePreviewOpen, setMobileFilePreviewOpen] = useState(false);
   const [mobileFileSlideIndex, setMobileFileSlideIndex] = useState(0);
@@ -4132,11 +4409,8 @@ export function RightSidebar(
   const gitDetailsAbortRef = useRef<AbortController | null>(null);
   const changeAuditRequestIdRef = useRef(0);
   const changeAuditAbortRef = useRef<AbortController | null>(null);
-  const branchDiffRequestIdRef = useRef(0);
-  const branchDiffAbortRef = useRef<AbortController | null>(null);
   const branchAuditRequestIdRef = useRef(0);
   const branchAuditAbortRef = useRef<AbortController | null>(null);
-  const branchAuditRepoRootRef = useRef<string | null>(null);
   const diffStreamSyncedPathRef = useRef<string | null>(null);
   const lastAutoRefreshRootRef = useRef<string | null>(null);
   const fileTreeResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
@@ -4235,6 +4509,13 @@ export function RightSidebar(
       .map((repoRoot) => gitRepositories.find((repo) => repo.root === repoRoot))
       .filter((repo): repo is GitRepositoryBundle => Boolean(repo))
   ), [changeAuditTargetRepoRoots, gitRepositories]);
+  const changeAuditScopeRepos = useMemo<AuditPromptScopeRepoOption[]>(() => (
+    gitRepoFilters.map((repo) => ({
+      root: repo.root,
+      label: repo.label,
+      branch: repo.branch ?? null,
+    }))
+  ), [gitRepoFilters]);
 
   const loadChangeAuditRecords = useCallback(async () => {
     if (!rootPath) {
@@ -4272,7 +4553,7 @@ export function RightSidebar(
   }, [changeAuditRecords.length, changeAuditTargetRepoRoots, rootPath]);
 
   const loadBranchAuditRecords = useCallback(async (repoRoot: string | null, baseRef?: string | null, branchName?: string | null) => {
-    if (!repoRoot) {
+    if (!repoRoot && !rootPath) {
       setBranchAuditRecords([]);
       return;
     }
@@ -4281,12 +4562,10 @@ export function RightSidebar(
     branchAuditAbortRef.current?.abort();
     const controller = new AbortController();
     branchAuditAbortRef.current = controller;
-    setBranchAuditLoading(branchAuditRecords.length === 0);
-    setBranchAuditError(null);
     try {
       const result = await getBranchAuditRecords({
         workspaceRoot: rootPath,
-        repoRoot,
+        repoRoot: repoRoot ?? undefined,
         baseRef,
         branchName,
       }, controller.signal);
@@ -4294,10 +4573,9 @@ export function RightSidebar(
       setBranchAuditRecords(result.records);
     } catch (error) {
       if (branchAuditRequestIdRef.current !== requestId || isAbortError(error)) return;
-      setBranchAuditError(error instanceof Error ? error.message : 'Failed to load branch explanations');
+      console.warn('[RightSidebar] Failed to load branch explanations', error);
     } finally {
       if (branchAuditAbortRef.current === controller) branchAuditAbortRef.current = null;
-      if (branchAuditRequestIdRef.current === requestId) setBranchAuditLoading(false);
     }
   }, [branchAuditRecords.length, rootPath]);
 
@@ -4349,20 +4627,13 @@ export function RightSidebar(
     if (current && !current.startsWith('/') && !bundle.files.some((file) => file.path === current || file.absolutePath === current)) {
       selectFile(null);
     }
-    setEagerDiffStreamPaths((currentPaths) => {
-      const valid = new Set(bundle.files.map((file) => getChangedFileSelectionPath(file)));
-      const next = new Set<string>();
-      for (const path of currentPaths) {
-        if (valid.has(path)) next.add(path);
-      }
-      return next;
-    });
     setCollapsedGitRepoGroups((collapsed) => {
       const valid = new Set(bundle.files.map((file) => getChangedFileRepoRoot(file, rootPath)).filter(Boolean) as string[]);
       const next = new Set<string>();
       for (const root of collapsed) {
         if (valid.has(root)) next.add(root);
       }
+      writeCollapsedSet(COLLAPSED_GIT_REPO_GROUPS_STORAGE_KEY, next);
       return next;
     });
     if (bundle.untrackedDeferred && bundle.context?.root) {
@@ -4388,10 +4659,6 @@ export function RightSidebar(
     changeAuditRequestIdRef.current += 1;
     changeAuditAbortRef.current?.abort();
     changeAuditAbortRef.current = null;
-    branchDiffRequestIdRef.current += 1;
-    branchDiffAbortRef.current?.abort();
-    cancelIoSlot('right-sidebar-branch-diff');
-    branchDiffAbortRef.current = null;
     branchAuditRequestIdRef.current += 1;
     branchAuditAbortRef.current?.abort();
     branchAuditAbortRef.current = null;
@@ -4402,14 +4669,22 @@ export function RightSidebar(
     setChangeAuditError(null);
     setChangeAuditRepoRoots([]);
     setChangeAuditScopeOpen(false);
-    setBranchDiff(null);
-    setBranchDiffLoading(false);
-    setBranchDiffError(null);
     setBranchAuditRecords([]);
-    setBranchAuditLoading(false);
-    setBranchAuditError(null);
     setBranchAuditDetailOpen(false);
+    setCommitDiff(null);
+    setCommitDiffLoading(null);
+    setCommitDiffError(null);
+    setSelectedCommitDiffFileKey(null);
+    setSelectedBranchAuditHistoryKey(null);
     setSelectedBranchAuditFileKey(null);
+    setBranchAuditModuleOpen(false);
+    writeCache(BRANCH_AUDIT_MODULE_OPEN_STORAGE_KEY, false);
+    setBranchAuditScopeOpen(false);
+    const branchAuditModuleState = rootPath ? readBranchAuditModuleCache()[rootPath] : null;
+    setBranchAuditRepoRoots(branchAuditModuleState?.selectedRepoRoots ?? []);
+    setBranchAuditRepoBranches(branchAuditModuleState?.repoTargetBranches ?? {});
+    setBranchAuditRepoBaseBranches(branchAuditModuleState?.repoBaseBranches ?? {});
+    setBranchAuditIncludeUncommitted(branchAuditModuleState?.includeUncommitted ?? true);
     setGitDetailsLoading(false);
     setActiveGitRepoRoot(null);
     const cached = rootPath ? useSidebarStore.getState().projectStateCache.get(rootPath) : undefined;
@@ -4704,6 +4979,17 @@ export function RightSidebar(
     return () => window.cancelAnimationFrame(frame);
   }, [diffPaneActive, isMobile, mobileDiffSlideIndex]);
 
+  // When git is reported unavailable, it may be a transient failure (e.g. git
+  // lock contention, I/O timeout). Retry once after a short delay so the
+  // Git/Changes tabs can recover without user action.
+  useEffect(() => {
+    if (!gitKnownUnavailable || !rootPath || gitBundleLoading) return;
+    const handle = window.setTimeout(() => {
+      void refreshGitState();
+    }, 3_000);
+    return () => window.clearTimeout(handle);
+  }, [gitKnownUnavailable, rootPath, gitBundleLoading, refreshGitState]);
+
   // Load Git state only when the Git/Changes panes are actually used. On large
   // repositories, even a delayed status probe can compete with file browsing
   // for disk I/O, so Files stays isolated from Git unless the user asks for it.
@@ -4965,6 +5251,21 @@ export function RightSidebar(
     };
   }, [applyFileWatchEvents, isOpen, watchedFileRoots]);
 
+  useEffect(() => {
+    if (!rootPath) return;
+    const cache = readBranchAuditModuleCache();
+    writeCache(BRANCH_AUDIT_MODULE_STORAGE_KEY, {
+      ...cache,
+      [rootPath]: {
+        selectedRepoRoots: branchAuditRepoRoots,
+        repoTargetBranches: branchAuditRepoBranches,
+        repoBaseBranches: branchAuditRepoBaseBranches,
+        includeUncommitted: branchAuditIncludeUncommitted,
+        updatedAt: Date.now(),
+      },
+    });
+  }, [branchAuditIncludeUncommitted, branchAuditRepoBaseBranches, branchAuditRepoBranches, branchAuditRepoRoots, rootPath]);
+
   const changedSummary = useMemo(() => summarizeChangedFiles(changedFiles.values()), [changedFiles]);
 
   const gitRepositoryByRoot = useMemo(() => {
@@ -5027,71 +5328,41 @@ export function RightSidebar(
   const activeGitActionRepoRoot = useMemo(() => {
     if (activeGitRepoRoot && gitActionRepoOptions.some((repo) => repo.value === activeGitRepoRoot)) return activeGitRepoRoot;
     if (selectedChangedFile?.repoRoot && gitActionRepoOptions.some((repo) => repo.value === selectedChangedFile.repoRoot)) return selectedChangedFile.repoRoot;
-    if (gitRepoFilters.length === 1 && gitActionRepoOptions.some((repo) => repo.value === gitRepoFilters[0].root)) return gitRepoFilters[0].root;
     if (gitActionRepoOptions.length === 1) return gitActionRepoOptions[0].value;
+    if (gitActionRepoOptions.length > 1) return gitActionRepoOptions[0].value;
     return null;
-  }, [activeGitRepoRoot, gitActionRepoOptions, gitRepoFilters, selectedChangedFile?.repoRoot]);
+  }, [activeGitRepoRoot, gitActionRepoOptions, selectedChangedFile?.repoRoot]);
 
   const activeGitActionRepo = activeGitActionRepoRoot ? gitRepositoryByRoot.get(activeGitActionRepoRoot) ?? null : null;
   const activeGitActionContext = activeGitActionRepo?.context?.available
     ? activeGitActionRepo.context
     : activeGitActionRepoRoot === gitContext?.root ? gitContext : null;
+  const requiresGitActionRepoSelection = gitActionRepoOptions.length > 0 && !activeGitActionRepoRoot;
   const activeGitActionFiles = useMemo(() => (
-    activeGitActionRepoRoot
+    requiresGitActionRepoSelection
+      ? []
+      : activeGitActionRepoRoot
       ? Array.from(changedFiles.values()).filter((file) => getChangedFileRepoRoot(file, rootPath) === activeGitActionRepoRoot)
       : Array.from(changedFiles.values())
-  ), [activeGitActionRepoRoot, changedFiles, rootPath]);
+  ), [activeGitActionRepoRoot, changedFiles, requiresGitActionRepoSelection, rootPath]);
   const activeGitActionSummary = useMemo(() => summarizeChangedFiles(activeGitActionFiles), [activeGitActionFiles]);
-  const requiresGitActionRepoSelection = gitActionRepoOptions.length > 1 && !activeGitActionRepoRoot;
+  const activeGitActionContextReady = Boolean(
+    activeGitActionContext?.available
+      && activeGitActionContext.root
+      && activeGitActionRepoRoot
+      && activeGitActionContext.root === activeGitActionRepoRoot,
+  );
   const activeGitActionRepoLabel = activeGitActionRepoRoot
     ? gitActionRepoOptions.find((repo) => repo.value === activeGitActionRepoRoot)?.label ?? getPathBasename(activeGitActionRepoRoot)
-    : t('rightSidebar.allRepositories');
-  const branchAuditRepoRoot = activeGitActionRepoRoot ?? activeGitActionContext?.root ?? gitContext?.root ?? rootPath ?? null;
-  const branchAuditRepoLabel = branchAuditRepoRoot === activeGitActionRepoRoot
-    ? activeGitActionRepoLabel
-    : branchAuditRepoRoot ? getPathBasename(branchAuditRepoRoot) : rootName;
-  const branchAuditRepo = branchAuditRepoRoot ? gitRepositoryByRoot.get(branchAuditRepoRoot) ?? null : null;
-  const branchAuditContext = activeGitActionContext?.available
-    ? activeGitActionContext
-    : branchAuditRepo?.context?.available
-      ? branchAuditRepo.context
-      : branchAuditRepoRoot === gitContext?.root && gitContext?.available ? gitContext : null;
+    : t('rightSidebar.gitRepositoryPlaceholder');
+  const activeGitActionBranchLabel = activeGitActionContextReady
+    ? (activeGitActionContext?.branch ?? 'HEAD')
+    : requiresGitActionRepoSelection
+      ? t('rightSidebar.selectRepositoryForGitActions')
+      : gitDetailsLoading
+        ? t('rightSidebar.gitActionRunning')
+        : 'HEAD';
   const gitDetailsLoaded = Boolean(activeGitActionContext?.available && activeGitActionContext.branches && activeGitActionContext.remotes && activeGitActionContext.recentCommits);
-
-  const loadBranchDiff = useCallback(async () => {
-    const repoRoot = branchAuditRepoRoot;
-    const base = branchAuditBase.trim();
-    if (!rootPath || !repoRoot || !base) return null;
-    const requestId = branchDiffRequestIdRef.current + 1;
-    branchDiffRequestIdRef.current = requestId;
-    branchDiffAbortRef.current?.abort();
-    cancelIoSlot('right-sidebar-branch-diff');
-    const controller = new AbortController();
-    branchDiffAbortRef.current = controller;
-    setBranchDiffLoading(true);
-    setBranchDiffError(null);
-    try {
-      const result = await getBranchDiff({ cwd: rootPath, repoRoot, base, requestSlotId: 'right-sidebar-branch-diff' }, controller.signal);
-      if (branchDiffRequestIdRef.current !== requestId) return null;
-      if (!result.available) {
-        setBranchDiff(null);
-        setBranchDiffError(result.error ?? 'Branch diff is unavailable');
-        return result;
-      }
-      setBranchDiff(result);
-      writeBranchAuditBase(repoRoot, base);
-      void loadBranchAuditRecords(repoRoot, result.baseRef, result.currentBranch);
-      return result;
-    } catch (error) {
-      if (branchDiffRequestIdRef.current !== requestId || isAbortError(error)) return null;
-      setBranchDiff(null);
-      setBranchDiffError(error instanceof Error ? error.message : 'Failed to load branch diff');
-      return null;
-    } finally {
-      if (branchDiffAbortRef.current === controller) branchDiffAbortRef.current = null;
-      if (branchDiffRequestIdRef.current === requestId) setBranchDiffLoading(false);
-    }
-  }, [branchAuditBase, branchAuditRepoRoot, loadBranchAuditRecords, rootPath]);
 
   useEffect(() => {
     if (!activeGitActionRepoRoot || !gitContext?.available || !gitPaneActive || gitDetailsLoaded || gitDetailsLoading || requiresGitActionRepoSelection) return;
@@ -5099,20 +5370,14 @@ export function RightSidebar(
   }, [activeGitActionRepoRoot, gitContext?.available, gitDetailsLoaded, gitDetailsLoading, gitPaneActive, loadGitDetails, requiresGitActionRepoSelection]);
 
   useEffect(() => {
-    if (!branchAuditRepoRoot || !gitContext?.available || !gitPaneActive || gitDetailsLoading) return;
-    if (branchAuditContext?.branches && branchAuditContext.remotes && branchAuditContext.recentCommits) return;
-    void loadGitDetails(branchAuditRepoRoot);
-  }, [branchAuditContext?.branches, branchAuditContext?.recentCommits, branchAuditContext?.remotes, branchAuditRepoRoot, gitContext?.available, gitDetailsLoading, gitPaneActive, loadGitDetails]);
-
-  useEffect(() => {
     if (!isOpen || !diffPaneActive || !rootPath) return;
     void loadChangeAuditRecords();
   }, [diffPaneActive, isOpen, loadChangeAuditRecords, rootPath]);
 
   useEffect(() => {
-    if (!isOpen || !gitPaneActive || !branchAuditRepoRoot) return;
-    void loadBranchAuditRecords(branchAuditRepoRoot, branchAuditBase.trim() || undefined, branchAuditContext?.branch ?? undefined);
-  }, [branchAuditBase, branchAuditContext?.branch, branchAuditRepoRoot, gitPaneActive, isOpen, loadBranchAuditRecords]);
+    if (!isOpen || !gitPaneActive || !rootPath) return;
+    void loadBranchAuditRecords(null);
+  }, [gitPaneActive, isOpen, loadBranchAuditRecords, rootPath]);
 
   const activeGitRepoIndex = useMemo(() => {
     if (!activeGitRepoRoot) return 0;
@@ -5138,11 +5403,11 @@ export function RightSidebar(
   const activeGitRepoSwitcherItem = gitRepoSwitcherItems[activeGitRepoIndex] ?? gitRepoSwitcherItems[0];
 
   useEffect(() => {
-    if (activeGitRepoRoot && !gitRepoFilters.some((repo) => repo.root === activeGitRepoRoot)) {
+    if (activeGitRepoRoot && !gitActionRepoOptions.some((repo) => repo.value === activeGitRepoRoot)) {
       setActiveGitRepoRoot(null);
     }
     setChangeAuditRepoRoots((current) => current.filter((repoRoot) => gitRepoFilters.some((repo) => repo.root === repoRoot)));
-  }, [activeGitRepoRoot, gitRepoFilters]);
+  }, [activeGitRepoRoot, gitActionRepoOptions, gitRepoFilters]);
 
   const switchBranchOptions = useMemo<GitPickerOption[]>(() => {
     const values = new Set<string>();
@@ -5187,42 +5452,73 @@ export function RightSidebar(
     return options;
   }, [activeGitActionContext?.branch, activeGitActionContext?.branches, activeGitActionContext?.remoteBranches, activeGitActionContext?.upstreamBranch, activeGitActionContext?.upstreamRemote, t]);
 
-  const branchAuditBaseOptions = useMemo<GitPickerOption[]>(() => {
-    const options: GitPickerOption[] = [];
-    const seen = new Set<string>();
-    const addOption = (branch: string | null | undefined, meta?: string) => {
-      if (!branch || seen.has(branch)) return;
-      seen.add(branch);
-      options.push({ value: branch, label: branch, meta });
-    };
-    addOption(branchAuditContext?.upstream, branchAuditContext?.upstream ? t('rightSidebar.pushUpstreamBadge') : undefined);
-    for (const branch of branchAuditContext?.remoteBranches ?? []) addOption(branch, 'remote');
-    for (const branch of branchAuditContext?.branches ?? []) addOption(branch, branch === branchAuditContext?.branch ? t('rightSidebar.pushCurrentBranchBadge') : 'local');
-    return options;
-  }, [branchAuditContext?.branch, branchAuditContext?.branches, branchAuditContext?.remoteBranches, branchAuditContext?.upstream, t]);
+  const branchAuditScopeRepos = useMemo<AuditPromptScopeRepoOption[]>(() => (
+    gitActionRepoOptions.map((repo) => {
+      const bundle = gitRepositoryByRoot.get(repo.value);
+      return {
+        root: repo.value,
+        label: repo.label,
+        branch: bundle?.context?.branch ?? null,
+      };
+    })
+  ), [gitActionRepoOptions, gitRepositoryByRoot]);
+  useEffect(() => {
+    if (branchAuditScopeRepos.length === 0) return;
+    setBranchAuditRepoBranches((current) => {
+      let changed = false;
+      const next = { ...current };
+      const validRoots = new Set(branchAuditScopeRepos.map((repo) => repo.root));
+      for (const repoRoot of Object.keys(next)) {
+        if (!validRoots.has(repoRoot)) {
+          delete next[repoRoot];
+          changed = true;
+        }
+      }
+      for (const repo of branchAuditScopeRepos) {
+        if (!next[repo.root] && repo.branch) {
+          next[repo.root] = repo.branch;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    setBranchAuditRepoBaseBranches((current) => {
+      let changed = false;
+      const next = { ...current };
+      const validRoots = new Set(branchAuditScopeRepos.map((repo) => repo.root));
+      for (const repoRoot of Object.keys(next)) {
+        if (!validRoots.has(repoRoot)) {
+          delete next[repoRoot];
+          changed = true;
+        }
+      }
+      for (const repo of branchAuditScopeRepos) {
+        if (next[repo.root]) continue;
+        const context = gitRepositoryByRoot.get(repo.root)?.context;
+        const fallbackBase = context?.upstream || context?.remoteBranches?.[0] || context?.branches?.find((branch) => branch !== context?.branch) || '';
+        if (fallbackBase) {
+          next[repo.root] = fallbackBase;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [branchAuditScopeRepos, gitRepositoryByRoot]);
+  const branchAuditTargetRepoRoots = useMemo(() => {
+    const validRoots = new Set(branchAuditScopeRepos.map((repo) => repo.root));
+    return branchAuditRepoRoots.filter((repoRoot) => validRoots.has(repoRoot));
+  }, [branchAuditRepoRoots, branchAuditScopeRepos]);
+  const branchAuditTargetsAllRepos = branchAuditTargetRepoRoots.length === 0;
+  const branchAuditTargetRepos = useMemo(() => (
+    (branchAuditTargetsAllRepos ? branchAuditScopeRepos : branchAuditScopeRepos.filter((repo) => branchAuditTargetRepoRoots.includes(repo.root)))
+  ), [branchAuditScopeRepos, branchAuditTargetRepoRoots, branchAuditTargetsAllRepos]);
 
   useEffect(() => {
-    if (!branchAuditRepoRoot) return;
-    const repoChanged = branchAuditRepoRootRef.current !== branchAuditRepoRoot;
-    if (repoChanged) branchAuditRepoRootRef.current = branchAuditRepoRoot;
-    const cached = repoChanged ? readBranchAuditBaseCache()[branchAuditRepoRoot] : null;
-    const fallbackBranch = branchAuditBaseOptions[0]?.value ?? '';
-    const nextBase = cached || (!branchAuditBase.trim() ? fallbackBranch : '');
-    if (!repoChanged && !nextBase) return;
-    if (nextBase) setBranchAuditBase(nextBase);
-    setBranchDiff(null);
-    setBranchDiffError(null);
-    setBranchAuditRecords([]);
-    setBranchAuditError(null);
-    if (nextBase) void loadBranchAuditRecords(branchAuditRepoRoot, nextBase, branchAuditContext?.branch ?? undefined);
-  }, [branchAuditBase, branchAuditBaseOptions, branchAuditContext?.branch, branchAuditRepoRoot, loadBranchAuditRecords]);
-
-  useEffect(() => {
-    if (!activeGitActionContext?.available || !activeGitActionRepoRoot) return;
+    if (!activeGitActionContextReady || !activeGitActionContext) return;
     setSwitchBranch(activeGitActionContext.branch || (activeGitActionContext.branches?.[0] ?? ''));
     setPushRemote(activeGitActionContext.upstreamRemote || (activeGitActionContext.remotes?.includes('origin') ? 'origin' : activeGitActionContext.remotes?.[0] ?? ''));
     setPushBranch(activeGitActionContext.upstreamBranch || activeGitActionContext.branch || (activeGitActionContext.branches?.[0] ?? ''));
-  }, [activeGitActionContext, activeGitActionRepoRoot]);
+  }, [activeGitActionContext, activeGitActionContextReady]);
 
   const pushSyncInfo = useMemo(() => {
     if (requiresGitActionRepoSelection) {
@@ -5454,6 +5750,42 @@ export function RightSidebar(
     );
   }
 
+  function renderDiffViewTypeToggle() {
+    const splitEnabled = isWide;
+    const effectiveMode: DiffViewType = splitEnabled ? diffViewType : 'unified';
+    return (
+      <div className="inline-flex h-7 shrink-0 overflow-hidden rounded-full bg-surface-2 p-0.5" aria-label={t('diffViewer.view')}>
+        <button
+          type="button"
+          onClick={() => setDiffViewMode('unified')}
+          aria-pressed={effectiveMode === 'unified'}
+          title={t('diffViewer.unifiedMode')}
+          className={`inline-flex h-6 items-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 ${
+            effectiveMode === 'unified'
+              ? 'bg-surface-elevated text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          {t('diffViewer.unified')}
+        </button>
+        <button
+          type="button"
+          onClick={() => setDiffViewMode('split')}
+          disabled={!splitEnabled}
+          aria-pressed={effectiveMode === 'split'}
+          title={splitEnabled ? t('diffViewer.splitMode') : t('diffViewer.unifiedMode')}
+          className={`inline-flex h-6 items-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 ${
+            effectiveMode === 'split'
+              ? 'bg-surface-elevated text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          {t('diffViewer.split')}
+        </button>
+      </div>
+    );
+  }
+
   function buildDiffNavigatorGroups(): DiffNavigatorGroup[] {
     return filteredChangedFileGroups.map((group) => {
       const staged = countStagedChanges(group.files.map(([, file]) => file));
@@ -5524,34 +5856,29 @@ export function RightSidebar(
     });
   }
 
-  function buildChangeDiffStreamItems() {
+  function buildDiffReviewFiles(): DiffReviewFile[] {
     if (changedFiles.size === 0) {
       return [{
         key: 'empty',
-        file: { path: '', status: 'unknown' },
+        path: '',
+        status: 'unknown',
         repoRoot: null,
-        selectionPath: 'empty',
         displayName: t('rightSidebar.noChanges'),
-        selected: false,
-        eager: true,
-        auditRecords: [],
         diffOverride: '',
+        auditRecords: [],
       }];
     }
-    return orderedChangedFilesForDiff.map(([key, file], index) => {
+    return orderedChangedFilesForDiff.map(([key, file]) => {
       const repoRoot = getChangedFileRepoRoot(file, rootPath);
-      const selectionPath = getChangedFileSelectionPath(file);
       const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
-      const selected = selectedFilePath === file.path || selectedFilePath === absolutePath || selectedFilePath === selectionPath;
       return {
         key,
-        file,
+        path: file.path,
+        absolutePath,
+        status: file.status,
         repoRoot,
-        selectionPath,
         displayName: getRelativeDisplayPath(absolutePath, repoRoot).name,
         displayDir: getRelativeDisplayPath(absolutePath, repoRoot).dir,
-        selected,
-        eager: index < 3 || eagerDiffStreamPaths.has(selectionPath),
         auditRecords: changeAuditRecords,
       };
     });
@@ -5681,7 +6008,7 @@ export function RightSidebar(
   }, [diffPaneActive, orderedChangedFilesForDiff, selectFile, syncSelectionFromDiffStream]);
 
   const gitContextText = useMemo(() => {
-    const context = activeGitActionContext?.available ? activeGitActionContext : gitContext;
+    const context = activeGitActionContextReady ? activeGitActionContext : gitActionRepoOptions.length <= 1 ? gitContext : null;
     if (!context?.available) return '';
     const changed = (context.changedFiles ?? []).map((file) => `- ${file.status} ./${file.path}`).join('\n');
     const commits = (context.recentCommits ?? []).map((commit) => `- ${commit}`).join('\n');
@@ -5691,10 +6018,10 @@ export function RightSidebar(
       changed ? `Changed files:\n${changed}` : 'Changed files: none',
       commits ? `Recent commits:\n${commits}` : '',
     ].filter(Boolean).join('\n\n');
-  }, [activeGitActionContext, gitContext, rootPath]);
+  }, [activeGitActionContext, activeGitActionContextReady, gitActionRepoOptions.length, gitContext, rootPath]);
 
   const gitContextInputText = useMemo(() => {
-    const context = activeGitActionContext?.available ? activeGitActionContext : gitContext;
+    const context = activeGitActionContextReady ? activeGitActionContext : gitActionRepoOptions.length <= 1 ? gitContext : null;
     if (!context?.available) return '';
     const changed = (context.changedFiles ?? [])
       .slice(0, 20)
@@ -5706,7 +6033,7 @@ export function RightSidebar(
       `branch: ${context.branch ?? 'unknown'}`,
       changed ? `changed files: ${changed}${more}` : 'changed files: none',
     ].join('; ') + ' ';
-  }, [activeGitActionContext, gitContext, rootPath]);
+  }, [activeGitActionContext, activeGitActionContextReady, gitActionRepoOptions.length, gitContext, rootPath]);
 
   const insertGitContext = useCallback(() => {
     if (!gitContextInputText) return;
@@ -5737,23 +6064,37 @@ export function RightSidebar(
     const exportCommands = targetRepos.length > 0
       ? targetRepos.map((repo) => `   td audit-export ${quoteShellArg(repo.root)}`).join('\n')
       : '   td audit-export';
+    const payloadCommand = targetRepos.length > 0
+      ? '   td audit ~/.termdock/change-audit/payload-<repo>.json'
+      : '   td audit ~/.termdock/change-audit/payload.json';
     return [
-      '为目标仓库的 Git 更改 hunk 生成审计解释，并通过 Termdock CLI 注入。',
+      '任务：为目标仓库的 Git diff hunk 生成自包含审计解释，并通过 Termdock CLI 注入。',
       '',
       `当前工作区：${rootPath ?? ''}`,
       '目标仓库：',
       repoList,
       '',
-      '操作指令：',
-      '1. 只针对上面列出的目标仓库执行 audit-export；如果目标是嵌套子仓，必须使用该子仓括号里的绝对路径，不要改用当前工作区根目录。示例：',
+      '执行步骤：',
+      '1. 仅对“目标仓库”逐个执行 audit-export。嵌套子仓使用括号内 repo 绝对路径作为命令参数。',
       exportCommands,
-      '2. 读取 audit-export 输出中的所有 hunk 完整 diff。通读整批改动，建立整体目标、主要行为变化和跨文件关系的理解。',
-      '3. 使用 audit-export 中已有的 diff 进行分析。不要为了通读而对每个 hunk 循环执行 td audit-show。仅当某个 hunk 的导出信息不足以判断时，再执行：td audit-show <hunkId> <对应仓库绝对路径>',
-      '4. 结合整批改动上下文，逐个写出需要解释的 hunk 意义，并执行：',
-      '   printf "%s\\n" "这里写该 hunk 的改动意义" | td audit-explain <hunkId> <对应仓库绝对路径>',
+      '2. 读取 audit-export 输出的全部 hunks[].diff，先理解整批改动的业务目标、行为变化、文件分工和跨 hunk 依赖。',
+      '3. 以 audit-export 内置 diff 为分析依据。仅在单个 hunk 信息不足时执行：td audit-show <hunkId> <对应仓库绝对路径>',
+      '4. 在 ~/.termdock/change-audit/ 生成批量 payload JSON。',
+      '   mkdir -p ~/.termdock/change-audit',
+      '5. payload 顶层字段：workspaceRoot、repoRoot、generatedBy、records[]。',
+      '6. records[] 每条对应一个 hunk；从 audit-export hunk 原样复制 filePath、oldPath、newPath、hunkHeader、hunkIndex、fingerprint；补充 summary、explanation。',
+      '7. 写入 payload 后批量注入：',
+      payloadCommand,
+      '8. 少量 hunk 或临时补单条时使用：printf "%s\\n" "这里写该 hunk 的改动意义" | td audit-explain <hunkId> <对应仓库绝对路径>',
+      '9. 注入成功后清理本次 payload：rm -f ~/.termdock/change-audit/payload*.json',
       '',
-      '解释内容指令：每条解释用清晰直白的话说明该 hunk 的更改意义、解决的问题、以及它和其它改动的关系。只写有信息量的结论，不写铺垫、套话、流程说明或泛泛风险；不要复述代码字面变化，不要孤立解释单个 hunk。',
-      '完成后汇报已注入多少个 hunk 解释。',
+      '写作标准：',
+      '- summary：一句话概括该 hunk 在整批改动中的职责。',
+      '- explanation：自包含说明业务链路、该 hunk 的作用、解决的问题、与其它 hunk 的关系。',
+      '- 面向不了解本轮对话的 AI 编写，补足必要上下文。',
+      '- 输出高信息量结论；避免铺垫、套话、流程复述、泛泛风险、逐行翻译 diff。',
+      '',
+      '完成条件：汇报每个目标仓库已注入的 hunk 数和总数。',
     ].join('\n');
   }, [changeAuditTargetRepoRoots.length, changeAuditTargetRepos, gitRepositories, rootName, rootPath]);
 
@@ -5762,8 +6103,8 @@ export function RightSidebar(
       ? changeAuditPromptText
       : [
         mode === 'regenerate'
-          ? '模式：重新生成。请基于当前 audit-export 重新生成全部 hunk 解释并覆盖写回。'
-          : '模式：补充失效。请基于当前 audit-export 只补充新增、变更或已失效的 hunk 解释，仍有效的解释不要重复写回。',
+          ? '模式：重新生成。基于当前 audit-export 为全部 hunk 重新生成解释并覆盖写回。'
+          : '模式：补充失效。基于当前 audit-export 补充新增、变更或已失效的 hunk 解释；保留仍有效的解释。',
         '',
         changeAuditPromptText,
       ].join('\n');
@@ -5779,25 +6120,31 @@ export function RightSidebar(
     if (!push) onClose();
   }, [changeAuditPromptText, changeAuditTargetRepoRoots, insertContextText, loadChangeAuditRecords, onClose, push, rootPath, t]);
 
-  const clearLoadedChangeAudit = useCallback(async () => {
-    if (changeAuditTargetRepoRoots.length === 0) return;
-    setChangeAuditClearing(true);
-    setChangeAuditError(null);
+  const handleClearAuditRecord = useCallback(async (id: string) => {
     try {
-      await Promise.all(changeAuditTargetRepoRoots.map((repoRoot) => clearChangeAuditRecords({ repoRoot })));
-      setChangeAuditRecords([]);
+      await clearChangeAuditRecords({ ids: [id] });
+      setChangeAuditRecords((prev) => prev.filter((record) => record.id !== id));
+    } catch {
       void loadChangeAuditRecords();
-    } catch (error) {
-      setChangeAuditError(t('rightSidebar.changeAuditClearFailed', { message: error instanceof Error ? error.message : 'Unknown error' }));
-    } finally {
-      setChangeAuditClearing(false);
     }
-  }, [changeAuditTargetRepoRoots, loadChangeAuditRecords, t]);
+  }, [loadChangeAuditRecords]);
 
   const toggleChangeAuditRepoRoot = useCallback((repoRoot: string | null) => {
     setChangeAuditRepoRoots((current) => {
       if (repoRoot === null) {
         setChangeAuditScopeOpen(false);
+        return [];
+      }
+      return current.includes(repoRoot)
+        ? current.filter((value) => value !== repoRoot)
+        : [...current, repoRoot];
+    });
+  }, []);
+
+  const toggleBranchAuditRepoRoot = useCallback((repoRoot: string | null) => {
+    setBranchAuditRepoRoots((current) => {
+      if (repoRoot === null) {
+        setBranchAuditScopeOpen(false);
         return [];
       }
       return current.includes(repoRoot)
@@ -5828,28 +6175,9 @@ export function RightSidebar(
         diff,
       };
     };
-    const seen = new Set<string>();
-    const items = (branchDiff?.hunks ?? []).map((hunk) => {
-      const matchingRecords = branchAuditRecords.filter((record) => (
-        record.repoRoot === branchAuditRepoRoot
-        && record.baseRef === branchDiff?.baseRef
-        && (!branchDiff?.currentBranch || record.branchName === branchDiff.currentBranch)
-        && record.filePath === hunk.filePath
-        && record.hunkHeader === hunk.hunkHeader
-      ));
-      const current = matchingRecords.find((record) => record.fingerprint === hunk.fingerprint) ?? null;
-      const stale = current ? null : matchingRecords[0] ?? null;
-      const key = `${hunk.filePath}\u0000${hunk.hunkHeader}\u0000${hunk.hunkIndex}`;
-      seen.add(`${hunk.filePath}\u0000${hunk.hunkHeader}`);
-      return { key, hunk, current, stale };
-    });
-    const cachedOnly = branchAuditRecords
-      .filter((record) => (
-        record.repoRoot === branchAuditRepoRoot
-        && (!branchDiff?.baseRef || record.baseRef === branchDiff.baseRef)
-        && (!branchDiff?.currentBranch || record.branchName === branchDiff.currentBranch)
-        && !seen.has(`${record.filePath}\u0000${record.hunkHeader}`)
-      ))
+    if (!selectedBranchAuditHistoryKey) return [];
+    return branchAuditRecords
+      .filter((record) => getBranchAuditHistoryKey(record) === selectedBranchAuditHistoryKey)
       .map((record) => {
         const hunk = buildRecordHunk(record);
         return {
@@ -5859,45 +6187,95 @@ export function RightSidebar(
           stale: null,
         };
       });
-    return [...items, ...cachedOnly];
-  }, [branchAuditRecords, branchAuditRepoRoot, branchDiff?.baseRef, branchDiff?.currentBranch, branchDiff?.hunks]);
+  }, [branchAuditRecords, selectedBranchAuditHistoryKey]);
 
-  const branchAuditCurrentCount = branchAuditReviewItems.filter((view) => view.current).length;
-  const branchAuditStaleCount = branchAuditReviewItems.filter((view) => view.stale).length;
   const hasBranchAuditRecords = branchAuditRecords.length > 0;
-  const hasViewableBranchAudit = branchAuditCurrentCount > 0 || branchAuditStaleCount > 0;
+  const branchAuditHistoryGroups = useMemo(() => {
+    const groups = new Map<string, { key: string; repoRoot: string; repoLabel: string; baseRef: string; branchName: string | null; headRef: string | null; diffFingerprint: string | null; records: BranchAuditRecord[]; latestInjectedAt: number }>();
+    for (const record of branchAuditRecords) {
+      const repoRoot = record.repoRoot;
+      const repo = gitRepositoryByRoot.get(repoRoot);
+      const repoLabel = repo?.relativeRoot === '.' ? rootName : repo?.relativeRoot || repo?.name || getPathBasename(repoRoot);
+      const key = getBranchAuditHistoryKey(record);
+      const group = groups.get(key) ?? {
+        key,
+        repoRoot,
+        repoLabel,
+        baseRef: record.baseRef,
+        branchName: record.branchName ?? null,
+        headRef: record.headRef ?? null,
+        diffFingerprint: record.diffFingerprint ?? null,
+        records: [],
+        latestInjectedAt: 0,
+      };
+      group.records.push(record);
+      group.latestInjectedAt = Math.max(group.latestInjectedAt, record.injectedAt ?? 0);
+      groups.set(key, group);
+    }
+    return Array.from(groups.values()).sort((a, b) => b.latestInjectedAt - a.latestInjectedAt);
+  }, [branchAuditRecords, gitRepositoryByRoot, rootName]);
+  const selectedBranchAuditHistoryGroup = useMemo(() => (
+    selectedBranchAuditHistoryKey
+      ? branchAuditHistoryGroups.find((group) => group.key === selectedBranchAuditHistoryKey) ?? null
+      : null
+  ), [branchAuditHistoryGroups, selectedBranchAuditHistoryKey]);
 
-  const buildBranchAuditPrompt = useCallback((diffPayload: BranchDiffResponse, mode: 'generate' | 'regenerate' | 'refresh-stale') => {
-    const instruction = mode === 'regenerate'
-      ? '重新生成已有解释'
-      : mode === 'refresh-stale'
-        ? '补充生成已经失效的解释'
-        : '生成解释';
+  const commitDiffReviewItems = useMemo(() => (
+    (commitDiff?.hunks ?? []).map((hunk) => ({
+      key: `${hunk.filePath}\u0000${hunk.hunkHeader}\u0000${hunk.hunkIndex}`,
+      hunk,
+      current: null,
+      stale: null,
+    }))
+  ), [commitDiff?.hunks]);
+
+  const branchAuditPromptText = useMemo(() => {
+    const quoteShellArg = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+    const targetRepos = branchAuditTargetRepos;
+    const repoList = targetRepos.length > 0
+      ? targetRepos.map((repo) => `- ${repo.label} (${repo.root})，目标分支：${branchAuditRepoBranches[repo.root] || repo.branch || '(current branch)'}，基线分支：${branchAuditRepoBaseBranches[repo.root] || '(not set)'}`).join('\n')
+      : `- ${rootPath ? '.' : ''}`;
+    const exportCommands = targetRepos.length > 0
+      ? targetRepos.map((repo) => {
+        const targetBranch = branchAuditRepoBranches[repo.root] || repo.branch || '';
+        const baseBranch = branchAuditRepoBaseBranches[repo.root] || '';
+        const safeName = repo.label.replace(/[^A-Za-z0-9_-]+/g, '_') || 'repo';
+        const switchLine = targetBranch ? `   git -C ${quoteShellArg(repo.root)} switch ${quoteShellArg(targetBranch)}` : `   # ${repo.label}: keep current branch`;
+        return [
+          switchLine,
+          '   mkdir -p ~/.termdock/branch-audit',
+          `   td branch-audit-export ${quoteShellArg(baseBranch)} ${quoteShellArg(repo.root)} > ~/.termdock/branch-audit/branch-audit-export-${safeName}.json`,
+        ].join('\n');
+      }).join('\n')
+      : '   td branch-audit-export <base-branch>';
     return [
-      '解释当前分支相对于基线分支的改动，并把解释写回 Termdock。',
-      `模式：${instruction}`,
-      `- 工作区：${rootPath ?? ''}`,
-      `- 仓库：${diffPayload.repoRoot ?? branchAuditRepoRoot ?? ''}`,
-      `- 当前分支：${diffPayload.currentBranch ?? '(detached or unknown)'}`,
-      `- 基线分支：${diffPayload.baseRef ?? ''}`,
-      `- fingerprint：${diffPayload.diffFingerprint ?? ''}`,
+      '解释目标仓库当前分支相对于基线分支的改动，并把解释写回 Termdock。',
       '',
-      '请先导出分支 hunk：',
-      `td branch-audit-export ${JSON.stringify(diffPayload.baseRef ?? '')} ${JSON.stringify(diffPayload.repoRoot ?? branchAuditRepoRoot ?? '')} > branch-audit-export.json`,
+      `当前工作区：${rootPath ?? ''}`,
+      `包含本地未提交更改：${branchAuditIncludeUncommitted ? '是' : '否'}`,
+      '目标仓库：',
+      repoList,
       '',
-      '读取 branch-audit-export.json 中的 hunks[]，不要把整份 JSON 粘贴回输入框。',
-      '逐 hunk 写解释。解释要说明该 hunk 的意图、解决的问题、影响、风险，以及它和其它 hunk 的关系；不要逐行复述 diff。',
+      '操作指令：',
+      branchAuditIncludeUncommitted
+        ? '1. 只针对上面列出的目标仓库导出分支 hunk；如果指定了目标分支，先在对应仓库切到目标分支。导出内容需要包含目标分支相对基线分支的提交改动，以及当前工作区本地未提交/未跟踪改动。嵌套子仓或软链接子仓必须使用括号里的仓库绝对路径，不要改用当前工作区根目录。示例：'
+        : '1. 只针对上面列出的目标仓库导出分支 hunk；如果指定了目标分支，先在对应仓库切到目标分支。不要包含本地未提交/未跟踪改动；如果导出结果里混入了本地工作区改动，生成解释时必须忽略这些本地改动，只解释目标分支相对基线分支的提交改动。嵌套子仓或软链接子仓必须使用括号里的仓库绝对路径，不要改用当前工作区根目录。示例：',
+      exportCommands,
+      '2. 读取导出的 ~/.termdock/branch-audit/branch-audit-export*.json 中的 hunks[]，不要把临时 JSON 放到业务仓目录，也不要把整份 JSON 粘贴回输入框。',
+      '3. 逐个 hunk 写解释。解释要说明该 hunk 的意图、解决的问题、影响、风险，以及它和其它 hunk 的关系；不要逐行复述 diff。',
+      '4. 每个仓库分别生成 ~/.termdock/branch-audit/payload-<repo>.json，payload 必须包含 workspaceRoot、repoRoot、baseRef、branchName、headRef、diffFingerprint 和 records[]；records[] 每条 record 对应一个 hunk，diff 字段必须从 hunk.diff 原样复制。',
+      '5. 把解释写入 payload 后执行：td branch-audit ~/.termdock/branch-audit/payload-<repo>.json',
+      '6. 注入成功后删除本次生成的临时 JSON：rm -f ~/.termdock/branch-audit/branch-audit-export-*.json ~/.termdock/branch-audit/payload-*.json',
       '',
-      'payload.json 必须是 records[]，每条 record 对应导出结果里的一个 hunk；diff 字段必须从对应 hunk.diff 原样复制，用作 Termdock 查看解释时的缓存，不要省略。',
-      '把解释写入 payload.json 后执行：td branch-audit payload.json',
+      'payload 示例：',
       '```json',
       JSON.stringify({
         workspaceRoot: rootPath ?? null,
-        repoRoot: diffPayload.repoRoot ?? branchAuditRepoRoot ?? null,
-        baseRef: diffPayload.baseRef ?? null,
-        branchName: diffPayload.currentBranch ?? null,
-        headRef: diffPayload.headRef ?? null,
-        diffFingerprint: diffPayload.diffFingerprint ?? null,
+        repoRoot: '<target repo root>',
+        baseRef: '<target repo base branch>',
+        branchName: '<from export currentBranch>',
+        headRef: '<from export headRef>',
+        diffFingerprint: '<from export diffFingerprint>',
         generatedBy: 'termdock-branch-audit',
         records: [
           {
@@ -5914,47 +6292,58 @@ export function RightSidebar(
         ],
       }, null, 2),
       '```',
-    ].filter((line) => line !== '').join('\n');
-  }, [branchAuditRepoRoot, rootPath]);
+    ].join('\n');
+  }, [branchAuditIncludeUncommitted, branchAuditRepoBaseBranches, branchAuditRepoBranches, branchAuditTargetRepos, rootPath]);
 
-  const insertBranchAuditPrompt = useCallback(async (mode: 'generate' | 'regenerate' | 'refresh-stale' = 'generate') => {
-    const diffPayload = await loadBranchDiff();
-    if (!diffPayload?.available) return;
-    const prompt = buildBranchAuditPrompt(diffPayload, mode);
-    insertContextText(t('rightSidebar.branchAuditShort'), prompt, `context:branch-audit:${diffPayload.repoRoot}:${diffPayload.baseRef}`);
+  const insertBranchAuditScopePrompt = useCallback((mode: 'generate' | 'regenerate' | 'refresh-stale' = 'generate') => {
+    const basePrompt = mode === 'generate'
+      ? branchAuditPromptText
+      : [
+        mode === 'regenerate'
+          ? '模式：重新生成。请基于当前分支导出结果重新生成全部 hunk 解释并覆盖写回。'
+          : '模式：补充失效。请基于当前分支导出结果只补充新增、变更或已失效的 hunk 解释，仍有效的解释不要重复写回。',
+        '',
+        branchAuditPromptText,
+      ].join('\n');
+    insertContextText(t('rightSidebar.branchAuditShort'), basePrompt, `context:branch-audit-scope:${mode}`);
     if (!push) onClose();
-  }, [buildBranchAuditPrompt, insertContextText, loadBranchDiff, onClose, push, t]);
+  }, [branchAuditPromptText, insertContextText, onClose, push, t]);
 
-  const openBranchAuditDetail = useCallback(() => {
-    setSelectedBranchAuditFileKey(
-      branchAuditReviewItems.find((item) => item.current || item.stale)?.hunk.filePath
-      ?? branchAuditReviewItems[0]?.hunk.filePath
-      ?? null,
-    );
+  const openBranchAuditHistoryDetail = useCallback((historyKey: string) => {
+    const group = branchAuditHistoryGroups.find((item) => item.key === historyKey);
+    if (!group) return;
+    setSelectedBranchAuditHistoryKey(historyKey);
+    setSelectedBranchAuditFileKey(group.records[0]?.filePath ?? null);
     setBranchAuditDetailOpen(true);
-    if (!branchDiff?.available && branchAuditRepoRoot && branchAuditBase.trim()) {
-      void loadBranchDiff();
-    }
-  }, [branchAuditBase, branchAuditRepoRoot, branchAuditReviewItems, branchDiff?.available, loadBranchDiff]);
+  }, [branchAuditHistoryGroups]);
 
-  const clearLoadedBranchAudit = useCallback(async () => {
-    if (!branchAuditRepoRoot) return;
-    setBranchAuditClearing(true);
-    setBranchAuditError(null);
+  const openCommitDiff = useCallback(async (commitLine: string) => {
+    if (!rootPath || !activeGitActionRepoRoot) return;
+    const [commit] = commitLine.split(/\s+/);
+    if (!commit) return;
+    setCommitDiffLoading(commit);
+    setCommitDiffError(null);
+    setCommitDiff(null);
     try {
-      await clearBranchAuditRecords({
-        repoRoot: branchAuditRepoRoot,
-        baseRef: branchDiff?.baseRef,
-        branchName: branchDiff?.currentBranch ?? undefined,
+      const result = await getCommitDiff({
+        cwd: rootPath,
+        repoRoot: activeGitActionRepoRoot,
+        commit,
+        requestSlotId: 'right-sidebar-commit-diff',
       });
-      setBranchAuditRecords([]);
-      void loadBranchAuditRecords(branchAuditRepoRoot, branchDiff?.baseRef, branchDiff?.currentBranch);
+      if (!result.available) {
+        setCommitDiffError(result.error ?? 'Commit diff is unavailable');
+        return;
+      }
+      setCommitDiff(result);
+      const first = result.hunks?.[0];
+      setSelectedCommitDiffFileKey(first ? `${first.filePath}\u0000${first.hunkHeader}\u0000${first.hunkIndex}` : null);
     } catch (error) {
-      setBranchAuditError(t('rightSidebar.branchAuditClearFailed', { message: error instanceof Error ? error.message : 'Unknown error' }));
+      setCommitDiffError(error instanceof Error ? error.message : 'Failed to load commit diff');
     } finally {
-      setBranchAuditClearing(false);
+      setCommitDiffLoading(null);
     }
-  }, [branchAuditRepoRoot, branchDiff?.baseRef, branchDiff?.currentBranch, loadBranchAuditRecords, t]);
+  }, [activeGitActionRepoRoot, rootPath]);
 
   const selectDiffFile = useCallback((path: string | null) => {
     const state = useSidebarStore.getState();
@@ -5976,12 +6365,6 @@ export function RightSidebar(
       slideMobileDiffTo(1);
     }
     if (path) {
-      setEagerDiffStreamPaths((current) => {
-        if (current.has(path)) return current;
-        const next = new Set(current);
-        next.add(path);
-        return next;
-      });
       const scrollToTarget = () => scrollDiffStreamItemIntoView(path);
       window.setTimeout(scrollToTarget, 60);
       window.setTimeout(scrollToTarget, 260);
@@ -6008,6 +6391,7 @@ export function RightSidebar(
       const next = new Set(current);
       if (next.has(repoRoot)) next.delete(repoRoot);
       else next.add(repoRoot);
+      writeCollapsedSet(COLLAPSED_GIT_REPO_GROUPS_STORAGE_KEY, next);
       return next;
     });
   }, []);
@@ -6017,6 +6401,7 @@ export function RightSidebar(
       const next = new Set(current);
       if (next.has(path)) next.delete(path);
       else next.add(path);
+      writeCollapsedSet(COLLAPSED_DIFF_DIRECTORIES_STORAGE_KEY, next);
       return next;
     });
   }, []);
@@ -6024,6 +6409,24 @@ export function RightSidebar(
   const setDiffChangeMode = useCallback((mode: DiffChangeListMode) => {
     setDiffChangeListMode(mode);
     writeCache(DIFF_CHANGE_LIST_MODE_STORAGE_KEY, mode);
+  }, []);
+
+  const toggleDiffWrap = useCallback(() => {
+    setDiffWrap((prev) => {
+      const next = !prev;
+      writeCache(DIFF_WRAP_STORAGE_KEY, next);
+      return next;
+    });
+  }, []);
+
+  const setDiffViewMode = useCallback((mode: DiffViewType) => {
+    setDiffViewType(mode);
+    writeCache(DIFF_VIEW_TYPE_STORAGE_KEY, mode);
+  }, []);
+
+  const updateSearchMode = useCallback((mode: FileSearchMode) => {
+    setSearchMode(mode);
+    writeCache(FILE_SEARCH_MODE_STORAGE_KEY, mode);
   }, []);
 
   const runSidebarGitAction = useCallback(async (request: GitActionRequest, label: string, pathForBusy?: string): Promise<boolean> => {
@@ -6061,20 +6464,21 @@ export function RightSidebar(
     setConfirmGitAction({ kind: 'stash-all', repoRoot, repoLabel });
   }, [runSidebarGitAction, t]);
 
+  const selectGitRepoRoot = useCallback((repoRoot: string | null) => {
+    setActiveGitRepoRoot(repoRoot);
+    setSwitchBranch('');
+    setPushRemote('');
+    setPushBranch('');
+    selectFile(getFirstChangedFileSelectionPathForRepo(repoRoot));
+    if (!gitPaneActive) setRightTab('diff');
+  }, [getFirstChangedFileSelectionPathForRepo, gitPaneActive, selectFile, setRightTab]);
+
   const selectGitRepoByIndex = useCallback((index: number) => {
     if (gitRepoSwitcherItems.length === 0) return;
     const wrapped = (index + gitRepoSwitcherItems.length) % gitRepoSwitcherItems.length;
     const repoRoot = gitRepoSwitcherItems[wrapped]?.root ?? null;
-    setActiveGitRepoRoot(repoRoot);
-    selectFile(getFirstChangedFileSelectionPathForRepo(repoRoot));
-    if (!gitPaneActive) setRightTab('diff');
-  }, [getFirstChangedFileSelectionPathForRepo, gitPaneActive, gitRepoSwitcherItems, selectFile, setRightTab]);
-
-  const selectGitRepoRoot = useCallback((repoRoot: string | null) => {
-    setActiveGitRepoRoot(repoRoot);
-    selectFile(getFirstChangedFileSelectionPathForRepo(repoRoot));
-    if (!gitPaneActive) setRightTab('diff');
-  }, [getFirstChangedFileSelectionPathForRepo, gitPaneActive, selectFile, setRightTab]);
+    selectGitRepoRoot(repoRoot);
+  }, [gitRepoSwitcherItems, selectGitRepoRoot]);
 
   const handleRepoSwitcherPointerDown = useCallback((event: PointerEvent<HTMLButtonElement>) => {
     repoSwitcherPointerRef.current = { startX: event.clientX, pointerId: event.pointerId };
@@ -6155,8 +6559,172 @@ export function RightSidebar(
   const pushActionCompleted = completedGitAction?.action === 'push';
   const effectiveGitQuickActionsOpen = gitPaneActive || gitQuickActionsOpen;
 
+  const branchAuditScopeLabel = branchAuditTargetsAllRepos
+    ? t('rightSidebar.changeAuditScopeAll')
+    : branchAuditTargetRepos.length === 1
+      ? branchAuditTargetRepos[0].label
+      : `${branchAuditTargetRepos.length} repos`;
+  const branchAuditReadyToGenerate = branchAuditTargetRepos.length > 0
+    && branchAuditTargetRepos.every((repo) => Boolean(branchAuditRepoBaseBranches[repo.root]?.trim()));
+
+  const branchAuditPromptButton = rootPath ? (
+    <AuditPromptScopeButton
+      open={branchAuditScopeOpen}
+      onOpenChange={setBranchAuditScopeOpen}
+      showScopePicker
+      selectedAll={branchAuditTargetsAllRepos}
+      repos={branchAuditScopeRepos}
+      selectedRoots={branchAuditTargetRepoRoots}
+      onToggleRepo={toggleBranchAuditRepoRoot}
+      onGenerate={() => insertBranchAuditScopePrompt(hasBranchAuditRecords ? 'regenerate' : 'generate')}
+      disabled={!branchAuditReadyToGenerate}
+      inserted={insertedReferenceKey?.startsWith('context:branch-audit-scope:') ?? false}
+      buttonLabel={hasBranchAuditRecords ? t('rightSidebar.branchAuditRegenerate') : t('rightSidebar.branchAuditGenerate')}
+      insertedLabel={t('rightSidebar.inserted')}
+      title={t('rightSidebar.branchAuditGenerateTitle')}
+      ariaLabel={t('rightSidebar.branchAuditShort')}
+      scopeTitle={t('rightSidebar.changeAuditScopeLabel')}
+      scopeLabel={branchAuditScopeLabel}
+      allLabel={t('rightSidebar.changeAuditScopeAll')}
+      generateLabel={hasBranchAuditRecords ? t('rightSidebar.branchAuditRegenerate') : t('rightSidebar.branchAuditGenerate')}
+      renderRepoExtra={(repo) => {
+        const bundle = gitRepositoryByRoot.get(repo.root);
+        const branchOptions: GitPickerOption[] = [];
+        const seen = new Set<string>();
+        const addBranch = (branch: string | null | undefined, meta?: string) => {
+          if (!branch || seen.has(branch)) return;
+          seen.add(branch);
+          branchOptions.push({ value: branch, label: branch, meta });
+        };
+        addBranch(branchAuditRepoBranches[repo.root] || bundle?.context?.branch, t('rightSidebar.pushCurrentBranchBadge'));
+        for (const branch of bundle?.context?.branches ?? []) addBranch(branch, branch === bundle?.context?.branch ? t('rightSidebar.pushCurrentBranchBadge') : 'local');
+        for (const branch of bundle?.context?.remoteBranches ?? []) addBranch(branch, 'remote');
+        const baseOptions: GitPickerOption[] = [];
+        const seenBase = new Set<string>();
+        const addBase = (branch: string | null | undefined, meta?: string) => {
+          if (!branch || seenBase.has(branch)) return;
+          seenBase.add(branch);
+          baseOptions.push({ value: branch, label: branch, meta });
+        };
+        addBase(branchAuditRepoBaseBranches[repo.root], branchAuditRepoBaseBranches[repo.root] ? t('rightSidebar.pushUpstreamBadge') : undefined);
+        addBase(bundle?.context?.upstream, bundle?.context?.upstream ? t('rightSidebar.pushUpstreamBadge') : undefined);
+        for (const branch of bundle?.context?.remoteBranches ?? []) addBase(branch, 'remote');
+        for (const branch of bundle?.context?.branches ?? []) addBase(branch, branch === bundle?.context?.branch ? t('rightSidebar.pushCurrentBranchBadge') : 'local');
+        return (
+          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+            <GitTargetPicker
+              label={t('rightSidebar.currentBranchLabel')}
+              value={branchAuditRepoBranches[repo.root] || bundle?.context?.branch || ''}
+              options={branchOptions}
+              placeholder={t('rightSidebar.switchBranchPlaceholder')}
+              searchPlaceholder={t('rightSidebar.switchBranchSearchPlaceholder')}
+              emptyText={t('rightSidebar.switchNoBranches')}
+              onChange={(branch) => {
+                setBranchAuditRepoBranches((current) => ({
+                  ...current,
+                  [repo.root]: branch,
+                }));
+              }}
+            />
+            <GitTargetPicker
+              label={t('rightSidebar.branchAuditBaseLabel')}
+              value={branchAuditRepoBaseBranches[repo.root] || ''}
+              options={baseOptions}
+              placeholder={t('rightSidebar.branchAuditBasePlaceholder')}
+              searchPlaceholder={t('rightSidebar.branchAuditBaseSearchPlaceholder')}
+              emptyText={t('rightSidebar.branchAuditBaseEmpty')}
+              onChange={(branch) => {
+                setBranchAuditRepoBaseBranches((current) => ({
+                  ...current,
+                  [repo.root]: branch,
+                }));
+              }}
+            />
+          </div>
+        );
+      }}
+    />
+  ) : null;
+
+  const branchAuditModulePanel = rootPath ? (
+    <div className="border-b border-border/10 px-1 py-3">
+      <button
+        type="button"
+        onClick={() => setBranchAuditModuleOpen((open) => { const next = !open; writeCache(BRANCH_AUDIT_MODULE_OPEN_STORAGE_KEY, next); return next; })}
+        className="group flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left transition hover:bg-surface-2 active:scale-[0.99]"
+        aria-expanded={branchAuditModuleOpen}
+      >
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground group-hover:text-foreground">
+          <RiSparkles size={14} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12px] font-semibold text-foreground">{t('rightSidebar.branchAuditTitle')}</span>
+          <span className="block truncate text-[10px] text-muted-foreground">{branchAuditScopeLabel}</span>
+        </span>
+        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition group-hover:bg-surface-elevated group-hover:text-foreground ${branchAuditModuleOpen ? 'rotate-90' : ''}`}>
+          <RiChevronRight size={13} />
+        </span>
+      </button>
+      {branchAuditModuleOpen && (
+        <div className="mt-2 rounded-lg border border-border/10 bg-surface/60 p-2">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="min-w-0 text-[11px] text-muted-foreground">
+              {t('rightSidebar.changeAuditScopeLabel')}: {branchAuditScopeLabel}
+            </div>
+            {branchAuditPromptButton}
+          </div>
+          <div className="text-[10px] leading-relaxed text-muted-foreground">
+            {t('rightSidebar.changeAuditScopeLabel')}: {branchAuditScopeLabel}
+          </div>
+          <label className="mt-2 flex cursor-pointer items-center justify-between gap-3 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-foreground">
+            <span className="min-w-0">
+              <span className="block font-medium">包含本地未提交改动</span>
+              <span className="block truncate text-[10px] text-muted-foreground">生成解释时纳入 working tree / untracked diff</span>
+            </span>
+            <input
+              type="checkbox"
+              checked={branchAuditIncludeUncommitted}
+              onChange={(event) => setBranchAuditIncludeUncommitted(event.target.checked)}
+              className="h-4 w-4 shrink-0 accent-[rgb(var(--primary-rgb))]"
+            />
+          </label>
+          <div className="mt-2 space-y-1.5">
+            {branchAuditHistoryGroups.length > 0 ? branchAuditHistoryGroups.slice(0, 8).map((group) => (
+              <button
+                key={group.key}
+                type="button"
+                onClick={() => openBranchAuditHistoryDetail(group.key)}
+                className={`w-full rounded-md px-2 py-1.5 text-left transition active:scale-[0.99] ${
+                  selectedBranchAuditHistoryKey === group.key
+                    ? 'bg-primary/15 text-primary'
+                    : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+                }`}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{group.repoLabel}</span>
+                  <span className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[10px] text-muted-foreground">{group.records.length} hunk</span>
+                </div>
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+                  <span className="rounded bg-surface px-1.5 py-0.5">{group.branchName ?? 'HEAD'}</span>
+                  <span className="text-muted-foreground/60">→</span>
+                  <span className="rounded bg-surface px-1.5 py-0.5">{group.baseRef}</span>
+                  {group.diffFingerprint && <span className="rounded bg-surface px-1.5 py-0.5">{group.diffFingerprint}</span>}
+                </div>
+              </button>
+            )) : (
+              <div className="rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
+                {t('rightSidebar.branchAuditEmpty')}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null;
+
   const gitQuickActionsPanel = gitContext?.available && rootPath ? (
     <div className={effectiveGitQuickActionsOpen ? 'overflow-visible' : 'overflow-hidden'}>
+      {branchAuditModulePanel}
       <button
         type="button"
         onClick={() => {
@@ -6207,8 +6775,7 @@ export function RightSidebar(
                 emptyText={t('rightSidebar.gitRepositoryEmpty')}
                 disabled={Boolean(runningGitAction)}
                 onChange={(repoRoot) => {
-                  setActiveGitRepoRoot(repoRoot || null);
-                  selectFile(null);
+                  selectGitRepoRoot(repoRoot || null);
                 }}
               />
               {requiresGitActionRepoSelection && (
@@ -6221,121 +6788,8 @@ export function RightSidebar(
           <div className="border-b border-border/10 px-1 py-3">
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="min-w-0">
-                <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.branchAuditTitle')}</div>
-                <div className="mt-0.5 truncate text-[10px] text-muted-foreground" title={branchAuditRepoRoot ?? undefined}>
-                  {branchAuditRepoLabel}
-                </div>
-              </div>
-              {(branchDiffLoading || branchAuditLoading) && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
-            </div>
-            <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-1.5">
-              <GitTargetPicker
-                label={t('rightSidebar.branchAuditBaseLabel')}
-                value={branchAuditBase}
-                options={branchAuditBaseOptions}
-                placeholder={t('rightSidebar.branchAuditBasePlaceholder')}
-                searchPlaceholder={t('rightSidebar.branchAuditBaseSearchPlaceholder')}
-                emptyText={t('rightSidebar.branchAuditBaseEmpty')}
-                disabled={branchDiffLoading}
-                onChange={(value) => {
-                  setBranchAuditBase(value);
-                  setBranchDiff(null);
-                  setBranchDiffError(null);
-                  setBranchAuditRecords([]);
-                  setBranchAuditDetailOpen(false);
-                  if (branchAuditRepoRoot) void loadBranchAuditRecords(branchAuditRepoRoot, value, branchAuditContext?.branch ?? undefined);
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => void insertBranchAuditPrompt(hasBranchAuditRecords ? 'regenerate' : 'generate')}
-                disabled={!branchAuditRepoRoot || !branchAuditBase.trim() || branchDiffLoading}
-                className="inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded-md bg-primary px-2.5 text-[11px] font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted-foreground active:scale-95"
-                title={t('rightSidebar.branchAuditGenerateTitle')}
-              >
-                {branchDiffLoading ? <RiLoader size={12} className="animate-spin" /> : <RiSparkles size={12} />}
-                {hasBranchAuditRecords ? t('rightSidebar.branchAuditRegenerate') : t('rightSidebar.branchAuditGenerate')}
-              </button>
-            </div>
-            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => void loadBranchDiff()}
-                disabled={!branchAuditRepoRoot || !branchAuditBase.trim() || branchDiffLoading}
-                className="inline-flex h-7 items-center gap-1 rounded-full bg-surface-2 px-2 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
-                title={t('rightSidebar.branchAuditRefreshDiff')}
-              >
-                {branchDiffLoading ? <RiLoader size={11} className="animate-spin" /> : <RiRefresh size={11} />}
-                {t('rightSidebar.branchAuditRefreshDiff')}
-              </button>
-              {branchAuditStaleCount > 0 && (
-                <button
-                  type="button"
-                  onClick={() => void insertBranchAuditPrompt('refresh-stale')}
-                  disabled={branchDiffLoading}
-                  className="inline-flex h-7 items-center gap-1 rounded-full bg-[rgb(var(--warning-rgb)_/_0.12)] px-2 text-[10px] font-semibold text-[color:var(--warning)] transition hover:bg-[rgb(var(--warning-rgb)_/_0.18)] disabled:opacity-50 active:scale-95"
-                  title={t('rightSidebar.branchAuditRefreshStaleTitle')}
-                >
-                  <RiSparkles size={11} />
-                  {t('rightSidebar.branchAuditRefreshStale')}
-                </button>
-              )}
-              {hasBranchAuditRecords && (
-                <button
-                  type="button"
-                  onClick={() => void openBranchAuditDetail()}
-                  className="inline-flex h-7 items-center gap-1 rounded-full bg-primary/15 px-2 text-[10px] font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
-                  title={t('rightSidebar.branchAuditCurrent')}
-                >
-                  <RiFileText size={11} />
-                  {t('rightSidebar.branchAuditView')}
-                </button>
-              )}
-              {hasBranchAuditRecords && (
-                <button
-                  type="button"
-                  onClick={() => void clearLoadedBranchAudit()}
-                  disabled={branchAuditClearing}
-                  className="inline-flex h-7 items-center gap-1 rounded-full bg-surface-2 px-2 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50 active:scale-95"
-                  title={t('rightSidebar.branchAuditClearTitle')}
-                >
-                  {branchAuditClearing ? <RiLoader size={11} className="animate-spin" /> : null}
-                  {t('rightSidebar.clearChangeAudit')}
-                </button>
-              )}
-            </div>
-            {(branchDiffError || branchAuditError) && (
-              <div className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">
-                {branchDiffError ?? branchAuditError}
-              </div>
-            )}
-            {branchDiff?.available && (
-              <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
-                <span className="rounded bg-surface-2 px-1.5 py-0.5">{branchDiff.baseRef}</span>
-                <span className="rounded bg-surface-2 px-1.5 py-0.5">{t('rightSidebar.branchAuditCommitCount', { count: branchDiff.commitCount ?? 0 })}</span>
-                <span className="rounded bg-surface-2 px-1.5 py-0.5">{t('rightSidebar.branchAuditFileCount', { count: branchDiff.files?.length ?? 0 })}</span>
-                {branchDiff.truncated && <span className="rounded bg-[rgb(var(--warning-rgb)_/_0.12)] px-1.5 py-0.5 text-[color:var(--warning)]">{t('rightSidebar.branchAuditTruncated')}</span>}
-              </div>
-            )}
-            {hasViewableBranchAudit ? (
-              <div className="mt-2 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
-                {branchAuditCurrentCount} hunk explained{branchAuditStaleCount > 0 ? ` · ${branchAuditStaleCount} stale` : ''}
-              </div>
-            ) : hasBranchAuditRecords ? (
-              <div className="mt-2 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
-                {t('rightSidebar.branchAuditSaved', { count: branchAuditRecords.length })}
-              </div>
-            ) : (
-              <div className="mt-2 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
-                {t('rightSidebar.branchAuditEmpty')}
-              </div>
-            )}
-          </div>
-          <div className="border-b border-border/10 px-1 py-3">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="min-w-0">
                 <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.branchSectionTitle')}</div>
-                <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{activeGitActionContext?.branch ?? 'HEAD'}</div>
+                <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{activeGitActionBranchLabel}</div>
               </div>
               <button
                 type="button"
@@ -6408,16 +6862,28 @@ export function RightSidebar(
                   const [hash, ...messageParts] = commit.split(/\s+/);
                   const message = messageParts.join(' ') || commit;
                   return (
-                    <div key={commit} className="flex min-w-0 items-start gap-2 rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[10px]">
+                    <button
+                      key={commit}
+                      type="button"
+                      onClick={() => void openCommitDiff(commit)}
+                      className="flex w-full min-w-0 items-start gap-2 rounded-md bg-surface-2 px-2 py-1.5 text-left font-mono text-[10px] transition hover:bg-surface-elevated active:scale-[0.99]"
+                      title={message}
+                    >
                       <span className="shrink-0 text-[color:var(--diff-hunk-accent)]">{hash}</span>
                       <span className="min-w-0 flex-1 truncate text-muted-foreground" title={message}>{message}</span>
-                    </div>
+                      {commitDiffLoading === hash && <RiLoader size={11} className="shrink-0 animate-spin text-muted-foreground" />}
+                    </button>
                   );
                 })}
               </div>
             ) : (
               <div className="rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                 {t('rightSidebar.recentCommitsEmpty')}
+              </div>
+            )}
+            {commitDiffError && (
+              <div className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">
+                {commitDiffError}
               </div>
             )}
           </div>
@@ -6691,82 +7157,26 @@ export function RightSidebar(
       : `${changeAuditTargetRepos.length} repos`;
 
   const changeAuditButton = rootPath ? (
-    <div className="relative inline-flex shrink-0">
-      <button
-        type="button"
-        onClick={() => {
-          if (showGitRepoFilter) setChangeAuditScopeOpen((open) => !open);
-          else insertChangeAuditPrompt();
-        }}
-        disabled={!rootPath}
-        className={`inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-[11px] font-medium transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
-          insertedReferenceKey === changeAuditPromptKey
-            ? 'bg-surface-elevated text-foreground'
-            : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
-        }`}
-        aria-label={t('rightSidebar.insertChangeAuditPrompt')}
-        title={showGitRepoFilter ? `${t('rightSidebar.changeAuditScopeLabel')}: ${changeAuditScopeLabel}` : t('rightSidebar.insertChangeAuditPromptTitle')}
-      >
-        <RiSparkles size={13} />
-        <span>{insertedReferenceKey === changeAuditPromptKey ? t('rightSidebar.inserted') : t('rightSidebar.changeAuditShort')}</span>
-        {showGitRepoFilter && <RiChevronDown size={11} className={`shrink-0 transition ${changeAuditScopeOpen ? 'rotate-180' : ''}`} />}
-      </button>
-      {showGitRepoFilter && changeAuditScopeOpen && (
-        <div className="absolute left-0 top-[calc(100%+4px)] z-menu-panel w-60 overflow-hidden rounded-lg border border-border/15 bg-surface/98 p-1 text-[10px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
-          <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-            {t('rightSidebar.changeAuditScopeLabel')}
-          </div>
-          <button
-            type="button"
-            onClick={() => toggleChangeAuditRepoRoot(null)}
-            className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left font-medium transition ${
-              changeAuditTargetsAllRepos
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
-            }`}
-          >
-            <span className="truncate">{t('rightSidebar.changeAuditScopeAll')}</span>
-            {changeAuditTargetsAllRepos && <span className="text-[10px]">✓</span>}
-          </button>
-          {gitRepoFilters.map((repo) => {
-            const selected = changeAuditTargetRepoRoots.includes(repo.root);
-            return (
-              <button
-                key={repo.root}
-                type="button"
-                onClick={() => toggleChangeAuditRepoRoot(repo.root)}
-                className={`mt-0.5 flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left font-medium transition ${
-                  selected
-                    ? 'bg-primary/15 text-primary'
-                    : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
-                }`}
-                title={repo.root}
-              >
-                <span className="min-w-0">
-                  <span className="block truncate">{repo.label}</span>
-                  {repo.branch && <span className="block truncate text-[9px] opacity-70">{repo.branch}</span>}
-                </span>
-                {selected && <span className="text-[10px]">✓</span>}
-              </button>
-            );
-          })}
-          <div className="mt-1 border-t border-border/15 p-1">
-            <button
-              type="button"
-              onClick={() => {
-                setChangeAuditScopeOpen(false);
-                insertChangeAuditPrompt();
-              }}
-              className="flex h-7 w-full items-center justify-center gap-1 rounded-md bg-primary/15 px-2 text-[11px] font-semibold text-primary transition hover:bg-primary/25 active:scale-95"
-              title={t('rightSidebar.insertChangeAuditPromptTitle')}
-            >
-              <RiSparkles size={12} />
-              {t('rightSidebar.changeAuditShort')}
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
+    <AuditPromptScopeButton
+      open={changeAuditScopeOpen}
+      onOpenChange={setChangeAuditScopeOpen}
+      showScopePicker={showGitRepoFilter}
+      selectedAll={changeAuditTargetsAllRepos}
+      repos={changeAuditScopeRepos}
+      selectedRoots={changeAuditTargetRepoRoots}
+      onToggleRepo={toggleChangeAuditRepoRoot}
+      onGenerate={() => insertChangeAuditPrompt()}
+      disabled={!rootPath}
+      inserted={insertedReferenceKey === changeAuditPromptKey}
+      buttonLabel={t('rightSidebar.changeAuditShort')}
+      insertedLabel={t('rightSidebar.inserted')}
+      title={t('rightSidebar.insertChangeAuditPromptTitle')}
+      ariaLabel={t('rightSidebar.insertChangeAuditPrompt')}
+      scopeTitle={t('rightSidebar.changeAuditScopeLabel')}
+      scopeLabel={changeAuditScopeLabel}
+      allLabel={t('rightSidebar.changeAuditScopeAll')}
+      generateLabel={t('rightSidebar.changeAuditShort')}
+    />
   ) : null;
 
   return (
@@ -6884,7 +7294,7 @@ export function RightSidebar(
                 <div className="flex shrink-0 items-center gap-0.5 rounded-full bg-surface/70 p-0.5 text-[10px] font-medium">
                   <button
                     type="button"
-                    onClick={() => setSearchMode('name')}
+                    onClick={() => updateSearchMode('name')}
                     aria-pressed={searchMode === 'name'}
                     className={`rounded-full px-2 py-0.5 transition active:scale-95 ${searchMode === 'name' ? 'bg-primary/15 text-primary' : 'text-muted-foreground/80 hover:text-foreground'}`}
                   >
@@ -6892,7 +7302,7 @@ export function RightSidebar(
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSearchMode('content')}
+                    onClick={() => updateSearchMode('content')}
                     aria-pressed={searchMode === 'content'}
                     className={`rounded-full px-2 py-0.5 transition active:scale-95 ${searchMode === 'content' ? 'bg-primary/15 text-primary' : 'text-muted-foreground/80 hover:text-foreground'}`}
                   >
@@ -6986,7 +7396,7 @@ export function RightSidebar(
                 {t('rightSidebar.stashAll')}
               </button>
             )}
-            {gitContext?.available && (
+            {gitContextInputText && gitContextText && (
               <>
                 <button
                   type="button"
@@ -7115,21 +7525,24 @@ export function RightSidebar(
       {/* Content */}
       <div className="min-h-0 flex-1 overflow-hidden bg-surface">
         <Pane active={gitPaneActive}>
-          {branchAuditDetailOpen ? (
+          {commitDiff ? (
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
-              <DiffReviewPanel
-                items={branchAuditReviewItems}
-                selectedKey={selectedBranchAuditFileKey}
-                onSelect={setSelectedBranchAuditFileKey}
-                emptyText={t('rightSidebar.branchAuditEmpty')}
+              <UniversalDiffReview
+                items={commitDiffReviewItems}
+                selectedKey={selectedCommitDiffFileKey}
+                onSelect={setSelectedCommitDiffFileKey}
+                emptyText={t('rightSidebar.noChanges')}
                 mobile={isMobile}
                 backLabel={t('rightSidebar.backToChangeList')}
-                headerTitle={t('rightSidebar.branchAuditTitle')}
-                headerMeta={`${branchDiff?.currentBranch ?? 'HEAD'} → ${branchDiff?.baseRef ?? branchAuditBase}`}
-                onClose={() => setBranchAuditDetailOpen(false)}
+                headerTitle={t('rightSidebar.recentCommitsTitle')}
+                headerMeta={`${commitDiff.headRef ?? ''}${commitDiff.commits?.[0] ? ` · ${commitDiff.commits[0]}` : ''}`}
+                onClose={() => {
+                  setCommitDiff(null);
+                  setSelectedCommitDiffFileKey(null);
+                }}
                 closeLabel={t('common.back')}
                 wrap={diffWrap}
-                onToggleWrap={isWide ? undefined : () => setDiffWrap((prev) => !prev)}
+                onToggleWrap={isWide ? undefined : toggleDiffWrap}
                 wrapTitle={t('rightSidebar.wrapLongLines')}
                 wrapOnLabel={t('rightSidebar.wrapOn')}
                 wrapOffLabel={t('rightSidebar.wrapOff')}
@@ -7138,12 +7551,35 @@ export function RightSidebar(
                 onReferenceCopied={markReferenceCopied}
                 insertedReferenceKey={insertedReferenceKey}
                 copiedReferenceKey={copiedReferenceKey}
-                referenceContext={{
-                  repoRoot: branchAuditRepoRoot,
-                  baseRef: branchDiff?.baseRef ?? branchAuditBase,
-                  branchName: branchDiff?.currentBranch ?? branchAuditContext?.branch,
-                  headRef: branchDiff?.headRef,
-                }}
+                onClearAuditRecord={handleClearAuditRecord}
+              />
+            </div>
+          ) : branchAuditDetailOpen ? (
+            <div className="flex h-full min-h-0 flex-col overflow-hidden">
+              <UniversalDiffReview
+                items={branchAuditReviewItems}
+                selectedKey={selectedBranchAuditFileKey}
+                onSelect={setSelectedBranchAuditFileKey}
+                emptyText={t('rightSidebar.branchAuditEmpty')}
+                mobile={isMobile}
+                backLabel={t('rightSidebar.backToChangeList')}
+                headerTitle={t('rightSidebar.branchAuditTitle')}
+                headerMeta={selectedBranchAuditHistoryGroup
+                  ? `${selectedBranchAuditHistoryGroup.repoLabel} · ${selectedBranchAuditHistoryGroup.branchName ?? 'HEAD'} → ${selectedBranchAuditHistoryGroup.baseRef}`
+                  : undefined}
+                onClose={() => setBranchAuditDetailOpen(false)}
+                closeLabel={t('common.back')}
+                wrap={diffWrap}
+                onToggleWrap={isWide ? undefined : toggleDiffWrap}
+                wrapTitle={t('rightSidebar.wrapLongLines')}
+                wrapOnLabel={t('rightSidebar.wrapOn')}
+                wrapOffLabel={t('rightSidebar.wrapOff')}
+                desktopLayout={isWide ? 'split' : 'stacked'}
+                onInsertDiffReference={insertContextText}
+                onReferenceCopied={markReferenceCopied}
+                insertedReferenceKey={insertedReferenceKey}
+                copiedReferenceKey={copiedReferenceKey}
+                onClearAuditRecord={handleClearAuditRecord}
               />
             </div>
           ) : (
@@ -7400,7 +7836,7 @@ export function RightSidebar(
 
         <Pane active={diffPaneActive} mounted={hasMountedDiffPane}>
           {isWide ? (
-            <ChangeDiffReview
+            <DiffReview
               mobile={false}
               desktopLayout="split"
               desktopSidePanel={gitContext?.available && showGitRepoFilter ? (
@@ -7459,6 +7895,7 @@ export function RightSidebar(
                   </div>
                   <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
                     {modeToggle}
+                    {renderDiffViewTypeToggle()}
                     {changeAuditButton}
                     {diffRefreshButton}
                   </div>
@@ -7491,27 +7928,6 @@ export function RightSidebar(
                       <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
                         {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
                       </div>
-                      {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
-                        <button
-                          type="button"
-                          onClick={() => insertChangeAuditPrompt('regenerate')}
-                          className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-                          title={t('rightSidebar.changeAuditRegenerate')}
-                        >
-                          {t('rightSidebar.changeAuditRegenerate')}
-                        </button>
-                      )}
-                      {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
-                        <button
-                          type="button"
-                          onClick={() => void clearLoadedChangeAudit()}
-                          disabled={changeAuditClearing}
-                          className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
-                          title={t('rightSidebar.clearChangeAuditTitle')}
-                        >
-                          {changeAuditClearing ? <RiLoader size={11} className="animate-spin" /> : t('rightSidebar.clearChangeAudit')}
-                        </button>
-                      )}
                     </div>
                   )}
                   {!activeGitRepoSummary && showGitRepoFilter && (
@@ -7522,16 +7938,18 @@ export function RightSidebar(
                   )}
                 </div>
               )}
-              streamItems={buildChangeDiffStreamItems()}
+              files={buildDiffReviewFiles()}
               activePane={diffPaneActive}
               wrap={diffWrap}
               showScrollHint={!diffWrap}
+              diffViewType={isWide ? diffViewType : 'unified'}
               reloadKey={diffRefreshKey}
               renderStreamBadge={(status) => <ChangeBadge status={status} />}
               onInsertDiffReference={insertContextText}
               onReferenceCopied={markReferenceCopied}
               insertedReferenceKey={insertedReferenceKey}
               copiedReferenceKey={copiedReferenceKey}
+              onClearAuditRecord={handleClearAuditRecord}
               onDetailScroll={syncSelectionFromDiffStream}
             />
           ) : (
@@ -7552,11 +7970,12 @@ export function RightSidebar(
                   </div>
                   <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
                     {renderDiffChangeModeToggle()}
+                    {renderDiffViewTypeToggle()}
                     {changeAuditButton}
                     {diffRefreshButton}
                     <button
                       type="button"
-                      onClick={() => setDiffWrap((prev) => !prev)}
+                      onClick={toggleDiffWrap}
                       aria-pressed={diffWrap}
                       title={t('rightSidebar.wrapLongLines')}
                       className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
@@ -7598,27 +8017,6 @@ export function RightSidebar(
                       <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
                         {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
                       </div>
-                      {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
-                        <button
-                          type="button"
-                          onClick={() => insertChangeAuditPrompt('regenerate')}
-                          className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-                          title={t('rightSidebar.changeAuditRegenerate')}
-                        >
-                          {t('rightSidebar.changeAuditRegenerate')}
-                        </button>
-                      )}
-                      {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
-                        <button
-                          type="button"
-                          onClick={() => void clearLoadedChangeAudit()}
-                          disabled={changeAuditClearing}
-                          className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
-                          title={t('rightSidebar.clearChangeAuditTitle')}
-                        >
-                          {changeAuditClearing ? <RiLoader size={11} className="animate-spin" /> : t('rightSidebar.clearChangeAudit')}
-                        </button>
-                      )}
                     </div>
                   )}
                   {!activeGitRepoSummary && showGitRepoFilter && (
@@ -7631,7 +8029,7 @@ export function RightSidebar(
                 </div>
               )}
               {isMobile ? (
-                <ChangeDiffReview
+                <DiffReview
                   mobile
                   backLabel={t('rightSidebar.backToChangeList')}
                   externalSwiperRef={mobileDiffSwiperRef}
@@ -7684,16 +8082,6 @@ export function RightSidebar(
                           <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
                             {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
                           </div>
-                          {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
-                            <button
-                              type="button"
-                              onClick={() => insertChangeAuditPrompt('regenerate')}
-                              className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-                              title={t('rightSidebar.changeAuditRegenerate')}
-                            >
-                              {t('rightSidebar.changeAuditRegenerate')}
-                            </button>
-                          )}
                         </div>
                       )}
                       {!activeGitRepoSummary && showGitRepoFilter && (
@@ -7733,7 +8121,7 @@ export function RightSidebar(
                       </button>
                       <button
                         type="button"
-                        onClick={() => setDiffWrap((prev) => !prev)}
+                        onClick={toggleDiffWrap}
                         aria-pressed={diffWrap}
                         title={t('rightSidebar.wrapLongLines')}
                         className={`inline-flex h-9 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-medium transition active:scale-95 ${
@@ -7748,20 +8136,22 @@ export function RightSidebar(
                     </div>
                   )}
                   detailContainerClassName="termdock-native-select termdock-diff-stream-scroller min-h-0"
-                  streamItems={buildChangeDiffStreamItems()}
+                  files={buildDiffReviewFiles()}
                   activePane={diffPaneActive}
                   wrap={diffWrap}
                   showScrollHint={!diffWrap}
+                  diffViewType="unified"
                   reloadKey={diffRefreshKey}
                   renderStreamBadge={(status) => <ChangeBadge status={status} />}
                   onInsertDiffReference={insertContextText}
                   onReferenceCopied={markReferenceCopied}
                   insertedReferenceKey={insertedReferenceKey}
                   copiedReferenceKey={copiedReferenceKey}
+                  onClearAuditRecord={handleClearAuditRecord}
                   onDetailScroll={syncSelectionFromDiffStream}
                 />
               ) : (
-                <ChangeDiffReview
+                <DiffReview
                   mobile={false}
                   desktopLayout="stacked"
                   backLabel={t('rightSidebar.backToChangeList')}
@@ -7817,11 +8207,12 @@ export function RightSidebar(
                       </div>
                       <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
                         {modeToggle}
+                        {renderDiffViewTypeToggle()}
                         {changeAuditButton}
                         {diffRefreshButton}
                         <button
                           type="button"
-                          onClick={() => setDiffWrap((prev) => !prev)}
+                          onClick={toggleDiffWrap}
                           aria-pressed={diffWrap}
                           title={t('rightSidebar.wrapLongLines')}
                           className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
@@ -7863,27 +8254,6 @@ export function RightSidebar(
                           <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
                             {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
                           </div>
-                          {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
-                            <button
-                              type="button"
-                              onClick={() => insertChangeAuditPrompt('regenerate')}
-                              className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-                              title={t('rightSidebar.changeAuditRegenerate')}
-                            >
-                              {t('rightSidebar.changeAuditRegenerate')}
-                            </button>
-                          )}
-                          {changeAuditRecords.length > 0 && !changeAuditTargetsAllRepos && (
-                            <button
-                              type="button"
-                              onClick={() => void clearLoadedChangeAudit()}
-                              disabled={changeAuditClearing}
-                              className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
-                              title={t('rightSidebar.clearChangeAuditTitle')}
-                            >
-                              {changeAuditClearing ? <RiLoader size={11} className="animate-spin" /> : t('rightSidebar.clearChangeAudit')}
-                            </button>
-                          )}
                         </div>
                       )}
                       {!activeGitRepoSummary && showGitRepoFilter && (
@@ -7894,16 +8264,18 @@ export function RightSidebar(
                       )}
                     </div>
                   )}
-                  streamItems={buildChangeDiffStreamItems()}
+                  files={buildDiffReviewFiles()}
                   activePane={diffPaneActive}
                   wrap={diffWrap}
                   showScrollHint={!diffWrap}
+                  diffViewType={isWide ? diffViewType : 'unified'}
                   reloadKey={diffRefreshKey}
                   renderStreamBadge={(status) => <ChangeBadge status={status} />}
                   onInsertDiffReference={insertContextText}
                   onReferenceCopied={markReferenceCopied}
                   insertedReferenceKey={insertedReferenceKey}
                   copiedReferenceKey={copiedReferenceKey}
+                  onClearAuditRecord={handleClearAuditRecord}
                   onDetailScroll={syncSelectionFromDiffStream}
                 />
               )}

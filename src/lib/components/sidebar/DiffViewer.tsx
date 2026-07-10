@@ -7,11 +7,15 @@ import { cancelIoSlot, getFileDiff, isPreviewableImagePath, readImagePreviewBlob
 import { useI18n } from '../../i18n';
 import { loadRefractor, resolveLanguage, MAX_HIGHLIGHT_BYTES, MAX_HIGHLIGHT_LINE_LENGTH, type RefractorLike } from '../../utils/syntaxHighlight';
 import { useReferenceLongPressCopy } from './referenceLongPress';
+import { readCache, writeCache } from '../../utils/localStorageCache';
 
 const MAX_DIFF_CACHE_ENTRIES = 24;
 const MAX_RENDER_DIFF_LINES = 8_000;
+const DIFF_VIEW_TYPE_STORAGE_KEY = 'termdock:diff-viewer:view-type:v1';
+const SPLIT_DIFF_MEDIA_QUERY = '(min-width: 900px)';
 
 type DiffLoadResult = FileDiffResponse;
+export type DiffViewType = 'unified' | 'split';
 
 const diffResultCache = new Map<string, DiffLoadResult>();
 const diffPromiseCache = new Map<string, Promise<DiffLoadResult>>();
@@ -212,6 +216,8 @@ interface DiffViewerProps {
   active?: boolean;
   auditRecords?: ChangeAuditRecord[];
   diffOverride?: string | null;
+  viewType?: DiffViewType;
+  onClearAuditRecord?: (id: string) => void;
   onSummaryChange?: (summary: { files: number; additions: number; deletions: number } | null) => void;
 }
 
@@ -337,6 +343,20 @@ function isDiffTooLargeToRender(diffText: string | null): boolean {
   return false;
 }
 
+function isDiffViewType(value: unknown): value is DiffViewType {
+  return value === 'unified' || value === 'split';
+}
+
+function readDiffViewType(): DiffViewType {
+  return readCache(DIFF_VIEW_TYPE_STORAGE_KEY, isDiffViewType) ?? 'unified';
+}
+
+function canUseSplitDiffView(): boolean {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia(SPLIT_DIFF_MEDIA_QUERY).matches;
+}
+
 /**
  * Inline hint that says "swipe to see more" above a file's diff row.
  * Self-dismisses on first tap so it doesn't get in the way of repeat
@@ -359,11 +379,13 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, auditRecords, diffOverride, onSummaryChange }: DiffViewerProps) {
+export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, auditRecords, diffOverride, viewType: controlledViewType, onClearAuditRecord, onSummaryChange }: DiffViewerProps) {
   const { t } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
   // global diff slot in the sidebar store.
+  const [preferredViewType, setPreferredViewType] = useState<DiffViewType>(() => readDiffViewType());
+  const [splitViewAvailable, setSplitViewAvailable] = useState(() => canUseSplitDiffView());
   const [diffContent, setDiffContent] = useState<string | null>(null);
   const [diffNotice, setDiffNotice] = useState<string | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
@@ -377,6 +399,21 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
   const rootPath = useSidebarStore((s) => s.rootPath);
   const previousReloadKeyRef = useRef(reloadKey);
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
+  const viewType: DiffViewType = (controlledViewType ?? preferredViewType) === 'split' && splitViewAvailable ? 'split' : 'unified';
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia(SPLIT_DIFF_MEDIA_QUERY);
+    const update = () => setSplitViewAvailable(media.matches);
+    update();
+    media.addEventListener?.('change', update);
+    return () => media.removeEventListener?.('change', update);
+  }, []);
+
+  const updateViewType = useCallback((next: DiffViewType) => {
+    setPreferredViewType(next);
+    writeCache(DIFF_VIEW_TYPE_STORAGE_KEY, next);
+  }, []);
   const changedFileRepoRoot = changedFile?.repoRoot ?? null;
   const changedFileStatus = changedFile?.status ?? null;
   const auditRepoRoot = changedFileRepoRoot ?? repoRoot ?? rootPath;
@@ -653,7 +690,7 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
       const canHighlight = Boolean(language && refractor?.registered(language));
       try {
         const hunkData = file.hunks as HunkData[];
-        const editEnhancers = [markEdits(hunkData, { type: 'line' })];
+        const editEnhancers = [markEdits(hunkData, { type: 'block' })];
         const tokens = canHighlight
           ? tokenize(hunkData, { highlight: true, refractor: refractor!, language: language!, enhancers: editEnhancers })
           : tokenize(hunkData, { enhancers: editEnhancers });
@@ -783,7 +820,7 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
               {t('diffViewer.binaryOrEmpty')}
             </div>
           ) : (
-            <div className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${wrap ? 'termdock-diff-wrap' : ''}`} data-sidebar-gesture-ignore>
+            <div className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${viewType === 'split' ? 'diff-split' : ''} ${wrap ? 'termdock-diff-wrap' : ''}`} data-sidebar-gesture-ignore>
               <div className="min-w-full">
                 {file.hunks.map((hunk, index) => {
                     const hunkDiffText = formatDiffReference([
@@ -821,13 +858,23 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
                                 <div className="mb-0.5 flex min-w-0 items-center gap-1.5">
                                   <span className="font-semibold text-foreground">{hunkAudit.current ? t('diffViewer.auditExplanation') : t('diffViewer.auditStale')}</span>
                                   <span className="font-mono text-[10px] text-muted-foreground">{hunkAudit.fingerprint}</span>
+                                  {onClearAuditRecord && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onClearAuditRecord((hunkAudit.current ?? hunkAudit.stale)!.id)}
+                                      className="ml-auto shrink-0 rounded p-0.5 text-muted-foreground/60 transition hover:bg-surface-2 hover:text-foreground"
+                                      title={t('diffViewer.auditClear')}
+                                    >
+                                      <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                                    </button>
+                                  )}
                                 </div>
                                 <div className="termdock-diff-audit-explanation min-w-0">{hunkAudit.current?.explanation ?? hunkAudit.stale?.explanation}</div>
                               </div>
                             )}
                         </div>
                         <Diff
-                          viewType="unified"
+                          viewType={viewType}
                           diffType={file.type}
                           hunks={[hunk]}
                           tokens={fileTokens.get(key)}
@@ -976,17 +1023,48 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
               <span className="text-[color:var(--diff-delete-strong)]">-{totalChanges.deletions}</span>
             </div>
           </div>
-          {onInsertDiffReference && (
-            <button
-              type="button"
-              onClick={insertWholeDiff}
-              {...getReferenceLongPressHandlers(formatDiffReference(diffContent ?? ''), wholeDiffReferenceKey)}
-              className={`inline-flex h-8 shrink-0 items-center rounded-full px-3 text-[11px] font-semibold transition active:scale-95 ${wholeDiffReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
-              title={t('diffViewer.insertAllDiff')}
-            >
-              {copiedReferenceKey === wholeDiffReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === wholeDiffReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertAllShort')}
-            </button>
-          )}
+          <div className="flex shrink-0 items-center gap-1.5">
+            <div className="inline-flex h-7 shrink-0 overflow-hidden rounded-full bg-surface-2 p-0.5" aria-label={t('diffViewer.view')}>
+              <button
+                type="button"
+                onClick={() => updateViewType('unified')}
+                aria-pressed={viewType === 'unified'}
+                className={`inline-flex h-6 items-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 ${
+                  viewType === 'unified'
+                    ? 'bg-surface-elevated text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+                title={t('diffViewer.unifiedMode')}
+              >
+                {t('diffViewer.unified')}
+              </button>
+              <button
+                type="button"
+                onClick={() => updateViewType('split')}
+                disabled={!splitViewAvailable}
+                aria-pressed={viewType === 'split'}
+                className={`inline-flex h-6 items-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 ${
+                  viewType === 'split'
+                    ? 'bg-surface-elevated text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+                title={splitViewAvailable ? t('diffViewer.splitMode') : t('diffViewer.unifiedMode')}
+              >
+                {t('diffViewer.split')}
+              </button>
+            </div>
+            {onInsertDiffReference && (
+              <button
+                type="button"
+                onClick={insertWholeDiff}
+                {...getReferenceLongPressHandlers(formatDiffReference(diffContent ?? ''), wholeDiffReferenceKey)}
+                className={`inline-flex h-8 shrink-0 items-center rounded-full px-3 text-[11px] font-semibold transition active:scale-95 ${wholeDiffReferenceActive ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary hover:bg-primary/25'}`}
+                title={t('diffViewer.insertAllDiff')}
+              >
+                {copiedReferenceKey === wholeDiffReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === wholeDiffReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertAllShort')}
+              </button>
+            )}
+          </div>
         </div>
       </div>
       {diffNoticeBanner}

@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import type { ChangeAuditRecord, GitChangedFile } from '../../terminal/api';
-import { DiffViewer } from './DiffViewer';
+import { DiffViewer, type DiffViewType } from './DiffViewer';
 
 export interface DiffStreamFile {
   path: string;
@@ -19,6 +19,7 @@ interface DiffStreamItemProps {
   eager?: boolean;
   wrap: boolean;
   showScrollHint: boolean;
+  viewType?: DiffViewType;
   reloadKey?: number;
   auditRecords: ChangeAuditRecord[];
   diffOverride?: string | null;
@@ -28,6 +29,7 @@ interface DiffStreamItemProps {
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
   onVisibleChange?: (visible: boolean) => void;
+  onClearAuditRecord?: (id: string) => void;
 }
 
 export function DiffStreamItem({
@@ -41,6 +43,7 @@ export function DiffStreamItem({
   eager = false,
   wrap,
   showScrollHint,
+  viewType,
   reloadKey = 0,
   auditRecords,
   diffOverride,
@@ -50,6 +53,7 @@ export function DiffStreamItem({
   insertedReferenceKey,
   copiedReferenceKey,
   onVisibleChange,
+  onClearAuditRecord,
 }: DiffStreamItemProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [visible, setVisible] = useState(eager);
@@ -65,11 +69,12 @@ export function DiffStreamItem({
       setVisible(true);
       return;
     }
+    const root = findScrollableDiffRoot(node);
     const observer = new IntersectionObserver((entries) => {
       const isVisible = entries.some((entry) => entry.isIntersecting);
       setVisible((current) => current || isVisible);
       onVisibleChange?.(isVisible);
-    }, { root: null, rootMargin: '720px 0px' });
+    }, { root, rootMargin: '360px 0px' });
     observer.observe(node);
     return () => observer.disconnect();
   }, [eager, onVisibleChange]);
@@ -100,10 +105,12 @@ export function DiffStreamItem({
           changedFile={file as GitChangedFile}
           wrap={wrap}
           showScrollHint={showScrollHint}
+          viewType={viewType}
           reloadKey={reloadKey}
           embedded
           auditRecords={auditRecords}
           diffOverride={diffOverride}
+          onClearAuditRecord={onClearAuditRecord}
           onInsertDiffReference={onInsertDiffReference}
           onReferenceCopied={onReferenceCopied}
           insertedReferenceKey={insertedReferenceKey}
@@ -116,4 +123,20 @@ export function DiffStreamItem({
       )}
     </div>
   );
+}
+
+function canScrollVertically(element: HTMLElement): boolean {
+  const overflowY = window.getComputedStyle(element).overflowY;
+  return (overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight + 1;
+}
+
+function findScrollableDiffRoot(node: HTMLElement): HTMLElement | null {
+  let current = node.parentElement;
+  while (current) {
+    if (current.classList.contains('termdock-diff-stream-scroller') && canScrollVertically(current)) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
 }

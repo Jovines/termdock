@@ -282,6 +282,7 @@ export const en: TranslationDictionary = {
     insertAllShort: 'Insert all',
     auditExplanation: 'Change meaning',
     auditStale: 'Explanation stale',
+    auditClear: 'Clear explanation',
     allDiffLabel: 'all changes',
     allChangesLabel: 'all changes',
     workingTree: 'Working tree changes',

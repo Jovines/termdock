@@ -5,7 +5,7 @@ import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout }
 import { TerminalViewport, type RefreshReason, type TerminalController } from '../terminal/TerminalViewport';
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
-import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, updateSessionInventoryEntry, uploadFiles } from '../../terminal/api';
+import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
 import { computeTerminalLogicalFocus } from '../../terminal/focus';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
@@ -15,7 +15,6 @@ import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../../terminal/settings';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
-import { useI18n } from '../../i18n';
 
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
@@ -67,7 +66,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   showDebug: externalShowDebug,
   onStatusChange,
 }) => {
-  const { t } = useI18n();
   // Use external fontSize from props, with local override support for pinch-to-zoom
   const [fontSize, setFontSize] = React.useState(terminalSettings.fontSize);
   const terminal = React.useMemo(() => createTermdockAPI(), []);
@@ -1507,25 +1505,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
   }, [appendToBuffer, reportFlowControl, sessionId]);
 
-  const shellQuotePath = React.useCallback((path: string) => `'${path.replace(/'/g, `'\\''`)}'`, []);
-
-  const handleDropFiles = React.useCallback(async (files: File[]) => {
-    const cwd = terminalState?.cwd || null;
-    const targetDir = cwd || '/tmp';
-    const terminalId = terminalIdRef.current;
-    if (!terminalId || files.length === 0) return;
-    try {
-      const result = await uploadFiles(targetDir, files);
-      const input = result.files.map((f) => shellQuotePath(f.path)).join(' ');
-      if (input) {
-        await terminal.sendInput(terminalId, `${input} `);
-        terminalControllerRef.current?.focus();
-      }
-    } catch (err) {
-      setConnectionError(err instanceof Error ? err.message : 'Failed to upload dropped file');
-    }
-  }, [terminalState?.cwd, shellQuotePath, terminal]);
-
   const handleEnsureSizeMatches = React.useCallback((reason: string) => {
     if (!isActiveRef.current) return;
     terminalControllerRef.current?.ensureSizeMatches(reason);
@@ -1827,8 +1806,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               enableTouchScroll={isMobile}
               mobileLongPressMode={mobileLongPressMode}
               autoFocus={!isMobile}
-              dropFilesHint={t('terminal.dropFilesToPastePaths')}
-              onDropFiles={handleDropFiles}
             />
           </ErrorBoundary>
         </div>

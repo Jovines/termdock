@@ -510,13 +510,28 @@ function getImageMimeType(filePath: string): string | null {
   return IMAGE_MIME_BY_EXT[path.extname(filePath).toLowerCase()] ?? null;
 }
 
-function toInlineFilename(name: string): string {
-  return name.replace(/["\\\r\n]/g, '_');
+function toContentDispositionFilename(name: string): string {
+  return name.replace(/["\\\r\n]/g, '_').replace(/[^\x20-\x7E]/g, '_');
+}
+
+function toRfc5987ValueChars(value: string): string {
+  return encodeURIComponent(value).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+export function buildContentDisposition(disposition: 'inline' | 'attachment', filename: string): string {
+  const fallback = toContentDispositionFilename(filename) || 'download';
+  return `${disposition}; filename="${fallback}"; filename*=UTF-8''${toRfc5987ValueChars(filename)}`;
 }
 
 function isPathInside(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+async function isWorkspaceGitRepositoryRoot(workspaceRoot: string, repoRoot: string, signal?: AbortSignal): Promise<boolean> {
+  if (isPathInside(workspaceRoot, repoRoot)) return true;
+  const { repositories } = await getCachedNestedGitRoots(workspaceRoot, { refresh: false, signal });
+  return repositories.some((repo) => repo.root === repoRoot && isPathInside(workspaceRoot, repo.displayRoot));
 }
 
 async function toGitPathspec(gitRoot: string, requestedPath: string): Promise<string> {
@@ -1929,6 +1944,57 @@ async function getBranchDiffPayload(
   };
 }
 
+async function getCommitDiffPayload(
+  workspaceRoot: string,
+  repoRoot: string,
+  commit: string,
+  signal: AbortSignal,
+): Promise<BranchDiffPayload> {
+  const trimmedCommit = commit.trim();
+  if (!isSafeGitRefName(trimmedCommit)) {
+    return { available: false, workspaceRoot, repoRoot, baseBranch: trimmedCommit, error: 'Invalid commit ref' };
+  }
+  const [currentBranch, headRef, subject, statResult, nameResult, diffResult] = await Promise.all([
+    execGit(['branch', '--show-current'], repoRoot, signal).catch(emptyOnNonAbortGitError),
+    execGit(['rev-parse', '--short=12', trimmedCommit], repoRoot, signal).catch(emptyOnNonAbortGitError),
+    execGit(['log', '-1', '--format=%s', trimmedCommit], repoRoot, signal).catch(emptyOnNonAbortGitError),
+    execGitLimited(['show', '--stat', '--format=', trimmedCommit], repoRoot, MAX_BRANCH_DIFF_STAT_BYTES, false, signal),
+    execGitLimited(['show', '--name-only', '--format=', trimmedCommit], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
+    execGitLimited(['show', '--format=', trimmedCommit], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
+  ]);
+  const diff = diffResult.stdout;
+  const stat = statResult.stdout.trim();
+  const files = Array.from(new Set(nameResult.stdout.split('\n').map((line) => line.trim()).filter(Boolean)));
+  const hunks = parseBranchDiffHunks(diff).map((hunk) => ({ ...hunk, source: 'committed' as const, commit: headRef.trim() || trimmedCommit }));
+  const fingerprint = buildChangeAuditFingerprint([
+    repoRoot,
+    trimmedCommit,
+    currentBranch.trim(),
+    headRef.trim(),
+    stat,
+    files.join('\n'),
+    subject.trim(),
+    diff,
+  ]);
+  return {
+    available: true,
+    workspaceRoot,
+    repoRoot,
+    baseRef: `${trimmedCommit}^`,
+    baseBranch: trimmedCommit,
+    currentBranch: currentBranch.trim() || null,
+    headRef: headRef.trim() || trimmedCommit,
+    diffFingerprint: fingerprint,
+    stat,
+    files,
+    hunks,
+    commits: [subject.trim()].filter(Boolean),
+    commitCount: subject.trim() ? 1 : 0,
+    diff,
+    truncated: statResult.truncated || nameResult.truncated || diffResult.truncated,
+  };
+}
+
 // In-memory cache for `git rev-parse --show-toplevel` results.
 // Key = requested cwd, Value = { root, expiresAt }. Invalidated quickly so
 // directory changes still propagate, but reused within the same UI burst
@@ -1963,7 +2029,10 @@ async function findGitRoot(cwd: string): Promise<string | null> {
     gitRootCache.set(cwd, { root, expiresAt: now + GIT_ROOT_CACHE_TTL_MS });
     return root;
   } catch {
-    gitRootCache.set(cwd, { root: null, expiresAt: now + GIT_ROOT_CACHE_TTL_MS });
+    // Do NOT cache null — a transient failure (timeout, lock contention, I/O
+    // delay) must not be mistaken for "not a git repository". On a real
+    // non-git directory git rev-parse fails instantly (< 50 ms), so the
+    // cost of retrying is negligible.
     return null;
   }
 }
@@ -2546,7 +2615,7 @@ router.get('/blob', async (req: Request, res: Response) => {
     res.setHeader('Last-Modified', stat.mtime.toUTCString());
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Disposition', `inline; filename="${toInlineFilename(path.basename(resolvedPath))}"`);
+    res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(resolvedPath)));
 
     const stream = fs.createReadStream(resolvedPath);
     controller.signal.addEventListener('abort', () => stream.destroy(controller.signal.reason instanceof Error ? controller.signal.reason : undefined), { once: true });
@@ -2612,7 +2681,7 @@ router.get('/download', async (req: Request, res: Response) => {
     res.setHeader('Last-Modified', stat.mtime.toUTCString());
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Disposition', `attachment; filename="${toInlineFilename(path.basename(resolvedPath))}"`);
+    res.setHeader('Content-Disposition', buildContentDisposition('attachment', path.basename(resolvedPath)));
 
     const stream = fs.createReadStream(resolvedPath);
     stream.on('error', (error) => {
@@ -3193,7 +3262,7 @@ router.get('/branch-diff', async (req: Request, res: Response) => {
       return;
     }
     const repoRoot = requestedRepoRoot ? await pathValidator.validatePathAsync(requestedRepoRoot) : workspaceGitRoot;
-    if (!isPathInside(workspaceGitRoot, repoRoot)) {
+    if (!(await isWorkspaceGitRepositoryRoot(workspaceGitRoot, repoRoot, controller.signal))) {
       res.status(400).json({ available: false, error: 'Repository is outside current workspace' });
       return;
     }
@@ -3227,6 +3296,76 @@ router.get('/branch-diff', async (req: Request, res: Response) => {
   } catch (error) {
     const payload = getErrorPayload(error);
     logFsIo({ id: requestId, action, op: 'git.branch-diff', startedAt, status: 'error', cwd, repoRoot: repoRootForLog, code: payload.code, error: payload.error, extra: { baseBranch, requestSlotId } });
+    res.status(error instanceof OperationTimeoutError ? 504 : 200).json({ available: false, ...payload });
+  } finally {
+    releaseIoSlot(requestSlotId, requestId);
+  }
+});
+
+router.get('/commit-diff', async (req: Request, res: Response) => {
+  const requestId = ++fsIoRequestSeq;
+  const startedAt = Date.now();
+  const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined;
+  const requestedRepoRoot = typeof req.query.repoRoot === 'string' ? req.query.repoRoot : undefined;
+  const commit = typeof req.query.commit === 'string' ? req.query.commit : '';
+  const action = getRequestAction(req, 'load_commit_diff');
+  const requestSlotId = typeof req.query.requestSlotId === 'string' ? req.query.requestSlotId : undefined;
+  const controller = new AbortController();
+  const abortRequest = () => {
+    if (!res.writableEnded) controller.abort(new SupersededRequestError('git.commit-diff'));
+  };
+  req.on('aborted', abortRequest);
+  res.on('close', abortRequest);
+  let repoRootForLog: string | null = null;
+  registerIoSlot({ requestId, op: 'git.commit-diff', action, slotId: requestSlotId, controller, cwd: requestedRepoRoot ?? cwd });
+  try {
+    if ((!cwd && !requestedRepoRoot) || !commit.trim()) {
+      res.json({ available: false, error: 'No cwd or commit provided' });
+      return;
+    }
+    const resolvedCwd = await pathValidator.validatePathAsync(cwd ?? requestedRepoRoot ?? '');
+    throwIfAborted(controller.signal, 'git.commit-diff');
+    const workspaceGitRoot = await findGitRoot(resolvedCwd);
+    throwIfAborted(controller.signal, 'git.commit-diff');
+    if (!workspaceGitRoot) {
+      res.json({ available: false, workspaceRoot: resolvedCwd, error: 'Not a git repository' });
+      return;
+    }
+    const repoRoot = requestedRepoRoot ? await pathValidator.validatePathAsync(requestedRepoRoot) : workspaceGitRoot;
+    if (!(await isWorkspaceGitRepositoryRoot(workspaceGitRoot, repoRoot, controller.signal))) {
+      res.status(400).json({ available: false, error: 'Repository is outside current workspace' });
+      return;
+    }
+    const actualRepoRoot = await findGitRoot(repoRoot);
+    if (!actualRepoRoot || actualRepoRoot !== repoRoot) {
+      res.status(400).json({ available: false, error: 'Repository root is invalid' });
+      return;
+    }
+    repoRootForLog = repoRoot;
+    const payload = await withTimeout(
+      getCommitDiffPayload(workspaceGitRoot, repoRoot, commit, controller.signal),
+      GIT_FILE_DIFF_ROUTE_TIMEOUT_MS,
+      'Commit diff took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+      'GIT_COMMIT_DIFF_TIMEOUT',
+      () => controller.abort(new OperationTimeoutError('Commit diff took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_COMMIT_DIFF_TIMEOUT')),
+    );
+    logFsIo({
+      id: requestId,
+      action,
+      op: 'git.commit-diff',
+      startedAt,
+      status: payload.available ? 'ok' : 'error',
+      cwd: resolvedCwd,
+      repoRoot,
+      count: payload.files?.length ?? 0,
+      error: payload.error,
+      truncated: payload.truncated,
+      extra: { commit, requestSlotId },
+    });
+    res.json(payload);
+  } catch (error) {
+    const payload = getErrorPayload(error);
+    logFsIo({ id: requestId, action, op: 'git.commit-diff', startedAt, status: 'error', cwd, repoRoot: repoRootForLog, code: payload.code, error: payload.error, extra: { commit, requestSlotId } });
     res.status(error instanceof OperationTimeoutError ? 504 : 200).json({ available: false, ...payload });
   } finally {
     releaseIoSlot(requestSlotId, requestId);
@@ -3454,6 +3593,10 @@ router.post('/upload', async (req: Request, res: Response) => {
 
     const bb = busboy({
       headers: req.headers,
+      // Browser FormData sends UTF-8 filenames, while busboy defaults bare
+      // multipart filename parameters to latin1. Without this, dropped files
+      // named with CJK characters turn into mojibake like "æ¥è¯¢".
+      defParamCharset: 'utf8',
       limits: { fileSize: MAX_UPLOAD_SIZE, files: MAX_UPLOAD_FILES },
     });
 

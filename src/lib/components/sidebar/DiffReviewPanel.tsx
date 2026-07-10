@@ -1,18 +1,18 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 import type { BranchAuditRecord, BranchDiffHunk, ChangeAuditRecord } from '../../terminal/api';
 import { type DiffNavigatorFile } from './DiffFileNavigator';
-import { ChangeDiffReview } from './ChangeDiffReview';
+import { DiffReview, type DiffReviewFile, ChangeBadge } from './DiffReview';
 
-export interface DiffReviewItem {
+export interface UniversalDiffReviewItem {
   key: string;
   hunk: BranchDiffHunk;
   current?: BranchAuditRecord | null;
   stale?: BranchAuditRecord | null;
 }
 
-interface DiffReviewPanelProps {
-  items: DiffReviewItem[];
+interface UniversalDiffReviewProps {
+  items: UniversalDiffReviewItem[];
   selectedKey: string | null;
   onSelect: (key: string) => void;
   emptyText: string;
@@ -32,12 +32,7 @@ interface DiffReviewPanelProps {
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
-  referenceContext?: {
-    repoRoot?: string | null;
-    baseRef?: string | null;
-    branchName?: string | null;
-    headRef?: string | null;
-  };
+  onClearAuditRecord?: (id: string) => void;
 }
 
 type ViewMode = 'list' | 'tree';
@@ -45,14 +40,30 @@ type ViewMode = 'list' | 'tree';
 interface FileAuditGroup {
   key: string;
   filePath: string;
-  items: DiffReviewItem[];
+  items: UniversalDiffReviewItem[];
   additions: number;
   deletions: number;
   explained: number;
   stale: number;
+  changeType: string;
 }
 
-function buildFileGroups(items: DiffReviewItem[]): FileAuditGroup[] {
+/** Derive git change type from hunk oldPath/newPath. */
+function deriveChangeType(items: UniversalDiffReviewItem[]): string {
+  for (const item of items) {
+    const hunk = item.hunk;
+    if (hunk.oldPath && hunk.newPath && hunk.oldPath !== hunk.newPath) return 'renamed';
+    if (!hunk.oldPath && hunk.newPath) return 'added';
+    if (hunk.oldPath && !hunk.newPath) return 'deleted';
+  }
+  const hasAdditions = items.some((item) => item.hunk.additions > 0);
+  const hasDeletions = items.some((item) => item.hunk.deletions > 0);
+  if (hasAdditions && !hasDeletions) return 'added';
+  if (!hasAdditions && hasDeletions) return 'deleted';
+  return 'modified';
+}
+
+function buildFileGroups(items: UniversalDiffReviewItem[]): FileAuditGroup[] {
   const map = new Map<string, FileAuditGroup>();
   for (const item of items) {
     const group = map.get(item.hunk.filePath) ?? {
@@ -63,6 +74,7 @@ function buildFileGroups(items: DiffReviewItem[]): FileAuditGroup[] {
       deletions: 0,
       explained: 0,
       stale: 0,
+      changeType: 'modified',
     };
     group.items.push(item);
     group.additions += item.hunk.additions;
@@ -71,7 +83,11 @@ function buildFileGroups(items: DiffReviewItem[]): FileAuditGroup[] {
     if (item.stale) group.stale += 1;
     map.set(item.hunk.filePath, group);
   }
-  return Array.from(map.values()).sort((a, b) => a.filePath.localeCompare(b.filePath));
+  const groups = Array.from(map.values()).sort((a, b) => a.filePath.localeCompare(b.filePath));
+  for (const group of groups) {
+    group.changeType = deriveChangeType(group.items);
+  }
+  return groups;
 }
 
 function toNavigatorFile(group: FileAuditGroup): DiffNavigatorFile {
@@ -81,7 +97,7 @@ function toNavigatorFile(group: FileAuditGroup): DiffNavigatorFile {
     path: group.filePath,
     displayName: name,
     displayDir: group.filePath.includes('/') ? group.filePath.slice(0, -name.length - 1) : '',
-    status: group.explained > 0 ? 'explained' : group.stale > 0 ? 'stale' : 'unknown',
+    status: group.changeType,
     title: group.filePath,
   };
 }
@@ -120,86 +136,52 @@ function combineFileHunkDiffs(diffs: string[], expectedHunkHeaders: string[]): s
   return combined.join('\n');
 }
 
-function buildFileAuditStreamItems({
+function buildDiffReviewFiles({
   groups,
-  selectedKey,
   onInsertDiffReference,
-  referenceContext,
 }: {
   groups: FileAuditGroup[];
-  selectedKey: string | null;
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
-  referenceContext?: {
-    repoRoot?: string | null;
-    baseRef?: string | null;
-    branchName?: string | null;
-    headRef?: string | null;
-  };
-}) {
-  return groups.map((group, index) => {
-          const diffText = combineFileHunkDiffs(
-            group.items.map((item) => item.hunk.diff || item.current?.diff || item.stale?.diff || ''),
-            group.items.map((item) => item.hunk.hunkHeader),
-          );
-          const auditRecords: ChangeAuditRecord[] = group.items
-            .map((item) => item.current ?? item.stale)
-            .filter((record): record is BranchAuditRecord => Boolean(record))
-            .map((record) => ({
-              id: record.id,
-              repoRoot: record.repoRoot,
-              filePath: record.filePath,
-              oldPath: record.oldPath,
-              newPath: record.newPath,
-              hunkHeader: record.hunkHeader,
-              hunkIndex: record.hunkIndex,
-              fingerprint: record.fingerprint,
-              diff: record.diff,
-              explanation: record.explanation,
-              summary: record.summary,
-              workspaceRoot: record.workspaceRoot,
-              generatedBy: record.generatedBy,
-              injectedAt: record.injectedAt,
-            }));
-          const name = group.filePath.split('/').pop() ?? group.filePath;
-          const dir = group.filePath.includes('/') ? group.filePath.slice(0, -name.length - 1) : '';
-          const sources = Array.from(new Set(group.items.map((item) => {
-            if (item.hunk.source === 'uncommitted') return 'uncommitted working tree';
-            if (item.hunk.source === 'committed' && item.hunk.commit) return `commit ${item.hunk.commit}`;
-            if (item.hunk.source === 'committed') return 'committed change';
-            return 'unknown source';
-          })));
-          const wrapReference = onInsertDiffReference
-            ? (label: string, text: string, key?: string) => {
-              const referenceText = [
-                'Branch diff reference',
-                `repo: ${referenceContext?.repoRoot ?? auditRecords[0]?.repoRoot ?? ''}`,
-                `base: ${referenceContext?.baseRef ?? ''}`,
-                `branch: ${referenceContext?.branchName ?? ''}`,
-                `head: ${referenceContext?.headRef ?? ''}`,
-                `file: ${group.filePath}`,
-                `hunks: ${group.items.map((item) => item.hunk.hunkHeader).join(' | ')}`,
-                `source: ${sources.join(', ')}`,
-                '',
-                text.trimEnd(),
-                '',
-              ].join('\n');
-              onInsertDiffReference(label, referenceText, key);
-            }
-            : undefined;
-          return {
-            key: group.key,
-            file: { path: group.filePath, absolutePath: auditRecords[0]?.repoRoot ? `${auditRecords[0].repoRoot}/${group.filePath}` : group.filePath, status: group.explained > 0 ? 'explained' : group.stale > 0 ? 'stale' : 'unknown' },
-            repoRoot: auditRecords[0]?.repoRoot ?? null,
-            selectionPath: group.key,
-            displayName: name,
-            displayDir: dir,
-            selected: selectedKey === group.key,
-            eager: index < 3 || selectedKey === group.key,
-            diffOverride: diffText,
-            auditRecords,
-            onInsertDiffReference: wrapReference,
-          };
-        });
+}): DiffReviewFile[] {
+  return groups.map((group) => {
+    const diffText = combineFileHunkDiffs(
+      group.items.map((item) => item.hunk.diff || item.current?.diff || item.stale?.diff || ''),
+      group.items.map((item) => item.hunk.hunkHeader),
+    );
+    const auditRecords: ChangeAuditRecord[] = group.items
+      .map((item) => item.current ?? item.stale)
+      .filter((record): record is BranchAuditRecord => Boolean(record))
+      .map((record) => ({
+        id: record.id,
+        repoRoot: record.repoRoot,
+        filePath: record.filePath,
+        oldPath: record.oldPath,
+        newPath: record.newPath,
+        hunkHeader: record.hunkHeader,
+        hunkIndex: record.hunkIndex,
+        fingerprint: record.fingerprint,
+        diff: record.diff,
+        explanation: record.explanation,
+        summary: record.summary,
+        workspaceRoot: record.workspaceRoot,
+        generatedBy: record.generatedBy,
+        injectedAt: record.injectedAt,
+      }));
+    const name = group.filePath.split('/').pop() ?? group.filePath;
+    const dir = group.filePath.includes('/') ? group.filePath.slice(0, -name.length - 1) : '';
+    return {
+      key: group.key,
+      path: group.filePath,
+      absolutePath: auditRecords[0]?.repoRoot ? `${auditRecords[0].repoRoot}/${group.filePath}` : group.filePath,
+      status: group.explained > 0 ? 'explained' : group.stale > 0 ? 'stale' : 'unknown',
+      repoRoot: auditRecords[0]?.repoRoot ?? null,
+      displayName: name,
+      displayDir: dir,
+      diffOverride: diffText,
+      auditRecords,
+      onInsertDiffReference: onInsertDiffReference,
+    };
+  });
 }
 
 function syncBranchSelectionFromStream(container: HTMLDivElement, selectedKey: string | null, onSelect: (key: string) => void): string | null {
@@ -227,16 +209,32 @@ function syncBranchSelectionFromStream(container: HTMLDivElement, selectedKey: s
 function scrollBranchDiffItemIntoView(key: string): void {
   const target = document.querySelector<HTMLElement>(`[data-diff-stream-item="${CSS.escape(key)}"]`);
   if (!target) return;
-  const scroller = target.closest<HTMLElement>('.termdock-diff-stream-scroller');
+  const scroller = findScrollableDiffStreamScroller(target);
   if (!scroller) {
     target.scrollIntoView({ block: 'start', behavior: 'smooth' });
     return;
   }
   const targetTop = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
-  scroller.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+  scroller.scrollTo({ top: Math.max(0, targetTop), behavior: 'instant' });
 }
 
-export function DiffReviewPanel({
+function isVerticalScroller(element: HTMLElement): boolean {
+  const overflowY = window.getComputedStyle(element).overflowY;
+  return (overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight + 1;
+}
+
+function findScrollableDiffStreamScroller(target: HTMLElement): HTMLElement | null {
+  let current: HTMLElement | null = target;
+  while (current) {
+    if (current.classList.contains('termdock-diff-stream-scroller') && isVerticalScroller(current)) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return target.closest<HTMLElement>('.termdock-diff-stream-scroller');
+}
+
+export function UniversalDiffReview({
   items,
   selectedKey,
   onSelect,
@@ -257,8 +255,8 @@ export function DiffReviewPanel({
   onReferenceCopied,
   insertedReferenceKey,
   copiedReferenceKey,
-  referenceContext,
-}: DiffReviewPanelProps) {
+  onClearAuditRecord,
+}: UniversalDiffReviewProps) {
   const groups = useMemo(() => buildFileGroups(items), [items]);
   const groupByKey = useMemo(() => new Map(groups.map((group) => [group.key, group])), [groups]);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
@@ -270,16 +268,19 @@ export function DiffReviewPanel({
     label: 'Branch audit',
     files: groups.map(toNavigatorFile),
   }], [groups]);
-  const streamItems = useMemo(() => buildFileAuditStreamItems({
+  const files = useMemo(() => buildDiffReviewFiles({
     groups,
-    selectedKey: effectiveKey,
     onInsertDiffReference,
-    referenceContext,
-  }), [effectiveKey, groups, onInsertDiffReference, referenceContext]);
+  }), [groups, onInsertDiffReference]);
 
+  // Auto-select fallback key when nothing is selected
+  const fallbackKeyRef = useRef(fallbackKey);
+  const onSelectRef = useRef(onSelect);
+  fallbackKeyRef.current = fallbackKey;
+  onSelectRef.current = onSelect;
   useEffect(() => {
-    if (!selectedKey && fallbackKey) onSelect(fallbackKey);
-  }, [fallbackKey, onSelect, selectedKey]);
+    if (!selectedKey && fallbackKeyRef.current) onSelectRef.current(fallbackKeyRef.current);
+  }, [selectedKey]);
 
   if (items.length === 0) {
     return (
@@ -367,7 +368,7 @@ export function DiffReviewPanel({
   ) : undefined;
 
   return (
-    <ChangeDiffReview
+    <DiffReview
       mobile={mobile}
       desktopLayout={desktopLayout}
       backLabel={backLabel}
@@ -391,10 +392,16 @@ export function DiffReviewPanel({
       }}
       renderLeading={(file) => {
         const group = groupByKey.get(file.key);
+        const auditMark = group?.explained ? 'E' : group?.stale ? 'S' : null;
         return (
-          <span className={`text-[10px] font-semibold ${group?.explained ? 'text-accent' : group?.stale ? 'text-[color:var(--warning)]' : 'text-muted-foreground'}`}>
-            {group?.explained ? 'E' : group?.stale ? 'S' : '-'}
-          </span>
+          <>
+            <ChangeBadge status={file.status} />
+            {auditMark && (
+              <span className={`text-[8px] font-bold leading-none ${group?.explained ? 'text-accent' : 'text-[color:var(--warning)]'}`}>
+                {auditMark}
+              </span>
+            )}
+          </>
         );
       }}
       renderTrailing={(file) => {
@@ -403,23 +410,31 @@ export function DiffReviewPanel({
       }}
       renderListHeader={renderHeader}
       renderMobileDetailHeader={mobileDetailHeader}
+      detailContainerClassName={mobile ? 'termdock-native-select termdock-diff-stream-scroller min-h-0' : undefined}
       onDetailScroll={(container) => syncBranchSelectionFromStream(container, effectiveKey, onSelect)}
-      streamItems={streamItems}
+      files={files}
       activePane
       wrap={wrap}
       showScrollHint={!wrap}
-      renderStreamBadge={(_, item) => {
+      renderStreamBadge={(status, item) => {
         const group = groupByKey.get(item.key);
+        const auditMark = group?.explained ? 'E' : group?.stale ? 'S' : null;
         return (
-          <span className={`flex w-4 shrink-0 justify-center text-[10px] font-semibold ${group?.explained ? 'text-accent' : group?.stale ? 'text-[color:var(--warning)]' : 'text-muted-foreground'}`}>
-            {group?.explained ? 'E' : group?.stale ? 'S' : '-'}
-          </span>
+          <>
+            <ChangeBadge status={status} />
+            {auditMark && (
+              <span className={`text-[8px] font-bold leading-none ${group?.explained ? 'text-accent' : 'text-[color:var(--warning)]'}`}>
+                {auditMark}
+              </span>
+            )}
+          </>
         );
       }}
       onInsertDiffReference={onInsertDiffReference}
       onReferenceCopied={onReferenceCopied}
       insertedReferenceKey={insertedReferenceKey}
       copiedReferenceKey={copiedReferenceKey}
+      onClearAuditRecord={onClearAuditRecord}
       emptyContent={<div className="rounded-lg bg-surface-2 px-3 py-6 text-center text-xs text-muted-foreground">{emptyText}</div>}
     />
   );
