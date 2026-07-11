@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { LoginScreen } from './lib/components/auth/LoginScreen';
+import { DiffLab } from './lib/components/sidebar/DiffLab';
+import { DiffReviewLab } from './lib/components/sidebar/DiffReviewLab';
 import { ErrorBoundary } from './lib/components/ui/ErrorBoundary';
 import { syncInitialViewportCssVars } from './lib/hooks/useViewportHeight';
 import { I18nProvider, useI18n } from './lib/i18n';
@@ -78,7 +80,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <I18nProvider>
       <ErrorBoundary>
-        <AuthGate />
+        {(() => {
+          const params = new URLSearchParams(window.location.search);
+          if (params.get('diff-review-lab') === '1') return <DiffReviewLab />;
+          if (params.get('diff-lab') === '1') return <DiffLab />;
+          return <AuthGate />;
+        })()}
       </ErrorBoundary>
     </I18nProvider>
   </React.StrictMode>

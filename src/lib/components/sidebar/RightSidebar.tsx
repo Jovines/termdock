@@ -30,15 +30,17 @@ import {
   EyeOff as RiEyeOff,
   Sparkles as RiSparkles,
   Upload as RiUpload,
+  Trash2 as RiTrash,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { UniversalDiffReview } from './DiffReviewPanel';
 import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
 import { DiffReview, type DiffReviewFile, ChangeBadge } from './DiffReview';
-import type { DiffViewType } from './DiffViewer';
+import { ChangeStatusWithAuditBadge, getFileAuditStatus } from './AuditStatusBadge';
+import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { cancelIoSlot, clearChangeAuditRecords, getBranchAuditRecords, getChangeAuditRecords, getCommitDiff, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getUntrackedFiles, isPreviewableImagePath, openInFileBrowser, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getChangeAuditRecords, getCommitDiff, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, isPreviewableImagePath, openInFileBrowser, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type GitActionRequest, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffAlgorithm, type GitDiffOptions, type GitDiffWhitespaceMode, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, refractorNodesToReact, type RefractorLike } from '../../utils/syntaxHighlight';
@@ -75,6 +77,10 @@ const MARKDOWN_VIEW_MODE_STORAGE_KEY = 'termdock:right-sidebar:markdown-view-mod
 const DIFF_CHANGE_LIST_MODE_STORAGE_KEY = 'termdock:right-sidebar:diff-change-list-mode:v1';
 const DIFF_WRAP_STORAGE_KEY = 'termdock:right-sidebar:diff-wrap:v1';
 const DIFF_VIEW_TYPE_STORAGE_KEY = 'termdock:diff-viewer:view-type:v1';
+const DIFF_INLINE_MODE_STORAGE_KEY = 'termdock:diff-viewer:inline-mode:v1';
+const DIFF_ALGORITHM_STORAGE_KEY = 'termdock:diff-viewer:algorithm:v1';
+const DIFF_WHITESPACE_STORAGE_KEY = 'termdock:diff-viewer:whitespace:v1';
+const DIFF_SETTINGS_CHANGED_EVENT = 'termdock:diff-settings-changed';
 const FILE_SEARCH_MODE_STORAGE_KEY = 'termdock:right-sidebar:file-search-mode:v1';
 const COLLAPSED_GIT_REPO_GROUPS_STORAGE_KEY = 'termdock:right-sidebar:collapsed-git-repo-groups:v1';
 const COLLAPSED_DIFF_DIRECTORIES_STORAGE_KEY = 'termdock:right-sidebar:collapsed-diff-directories:v1';
@@ -87,6 +93,8 @@ const FILE_PREVIEW_READING_STATE_WRITE_MS = 250;
 const FILE_TREE_WIDTH_WRITE_MS = 120;
 const GIT_BUNDLE_SLOW_MS = 700;
 const SIDEBAR_BACKGROUND_IO_DELAY_MS = 600;
+const MOBILE_SIDEBAR_OPEN_SETTLE_DELAY_MS = 320;
+const RECENT_COMMITS_PAGE_SIZE = 20;
 const FILE_PREVIEW_STUCK_TIMEOUT_MS = 12_000;
 const DEFAULT_FILE_TREE_WIDTH_PX = 300;
 const MIN_FILE_TREE_WIDTH_PX = 240;
@@ -136,7 +144,7 @@ function readMarkdownViewMode(): MarkdownViewMode {
 }
 
 function readDiffChangeListMode(): DiffChangeListMode {
-  return readCache(DIFF_CHANGE_LIST_MODE_STORAGE_KEY, isDiffChangeListMode) ?? 'list';
+  return readCache(DIFF_CHANGE_LIST_MODE_STORAGE_KEY, isDiffChangeListMode) ?? 'tree';
 }
 
 function isDiffWrap(value: unknown): value is boolean {
@@ -153,6 +161,30 @@ function isDiffViewType(value: unknown): value is DiffViewType {
 
 function readDiffViewType(): DiffViewType {
   return readCache(DIFF_VIEW_TYPE_STORAGE_KEY, isDiffViewType) ?? 'unified';
+}
+
+function isDiffInlineMode(value: unknown): value is DiffInlineMode {
+  return value === 'none' || value === 'words' || value === 'chars';
+}
+
+function readDiffInlineMode(): DiffInlineMode {
+  return readCache(DIFF_INLINE_MODE_STORAGE_KEY, isDiffInlineMode) ?? 'words';
+}
+
+function isGitDiffAlgorithm(value: unknown): value is GitDiffAlgorithm {
+  return value === 'default' || value === 'myers' || value === 'minimal' || value === 'patience' || value === 'histogram';
+}
+
+function readGitDiffAlgorithm(): GitDiffAlgorithm {
+  return readCache(DIFF_ALGORITHM_STORAGE_KEY, isGitDiffAlgorithm) ?? 'default';
+}
+
+function isGitDiffWhitespaceMode(value: unknown): value is GitDiffWhitespaceMode {
+  return value === 'default' || value === 'trim' || value === 'ignore' || value === 'ignore-blank-lines';
+}
+
+function readGitDiffWhitespaceMode(): GitDiffWhitespaceMode {
+  return readCache(DIFF_WHITESPACE_STORAGE_KEY, isGitDiffWhitespaceMode) ?? 'default';
 }
 
 function isFileSearchMode(value: unknown): value is FileSearchMode {
@@ -2881,10 +2913,10 @@ function writeFilePreviewReadingState(rootPath: string | null, filePath: string 
   writeCacheThrottled(FILE_PREVIEW_READING_STATE_STORAGE_KEY, Object.fromEntries(nextEntries), FILE_PREVIEW_READING_STATE_WRITE_MS);
 }
 
-function Pane({ active, mounted = true, children }: { active: boolean; mounted?: boolean; children: ReactNode }) {
+function Pane({ active, mounted = true, fallback = null, children }: { active: boolean; mounted?: boolean; fallback?: ReactNode; children: ReactNode | (() => ReactNode) }) {
   return (
     <div className={`h-full min-h-0 overflow-hidden bg-surface text-foreground ${active ? 'block' : 'hidden'}`} aria-hidden={!active}>
-      {mounted ? children : null}
+      {mounted ? (typeof children === 'function' ? children() : children) : fallback}
     </div>
   );
 }
@@ -3104,6 +3136,16 @@ function formatGitCacheAge(ms: number | null | undefined): string {
   return `${Math.floor(minutes / 60)}h ago`;
 }
 
+function formatAuditTimestamp(timestamp: number | null | undefined, locale: string): string | null {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) return null;
+  return new Intl.DateTimeFormat(locale === 'zh' ? 'zh-CN' : 'en', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp));
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
@@ -3111,6 +3153,10 @@ function isAbortError(error: unknown): boolean {
 function isGitBundleCancellation(bundle: GitBundleResponse): boolean {
   const error = bundle.error ?? bundle.context?.error ?? '';
   return error.includes('request was cancelled') || error.includes('IO_REQUEST_CANCELLED');
+}
+
+function isConfirmedNonGitContext(context: GitContext | null): boolean {
+  return context?.available === false && context.code === 'NOT_GIT_REPOSITORY';
 }
 
 function hasNativeTextSelection(): boolean {
@@ -4303,7 +4349,7 @@ export function RightSidebar(
     onCloseMarkdownImageLightbox,
   }: RightSidebarProps,
 ) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [fileQuery, setFileQuery] = useState('');
   const searchOpen = useSidebarStore((s) => s.rightSearchOpen);
   const setRightSearchOpen = useSidebarStore((s) => s.setRightSearchOpen);
@@ -4328,6 +4374,9 @@ export function RightSidebar(
   // user can opt in per-session without leaving the panel.
   const [diffWrap, setDiffWrap] = useState(() => readDiffWrap());
   const [diffViewType, setDiffViewType] = useState<DiffViewType>(() => readDiffViewType());
+  const [diffInlineMode, setDiffInlineMode] = useState<DiffInlineMode>(() => readDiffInlineMode());
+  const [diffAlgorithm, setDiffAlgorithm] = useState<GitDiffAlgorithm>(() => readGitDiffAlgorithm());
+  const [diffWhitespace, setDiffWhitespace] = useState<GitDiffWhitespaceMode>(() => readGitDiffWhitespaceMode());
   const [diffRefreshKey, setDiffRefreshKey] = useState(0);
   const [changeAuditRecords, setChangeAuditRecords] = useState<ChangeAuditRecord[]>([]);
   const [changeAuditLoading, setChangeAuditLoading] = useState(false);
@@ -4339,6 +4388,17 @@ export function RightSidebar(
   const [commitDiff, setCommitDiff] = useState<BranchDiffResponse | null>(null);
   const [commitDiffLoading, setCommitDiffLoading] = useState<string | null>(null);
   const [commitDiffError, setCommitDiffError] = useState<string | null>(null);
+  const [recentCommitsOpen, setRecentCommitsOpen] = useState(false);
+  const [recentCommitQuery, setRecentCommitQuery] = useState('');
+  const deferredRecentCommitQuery = useDeferredValue(recentCommitQuery);
+  const [recentCommits, setRecentCommits] = useState<string[]>([]);
+  const [recentCommitsLoading, setRecentCommitsLoading] = useState(false);
+  const [recentCommitsLoadingMore, setRecentCommitsLoadingMore] = useState(false);
+  const [recentCommitsError, setRecentCommitsError] = useState<string | null>(null);
+  const [recentCommitsHasMore, setRecentCommitsHasMore] = useState(false);
+  const recentCommitsAbortRef = useRef<AbortController | null>(null);
+  const recentCommitsRequestIdRef = useRef(0);
+  const recentCommitsStateRef = useRef({ count: 0, loading: false, loadingMore: false, hasMore: false });
   const [selectedCommitDiffFileKey, setSelectedCommitDiffFileKey] = useState<string | null>(null);
   const [branchAuditModuleOpen, setBranchAuditModuleOpen] = useState(() => readCache(BRANCH_AUDIT_MODULE_OPEN_STORAGE_KEY, isDiffWrap) ?? false);
   const [branchAuditScopeOpen, setBranchAuditScopeOpen] = useState(false);
@@ -4351,6 +4411,8 @@ export function RightSidebar(
   const [mobileFilePreviewOpen, setMobileFilePreviewOpen] = useState(false);
   const [mobileFileSlideIndex, setMobileFileSlideIndex] = useState(0);
   const [mobileDiffSlideIndex, setMobileDiffSlideIndex] = useState(0);
+  const [mobileSidebarSettled, setMobileSidebarSettled] = useState(false);
+  const [hasMountedGitPane, setHasMountedGitPane] = useState(false);
   const [hasMountedDiffPane, setHasMountedDiffPane] = useState(false);
   const [hasMountedPreviewPane, setHasMountedPreviewPane] = useState(false);
   const [runningGitAction, setRunningGitAction] = useState<{ action: GitActionKey; path?: string } | null>(null);
@@ -4370,6 +4432,38 @@ export function RightSidebar(
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
   const isWide = !isMobile && drawerWidthPx >= WIDE_WIDTH_THRESHOLD_PX;
+  // Unconditional probe (no debug flag) to settle which diff branch a real
+  // device renders. Fires when the diff pane becomes active. DIFF_VIEWER prefix
+  // bypasses server rate-limiting; lands in ~/.termdock/client.log.
+  const diffBranchProbeRef = useRef<string>('');
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const branch = isMobile ? 'mobile' : isWide ? 'wide' : 'medium';
+    const signature = `${branch}:${Math.round(drawerWidthPx)}`;
+    if (diffBranchProbeRef.current === signature) return;
+    diffBranchProbeRef.current = signature;
+    let anchorFlag = 'err';
+    try { anchorFlag = window.localStorage.getItem('termdock:debug:diff-review') ?? 'null'; } catch { /* ignore */ }
+    void fetch('/api/client-log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        level: 'info',
+        message: 'DIFF_VIEWER BRANCH_PROBE',
+        data: {
+          branch,
+          drawerWidthPx: Math.round(drawerWidthPx),
+          innerWidth: window.innerWidth,
+          innerHeight: window.innerHeight,
+          orientation: window.innerWidth > window.innerHeight ? 'landscape' : 'portrait',
+          anchorLogFlag: anchorFlag,
+          standalone: (window.navigator as unknown as { standalone?: boolean }).standalone ?? null,
+          displayMode: window.matchMedia?.('(display-mode: standalone)')?.matches ?? null,
+        },
+      }),
+      keepalive: true,
+    }).catch(() => undefined);
+  }, [drawerWidthPx, isMobile, isWide]);
   const [fileTreeWidthPx, setFileTreeWidthPx] = useState(() => readFileTreeWidth(drawerWidthPx));
   const rightTab = useSidebarStore((s) => s.rightTab);
   const setRightTab = useSidebarStore((s) => s.setRightTab);
@@ -4405,6 +4499,8 @@ export function RightSidebar(
   const gitBundlePendingRef = useRef<{ cwd: string; includeNested: boolean; refresh: boolean; promise: Promise<GitBundleResponse | null> } | null>(null);
   const untrackedRequestIdRef = useRef(0);
   const untrackedAbortRef = useRef<AbortController | null>(null);
+  const untrackedCompletedRootsRef = useRef<Set<string>>(new Set());
+  const untrackedRunningRootsRef = useRef<Set<string>>(new Set());
   const gitDetailsRequestIdRef = useRef(0);
   const gitDetailsAbortRef = useRef<AbortController | null>(null);
   const changeAuditRequestIdRef = useRef(0);
@@ -4419,6 +4515,10 @@ export function RightSidebar(
   const mobileDiffSwiperRef = useRef<SwiperInstance | null>(null);
   const [untrackedLoading, setUntrackedLoading] = useState(false);
   const [untrackedError, setUntrackedError] = useState<string | null>(null);
+
+  const isCurrentSidebarRoot = useCallback((expectedRootPath: string | null): boolean => (
+    useSidebarStore.getState().rootPath === expectedRootPath
+  ), []);
 
   useEffect(() => {
     if (!isOpen || typeof window === 'undefined') return;
@@ -4448,12 +4548,18 @@ export function RightSidebar(
 
   const loadUntrackedFiles = useCallback(async (cwd: string | undefined = rootPath ?? undefined) => {
     if (!cwd) return null;
+    if (untrackedCompletedRootsRef.current.has(cwd) || untrackedRunningRootsRef.current.has(cwd)) {
+      logGitBundleClientEvent('untracked_skip_cached', { cwd, rootPath, completed: untrackedCompletedRootsRef.current.has(cwd), running: untrackedRunningRootsRef.current.has(cwd) });
+      return null;
+    }
+    const expectedRootPath = rootPath;
     const requestId = untrackedRequestIdRef.current + 1;
     untrackedRequestIdRef.current = requestId;
     untrackedAbortRef.current?.abort();
     cancelIoSlot('right-sidebar-git-untracked');
     const controller = new AbortController();
     untrackedAbortRef.current = controller;
+    untrackedRunningRootsRef.current.add(cwd);
     setUntrackedLoading(true);
     setUntrackedError(null);
     logGitBundleClientEvent('untracked_start', { requestId, cwd, rootPath });
@@ -4465,37 +4571,45 @@ export function RightSidebar(
           logGitBundleClientEvent('untracked_stale_result', { requestId, activeRequestId: untrackedRequestIdRef.current, cwd, status: result.status });
           return null;
         }
+        if (!isCurrentSidebarRoot(expectedRootPath)) {
+          logGitBundleClientEvent('untracked_root_changed', { requestId, cwd, expectedRootPath, currentRootPath: useSidebarStore.getState().rootPath });
+          return null;
+        }
         await new Promise((resolve) => window.setTimeout(resolve, attempts < 10 ? 1000 : 3000));
         attempts += 1;
         result = await getUntrackedFiles(cwd, controller.signal, 'right-sidebar-git-untracked');
       }
-      if (untrackedRequestIdRef.current !== requestId) {
-        logGitBundleClientEvent('untracked_stale_result', { requestId, activeRequestId: untrackedRequestIdRef.current, cwd, files: result.files.length, status: result.status });
+      if (untrackedRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath)) {
+        logGitBundleClientEvent('untracked_stale_result', { requestId, activeRequestId: untrackedRequestIdRef.current, cwd, expectedRootPath, currentRootPath: useSidebarStore.getState().rootPath, files: result.files.length, status: result.status });
         return null;
       }
       if (result.status === 'done') {
         setChangedFiles(mergeChangedFileMaps(useSidebarStore.getState().changedFiles, result.files));
+        untrackedCompletedRootsRef.current.add(cwd);
         logGitBundleClientEvent('untracked_apply', { requestId, cwd, files: result.files.length });
         return result;
       }
       const message = result.error || (result.status === 'running' ? 'Untracked file scan is still running.' : 'Failed to scan untracked files');
+      untrackedCompletedRootsRef.current.add(cwd);
       setUntrackedError(message);
       logGitBundleClientEvent('untracked_error', { requestId, cwd, message, code: result.code, status: result.status });
       return null;
     } catch (error) {
-      if (untrackedRequestIdRef.current !== requestId || isAbortError(error)) {
-        logGitBundleClientEvent('untracked_aborted', { requestId, activeRequestId: untrackedRequestIdRef.current, cwd, message: error instanceof Error ? error.message : String(error) });
+      if (untrackedRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath) || isAbortError(error)) {
+        logGitBundleClientEvent('untracked_aborted', { requestId, activeRequestId: untrackedRequestIdRef.current, cwd, expectedRootPath, currentRootPath: useSidebarStore.getState().rootPath, message: error instanceof Error ? error.message : String(error) });
         return null;
       }
       const message = error instanceof Error ? error.message : 'Failed to scan untracked files';
+      untrackedCompletedRootsRef.current.add(cwd);
       setUntrackedError(message);
       logGitBundleClientEvent('untracked_error', { requestId, cwd, message });
       return null;
     } finally {
       if (untrackedAbortRef.current === controller) untrackedAbortRef.current = null;
-      if (untrackedRequestIdRef.current === requestId) setUntrackedLoading(false);
+      untrackedRunningRootsRef.current.delete(cwd);
+      if (untrackedRequestIdRef.current === requestId && isCurrentSidebarRoot(expectedRootPath)) setUntrackedLoading(false);
     }
-  }, [rootPath, setChangedFiles]);
+  }, [isCurrentSidebarRoot, rootPath, setChangedFiles]);
 
   const changeAuditTargetRepoRoots = useMemo(() => {
     const validRoots = new Set(gitRepoFilters.map((repo) => repo.root));
@@ -4522,6 +4636,7 @@ export function RightSidebar(
       setChangeAuditRecords([]);
       return;
     }
+    const expectedRootPath = rootPath;
     // Auxiliary data must stay out of per-file/per-hunk render paths. Load
     // audit explanations once at the sidebar level, then pass the snapshot to
     // DiffViewer. Do not fetch this from every DiffViewer instance; concurrent
@@ -4541,22 +4656,23 @@ export function RightSidebar(
           )))).flatMap((entry) => entry.records),
         }
         : await getChangeAuditRecords({}, controller.signal);
-      if (changeAuditRequestIdRef.current !== requestId) return;
+      if (changeAuditRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath)) return;
       setChangeAuditRecords(result.records);
     } catch (error) {
-      if (changeAuditRequestIdRef.current !== requestId || isAbortError(error)) return;
+      if (changeAuditRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath) || isAbortError(error)) return;
       setChangeAuditError(error instanceof Error ? error.message : 'Failed to load change audit explanations');
     } finally {
       if (changeAuditAbortRef.current === controller) changeAuditAbortRef.current = null;
-      if (changeAuditRequestIdRef.current === requestId) setChangeAuditLoading(false);
+      if (changeAuditRequestIdRef.current === requestId && isCurrentSidebarRoot(expectedRootPath)) setChangeAuditLoading(false);
     }
-  }, [changeAuditRecords.length, changeAuditTargetRepoRoots, rootPath]);
+  }, [changeAuditRecords.length, changeAuditTargetRepoRoots, isCurrentSidebarRoot, rootPath]);
 
   const loadBranchAuditRecords = useCallback(async (repoRoot: string | null, baseRef?: string | null, branchName?: string | null) => {
     if (!repoRoot && !rootPath) {
       setBranchAuditRecords([]);
       return;
     }
+    const expectedRootPath = rootPath;
     const requestId = branchAuditRequestIdRef.current + 1;
     branchAuditRequestIdRef.current = requestId;
     branchAuditAbortRef.current?.abort();
@@ -4569,17 +4685,26 @@ export function RightSidebar(
         baseRef,
         branchName,
       }, controller.signal);
-      if (branchAuditRequestIdRef.current !== requestId) return;
+      if (branchAuditRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath)) return;
       setBranchAuditRecords(result.records);
     } catch (error) {
-      if (branchAuditRequestIdRef.current !== requestId || isAbortError(error)) return;
+      if (branchAuditRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath) || isAbortError(error)) return;
       console.warn('[RightSidebar] Failed to load branch explanations', error);
     } finally {
       if (branchAuditAbortRef.current === controller) branchAuditAbortRef.current = null;
     }
-  }, [branchAuditRecords.length, rootPath]);
+  }, [branchAuditRecords.length, isCurrentSidebarRoot, rootPath]);
 
   const applyGitBundle = useCallback((bundle: GitBundleResponse, options: { reloadDiff?: boolean } = {}) => {
+    if (!isCurrentSidebarRoot(rootPath)) {
+      logGitBundleClientEvent('apply_skipped_root_changed', {
+        expectedRootPath: rootPath,
+        currentRootPath: useSidebarStore.getState().rootPath,
+        bundleRoot: bundle.context?.root,
+        files: bundle.files.length,
+      });
+      return;
+    }
     logGitBundleClientEvent(bundle.files.length === 0 ? 'empty_bundle' : 'apply', {
       rootPath,
       available: bundle.available,
@@ -4640,7 +4765,7 @@ export function RightSidebar(
       void loadUntrackedFiles(bundle.context.root);
     }
     void loadChangeAuditRecords();
-  }, [loadChangeAuditRecords, loadUntrackedFiles, rootPath, selectFile, setChangedFiles]);
+  }, [isCurrentSidebarRoot, loadChangeAuditRecords, loadUntrackedFiles, rootPath, selectFile, setChangedFiles]);
 
   useEffect(() => {
     gitBundleRequestIdRef.current += 1;
@@ -4662,6 +4787,10 @@ export function RightSidebar(
     branchAuditRequestIdRef.current += 1;
     branchAuditAbortRef.current?.abort();
     branchAuditAbortRef.current = null;
+    recentCommitsRequestIdRef.current += 1;
+    recentCommitsAbortRef.current?.abort();
+    cancelIoSlot('right-sidebar-recent-commits');
+    recentCommitsAbortRef.current = null;
     setUntrackedLoading(false);
     setUntrackedError(null);
     setChangeAuditRecords([]);
@@ -4674,6 +4803,13 @@ export function RightSidebar(
     setCommitDiff(null);
     setCommitDiffLoading(null);
     setCommitDiffError(null);
+    setRecentCommitsOpen(false);
+    setRecentCommitQuery('');
+    setRecentCommits([]);
+    setRecentCommitsLoading(false);
+    setRecentCommitsLoadingMore(false);
+    setRecentCommitsError(null);
+    setRecentCommitsHasMore(false);
     setSelectedCommitDiffFileKey(null);
     setSelectedBranchAuditHistoryKey(null);
     setSelectedBranchAuditFileKey(null);
@@ -4687,18 +4823,24 @@ export function RightSidebar(
     setBranchAuditIncludeUncommitted(branchAuditModuleState?.includeUncommitted ?? true);
     setGitDetailsLoading(false);
     setActiveGitRepoRoot(null);
-    const cached = rootPath ? useSidebarStore.getState().projectStateCache.get(rootPath) : undefined;
-    if (!cached || cached.changedFiles.size === 0) {
-      setGitRepositories([]);
-      setGitRepoFilters([]);
-      setGitContext(null);
-    }
+    untrackedCompletedRootsRef.current.clear();
+    untrackedRunningRootsRef.current.clear();
+    setRunningGitAction(null);
+    setCompletedGitAction(null);
+    setConfirmGitAction(null);
+    setGitActionError(null);
+    setGitRepositories([]);
+    setGitRepoFilters([]);
+    setGitContext(null);
+    lastAutoRefreshRootRef.current = null;
   }, [rootPath]);
 
   const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; includeNested?: boolean } = {}) => {
     if (!cwd) return null;
+    const expectedRootPath = rootPath;
     const includeNested = options.includeNested ?? true;
     const refresh = options.reloadDiff ?? false;
+    if (refresh) untrackedCompletedRootsRef.current.delete(cwd);
     const pending = gitBundlePendingRef.current;
     if (pending && pending.cwd === cwd && pending.includeNested === includeNested && pending.refresh === refresh) {
       logGitBundleClientEvent('reuse_pending', { cwd, includeNested, refresh });
@@ -4747,11 +4889,13 @@ export function RightSidebar(
         });
         return null;
       }
-      if (gitBundleRequestIdRef.current !== requestId) {
+      if (gitBundleRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath)) {
         logGitBundleClientEvent('stale_result', {
           requestId,
           activeRequestId: gitBundleRequestIdRef.current,
           cwd,
+          expectedRootPath,
+          currentRootPath: useSidebarStore.getState().rootPath,
           files: bundle.files.length,
           repositories: bundle.repositories?.length ?? 0,
         });
@@ -4763,7 +4907,7 @@ export function RightSidebar(
     gitBundlePendingRef.current = { cwd, includeNested, refresh, promise };
     try {
       const result = await promise;
-      if (gitBundleRequestIdRef.current === requestId && result) {
+      if (gitBundleRequestIdRef.current === requestId && result && isCurrentSidebarRoot(expectedRootPath)) {
         markGitBundleLoaded({
           cached: result.cached,
           stale: result.stale,
@@ -4771,17 +4915,19 @@ export function RightSidebar(
           nestedDeferred: result.nestedDeferred,
           untrackedDeferred: result.untrackedDeferred,
         });
-      } else if (gitBundleRequestIdRef.current === requestId) {
+      } else if (gitBundleRequestIdRef.current === requestId && isCurrentSidebarRoot(expectedRootPath)) {
         setGitBundleLoading(false);
         setGitBundleSlow(false);
       }
       return result;
     } catch (err) {
-      if (gitBundleRequestIdRef.current !== requestId || isAbortError(err)) {
+      if (gitBundleRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath) || isAbortError(err)) {
         logGitBundleClientEvent('aborted', {
           requestId,
           activeRequestId: gitBundleRequestIdRef.current,
           cwd,
+          expectedRootPath,
+          currentRootPath: useSidebarStore.getState().rootPath,
           message: err instanceof Error ? err.message : String(err),
         });
         return null;
@@ -4799,7 +4945,7 @@ export function RightSidebar(
       if (gitBundleAbortRef.current === controller) gitBundleAbortRef.current = null;
       if (gitBundlePendingRef.current?.promise === promise) gitBundlePendingRef.current = null;
     }
-  }, [applyGitBundle, changedFiles.size, gitBundleLastLoadedAt, markGitBundleLoaded, rootPath, setGitBundleError, setGitBundleLoading, setGitBundleSlow]);
+  }, [applyGitBundle, changedFiles.size, gitBundleLastLoadedAt, isCurrentSidebarRoot, markGitBundleLoaded, rootPath, setGitBundleError, setGitBundleLoading, setGitBundleSlow]);
 
   const refreshGitState = useCallback(async () => {
     if (!rootPath) return;
@@ -4808,6 +4954,7 @@ export function RightSidebar(
 
   const loadGitDetails = useCallback(async (cwd: string | undefined = rootPath ?? undefined) => {
     if (!cwd) return null;
+    const expectedRootPath = rootPath;
     const requestId = gitDetailsRequestIdRef.current + 1;
     gitDetailsRequestIdRef.current = requestId;
     gitDetailsAbortRef.current?.abort();
@@ -4817,7 +4964,7 @@ export function RightSidebar(
     setGitDetailsLoading(true);
     try {
       const context = await getGitContext(cwd, controller.signal, 'load_git_details', 'right-sidebar-git-details');
-      if (gitDetailsRequestIdRef.current !== requestId) return null;
+      if (gitDetailsRequestIdRef.current !== requestId || !isCurrentSidebarRoot(expectedRootPath)) return null;
       setGitRepositories((repos) => repos.map((repo) => (
         repo.root === context.root
           ? { ...repo, available: context.available, context, error: context.error }
@@ -4830,16 +4977,16 @@ export function RightSidebar(
       });
       return context;
     } catch (error) {
-      if (isAbortError(error)) return null;
+      if (isAbortError(error) || !isCurrentSidebarRoot(expectedRootPath)) return null;
       if (gitDetailsRequestIdRef.current === requestId) {
         setGitActionError(error instanceof Error ? error.message : 'Failed to load Git details');
       }
       return null;
     } finally {
       if (gitDetailsAbortRef.current === controller) gitDetailsAbortRef.current = null;
-      if (gitDetailsRequestIdRef.current === requestId) setGitDetailsLoading(false);
+      if (gitDetailsRequestIdRef.current === requestId && isCurrentSidebarRoot(expectedRootPath)) setGitDetailsLoading(false);
     }
-  }, [rootPath]);
+  }, [isCurrentSidebarRoot, rootPath]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -4856,16 +5003,36 @@ export function RightSidebar(
       untrackedAbortRef.current?.abort();
       cancelIoSlot('right-sidebar-git-untracked');
       untrackedAbortRef.current = null;
+      branchAuditRequestIdRef.current += 1;
+      branchAuditAbortRef.current?.abort();
+      branchAuditAbortRef.current = null;
+      recentCommitsRequestIdRef.current += 1;
+      recentCommitsAbortRef.current?.abort();
+      cancelIoSlot('right-sidebar-recent-commits');
+      recentCommitsAbortRef.current = null;
       setUntrackedLoading(false);
       setUntrackedError(null);
       setGitDetailsLoading(false);
+      setBranchAuditDetailOpen(false);
+      setCommitDiff(null);
+      setCommitDiffLoading(null);
+      setCommitDiffError(null);
+      setRecentCommitsOpen(false);
+      setRecentCommitQuery('');
+      setRecentCommits([]);
+      setRecentCommitsLoading(false);
+      setRecentCommitsLoadingMore(false);
+      setRecentCommitsError(null);
+      setRecentCommitsHasMore(false);
       setFileQuery('');
       setRightSearchOpen(false);
       setLineRange(null);
+      setHasMountedGitPane(false);
+      if (isMobile) setHasMountedDiffPane(false);
       // Keep diff view mode + wrap preference across close/open so the
       // user's chosen reading mode is preserved within a session.
     }
-  }, [isOpen, setRightSearchOpen]);
+  }, [isMobile, isOpen, setRightSearchOpen]);
 
   // Focus the search input whenever the search box opens, regardless of whether
   // it was opened by the header button or a global keyboard shortcut.
@@ -4956,7 +5123,7 @@ export function RightSidebar(
     }
   }, []);
 
-  const gitKnownUnavailable = Boolean(rootPath && gitBundleLastLoadedAt !== null && gitContext?.available === false);
+  const gitKnownUnavailable = Boolean(rootPath && gitBundleLastLoadedAt !== null && isConfirmedNonGitContext(gitContext));
   // Non-Git workspaces have no Git/Changes tabs. Only the medium-width desktop
   // layout keeps a separate "Preview" tab; mobile (overlay) and wide (side-by-
   // side) layouts render the preview without a dedicated tab.
@@ -4967,6 +5134,23 @@ export function RightSidebar(
   const filesPaneActive = effectiveRightTab === 'files';
   const diffPaneActive = effectiveRightTab === 'diff';
   const previewPaneActive = effectiveRightTab === 'file' && !isMobile && !isWide;
+  const mobileDiffDetailMounted = !isMobile || mobileDiffSlideIndex === 1;
+
+  useEffect(() => {
+    if (!isMobile) {
+      setMobileSidebarSettled(true);
+      return;
+    }
+    if (!isOpen) {
+      setMobileSidebarSettled(false);
+      return;
+    }
+    setMobileSidebarSettled(false);
+    const handle = window.setTimeout(() => {
+      setMobileSidebarSettled(true);
+    }, MOBILE_SIDEBAR_OPEN_SETTLE_DELAY_MS);
+    return () => window.clearTimeout(handle);
+  }, [isMobile, isOpen]);
 
   useEffect(() => {
     if (!isMobile || !diffPaneActive) return;
@@ -4994,23 +5178,38 @@ export function RightSidebar(
   // repositories, even a delayed status probe can compete with file browsing
   // for disk I/O, so Files stays isolated from Git unless the user asks for it.
   useEffect(() => {
-    const shouldLoadGit = gitPaneActive || diffPaneActive || rightTab === 'git' || rightTab === 'diff';
+    const shouldLoadGit = isOpen && (gitPaneActive || diffPaneActive);
     if (!shouldLoadGit || !rootPath || gitBundleLoading) return;
     if (!rootEntriesLoaded) return;
-    const hasCachedGitBundle = gitBundleLastLoadedAt !== null;
+    const hasCachedGitBundle = gitBundleLastLoadedAt !== null && (gitContext !== null || gitRepositories.length > 0);
     if (hasCachedGitBundle && lastAutoRefreshRootRef.current === rootPath) return;
     lastAutoRefreshRootRef.current = rootPath;
+    const delay = gitPaneActive && !isMobile ? 0 : SIDEBAR_BACKGROUND_IO_DELAY_MS;
     const handle = window.setTimeout(() => {
       void loadGitBundle(rootPath);
-    }, 0);
+    }, delay);
     return () => {
       window.clearTimeout(handle);
     };
-  }, [diffPaneActive, gitBundleLastLoadedAt, gitBundleLoading, gitPaneActive, isOpen, loadGitBundle, rightTab, rootEntriesLoaded, rootPath]);
+  }, [diffPaneActive, gitBundleLastLoadedAt, gitBundleLoading, gitContext, gitPaneActive, gitRepositories.length, isMobile, isOpen, loadGitBundle, rootEntriesLoaded, rootPath]);
 
   useEffect(() => {
-    if (diffPaneActive) setHasMountedDiffPane(true);
-  }, [diffPaneActive]);
+    if (!isOpen || !gitPaneActive) return;
+    if (!isMobile || mobileSidebarSettled) setHasMountedGitPane(true);
+  }, [gitPaneActive, isMobile, isOpen, mobileSidebarSettled]);
+
+  useEffect(() => {
+    if (!isOpen || gitPaneActive) return;
+    const handle = window.setTimeout(() => {
+      setHasMountedGitPane(true);
+    }, SIDEBAR_BACKGROUND_IO_DELAY_MS);
+    return () => window.clearTimeout(handle);
+  }, [gitPaneActive, isOpen]);
+
+  useEffect(() => {
+    if (!diffPaneActive) return;
+    if (!isMobile || mobileSidebarSettled) setHasMountedDiffPane(true);
+  }, [diffPaneActive, isMobile, mobileSidebarSettled]);
 
   useEffect(() => {
     if (previewPaneActive) setHasMountedPreviewPane(true);
@@ -5183,7 +5382,6 @@ export function RightSidebar(
   const canPinFileTreeRoot = Boolean(rootPath && fileTreeRoot && fileTreeRoot !== rootPath);
   const browsingOutsideProject = Boolean(rootPath && explorerRoot && explorerRoot !== rootPath);
   const fileTreeRootReferenceKey = fileTreeRoot ? `path:${fileTreeRoot}` : null;
-  const gitContextReferenceKey = 'context:git';
   const changeAuditPromptKey = 'context:change-audit';
 
   const goToExplorerParent = useCallback(() => {
@@ -5362,22 +5560,106 @@ export function RightSidebar(
       : gitDetailsLoading
         ? t('rightSidebar.gitActionRunning')
         : 'HEAD';
-  const gitDetailsLoaded = Boolean(activeGitActionContext?.available && activeGitActionContext.branches && activeGitActionContext.remotes && activeGitActionContext.recentCommits);
+  const gitDetailsLoaded = Boolean(
+    activeGitActionContext?.available
+      && activeGitActionContext.root === activeGitActionRepoRoot
+      && activeGitActionContext.status,
+  );
 
   useEffect(() => {
-    if (!activeGitActionRepoRoot || !gitContext?.available || !gitPaneActive || gitDetailsLoaded || gitDetailsLoading || requiresGitActionRepoSelection) return;
+    recentCommitsStateRef.current = {
+      count: recentCommits.length,
+      loading: recentCommitsLoading,
+      loadingMore: recentCommitsLoadingMore,
+      hasMore: recentCommitsHasMore,
+    };
+  }, [recentCommits.length, recentCommitsHasMore, recentCommitsLoading, recentCommitsLoadingMore]);
+
+  useEffect(() => {
+    recentCommitsRequestIdRef.current += 1;
+    recentCommitsAbortRef.current?.abort();
+    cancelIoSlot('right-sidebar-recent-commits');
+    recentCommitsAbortRef.current = null;
+    setRecentCommitQuery('');
+    setRecentCommits([]);
+    setRecentCommitsLoading(false);
+    setRecentCommitsLoadingMore(false);
+    setRecentCommitsError(null);
+    setRecentCommitsHasMore(false);
+  }, [activeGitActionRepoRoot]);
+
+  const loadRecentCommits = useCallback(async (options: { reset?: boolean } = {}) => {
+    if (!rootPath || !activeGitActionRepoRoot || requiresGitActionRepoSelection) return;
+    const reset = options.reset ?? false;
+    const snapshot = recentCommitsStateRef.current;
+    const skip = reset ? 0 : snapshot.count;
+    if (!reset && (snapshot.loading || snapshot.loadingMore || !snapshot.hasMore)) return;
+    const requestId = recentCommitsRequestIdRef.current + 1;
+    recentCommitsRequestIdRef.current = requestId;
+    recentCommitsAbortRef.current?.abort();
+    cancelIoSlot('right-sidebar-recent-commits');
+    const controller = new AbortController();
+    recentCommitsAbortRef.current = controller;
+    if (reset) setRecentCommitsLoading(true);
+    else setRecentCommitsLoadingMore(true);
+    setRecentCommitsError(null);
+    try {
+      const result = await getRecentCommits({
+        cwd: rootPath,
+        repoRoot: activeGitActionRepoRoot,
+        limit: RECENT_COMMITS_PAGE_SIZE,
+        skip,
+        query: deferredRecentCommitQuery.trim(),
+        requestSlotId: 'right-sidebar-recent-commits',
+      }, controller.signal);
+      if (recentCommitsRequestIdRef.current !== requestId) return;
+      if (!result.available) {
+        setRecentCommitsError(result.error ?? 'Recent commits are unavailable');
+        if (reset) setRecentCommits([]);
+        setRecentCommitsHasMore(false);
+        return;
+      }
+      setRecentCommits((current) => (reset ? result.commits : [...current, ...result.commits]));
+      setRecentCommitsHasMore(result.hasMore);
+    } catch (error) {
+      if (recentCommitsRequestIdRef.current !== requestId || isAbortError(error)) return;
+      setRecentCommitsError(error instanceof Error ? error.message : 'Failed to load recent commits');
+      if (reset) setRecentCommits([]);
+      setRecentCommitsHasMore(false);
+    } finally {
+      if (recentCommitsAbortRef.current === controller) recentCommitsAbortRef.current = null;
+      if (recentCommitsRequestIdRef.current === requestId) {
+        setRecentCommitsLoading(false);
+        setRecentCommitsLoadingMore(false);
+      }
+    }
+  }, [activeGitActionRepoRoot, deferredRecentCommitQuery, requiresGitActionRepoSelection, rootPath]);
+
+  useEffect(() => {
+    if (!recentCommitsOpen) return;
+    void loadRecentCommits({ reset: true });
+  }, [deferredRecentCommitQuery, loadRecentCommits, recentCommitsOpen]);
+
+  const handleRecentCommitsScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const target = event.currentTarget;
+    if (target.scrollTop + target.clientHeight < target.scrollHeight - 48) return;
+    void loadRecentCommits({ reset: false });
+  }, [loadRecentCommits]);
+
+  useEffect(() => {
+    if (!activeGitActionRepoRoot || !gitContext?.available || !gitPaneActive || !hasMountedGitPane || gitDetailsLoaded || gitDetailsLoading || requiresGitActionRepoSelection) return;
     void loadGitDetails(activeGitActionRepoRoot);
-  }, [activeGitActionRepoRoot, gitContext?.available, gitDetailsLoaded, gitDetailsLoading, gitPaneActive, loadGitDetails, requiresGitActionRepoSelection]);
+  }, [activeGitActionRepoRoot, gitContext?.available, gitDetailsLoaded, gitDetailsLoading, gitPaneActive, hasMountedGitPane, loadGitDetails, requiresGitActionRepoSelection]);
 
   useEffect(() => {
-    if (!isOpen || !diffPaneActive || !rootPath) return;
+    if (!isOpen || (!diffPaneActive && !gitPaneActive) || !rootPath) return;
     void loadChangeAuditRecords();
-  }, [diffPaneActive, isOpen, loadChangeAuditRecords, rootPath]);
+  }, [diffPaneActive, gitPaneActive, isOpen, loadChangeAuditRecords, rootPath]);
 
   useEffect(() => {
-    if (!isOpen || !gitPaneActive || !rootPath) return;
+    if (!isOpen || !gitPaneActive || !hasMountedGitPane || !branchAuditModuleOpen || !rootPath) return;
     void loadBranchAuditRecords(null);
-  }, [gitPaneActive, isOpen, loadBranchAuditRecords, rootPath]);
+  }, [branchAuditModuleOpen, gitPaneActive, hasMountedGitPane, isOpen, loadBranchAuditRecords, rootPath]);
 
   const activeGitRepoIndex = useMemo(() => {
     if (!activeGitRepoRoot) return 0;
@@ -5430,6 +5712,7 @@ export function RightSidebar(
       meta: remote === activeGitActionContext?.upstreamRemote ? t('rightSidebar.pushUpstreamBadge') : undefined,
     }));
   }, [activeGitActionContext?.remotes, activeGitActionContext?.upstreamRemote, t]);
+  const showPushRemotePicker = pushRemoteOptions.length > 1;
 
   const pushBranchOptions = useMemo<GitPickerOption[]>(() => {
     const options: GitPickerOption[] = [];
@@ -5524,6 +5807,9 @@ export function RightSidebar(
     if (requiresGitActionRepoSelection) {
       return { text: t('rightSidebar.selectRepositoryForGitActions'), className: 'bg-[rgb(var(--warning-rgb)_/_0.12)] text-[color:var(--warning)]' };
     }
+    if (!gitDetailsLoaded || gitDetailsLoading) {
+      return { text: t('common.loading'), className: 'bg-surface-2 text-muted-foreground' };
+    }
     if (!activeGitActionContext?.upstream) {
       return { text: t('rightSidebar.pushNoUpstream'), className: 'bg-surface-2 text-muted-foreground' };
     }
@@ -5539,7 +5825,7 @@ export function RightSidebar(
       return { text: t('rightSidebar.pushBehindCount', { count: behind }), className: 'bg-surface-2 text-[color:var(--diff-hunk-accent)]' };
     }
     return { text: t('rightSidebar.pushUpToDate'), className: 'bg-surface-2 text-muted-foreground' };
-  }, [activeGitActionContext?.ahead, activeGitActionContext?.behind, activeGitActionContext?.upstream, requiresGitActionRepoSelection, t]);
+  }, [activeGitActionContext?.ahead, activeGitActionContext?.behind, activeGitActionContext?.upstream, gitDetailsLoaded, gitDetailsLoading, requiresGitActionRepoSelection, t]);
 
   function renderGitRepoFilter() {
     if (!showGitRepoFilter) return null;
@@ -5868,23 +6154,40 @@ export function RightSidebar(
         auditRecords: [],
       }];
     }
-    return orderedChangedFilesForDiff.map(([key, file]) => {
+    return orderedChangedFilesForDiff.map(([, file]) => {
       const repoRoot = getChangedFileRepoRoot(file, rootPath);
       const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
+      const changedLines = (file.additions ?? 0) + (file.deletions ?? 0);
+      const estimatedHeight = Math.max(360, Math.min(12000, 120 + changedLines * 24));
       return {
-        key,
+        key: getChangedFileSelectionPath(file),
         path: file.path,
         absolutePath,
         status: file.status,
         repoRoot,
         displayName: getRelativeDisplayPath(absolutePath, repoRoot).name,
         displayDir: getRelativeDisplayPath(absolutePath, repoRoot).dir,
+        estimatedHeight,
         auditRecords: changeAuditRecords,
       };
     });
   }
 
+  function renderChangeNavigatorLeading(navigatorFile: DiffNavigatorFile) {
+    const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
+    const repoRoot = file ? getChangedFileRepoRoot(file, rootPath) : null;
+    const auditStatus = getFileAuditStatus(changeAuditRecords, repoRoot, file?.path ?? navigatorFile.path);
+    return (
+      <ChangeStatusWithAuditBadge
+        changeStatus={navigatorFile.status}
+        auditStatus={auditStatus}
+        renderChangeBadge={(status) => <ChangeBadge status={status} />}
+      />
+    );
+  }
+
   const syncSelectionFromDiffStream = useCallback((container: HTMLDivElement): string | null => {
+    if (isMobile) return null;
     const items = Array.from(container.querySelectorAll<HTMLElement>('[data-diff-stream-item]'));
     if (items.length === 0) return null;
     const containerTop = container.getBoundingClientRect().top;
@@ -5906,7 +6209,7 @@ export function RightSidebar(
     diffStreamSyncedPathRef.current = path;
     selectFile(path);
     return path;
-  }, [selectFile]);
+  }, [isMobile, selectFile]);
 
   const canPull = Boolean(!runningGitAction && activeGitActionRepoRoot && !requiresGitActionRepoSelection && (activeGitActionContext?.upstream || (pushRemote.trim() && pushBranch.trim())));
   const canPush = Boolean(!runningGitAction && activeGitActionRepoRoot && !requiresGitActionRepoSelection && (activeGitActionContext?.upstream || (pushRemote.trim() && pushBranch.trim())));
@@ -5981,6 +6284,7 @@ export function RightSidebar(
 
   useEffect(() => {
     if (!diffPaneActive || orderedChangedFilesForDiff.length === 0) return;
+    if (isMobile) return;
     const handles: number[] = [];
     const syncInitial = () => {
       const scroller = document.querySelector<HTMLDivElement>('.termdock-diff-stream-scroller');
@@ -6005,41 +6309,7 @@ export function RightSidebar(
       handles.push(window.setTimeout(syncInitial, delay));
     }
     return () => handles.forEach((handle) => window.clearTimeout(handle));
-  }, [diffPaneActive, orderedChangedFilesForDiff, selectFile, syncSelectionFromDiffStream]);
-
-  const gitContextText = useMemo(() => {
-    const context = activeGitActionContextReady ? activeGitActionContext : gitActionRepoOptions.length <= 1 ? gitContext : null;
-    if (!context?.available) return '';
-    const changed = (context.changedFiles ?? []).map((file) => `- ${file.status} ./${file.path}`).join('\n');
-    const commits = (context.recentCommits ?? []).map((commit) => `- ${commit}`).join('\n');
-    return [
-      `Git root: ${context.root ?? rootPath ?? ''}`,
-      `Branch: ${context.branch ?? '(detached or unknown)'}`,
-      changed ? `Changed files:\n${changed}` : 'Changed files: none',
-      commits ? `Recent commits:\n${commits}` : '',
-    ].filter(Boolean).join('\n\n');
-  }, [activeGitActionContext, activeGitActionContextReady, gitActionRepoOptions.length, gitContext, rootPath]);
-
-  const gitContextInputText = useMemo(() => {
-    const context = activeGitActionContextReady ? activeGitActionContext : gitActionRepoOptions.length <= 1 ? gitContext : null;
-    if (!context?.available) return '';
-    const changed = (context.changedFiles ?? [])
-      .slice(0, 20)
-      .map((file) => `${file.status} ./${file.path}`)
-      .join('; ');
-    const more = (context.changedFiles?.length ?? 0) > 20 ? '; ...' : '';
-    return [
-      `Git root: ${context.root ?? rootPath ?? ''}`,
-      `branch: ${context.branch ?? 'unknown'}`,
-      changed ? `changed files: ${changed}${more}` : 'changed files: none',
-    ].join('; ') + ' ';
-  }, [activeGitActionContext, activeGitActionContextReady, gitActionRepoOptions.length, gitContext, rootPath]);
-
-  const insertGitContext = useCallback(() => {
-    if (!gitContextInputText) return;
-    insertContextText(t('rightSidebar.gitInfo'), gitContextInputText, gitContextReferenceKey);
-    if (!push) onClose();
-  }, [gitContextInputText, insertContextText, onClose, push, t]);
+  }, [diffPaneActive, isMobile, orderedChangedFilesForDiff, selectFile, syncSelectionFromDiffStream]);
 
   const changeAuditPromptText = useMemo(() => {
     const quoteShellArg = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
@@ -6077,16 +6347,17 @@ export function RightSidebar(
       '执行步骤：',
       '1. 仅对“目标仓库”逐个执行 audit-export。嵌套子仓使用括号内 repo 绝对路径作为命令参数。',
       exportCommands,
-      '2. 读取 audit-export 输出的全部 hunks[].diff，先理解整批改动的业务目标、行为变化、文件分工和跨 hunk 依赖。',
-      '3. 以 audit-export 内置 diff 为分析依据。仅在单个 hunk 信息不足时执行：td audit-show <hunkId> <对应仓库绝对路径>',
-      '4. 在 ~/.termdock/change-audit/ 生成批量 payload JSON。',
+      '2. 先检查 audit-export 输出的 coverage[]：确认 untrackedFiles 是否为空、未跟踪文件是否已经出现在 hunks[].filePath 中；如果 coverage 显示存在未跟踪文件但 hunks[] 未包含对应文件，必须汇报导出异常，不要假装已解释。',
+      '3. 读取 audit-export 输出的全部 hunks[].diff，包含 tracked 与 untracked hunks；先理解整批改动的业务目标、行为变化、文件分工和跨 hunk 依赖。',
+      '4. 以 audit-export 内置 diff 为分析依据。仅在单个 hunk 信息不足时执行：td audit-show <hunkId> <对应仓库绝对路径>',
+      '5. 在 ~/.termdock/change-audit/ 生成批量 payload JSON。',
       '   mkdir -p ~/.termdock/change-audit',
-      '5. payload 顶层字段：workspaceRoot、repoRoot、generatedBy、records[]。',
-      '6. records[] 每条对应一个 hunk；从 audit-export hunk 原样复制 filePath、oldPath、newPath、hunkHeader、hunkIndex、fingerprint；补充 summary、explanation。',
-      '7. 写入 payload 后批量注入：',
+      '6. payload 顶层字段：workspaceRoot、repoRoot、generatedBy、records[]。',
+      '7. records[] 可对应整个 hunk，也可对应一个较大的 hunk section；从 audit-export hunk 原样复制 filePath、oldPath、newPath、hunkHeader、hunkIndex、fingerprint；如果解释的是 section，额外填写 sectionIndex 和 sectionFingerprint；补充 summary、explanation。',
+      '8. 写入 payload 后批量注入：',
       payloadCommand,
-      '8. 少量 hunk 或临时补单条时使用：printf "%s\\n" "这里写该 hunk 的改动意义" | td audit-explain <hunkId> <对应仓库绝对路径>',
-      '9. 注入成功后清理本次 payload：rm -f ~/.termdock/change-audit/payload*.json',
+      '9. 少量 hunk 或临时补单条时使用：printf "%s\\n" "这里写该 hunk 的改动意义" | td audit-explain <hunkId> <对应仓库绝对路径>',
+      '10. 注入成功后清理本次 payload：rm -f ~/.termdock/change-audit/payload*.json',
       '',
       '写作标准：',
       '- summary：一句话概括该 hunk 在整批改动中的职责。',
@@ -6129,6 +6400,38 @@ export function RightSidebar(
     }
   }, [loadChangeAuditRecords]);
 
+  const handleClearLoadedChangeAuditRecords = useCallback(async () => {
+    if (changeAuditRecords.length === 0) return;
+    const ids = changeAuditRecords.map((record) => record.id);
+    try {
+      await clearChangeAuditRecords({ ids });
+      setChangeAuditRecords((prev) => prev.filter((record) => !ids.includes(record.id)));
+      setChangeAuditError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to clear change audit explanations';
+      setChangeAuditError(t('rightSidebar.changeAuditClearFailed', { message }));
+      void loadChangeAuditRecords();
+    }
+  }, [changeAuditRecords, loadChangeAuditRecords, t]);
+
+  const handleClearBranchAuditGroup = useCallback(async (group: { key: string; records: BranchAuditRecord[] }) => {
+    if (group.records.length === 0) return;
+    const ids = group.records.map((record) => record.id);
+    try {
+      await clearBranchAuditRecords({ ids });
+      setBranchAuditRecords((prev) => prev.filter((record) => !ids.includes(record.id)));
+      if (selectedBranchAuditHistoryKey === group.key) {
+        setSelectedBranchAuditHistoryKey(null);
+        setBranchAuditDetailOpen(false);
+      }
+    } catch (error) {
+      setGitActionError(t('rightSidebar.branchAuditClearFailed', {
+        message: error instanceof Error ? error.message : 'Failed to clear branch explanation',
+      }));
+      void loadBranchAuditRecords(null);
+    }
+  }, [loadBranchAuditRecords, selectedBranchAuditHistoryKey, t]);
+
   const toggleChangeAuditRepoRoot = useCallback((repoRoot: string | null) => {
     setChangeAuditRepoRoots((current) => {
       if (repoRoot === null) {
@@ -6154,6 +6457,7 @@ export function RightSidebar(
   }, []);
 
   const branchAuditReviewItems = useMemo(() => {
+    if (!hasMountedGitPane) return [];
     const buildRecordHunk = (record: BranchAuditRecord): BranchDiffHunk => {
       const diff = record.diff ?? '';
       let additions = 0;
@@ -6187,10 +6491,11 @@ export function RightSidebar(
           stale: null,
         };
       });
-  }, [branchAuditRecords, selectedBranchAuditHistoryKey]);
+  }, [branchAuditRecords, hasMountedGitPane, selectedBranchAuditHistoryKey]);
 
   const hasBranchAuditRecords = branchAuditRecords.length > 0;
   const branchAuditHistoryGroups = useMemo(() => {
+    if (!hasMountedGitPane) return [];
     const groups = new Map<string, { key: string; repoRoot: string; repoLabel: string; baseRef: string; branchName: string | null; headRef: string | null; diffFingerprint: string | null; records: BranchAuditRecord[]; latestInjectedAt: number }>();
     for (const record of branchAuditRecords) {
       const repoRoot = record.repoRoot;
@@ -6213,7 +6518,7 @@ export function RightSidebar(
       groups.set(key, group);
     }
     return Array.from(groups.values()).sort((a, b) => b.latestInjectedAt - a.latestInjectedAt);
-  }, [branchAuditRecords, gitRepositoryByRoot, rootName]);
+  }, [branchAuditRecords, gitRepositoryByRoot, hasMountedGitPane, rootName]);
   const selectedBranchAuditHistoryGroup = useMemo(() => (
     selectedBranchAuditHistoryKey
       ? branchAuditHistoryGroups.find((group) => group.key === selectedBranchAuditHistoryKey) ?? null
@@ -6258,10 +6563,10 @@ export function RightSidebar(
       '',
       '操作指令：',
       branchAuditIncludeUncommitted
-        ? '1. 只针对上面列出的目标仓库导出分支 hunk；如果指定了目标分支，先在对应仓库切到目标分支。导出内容需要包含目标分支相对基线分支的提交改动，以及当前工作区本地未提交/未跟踪改动。嵌套子仓或软链接子仓必须使用括号里的仓库绝对路径，不要改用当前工作区根目录。示例：'
-        : '1. 只针对上面列出的目标仓库导出分支 hunk；如果指定了目标分支，先在对应仓库切到目标分支。不要包含本地未提交/未跟踪改动；如果导出结果里混入了本地工作区改动，生成解释时必须忽略这些本地改动，只解释目标分支相对基线分支的提交改动。嵌套子仓或软链接子仓必须使用括号里的仓库绝对路径，不要改用当前工作区根目录。示例：',
+        ? '1. 只针对上面列出的目标仓库导出分支 hunk；如果指定了目标分支，先在对应仓库切到目标分支。导出内容需要包含目标分支相对基线分支的提交改动，以及当前工作区 staged/unstaged/untracked 改动。嵌套子仓或软链接子仓必须使用括号里的仓库绝对路径，不要改用当前工作区根目录。示例：'
+        : '1. 只针对上面列出的目标仓库导出分支 hunk；如果指定了目标分支，先在对应仓库切到目标分支。不要包含本地 staged/unstaged/untracked 改动；如果导出结果里混入了本地工作区改动，生成解释时必须忽略这些本地改动，只解释目标分支相对基线分支的提交改动。嵌套子仓或软链接子仓必须使用括号里的仓库绝对路径，不要改用当前工作区根目录。示例：',
       exportCommands,
-      '2. 读取导出的 ~/.termdock/branch-audit/branch-audit-export*.json 中的 hunks[]，不要把临时 JSON 放到业务仓目录，也不要把整份 JSON 粘贴回输入框。',
+      '2. 读取导出的 ~/.termdock/branch-audit/branch-audit-export*.json 中的 hunks[]，不要把临时 JSON 放到业务仓目录，也不要把整份 JSON 粘贴回输入框。导出工具使用 base...HEAD（三点）生成 diff，只表示当前分支独有改动；提交列表使用 base..HEAD（两点）。',
       '3. 逐个 hunk 写解释。解释要说明该 hunk 的意图、解决的问题、影响、风险，以及它和其它 hunk 的关系；不要逐行复述 diff。',
       '4. 每个仓库分别生成 ~/.termdock/branch-audit/payload-<repo>.json，payload 必须包含 workspaceRoot、repoRoot、baseRef、branchName、headRef、diffFingerprint 和 records[]；records[] 每条 record 对应一个 hunk，diff 字段必须从 hunk.diff 原样复制。',
       '5. 把解释写入 payload 后执行：td branch-audit ~/.termdock/branch-audit/payload-<repo>.json',
@@ -6364,7 +6669,7 @@ export function RightSidebar(
     if (isMobile && path) {
       slideMobileDiffTo(1);
     }
-    if (path) {
+    if (path && !isMobile) {
       const scrollToTarget = () => scrollDiffStreamItemIntoView(path);
       window.setTimeout(scrollToTarget, 60);
       window.setTimeout(scrollToTarget, 260);
@@ -6424,20 +6729,44 @@ export function RightSidebar(
     writeCache(DIFF_VIEW_TYPE_STORAGE_KEY, mode);
   }, []);
 
+  useEffect(() => {
+    const syncDiffSettings = () => {
+      setDiffInlineMode(readDiffInlineMode());
+      setDiffAlgorithm(readGitDiffAlgorithm());
+      setDiffWhitespace(readGitDiffWhitespaceMode());
+      setDiffRefreshKey((key) => key + 1);
+    };
+    window.addEventListener(DIFF_SETTINGS_CHANGED_EVENT, syncDiffSettings);
+    window.addEventListener('storage', syncDiffSettings);
+    return () => {
+      window.removeEventListener(DIFF_SETTINGS_CHANGED_EVENT, syncDiffSettings);
+      window.removeEventListener('storage', syncDiffSettings);
+    };
+  }, []);
+
+  const diffOptions = useMemo<GitDiffOptions>(() => ({
+    algorithm: diffAlgorithm,
+    whitespace: diffWhitespace,
+  }), [diffAlgorithm, diffWhitespace]);
+
   const updateSearchMode = useCallback((mode: FileSearchMode) => {
     setSearchMode(mode);
     writeCache(FILE_SEARCH_MODE_STORAGE_KEY, mode);
   }, []);
 
   const runSidebarGitAction = useCallback(async (request: GitActionRequest, label: string, pathForBusy?: string): Promise<boolean> => {
+    const expectedRootPath = rootPath;
+    if (rootPath) untrackedCompletedRootsRef.current.delete(rootPath);
     setGitActionError(null);
     setCompletedGitAction(null);
     setRunningGitAction({ action: request.action, path: pathForBusy });
     try {
       const result = await runGitAction(request);
+      if (!isCurrentSidebarRoot(expectedRootPath)) return false;
       const refreshedBundle = rootPath
         ? await getGitBundle(rootPath, undefined, { includeNested: true, refresh: true, action: 'git_action_refresh', requestSlotId: buildGitBundleRequestSlotId(rootPath) }).catch(() => result.bundle)
         : result.bundle;
+      if (!isCurrentSidebarRoot(expectedRootPath)) return false;
       applyGitBundle(refreshedBundle, { reloadDiff: true });
       const completedAction = { action: request.action, path: pathForBusy, label };
       setCompletedGitAction(completedAction);
@@ -6451,9 +6780,9 @@ export function RightSidebar(
       setGitActionError(t('rightSidebar.gitActionFailed', { message: err instanceof Error ? err.message : 'Unknown error' }));
       return false;
     } finally {
-      setRunningGitAction(null);
+      if (isCurrentSidebarRoot(expectedRootPath)) setRunningGitAction(null);
     }
-  }, [applyGitBundle, rootPath, t]);
+  }, [applyGitBundle, isCurrentSidebarRoot, rootPath, t]);
 
   const runRepoGitAction = useCallback((action: 'stage-all' | 'stash-all', repoRoot: string | null, repoLabel: string) => {
     if (!repoRoot) return;
@@ -6646,6 +6975,38 @@ export function RightSidebar(
     />
   ) : null;
 
+  const latestChangeAuditTime = formatAuditTimestamp(
+    changeAuditRecords.reduce((latest, record) => Math.max(latest, record.injectedAt ?? 0), 0),
+    locale,
+  );
+
+  const changeAuditStatusBar = (changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) ? (
+    <div className="mt-2 flex min-w-0 items-center gap-2">
+      <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
+        <div className="truncate">
+          {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
+        </div>
+        {!changeAuditError && latestChangeAuditTime && (
+          <div className="mt-0.5 truncate text-[9px] text-muted-foreground/70">
+            {t('rightSidebar.changeAuditLoadedAt', { time: latestChangeAuditTime })}
+          </div>
+        )}
+      </div>
+      {changeAuditRecords.length > 0 && (
+        <button
+          type="button"
+          onClick={() => void handleClearLoadedChangeAuditRecords()}
+          disabled={changeAuditLoading}
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
+          title={t('rightSidebar.clearChangeAuditTitle')}
+          aria-label={t('rightSidebar.clearChangeAudit')}
+        >
+          <RiTrash size={12} />
+        </button>
+      )}
+    </div>
+  ) : null;
+
   const branchAuditModulePanel = rootPath ? (
     <div className="border-b border-border/10 px-1 py-3">
       <button
@@ -6673,10 +7034,7 @@ export function RightSidebar(
             </div>
             {branchAuditPromptButton}
           </div>
-          <div className="text-[10px] leading-relaxed text-muted-foreground">
-            {t('rightSidebar.changeAuditScopeLabel')}: {branchAuditScopeLabel}
-          </div>
-          <label className="mt-2 flex cursor-pointer items-center justify-between gap-3 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-foreground">
+                    <label className="mt-2 flex cursor-pointer items-center justify-between gap-3 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-foreground">
             <span className="min-w-0">
               <span className="block font-medium">包含本地未提交改动</span>
               <span className="block truncate text-[10px] text-muted-foreground">生成解释时纳入 working tree / untracked diff</span>
@@ -6690,27 +7048,45 @@ export function RightSidebar(
           </label>
           <div className="mt-2 space-y-1.5">
             {branchAuditHistoryGroups.length > 0 ? branchAuditHistoryGroups.slice(0, 8).map((group) => (
-              <button
+              <div
                 key={group.key}
-                type="button"
-                onClick={() => openBranchAuditHistoryDetail(group.key)}
-                className={`w-full rounded-md px-2 py-1.5 text-left transition active:scale-[0.99] ${
+                className={`flex min-w-0 items-start gap-1 rounded-md transition ${
                   selectedBranchAuditHistoryKey === group.key
                     ? 'bg-primary/15 text-primary'
                     : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
                 }`}
               >
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{group.repoLabel}</span>
-                  <span className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[10px] text-muted-foreground">{group.records.length} hunk</span>
-                </div>
-                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
-                  <span className="rounded bg-surface px-1.5 py-0.5">{group.branchName ?? 'HEAD'}</span>
-                  <span className="text-muted-foreground/60">→</span>
-                  <span className="rounded bg-surface px-1.5 py-0.5">{group.baseRef}</span>
-                  {group.diffFingerprint && <span className="rounded bg-surface px-1.5 py-0.5">{group.diffFingerprint}</span>}
-                </div>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => openBranchAuditHistoryDetail(group.key)}
+                  className="min-w-0 flex-1 px-2 py-1.5 text-left active:scale-[0.99]"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{group.repoLabel}</span>
+                    <span className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[10px] text-muted-foreground">{group.records.length} hunk</span>
+                  </div>
+                  <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+                    <span className="rounded bg-surface px-1.5 py-0.5">{group.branchName ?? 'HEAD'}</span>
+                    <span className="text-muted-foreground/60">→</span>
+                    <span className="rounded bg-surface px-1.5 py-0.5">{group.baseRef}</span>
+                    {group.diffFingerprint && <span className="rounded bg-surface px-1.5 py-0.5">{group.diffFingerprint}</span>}
+                  </div>
+                  {formatAuditTimestamp(group.latestInjectedAt, locale) && (
+                    <div className="mt-1 truncate text-[10px] text-muted-foreground/70">
+                      {t('rightSidebar.branchAuditGeneratedAt', { time: formatAuditTimestamp(group.latestInjectedAt, locale) ?? '' })}
+                    </div>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleClearBranchAuditGroup(group)}
+                  className="mr-1 mt-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface hover:text-foreground active:scale-95"
+                  title={t('rightSidebar.branchAuditClearTitle')}
+                  aria-label={t('rightSidebar.branchAuditClearTitle')}
+                >
+                  <RiTrash size={12} />
+                </button>
+              </div>
             )) : (
               <div className="rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                 {t('rightSidebar.branchAuditEmpty')}
@@ -6722,9 +7098,12 @@ export function RightSidebar(
     </div>
   ) : null;
 
-  const gitQuickActionsPanel = gitContext?.available && rootPath ? (
+  const gitQuickActionsPanel = hasMountedGitPane && rootPath && gitDetailsLoaded ? (
     <div className={effectiveGitQuickActionsOpen ? 'overflow-visible' : 'overflow-hidden'}>
       {branchAuditModulePanel}
+      <div className="px-1">
+        {changeAuditStatusBar}
+      </div>
       <button
         type="button"
         onClick={() => {
@@ -6745,7 +7124,7 @@ export function RightSidebar(
           {t('rightSidebar.gitQuickActions')}
         </span>
         <span className="flex shrink-0 items-center gap-1">
-          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${activeGitActionSummary.staged > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>
+          <span className={`inline-flex min-w-[4.5rem] items-center justify-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${activeGitActionSummary.staged > 0 ? 'bg-accent/10 text-accent' : 'bg-surface-2 text-muted-foreground'}`}>
             {gitDetailsLoading && <RiLoader size={10} className="animate-spin" />}
             {activeGitActionSummary.staged > 0 ? t('rightSidebar.stagedCount', { count: activeGitActionSummary.staged }) : t('rightSidebar.noStagedChangesShort')}
           </span>
@@ -6852,38 +7231,98 @@ export function RightSidebar(
             />
           </div>
           <div className="border-b border-border/10 px-1 py-3">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-[11px] font-semibold text-foreground">{t('rightSidebar.recentCommitsTitle')}</div>
-              {gitDetailsLoading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
-            </div>
-            {(activeGitActionContext?.recentCommits?.length ?? 0) > 0 ? (
-              <div className="space-y-1">
-                {activeGitActionContext?.recentCommits?.slice(0, 8).map((commit) => {
-                  const [hash, ...messageParts] = commit.split(/\s+/);
-                  const message = messageParts.join(' ') || commit;
-                  return (
+            <button
+              type="button"
+              onClick={() => setRecentCommitsOpen((open) => !open)}
+              className="group flex w-full items-center justify-between gap-2 rounded-lg px-1 py-1.5 text-left transition hover:bg-surface-2 active:scale-[0.99]"
+              aria-expanded={recentCommitsOpen}
+            >
+              <span className="min-w-0 text-[11px] font-semibold text-foreground">{t('rightSidebar.recentCommitsTitle')}</span>
+              <span className="flex shrink-0 items-center gap-1.5">
+                {recentCommitsLoading && <RiLoader size={12} className="animate-spin text-muted-foreground" />}
+                <span className={`flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition group-hover:bg-surface-elevated group-hover:text-foreground ${recentCommitsOpen ? 'rotate-90' : ''}`}>
+                  <RiChevronRight size={13} />
+                </span>
+              </span>
+            </button>
+            {recentCommitsOpen && (
+              <div className="mt-2 space-y-2">
+                <div className="flex items-center gap-2 rounded-md bg-surface-2 px-2 py-1.5 text-muted-foreground focus-within:bg-surface-elevated">
+                  <RiSearch size={12} className="shrink-0" />
+                  <input
+                    value={recentCommitQuery}
+                    onChange={(event) => setRecentCommitQuery(event.target.value)}
+                    placeholder={t('rightSidebar.recentCommitsSearchPlaceholder')}
+                    className="min-w-0 flex-1 bg-transparent text-[12px] text-foreground placeholder:text-muted-foreground"
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  {recentCommitQuery && (
                     <button
-                      key={commit}
                       type="button"
-                      onClick={() => void openCommitDiff(commit)}
-                      className="flex w-full min-w-0 items-start gap-2 rounded-md bg-surface-2 px-2 py-1.5 text-left font-mono text-[10px] transition hover:bg-surface-elevated active:scale-[0.99]"
-                      title={message}
+                      onClick={() => setRecentCommitQuery('')}
+                      className="rounded-full p-0.5 text-muted-foreground hover:bg-surface hover:text-foreground"
+                      aria-label={t('rightSidebar.clearSearch')}
                     >
-                      <span className="shrink-0 text-[color:var(--diff-hunk-accent)]">{hash}</span>
-                      <span className="min-w-0 flex-1 truncate text-muted-foreground" title={message}>{message}</span>
-                      {commitDiffLoading === hash && <RiLoader size={11} className="shrink-0 animate-spin text-muted-foreground" />}
+                      <RiCloseLine size={12} />
                     </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
-                {t('rightSidebar.recentCommitsEmpty')}
+                  )}
+                </div>
+                <div className="max-h-56 space-y-1 overflow-y-auto overscroll-contain pr-1" onScroll={handleRecentCommitsScroll}>
+                  {recentCommits.length > 0 ? (
+                    recentCommits.map((commit) => {
+                      const [hash, ...messageParts] = commit.split(/\s+/);
+                      const message = messageParts.join(' ') || commit;
+                      return (
+                        <button
+                          key={commit}
+                          type="button"
+                          onClick={() => void openCommitDiff(commit)}
+                          className="flex w-full min-w-0 items-start gap-2 rounded-md bg-surface-2 px-2 py-1.5 text-left font-mono text-[10px] transition hover:bg-surface-elevated active:scale-[0.99]"
+                          title={message}
+                        >
+                          <span className="shrink-0 text-[color:var(--diff-hunk-accent)]">{hash}</span>
+                          <span className="min-w-0 flex-1 truncate text-muted-foreground" title={message}>{message}</span>
+                          {commitDiffLoading === hash && <RiLoader size={11} className="shrink-0 animate-spin text-muted-foreground" />}
+                        </button>
+                      );
+                    })
+                  ) : recentCommitsLoading ? (
+                    <div className="rounded-md bg-surface-2 px-2 py-2 text-center text-[11px] text-muted-foreground">
+                      {t('common.loading')}
+                    </div>
+                  ) : (
+                    <div className="rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
+                      {t('rightSidebar.recentCommitsEmpty')}
+                    </div>
+                  )}
+                  {recentCommitsLoadingMore && (
+                    <div className="flex justify-center rounded-md bg-surface-2 px-2 py-2 text-muted-foreground">
+                      <RiLoader size={12} className="animate-spin" />
+                    </div>
+                  )}
+                  {recentCommitsHasMore && !recentCommitsLoadingMore && recentCommits.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void loadRecentCommits({ reset: false })}
+                      className="w-full rounded-md bg-surface-2 px-2 py-1.5 text-[11px] font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                    >
+                      {t('rightSidebar.recentCommitsLoadMore')}
+                    </button>
+                  )}
+                </div>
               </div>
             )}
             {commitDiffError && (
               <div className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">
                 {commitDiffError}
+              </div>
+            )}
+            {recentCommitsError && (
+              <div className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">
+                {recentCommitsError}
               </div>
             )}
           </div>
@@ -6895,7 +7334,7 @@ export function RightSidebar(
                   type="button"
                   onClick={() => void handleQuickPull()}
                   disabled={!canPull}
-                  className={`relative inline-flex h-7 items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${pullActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
+                  className={`relative inline-flex h-7 min-w-[3.25rem] items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${pullActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
                   title={t('rightSidebar.pullChanges')}
                 >
                   <span className={runningGitAction?.action === 'pull' || pullActionCompleted ? 'opacity-0' : ''}>{t('rightSidebar.pullChanges')}</span>
@@ -6906,7 +7345,7 @@ export function RightSidebar(
                   type="button"
                   onClick={() => void handleQuickPush()}
                   disabled={!canPush}
-                  className={`relative inline-flex h-7 items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${pushActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
+                  className={`relative inline-flex h-7 min-w-[3.25rem] items-center justify-center rounded-md px-2.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 ${pushActionCompleted ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-surface-2 text-foreground hover:bg-surface-elevated'}`}
                   title={t('rightSidebar.pushChanges')}
                 >
                   <span className={runningGitAction?.action === 'push' || pushActionCompleted ? 'opacity-0' : ''}>{t('rightSidebar.pushChanges')}</span>
@@ -6920,19 +7359,23 @@ export function RightSidebar(
               title={activeGitActionContext?.upstream ?? undefined}
             >
               <span className="truncate font-medium">{pushSyncInfo.text}</span>
-              {activeGitActionContext?.upstream && <span className="shrink-0 truncate text-[10px] opacity-75">{activeGitActionContext.upstream}</span>}
+              <span className="w-[6.5rem] shrink-0 truncate text-right text-[10px] opacity-75">
+                {activeGitActionContext?.upstream ?? ''}
+              </span>
             </div>
-            <div className="grid grid-cols-2 gap-1.5">
-              <GitTargetPicker
-                label={t('rightSidebar.pushRemoteLabel')}
-                value={pushRemote}
-                options={pushRemoteOptions}
-                placeholder={t('rightSidebar.pushRemotePlaceholder')}
-                searchPlaceholder={t('rightSidebar.pushRemoteSearchPlaceholder')}
-                emptyText={t('rightSidebar.pushNoRemotes')}
-                disabled={Boolean(runningGitAction)}
-                onChange={setPushRemote}
-              />
+            <div className={`grid gap-1.5 ${showPushRemotePicker ? 'grid-cols-2' : 'grid-cols-1'}`}>
+              {showPushRemotePicker && (
+                <GitTargetPicker
+                  label={t('rightSidebar.pushRemoteLabel')}
+                  value={pushRemote}
+                  options={pushRemoteOptions}
+                  placeholder={t('rightSidebar.pushRemotePlaceholder')}
+                  searchPlaceholder={t('rightSidebar.pushRemoteSearchPlaceholder')}
+                  emptyText={t('rightSidebar.pushNoRemotes')}
+                  disabled={Boolean(runningGitAction)}
+                  onChange={setPushRemote}
+                />
+              )}
               <GitTargetPicker
                 label={t('rightSidebar.pushBranchLabel')}
                 value={pushBranch}
@@ -7179,6 +7622,66 @@ export function RightSidebar(
     />
   ) : null;
 
+  const gitSummaryChips = (changedFiles.size > 0 || gitContext?.available || gitBundleLastLoadedAt) ? (
+    <div className="flex flex-wrap items-center gap-1 text-[10px] font-medium">
+      {gitContext?.available && gitContext.branch && (
+        <span className="inline-flex min-w-0 max-w-[8rem] items-center gap-0.5 truncate rounded bg-surface-2 px-1.5 py-0.5 text-muted-foreground" title={gitContext.branch}>
+          <RiGitBranch size={10} className="shrink-0" />
+          <span className="truncate">{gitContext.branch}</span>
+        </span>
+      )}
+      {changedSummary.modified > 0 && (
+        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-hunk-accent)]">{changedSummary.modified}M</span>
+      )}
+      {changedSummary.added > 0 && (
+        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">+{changedSummary.added}</span>
+      )}
+      {changedSummary.deleted > 0 && (
+        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-delete-strong)]">-{changedSummary.deleted}</span>
+      )}
+      {changedSummary.renamed > 0 && (
+        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-muted-foreground">{changedSummary.renamed}R</span>
+      )}
+      {changedSummary.copied > 0 && (
+        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">{changedSummary.copied}C</span>
+      )}
+      {changedSummary.untracked > 0 && (
+        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">{changedSummary.untracked}U</span>
+      )}
+      {changedSummary.conflicted > 0 && (
+        <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">{changedSummary.conflicted}!</span>
+      )}
+      {changedSummary.other > 0 && (
+        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-muted-foreground">{changedSummary.other}?</span>
+      )}
+      {changedSummary.staged > 0 && (
+        <span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{t('rightSidebar.stagedCountShort', { count: changedSummary.staged })}</span>
+      )}
+      {gitContext?.available && rootPath && changedFiles.size > 0 && gitRepositories.length <= 1 && (
+        <button
+          type="button"
+          onClick={() => void runSidebarGitAction({ action: 'stage-all', cwd: rootPath }, t('rightSidebar.stageAll'))}
+          disabled={Boolean(runningGitAction)}
+          className="rounded-full bg-accent/10 px-2 py-0.5 font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
+          title={t('rightSidebar.stageAll')}
+        >
+          {t('rightSidebar.stageAll')}
+        </button>
+      )}
+      {gitContext?.available && rootPath && changedFiles.size > 0 && gitRepositories.length <= 1 && (
+        <button
+          type="button"
+          onClick={() => setConfirmGitAction({ kind: 'stash-all', repoRoot: rootPath, repoLabel: rootName })}
+          disabled={Boolean(runningGitAction)}
+          className="rounded-full bg-surface-2 px-2 py-0.5 font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
+          title={t('rightSidebar.stashAll')}
+        >
+          {t('rightSidebar.stashAll')}
+        </button>
+      )}
+    </div>
+  ) : null;
+
   return (
     <Sidebar
       side="right"
@@ -7197,20 +7700,17 @@ export function RightSidebar(
       <div className="relative shrink-0 border-b border-border/15 bg-surface px-2 pt-2">
         <div className="flex items-center gap-1.5">
           <div className="min-w-0 flex-1 px-1">
-            <div className="flex items-baseline gap-1.5">
+            <div className="flex min-h-[1.25rem] items-baseline gap-1.5">
               <span className="truncate text-[13px] font-semibold text-foreground" title={rootPath ?? undefined}>
                 {rootName}
               </span>
-              {gitContext?.available && gitContext.branch && (
-                <span className="inline-flex items-center gap-0.5 truncate text-[11px] text-muted-foreground" title={gitContext.branch}>
+              {(!isMobile || mobileSidebarSettled) && gitContext?.available && gitContext.branch && (
+                <span className="inline-flex min-w-0 items-center gap-0.5 truncate text-[11px] text-muted-foreground" title={gitContext.branch}>
                   <RiGitBranch size={10} className="shrink-0" />
-                  <span className="truncate max-w-[7rem]">{gitContext.branch}</span>
+                  <span className="max-w-[7rem] truncate">{gitContext.branch}</span>
                 </span>
               )}
-              {changedFiles.size > 0 && (
-                <span className="text-[11px] text-accent">{changedFiles.size}</span>
-              )}
-              {gitBundleLastLoadedAt && (
+              {(!isMobile || mobileSidebarSettled) && gitBundleLastLoadedAt && (
                 <span
                   className={`truncate text-[10px] ${gitBundleCacheInfo?.stale ? 'text-[color:var(--warning)]' : 'text-muted-foreground/75'}`}
                   title={[
@@ -7344,82 +7844,6 @@ export function RightSidebar(
           </div>
         )}
 
-        {/* Changed-file mini summary chips (only when there are changes) */}
-        {changedFiles.size > 0 && (
-          <div className="mt-2 flex flex-wrap items-center gap-1 text-[10px] font-medium">
-            {changedSummary.modified > 0 && (
-              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-hunk-accent)]">{changedSummary.modified}M</span>
-            )}
-            {changedSummary.added > 0 && (
-              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">+{changedSummary.added}</span>
-            )}
-            {changedSummary.deleted > 0 && (
-              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-delete-strong)]">-{changedSummary.deleted}</span>
-            )}
-            {changedSummary.renamed > 0 && (
-              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-muted-foreground">{changedSummary.renamed}R</span>
-            )}
-            {changedSummary.copied > 0 && (
-              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">{changedSummary.copied}C</span>
-            )}
-            {changedSummary.untracked > 0 && (
-              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[color:var(--diff-insert-strong)]">{changedSummary.untracked}U</span>
-            )}
-            {changedSummary.conflicted > 0 && (
-              <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">{changedSummary.conflicted}!</span>
-            )}
-            {changedSummary.other > 0 && (
-              <span className="rounded bg-surface-2 px-1.5 py-0.5 text-muted-foreground">{changedSummary.other}?</span>
-            )}
-            {changedSummary.staged > 0 && (
-              <span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{t('rightSidebar.stagedCountShort', { count: changedSummary.staged })}</span>
-            )}
-            {gitContext?.available && rootPath && changedFiles.size > 0 && gitRepositories.length <= 1 && (
-              <button
-                type="button"
-                onClick={() => void runSidebarGitAction({ action: 'stage-all', cwd: rootPath }, t('rightSidebar.stageAll'))}
-                disabled={Boolean(runningGitAction)}
-                className="rounded-full bg-accent/10 px-2 py-0.5 font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
-                title={t('rightSidebar.stageAll')}
-              >
-                {t('rightSidebar.stageAll')}
-              </button>
-            )}
-            {gitContext?.available && rootPath && changedFiles.size > 0 && gitRepositories.length <= 1 && (
-              <button
-                type="button"
-                onClick={() => setConfirmGitAction({ kind: 'stash-all', repoRoot: rootPath, repoLabel: rootName })}
-                disabled={Boolean(runningGitAction)}
-                className="rounded-full bg-surface-2 px-2 py-0.5 font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
-                title={t('rightSidebar.stashAll')}
-              >
-                {t('rightSidebar.stashAll')}
-              </button>
-            )}
-            {gitContextInputText && gitContextText && (
-              <>
-                <button
-                  type="button"
-                  onClick={insertGitContext}
-                  {...getReferenceLongPressHandlers(gitContextInputText.trimEnd(), gitContextReferenceKey)}
-                  className={`ml-auto rounded-full px-2 py-0.5 font-medium ${insertedReferenceKey === gitContextReferenceKey || copiedReferenceKey === gitContextReferenceKey ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary hover:bg-primary/20'}`}
-                  title={t('rightSidebar.insertGitContext')}
-                >
-                  {copiedReferenceKey === gitContextReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === gitContextReferenceKey ? t('rightSidebar.inserted') : t('rightSidebar.insertPreset', { label: t('rightSidebar.gitInfo') })}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void navigator.clipboard?.writeText(gitContextText)}
-                  className="rounded-full bg-surface-2 px-2 py-0.5 text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
-                  title={t('rightSidebar.copyGitContext')}
-                >
-                  {t('common.copy')}
-                </button>
-              </>
-            )}
-          </div>
-        )}
-
         {/* Tab bar — non-Git workspaces drop the Git/Changes tabs. On mobile
             (overlay preview) and wide (side-by-side preview) layouts the file
             browser fills the panel with no tab bar at all; only the medium
@@ -7524,7 +7948,13 @@ export function RightSidebar(
 
       {/* Content */}
       <div className="min-h-0 flex-1 overflow-hidden bg-surface">
-        <Pane active={gitPaneActive}>
+        <Pane
+          active={gitPaneActive}
+          mounted={hasMountedGitPane}
+          fallback={(
+            <GitChangesLoadingState slow={false} />
+          )}
+        >
           {commitDiff ? (
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
               <UniversalDiffReview
@@ -7590,6 +8020,14 @@ export function RightSidebar(
               <GitChangesLoadingState slow={gitBundleSlow} />
             ) : gitBundleError ? (
               <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
+            ) : isConfirmedNonGitContext(gitContext) ? (
+              <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                {rootPath ? t('rightSidebar.gitUnavailable') : t('fileTree.noWorkingDir')}
+              </div>
+            ) : gitContext?.available === false ? (
+              <GitChangesErrorState message={gitContext.error ?? t('rightSidebar.gitChangesLoadFailed')} onRetry={() => void refreshGitState()} />
+            ) : rootPath ? (
+              <GitChangesLoadingState slow={gitBundleSlow} />
             ) : (
               <div className="px-3 py-6 text-center text-xs text-muted-foreground">
                 {rootPath ? t('rightSidebar.gitUnavailable') : t('fileTree.noWorkingDir')}
@@ -7835,7 +8273,7 @@ export function RightSidebar(
         </Pane>
 
         <Pane active={diffPaneActive} mounted={hasMountedDiffPane}>
-          {isWide ? (
+          {() => (isWide ? (
             <DiffReview
               mobile={false}
               desktopLayout="split"
@@ -7858,7 +8296,7 @@ export function RightSidebar(
                 if (!file) return;
                 selectDiffFile(getChangedFileSelectionPath(file));
               }}
-              renderLeading={(navigatorFile) => <ChangeBadge status={navigatorFile.status} />}
+              renderLeading={renderChangeNavigatorLeading}
               renderTrailing={(navigatorFile) => {
                 const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
                 return file ? renderChangeNavigatorTrailing(file) : null;
@@ -7885,6 +8323,11 @@ export function RightSidebar(
               )}
               renderListHeader={(modeToggle) => rootPath && (
                 <div className="px-0 py-0">
+                  {gitSummaryChips && (
+                    <div className="mb-2">
+                      {gitSummaryChips}
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-2">
                     <span className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
                       {t('rightSidebar.allChanges')}
@@ -7923,13 +8366,7 @@ export function RightSidebar(
                       </button>
                     </div>
                   )}
-                  {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
-                    <div className="mt-2 flex min-w-0 items-center gap-2">
-                      <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
-                        {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
-                      </div>
-                    </div>
-                  )}
+                  {changeAuditStatusBar}
                   {!activeGitRepoSummary && showGitRepoFilter && (
                     <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                       <RiGitBranch size={12} className="shrink-0" />
@@ -7943,6 +8380,8 @@ export function RightSidebar(
               wrap={diffWrap}
               showScrollHint={!diffWrap}
               diffViewType={isWide ? diffViewType : 'unified'}
+              inlineMode={diffInlineMode}
+              diffOptions={diffOptions}
               reloadKey={diffRefreshKey}
               renderStreamBadge={(status) => <ChangeBadge status={status} />}
               onInsertDiffReference={insertContextText}
@@ -8012,13 +8451,7 @@ export function RightSidebar(
                       </button>
                     </div>
                   )}
-                  {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
-                    <div className="mt-2 flex min-w-0 items-center gap-2">
-                      <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
-                        {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
-                      </div>
-                    </div>
-                  )}
+                  {changeAuditStatusBar}
                   {!activeGitRepoSummary && showGitRepoFilter && (
                     <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                       <RiGitBranch size={12} className="shrink-0" />
@@ -8034,6 +8467,7 @@ export function RightSidebar(
                   backLabel={t('rightSidebar.backToChangeList')}
                   externalSwiperRef={mobileDiffSwiperRef}
                   onMobileSlideChange={setMobileDiffSlideIndex}
+                  detailMounted={mobileDiffDetailMounted}
                   groups={filteredChangedFiles.length > 0 ? buildDiffNavigatorGroups() : []}
                   mode={diffChangeListMode}
                   onModeChange={setDiffChangeMode}
@@ -8046,7 +8480,7 @@ export function RightSidebar(
                     if (!file) return;
                     selectDiffFile(getChangedFileSelectionPath(file));
                   }}
-                  renderLeading={(navigatorFile) => <ChangeBadge status={navigatorFile.status} />}
+                  renderLeading={renderChangeNavigatorLeading}
                   renderTrailing={(navigatorFile) => {
                     const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
                     return file ? renderChangeNavigatorTrailing(file) : null;
@@ -8058,6 +8492,11 @@ export function RightSidebar(
                   listContainerClassName="termdock-native-select min-h-0 px-2 pb-[calc(env(safe-area-inset-bottom)+4.5rem)]"
                   renderListHeader={(modeToggle) => rootPath && (
                     <div className="px-0 py-0">
+                      {gitSummaryChips && (
+                        <div className="mb-2">
+                          {gitSummaryChips}
+                        </div>
+                      )}
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
                           <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
@@ -8077,13 +8516,7 @@ export function RightSidebar(
                           {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
                         </div>
                       )}
-                      {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
-                        <div className="mt-2 flex min-w-0 items-center gap-2">
-                          <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
-                            {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
-                          </div>
-                        </div>
-                      )}
+                      {changeAuditStatusBar}
                       {!activeGitRepoSummary && showGitRepoFilter && (
                         <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                           <RiGitBranch size={12} className="shrink-0" />
@@ -8141,6 +8574,8 @@ export function RightSidebar(
                   wrap={diffWrap}
                   showScrollHint={!diffWrap}
                   diffViewType="unified"
+                  inlineMode={diffInlineMode}
+                  diffOptions={diffOptions}
                   reloadKey={diffRefreshKey}
                   renderStreamBadge={(status) => <ChangeBadge status={status} />}
                   onInsertDiffReference={insertContextText}
@@ -8167,7 +8602,7 @@ export function RightSidebar(
                     if (!file) return;
                     selectDiffFile(getChangedFileSelectionPath(file));
                   }}
-                  renderLeading={(navigatorFile) => <ChangeBadge status={navigatorFile.status} />}
+                  renderLeading={renderChangeNavigatorLeading}
                   renderTrailing={(navigatorFile) => {
                     const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
                     return file ? renderChangeNavigatorTrailing(file) : null;
@@ -8194,6 +8629,11 @@ export function RightSidebar(
                   )}
                   renderListHeader={(modeToggle) => rootPath && (
                     <div className="px-0 py-0">
+                      {gitSummaryChips && (
+                        <div className="mb-2">
+                          {gitSummaryChips}
+                        </div>
+                      )}
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
                           <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
@@ -8249,13 +8689,7 @@ export function RightSidebar(
                           </button>
                         </div>
                       )}
-                      {(changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) && (
-                        <div className="mt-2 flex min-w-0 items-center gap-2">
-                          <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
-                            {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
-                          </div>
-                        </div>
-                      )}
+                      {changeAuditStatusBar}
                       {!activeGitRepoSummary && showGitRepoFilter && (
                         <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                           <RiGitBranch size={12} className="shrink-0" />
@@ -8269,6 +8703,8 @@ export function RightSidebar(
                   wrap={diffWrap}
                   showScrollHint={!diffWrap}
                   diffViewType={isWide ? diffViewType : 'unified'}
+                  inlineMode={diffInlineMode}
+                  diffOptions={diffOptions}
                   reloadKey={diffRefreshKey}
                   renderStreamBadge={(status) => <ChangeBadge status={status} />}
                   onInsertDiffReference={insertContextText}
@@ -8280,7 +8716,7 @@ export function RightSidebar(
                 />
               )}
             </div>
-          )}
+          ))}
         </Pane>
       </div>
         {renderMobileRepoSwitcher()}

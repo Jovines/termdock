@@ -333,6 +333,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
         changedFiles: new Map(s.changedFiles),
         gitBundleError: s.gitBundleError,
         gitBundleLastLoadedAt: s.gitBundleLastLoadedAt,
+        gitBundleCacheInfo: s.gitBundleCacheInfo,
       });
     }
 
@@ -350,6 +351,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       gitBundleSlow: false,
       gitBundleError: cached?.gitBundleError ?? null,
       gitBundleLastLoadedAt: cached?.gitBundleLastLoadedAt ?? null,
+      gitBundleCacheInfo: cached?.gitBundleCacheInfo ?? null,
       projectStateCache,
     };
   }),

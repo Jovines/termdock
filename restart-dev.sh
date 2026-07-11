@@ -16,6 +16,26 @@ SERVER_PID_FILE="$RUNTIME_DIR/dev-server.pid"
 CLIENT_PID_FILE="$RUNTIME_DIR/dev-client.pid"
 SERVER_LOG_FILE="$RUNTIME_DIR/dev-server.log"
 CLIENT_LOG_FILE="$RUNTIME_DIR/dev-client.log"
+SETTINGS_FILE="$HOME/.termdock/settings.json"
+RESTART_BRIDGE_CAFFEINATE_SECONDS=300
+
+start_restart_bridge_caffeinate() {
+  if [ "$(uname -s)" != "Darwin" ]; then
+    return
+  fi
+
+  if [ ! -f "$SETTINGS_FILE" ]; then
+    return
+  fi
+
+  if ! node -e "const fs=require('fs'); const s=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); process.exit(s.preventSleep === true ? 0 : 1)" "$SETTINGS_FILE" 2>/dev/null; then
+    return
+  fi
+
+  caffeinate -i -s -t "$RESTART_BRIDGE_CAFFEINATE_SECONDS" >/dev/null 2>&1 &
+  disown "$!" 2>/dev/null || true
+  echo "Keeping macOS awake for up to ${RESTART_BRIDGE_CAFFEINATE_SECONDS}s while Termdock dev restarts."
+}
 
 kill_pid_and_children() {
   pid="$1"
@@ -111,6 +131,7 @@ do_stop() {
 do_restart() {
   echo "Restarting termdock dev services in background..."
 
+  start_restart_bridge_caffeinate
   do_stop
 
   ensure_port_available "$BACKEND_PORT"

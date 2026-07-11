@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { ArrowLeft as RiArrowLeft } from 'lucide-react';
 import { Swiper, SwiperSlide } from 'swiper/react';
 import type { Swiper as SwiperInstance } from 'swiper';
@@ -19,6 +19,7 @@ interface DiffReviewFrameProps {
   onDetailScroll?: (container: HTMLDivElement) => void;
   desktopSidePanel?: ReactNode;
   desktopListClassName?: string;
+  mobileDetailOwnsScroll?: boolean;
 }
 
 export function DiffReviewFrame({
@@ -35,12 +36,27 @@ export function DiffReviewFrame({
   onDetailScroll,
   desktopSidePanel,
   desktopListClassName,
+  mobileDetailOwnsScroll = false,
 }: DiffReviewFrameProps) {
   const swiperRef = useRef<SwiperInstance | null>(null);
+  const [mobileSlideIndex, setMobileSlideIndex] = useState(0);
+  const syncMobileSwiperTouch = useCallback((instance: SwiperInstance, index: number) => {
+    instance.allowTouchMove = index === 0;
+  }, []);
 
   if (mobile) {
-    const slideToDetail = () => swiperRef.current?.slideTo(1);
-    const slideToList = () => swiperRef.current?.slideTo(0);
+    const slideToDetail = () => {
+      const swiper = swiperRef.current;
+      if (!swiper) return;
+      syncMobileSwiperTouch(swiper, 1);
+      swiper.slideTo(1);
+    };
+    const slideToList = () => {
+      const swiper = swiperRef.current;
+      if (!swiper) return;
+      syncMobileSwiperTouch(swiper, 0);
+      swiper.slideTo(0);
+    };
     const listContent = typeof list === 'function' ? list({ slideToDetail }) : list;
     const detailHeader = typeof mobileDetailHeader === 'function'
       ? mobileDetailHeader({ slideToList, slideToDetail })
@@ -50,11 +66,19 @@ export function DiffReviewFrame({
         className="h-full min-h-0 w-full"
         slidesPerView={1}
         resistanceRatio={0.45}
+        allowTouchMove={mobileSlideIndex === 0}
+        touchStartPreventDefault={false}
         onSwiper={(instance) => {
           swiperRef.current = instance;
+          syncMobileSwiperTouch(instance, mobileSlideIndex);
           if (externalSwiperRef) externalSwiperRef.current = instance;
         }}
-        onSlideChange={(instance) => onMobileSlideChange?.(instance.activeIndex)}
+        onSlideChange={(instance) => {
+          const nextIndex = instance.activeIndex;
+          setMobileSlideIndex(nextIndex);
+          syncMobileSwiperTouch(instance, nextIndex);
+          onMobileSlideChange?.(nextIndex);
+        }}
       >
         <SwiperSlide className="h-full min-h-0">
           <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -83,9 +107,11 @@ export function DiffReviewFrame({
               )}
             </div>
             <div
-              className="termdock-diff-stream-scroller min-h-0 flex-1 overflow-y-auto overscroll-contain"
+              className={mobileDetailOwnsScroll
+                ? 'min-h-0 flex-1 overflow-hidden'
+                : 'termdock-diff-stream-scroller min-h-0 flex-1 overflow-y-auto overscroll-contain'}
               data-sidebar-gesture-ignore
-              onScroll={(event) => onDetailScroll?.(event.currentTarget)}
+              onScroll={mobileDetailOwnsScroll ? undefined : (event) => onDetailScroll?.(event.currentTarget)}
             >
               {detail}
             </div>

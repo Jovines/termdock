@@ -106,6 +106,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     actionId: string;
     timer: number;
   } | null>(null);
+  const lastPasteTriggerAtRef = React.useRef(0);
 
   const preventToolbarButtonFocus = React.useCallback(
     (event: React.MouseEvent<HTMLDivElement> | React.PointerEvent<HTMLDivElement>) => {
@@ -252,15 +253,50 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     [toolbarDisabled]
   );
 
+  const triggerPastePress = React.useCallback(() => {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (now - lastPasteTriggerAtRef.current < 350) {
+      return;
+    }
+    lastPasteTriggerAtRef.current = now;
+    onPastePress?.();
+  }, [onPastePress]);
+
   const handlePastePointerDown = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>) => {
       if (toolbarDisabled) {
         return;
       }
+      event.stopPropagation();
+      if (event.pointerType === 'touch') {
+        return;
+      }
       event.preventDefault();
-      onPastePress?.();
+      triggerPastePress();
     },
-    [onPastePress, toolbarDisabled]
+    [toolbarDisabled, triggerPastePress]
+  );
+
+  const handlePasteClick = React.useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      if (toolbarDisabled) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      triggerPastePress();
+    },
+    [toolbarDisabled, triggerPastePress],
+  );
+
+  const stopToolbarButtonBubble = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement> | React.TouchEvent<HTMLButtonElement>) => {
+      if (toolbarDisabled) {
+        return;
+      }
+      event.stopPropagation();
+    },
+    [toolbarDisabled],
   );
 
   const DOUBLE_TAP_WINDOW_MS = 250;
@@ -537,7 +573,12 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         </button>
         <button
           type="button"
+          data-mobile-copy-button="true"
           onPointerDown={handlePastePointerDown}
+          onPointerUp={stopToolbarButtonBubble}
+          onTouchStart={stopToolbarButtonBubble}
+          onTouchEnd={stopToolbarButtonBubble}
+          onClick={handlePasteClick}
           tabIndex={-1}
           disabled={buttonDisabled}
           title="Paste"

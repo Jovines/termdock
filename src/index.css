@@ -917,10 +917,6 @@ html[data-theme='light'] .termdock-diff {
   color: var(--foreground) !important;
 }
 
-.termdock-diff .diff-code-insert {
-  border-left: 2px solid rgba(var(--diff-insert-rgb), 0.68);
-}
-
 .termdock-diff .diff-line:has(.diff-code-insert .diff-code-edit) .diff-code-insert,
 .termdock-diff .diff-line:has(.diff-code-insert .diff-code-edit) .diff-gutter-insert {
   background-color: rgba(var(--diff-insert-rgb), 0.09) !important;
@@ -930,10 +926,6 @@ html[data-theme='light'] .termdock-diff {
 .termdock-diff .diff-gutter-delete {
   background-color: var(--diff-code-delete-background-color) !important;
   color: var(--foreground) !important;
-}
-
-.termdock-diff .diff-code-delete {
-  border-left: 2px solid rgba(var(--diff-delete-rgb), 0.62);
 }
 
 .termdock-diff .diff-line:has(.diff-code-delete .diff-code-edit) .diff-code-delete,
@@ -1366,6 +1358,14 @@ html[data-theme='light'] .termdock-code .token.important {
      hunk. The element re-renders, so this only kicks in on the
      expand toggle. */
   animation: diff-hunk-expand 0.18s ease-out;
+}
+
+.diff-hunk-imports {
+  opacity: 0.78;
+}
+
+.diff-hunk-imports:hover {
+  opacity: 1;
 }
 
 @keyframes diff-hunk-expand {

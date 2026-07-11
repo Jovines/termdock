@@ -28,6 +28,7 @@ const MAX_CONTENT_SEARCH_FILES = 1_000;
 const MAX_CONTENT_MATCHES_PER_FILE = 50;
 const MAX_CONTENT_MATCH_LINE_LENGTH = 400;
 const MAX_GIT_CONTEXT_CHANGED_FILES = 200;
+const MAX_RECENT_COMMITS_LIMIT = 50;
 const MAX_DIFF_BYTES = 1024 * 1024; // 1MB
 const MAX_BRANCH_DIFF_BYTES = 2 * 1024 * 1024; // 2MB
 const MAX_BRANCH_DIFF_STAT_BYTES = 128 * 1024;
@@ -83,6 +84,8 @@ interface GitChangedFile {
   canUnstage: boolean;
   canStash: boolean;
   canRestoreWorktree: boolean;
+  additions?: number;
+  deletions?: number;
 }
 
 interface GitBundlePayload {
@@ -106,6 +109,7 @@ interface GitBundlePayload {
     changedFiles?: Array<{ path: string; absolutePath: string; status: string }>;
     truncated?: boolean;
     error?: string;
+    code?: string;
   } | null;
   repositories?: GitRepositoryBundle[];
   repoFilters?: GitRepositoryFilter[];
@@ -116,6 +120,7 @@ interface GitBundlePayload {
   nestedDeferred?: boolean;
   untrackedDeferred?: boolean;
   error?: string;
+  code?: string;
 }
 
 interface GitRepositoryFilter {
@@ -443,6 +448,30 @@ function getRequestAction(req: Request, fallback: string): string {
   return value;
 }
 
+type GitDiffAlgorithm = 'default' | 'myers' | 'minimal' | 'patience' | 'histogram';
+type GitDiffWhitespaceMode = 'default' | 'trim' | 'ignore' | 'ignore-blank-lines';
+
+function getGitDiffAlgorithm(value: unknown): GitDiffAlgorithm {
+  return value === 'myers' || value === 'minimal' || value === 'patience' || value === 'histogram'
+    ? value
+    : 'default';
+}
+
+function getGitDiffWhitespaceMode(value: unknown): GitDiffWhitespaceMode {
+  return value === 'trim' || value === 'ignore' || value === 'ignore-blank-lines'
+    ? value
+    : 'default';
+}
+
+function buildGitDiffOptionArgs(options: { algorithm: GitDiffAlgorithm; whitespace: GitDiffWhitespaceMode }): string[] {
+  const args: string[] = [];
+  if (options.algorithm !== 'default') args.push(`--diff-algorithm=${options.algorithm}`);
+  if (options.whitespace === 'trim') args.push('--ignore-space-at-eol');
+  if (options.whitespace === 'ignore') args.push('--ignore-all-space');
+  if (options.whitespace === 'ignore-blank-lines') args.push('--ignore-blank-lines');
+  return args;
+}
+
 interface FileSearchEntry {
   name: string;
   path: string;
@@ -707,6 +736,19 @@ function mergeNameStatus(
   }
 }
 
+function mergeNumstat(files: Map<string, GitChangedFile>, gitRoot: string, output: string) {
+  for (const record of output.split('\0').filter(Boolean)) {
+    const [additionsRaw, deletionsRaw, filePath] = record.split('\t');
+    if (!additionsRaw || !deletionsRaw || !filePath) continue;
+    const additions = additionsRaw === '-' ? 0 : Number.parseInt(additionsRaw, 10);
+    const deletions = deletionsRaw === '-' ? 0 : Number.parseInt(deletionsRaw, 10);
+    const current = files.get(filePath) ?? emptyChangedFile(gitRoot, filePath);
+    current.additions = (current.additions ?? 0) + (Number.isFinite(additions) ? additions : 0);
+    current.deletions = (current.deletions ?? 0) + (Number.isFinite(deletions) ? deletions : 0);
+    files.set(filePath, current);
+  }
+}
+
 function finalizeChangedFiles(files: Map<string, GitChangedFile>): GitChangedFile[] {
   return Array.from(files.values())
     .map((file) => ({
@@ -726,9 +768,11 @@ function countStagedFiles(files: GitChangedFile[]): number {
 
 async function getChangedFiles(gitRoot: string, signal?: AbortSignal, options: { includeUntracked?: boolean; untrackedTimeoutMs?: number } = {}): Promise<ChangedFilesResult> {
   const includeUntracked = options.includeUntracked !== false;
-  const [stagedOutput, unstagedOutput, untrackedResult] = await Promise.all([
+  const [stagedOutput, unstagedOutput, stagedNumstat, unstagedNumstat, untrackedResult] = await Promise.all([
     execGit(['diff', '--cached', '--name-status', '-M', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError),
     execGit(['diff', '--name-status', '-M', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError),
+    execGit(['diff', '--cached', '--numstat', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError),
+    execGit(['diff', '--numstat', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError),
     includeUntracked
       ? execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot, signal, options.untrackedTimeoutMs ?? GIT_UNTRACKED_TIMEOUT_MS)
         .then((output) => ({ output, deferred: false }))
@@ -744,6 +788,8 @@ async function getChangedFiles(gitRoot: string, signal?: AbortSignal, options: {
   const files = new Map<string, GitChangedFile>();
   mergeNameStatus(files, gitRoot, stagedOutput, 'staged');
   mergeNameStatus(files, gitRoot, unstagedOutput, 'unstaged');
+  mergeNumstat(files, gitRoot, stagedNumstat);
+  mergeNumstat(files, gitRoot, unstagedNumstat);
 
   for (const p of untrackedResult.output.split('\0').filter(Boolean)) {
     const current = files.get(p) ?? emptyChangedFile(gitRoot, p);
@@ -1894,15 +1940,18 @@ async function getBranchDiffPayload(
       baseRef = localRef;
     }
   }
-  const [currentBranch, headRef, statResult, nameResult, logResult, diffResult] = await Promise.all([
+  const [currentBranch, headRef, statResult, nameResult, workingNameResult, logResult, diffResult, workingDiffResult] = await Promise.all([
     execGit(['branch', '--show-current'], repoRoot, signal).catch(emptyOnNonAbortGitError),
     execGit(['rev-parse', '--short=12', 'HEAD'], repoRoot, signal).catch(emptyOnNonAbortGitError),
-    execGitLimited(['diff', baseRef, '--stat'], repoRoot, MAX_BRANCH_DIFF_STAT_BYTES, false, signal),
-    execGitLimited(['diff', '--name-only', baseRef], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
+    execGitLimited(['diff', `${baseRef}...HEAD`, '--stat'], repoRoot, MAX_BRANCH_DIFF_STAT_BYTES, false, signal),
+    execGitLimited(['diff', '--name-only', `${baseRef}...HEAD`], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
+    execGitLimited(['diff', '--name-only', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
     execGitLimited(['log', `${baseRef}..HEAD`, '--oneline', '--no-merges'], repoRoot, MAX_BRANCH_DIFF_LOG_BYTES, false, signal),
-    execGitLimited(['diff', baseRef], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
+    execGitLimited(['diff', `${baseRef}...HEAD`], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
+    execGitLimited(['diff', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
   ]);
-  const untrackedResult = await appendUntrackedDiffs(repoRoot, diffResult.stdout, signal, {
+  const trackedDiff = [diffResult.stdout, workingDiffResult.stdout].filter(Boolean).join('\n');
+  const untrackedResult = await appendUntrackedDiffs(repoRoot, trackedDiff, signal, {
     maxBytes: MAX_BRANCH_DIFF_BYTES,
     perFileMaxBytes: MAX_UNTRACKED_DIFF_FILE_BYTES,
   });
@@ -1910,6 +1959,7 @@ async function getBranchDiffPayload(
   const stat = statResult.stdout.trim();
   const files = Array.from(new Set([
     ...nameResult.stdout.split('\n').map((line) => line.trim()).filter(Boolean),
+    ...workingNameResult.stdout.split('\n').map((line) => line.trim()).filter(Boolean),
     ...untrackedResult.files,
   ]));
   const hunks = await annotateBranchDiffHunks(repoRoot, baseRef, parseBranchDiffHunks(diff), signal);
@@ -2548,6 +2598,54 @@ router.get('/read', async (req: Request, res: Response) => {
   }
 });
 
+router.get('/git-blob', async (req: Request, res: Response) => {
+  const requestId = ++fsIoRequestSeq;
+  const startedAt = Date.now();
+  const requestedPath = typeof req.query.path === 'string' ? req.query.path : undefined;
+  const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined;
+  const ref = typeof req.query.ref === 'string' ? req.query.ref : 'HEAD';
+  const source = req.query.source === 'index' ? 'index' : 'ref';
+  const controller = new AbortController();
+  const abortRequest = () => {
+    if (!res.writableEnded) controller.abort(new SupersededRequestError('git.blob'));
+  };
+  req.on('aborted', abortRequest);
+  res.on('close', abortRequest);
+  try {
+    if (!requestedPath) {
+      res.status(400).json({ error: 'Missing path parameter' });
+      return;
+    }
+    if (source !== 'index' && !isSafeGitRefName(ref)) {
+      res.status(400).json({ error: 'Invalid git ref' });
+      return;
+    }
+    const resolvedCwd = cwd ? await pathValidator.validatePathAsync(cwd) : process.cwd();
+    const gitRoot = await findGitRoot(resolvedCwd);
+    if (!gitRoot) {
+      res.status(400).json({ error: 'Not a git repository' });
+      return;
+    }
+    const pathspec = await toGitPathspec(gitRoot, requestedPath);
+    const objectSpec = source === 'index' ? `:${pathspec}` : `${ref}:${pathspec}`;
+    const result = await execGitLimited(['show', objectSpec], gitRoot, MAX_FILE_SIZE, false, controller.signal);
+    logFsIo({ id: requestId, action: 'git_blob', op: 'git.blob', startedAt, status: 'ok', path: requestedPath, cwd, repoRoot: gitRoot, bytes: Buffer.byteLength(result.stdout), truncated: result.truncated });
+    res.json({
+      path: requestedPath,
+      ref: source === 'index' ? ':index' : ref,
+      source,
+      content: result.truncated ? '' : result.stdout,
+      truncated: result.truncated || undefined,
+      size: Buffer.byteLength(result.stdout),
+      maxBytes: result.truncated ? MAX_FILE_SIZE : undefined,
+    });
+  } catch (error) {
+    const payload = getErrorPayload(error);
+    logFsIo({ id: requestId, action: 'git_blob', op: 'git.blob', startedAt, status: 'error', path: requestedPath, cwd, code: payload.code, error: payload.error });
+    res.status(error instanceof OperationTimeoutError ? 504 : 200).json({ path: requestedPath ?? null, content: '', ...payload });
+  }
+});
+
 // Stream supported image files for the right sidebar preview.
 router.get('/blob', async (req: Request, res: Response) => {
   const requestId = ++fsIoRequestSeq;
@@ -2710,6 +2808,11 @@ router.get('/diff', async (req: Request, res: Response) => {
   const interactionId = typeof req.query.interactionId === 'string' ? req.query.interactionId : undefined;
   const requestSlotId = typeof req.query.requestSlotId === 'string' ? req.query.requestSlotId : undefined;
   const action = getRequestAction(req, requestedPath ? 'view_diff' : 'view_all_changes');
+  const diffOptions = {
+    algorithm: getGitDiffAlgorithm(req.query.algorithm),
+    whitespace: getGitDiffWhitespaceMode(req.query.whitespace),
+  };
+  const diffOptionArgs = buildGitDiffOptionArgs(diffOptions);
   const controller = new AbortController();
   let requestClosed = false;
   const abortRequest = (event: string) => {
@@ -2748,7 +2851,7 @@ router.get('/diff', async (req: Request, res: Response) => {
     }
     activeDiffSlots.set(requestSlotId, { controller, requestId });
   }
-  logFsIoEvent({ id: requestId, action, op: 'git.diff', event: 'request-start', path: requestedPath, cwd, extra: { inflight, traceId, interactionId, requestSlotId } });
+  logFsIoEvent({ id: requestId, action, op: 'git.diff', event: 'request-start', path: requestedPath, cwd, extra: { inflight, traceId, interactionId, requestSlotId, ...diffOptions } });
   writeDiffTraceLog({
     source: 'server.git-diff',
     event: 'request-start',
@@ -2760,6 +2863,7 @@ router.get('/diff', async (req: Request, res: Response) => {
     filePath: requestedPath,
     cwd,
     inflight,
+    diffOptions,
   });
   try {
     const result = await withTimeout((async () => {
@@ -2800,7 +2904,7 @@ router.get('/diff', async (req: Request, res: Response) => {
       const pathspec = requestedPath ? await toGitPathspec(gitCwd, requestedPath) : null;
       const skippedFiles: DiffSkippedFile[] = [];
       const buildDiffArgs = (includeCached: boolean) => {
-        const args = ['diff', '-M'];
+        const args = ['diff', '-M', ...diffOptionArgs];
         if (includeCached) args.push('--cached');
         if (pathspec) args.push('--', pathspec);
         return args;
@@ -2842,7 +2946,7 @@ router.get('/diff', async (req: Request, res: Response) => {
         if (size !== null && size > MAX_UNTRACKED_DIFF_FILE_BYTES) {
           skippedFiles.push(makeSkippedUntracked(pathspec, size));
         } else {
-          diff = await readLimitedNoIndexDiff(['diff', '--no-index', '--', '/dev/null', pathspec]);
+          diff = await readLimitedNoIndexDiff(['diff', '--no-index', ...diffOptionArgs, '--', '/dev/null', pathspec]);
           totalBytes = getDiffByteLength(diff);
         }
       }
@@ -2859,7 +2963,7 @@ router.get('/diff', async (req: Request, res: Response) => {
             skippedFiles.push(makeSkippedUntracked(p, size));
             continue;
           }
-          const partial = await readLimitedNoIndexDiff(['diff', '--no-index', '--', '/dev/null', p], MAX_UNTRACKED_DIFF_FILE_BYTES);
+          const partial = await readLimitedNoIndexDiff(['diff', '--no-index', ...diffOptionArgs, '--', '/dev/null', p], MAX_UNTRACKED_DIFF_FILE_BYTES);
           if (!partial) continue;
           const nextDiff = diff ? `${diff}\n${partial}` : partial;
           const nextBytes = getDiffByteLength(nextDiff);
@@ -3089,16 +3193,15 @@ router.get('/git-context', async (req: Request, res: Response) => {
     gitRootForLog = gitRoot;
     if (!gitRoot) {
       logFsIo({ action, op: 'git.context', startedAt, status: 'error', cwd: resolvedCwd, repoRoot: null, code: 'NOT_GIT_REPOSITORY', error: 'Not a git repository' });
-      res.json({ available: false, cwd: resolvedCwd, error: 'Not a git repository' });
+      res.json({ available: false, cwd: resolvedCwd, error: 'Not a git repository', code: 'NOT_GIT_REPOSITORY' });
       return;
     }
 
     const result = await withTimeout((async () => {
       throwIfAborted(controller.signal, 'git.context');
-      const [branchOutput, statusOutput, logOutput, pushTargets] = await Promise.all([
+      const [branchOutput, statusOutput, pushTargets] = await Promise.all([
         execGit(['branch', '--show-current'], gitRoot, controller.signal).catch(emptyOnNonAbortGitError),
         execGit(['status', '--short', '--branch'], gitRoot, controller.signal).catch(emptyOnNonAbortGitError),
-        execGit(['log', '--oneline', '-8'], gitRoot, controller.signal).catch(emptyOnNonAbortGitError),
         getGitPushTargets(gitRoot, controller.signal),
       ]);
       throwIfAborted(controller.signal, 'git.context');
@@ -3106,7 +3209,7 @@ router.get('/git-context', async (req: Request, res: Response) => {
       const files = (await getChangedFiles(gitRoot, controller.signal, { includeUntracked: false })).files;
       throwIfAborted(controller.signal, 'git.context');
       const changedFiles = toContextFiles(files);
-      return { branchOutput, statusOutput, logOutput, pushTargets, changedFiles };
+      return { branchOutput, statusOutput, pushTargets, changedFiles };
     })(), GIT_ROUTE_TIMEOUT_MS, 'Git details took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_CONTEXT_TIMEOUT', () => controller.abort(new OperationTimeoutError('Git details took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_CONTEXT_TIMEOUT')));
 
     logFsIo({ id: requestId, action, op: 'git.context', startedAt, status: 'ok', cwd: resolvedCwd, repoRoot: gitRoot, count: result.changedFiles.length, truncated: result.changedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES, extra: { requestSlotId } });
@@ -3117,7 +3220,6 @@ router.get('/git-context', async (req: Request, res: Response) => {
       branch: result.branchOutput.trim() || null,
       ...result.pushTargets,
       status: result.statusOutput.trim(),
-      recentCommits: result.logOutput.split('\n').map((line) => line.trim()).filter(Boolean),
       changedFiles: result.changedFiles,
       truncated: result.changedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES,
     });
@@ -3167,7 +3269,8 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
       const payload = {
         available: false,
         files: [],
-        context: { available: false, cwd: resolvedCwd, error: 'Not a git repository' },
+        context: { available: false, cwd: resolvedCwd, error: 'Not a git repository', code: 'NOT_GIT_REPOSITORY' },
+        code: 'NOT_GIT_REPOSITORY',
       };
       logFsIo({ id: requestId, action, op: 'git.bundle', startedAt, status: 'error', cwd: resolvedCwd, repoRoot: null, code: 'NOT_GIT_REPOSITORY', error: 'Not a git repository' });
       res.json(payload);
@@ -3367,6 +3470,91 @@ router.get('/commit-diff', async (req: Request, res: Response) => {
     const payload = getErrorPayload(error);
     logFsIo({ id: requestId, action, op: 'git.commit-diff', startedAt, status: 'error', cwd, repoRoot: repoRootForLog, code: payload.code, error: payload.error, extra: { commit, requestSlotId } });
     res.status(error instanceof OperationTimeoutError ? 504 : 200).json({ available: false, ...payload });
+  } finally {
+    releaseIoSlot(requestSlotId, requestId);
+  }
+});
+
+router.get('/git-recent-commits', async (req: Request, res: Response) => {
+  const requestId = ++fsIoRequestSeq;
+  const startedAt = Date.now();
+  const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined;
+  const requestedRepoRoot = typeof req.query.repoRoot === 'string' ? req.query.repoRoot : undefined;
+  const query = typeof req.query.query === 'string' ? req.query.query.trim() : '';
+  const rawLimit = Number.parseInt(typeof req.query.limit === 'string' ? req.query.limit : '', 10);
+  const rawSkip = Number.parseInt(typeof req.query.skip === 'string' ? req.query.skip : '', 10);
+  const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 20, 1), MAX_RECENT_COMMITS_LIMIT);
+  const skip = Math.max(Number.isFinite(rawSkip) ? rawSkip : 0, 0);
+  const action = getRequestAction(req, 'load_recent_commits');
+  const requestSlotId = typeof req.query.requestSlotId === 'string' ? req.query.requestSlotId : undefined;
+  const controller = new AbortController();
+  const abortRequest = () => {
+    if (!res.writableEnded) controller.abort(new SupersededRequestError('git.recent-commits'));
+  };
+  req.on('aborted', abortRequest);
+  res.on('close', abortRequest);
+  let repoRootForLog: string | null = null;
+  registerIoSlot({ requestId, op: 'git.recent-commits', action, slotId: requestSlotId, controller, cwd: requestedRepoRoot ?? cwd });
+  try {
+    if (!cwd && !requestedRepoRoot) {
+      res.json({ available: false, error: 'No cwd provided' });
+      return;
+    }
+    const resolvedCwd = await pathValidator.validatePathAsync(cwd ?? requestedRepoRoot ?? '');
+    throwIfAborted(controller.signal, 'git.recent-commits');
+    const workspaceGitRoot = await findGitRoot(resolvedCwd);
+    throwIfAborted(controller.signal, 'git.recent-commits');
+    if (!workspaceGitRoot) {
+      res.json({ available: false, cwd: resolvedCwd, error: 'Not a git repository', commits: [], hasMore: false });
+      return;
+    }
+    const repoRoot = requestedRepoRoot ? await pathValidator.validatePathAsync(requestedRepoRoot) : workspaceGitRoot;
+    if (!(await isWorkspaceGitRepositoryRoot(workspaceGitRoot, repoRoot, controller.signal))) {
+      res.status(400).json({ available: false, error: 'Repository is outside current workspace', commits: [], hasMore: false });
+      return;
+    }
+    const actualRepoRoot = await findGitRoot(repoRoot);
+    if (!actualRepoRoot || actualRepoRoot !== repoRoot) {
+      res.status(400).json({ available: false, error: 'Repository root is invalid', commits: [], hasMore: false });
+      return;
+    }
+    repoRootForLog = repoRoot;
+    const fetchCount = limit + 1;
+    const logArgs = ['log', '--oneline', `--skip=${skip}`, `-${fetchCount}`];
+    if (query) {
+      logArgs.push('--regexp-ignore-case', '--all-match', `--grep=${query}`);
+    }
+    let output = await withTimeout(
+      execGit(logArgs, repoRoot, controller.signal).catch(emptyOnNonAbortGitError),
+      GIT_ROUTE_TIMEOUT_MS,
+      'Recent commits took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+      'GIT_RECENT_COMMITS_TIMEOUT',
+      () => controller.abort(new OperationTimeoutError('Recent commits took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_RECENT_COMMITS_TIMEOUT')),
+    );
+    let commits = output.split('\n').map((line) => line.trim()).filter(Boolean);
+    if (query && commits.length === 0 && /^[0-9a-f]{4,40}$/i.test(query)) {
+      const hashSearchLimit = Math.max(fetchCount + skip, 200);
+      output = await withTimeout(
+        execGit(['log', '--oneline', '--abbrev=40', `-${hashSearchLimit}`], repoRoot, controller.signal).catch(emptyOnNonAbortGitError),
+        GIT_ROUTE_TIMEOUT_MS,
+        'Recent commits took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+        'GIT_RECENT_COMMITS_TIMEOUT',
+        () => controller.abort(new OperationTimeoutError('Recent commits took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_RECENT_COMMITS_TIMEOUT')),
+      );
+      commits = output
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.toLowerCase().startsWith(query.toLowerCase()))
+        .slice(skip, skip + fetchCount);
+    }
+    const hasMore = commits.length > limit;
+    const page = commits.slice(0, limit);
+    logFsIo({ id: requestId, action, op: 'git.recent-commits', startedAt, status: 'ok', cwd: resolvedCwd, repoRoot, count: page.length, extra: { requestSlotId, query, skip, limit, hasMore } });
+    res.json({ available: true, cwd: resolvedCwd, root: repoRoot, commits: page, hasMore, skip, limit, query });
+  } catch (error) {
+    const payload = getErrorPayload(error);
+    logFsIo({ id: requestId, action, op: 'git.recent-commits', startedAt, status: 'error', cwd, repoRoot: repoRootForLog, code: payload.code, error: payload.error, extra: { requestSlotId, query, skip, limit } });
+    res.status(error instanceof OperationTimeoutError ? 504 : 200).json({ available: false, commits: [], hasMore: false, ...payload });
   } finally {
     releaseIoSlot(requestSlotId, requestId);
   }

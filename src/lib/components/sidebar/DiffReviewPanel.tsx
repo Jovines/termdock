@@ -3,6 +3,8 @@ import { ArrowLeft } from 'lucide-react';
 import type { BranchAuditRecord, BranchDiffHunk, ChangeAuditRecord } from '../../terminal/api';
 import { type DiffNavigatorFile } from './DiffFileNavigator';
 import { DiffReview, type DiffReviewFile, ChangeBadge } from './DiffReview';
+import { ChangeStatusWithAuditBadge } from './AuditStatusBadge';
+import { readCache, writeCache } from '../../utils/localStorageCache';
 
 export interface UniversalDiffReviewItem {
   key: string;
@@ -36,6 +38,15 @@ interface UniversalDiffReviewProps {
 }
 
 type ViewMode = 'list' | 'tree';
+const DIFF_CHANGE_LIST_MODE_STORAGE_KEY = 'termdock:right-sidebar:diff-change-list-mode:v1';
+
+function isViewMode(value: unknown): value is ViewMode {
+  return value === 'list' || value === 'tree';
+}
+
+function readViewMode(): ViewMode {
+  return readCache(DIFF_CHANGE_LIST_MODE_STORAGE_KEY, isViewMode) ?? 'tree';
+}
 
 interface FileAuditGroup {
   key: string;
@@ -173,7 +184,7 @@ function buildDiffReviewFiles({
       key: group.key,
       path: group.filePath,
       absolutePath: auditRecords[0]?.repoRoot ? `${auditRecords[0].repoRoot}/${group.filePath}` : group.filePath,
-      status: group.explained > 0 ? 'explained' : group.stale > 0 ? 'stale' : 'unknown',
+      status: group.changeType,
       repoRoot: auditRecords[0]?.repoRoot ?? null,
       displayName: name,
       displayDir: dir,
@@ -259,7 +270,7 @@ export function UniversalDiffReview({
 }: UniversalDiffReviewProps) {
   const groups = useMemo(() => buildFileGroups(items), [items]);
   const groupByKey = useMemo(() => new Map(groups.map((group) => [group.key, group])), [groups]);
-  const [viewMode, setViewMode] = useState<ViewMode>('list');
+  const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
   const [collapsedDirectories, setCollapsedDirectories] = useState<Set<string>>(() => new Set());
   const fallbackKey = groups.find((group) => group.explained > 0 || group.stale > 0)?.key ?? groups[0]?.key ?? null;
   const effectiveKey = selectedKey && groups.some((group) => group.key === selectedKey) ? selectedKey : fallbackKey;
@@ -375,7 +386,10 @@ export function UniversalDiffReview({
       groups={navigatorGroups}
       selectedKey={effectiveKey}
       mode={viewMode}
-      onModeChange={setViewMode}
+      onModeChange={(mode) => {
+        setViewMode(mode);
+        writeCache(DIFF_CHANGE_LIST_MODE_STORAGE_KEY, mode);
+      }}
       compact={mobile}
       collapsedDirectoryKeys={collapsedDirectories}
       onToggleDirectory={(key) => {
@@ -392,17 +406,7 @@ export function UniversalDiffReview({
       }}
       renderLeading={(file) => {
         const group = groupByKey.get(file.key);
-        const auditMark = group?.explained ? 'E' : group?.stale ? 'S' : null;
-        return (
-          <>
-            <ChangeBadge status={file.status} />
-            {auditMark && (
-              <span className={`text-[8px] font-bold leading-none ${group?.explained ? 'text-accent' : 'text-[color:var(--warning)]'}`}>
-                {auditMark}
-              </span>
-            )}
-          </>
-        );
+        return <ChangeStatusWithAuditBadge changeStatus={file.status} auditStatus={group} renderChangeBadge={(status) => <ChangeBadge status={status} />} />;
       }}
       renderTrailing={(file) => {
         const group = groupByKey.get(file.key);
@@ -418,17 +422,7 @@ export function UniversalDiffReview({
       showScrollHint={!wrap}
       renderStreamBadge={(status, item) => {
         const group = groupByKey.get(item.key);
-        const auditMark = group?.explained ? 'E' : group?.stale ? 'S' : null;
-        return (
-          <>
-            <ChangeBadge status={status} />
-            {auditMark && (
-              <span className={`text-[8px] font-bold leading-none ${group?.explained ? 'text-accent' : 'text-[color:var(--warning)]'}`}>
-                {auditMark}
-              </span>
-            )}
-          </>
-        );
+        return <ChangeStatusWithAuditBadge changeStatus={status} auditStatus={group} renderChangeBadge={(changeStatus) => <ChangeBadge status={changeStatus} />} />;
       }}
       onInsertDiffReference={onInsertDiffReference}
       onReferenceCopied={onReferenceCopied}

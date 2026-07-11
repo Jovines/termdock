@@ -324,6 +324,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   // 分组状态（与顶栏 tab / 侧边栏共享同一份）。
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
+  const sidebarOverlayOpen = useSidebarStore((s) => s.leftOpen || s.rightOpen);
 
   // 订阅 useTerminalStore 的 cwd（分组按 cwd 归类）。只取 id→cwd 的 Map，
   // 浅比较避免终端高频输出导致的重渲染。
@@ -605,12 +606,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   useEffect(() => {
     const swiper = swiperRef.current;
     if (!swiper) return;
-    const nextAllow = arranged.length > 1;
+    const nextAllow = arranged.length > 1 && !sidebarOverlayOpen;
     if (swiper.allowTouchMove !== nextAllow) {
       swiper.allowTouchMove = nextAllow;
-      logSwiperState('[swiper:allow-touch-sync]', { nextAllow });
+      logSwiperState('[swiper:allow-touch-sync]', { nextAllow, sidebarOverlayOpen });
     }
-  }, [arranged.length, logSwiperState]);
+  }, [arranged.length, logSwiperState, sidebarOverlayOpen]);
 
   const updateSwiperLayout = useCallback((reason: string) => {
     const swiper = swiperRef.current;
@@ -1157,7 +1158,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         <Swiper
           onSwiper={(instance) => {
             swiperRef.current = instance;
-            instance.allowTouchMove = arranged.length > 1;
+            instance.allowTouchMove = arranged.length > 1 && !sidebarOverlayOpen;
             logSwiperState('[swiper:on-swiper]', { allowTouchMove: instance.allowTouchMove });
             requestAnimationFrame(() => updateSwiperLayout('on-swiper'));
           }}

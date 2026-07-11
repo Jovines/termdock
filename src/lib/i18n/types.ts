@@ -103,6 +103,7 @@ export type TranslationDictionary = {
     changeAuditShort: string;
     changeAuditLoading: string;
     changeAuditLoaded: (params: TranslatorParams) => string;
+    changeAuditLoadedAt: (params: TranslatorParams) => string;
     changeAuditRegenerate: string;
     changeAuditRefreshStale: string;
     changeAuditRefreshStaleTitle: string;
@@ -133,6 +134,7 @@ export type TranslationDictionary = {
     branchAuditEmpty: string;
     branchAuditView: string;
     branchAuditSaved: (params: TranslatorParams) => string;
+    branchAuditGeneratedAt: (params: TranslatorParams) => string;
     insertPreset: (params: TranslatorParams) => string;
     tabChanges: string;
     tabGit: string;
@@ -222,6 +224,8 @@ export type TranslationDictionary = {
     commitChanges: string;
     commitNeedsStaged: string;
     recentCommitsTitle: string;
+    recentCommitsSearchPlaceholder: string;
+    recentCommitsLoadMore: string;
     recentCommitsEmpty: string;
     pushSectionTitle: string;
     pushRemoteLabel: string;
@@ -300,6 +304,7 @@ export type TranslationDictionary = {
     auditExplanation: string;
     auditStale: string;
     auditClear: string;
+    auditGeneratedAt: (params: TranslatorParams) => string;
     allDiffLabel: string;
     allChangesLabel: string;
     workingTree: string;

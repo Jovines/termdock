@@ -67,6 +67,10 @@ const PROGRAM_RULES_CACHE_KEY = 'termdock-program-rules-cache';
 const TOOLBAR_PRESETS_CACHE_KEY = 'termdock-toolbar-presets-cache';
 const SETTINGS_CACHE_KEY = 'termdock-settings-cache';
 const COLOR_THEME_CACHE_KEY = 'termdock-color-theme';
+const DIFF_INLINE_MODE_STORAGE_KEY = 'termdock:diff-viewer:inline-mode:v1';
+const DIFF_ALGORITHM_STORAGE_KEY = 'termdock:diff-viewer:algorithm:v1';
+const DIFF_WHITESPACE_STORAGE_KEY = 'termdock:diff-viewer:whitespace:v1';
+const DIFF_SETTINGS_CHANGED_EVENT = 'termdock:diff-settings-changed';
 const RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_ROOT_CACHE_KEY = 'termdock:right-sidebar:file-preview-open-by-root:v1';
 const MAX_RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_ROOTS = 60;
 const DESKTOP_TAB_MENU_WIDTH = 320;
@@ -101,6 +105,10 @@ function isTermdockColorTheme(v: unknown): v is TermdockColorTheme {
 
 type RightSidebarFilePreviewOpenCache = Record<string, { updatedAt: number }>;
 
+type DiffInlineMode = 'none' | 'words' | 'chars';
+type GitDiffAlgorithm = 'default' | 'myers' | 'minimal' | 'patience' | 'histogram';
+type GitDiffWhitespaceMode = 'default' | 'trim' | 'ignore' | 'ignore-blank-lines';
+
 function isRightSidebarFilePreviewOpenCache(value: unknown): value is RightSidebarFilePreviewOpenCache {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   return Object.entries(value as Record<string, unknown>).every(([key, entry]) => {
@@ -116,6 +124,18 @@ function normalizeOpenByRootCache(cache: RightSidebarFilePreviewOpenCache): Righ
     .sort(([, a], [, b]) => b.updatedAt - a.updatedAt)
     .slice(0, MAX_RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_ROOTS);
   return Object.fromEntries(entries);
+}
+
+function isDiffInlineMode(value: unknown): value is DiffInlineMode {
+  return value === 'none' || value === 'words' || value === 'chars';
+}
+
+function isGitDiffAlgorithm(value: unknown): value is GitDiffAlgorithm {
+  return value === 'default' || value === 'myers' || value === 'minimal' || value === 'patience' || value === 'histogram';
+}
+
+function isGitDiffWhitespaceMode(value: unknown): value is GitDiffWhitespaceMode {
+  return value === 'default' || value === 'trim' || value === 'ignore' || value === 'ignore-blank-lines';
 }
 
 function isAgentRulesArray(v: unknown): v is AgentProgramConfig[] {
@@ -480,6 +500,9 @@ function App() {
   const [colorTheme, setColorTheme] = React.useState<TermdockColorTheme>(() =>
     readCache(COLOR_THEME_CACHE_KEY, isTermdockColorTheme) ?? 'dark',
   );
+  const [diffInlineMode, setDiffInlineMode] = React.useState<DiffInlineMode>(() => readCache(DIFF_INLINE_MODE_STORAGE_KEY, isDiffInlineMode) ?? 'words');
+  const [diffAlgorithm, setDiffAlgorithm] = React.useState<GitDiffAlgorithm>(() => readCache(DIFF_ALGORITHM_STORAGE_KEY, isGitDiffAlgorithm) ?? 'default');
+  const [diffWhitespace, setDiffWhitespace] = React.useState<GitDiffWhitespaceMode>(() => readCache(DIFF_WHITESPACE_STORAGE_KEY, isGitDiffWhitespaceMode) ?? 'default');
   // Hydrate settings from cache so the toggles show user's real choice on cold
   // start instead of flashing the defaults until the HTTP fetch resolves.
   const cachedSettings = React.useRef<SettingsCacheDoc | null>(readCache(SETTINGS_CACHE_KEY, isSettingsCacheDoc)).current;
@@ -531,6 +554,28 @@ function App() {
     document.documentElement.dataset.theme = colorTheme;
     writeCache(COLOR_THEME_CACHE_KEY, colorTheme);
   }, [colorTheme]);
+
+  const notifyDiffSettingsChanged = React.useCallback(() => {
+    window.dispatchEvent(new CustomEvent(DIFF_SETTINGS_CHANGED_EVENT));
+  }, []);
+
+  const updateDiffInlineMode = React.useCallback((mode: DiffInlineMode) => {
+    setDiffInlineMode(mode);
+    writeCache(DIFF_INLINE_MODE_STORAGE_KEY, mode);
+    notifyDiffSettingsChanged();
+  }, [notifyDiffSettingsChanged]);
+
+  const updateDiffAlgorithm = React.useCallback((algorithm: GitDiffAlgorithm) => {
+    setDiffAlgorithm(algorithm);
+    writeCache(DIFF_ALGORITHM_STORAGE_KEY, algorithm);
+    notifyDiffSettingsChanged();
+  }, [notifyDiffSettingsChanged]);
+
+  const updateDiffWhitespace = React.useCallback((whitespace: GitDiffWhitespaceMode) => {
+    setDiffWhitespace(whitespace);
+    writeCache(DIFF_WHITESPACE_STORAGE_KEY, whitespace);
+    notifyDiffSettingsChanged();
+  }, [notifyDiffSettingsChanged]);
 
   useEffect(() => {
     writeCache(
@@ -2317,6 +2362,52 @@ function App() {
                         );
                       })}
                     </div>
+                  </div>
+                </div>
+
+                {/* Diff review */}
+                <div className="space-y-2 rounded-xl bg-surface-2 px-2.5 py-2">
+                  <div className="text-[12px] font-medium text-foreground/90">Diff</div>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <label className="min-w-0 text-[11px] text-muted-foreground">
+                      <span className="mb-1 block">Inline</span>
+                      <select
+                        value={diffInlineMode}
+                        onChange={(event) => updateDiffInlineMode(event.target.value as DiffInlineMode)}
+                        className="h-8 w-full rounded-md border border-border/20 bg-surface px-2 text-[11px] font-medium text-foreground outline-none"
+                      >
+                        <option value="words">Words</option>
+                        <option value="chars">Characters</option>
+                        <option value="none">Off</option>
+                      </select>
+                    </label>
+                    <label className="min-w-0 text-[11px] text-muted-foreground">
+                      <span className="mb-1 block">Whitespace</span>
+                      <select
+                        value={diffWhitespace}
+                        onChange={(event) => updateDiffWhitespace(event.target.value as GitDiffWhitespaceMode)}
+                        className="h-8 w-full rounded-md border border-border/20 bg-surface px-2 text-[11px] font-medium text-foreground outline-none"
+                      >
+                        <option value="default">All</option>
+                        <option value="trim">Trim edges</option>
+                        <option value="ignore">Ignore all</option>
+                        <option value="ignore-blank-lines">Ignore blank lines</option>
+                      </select>
+                    </label>
+                    <label className="min-w-0 text-[11px] text-muted-foreground">
+                      <span className="mb-1 block">Algorithm</span>
+                      <select
+                        value={diffAlgorithm}
+                        onChange={(event) => updateDiffAlgorithm(event.target.value as GitDiffAlgorithm)}
+                        className="h-8 w-full rounded-md border border-border/20 bg-surface px-2 text-[11px] font-medium text-foreground outline-none"
+                      >
+                        <option value="default">Default</option>
+                        <option value="histogram">Histogram</option>
+                        <option value="patience">Patience</option>
+                        <option value="minimal">Minimal</option>
+                        <option value="myers">Myers</option>
+                      </select>
+                    </label>
                   </div>
                 </div>
 

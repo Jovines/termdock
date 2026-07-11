@@ -137,6 +137,13 @@ function sessionListKey(sessionList: PersistedSession[]): string {
     .join('|');
 }
 
+function pickValidActiveSessionId(sessionList: PersistedSession[], preferredSessionId: string | null): string | null {
+  if (sessionList.length === 0) return null;
+  return preferredSessionId && sessionList.some((session) => session.sessionId === preferredSessionId)
+    ? preferredSessionId
+    : (sessionList[0]?.sessionId ?? null);
+}
+
 export function useSessionPersistence(): UseSessionPersistenceReturn {
   // 同步从 localStorage hydrate 初始状态：缓存命中时 isLoading 直接 false，
   // UI 可以瞬间渲染；缓存未命中（真·第一次启动 / 清过缓存）才走 HTTP fetch。
@@ -145,7 +152,9 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const [sessions, setSessions] = useState<PersistedSession[]>(initialCached ?? []);
   const [inventory, setInventory] = useState<SessionInventory | null>(null);
   const [activeSessionId, setActiveSessionIdState] = useState<string | null>(
-    initialCached && initialCached.length > 0 ? initialActiveId : null
+    initialCached && initialCached.length > 0
+      ? pickValidActiveSessionId(initialCached, initialActiveId)
+      : initialActiveId
   );
   const [isLoading, setIsLoading] = useState<boolean>(initialCached === null);
   const initialized = useRef(false);
@@ -158,14 +167,25 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
-  const applySessionList = useCallback((sessionList: PersistedSession[]) => {
-    setSessions((prev) => (sessionListKey(prev) === sessionListKey(sessionList) ? prev : sessionList));
-    writeSessionsCache(sessionList);
+  const reconcileActiveSessionId = useCallback((sessionList: PersistedSession[]) => {
+    const nextActiveSessionId = pickValidActiveSessionId(sessionList, activeSessionIdRef.current ?? readActiveSessionId());
+    setActiveSessionIdState((prev) => (prev === nextActiveSessionId ? prev : nextActiveSessionId));
+    writeActiveSessionId(nextActiveSessionId);
+    activeSessionIdRef.current = nextActiveSessionId;
+    return nextActiveSessionId;
   }, []);
 
-  const applyInventory = useCallback((nextInventory: SessionInventory) => {
+  const applySessionList = useCallback((sessionList: PersistedSession[], options?: { reconcileActive?: boolean }) => {
+    setSessions((prev) => (sessionListKey(prev) === sessionListKey(sessionList) ? prev : sessionList));
+    writeSessionsCache(sessionList);
+    if (options?.reconcileActive) {
+      reconcileActiveSessionId(sessionList);
+    }
+  }, [reconcileActiveSessionId]);
+
+  const applyInventory = useCallback((nextInventory: SessionInventory, options?: { reconcileActive?: boolean }) => {
     setInventory(nextInventory);
-    applySessionList(normalizeInventorySessionList(nextInventory.clientSessions));
+    applySessionList(normalizeInventorySessionList(nextInventory.clientSessions), options);
   }, [applySessionList]);
 
   const discardLegacyLocalState = useCallback((): PersistedSession[] => {
@@ -193,16 +213,10 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
 
     try {
       const nextInventory = await getSessionInventory();
-      applyInventory(nextInventory);
+      applyInventory(nextInventory, { reconcileActive: true });
       const sessionList = normalizeInventorySessionList(nextInventory.clientSessions);
-      const restoredActiveSessionId = readActiveSessionId();
 
       if (sessionList.length > 0) {
-        const validActiveId = sessionList.some(s => s.sessionId === restoredActiveSessionId)
-          ? restoredActiveSessionId
-          : (sessionList[0]?.sessionId ?? null);
-        setActiveSessionIdState((prev) => (prev === validActiveId ? prev : validActiveId));
-        writeActiveSessionId(validActiveId);
         return sessionList;
       }
 
@@ -389,12 +403,12 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
         lastSnapshotSeqRef.current = snapshotSeq;
       }
       if (snapshot.inventory) {
-        applyInventory(snapshot.inventory);
+        applyInventory(snapshot.inventory, { reconcileActive: true });
         return;
       }
 
       const serverSessions = normalizeSessionList(snapshot.clientState.sessions || []);
-      applySessionList(serverSessions);
+      applySessionList(serverSessions, { reconcileActive: true });
     });
     return unsubscribe;
   }, [applyInventory, applySessionList]);

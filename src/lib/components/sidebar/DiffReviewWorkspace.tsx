@@ -37,6 +37,7 @@ interface DiffReviewWorkspaceProps {
   onDetailScroll?: (container: HTMLDivElement) => void;
   desktopSidePanel?: ReactNode;
   desktopListClassName?: string;
+  mobileDetailOwnsScroll?: boolean;
 }
 
 export function DiffReviewModeToggle({
@@ -94,7 +95,7 @@ export function DiffReviewWorkspace({
   emptyContent,
   listPrefix,
   listContainerClassName = 'px-2 py-2',
-  detailContainerClassName = 'termdock-native-select px-3 py-3',
+  detailContainerClassName = 'termdock-native-select termdock-diff-stream-scroller min-h-0',
   renderListHeader,
   renderMobileDetailHeader,
   externalSwiperRef,
@@ -104,6 +105,7 @@ export function DiffReviewWorkspace({
   onDetailScroll,
   desktopSidePanel,
   desktopListClassName,
+  mobileDetailOwnsScroll,
 }: DiffReviewWorkspaceProps) {
   const modeToggle = <DiffReviewModeToggle mode={mode} onModeChange={onModeChange} />;
   const listHeader = renderListHeader ? renderListHeader(modeToggle) : <div className="flex justify-end">{modeToggle}</div>;
@@ -119,6 +121,7 @@ export function DiffReviewWorkspace({
       onDetailScroll={onDetailScroll}
       desktopSidePanel={desktopSidePanel}
       desktopListClassName={desktopListClassName}
+      mobileDetailOwnsScroll={mobileDetailOwnsScroll}
       mobileListHeader={mobile ? listHeader : undefined}
       desktopListHeader={!mobile ? listHeader : undefined}
       mobileDetailHeader={renderMobileDetailHeader}
@@ -146,7 +149,10 @@ export function DiffReviewWorkspace({
         </div>
       )}
       detail={(
-        <div className={detailContainerClassName} data-sidebar-gesture-ignore>
+        <div
+          className={mobile && mobileDetailOwnsScroll ? 'h-full min-h-0' : detailContainerClassName}
+          data-sidebar-gesture-ignore
+        >
           {detail}
         </div>
       )}

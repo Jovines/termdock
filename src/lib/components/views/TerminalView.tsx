@@ -1581,17 +1581,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [activeModifier, handleViewportInput]);
 
   const handleMobilePastePress = React.useCallback(() => {
-    navigator.clipboard?.readText().then((text) => {
-      if (!text) return;
-      handleViewportInput(text, {
-        skipModifierTransform: true,
-        consumeModifier: false,
-      });
-      focusTerminalIfActive();
-    }).catch(() => {
-      focusTerminalIfActive();
-    });
-  }, [focusTerminalIfActive, handleViewportInput]);
+    void terminalControllerRef.current?.pasteClipboardText();
+  }, []);
 
   // 重连抖动修复：auto-recreate / 短线重连过渡期 activeProgram 会被清成 null
   // （clearTerminalSession），随后 connected 事件再写回。若直接用它推导 preset，

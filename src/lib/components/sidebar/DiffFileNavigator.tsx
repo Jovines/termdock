@@ -101,7 +101,7 @@ export function DiffTreeRowShell({
       }`}
       style={{ paddingLeft: `${depth * 14 + 8}px` }}
     >
-      <span className="flex w-[14px] shrink-0 items-center justify-center text-muted-foreground/80">
+      <span className="flex min-w-[14px] shrink-0 items-center justify-center text-muted-foreground/80">
         {leading}
       </span>
       <span className="min-w-0 flex-1">

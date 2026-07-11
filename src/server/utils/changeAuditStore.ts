@@ -15,6 +15,8 @@ export interface ChangeAuditHunkExplanation {
   newPath?: string | null;
   hunkHeader: string;
   hunkIndex?: number | null;
+  sectionIndex?: number | null;
+  sectionFingerprint?: string | null;
   fingerprint: string;
   explanation: string;
   summary?: string | null;
@@ -63,6 +65,8 @@ export interface BranchAuditHunkExplanation {
   newPath?: string | null;
   hunkHeader: string;
   hunkIndex?: number | null;
+  sectionIndex?: number | null;
+  sectionFingerprint?: string | null;
   fingerprint: string;
   diff?: string | null;
   explanation: string;
@@ -82,6 +86,8 @@ export interface StoredBranchAuditRecord {
   newPath?: string | null;
   hunkHeader: string;
   hunkIndex?: number | null;
+  sectionIndex?: number | null;
+  sectionFingerprint?: string | null;
   fingerprint: string;
   diff?: string | null;
   explanation: string;
@@ -206,7 +212,11 @@ function normalizeRecord(record: ChangeAuditHunkExplanation, fallback: { workspa
   const hunkIndex = typeof record.hunkIndex === 'number' && Number.isFinite(record.hunkIndex)
     ? Math.max(0, Math.floor(record.hunkIndex))
     : null;
-  const id = buildChangeAuditRecordId({ repoRoot, filePath, hunkHeader, fingerprint });
+  const sectionIndex = typeof record.sectionIndex === 'number' && Number.isFinite(record.sectionIndex)
+    ? Math.max(0, Math.floor(record.sectionIndex))
+    : null;
+  const sectionFingerprint = normalizeString(record.sectionFingerprint);
+  const id = buildChangeAuditRecordId({ repoRoot, filePath, hunkHeader, fingerprint, sectionFingerprint, sectionIndex });
   return {
     id,
     repoRoot,
@@ -215,6 +225,8 @@ function normalizeRecord(record: ChangeAuditHunkExplanation, fallback: { workspa
     newPath,
     hunkHeader,
     hunkIndex,
+    sectionIndex,
+    sectionFingerprint,
     fingerprint,
     explanation,
     summary,
@@ -228,16 +240,16 @@ export function buildChangeAuditFingerprint(parts: string[]): string {
   return createHash('sha256').update(parts.join('\n'), 'utf8').digest('hex').slice(0, 16);
 }
 
-export function buildChangeAuditRecordId(input: Pick<ChangeAuditHunkExplanation, 'repoRoot' | 'filePath' | 'hunkHeader' | 'fingerprint'>): string {
+export function buildChangeAuditRecordId(input: Pick<ChangeAuditHunkExplanation, 'repoRoot' | 'filePath' | 'hunkHeader' | 'fingerprint'> & { sectionFingerprint?: string | null; sectionIndex?: number | null }): string {
   return createHash('sha256')
-    .update(`${input.repoRoot}\0${input.filePath}\0${input.hunkHeader}\0${input.fingerprint}`, 'utf8')
+    .update(`${input.repoRoot}\0${input.filePath}\0${input.hunkHeader}\0${input.fingerprint}\0${input.sectionIndex ?? ''}\0${input.sectionFingerprint ?? ''}`, 'utf8')
     .digest('hex')
     .slice(0, 24);
 }
 
-export function buildBranchAuditRecordId(input: Pick<StoredBranchAuditRecord, 'repoRoot' | 'baseRef' | 'filePath' | 'hunkHeader' | 'fingerprint'> & { branchName?: string | null }): string {
+export function buildBranchAuditRecordId(input: Pick<StoredBranchAuditRecord, 'repoRoot' | 'baseRef' | 'filePath' | 'hunkHeader' | 'fingerprint'> & { branchName?: string | null; sectionIndex?: number | null; sectionFingerprint?: string | null }): string {
   return createHash('sha256')
-    .update(`${input.repoRoot}\0${input.baseRef}\0${input.branchName ?? ''}\0${input.filePath}\0${input.hunkHeader}\0${input.fingerprint}`, 'utf8')
+    .update(`${input.repoRoot}\0${input.baseRef}\0${input.branchName ?? ''}\0${input.filePath}\0${input.hunkHeader}\0${input.fingerprint}\0${input.sectionIndex ?? ''}\0${input.sectionFingerprint ?? ''}`, 'utf8')
     .digest('hex')
     .slice(0, 24);
 }
@@ -288,8 +300,12 @@ function normalizeBranchRecord(record: BranchAuditHunkExplanation, fallback: Bra
   const hunkIndex = typeof record.hunkIndex === 'number' && Number.isFinite(record.hunkIndex)
     ? Math.max(0, Math.floor(record.hunkIndex))
     : null;
+  const sectionIndex = typeof record.sectionIndex === 'number' && Number.isFinite(record.sectionIndex)
+    ? Math.max(0, Math.floor(record.sectionIndex))
+    : null;
+  const sectionFingerprint = normalizeString(record.sectionFingerprint);
   return {
-    id: buildBranchAuditRecordId({ repoRoot, baseRef, branchName, filePath, hunkHeader, fingerprint }),
+    id: buildBranchAuditRecordId({ repoRoot, baseRef, branchName, filePath, hunkHeader, fingerprint, sectionIndex, sectionFingerprint }),
     workspaceRoot: normalizeString(fallback.workspaceRoot),
     repoRoot,
     baseRef,
@@ -301,6 +317,8 @@ function normalizeBranchRecord(record: BranchAuditHunkExplanation, fallback: Bra
     newPath: normalizeString(record.newPath),
     hunkHeader,
     hunkIndex,
+    sectionIndex,
+    sectionFingerprint,
     fingerprint,
     diff: normalizeString(record.diff),
     explanation,

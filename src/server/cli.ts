@@ -19,7 +19,7 @@ import { promisify } from 'util';
 import { Writable } from 'stream';
 import { createRequire } from 'module';
 import { PORT, DEFAULT_HOST } from './config.js';
-import { isFirstRunCompleted, markFirstRunCompleted, normalizeLocalAccessName, setLocalAccessSetting, getLocalAccessSetting } from './utils/settings.js';
+import { isFirstRunCompleted, markFirstRunCompleted, normalizeLocalAccessName, setLocalAccessSetting, getLocalAccessSetting, getPreventSleepSetting } from './utils/settings.js';
 import { localAccessManager, getLanIPv4Addresses } from './utils/localAccess.js';
 import type { CertificateRefreshResult, StartServerResult } from './entry.js';
 import {
@@ -63,6 +63,7 @@ const certDir = path.join(stateDir, 'certs');
 const defaultHttpsCertPath = path.join(certDir, 'termdock-local.pem');
 const defaultHttpsKeyPath = path.join(certDir, 'termdock-local-key.pem');
 const defaultHttpsCaPath = path.join(certDir, 'rootCA.pem');
+const restartBridgeCaffeinateSeconds = 300;
 
 // ANSI color helpers. Disabled when stdout is not a TTY (e.g. piped, log file)
 // or when the user opts out via NO_COLOR / FORCE_COLOR=0.
@@ -92,6 +93,22 @@ const ICON = {
   info: c.cyan('›'),
   lock: '🔒',
 };
+
+function startRestartBridgeCaffeinate(): boolean {
+  if (process.platform !== 'darwin') return false;
+  if (!getPreventSleepSetting()) return false;
+
+  try {
+    const child = spawn('caffeinate', ['-i', '-s', '-t', String(restartBridgeCaffeinateSeconds)], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 interface CliOptions {
   host?: string;
@@ -1130,6 +1147,19 @@ interface ChangeAuditCliSnapshot {
   hunks: ChangeAuditCliHunk[];
 }
 
+interface ChangeAuditRepoCoverage {
+  repoRoot: string;
+  relativeRoot: string;
+  trackedDiffBytes: number;
+  untrackedFiles: string[];
+  untrackedDiffBytes: number;
+}
+
+interface ChangeAuditHunksResult {
+  hunks: ChangeAuditCliHunk[];
+  coverage: ChangeAuditRepoCoverage[];
+}
+
 const CHANGE_AUDIT_SNAPSHOT_MAX_AGE_MS = 10 * 60 * 1000;
 
 function fnv1a32(text: string): string {
@@ -1239,13 +1269,14 @@ async function discoverAuditRepositories(workspaceRoot: string): Promise<AuditRe
   return targets.sort((a, b) => a.relativeRoot.localeCompare(b.relativeRoot));
 }
 
-async function readWorkingTreeDiff(repoRoot: string): Promise<string> {
+async function readWorkingTreeDiff(repoRoot: string): Promise<{ diff: string; trackedDiffBytes: number; untrackedFiles: string[]; untrackedDiffBytes: number }> {
   const [cached, worktree, untracked] = await Promise.all([
     execFileAsync('git', ['diff', '-M', '--cached'], { cwd: repoRoot, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout).catch(() => ''),
     execFileAsync('git', ['diff', '-M'], { cwd: repoRoot, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout).catch(() => ''),
     execFileAsync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: repoRoot, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }).then(async ({ stdout }) => {
       const pieces: string[] = [];
-      for (const filePath of stdout.split('\0').filter(Boolean)) {
+      const files = stdout.split('\0').filter(Boolean);
+      for (const filePath of files) {
         try {
           const { stdout: diff } = await execFileAsync('git', ['diff', '--no-index', '--', '/dev/null', filePath], {
             cwd: repoRoot,
@@ -1258,10 +1289,17 @@ async function readWorkingTreeDiff(repoRoot: string): Promise<string> {
           if (maybe.stdout) pieces.push(maybe.stdout);
         }
       }
-      return pieces.join('\n');
-    }).catch(() => ''),
+      const diff = pieces.join('\n');
+      return { files, diff, bytes: Buffer.byteLength(diff, 'utf8') };
+    }).catch(() => ({ files: [] as string[], diff: '', bytes: 0 })),
   ]);
-  return [cached, worktree, untracked].filter(Boolean).join('\n');
+  const trackedDiff = [cached, worktree].filter(Boolean).join('\n');
+  return {
+    diff: [trackedDiff, untracked.diff].filter(Boolean).join('\n'),
+    trackedDiffBytes: Buffer.byteLength(trackedDiff, 'utf8'),
+    untrackedFiles: untracked.files,
+    untrackedDiffBytes: untracked.bytes,
+  };
 }
 
 function parseAuditHunks(target: AuditRepositoryTarget, diffText: string): ChangeAuditCliHunk[] {
@@ -1342,13 +1380,35 @@ function parseAuditHunks(target: AuditRepositoryTarget, diffText: string): Chang
   return hunks;
 }
 
-async function getAuditHunks(cwdInput?: string | true): Promise<ChangeAuditCliHunk[]> {
+async function getAuditHunksWithCoverage(cwdInput?: string | true): Promise<ChangeAuditHunksResult> {
   const workspaceRoot = typeof cwdInput === 'string' ? path.resolve(cwdInput) : process.cwd();
   const targets = await discoverAuditRepositories(workspaceRoot);
-  const hunksByRepo = await Promise.all(targets.map(async (target) => (
-    parseAuditHunks(target, await readWorkingTreeDiff(target.repoRoot).catch(() => ''))
-  )));
-  return hunksByRepo.flat();
+  const byRepo = await Promise.all(targets.map(async (target) => {
+    const result = await readWorkingTreeDiff(target.repoRoot).catch(() => ({
+      diff: '',
+      trackedDiffBytes: 0,
+      untrackedFiles: [] as string[],
+      untrackedDiffBytes: 0,
+    }));
+    return {
+      hunks: parseAuditHunks(target, result.diff),
+      coverage: {
+        repoRoot: target.repoRoot,
+        relativeRoot: target.relativeRoot,
+        trackedDiffBytes: result.trackedDiffBytes,
+        untrackedFiles: result.untrackedFiles,
+        untrackedDiffBytes: result.untrackedDiffBytes,
+      },
+    };
+  }));
+  return {
+    hunks: byRepo.flatMap((entry) => entry.hunks),
+    coverage: byRepo.map((entry) => entry.coverage),
+  };
+}
+
+async function getAuditHunks(cwdInput?: string | true): Promise<ChangeAuditCliHunk[]> {
+  return (await getAuditHunksWithCoverage(cwdInput)).hunks;
 }
 
 function normalizeAuditSourceRoot(cwdInput?: string | true): string {
@@ -1415,10 +1475,11 @@ async function readBranchDiff(repoRoot: string, baseInput: string): Promise<{ ba
       baseRef = base;
     }
   }
-  const [branchName, headRef, trackedDiff, untrackedDiff] = await Promise.all([
+  const [branchName, headRef, branchDiff, workingDiff, untrackedDiff] = await Promise.all([
     execFileAsync('git', ['branch', '--show-current'], { cwd: repoRoot, timeout: 10_000, maxBuffer: 128 * 1024 }).then((r) => r.stdout.trim() || null).catch(() => null),
     execFileAsync('git', ['rev-parse', '--short=12', 'HEAD'], { cwd: repoRoot, timeout: 10_000, maxBuffer: 128 * 1024 }).then((r) => r.stdout.trim() || null).catch(() => null),
-    execFileAsync('git', ['diff', baseRef], { cwd: repoRoot, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout).catch(() => ''),
+    execFileAsync('git', ['diff', `${baseRef}...HEAD`], { cwd: repoRoot, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout).catch(() => ''),
+    execFileAsync('git', ['diff', 'HEAD'], { cwd: repoRoot, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout).catch(() => ''),
     execFileAsync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: repoRoot, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }).then(async ({ stdout }) => {
       const pieces: string[] = [];
       for (const filePath of stdout.split('\0').filter(Boolean)) {
@@ -1437,7 +1498,7 @@ async function readBranchDiff(repoRoot: string, baseInput: string): Promise<{ ba
       return pieces.join('\n');
     }).catch(() => ''),
   ]);
-  const diff = [trackedDiff, untrackedDiff].filter(Boolean).join('\n');
+  const diff = [branchDiff, workingDiff, untrackedDiff].filter(Boolean).join('\n');
   const diffFingerprint = createHash('sha256').update([repoRoot, baseRef, branchName ?? '', headRef ?? '', diff].join('\n'), 'utf8').digest('hex').slice(0, 16);
   return { baseRef, branchName, headRef, diff, diffFingerprint };
 }
@@ -1478,11 +1539,12 @@ async function runChangeAuditList(source: string | true | undefined): Promise<vo
 }
 
 async function runChangeAuditExport(source: string | true | undefined): Promise<void> {
-  const hunks = await getAuditHunks(source);
+  const { hunks, coverage } = await getAuditHunksWithCoverage(source);
   writeChangeAuditSnapshot(source, hunks);
   console.log(JSON.stringify({
     version: 1,
     count: hunks.length,
+    coverage,
     hunks,
   }, null, 2));
 }
@@ -2527,9 +2589,13 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
+    const bridgeCaffeinateStarted = startRestartBridgeCaffeinate();
     process.kill(runningState.pid, 'SIGTERM');
     removeStateFile();
     console.log(`${ICON.ok} ${c.green(`Stopped Termdock (PID ${runningState.pid}).`)}`);
+    if (bridgeCaffeinateStarted) {
+      console.log(`${ICON.info} ${c.dim(`Keeping macOS awake for up to ${restartBridgeCaffeinateSeconds}s while Termdock restarts.`)}`);
+    }
     process.exit(0);
   }
 

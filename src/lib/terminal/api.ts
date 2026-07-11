@@ -1622,6 +1622,24 @@ export async function readFileContent(filePath: string, signal?: AbortSignal, ac
   return response.json();
 }
 
+export async function getGitBlobContent(filePath: string, cwd: string, ref = 'HEAD', signal?: AbortSignal, source: 'ref' | 'index' = 'ref'): Promise<{
+  path: string; ref: string; source?: 'ref' | 'index'; content: string; size: number; truncated?: boolean; error?: string;
+}> {
+  const params = new URLSearchParams({ path: filePath, cwd, ref, action: 'git_blob' });
+  if (source === 'index') params.set('source', 'index');
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/git-blob?${params}`,
+    { signal },
+    FS_REQUEST_TIMEOUT_MS,
+    'Git blob preview took too long.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to read git blob' }));
+    throw new Error(error.error || 'Failed to read git blob');
+  }
+  return response.json();
+}
+
 export async function readImagePreviewBlob(filePath: string, signal?: AbortSignal, action = 'view_file', requestSlotId?: string): Promise<ImagePreviewBlob> {
   const params = new URLSearchParams({ path: filePath, action });
   if (requestSlotId) params.set('requestSlotId', requestSlotId);
@@ -1819,12 +1837,26 @@ export interface FileDiffResponse {
   skippedFiles?: FileDiffSkippedFile[];
 }
 
-export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: string, signal?: AbortSignal, action = filePath ? 'view_diff' : 'view_all_changes', traceId?: string, interactionId?: string, requestSlotId?: string): Promise<FileDiffResponse> {
+export type GitDiffAlgorithm = 'default' | 'myers' | 'minimal' | 'patience' | 'histogram';
+export type GitDiffWhitespaceMode = 'default' | 'trim' | 'ignore' | 'ignore-blank-lines';
+
+export interface GitDiffOptions {
+  algorithm?: GitDiffAlgorithm;
+  whitespace?: GitDiffWhitespaceMode;
+}
+
+function appendGitDiffOptions(params: URLSearchParams, options?: GitDiffOptions): void {
+  if (options?.algorithm && options.algorithm !== 'default') params.set('algorithm', options.algorithm);
+  if (options?.whitespace && options.whitespace !== 'default') params.set('whitespace', options.whitespace);
+}
+
+export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: string, signal?: AbortSignal, action = filePath ? 'view_diff' : 'view_all_changes', traceId?: string, interactionId?: string, requestSlotId?: string, options?: GitDiffOptions): Promise<FileDiffResponse> {
   const params = new URLSearchParams();
   if (filePath) params.set('path', filePath);
   if (cached) params.set('cached', 'true');
   if (cwd) params.set('cwd', cwd);
   params.set('action', action);
+  appendGitDiffOptions(params, options);
   if (traceId) params.set('traceId', traceId);
   if (interactionId) params.set('interactionId', interactionId);
   if (requestSlotId) params.set('requestSlotId', requestSlotId);
@@ -1838,6 +1870,8 @@ export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: str
     cwd,
     action,
     cached: Boolean(cached),
+    algorithm: options?.algorithm ?? 'default',
+    whitespace: options?.whitespace ?? 'default',
     timeoutMs: isConcreteVisibleFileDiff ? GIT_FILE_DIFF_REQUEST_TIMEOUT_MS : GIT_REQUEST_TIMEOUT_MS,
   });
   const response = await fetchWithTimeout(
@@ -1996,6 +2030,8 @@ export interface GitChangedFile {
   canUnstage: boolean;
   canStash: boolean;
   canRestoreWorktree: boolean;
+  additions?: number;
+  deletions?: number;
 }
 
 export interface GitContextFile {
@@ -2022,6 +2058,7 @@ export interface GitContext {
   changedFiles?: GitContextFile[];
   truncated?: boolean;
   error?: string;
+  code?: string;
 }
 
 export async function getGitContext(cwd?: string, signal?: AbortSignal, action = 'load_git_details', requestSlotId?: string): Promise<GitContext> {
@@ -2057,6 +2094,7 @@ export interface GitBundleResponse {
   nestedDeferred?: boolean;
   untrackedDeferred?: boolean;
   error?: string;
+  code?: string;
 }
 
 export interface GitRepositoryFilter {
@@ -2090,6 +2128,8 @@ export interface ChangeAuditRecord {
   newPath?: string | null;
   hunkHeader: string;
   hunkIndex?: number | null;
+  sectionIndex?: number | null;
+  sectionFingerprint?: string | null;
   fingerprint: string;
   explanation: string;
   summary?: string | null;
@@ -2144,6 +2184,8 @@ export interface BranchAuditRecord {
   newPath?: string | null;
   hunkHeader: string;
   hunkIndex?: number | null;
+  sectionIndex?: number | null;
+  sectionFingerprint?: string | null;
   fingerprint: string;
   diff?: string | null;
   explanation: string;
@@ -2206,6 +2248,41 @@ export async function getCommitDiff(options: { cwd?: string | null; repoRoot?: s
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get commit diff' }));
     throw new Error(error.error || 'Failed to get commit diff');
+  }
+  return response.json();
+}
+
+export interface RecentCommitsResponse {
+  available: boolean;
+  cwd?: string;
+  root?: string;
+  commits: string[];
+  hasMore: boolean;
+  skip?: number;
+  limit?: number;
+  query?: string;
+  error?: string;
+  code?: string;
+}
+
+export async function getRecentCommits(options: { cwd?: string | null; repoRoot?: string | null; limit?: number; skip?: number; query?: string; requestSlotId?: string }, signal?: AbortSignal): Promise<RecentCommitsResponse> {
+  const params = new URLSearchParams();
+  if (options.cwd) params.set('cwd', options.cwd);
+  if (options.repoRoot) params.set('repoRoot', options.repoRoot);
+  if (typeof options.limit === 'number') params.set('limit', String(options.limit));
+  if (typeof options.skip === 'number') params.set('skip', String(options.skip));
+  if (options.query) params.set('query', options.query);
+  params.set('action', 'load_recent_commits');
+  if (options.requestSlotId) params.set('requestSlotId', options.requestSlotId);
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/git-recent-commits?${params}`,
+    { signal },
+    GIT_REQUEST_TIMEOUT_MS,
+    'Recent commits took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get recent commits' }));
+    throw new Error(error.error || 'Failed to get recent commits');
   }
   return response.json();
 }
