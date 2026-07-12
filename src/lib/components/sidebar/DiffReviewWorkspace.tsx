@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { MutableRefObject, ReactNode } from 'react';
 import { List, ListTree } from 'lucide-react';
 import type { Swiper as SwiperInstance } from 'swiper';
 import {
@@ -35,6 +35,7 @@ interface DiffReviewWorkspaceProps {
   slideToDetailOnMobile?: boolean;
   desktopLayout?: 'split' | 'stacked';
   onDetailScroll?: (container: HTMLDivElement) => void;
+  detailScrollerRef?: MutableRefObject<HTMLDivElement | null>;
   desktopSidePanel?: ReactNode;
   desktopListClassName?: string;
   mobileDetailOwnsScroll?: boolean;
@@ -103,6 +104,7 @@ export function DiffReviewWorkspace({
   slideToDetailOnMobile = true,
   desktopLayout = 'split',
   onDetailScroll,
+  detailScrollerRef,
   desktopSidePanel,
   desktopListClassName,
   mobileDetailOwnsScroll,
@@ -119,6 +121,7 @@ export function DiffReviewWorkspace({
       onMobileSlideChange={onMobileSlideChange}
       desktopLayout={desktopLayout}
       onDetailScroll={onDetailScroll}
+      detailScrollerRef={detailScrollerRef}
       desktopSidePanel={desktopSidePanel}
       desktopListClassName={desktopListClassName}
       mobileDetailOwnsScroll={mobileDetailOwnsScroll}

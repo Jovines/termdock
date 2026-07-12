@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { MutableRefObject, ReactNode } from 'react';
 import { useCallback, useRef, useState } from 'react';
 import { ArrowLeft as RiArrowLeft } from 'lucide-react';
 import { Swiper, SwiperSlide } from 'swiper/react';
@@ -17,6 +17,7 @@ interface DiffReviewFrameProps {
   externalSwiperRef?: { current: SwiperInstance | null };
   desktopLayout?: 'split' | 'stacked';
   onDetailScroll?: (container: HTMLDivElement) => void;
+  detailScrollerRef?: MutableRefObject<HTMLDivElement | null>;
   desktopSidePanel?: ReactNode;
   desktopListClassName?: string;
   mobileDetailOwnsScroll?: boolean;
@@ -34,6 +35,7 @@ export function DiffReviewFrame({
   externalSwiperRef,
   desktopLayout = 'split',
   onDetailScroll,
+  detailScrollerRef,
   desktopSidePanel,
   desktopListClassName,
   mobileDetailOwnsScroll = false,
@@ -126,6 +128,7 @@ export function DiffReviewFrame({
   if (desktopLayout === 'stacked') {
     return (
       <div
+        ref={(node) => { if (detailScrollerRef) detailScrollerRef.current = node; }}
         className="termdock-native-select termdock-diff-stream-scroller min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(env(safe-area-inset-bottom)+4.5rem)]"
         onScroll={(event) => onDetailScroll?.(event.currentTarget)}
       >
@@ -154,6 +157,7 @@ export function DiffReviewFrame({
         {desktopList}
       </div>
       <div
+        ref={(node) => { if (detailScrollerRef) detailScrollerRef.current = node; }}
         className="termdock-diff-stream-scroller min-w-0 flex-1 overflow-y-auto overscroll-contain"
         onScroll={(event) => onDetailScroll?.(event.currentTarget)}
       >

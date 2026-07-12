@@ -255,7 +255,7 @@ export function DiffReview({
   const scrolledSelectionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!mobile || !shouldRenderDetail) return;
+    if (!shouldRenderDetail) return;
     if (selectedIndex < 0 || !selectedKey) return;
     if (scrolledSelectionRef.current === selectedKey) return;
     scrolledSelectionRef.current = selectedKey;
@@ -292,7 +292,7 @@ export function DiffReview({
       window.requestAnimationFrame(refine);
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [mobile, selectedIndex, selectedKey, shouldRenderDetail]);
+  }, [selectedIndex, selectedKey, shouldRenderDetail]);
 
   const handleDetailScroll = useCallback((container: HTMLDivElement) => {
     detailScrollerRef.current = container;
@@ -331,6 +331,34 @@ export function DiffReview({
     );
   }, [activePane, copiedReferenceKey, diffOptions, diffViewType, inlineMode, insertedReferenceKey, matchesSelectedKey, onClearAuditRecord, onInsertDiffReference, onReferenceCopied, reloadKey, renderStreamBadge, showScrollHint, wrap]);
 
+  const renderVirtualStream = useCallback((lightweight: boolean) => (
+    <Virtualizer
+      ref={virtualizerRef}
+      scrollRef={detailScrollerRef}
+      data={allOrderedFiles}
+      // bufferSize is in pixels of extra render area beyond the viewport.
+      bufferSize={400}
+      // A fallback for files without numstat. Per-item estimatedHeight on the
+      // item DOM is more accurate and is used once mounted/measured.
+      itemSize={600}
+      onScroll={(offset) => {
+        if (!mobile) return;
+        const prev = virtuaOffsetRef.current;
+        virtuaOffsetRef.current = offset;
+        if (prev != null) {
+          const d = offset - prev;
+          if (Math.abs(d) > 120) logDiffReviewDebug('virtua_jump', { from: Math.round(prev), to: Math.round(offset), delta: Math.round(d) });
+        }
+      }}
+    >
+      {(item: DiffReviewFile) => (
+        <div key={item.key} className="border-b border-border/15">
+          {renderStreamItem(item, { eager: true, lightweight })}
+        </div>
+      )}
+    </Virtualizer>
+  ), [allOrderedFiles, mobile, renderStreamItem]);
+
   const detail = shouldRenderDetail ? (
     mobile ? (
       selectedIndex < 0 ? (
@@ -345,45 +373,12 @@ export function DiffReview({
           data-sidebar-gesture-ignore
           onScroll={(event) => handleDetailScroll(event.currentTarget)}
         >
-          <Virtualizer
-            ref={virtualizerRef}
-            scrollRef={detailScrollerRef}
-            data={allOrderedFiles}
-            // bufferSize is in PIXELS of extra render area beyond the viewport.
-            bufferSize={400}
-            // Height hint for unmeasured items. Diffs are tall; a realistic
-            // hint keeps virtua's size estimate close to reality so the scroll
-            // compensation when an item is finally measured stays small (a
-            // wildly-off estimate is what caused the large jumps).
-            itemSize={600}
-            onScroll={(offset) => {
-              const prev = virtuaOffsetRef.current;
-              virtuaOffsetRef.current = offset;
-              if (prev != null) {
-                const d = offset - prev;
-                if (Math.abs(d) > 120) logDiffReviewDebug('virtua_jump', { from: Math.round(prev), to: Math.round(offset), delta: Math.round(d) });
-              }
-            }}
-          >
-            {(item: DiffReviewFile) => (
-              <div key={item.key} className="border-b border-border/15">
-                {renderStreamItem(item, { eager: true, lightweight: true })}
-              </div>
-            )}
-          </Virtualizer>
+          {renderVirtualStream(true)}
         </div>
       )
     ) : (
-      <div className="termdock-diff-stream divide-y divide-border/15 bg-surface">
-        {allOrderedFiles.map((item, index) => {
-          const isSelected = matchesSelectedKey(item);
-          const isEager = activePane || index < 3 || isSelected;
-          return (
-            <div key={item.key}>
-              {renderStreamItem(item, { eager: isEager, lightweight: false })}
-            </div>
-          );
-        })}
+      <div className="termdock-diff-stream bg-surface">
+        {renderVirtualStream(false)}
       </div>
     )
   ) : (
@@ -417,6 +412,7 @@ export function DiffReview({
       slideToDetailOnMobile={slideToDetailOnMobile}
       desktopLayout={desktopLayout}
       onDetailScroll={handleDetailScroll}
+      detailScrollerRef={detailScrollerRef}
       desktopSidePanel={desktopSidePanel}
       desktopListClassName={desktopListClassName}
       mobileDetailOwnsScroll={mobile}
