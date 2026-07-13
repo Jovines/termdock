@@ -1621,16 +1621,41 @@ async function configureTmuxWheelBindings(): Promise<void> {
     'bind-key', '-n', 'MouseDrag1Pane',
     "if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' 'send-keys -M' 'if-shell -F \"#{||:#{e|>=:#{e|-:#{mouse_x},#{@termdock-mouse-down-x}},1},#{e|>=:#{e|-:#{@termdock-mouse-down-x},#{mouse_x}},1},#{e|>=:#{e|-:#{mouse_y},#{@termdock-mouse-down-y}},1},#{e|>=:#{e|-:#{@termdock-mouse-down-y},#{mouse_y}},1}}\" \"copy-mode -M\"'",
   ]);
+  await runTmux([
+    'bind-key', '-n', 'DoubleClick1Pane',
+    "select-pane -t= ; if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' 'send-keys -M' 'copy-mode -H ; send-keys -X select-word ; run-shell -d 0.3 ; send-keys -X copy-pipe-no-clear'",
+  ]);
+  await runTmux([
+    'bind-key', '-n', 'TripleClick1Pane',
+    "select-pane -t= ; if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' 'send-keys -M' 'copy-mode -H ; send-keys -X select-line ; run-shell -d 0.3 ; send-keys -X copy-pipe-no-clear'",
+  ]);
 
-  // tmux defaults MouseDragEnd1Pane in copy-mode to copy-pipe-and-cancel:
+  // tmux defaults mouse selection shortcuts to copy-pipe-and-cancel:
   // selecting text with the mouse copies successfully, then immediately exits
-  // copy-mode on button release. Termdock keeps copy-mode open so users can
-  // continue inspecting scrollback after one selection.
+  // copy-mode on release/double-click. Termdock keeps copy-mode open so users
+  // can continue inspecting scrollback after one selection.
   for (const table of ['copy-mode', 'copy-mode-vi']) {
     try {
       await runTmux(['bind-key', '-T', table, 'MouseDragEnd1Pane', 'send-keys', '-X', 'copy-pipe-no-clear']);
     } catch {
       await runTmux(['bind-key', '-T', table, 'MouseDragEnd1Pane', 'send-keys', '-X', 'copy-selection']);
+    }
+
+    for (const [key, selectionCommand] of [
+      ['DoubleClick1Pane', 'select-word'],
+      ['TripleClick1Pane', 'select-line'],
+    ] as const) {
+      try {
+        await runTmux([
+          'bind-key', '-T', table, key,
+          `select-pane ; send-keys -X ${selectionCommand} ; run-shell -d 0.3 ; send-keys -X copy-pipe-no-clear`,
+        ]);
+      } catch {
+        await runTmux([
+          'bind-key', '-T', table, key,
+          `select-pane ; send-keys -X ${selectionCommand} ; run-shell -d 0.3 ; send-keys -X copy-selection`,
+        ]);
+      }
     }
   }
 }

@@ -4803,11 +4803,12 @@ export function RightSidebar(
     lastAutoRefreshRootRef.current = null;
   }, [rootPath]);
 
-  const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; includeNested?: boolean } = {}) => {
+  const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; includeNested?: boolean; background?: boolean } = {}) => {
     if (!cwd) return null;
     const expectedRootPath = rootPath;
     const includeNested = options.includeNested ?? true;
     const refresh = options.reloadDiff ?? false;
+    const background = options.background ?? false;
     if (refresh) untrackedCompletedRootsRef.current.delete(cwd);
     const pending = gitBundlePendingRef.current;
     if (pending && pending.cwd === cwd && pending.includeNested === includeNested && pending.refresh === refresh) {
@@ -4822,8 +4823,10 @@ export function RightSidebar(
     const controller = new AbortController();
     gitBundleAbortRef.current = controller;
     let slowTimer: number | null = null;
-    setGitBundleLoading(true);
-    setGitBundleSlow(false);
+    if (!background) {
+      setGitBundleLoading(true);
+      setGitBundleSlow(false);
+    }
     setGitBundleError(null);
     logGitBundleClientEvent('start', {
       requestId,
@@ -4832,10 +4835,11 @@ export function RightSidebar(
       requestSlotId,
       includeNested,
       refresh,
+      background,
       existingChanges: changedFiles.size,
       lastLoadedAt: gitBundleLastLoadedAt,
     });
-    if (typeof window !== 'undefined') {
+    if (!background && typeof window !== 'undefined') {
       slowTimer = window.setTimeout(() => {
         if (gitBundleRequestIdRef.current === requestId) setGitBundleSlow(true);
       }, GIT_BUNDLE_SLOW_MS);
@@ -4880,7 +4884,7 @@ export function RightSidebar(
           cached: result.cached,
           stale: result.stale,
           cacheAgeMs: result.cacheAgeMs,
-          nestedDeferred: result.nestedDeferred,
+          nestedDeferred: !includeNested || result.nestedDeferred,
           untrackedDeferred: result.untrackedDeferred,
         });
       } else if (gitBundleRequestIdRef.current === requestId && isCurrentSidebarRoot(expectedRootPath)) {
@@ -4903,15 +4907,24 @@ export function RightSidebar(
       logGitBundleClientEvent('error', {
         requestId,
         cwd,
+        includeNested,
+        refresh,
+        background,
         message: err instanceof Error ? err.message : String(err),
       });
-      setGitContext(null);
-      setGitBundleError(err instanceof Error ? err.message : 'Failed to load Git changes');
+      if (!background) {
+        setGitContext(null);
+        setGitBundleError(err instanceof Error ? err.message : 'Failed to load Git changes');
+      }
       return null;
     } finally {
       if (slowTimer !== null) window.clearTimeout(slowTimer);
       if (gitBundleAbortRef.current === controller) gitBundleAbortRef.current = null;
       if (gitBundlePendingRef.current?.promise === promise) gitBundlePendingRef.current = null;
+      if (!background && gitBundleRequestIdRef.current === requestId && isCurrentSidebarRoot(expectedRootPath)) {
+        setGitBundleLoading(false);
+        setGitBundleSlow(false);
+      }
     }
   }, [applyGitBundle, changedFiles.size, gitBundleLastLoadedAt, isCurrentSidebarRoot, markGitBundleLoaded, rootPath, setGitBundleError, setGitBundleLoading, setGitBundleSlow]);
 
@@ -5154,12 +5167,16 @@ export function RightSidebar(
     lastAutoRefreshRootRef.current = rootPath;
     const delay = gitPaneActive && !isMobile ? 0 : SIDEBAR_BACKGROUND_IO_DELAY_MS;
     const handle = window.setTimeout(() => {
-      void loadGitBundle(rootPath);
+      void (async () => {
+        const bundle = await loadGitBundle(rootPath, { includeNested: false });
+        if (!bundle || !isCurrentSidebarRoot(rootPath)) return;
+        void loadGitBundle(rootPath, { includeNested: true, background: true });
+      })();
     }, delay);
     return () => {
       window.clearTimeout(handle);
     };
-  }, [diffPaneActive, gitBundleLastLoadedAt, gitBundleLoading, gitContext, gitPaneActive, gitRepositories.length, isMobile, isOpen, loadGitBundle, rootEntriesLoaded, rootPath]);
+  }, [diffPaneActive, gitBundleLastLoadedAt, gitBundleLoading, gitContext, gitPaneActive, gitRepositories.length, isCurrentSidebarRoot, isMobile, isOpen, loadGitBundle, rootEntriesLoaded, rootPath]);
 
   useEffect(() => {
     if (!isOpen || !gitPaneActive) return;
