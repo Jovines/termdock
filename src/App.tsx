@@ -746,6 +746,15 @@ function App() {
   const closingFromPopStateRef = React.useRef(false);
   const baseHistoryGuardArmedByUserRef = React.useRef(false);
 
+  const requestDesktopTerminalFocus = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    const hasDesktopPointer = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+    if (!isDesktopViewport || !hasDesktopPointer || navigator.maxTouchPoints > 0) return;
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('focus-active-terminal-session'));
+    }, 0);
+  }, [isDesktopViewport]);
+
   const closeHistoryOverlayDirect = useCallback((overlay: HistoryOverlay) => {
     if (overlay === 'markdown-image-lightbox') {
       setMarkdownImageLightboxOpen(false);
@@ -1049,6 +1058,9 @@ function App() {
     if (activeHistoryOverlay && activeHistoryOverlay !== previousOverlay && !closingFromPopStateRef.current) {
       pushHistoryOverlay(activeHistoryOverlay);
     }
+    if (!activeHistoryOverlay && previousOverlay) {
+      requestDesktopTerminalFocus();
+    }
     lastHistoryOverlayRef.current = activeHistoryOverlay;
 
     if (!activeHistoryOverlay && closingFromPopStateRef.current) {
@@ -1056,7 +1068,7 @@ function App() {
         closingFromPopStateRef.current = false;
       }, 0);
     }
-  }, [activeHistoryOverlay, isIOS]);
+  }, [activeHistoryOverlay, isIOS, requestDesktopTerminalFocus]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1269,6 +1281,13 @@ function App() {
   const [programRules, setProgramRules] = React.useState<ProgramLabelRule[]>(cachedProgramRules ?? []);
   const [programRulesLoaded, setProgramRulesLoaded] = React.useState(cachedProgramRules !== null);
   const [programRulesSaving, setProgramRulesSaving] = React.useState(false);
+  const terminalFocusAvailable = !activeHistoryOverlay
+    && !isNotificationsOpen
+    && !isToolbarPresetsOpen
+    && !isAgentRulesOpen
+    && !tabMenuSessionId
+    && !sidebarCloseChoiceSessionId
+    && !newSessionShortcutConfirmMode;
 
   const applyToolbarPresetsDoc = React.useCallback((doc: { version?: unknown; presets?: unknown; updatedAt?: unknown }) => {
     const storedVersion = typeof doc.version === 'number' ? doc.version : 0;
@@ -2234,6 +2253,7 @@ function App() {
                 colorTheme={colorTheme}
                 toolbarPresets={toolbarPresets}
                 showDebug={showDebug}
+                terminalFocusAvailable={terminalFocusAvailable}
                 defaultSessionMode={newSessionMode}
                 defaultTmuxSessionName={newSessionTmuxName}
                 onSessionDataUpdate={handleSessionDataUpdate}

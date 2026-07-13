@@ -18,7 +18,6 @@ interface DiffStreamItemProps {
   activePane: boolean;
   eager?: boolean;
   lightweight?: boolean;
-  estimatedHeight?: number;
   wrap: boolean;
   showScrollHint: boolean;
   viewType?: DiffViewType;
@@ -47,7 +46,6 @@ export function DiffStreamItem({
   activePane,
   eager = false,
   lightweight = false,
-  estimatedHeight,
   wrap,
   showScrollHint,
   viewType,
@@ -67,9 +65,7 @@ export function DiffStreamItem({
 }: DiffStreamItemProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [visible, setVisible] = useState(eager);
-  const [contentReady, setContentReady] = useState(false);
   const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
-  const reserveHeight = lightweight && !contentReady && estimatedHeight ? estimatedHeight : undefined;
 
   useEffect(() => {
     if (eager) {
@@ -108,11 +104,7 @@ export function DiffStreamItem({
       data-diff-selection-path={selectionPath}
       data-diff-file-path={file.path}
       data-diff-absolute-path={absolutePath}
-      // Marks whether this item's height is stable (diff rendered). Used by the
-      // scroll anchor so it never pins to an item that is still growing.
-      data-diff-content-ready={contentReady ? '1' : '0'}
       className={`scroll-mt-3 border-b border-border/15 last:border-b-0 ${selected ? 'bg-surface-elevated/35' : ''}`}
-      style={reserveHeight ? { minHeight: reserveHeight } : undefined}
     >
       <div className={`sticky top-0 z-menu-panel flex min-w-0 items-center gap-2 border-b border-border/15 px-3 py-2 backdrop-blur ${
         selected ? 'bg-surface-elevated/95' : 'bg-surface/95'
@@ -140,10 +132,7 @@ export function DiffStreamItem({
           auditRecords={auditRecords}
           diffOverride={diffOverride}
           onClearAuditRecord={onClearAuditRecord}
-          onContentReady={() => {
-            setContentReady(true);
-            onContentReady?.(selectionPath);
-          }}
+          onContentReady={() => onContentReady?.(selectionPath)}
           onInsertDiffReference={onInsertDiffReference}
           onReferenceCopied={onReferenceCopied}
           insertedReferenceKey={insertedReferenceKey}

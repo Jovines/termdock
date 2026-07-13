@@ -2030,8 +2030,6 @@ export interface GitChangedFile {
   canUnstage: boolean;
   canStash: boolean;
   canRestoreWorktree: boolean;
-  additions?: number;
-  deletions?: number;
 }
 
 export interface GitContextFile {

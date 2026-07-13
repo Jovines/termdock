@@ -4432,38 +4432,6 @@ export function RightSidebar(
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
   const isWide = !isMobile && drawerWidthPx >= WIDE_WIDTH_THRESHOLD_PX;
-  // Unconditional probe (no debug flag) to settle which diff branch a real
-  // device renders. Fires when the diff pane becomes active. DIFF_VIEWER prefix
-  // bypasses server rate-limiting; lands in ~/.termdock/client.log.
-  const diffBranchProbeRef = useRef<string>('');
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const branch = isMobile ? 'mobile' : isWide ? 'wide' : 'medium';
-    const signature = `${branch}:${Math.round(drawerWidthPx)}`;
-    if (diffBranchProbeRef.current === signature) return;
-    diffBranchProbeRef.current = signature;
-    let anchorFlag = 'err';
-    try { anchorFlag = window.localStorage.getItem('termdock:debug:diff-review') ?? 'null'; } catch { /* ignore */ }
-    void fetch('/api/client-log', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        level: 'info',
-        message: 'DIFF_VIEWER BRANCH_PROBE',
-        data: {
-          branch,
-          drawerWidthPx: Math.round(drawerWidthPx),
-          innerWidth: window.innerWidth,
-          innerHeight: window.innerHeight,
-          orientation: window.innerWidth > window.innerHeight ? 'landscape' : 'portrait',
-          anchorLogFlag: anchorFlag,
-          standalone: (window.navigator as unknown as { standalone?: boolean }).standalone ?? null,
-          displayMode: window.matchMedia?.('(display-mode: standalone)')?.matches ?? null,
-        },
-      }),
-      keepalive: true,
-    }).catch(() => undefined);
-  }, [drawerWidthPx, isMobile, isWide]);
   const [fileTreeWidthPx, setFileTreeWidthPx] = useState(() => readFileTreeWidth(drawerWidthPx));
   const rightTab = useSidebarStore((s) => s.rightTab);
   const setRightTab = useSidebarStore((s) => s.setRightTab);
@@ -6157,8 +6125,6 @@ export function RightSidebar(
     return orderedChangedFilesForDiff.map(([, file]) => {
       const repoRoot = getChangedFileRepoRoot(file, rootPath);
       const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
-      const changedLines = (file.additions ?? 0) + (file.deletions ?? 0);
-      const estimatedHeight = Math.max(360, Math.min(12000, 120 + changedLines * 24));
       return {
         key: getChangedFileSelectionPath(file),
         path: file.path,
@@ -6167,7 +6133,6 @@ export function RightSidebar(
         repoRoot,
         displayName: getRelativeDisplayPath(absolutePath, repoRoot).name,
         displayDir: getRelativeDisplayPath(absolutePath, repoRoot).dir,
-        estimatedHeight,
         auditRecords: changeAuditRecords,
       };
     });

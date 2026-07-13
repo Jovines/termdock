@@ -234,6 +234,7 @@ interface MultiTerminalViewProps {
   colorTheme?: TermdockColorTheme;
   toolbarPresets?: ToolbarPresetDefinition[];
   showDebug?: boolean;
+  terminalFocusAvailable?: boolean;
   defaultSessionMode?: TerminalMode;
   defaultTmuxSessionName?: string;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
@@ -271,6 +272,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   colorTheme = 'dark',
   toolbarPresets = [],
   showDebug,
+  terminalFocusAvailable = true,
   defaultSessionMode = 'shell',
   defaultTmuxSessionName = '',
   onStatusChange,
@@ -286,6 +288,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const swiperRef = useRef<SwiperInstance | null>(null);
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
   const [focusTransferRequest, setFocusTransferRequest] = useState<{ sessionId: string; token: number } | null>(null);
+  const terminalFocusAvailableRef = useRef(terminalFocusAvailable);
   const isTouchSwipeRef = useRef(false);
   const touchSwipeReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const swiperDrivenActiveSessionIdRef = useRef<string | null>(null);
@@ -357,6 +360,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   persistedActiveIdRef.current = persistedActiveId;
   isLoadingRef.current = isLoading;
   isRestoringRef.current = isRestoring;
+  terminalFocusAvailableRef.current = terminalFocusAvailable;
 
   const getSwiperDebugState = useCallback((swiper: SwiperInstance | null = swiperRef.current) => {
     const targetIndex = activeSessionIndexRef.current;
@@ -561,7 +565,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const isKeyboardOpen = !!activeSessionId &&
       keyboardOpenBySessionRef.current[activeSessionId] === true;
     const shouldTransferFocus =
-      !isMobileRef.current || isKeyboardOpen;
+      terminalFocusAvailableRef.current && (!isMobileRef.current || isKeyboardOpen);
 
     // Swiper itself is the source of truth for this update: it has already
     // moved (or is animating) the wrapper to `instance.activeIndex`. If the
@@ -945,6 +949,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
       setActiveSessionId(sessionId);
+      if (terminalFocusAvailableRef.current && !isMobileRef.current) {
+        setFocusTransferRequest({ sessionId, token: Date.now() });
+      }
       debugSession('[Session] Switched to session:', sessionId);
     }
   }, [sessions, debugSession]);
@@ -1073,6 +1080,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       handleSwitchSession(customEvent.detail);
     };
 
+    const handleFocusActiveSessionEvent = () => {
+      const sessionId = activeSessionIdRef.current;
+      if (!sessionId || isMobileRef.current) return;
+      setFocusTransferRequest({ sessionId, token: Date.now() });
+    };
+
     const handleCycleSessionEvent = (event: Event) => {
       const customEvent = event as CustomEvent<{ direction: 'prev' | 'next' } | undefined>;
       const direction = customEvent.detail?.direction;
@@ -1126,6 +1139,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     window.addEventListener('new-terminal-session', handleNewSessionEvent);
     window.addEventListener('switch-terminal-session', handleSwitchSessionEvent);
+    window.addEventListener('focus-active-terminal-session', handleFocusActiveSessionEvent);
     window.addEventListener('cycle-terminal-session', handleCycleSessionEvent);
     window.addEventListener('close-terminal-session', handleCloseSessionEvent);
     window.addEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
@@ -1136,6 +1150,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     return () => {
       window.removeEventListener('new-terminal-session', handleNewSessionEvent);
       window.removeEventListener('switch-terminal-session', handleSwitchSessionEvent);
+      window.removeEventListener('focus-active-terminal-session', handleFocusActiveSessionEvent);
       window.removeEventListener('cycle-terminal-session', handleCycleSessionEvent);
       window.removeEventListener('close-terminal-session', handleCloseSessionEvent);
       window.removeEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);

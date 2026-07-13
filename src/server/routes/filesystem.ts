@@ -84,8 +84,6 @@ interface GitChangedFile {
   canUnstage: boolean;
   canStash: boolean;
   canRestoreWorktree: boolean;
-  additions?: number;
-  deletions?: number;
 }
 
 interface GitBundlePayload {
@@ -736,19 +734,6 @@ function mergeNameStatus(
   }
 }
 
-function mergeNumstat(files: Map<string, GitChangedFile>, gitRoot: string, output: string) {
-  for (const record of output.split('\0').filter(Boolean)) {
-    const [additionsRaw, deletionsRaw, filePath] = record.split('\t');
-    if (!additionsRaw || !deletionsRaw || !filePath) continue;
-    const additions = additionsRaw === '-' ? 0 : Number.parseInt(additionsRaw, 10);
-    const deletions = deletionsRaw === '-' ? 0 : Number.parseInt(deletionsRaw, 10);
-    const current = files.get(filePath) ?? emptyChangedFile(gitRoot, filePath);
-    current.additions = (current.additions ?? 0) + (Number.isFinite(additions) ? additions : 0);
-    current.deletions = (current.deletions ?? 0) + (Number.isFinite(deletions) ? deletions : 0);
-    files.set(filePath, current);
-  }
-}
-
 function finalizeChangedFiles(files: Map<string, GitChangedFile>): GitChangedFile[] {
   return Array.from(files.values())
     .map((file) => ({
@@ -768,11 +753,9 @@ function countStagedFiles(files: GitChangedFile[]): number {
 
 async function getChangedFiles(gitRoot: string, signal?: AbortSignal, options: { includeUntracked?: boolean; untrackedTimeoutMs?: number } = {}): Promise<ChangedFilesResult> {
   const includeUntracked = options.includeUntracked !== false;
-  const [stagedOutput, unstagedOutput, stagedNumstat, unstagedNumstat, untrackedResult] = await Promise.all([
+  const [stagedOutput, unstagedOutput, untrackedResult] = await Promise.all([
     execGit(['diff', '--cached', '--name-status', '-M', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError),
     execGit(['diff', '--name-status', '-M', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError),
-    execGit(['diff', '--cached', '--numstat', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError),
-    execGit(['diff', '--numstat', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError),
     includeUntracked
       ? execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot, signal, options.untrackedTimeoutMs ?? GIT_UNTRACKED_TIMEOUT_MS)
         .then((output) => ({ output, deferred: false }))
@@ -788,8 +771,6 @@ async function getChangedFiles(gitRoot: string, signal?: AbortSignal, options: {
   const files = new Map<string, GitChangedFile>();
   mergeNameStatus(files, gitRoot, stagedOutput, 'staged');
   mergeNameStatus(files, gitRoot, unstagedOutput, 'unstaged');
-  mergeNumstat(files, gitRoot, stagedNumstat);
-  mergeNumstat(files, gitRoot, unstagedNumstat);
 
   for (const p of untrackedResult.output.split('\0').filter(Boolean)) {
     const current = files.get(p) ?? emptyChangedFile(gitRoot, p);
