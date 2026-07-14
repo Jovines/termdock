@@ -121,6 +121,11 @@ export type TranslationDictionary = {
     branchAuditGenerate: string;
     branchAuditRegenerate: string;
     branchAuditGenerateTitle: string;
+    branchAuditViewDiff: string;
+    branchAuditViewDiffTitle: string;
+    branchAuditDiffLoading: string;
+    branchAuditDiffEmpty: string;
+    branchAuditMissingBase: (params: TranslatorParams) => string;
     branchAuditRefreshDiff: string;
     branchAuditRefreshStale: string;
     branchAuditRefreshStaleTitle: string;
@@ -196,6 +201,8 @@ export type TranslationDictionary = {
     diffViewMode: string;
     diffViewModeList: string;
     diffViewModeTree: string;
+    diffViewModeAi: string;
+    changeWalkthroughEmpty: string;
     gitInfo: string;
     wrapLongLines: string;
     wrapOn: string;

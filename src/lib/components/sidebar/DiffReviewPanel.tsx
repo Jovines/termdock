@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
-import type { BranchAuditRecord, BranchDiffHunk, ChangeAuditRecord } from '../../terminal/api';
+import type { BranchAuditRecord, BranchDiffHunk, ChangeAuditRecord, ChangeWalkthrough, ChangeWalkthroughAnchor } from '../../terminal/api';
 import { type DiffNavigatorFile } from './DiffFileNavigator';
 import { DiffReview, type DiffReviewFile, ChangeBadge } from './DiffReview';
 import { ChangeStatusWithAuditBadge } from './AuditStatusBadge';
+import { ChangeWalkthroughPanel } from './ChangeWalkthroughPanel';
 import { readCache, writeCache } from '../../utils/localStorageCache';
 
 export interface UniversalDiffReviewItem {
@@ -35,6 +36,8 @@ interface UniversalDiffReviewProps {
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
   onClearAuditRecord?: (id: string) => void;
+  walkthroughs?: ChangeWalkthrough[];
+  onWalkthroughNavigate?: (anchor: ChangeWalkthroughAnchor) => void;
 }
 
 type ViewMode = 'list' | 'tree';
@@ -267,6 +270,8 @@ export function UniversalDiffReview({
   insertedReferenceKey,
   copiedReferenceKey,
   onClearAuditRecord,
+  walkthroughs = [],
+  onWalkthroughNavigate,
 }: UniversalDiffReviewProps) {
   const groups = useMemo(() => buildFileGroups(items), [items]);
   const groupByKey = useMemo(() => new Map(groups.map((group) => [group.key, group])), [groups]);
@@ -387,6 +392,7 @@ export function UniversalDiffReview({
       selectedKey={effectiveKey}
       mode={viewMode}
       onModeChange={(mode) => {
+        if (mode === 'ai') return;
         setViewMode(mode);
         writeCache(DIFF_CHANGE_LIST_MODE_STORAGE_KEY, mode);
       }}
@@ -413,6 +419,22 @@ export function UniversalDiffReview({
         return group ? <span className="shrink-0 text-[10px] text-muted-foreground">+{group.additions} -{group.deletions}</span> : null;
       }}
       renderListHeader={renderHeader}
+      aiContent={({ slideToDetail }) => (
+        walkthroughs.length > 0 && onWalkthroughNavigate ? (
+          <ChangeWalkthroughPanel
+            walkthroughs={walkthroughs}
+            repoRoot={walkthroughs[0]?.repoRoot}
+            onNavigate={(anchor) => {
+              if (mobile) window.requestAnimationFrame(slideToDetail);
+              onWalkthroughNavigate(anchor);
+            }}
+          />
+        ) : (
+          <div className="rounded-lg border border-border/15 bg-surface px-3 py-6 text-center text-xs text-muted-foreground">
+            暂无 AI 导览。生成解释后会在这里展示总览、链路和验证点。
+          </div>
+        )
+      )}
       renderMobileDetailHeader={mobileDetailHeader}
       detailContainerClassName={mobile ? 'termdock-native-select termdock-diff-stream-scroller min-h-0' : undefined}
       onDetailScroll={(container) => syncBranchSelectionFromStream(container, effectiveKey, onSelect)}

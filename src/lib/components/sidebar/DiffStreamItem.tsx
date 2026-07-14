@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import type { ChangeAuditRecord, GitChangedFile, GitDiffOptions } from '../../terminal/api';
-import { DiffViewer, type DiffInlineMode, type DiffViewType } from './DiffViewer';
+import { DiffViewer, type DiffInlineMode, type DiffViewerPreparedDiff, type DiffViewType } from './DiffViewer';
 
 export interface DiffStreamFile {
   path: string;
@@ -26,6 +26,7 @@ interface DiffStreamItemProps {
   reloadKey?: number;
   auditRecords: ChangeAuditRecord[];
   diffOverride?: string | null;
+  preparedDiff?: DiffViewerPreparedDiff | null;
   renderBadge: (status: string) => React.ReactNode;
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
   onReferenceCopied?: (key: string) => void;
@@ -54,6 +55,7 @@ export function DiffStreamItem({
   reloadKey = 0,
   auditRecords,
   diffOverride,
+  preparedDiff,
   renderBadge,
   onInsertDiffReference,
   onReferenceCopied,
@@ -120,6 +122,7 @@ export function DiffStreamItem({
           active={activePane && visible}
           repoRoot={repoRoot}
           filePath={file.path}
+          referenceFilePath={absolutePath}
           changedFile={file as GitChangedFile}
           wrap={wrap}
           showScrollHint={showScrollHint}
@@ -131,6 +134,7 @@ export function DiffStreamItem({
           lightweight={lightweight}
           auditRecords={auditRecords}
           diffOverride={diffOverride}
+          preparedDiff={preparedDiff}
           onClearAuditRecord={onClearAuditRecord}
           onContentReady={() => onContentReady?.(selectionPath)}
           onInsertDiffReference={onInsertDiffReference}

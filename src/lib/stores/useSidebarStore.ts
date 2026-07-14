@@ -4,7 +4,7 @@ import { readCache, writeCache } from '../utils/localStorageCache';
 
 export type RightSidebarTab = 'git' | 'files' | 'diff' | 'file';
 
-const RIGHT_SIDEBAR_TAB_CACHE_KEY = 'termdock:right-sidebar:tab:v1';
+const RIGHT_SIDEBAR_TABS_BY_ROOT_CACHE_KEY = 'termdock:right-sidebar:tabs-by-root:v1';
 const EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:explorer-roots:v1';
 const PINNED_EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:pinned-explorer-roots:v1';
 const SELECTED_FILE_PATHS_CACHE_KEY = 'termdock:right-sidebar:selected-files:v1';
@@ -56,6 +56,7 @@ function writeCollapsedGroups(keys: Set<string>): void {
 }
 
 interface ProjectSidebarState {
+  rightTab: RightSidebarTab;
   explorerRoot: string | null;
   expandedPaths: Set<string>;
   selectedFilePath: string | null;
@@ -70,8 +71,21 @@ function isRightSidebarTab(value: unknown): value is RightSidebarTab {
   return value === 'git' || value === 'files' || value === 'diff' || value === 'file';
 }
 
-function getInitialRightTab(): RightSidebarTab {
-  return readCache(RIGHT_SIDEBAR_TAB_CACHE_KEY, isRightSidebarTab) ?? 'files';
+function isRightSidebarTabCache(value: unknown): value is Record<string, RightSidebarTab> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every(isRightSidebarTab);
+}
+
+function readRightSidebarTabCache(): Record<string, RightSidebarTab> {
+  return readCache(RIGHT_SIDEBAR_TABS_BY_ROOT_CACHE_KEY, isRightSidebarTabCache) ?? {};
+}
+
+function writeRightSidebarTab(rootPath: string | null, tab: RightSidebarTab): void {
+  if (!rootPath) return;
+  writeCache(RIGHT_SIDEBAR_TABS_BY_ROOT_CACHE_KEY, {
+    ...readRightSidebarTabCache(),
+    [rootPath]: tab,
+  });
 }
 
 function isExplorerRootCache(value: unknown): value is Record<string, string> {
@@ -285,7 +299,7 @@ interface SidebarState {
 export const useSidebarStore = create<SidebarState>((set) => ({
   leftOpen: false,
   rightOpen: false,
-  rightTab: getInitialRightTab(),
+  rightTab: 'files',
   rightSearchOpen: false,
   rootPath: null,
   explorerRoot: null,
@@ -314,10 +328,10 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   toggleRight: () => set((s) => ({ rightOpen: !s.rightOpen, rightSearchOpen: s.rightOpen ? false : s.rightSearchOpen, leftOpen: s.rightOpen ? s.leftOpen : false })),
   closeAll: () => set({ leftOpen: false, rightOpen: false, rightSearchOpen: false }),
 
-  setRightTab: (tab) => {
-    writeCache(RIGHT_SIDEBAR_TAB_CACHE_KEY, tab);
-    set({ rightTab: tab });
-  },
+  setRightTab: (tab) => set((s) => {
+    writeRightSidebarTab(s.rootPath, tab);
+    return { rightTab: tab };
+  }),
   openRightSearch: () => set({ rightSearchOpen: true }),
   closeRightSearch: () => set({ rightSearchOpen: false }),
   setRightSearchOpen: (open) => set({ rightSearchOpen: open }),
@@ -326,6 +340,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     const projectStateCache = new Map(s.projectStateCache);
     if (s.rootPath) {
       projectStateCache.set(s.rootPath, {
+        rightTab: s.rightTab,
         explorerRoot: s.explorerRoot,
         expandedPaths: new Set(s.expandedPaths),
         selectedFilePath: s.selectedFilePath,
@@ -338,10 +353,12 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     }
 
     const cached = path ? projectStateCache.get(path) : undefined;
+    const persistedRightTab = path ? readRightSidebarTabCache()[path] : undefined;
     const persistedExplorerRoot = path ? s.explorerRootCache[path] : undefined;
     const persistedSelectedFilePath = path ? readSelectedFilePathCache()[path] : undefined;
     return {
       rootPath: path,
+      rightTab: cached?.rightTab ?? persistedRightTab ?? 'files',
       explorerRoot: cached?.explorerRoot ?? persistedExplorerRoot ?? path,
       expandedPaths: cached ? new Set(cached.expandedPaths) : new Set(),
       selectedFilePath: cached?.selectedFilePath ?? persistedSelectedFilePath ?? null,

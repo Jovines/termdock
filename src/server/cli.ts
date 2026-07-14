@@ -1069,7 +1069,7 @@ async function postChangeAuditPayload(payload: unknown): Promise<void> {
 
   const baseUrl = runningState.localUrl ?? `${runningState.scheme ?? 'http'}://${runningState.host === '0.0.0.0' ? 'localhost' : runningState.host}:${runningState.port}`;
   const response = await postLocalJson(baseUrl, token, '/api/local/change-audit', payload);
-  const body = JSON.parse(response.body || '{}') as { inserted?: number; total?: number; error?: string };
+  const body = JSON.parse(response.body || '{}') as { inserted?: number; total?: number; walkthroughs?: number; error?: string };
   if (response.statusCode < 200 || response.statusCode >= 300) {
     console.error(`${ICON.err} ${c.red(body.error || 'Failed to inject change audit explanations')}`);
     process.exit(1);
@@ -1077,6 +1077,9 @@ async function postChangeAuditPayload(payload: unknown): Promise<void> {
   console.log(`${ICON.ok} ${c.green('Injected change audit explanations.')}`);
   console.log(`  ${c.dim('Inserted:')} ${body.inserted ?? 0}`);
   console.log(`  ${c.dim('Total:')}    ${body.total ?? 0}`);
+  if (typeof body.walkthroughs === 'number') {
+    console.log(`  ${c.dim('Walkthroughs:')} ${body.walkthroughs}`);
+  }
 }
 
 async function runInjectBranchAudit(source: string | true): Promise<void> {
@@ -1105,7 +1108,7 @@ async function runInjectBranchAudit(source: string | true): Promise<void> {
 
   const baseUrl = runningState.localUrl ?? `${runningState.scheme ?? 'http'}://${runningState.host === '0.0.0.0' ? 'localhost' : runningState.host}:${runningState.port}`;
   const response = await postLocalJson(baseUrl, token, '/api/local/branch-audit', payload);
-  const body = JSON.parse(response.body || '{}') as { inserted?: number; total?: number; error?: string };
+  const body = JSON.parse(response.body || '{}') as { inserted?: number; total?: number; walkthroughs?: number; error?: string };
   if (response.statusCode < 200 || response.statusCode >= 300) {
     console.error(`${ICON.err} ${c.red(body.error || 'Failed to inject branch explanation')}`);
     process.exit(1);
@@ -1113,6 +1116,9 @@ async function runInjectBranchAudit(source: string | true): Promise<void> {
   console.log(`${ICON.ok} ${c.green('Injected branch explanation.')}`);
   console.log(`  ${c.dim('Inserted:')} ${body.inserted ?? 0}`);
   console.log(`  ${c.dim('Total:')}    ${body.total ?? 0}`);
+  if (typeof body.walkthroughs === 'number') {
+    console.log(`  ${c.dim('Walkthroughs:')} ${body.walkthroughs}`);
+  }
 }
 
 interface ChangeAuditCliHunk {
@@ -1128,6 +1134,15 @@ interface ChangeAuditCliHunk {
   hunkHeader: string;
   hunkIndex: number;
   fingerprint: string;
+  additions: number;
+  deletions: number;
+  sections: ChangeAuditCliSection[];
+  diff: string;
+}
+
+interface ChangeAuditCliSection {
+  index: number;
+  sectionFingerprint: string;
   additions: number;
   deletions: number;
   diff: string;
@@ -1185,6 +1200,39 @@ function buildHunkChangeFingerprint(lines: string[]): string {
     ? changedLines.join('\n')
     : lines.map((line) => line.slice(1)).join('\n');
   return fnv1a32(text);
+}
+
+function buildAuditSectionFingerprint(lines: string[]): string {
+  const text = lines
+    .filter((line) => line.startsWith('+') || line.startsWith('-'))
+    .filter((line) => !line.startsWith('+++') && !line.startsWith('---'))
+    .map((line) => `${line.startsWith('+') ? 'insert' : 'delete'}:${line.slice(1)}`)
+    .join('\n');
+  return fnv1a32(text);
+}
+
+function buildAuditSections(lines: string[], hunkHeader: string, contextSize = 2): ChangeAuditCliSection[] {
+  const sections: ChangeAuditCliSection[] = [];
+  let cursor = 0;
+  while (cursor < lines.length) {
+    while (cursor < lines.length && !lines[cursor].startsWith('+') && !lines[cursor].startsWith('-')) cursor += 1;
+    while (cursor < lines.length && (lines[cursor].startsWith('+++') || lines[cursor].startsWith('---'))) cursor += 1;
+    if (cursor >= lines.length) break;
+    const start = cursor;
+    while (cursor < lines.length && (lines[cursor].startsWith('+') || lines[cursor].startsWith('-')) && !lines[cursor].startsWith('+++') && !lines[cursor].startsWith('---')) cursor += 1;
+    const end = cursor;
+    const contextBefore = lines.slice(Math.max(0, start - contextSize), start).filter((line) => line.startsWith(' '));
+    const contextAfter = lines.slice(end, Math.min(lines.length, end + contextSize)).filter((line) => line.startsWith(' '));
+    const changed = lines.slice(start, end);
+    sections.push({
+      index: sections.length,
+      sectionFingerprint: buildAuditSectionFingerprint(changed),
+      additions: changed.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length,
+      deletions: changed.filter((line) => line.startsWith('-') && !line.startsWith('---')).length,
+      diff: [hunkHeader, ...contextBefore, ...changed, ...contextAfter].join('\n'),
+    });
+  }
+  return sections;
 }
 
 async function getGitRoot(cwd: string): Promise<string> {
@@ -1344,6 +1392,7 @@ function parseAuditHunks(target: AuditRepositoryTarget, diffText: string): Chang
       fingerprint,
       additions: currentLines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length,
       deletions: currentLines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length,
+      sections: buildAuditSections(currentLines, currentHeader),
       diff: hunkDiff,
     });
     hunkIndexByFile += 1;

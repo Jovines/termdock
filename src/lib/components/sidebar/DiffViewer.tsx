@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMoveHorizontal } from 'lucide-react';
-import { parseDiff, Diff, Hunk, tokenize, type HunkData, type HunkTokens } from 'react-diff-view';
+import { Diff, Hunk, getChangeKey, type FileData, type HunkData, type HunkTokens } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { cancelIoSlot, getFileDiff, getGitBlobContent, isPreviewableImagePath, readImagePreviewBlob, type ChangeAuditRecord, type FileDiffResponse, type GitChangedFile, type GitDiffOptions } from '../../terminal/api';
 import { useI18n } from '../../i18n';
-import { loadRefractor, resolveLanguage, MAX_HIGHLIGHT_BYTES, MAX_HIGHLIGHT_LINE_LENGTH, type RefractorLike } from '../../utils/syntaxHighlight';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 import { readCache, writeCache } from '../../utils/localStorageCache';
-import { findMovedLineCandidates, markSmartEdits, pairChangedLinesForDisplay } from './inlineDiff';
+import { findMovedLineCandidates } from './inlineDiff';
+import { parseDiffInWorker } from './diffWorkerClient';
 
 const MAX_DIFF_CACHE_ENTRIES = 24;
 const MAX_RENDER_DIFF_LINES = 8_000;
@@ -121,7 +121,7 @@ function getCachedDiffResult(filePath: string | undefined, cwd: string | undefin
   return diffResultCache.get(buildDiffCacheKey(filePath, cwd, options));
 }
 
-function loadFileDiffCached(filePath: string | undefined, cwd: string | undefined, force = false, options?: GitDiffOptions): Promise<DiffLoadResult> {
+export function loadFileDiffCached(filePath: string | undefined, cwd: string | undefined, force = false, options?: GitDiffOptions): Promise<DiffLoadResult> {
   const key = buildDiffCacheKey(filePath, cwd, options);
   if (force) {
     cancelPreloadDiff(key);
@@ -137,7 +137,7 @@ function loadFileDiffCached(filePath: string | undefined, cwd: string | undefine
   return requestFileDiffCached(key, filePath, cwd, version, undefined, options);
 }
 
-function loadVisibleFileDiff(filePath: string | undefined, cwd: string | undefined, signal: AbortSignal, force = false, traceId?: string, interactionId?: string | null, requestSlotId?: string | null, options?: GitDiffOptions): Promise<DiffLoadResult> {
+export function loadVisibleFileDiff(filePath: string | undefined, cwd: string | undefined, signal: AbortSignal, force = false, traceId?: string, interactionId?: string | null, requestSlotId?: string | null, options?: GitDiffOptions): Promise<DiffLoadResult> {
   const key = buildDiffCacheKey(filePath, cwd, options);
   if (force) {
     cancelPreloadDiff(key);
@@ -193,6 +193,7 @@ export function preloadSidebarDiff(rootPath: string | null | undefined, filePath
 interface DiffViewerProps {
   filePath: string | null;
   repoRoot?: string | null;
+  referenceFilePath?: string | null;
   interactionId?: string | null;
   requestSlotId?: string | null;
   changedFile?: GitChangedFile | null;
@@ -223,6 +224,7 @@ interface DiffViewerProps {
   lightweight?: boolean;
   auditRecords?: ChangeAuditRecord[];
   diffOverride?: string | null;
+  preparedDiff?: DiffViewerPreparedDiff | null;
   viewType?: DiffViewType;
   inlineMode?: DiffInlineMode;
   diffOptions?: GitDiffOptions;
@@ -230,6 +232,14 @@ interface DiffViewerProps {
   onClearAuditRecord?: (id: string) => void;
   onContentReady?: () => void;
   onSummaryChange?: (summary: { files: number; additions: number; deletions: number } | null) => void;
+}
+
+export interface DiffViewerPreparedDiff {
+  diffContent: string | null;
+  diffNotice: string | null;
+  diffError: string | null;
+  files: FileData[];
+  tokens: Map<string, HunkTokens>;
 }
 
 interface HunkAuditView {
@@ -263,6 +273,68 @@ function getPathParts(path: string | null, fallback: { name: string; dir: string
 
 function isDiffNullPath(path: string | null | undefined): boolean {
   return path === '/dev/null' || path === 'dev/null';
+}
+
+function joinRepoPath(repoRoot: string | null | undefined, filePath: string | null | undefined): string | null {
+  if (!filePath) return null;
+  if (isDiffNullPath(filePath) || filePath.startsWith('/')) return filePath;
+  return repoRoot ? `${repoRoot}/${filePath}` : filePath;
+}
+
+function toReferenceDiffPath(path: string | null | undefined, options: {
+  repoRoot?: string | null;
+  selectedFilePath?: string | null;
+  referenceFilePath?: string | null;
+}): string {
+  if (!path || isDiffNullPath(path)) return '/dev/null';
+  if (path.startsWith('/')) return path;
+  if (options.referenceFilePath && path === options.selectedFilePath) return options.referenceFilePath;
+  return joinRepoPath(options.repoRoot, path) ?? path;
+}
+
+function formatDiffEndpoint(prefix: 'a' | 'b', path: string): string {
+  if (isDiffNullPath(path)) return '/dev/null';
+  return path.startsWith('/') ? path : `${prefix}/${path}`;
+}
+
+function rewriteDiffReferencePaths(diffText: string, files: FileData[], options: {
+  repoRoot?: string | null;
+  selectedFilePath?: string | null;
+  referenceFilePath?: string | null;
+}): string {
+  if (!diffText || files.length === 0) return diffText;
+  const oldPathMap = new Map<string, string>();
+  const newPathMap = new Map<string, string>();
+  for (const file of files) {
+    if (file.oldPath && !isDiffNullPath(file.oldPath)) {
+      oldPathMap.set(file.oldPath, toReferenceDiffPath(file.oldPath, options));
+    }
+    if (file.newPath && !isDiffNullPath(file.newPath)) {
+      newPathMap.set(file.newPath, toReferenceDiffPath(file.newPath, options));
+    }
+  }
+
+  return diffText.split('\n').map((line) => {
+    const gitHeader = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+    if (gitHeader) {
+      const oldRef = oldPathMap.get(gitHeader[1]) ?? toReferenceDiffPath(gitHeader[1], options);
+      const newRef = newPathMap.get(gitHeader[2]) ?? toReferenceDiffPath(gitHeader[2], options);
+      return `diff --git ${formatDiffEndpoint('a', oldRef)} ${formatDiffEndpoint('b', newRef)}`;
+    }
+    const oldHeader = line.match(/^--- (a\/(.+)|\/dev\/null)$/);
+    if (oldHeader) {
+      if (oldHeader[1] === '/dev/null') return line;
+      const oldRef = oldPathMap.get(oldHeader[2]) ?? toReferenceDiffPath(oldHeader[2], options);
+      return `--- ${formatDiffEndpoint('a', oldRef)}`;
+    }
+    const newHeader = line.match(/^\+\+\+ (b\/(.+)|\/dev\/null)$/);
+    if (newHeader) {
+      if (newHeader[1] === '/dev/null') return line;
+      const newRef = newPathMap.get(newHeader[2]) ?? toReferenceDiffPath(newHeader[2], options);
+      return `+++ ${formatDiffEndpoint('b', newRef)}`;
+    }
+    return line;
+  }).join('\n');
 }
 
 interface DiffReferenceHunkMeta {
@@ -420,36 +492,33 @@ function isImportOnlyHunk(hunk: HunkData): boolean {
   return true;
 }
 
-function alignPairedChangesForSplitView(hunk: HunkData, pairs: Array<{ oldLineNumber: number; newLineNumber: number }>): HunkData {
-  if (pairs.length === 0) return hunk;
-  type InsertChange = Extract<HunkData['changes'][number], { type: 'insert' }>;
-  const insertByLine = new Map<number, InsertChange>();
-  const movedNewLines = new Set<number>();
-  for (const pair of pairs) movedNewLines.add(pair.newLineNumber);
-  for (const change of hunk.changes) {
-    if (change.type === 'insert' && movedNewLines.has(change.lineNumber)) {
-      insertByLine.set(change.lineNumber, change);
-    }
-  }
-
-  const movedOldToNew = new Map(pairs.map((pair) => [pair.oldLineNumber, pair.newLineNumber]));
-  const emittedInserts = new Set<number>();
+function alignAdjacentChangesForSplitView(hunk: HunkData): HunkData {
   const changes: HunkData['changes'] = [];
-  for (const change of hunk.changes) {
-    if (change.type === 'insert' && emittedInserts.has(change.lineNumber)) continue;
-    if (change.type === 'delete') {
-      const newLineNumber = movedOldToNew.get(change.lineNumber);
-      const pairedInsert = newLineNumber === undefined ? undefined : insertByLine.get(newLineNumber);
-      if (pairedInsert) {
-        changes.push(change, pairedInsert);
-        emittedInserts.add(pairedInsert.lineNumber);
-        continue;
-      }
+  let cursor = 0;
+  while (cursor < hunk.changes.length) {
+    const change = hunk.changes[cursor];
+    if (change.type === 'normal') {
+      changes.push(change);
+      cursor += 1;
+      continue;
     }
-    changes.push(change);
+
+    const block: HunkData['changes'] = [];
+    while (cursor < hunk.changes.length && hunk.changes[cursor].type !== 'normal') {
+      block.push(hunk.changes[cursor]);
+      cursor += 1;
+    }
+    const deletes = block.filter((item) => item.type === 'delete');
+    const inserts = block.filter((item) => item.type === 'insert');
+    const pairs = Math.min(deletes.length, inserts.length);
+    for (let index = 0; index < pairs; index += 1) {
+      changes.push(deletes[index], inserts[index]);
+    }
+    changes.push(...deletes.slice(pairs), ...inserts.slice(pairs));
   }
   return { ...hunk, changes };
 }
+
 
 function buildAuditLookupKey(repoRoot: string | null | undefined, filePath: string): string {
   return `${repoRoot ?? ''}\u0000${filePath}`;
@@ -461,11 +530,17 @@ function auditPathMatches(pathValue: string, filePath: string): boolean {
     || pathValue.endsWith(`/${filePath}`);
 }
 
+function isSectionAuditRecord(record: ChangeAuditRecord): boolean {
+  return typeof record.sectionIndex === 'number'
+    || (typeof record.sectionFingerprint === 'string' && record.sectionFingerprint.length > 0);
+}
+
 function getHunkAudit(records: ChangeAuditRecord[] | undefined, repoRoot: string | null | undefined, filePath: string, hunkHeader: string, fingerprint: string): HunkAuditView {
   if (!records || records.length === 0) return { fingerprint };
   const lookupKey = buildAuditLookupKey(repoRoot, filePath);
   let stale: ChangeAuditRecord | undefined;
   for (const record of records) {
+    if (isSectionAuditRecord(record)) continue;
     const paths = [record.filePath, record.newPath, record.oldPath].filter((value): value is string => typeof value === 'string' && value.length > 0);
     const exactRepoPathMatches = paths.some((pathValue) => buildAuditLookupKey(record.repoRoot, pathValue) === lookupKey);
     const fallbackPathMatches = paths.some((pathValue) => auditPathMatches(pathValue, filePath));
@@ -492,6 +567,11 @@ function getSectionAudit(records: ChangeAuditRecord[] | undefined, repoRoot: str
   return { stale, fingerprint: sectionFingerprint };
 }
 
+function getSectionWidgetChangeKey(section: HunkSection): string | null {
+  const lastChanged = section.changes[section.changes.length - 1];
+  return lastChanged ? getChangeKey(lastChanged) : null;
+}
+
 function getDiffGutterWidthCh(hunks: HunkData[]): number {
   let maxLineNumber = 0;
   for (const hunk of hunks) {
@@ -515,7 +595,7 @@ function formatBytes(bytes: number | null | undefined): string | null {
   return `${bytes} bytes`;
 }
 
-function formatDiffLimitMessage(result: DiffLoadResult): string | null {
+export function formatDiffLimitMessage(result: DiffLoadResult): string | null {
   if (result.tooLarge) {
     const size = formatBytes(result.size);
     const max = formatBytes(result.maxBytes);
@@ -530,7 +610,7 @@ function formatDiffLimitMessage(result: DiffLoadResult): string | null {
   return null;
 }
 
-function isDiffTooLargeToRender(diffText: string | null): boolean {
+export function isDiffTooLargeToRender(diffText: string | null): boolean {
   if (!diffText) return false;
   let lines = 1;
   for (let i = 0; i < diffText.length; i += 1) {
@@ -588,7 +668,7 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
+export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
   const { t, locale } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
@@ -599,6 +679,8 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
   const [diffNotice, setDiffNotice] = useState<string | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
+  const [parsedFiles, setParsedFiles] = useState<FileData[]>([]);
+  const [workerTokens, setWorkerTokens] = useState<Map<string, HunkTokens>>(() => new Map());
   const [oldSourceContent, setOldSourceContent] = useState<string | null>(null);
   const [expandedImportHunks, setExpandedImportHunks] = useState<Set<string>>(() => new Set());
   const [imagePreview, setImagePreview] = useState<{
@@ -628,8 +710,16 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
   const changedFileRepoRoot = changedFile?.repoRoot ?? null;
   const changedFileStatus = changedFile?.status ?? null;
   const auditRepoRoot = changedFileRepoRoot ?? repoRoot ?? rootPath;
+  const referenceRepoRoot = changedFileRepoRoot ?? repoRoot ?? rootPath;
+  const resolvedReferenceFilePath = referenceFilePath
+    ?? changedFile?.absolutePath
+    ?? joinRepoPath(referenceRepoRoot, filePath);
 
   useEffect(() => {
+    if (preparedDiff !== undefined) {
+      setOldSourceContent(null);
+      return;
+    }
     if (oldSourceOverride !== undefined) {
       setOldSourceContent(oldSourceOverride);
       return;
@@ -649,9 +739,10 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
         if (!controller.signal.aborted) setOldSourceContent(null);
       });
     return () => controller.abort();
-  }, [active, changedFile?.untracked, changedFileRepoRoot, changedFileStatus, diffOverride, filePath, oldSourceOverride, repoRoot, rootPath]);
+  }, [active, changedFile?.untracked, changedFileRepoRoot, changedFileStatus, diffOverride, filePath, oldSourceOverride, preparedDiff, repoRoot, rootPath]);
 
   useEffect(() => {
+    if (preparedDiff !== undefined) return;
     if (diffOverride !== undefined) {
       setDiffContent(diffOverride);
       setDiffNotice(null);
@@ -873,77 +964,64 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
         promiseSize: diffPromiseCache.size,
       });
     };
-  }, [active, changedFileRepoRoot, changedFileStatus, diffOptions, diffOverride, filePath, interactionId, reloadKey, repoRoot, requestSlotId, rootPath]);
-
-  const files = useMemo(() => {
-    if (!diffContent || diffContent.trim() === '') return [];
-    const startedAt = performance.now();
-    try {
-      const parsed = parseDiff(diffContent);
-      logDiffViewerEvent('parse_done', { filePath, bytes: diffContent.length, files: parsed.length, durationMs: Math.round(performance.now() - startedAt) });
-      return parsed;
-    } catch (error) {
-      logDiffViewerEvent('parse_error', { filePath, bytes: diffContent.length, durationMs: Math.round(performance.now() - startedAt), error: error instanceof Error ? error.message : String(error) });
-      throw error;
-    }
-  }, [diffContent]);
+  }, [active, changedFileRepoRoot, changedFileStatus, diffOptions, diffOverride, filePath, interactionId, preparedDiff, reloadKey, repoRoot, requestSlotId, rootPath]);
 
   useEffect(() => {
-    if (!active || diffLoading) return;
-    if (diffContent === null && !diffError && !imagePreview && diffOverride === undefined) return;
+    if (preparedDiff !== undefined) return;
+    if (!diffContent || diffContent.trim() === '') {
+      setParsedFiles([]);
+      setWorkerTokens(new Map());
+      return;
+    }
+    let cancelled = false;
+    const startedAt = performance.now();
+    parseDiffInWorker(diffContent, lightweight ? 'none' : inlineMode, oldSourceContent ?? undefined)
+      .then((result) => {
+        if (cancelled) return;
+        setParsedFiles(result.files);
+        setWorkerTokens(result.tokens);
+        logDiffViewerEvent('worker_parse_done', {
+          filePath,
+          bytes: diffContent.length,
+          files: result.files.length,
+          parseMs: result.parseMs,
+          tokenizeMs: result.tokenizeMs,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setParsedFiles([]);
+        setWorkerTokens(new Map());
+        setDiffError(error instanceof Error ? error.message : String(error));
+        logDiffViewerEvent('worker_parse_error', {
+          filePath,
+          bytes: diffContent.length,
+          durationMs: Math.round(performance.now() - startedAt),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [diffContent, filePath, inlineMode, lightweight, oldSourceContent, preparedDiff]);
+
+  const effectiveDiffContent = preparedDiff !== undefined ? preparedDiff?.diffContent ?? null : diffContent;
+  const effectiveDiffNotice = preparedDiff !== undefined ? preparedDiff?.diffNotice ?? null : diffNotice;
+  const rawEffectiveDiffError = preparedDiff !== undefined ? preparedDiff?.diffError ?? null : diffError;
+  const effectiveDiffError = rawEffectiveDiffError?.toLowerCase().includes('signal is aborted') ? null : rawEffectiveDiffError;
+  const effectiveDiffLoading = preparedDiff !== undefined ? false : diffLoading;
+  const files = preparedDiff !== undefined ? preparedDiff?.files ?? [] : parsedFiles;
+
+  useEffect(() => {
+    if (!active || effectiveDiffLoading) return;
+    if (effectiveDiffContent === null && !effectiveDiffError && !imagePreview && diffOverride === undefined && preparedDiff === undefined) return;
     onContentReady?.();
-  }, [active, diffContent, diffError, diffLoading, diffOverride, imagePreview, onContentReady]);
+  }, [active, effectiveDiffContent, effectiveDiffError, effectiveDiffLoading, diffOverride, imagePreview, onContentReady, preparedDiff]);
 
   const effectiveAuditRecords = auditRecords ?? [];
 
-  // Lazily-loaded refractor singleton, shared with the file preview. Loading is
-  // deferred until a diff actually renders so it never weighs on first paint.
-  const [refractor, setRefractor] = useState<RefractorLike | null>(null);
-  useEffect(() => {
-    if (lightweight) return;
-    if (files.length === 0 || refractor) return;
-    let cancelled = false;
-    loadRefractor()
-      .then((mod) => { if (!cancelled) setRefractor(mod); })
-      .catch(() => { /* highlight is best-effort; fall back to plain diff */ });
-    return () => { cancelled = true; };
-  }, [files.length, lightweight, refractor]);
-
-  // Per-file tokens keyed by the same identity used to render each file.
-  // Inline edit marks are always enabled for text diffs; syntax highlighting is
-  // layered on only when refractor knows the language and the file is small enough.
-  const fileTokens = useMemo(() => {
-    const map = new Map<string, HunkTokens>();
-    if (lightweight) return map;
-    const startedAt = performance.now();
-    for (const file of files) {
-      if (file.hunks.length === 0) continue;
-      const language = resolveLanguage(file.newPath || file.oldPath);
-      let bytes = 0;
-      let tooLong = false;
-      for (const hunk of file.hunks) {
-        for (const change of hunk.changes) {
-          bytes += change.content.length + 1;
-          if (change.content.length > MAX_HIGHLIGHT_LINE_LENGTH) tooLong = true;
-        }
-      }
-      if (tooLong || bytes > MAX_HIGHLIGHT_BYTES) continue;
-      const canHighlight = Boolean(language && refractor?.registered(language));
-      try {
-        const hunkData = file.hunks as HunkData[];
-        const editEnhancers = inlineMode === 'none' ? [] : [markSmartEdits(hunkData, inlineMode)];
-        const oldSource = oldSourceContent ?? undefined;
-        const tokens = canHighlight
-          ? tokenize(hunkData, { highlight: true, refractor: refractor!, language: language!, enhancers: editEnhancers, oldSource })
-          : tokenize(hunkData, { enhancers: editEnhancers, oldSource });
-        map.set(`${file.oldRevision}-${file.newRevision}-${file.newPath}`, tokens);
-      } catch {
-        // A single bad file shouldn't break the whole diff view.
-      }
-    }
-    logDiffViewerEvent('tokenize_done', { filePath, files: files.length, tokenized: map.size, durationMs: Math.round(performance.now() - startedAt) });
-    return map;
-  }, [files, inlineMode, lightweight, oldSourceContent, refractor]);
+  const fileTokens = preparedDiff !== undefined ? preparedDiff?.tokens ?? new Map() : workerTokens;
 
 
   const totalChanges = useMemo(() => {
@@ -985,18 +1063,24 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
   const wholeDiffReferenceKey = `diff:whole:${filePath ?? 'all'}`;
 
   const wholeDiffText = useMemo(() => {
-    if (!diffContent) return '';
+    if (!effectiveDiffContent) return '';
+    const referencePathOptions = {
+      repoRoot: referenceRepoRoot,
+      selectedFilePath: filePath,
+      referenceFilePath: resolvedReferenceFilePath,
+    };
     const hunks = files.flatMap((file) => {
       const displayPath = file.newPath && !isDiffNullPath(file.newPath)
         ? file.newPath
         : file.oldPath && !isDiffNullPath(file.oldPath) ? file.oldPath : 'unknown file';
-      return file.hunks.map((hunk, hunkIndex) => ({ filePath: displayPath, hunkIndex, hunk }));
+      const referencePath = toReferenceDiffPath(displayPath, referencePathOptions);
+      return file.hunks.map((hunk, hunkIndex) => ({ filePath: referencePath, hunkIndex, hunk }));
     });
-    return formatDiffReference(diffContent, {
+    return formatDiffReference(rewriteDiffReferencePaths(effectiveDiffContent, files, referencePathOptions), {
       filePath,
       hunks,
     });
-  }, [diffContent, filePath, files]);
+  }, [effectiveDiffContent, filePath, files, referenceRepoRoot, resolvedReferenceFilePath]);
 
   const insertWholeDiff = useCallback(() => {
     if (!wholeDiffText || !onInsertDiffReference) return;
@@ -1011,15 +1095,23 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
         const displayPath = file.newPath && !isDiffNullPath(file.newPath)
           ? file.newPath
           : file.oldPath && !isDiffNullPath(file.oldPath) ? file.oldPath : 'unknown file';
+        const referencePathOptions = {
+          repoRoot: referenceRepoRoot,
+          selectedFilePath: filePath,
+          referenceFilePath: resolvedReferenceFilePath,
+        };
+        const referenceDisplayPath = toReferenceDiffPath(displayPath, referencePathOptions);
+        const referenceOldPath = toReferenceDiffPath(file.oldPath || displayPath, referencePathOptions);
+        const referenceNewPath = toReferenceDiffPath(file.newPath || displayPath, referencePathOptions);
         const pathParts = getPathParts(displayPath, { name: 'unknown file', dir: '' });
         const showFileHeader = !hideSingleFileHeader || files.length > 1;
         const fileDiffReferenceText = [
-          `diff --git a/${file.oldPath || displayPath} b/${file.newPath || displayPath}`,
+          `diff --git ${formatDiffEndpoint('a', referenceOldPath)} ${formatDiffEndpoint('b', referenceNewPath)}`,
           ...file.hunks.flatMap((hunk) => [hunk.content, ...hunk.changes.map(formatDiffReferenceChange)]),
         ].join('\n');
         const fileDiffText = formatDiffReference(fileDiffReferenceText, {
-          filePath: displayPath,
-          hunks: file.hunks.map((hunk, hunkIndex) => ({ filePath: displayPath, hunkIndex, hunk })),
+          filePath: referenceDisplayPath,
+          hunks: file.hunks.map((hunk, hunkIndex) => ({ filePath: referenceDisplayPath, hunkIndex, hunk })),
         });
         const fileDiffReferenceKey = `diff:file:${displayPath}`;
         const fileDiffReferenceActive = insertedReferenceKey === fileDiffReferenceKey || copiedReferenceKey === fileDiffReferenceKey;
@@ -1082,14 +1174,14 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
             <div className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${viewType === 'split' ? 'diff-split' : ''} ${wrap ? 'termdock-diff-wrap' : ''}`} data-sidebar-gesture-ignore>
               <div className="min-w-full">
                 {file.hunks.map((hunk, index) => {
-                    const diffHeader = `diff --git a/${file.oldPath || displayPath} b/${file.newPath || displayPath}`;
+                    const diffHeader = `diff --git ${formatDiffEndpoint('a', referenceOldPath)} ${formatDiffEndpoint('b', referenceNewPath)}`;
                     const hunkDiffText = formatDiffReference([
                       diffHeader,
                       hunk.content,
                       ...hunk.changes.map(formatDiffReferenceChange),
                     ].join('\n'), {
-                      filePath: displayPath,
-                      hunks: [{ filePath: displayPath, hunkIndex: index, hunk }],
+                      filePath: referenceDisplayPath,
+                      hunks: [{ filePath: referenceDisplayPath, hunkIndex: index, hunk }],
                     });
                     const hunkFingerprint = buildHunkFingerprint(hunk);
                     const hunkAudit = getHunkAudit(effectiveAuditRecords, auditRepoRoot, displayPath, hunk.content, hunkFingerprint);
@@ -1104,12 +1196,81 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
                       .filter((change) => change.type === 'insert')
                       .map((change) => ({ content: change.content, lineNumber: change.lineNumber }));
                     const movedCandidates = lightweight ? [] : findMovedLineCandidates(deletedChanges, insertedChanges);
-                    const pairedChanges = lightweight ? [] : pairChangedLinesForDisplay(deletedChanges, insertedChanges);
                     const importOnlyHunk = isImportOnlyHunk(hunk);
                     const importCollapsed = importOnlyHunk && !expandedImportHunks.has(importCollapseKey);
                     const movedOldLines = new Set(movedCandidates.map((candidate) => candidate.oldLineNumber));
                     const movedNewLines = new Set(movedCandidates.map((candidate) => candidate.newLineNumber));
-                    const displayHunk = viewType === 'split' ? alignPairedChangesForSplitView(hunk, pairedChanges) : hunk;
+                    const displayHunk = viewType === 'split' ? alignAdjacentChangesForSplitView(hunk) : hunk;
+                    const sectionWidgets = hunkSections.reduce<Record<string, ReactNode>>((widgets, section) => {
+                      const sectionFingerprint = buildSectionFingerprint(section);
+                      const sectionAudit = getSectionAudit(effectiveAuditRecords, auditRepoRoot, displayPath, hunk.content, hunkFingerprint, section.index, sectionFingerprint);
+                      const auditRecord = sectionAudit.current ?? sectionAudit.stale;
+                      if (!auditRecord && !onInsertDiffReference) return widgets;
+                      const widgetKey = getSectionWidgetChangeKey(section);
+                      if (!widgetKey) return widgets;
+                      const sectionKey = `diff:section:${displayPath}:${index}:${section.index}`;
+                      const sectionText = onInsertDiffReference ? formatSectionReferenceText(referenceDisplayPath, index, hunk, section, diffHeader) : '';
+                      const activeSection = insertedReferenceKey === sectionKey || copiedReferenceKey === sectionKey;
+                      const sectionButton = onInsertDiffReference ? (
+                        <button
+                          type="button"
+                          onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}.${section.index + 1}`, sectionText, sectionKey)}
+                          {...getReferenceLongPressHandlers(sectionText, sectionKey)}
+                          className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition active:scale-95 ${
+                            activeSection
+                              ? 'bg-surface-elevated text-foreground'
+                              : auditRecord
+                                ? 'text-primary/80 hover:bg-primary/10 hover:text-primary'
+                                : 'text-muted-foreground/45 hover:bg-surface-2 hover:text-muted-foreground'
+                          }`}
+                          title={auditRecord ? auditRecord.summary ?? auditRecord.explanation : 'Insert this hunk section'}
+                        >
+                          {copiedReferenceKey === sectionKey ? t('rightSidebar.copied') : insertedReferenceKey === sectionKey ? t('rightSidebar.inserted') : t('diffViewer.insertHunkShort')}
+                        </button>
+                      ) : null;
+                      widgets[widgetKey] = (
+                        <div
+                          data-diff-section-anchor={displayPath}
+                          data-diff-section-audit={displayPath}
+                          data-diff-hunk-index={index}
+                          data-diff-section-index={section.index}
+                          data-diff-section-fingerprint={sectionFingerprint}
+                          className={auditRecord
+                            ? `mx-2 my-1 min-w-0 rounded-md border px-2 py-1.5 text-[11px] leading-relaxed ${wrap ? 'max-w-full overflow-hidden' : 'w-max'} ${
+                              sectionAudit.current
+                                ? 'border-primary/20 bg-primary/10 text-foreground'
+                                : 'border-[rgb(var(--warning-rgb)_/_0.26)] bg-[rgb(var(--warning-rgb)_/_0.12)] text-muted-foreground'
+                            }`
+                            : 'mx-2 my-0.5 flex min-w-0 justify-end text-[10px] leading-none'
+                          }
+                        >
+                          {auditRecord ? (
+                            <>
+                              {(auditRecord.summary || sectionButton || onClearAuditRecord) && (
+                            <div className="mb-0.5 flex min-w-0 items-center gap-1.5">
+                              {auditRecord.summary ? (
+                                <span className="min-w-0 flex-1 truncate text-[10px] font-semibold text-foreground">{auditRecord.summary}</span>
+                              ) : <span className="min-w-0 flex-1" />}
+                              {sectionButton}
+                            {onClearAuditRecord && (
+                              <button
+                                type="button"
+                                onClick={() => onClearAuditRecord(auditRecord.id)}
+                                className="ml-auto shrink-0 rounded p-0.5 text-muted-foreground/60 transition hover:bg-surface-2 hover:text-foreground"
+                                title={t('diffViewer.auditClear')}
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                              </button>
+                            )}
+                            </div>
+                              )}
+                              <div className="termdock-diff-audit-explanation min-w-0">{auditRecord.explanation}</div>
+                            </>
+                          ) : sectionButton}
+                        </div>
+                      );
+                      return widgets;
+                    }, {});
                     const generateLineClassName = ({ changes, defaultGenerate }: { changes: HunkData['changes']; defaultGenerate: () => string }) => {
                       const defaultClassName = defaultGenerate();
                       const moved = changes.some((change) => {
@@ -1122,7 +1283,13 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
                       return moved ? `${defaultClassName} diff-line-moved` : defaultClassName;
                     };
                     return (
-                      <div key={hunk.content} className={`diff-hunk ${importOnlyHunk ? 'diff-hunk-imports' : ''}`}>
+                      <div
+                        key={hunk.content}
+                        className={`diff-hunk ${importOnlyHunk ? 'diff-hunk-imports' : ''}`}
+                        data-diff-hunk-anchor={displayPath}
+                        data-diff-hunk-index={index}
+                        data-diff-hunk-fingerprint={hunkFingerprint}
+                      >
                         <div className="diff-decoration diff-hunk-meta-row bg-[rgba(var(--diff-accent-rgb),0.035)] px-2 py-1">
                           <div className={`diff-hunk-header flex min-w-0 items-center gap-2 ${wrap ? 'max-w-full flex-wrap overflow-hidden' : 'w-max whitespace-nowrap'}`}>
                               {onInsertDiffReference && (
@@ -1172,38 +1339,6 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
                                 Import-only changes collapsed.
                               </div>
                             )}
-                            {onInsertDiffReference && hunkSections.length > 1 && (
-                              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-                                <span className="text-[10px] font-medium text-muted-foreground">sections</span>
-                                {hunkSections.map((section) => {
-                                  const sectionKey = `diff:section:${displayPath}:${index}:${section.index}`;
-                                  const sectionText = formatSectionReferenceText(displayPath, index, hunk, section, diffHeader);
-                                  const sectionFingerprint = buildSectionFingerprint(section);
-                                  const sectionAudit = getSectionAudit(effectiveAuditRecords, auditRepoRoot, displayPath, hunk.content, hunkFingerprint, section.index, sectionFingerprint);
-                                  const activeSection = insertedReferenceKey === sectionKey || copiedReferenceKey === sectionKey;
-                                  return (
-                                    <button
-                                      key={sectionKey}
-                                      type="button"
-                                      onClick={() => onInsertDiffReference(`${pathParts.name} hunk ${index + 1}.${section.index + 1}`, sectionText, sectionKey)}
-                                      {...getReferenceLongPressHandlers(sectionText, sectionKey)}
-                                      className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold transition active:scale-95 ${
-                                        sectionAudit.current
-                                          ? 'bg-primary/15 text-primary'
-                                          : sectionAudit.stale
-                                            ? 'bg-[rgb(var(--warning-rgb)_/_0.16)] text-[color:var(--warning)]'
-                                            : activeSection
-                                          ? 'bg-surface-elevated text-foreground'
-                                          : 'bg-surface-2 text-muted-foreground hover:text-foreground'
-                                      }`}
-                                      title={sectionAudit.current ? sectionAudit.current.summary ?? sectionAudit.current.explanation : sectionAudit.stale ? 'Section explanation is stale' : 'Insert this hunk section'}
-                                    >
-                                      {section.index + 1}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            )}
                             {(hunkAudit.current || hunkAudit.stale) && (
                               (() => {
                                 const auditRecord = hunkAudit.current ?? hunkAudit.stale;
@@ -1246,6 +1381,7 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
                             hunks={[displayHunk]}
                             tokens={fileTokens.get(key)}
                             generateLineClassName={generateLineClassName}
+                            widgets={sectionWidgets}
                           >
                             {(hunks) => hunks.map((singleHunk) => <Hunk key={singleHunk.content} hunk={singleHunk} />)}
                           </Diff>
@@ -1262,7 +1398,7 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
     </>
   );
 
-  if (diffLoading) {
+  if (effectiveDiffLoading) {
     return embedded ? (
       <div className="flex items-center justify-center gap-2 bg-surface-2 py-6 text-xs text-muted-foreground">
         <RiLoader size={18} className="animate-spin" />
@@ -1276,26 +1412,26 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
     );
   }
 
-  if (diffError) {
+  if (effectiveDiffError) {
     return embedded ? (
       <div className="bg-destructive/5 px-3 py-3 text-xs text-destructive">
-        {diffError}
+        {effectiveDiffError}
       </div>
     ) : (
       <div className="mx-3 mt-3 border border-destructive/20 bg-destructive/5 px-4 py-4 text-sm text-destructive">
-        {diffError}
+        {effectiveDiffError}
       </div>
     );
   }
 
-  if (diffNotice && !diffContent) {
+  if (effectiveDiffNotice && !effectiveDiffContent) {
     return embedded ? (
       <div className="bg-[rgb(var(--warning-rgb)_/_0.12)] px-3 py-3 text-xs text-[color:var(--warning)]">
-        {diffNotice}
+        {effectiveDiffNotice}
       </div>
     ) : (
       <div className="mx-3 mt-3 border border-[rgb(var(--warning-rgb)_/_0.24)] bg-[rgb(var(--warning-rgb)_/_0.12)] px-4 py-4 text-sm text-[color:var(--warning)]">
-        {diffNotice}
+        {effectiveDiffNotice}
       </div>
     );
   }
@@ -1344,9 +1480,9 @@ export function DiffViewer({ filePath, repoRoot, interactionId, requestSlotId, c
     );
   }
 
-  const diffNoticeBanner = diffNotice ? (
+  const diffNoticeBanner = effectiveDiffNotice ? (
     <div className="mb-2 border border-[rgb(var(--warning-rgb)_/_0.24)] bg-[rgb(var(--warning-rgb)_/_0.12)] px-3 py-2 text-xs text-[color:var(--warning)]">
-      {diffNotice}
+      {effectiveDiffNotice}
     </div>
   ) : null;
 

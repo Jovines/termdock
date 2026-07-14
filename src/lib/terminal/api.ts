@@ -2136,6 +2136,73 @@ export interface ChangeAuditRecord {
   injectedAt: number;
 }
 
+export interface ChangeWalkthroughAnchor {
+  repoRoot?: string | null;
+  filePath: string;
+  hunkHeader?: string | null;
+  hunkIndex?: number | null;
+  hunkFingerprint?: string | null;
+  sectionIndex?: number | null;
+  sectionFingerprint?: string | null;
+}
+
+export interface ChangeWalkthroughHighlight {
+  what: string;
+  effect: string;
+  tag?: string | null;
+}
+
+export interface ChangeWalkthroughNode {
+  id: string;
+  title: string;
+  kind?: string | null;
+  summary?: string | null;
+  business: string;
+  anchor?: ChangeWalkthroughAnchor | null;
+}
+
+export interface ChangeWalkthroughEdge {
+  from: string;
+  to: string;
+  label?: string | null;
+  desc?: string | null;
+}
+
+export interface ChangeWalkthroughSection {
+  id: string;
+  nodeId?: string | null;
+  anchor: ChangeWalkthroughAnchor;
+  summary: string;
+  explanation?: string | null;
+}
+
+export interface ChangeWalkthroughRisk {
+  title: string;
+  anchor?: ChangeWalkthroughAnchor | null;
+}
+
+export interface ChangeWalkthrough {
+  version: 1;
+  id: string;
+  workspaceRoot?: string | null;
+  repoRoot: string;
+  baseRef?: string | null;
+  branchName?: string | null;
+  headRef?: string | null;
+  diffFingerprint?: string | null;
+  title: string;
+  scope?: string | null;
+  summary?: string | null;
+  generatedBy?: string | null;
+  injectedAt: number;
+  highlights: ChangeWalkthroughHighlight[];
+  nodes: ChangeWalkthroughNode[];
+  edges: ChangeWalkthroughEdge[];
+  sections: ChangeWalkthroughSection[];
+  risks: ChangeWalkthroughRisk[];
+  checks: string[];
+}
+
 export interface BranchDiffResponse {
   available: boolean;
   repoRoot?: string;
@@ -2192,7 +2259,7 @@ export interface BranchAuditRecord {
   injectedAt: number;
 }
 
-export async function getChangeAuditRecords(options: { workspaceRoot?: string | null; repoRoot?: string | null } = {}, signal?: AbortSignal): Promise<{ records: ChangeAuditRecord[]; loading?: boolean }> {
+export async function getChangeAuditRecords(options: { workspaceRoot?: string | null; repoRoot?: string | null } = {}, signal?: AbortSignal): Promise<{ records: ChangeAuditRecord[]; walkthroughs?: ChangeWalkthrough[]; loading?: boolean }> {
   const params = new URLSearchParams();
   if (options.workspaceRoot) params.set('workspaceRoot', options.workspaceRoot);
   if (options.repoRoot) params.set('repoRoot', options.repoRoot);
@@ -2210,11 +2277,13 @@ export async function getChangeAuditRecords(options: { workspaceRoot?: string | 
   return response.json();
 }
 
-export async function getBranchDiff(options: { cwd?: string | null; repoRoot?: string | null; base: string; requestSlotId?: string }, signal?: AbortSignal): Promise<BranchDiffResponse> {
+export async function getBranchDiff(options: { cwd?: string | null; repoRoot?: string | null; base: string; head?: string | null; includeUncommitted?: boolean; requestSlotId?: string }, signal?: AbortSignal): Promise<BranchDiffResponse> {
   const params = new URLSearchParams();
   if (options.cwd) params.set('cwd', options.cwd);
   if (options.repoRoot) params.set('repoRoot', options.repoRoot);
   params.set('base', options.base);
+  if (options.head) params.set('head', options.head);
+  if (options.includeUncommitted === false) params.set('includeUncommitted', '0');
   params.set('action', 'load_branch_diff');
   if (options.requestSlotId) params.set('requestSlotId', options.requestSlotId);
   const response = await fetchWithTimeout(
@@ -2285,7 +2354,7 @@ export async function getRecentCommits(options: { cwd?: string | null; repoRoot?
   return response.json();
 }
 
-export async function getBranchAuditRecords(options: { workspaceRoot?: string | null; repoRoot?: string | null; baseRef?: string | null; branchName?: string | null } = {}, signal?: AbortSignal): Promise<{ records: BranchAuditRecord[]; loading?: boolean }> {
+export async function getBranchAuditRecords(options: { workspaceRoot?: string | null; repoRoot?: string | null; baseRef?: string | null; branchName?: string | null } = {}, signal?: AbortSignal): Promise<{ records: BranchAuditRecord[]; walkthroughs?: ChangeWalkthrough[]; loading?: boolean }> {
   const params = new URLSearchParams();
   if (options.workspaceRoot) params.set('workspaceRoot', options.workspaceRoot);
   if (options.repoRoot) params.set('repoRoot', options.repoRoot);

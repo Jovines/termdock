@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { LoginScreen } from './lib/components/auth/LoginScreen';
+import { DagPlayground } from './lib/components/sidebar/DagPlayground';
 import { DiffLab } from './lib/components/sidebar/DiffLab';
 import { DiffReviewLab } from './lib/components/sidebar/DiffReviewLab';
 import { ErrorBoundary } from './lib/components/ui/ErrorBoundary';
@@ -82,6 +83,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       <ErrorBoundary>
         {(() => {
           const params = new URLSearchParams(window.location.search);
+          if (params.get('dag-playground') === '1') return <DagPlayground />;
           if (params.get('diff-review-lab') === '1') return <DiffReviewLab />;
           if (params.get('diff-lab') === '1') return <DiffLab />;
           return <AuthGate />;

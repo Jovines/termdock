@@ -11,13 +11,13 @@ export function createLocalRouter(options: { token?: string | null } = {}) {
     }
 
     const payload = req.body as ChangeAuditPayload;
-    if (!payload || !Array.isArray(payload.records)) {
-      res.status(400).json({ error: 'Expected JSON payload with records[]' });
+    if (!payload || (!Array.isArray(payload.records) && !payload.walkthrough)) {
+      res.status(400).json({ error: 'Expected JSON payload with records[] or walkthrough' });
       return;
     }
 
     const result = injectChangeAudit(payload);
-    res.json({ ok: true, inserted: result.inserted, total: result.total });
+    res.json({ ok: true, inserted: result.inserted, total: result.total, walkthroughs: result.walkthroughs });
   });
 
   router.post('/branch-audit', (req, res) => {
@@ -27,13 +27,13 @@ export function createLocalRouter(options: { token?: string | null } = {}) {
     }
 
     const payload = req.body as BranchAuditPayload;
-    if (!payload || !payload.repoRoot || !payload.baseRef || !Array.isArray(payload.records)) {
-      res.status(400).json({ error: 'Expected JSON payload with repoRoot, baseRef, and records[]' });
+    if (!payload || !payload.repoRoot || !payload.baseRef || (!Array.isArray(payload.records) && !payload.walkthrough)) {
+      res.status(400).json({ error: 'Expected JSON payload with repoRoot, baseRef, and records[] or walkthrough' });
       return;
     }
 
     const result = injectBranchAudit(payload);
-    res.json({ ok: true, inserted: result.inserted, total: result.total });
+    res.json({ ok: true, inserted: result.inserted, total: result.total, walkthroughs: result.walkthroughs });
   });
 
   return router;

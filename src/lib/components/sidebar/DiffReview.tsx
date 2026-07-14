@@ -1,10 +1,18 @@
-import { useCallback, useMemo, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Swiper as SwiperInstance } from 'swiper';
-import type { ChangeAuditRecord, GitDiffOptions } from '../../terminal/api';
-import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup, type DiffFileNavigatorMode } from './DiffFileNavigator';
-import { DiffReviewWorkspace } from './DiffReviewWorkspace';
+import { getGitBlobContent, type ChangeAuditRecord, type GitDiffOptions } from '../../terminal/api';
+import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
+import { DiffReviewWorkspace, type DiffReviewMode } from './DiffReviewWorkspace';
 import { DiffStreamItem, type DiffStreamFile } from './DiffStreamItem';
-import type { DiffInlineMode, DiffViewType } from './DiffViewer';
+import {
+  formatDiffLimitMessage,
+  isDiffTooLargeToRender,
+  loadVisibleFileDiff,
+  type DiffInlineMode,
+  type DiffViewerPreparedDiff,
+  type DiffViewType,
+} from './DiffViewer';
+import { parseDiffInWorker } from './diffWorkerClient';
 
 // --- ChangeBadge (shared) ---
 
@@ -44,6 +52,16 @@ export interface DiffReviewFile {
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
 }
 
+interface PreparedDiffEntry extends DiffViewerPreparedDiff {
+  key: string;
+}
+
+interface PreparedDiffSnapshot {
+  key: string;
+  files: DiffReviewFile[];
+  preparedDiffs: Map<string, PreparedDiffEntry>;
+}
+
 // --- Props ---
 
 export interface DiffReviewProps {
@@ -56,8 +74,8 @@ export interface DiffReviewProps {
   onSelectFile: (file: DiffNavigatorFile) => void;
 
   // --- Navigation mode ---
-  mode: DiffFileNavigatorMode;
-  onModeChange: (mode: DiffFileNavigatorMode) => void;
+  mode: DiffReviewMode;
+  onModeChange: (mode: DiffReviewMode) => void;
   collapsedDirectoryKeys: Set<string>;
   onToggleDirectory: (key: string) => void;
 
@@ -94,6 +112,7 @@ export interface DiffReviewProps {
   renderMobileDetailHeader?: ReactNode | ((controls: { slideToList: () => void; slideToDetail: () => void }) => ReactNode);
   emptyContent?: ReactNode;
   listPrefix?: ReactNode;
+  aiContent?: ReactNode | ((controls: { slideToDetail: () => void }) => ReactNode);
 
   // --- Containers ---
   listContainerClassName?: string;
@@ -108,7 +127,6 @@ export interface DiffReviewProps {
   externalSwiperRef?: { current: SwiperInstance | null };
   onMobileSlideChange?: (index: number) => void;
   slideToDetailOnMobile?: boolean;
-  detailMounted?: boolean;
 }
 
 // --- Component ---
@@ -146,6 +164,7 @@ export function DiffReview({
   renderMobileDetailHeader,
   emptyContent,
   listPrefix,
+  aiContent,
   listContainerClassName,
   detailContainerClassName,
   desktopSidePanel,
@@ -154,16 +173,13 @@ export function DiffReview({
   externalSwiperRef,
   onMobileSlideChange,
   slideToDetailOnMobile,
-  detailMounted = true,
 }: DiffReviewProps) {
-  const shouldRenderDetail = !mobile || detailMounted;
   const matchesSelectedKey = useMemo(() => {
     return (file: DiffReviewFile) => selectedKey === file.key
       || selectedKey === file.path
       || selectedKey === file.absolutePath;
   }, [selectedKey]);
   const allOrderedFiles = useMemo(() => {
-    if (!shouldRenderDetail) return [];
     const byKey = new Map<string, DiffReviewFile>();
     for (const file of files) {
       byKey.set(file.key, file);
@@ -186,19 +202,149 @@ export function DiffReview({
       ordered.push(file);
     }
     return ordered;
-  }, [files, groups, mode, shouldRenderDetail]);
-  const selectedIndex = useMemo(() => {
-    if (!shouldRenderDetail || !selectedKey) return -1;
-    return allOrderedFiles.findIndex(matchesSelectedKey);
-  }, [allOrderedFiles, matchesSelectedKey, selectedKey, shouldRenderDetail]);
+  }, [files, groups, mode]);
   const detailScrollerRef = useRef<HTMLDivElement | null>(null);
+  const [detailSnapshot, setDetailSnapshot] = useState<PreparedDiffSnapshot | null>(null);
+  const [prepareError, setPrepareError] = useState<string | null>(null);
+  const stableDiffOptions = useMemo(() => diffOptions ? {
+    algorithm: diffOptions.algorithm,
+    whitespace: diffOptions.whitespace,
+  } : undefined, [diffOptions?.algorithm, diffOptions?.whitespace]);
+
+  const detailPrepareKey = useMemo(() => {
+    return allOrderedFiles
+      .map((file) => [
+        file.key,
+        file.path,
+        file.repoRoot ?? '',
+        file.diffOverride ?? '',
+        diffOptions?.algorithm ?? 'default',
+        diffOptions?.whitespace ?? 'default',
+        inlineMode ?? 'words',
+        reloadKey,
+      ].join('\u0001'))
+      .join('\u0002');
+  }, [allOrderedFiles, diffOptions?.algorithm, diffOptions?.whitespace, inlineMode, reloadKey]);
+
+  useEffect(() => {
+    setDetailSnapshot(null);
+    setPrepareError(null);
+
+    if (allOrderedFiles.length === 0) {
+      setDetailSnapshot({
+        key: detailPrepareKey,
+        files: [],
+        preparedDiffs: new Map(),
+      });
+      return;
+    }
+
+    let cancelled = false;
+    const controller = new AbortController();
+
+    const prepareOne = async (file: DiffReviewFile): Promise<PreparedDiffEntry> => {
+      const gitRoot = file.repoRoot;
+      const requestPath = toDiffRequestPath(file.path, gitRoot);
+      try {
+        const rawDiff = file.diffOverride !== undefined
+          ? { path: file.path, diff: file.diffOverride ?? '', error: undefined, tooLarge: false }
+          : await loadVisibleFileDiff(requestPath, gitRoot ?? undefined, controller.signal, false, undefined, undefined, undefined, stableDiffOptions);
+        const notice = file.diffOverride !== undefined ? null : formatDiffLimitMessage(rawDiff);
+        const tooLargeToRender = isDiffTooLargeToRender(rawDiff.diff);
+        const diffContent = rawDiff.tooLarge || tooLargeToRender ? '' : rawDiff.diff;
+        if (!diffContent || diffContent.trim() === '') {
+          return {
+            key: file.key,
+            diffContent,
+            diffNotice: tooLargeToRender ? 'Diff has too many lines to preview safely.' : notice,
+            diffError: rawDiff.error ?? null,
+            files: [],
+            tokens: new Map(),
+          };
+        }
+        const oldSource = await loadOldSourceForPreparedDiff(file, controller.signal);
+        const parsed = await parseDiffInWorker(diffContent, inlineMode ?? 'words', oldSource ?? undefined);
+        return {
+          key: file.key,
+          diffContent,
+          diffNotice: tooLargeToRender ? 'Diff has too many lines to preview safely.' : notice,
+          diffError: rawDiff.error ?? null,
+          files: parsed.files,
+          tokens: parsed.tokens,
+        };
+      } catch (error) {
+        if (controller.signal.aborted || isPreparedDiffAbort(error)) {
+          return {
+            key: file.key,
+            diffContent: null,
+            diffNotice: null,
+            diffError: null,
+            files: [],
+            tokens: new Map(),
+          };
+        }
+        return {
+          key: file.key,
+          diffContent: null,
+          diffNotice: null,
+          diffError: error instanceof Error ? error.message : String(error),
+          files: [],
+          tokens: new Map(),
+        };
+      }
+    };
+
+    Promise.all(allOrderedFiles.map(prepareOne))
+      .then((entries) => {
+        if (cancelled) return;
+        setDetailSnapshot({
+          key: detailPrepareKey,
+          files: allOrderedFiles,
+          preparedDiffs: new Map(entries.map((entry) => [entry.key, entry])),
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setPrepareError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (cancelled) return;
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [detailPrepareKey]);
 
   const handleDetailScroll = useCallback((container: HTMLDivElement) => {
     detailScrollerRef.current = container;
     if (!mobile) onDetailScroll?.(container);
   }, [mobile, onDetailScroll]);
 
-  const renderStreamItem = useCallback((item: DiffReviewFile, options: { eager: boolean; lightweight: boolean }) => {
+  const currentSnapshot = detailSnapshot?.key === detailPrepareKey ? detailSnapshot : null;
+  const renderedFiles = currentSnapshot?.files ?? [];
+  const renderedPreparedDiffs = currentSnapshot?.preparedDiffs ?? null;
+
+  useEffect(() => {
+    if (!selectedKey) return;
+    const target = renderedFiles.find(matchesSelectedKey);
+    if (!target) return;
+    const frame = window.requestAnimationFrame(() => {
+      const container = detailScrollerRef.current;
+      if (!container) return;
+      const item = container.querySelector<HTMLElement>(`[data-diff-stream-item="${CSS.escape(target.key)}"]`);
+      if (!item) return;
+      const containerRect = container.getBoundingClientRect();
+      const itemRect = item.getBoundingClientRect();
+      if (itemRect.top >= containerRect.top && itemRect.top < containerRect.bottom) return;
+      const top = itemRect.top - containerRect.top + container.scrollTop;
+      container.scrollTo({ top: Math.max(0, top), behavior: 'instant' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [matchesSelectedKey, renderedFiles, selectedKey]);
+
+  const renderStreamItem = useCallback((item: DiffReviewFile, preparedDiff: DiffViewerPreparedDiff) => {
     const isSelected = matchesSelectedKey(item);
     return (
       <DiffStreamItem
@@ -209,8 +355,8 @@ export function DiffReview({
         displayDir={item.displayDir}
         selected={isSelected}
         activePane={activePane}
-        eager={options.eager}
-        lightweight={options.lightweight}
+        eager
+        lightweight={false}
         wrap={wrap}
         showScrollHint={showScrollHint}
         viewType={diffViewType}
@@ -219,6 +365,7 @@ export function DiffReview({
         reloadKey={reloadKey}
         auditRecords={item.auditRecords}
         diffOverride={item.diffOverride}
+        preparedDiff={preparedDiff}
         renderBadge={(status) => renderStreamBadge(status, item)}
         onInsertDiffReference={item.onInsertDiffReference ?? onInsertDiffReference}
         onReferenceCopied={onReferenceCopied}
@@ -229,44 +376,41 @@ export function DiffReview({
     );
   }, [activePane, copiedReferenceKey, diffOptions, diffViewType, inlineMode, insertedReferenceKey, matchesSelectedKey, onClearAuditRecord, onInsertDiffReference, onReferenceCopied, reloadKey, renderStreamBadge, showScrollHint, wrap]);
 
-  const detail = shouldRenderDetail ? (
-    mobile ? (
-      selectedIndex < 0 ? (
-        <div className="bg-surface px-3 py-6 text-center text-xs text-muted-foreground" />
-      ) : (
-        <div
-          ref={detailScrollerRef}
-          className="termdock-diff-stream termdock-diff-stream-scroller h-full max-h-full min-h-0 overflow-y-auto overscroll-contain bg-surface"
-          data-sidebar-gesture-ignore
-          onScroll={(event) => handleDetailScroll(event.currentTarget)}
-        >
-          <div className="termdock-diff-stream divide-y divide-border/15 bg-surface">
-            {allOrderedFiles.map((item, index) => (
-              <div key={item.key}>
-                {renderStreamItem(item, {
-                  eager: index === selectedIndex,
-                  lightweight: true,
-                })}
-              </div>
-            ))}
-          </div>
-        </div>
-      )
-    ) : (
-      <div className="termdock-diff-stream divide-y divide-border/15 bg-surface">
-        {allOrderedFiles.map((item, index) => {
-          const isSelected = matchesSelectedKey(item);
-          const isEager = activePane || index < 3 || isSelected;
-          return (
-            <div key={item.key}>
-              {renderStreamItem(item, { eager: isEager, lightweight: false })}
-            </div>
-          );
-        })}
-      </div>
-    )
+  const detailBody = prepareError ? (
+    <div className="flex h-full items-center justify-center bg-surface px-4 py-8 text-center text-xs text-destructive">
+      {prepareError}
+    </div>
+  ) : !currentSnapshot ? (
+    <div className="flex h-full items-center justify-center bg-surface px-4 py-8 text-center text-xs text-muted-foreground">
+      正在准备完整 diff，完成后列表会一次性显示…
+    </div>
   ) : (
-    <div className="bg-surface px-3 py-6 text-center text-xs text-muted-foreground" />
+    <div className="termdock-diff-stream divide-y divide-border/15 bg-surface">
+      {renderedFiles.map((item) => (
+        <div key={item.key}>
+          {renderStreamItem(item, renderedPreparedDiffs?.get(item.key) ?? buildMissingPreparedDiff())}
+        </div>
+      ))}
+    </div>
+  );
+
+  const detail = mobile ? (
+    <div
+      ref={detailScrollerRef}
+      className="termdock-diff-stream termdock-diff-stream-scroller h-full max-h-full min-h-0 overflow-y-auto overscroll-contain bg-surface"
+      data-sidebar-gesture-ignore
+      onScroll={(event) => handleDetailScroll(event.currentTarget)}
+    >
+      {detailBody}
+    </div>
+  ) : (
+    <div
+      ref={detailScrollerRef}
+      className="termdock-diff-stream termdock-diff-stream-scroller h-full max-h-full min-h-0 overflow-y-auto overscroll-contain bg-surface"
+      onScroll={(event) => handleDetailScroll(event.currentTarget)}
+    >
+      {detailBody}
+    </div>
   );
 
   return (
@@ -287,6 +431,7 @@ export function DiffReview({
       compact={compact}
       emptyContent={emptyContent}
       listPrefix={listPrefix}
+      aiContent={aiContent}
       listContainerClassName={listContainerClassName}
       detailContainerClassName={detailContainerClassName}
       renderListHeader={renderListHeader}
@@ -298,7 +443,7 @@ export function DiffReview({
       onDetailScroll={handleDetailScroll}
       desktopSidePanel={desktopSidePanel}
       desktopListClassName={desktopListClassName}
-      mobileDetailOwnsScroll={mobile}
+      detailOwnsScroll
     />
   );
 }
@@ -311,4 +456,42 @@ function toStreamFile(file: DiffReviewFile): DiffStreamFile {
     absolutePath: file.absolutePath,
     status: file.status,
   };
+}
+
+function toDiffRequestPath(path: string | null | undefined, rootPath: string | null | undefined): string | undefined {
+  if (!path) return undefined;
+  return rootPath && path.startsWith(`${rootPath}/`)
+    ? path.slice(rootPath.length + 1)
+    : path;
+}
+
+async function loadOldSourceForPreparedDiff(file: DiffReviewFile, signal: AbortSignal): Promise<string | null> {
+  const gitRoot = file.repoRoot;
+  if (!gitRoot || !file.path || file.diffOverride !== undefined || file.status === 'added' || file.status === 'untracked') {
+    return null;
+  }
+  try {
+    const requestPath = toDiffRequestPath(file.path, gitRoot);
+    if (!requestPath) return null;
+    const result = await getGitBlobContent(requestPath, gitRoot, 'HEAD', signal, 'ref');
+    return result.truncated || result.error ? null : result.content;
+  } catch {
+    return null;
+  }
+}
+
+function buildMissingPreparedDiff(): DiffViewerPreparedDiff {
+  return {
+    diffContent: null,
+    diffNotice: null,
+    diffError: null,
+    files: [],
+    tokens: new Map(),
+  };
+}
+
+function isPreparedDiffAbort(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === 'AbortError') return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes('signal is aborted');
 }

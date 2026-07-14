@@ -107,9 +107,7 @@ export function DiffReviewLab() {
   );
   const [mode, setMode] = useState<'list' | 'tree'>('list');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  // Mirror the real app: the detail only mounts once its Swiper slide is active.
   const [slideIndex, setSlideIndex] = useState(forcedIndex !== null ? 1 : 0);
-  const detailMounted = forcedIndex !== null || slideIndex === 1;
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground" data-diff-review-lab>
@@ -124,7 +122,9 @@ export function DiffReviewLab() {
           groups={groups}
           selectedKey={selectedKey}
           mode={mode}
-          onModeChange={setMode}
+          onModeChange={(nextMode) => {
+            if (nextMode !== 'ai') setMode(nextMode);
+          }}
           collapsedDirectoryKeys={collapsed}
           onToggleDirectory={(key) => setCollapsed((prev) => {
             const next = new Set(prev);
@@ -133,7 +133,6 @@ export function DiffReviewLab() {
           })}
           onSelectFile={(navigatorFile) => setSelectedKey(navigatorFile.key)}
           onMobileSlideChange={setSlideIndex}
-          detailMounted={detailMounted}
           renderLeading={() => null}
           renderStreamBadge={(status) => <span className="text-[10px] text-muted-foreground">{status}</span>}
           wrap

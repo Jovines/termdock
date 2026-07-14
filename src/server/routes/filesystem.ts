@@ -1900,12 +1900,19 @@ async function getBranchDiffPayload(
   workspaceRoot: string,
   repoRoot: string,
   baseBranch: string,
+  options: { headRef?: string | null; includeUncommitted?: boolean } | undefined,
   signal: AbortSignal,
 ): Promise<BranchDiffPayload> {
   const trimmedBase = baseBranch.trim();
   if (!isSafeGitRefName(trimmedBase)) {
     return { available: false, workspaceRoot, repoRoot, baseBranch: trimmedBase, error: 'Invalid base branch name' };
   }
+  const requestedHead = options?.headRef?.trim() ?? '';
+  const hasRequestedHead = requestedHead.length > 0;
+  if (hasRequestedHead && !isSafeGitRefName(requestedHead)) {
+    return { available: false, workspaceRoot, repoRoot, baseBranch: trimmedBase, error: 'Invalid target branch name' };
+  }
+  const includeUncommitted = options?.includeUncommitted ?? true;
 
   let baseRef = trimmedBase.includes('/') ? trimmedBase : `origin/${trimmedBase}`;
   if (trimmedBase.includes('/')) {
@@ -1921,21 +1928,29 @@ async function getBranchDiffPayload(
       baseRef = localRef;
     }
   }
+  let compareHead = 'HEAD';
+  if (hasRequestedHead) {
+    compareHead = requestedHead.includes('/') ? requestedHead : requestedHead;
+    await execGit(['rev-parse', '--verify', '--quiet', compareHead], repoRoot, signal);
+  }
+  const includeWorkingTree = includeUncommitted && !hasRequestedHead;
   const [currentBranch, headRef, statResult, nameResult, workingNameResult, logResult, diffResult, workingDiffResult] = await Promise.all([
     execGit(['branch', '--show-current'], repoRoot, signal).catch(emptyOnNonAbortGitError),
-    execGit(['rev-parse', '--short=12', 'HEAD'], repoRoot, signal).catch(emptyOnNonAbortGitError),
-    execGitLimited(['diff', `${baseRef}...HEAD`, '--stat'], repoRoot, MAX_BRANCH_DIFF_STAT_BYTES, false, signal),
-    execGitLimited(['diff', '--name-only', `${baseRef}...HEAD`], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
-    execGitLimited(['diff', '--name-only', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
-    execGitLimited(['log', `${baseRef}..HEAD`, '--oneline', '--no-merges'], repoRoot, MAX_BRANCH_DIFF_LOG_BYTES, false, signal),
-    execGitLimited(['diff', `${baseRef}...HEAD`], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
-    execGitLimited(['diff', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
+    execGit(['rev-parse', '--short=12', compareHead], repoRoot, signal).catch(emptyOnNonAbortGitError),
+    execGitLimited(['diff', `${baseRef}...${compareHead}`, '--stat'], repoRoot, MAX_BRANCH_DIFF_STAT_BYTES, false, signal),
+    execGitLimited(['diff', '--name-only', `${baseRef}...${compareHead}`], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
+    includeWorkingTree ? execGitLimited(['diff', '--name-only', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
+    execGitLimited(['log', `${baseRef}..${compareHead}`, '--oneline', '--no-merges'], repoRoot, MAX_BRANCH_DIFF_LOG_BYTES, false, signal),
+    execGitLimited(['diff', `${baseRef}...${compareHead}`], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
+    includeWorkingTree ? execGitLimited(['diff', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
   ]);
   const trackedDiff = [diffResult.stdout, workingDiffResult.stdout].filter(Boolean).join('\n');
-  const untrackedResult = await appendUntrackedDiffs(repoRoot, trackedDiff, signal, {
-    maxBytes: MAX_BRANCH_DIFF_BYTES,
-    perFileMaxBytes: MAX_UNTRACKED_DIFF_FILE_BYTES,
-  });
+  const untrackedResult = includeWorkingTree
+    ? await appendUntrackedDiffs(repoRoot, trackedDiff, signal, {
+      maxBytes: MAX_BRANCH_DIFF_BYTES,
+      perFileMaxBytes: MAX_UNTRACKED_DIFF_FILE_BYTES,
+    })
+    : { diff: trackedDiff, files: [] as string[], skippedFiles: [] as DiffSkippedFile[], truncated: false };
   const diff = untrackedResult.diff;
   const stat = statResult.stdout.trim();
   const files = Array.from(new Set([
@@ -1961,7 +1976,7 @@ async function getBranchDiffPayload(
     repoRoot,
     baseRef,
     baseBranch: trimmedBase,
-    currentBranch: currentBranch.trim() || null,
+    currentBranch: hasRequestedHead ? requestedHead : (currentBranch.trim() || null),
     headRef: headRef.trim() || null,
     diffFingerprint: fingerprint,
     stat,
@@ -3322,6 +3337,8 @@ router.get('/branch-diff', async (req: Request, res: Response) => {
   const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined;
   const requestedRepoRoot = typeof req.query.repoRoot === 'string' ? req.query.repoRoot : undefined;
   const baseBranch = typeof req.query.base === 'string' ? req.query.base : '';
+  const headRef = typeof req.query.head === 'string' ? req.query.head : null;
+  const includeUncommitted = req.query.includeUncommitted !== '0' && req.query.includeUncommitted !== 'false';
   const action = getRequestAction(req, 'load_branch_diff');
   const requestSlotId = typeof req.query.requestSlotId === 'string' ? req.query.requestSlotId : undefined;
   const controller = new AbortController();
@@ -3357,7 +3374,7 @@ router.get('/branch-diff', async (req: Request, res: Response) => {
     }
     repoRootForLog = repoRoot;
     const payload = await withTimeout(
-      getBranchDiffPayload(workspaceGitRoot, repoRoot, baseBranch, controller.signal),
+      getBranchDiffPayload(workspaceGitRoot, repoRoot, baseBranch, { headRef, includeUncommitted }, controller.signal),
       GIT_FILE_DIFF_ROUTE_TIMEOUT_MS,
       'Branch diff took too long. The repository may be busy, on slow storage, or locked by another Git process.',
       'GIT_BRANCH_DIFF_TIMEOUT',
@@ -3374,7 +3391,7 @@ router.get('/branch-diff', async (req: Request, res: Response) => {
       count: payload.files?.length ?? 0,
       error: payload.error,
       truncated: payload.truncated,
-      extra: { baseBranch, requestSlotId, commits: payload.commitCount },
+      extra: { baseBranch, headRef, includeUncommitted, requestSlotId, commits: payload.commitCount },
     });
     res.json(payload);
   } catch (error) {

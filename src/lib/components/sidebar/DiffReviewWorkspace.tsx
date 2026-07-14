@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { List, ListTree } from 'lucide-react';
+import { List, ListTree, Sparkles } from 'lucide-react';
 import type { Swiper as SwiperInstance } from 'swiper';
 import {
   DiffFileNavigator,
@@ -9,10 +9,12 @@ import {
 } from './DiffFileNavigator';
 import { DiffReviewFrame } from './DiffReviewFrame';
 
+export type DiffReviewMode = DiffFileNavigatorMode | 'ai';
+
 interface DiffReviewWorkspaceProps {
   groups: DiffNavigatorGroup[];
-  mode: DiffFileNavigatorMode;
-  onModeChange: (mode: DiffFileNavigatorMode) => void;
+  mode: DiffReviewMode;
+  onModeChange: (mode: DiffReviewMode) => void;
   selectedKey?: string | null;
   collapsedDirectoryKeys: Set<string>;
   onToggleDirectory: (key: string) => void;
@@ -26,6 +28,7 @@ interface DiffReviewWorkspaceProps {
   compact?: boolean;
   emptyContent?: ReactNode;
   listPrefix?: ReactNode;
+  aiContent?: ReactNode | ((controls: { slideToDetail: () => void }) => ReactNode);
   listContainerClassName?: string;
   detailContainerClassName?: string;
   renderListHeader?: (modeToggle: ReactNode) => ReactNode;
@@ -37,15 +40,17 @@ interface DiffReviewWorkspaceProps {
   onDetailScroll?: (container: HTMLDivElement) => void;
   desktopSidePanel?: ReactNode;
   desktopListClassName?: string;
-  mobileDetailOwnsScroll?: boolean;
+  detailOwnsScroll?: boolean;
 }
 
 export function DiffReviewModeToggle({
   mode,
   onModeChange,
+  showAi = false,
 }: {
-  mode: DiffFileNavigatorMode;
-  onModeChange: (mode: DiffFileNavigatorMode) => void;
+  mode: DiffReviewMode;
+  onModeChange: (mode: DiffReviewMode) => void;
+  showAi?: boolean;
 }) {
   return (
     <div className="inline-flex h-7 shrink-0 overflow-hidden rounded-full bg-surface-2 p-0.5">
@@ -73,6 +78,20 @@ export function DiffReviewModeToggle({
       >
         <ListTree size={13} />
       </button>
+      {showAi && (
+        <button
+          type="button"
+          onClick={() => onModeChange('ai')}
+          aria-pressed={mode === 'ai'}
+          className={`inline-flex h-6 w-7 items-center justify-center rounded-full transition active:scale-95 ${
+            mode === 'ai'
+              ? 'bg-surface-elevated text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          <Sparkles size={13} />
+        </button>
+      )}
     </div>
   );
 }
@@ -94,6 +113,7 @@ export function DiffReviewWorkspace({
   compact = false,
   emptyContent,
   listPrefix,
+  aiContent,
   listContainerClassName = 'px-2 py-2',
   detailContainerClassName = 'termdock-native-select termdock-diff-stream-scroller min-h-0',
   renderListHeader,
@@ -105,9 +125,10 @@ export function DiffReviewWorkspace({
   onDetailScroll,
   desktopSidePanel,
   desktopListClassName,
-  mobileDetailOwnsScroll,
+  detailOwnsScroll,
 }: DiffReviewWorkspaceProps) {
-  const modeToggle = <DiffReviewModeToggle mode={mode} onModeChange={onModeChange} />;
+  const modeToggle = <DiffReviewModeToggle mode={mode} onModeChange={onModeChange} showAi={Boolean(aiContent)} />;
+  const fileNavigatorMode: DiffFileNavigatorMode = mode === 'tree' ? 'tree' : 'list';
   const listHeader = renderListHeader ? renderListHeader(modeToggle) : <div className="flex justify-end">{modeToggle}</div>;
   const hasFiles = groups.some((group) => group.files.length > 0);
 
@@ -121,18 +142,22 @@ export function DiffReviewWorkspace({
       onDetailScroll={onDetailScroll}
       desktopSidePanel={desktopSidePanel}
       desktopListClassName={desktopListClassName}
-      mobileDetailOwnsScroll={mobileDetailOwnsScroll}
+      detailOwnsScroll={detailOwnsScroll}
       mobileListHeader={mobile ? listHeader : undefined}
       desktopListHeader={!mobile ? listHeader : undefined}
       mobileDetailHeader={renderMobileDetailHeader}
       list={({ slideToDetail }) => (
         <div className={listContainerClassName}>
-          {listPrefix}
-          {hasFiles ? (
+          {mode === 'ai' ? (
+            typeof aiContent === 'function' ? aiContent({ slideToDetail }) : aiContent ?? emptyContent
+          ) : (
+            <>
+              {listPrefix}
+              {hasFiles ? (
             <DiffFileNavigator
               groups={groups}
               selectedKey={selectedKey}
-              mode={mode}
+              mode={fileNavigatorMode}
               mobile={mobile}
               compact={compact}
               collapsedDirectoryKeys={collapsedDirectoryKeys}
@@ -145,12 +170,14 @@ export function DiffReviewWorkspace({
               renderTrailing={renderTrailing}
               renderSubtitle={renderSubtitle}
             />
-          ) : emptyContent}
+              ) : emptyContent}
+            </>
+          )}
         </div>
       )}
       detail={(
         <div
-          className={mobile && mobileDetailOwnsScroll ? 'h-full min-h-0' : detailContainerClassName}
+          className={detailOwnsScroll ? 'h-full min-h-0' : detailContainerClassName}
           data-sidebar-gesture-ignore
         >
           {detail}
