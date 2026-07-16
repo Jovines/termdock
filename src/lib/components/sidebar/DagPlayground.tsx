@@ -20,6 +20,8 @@ const sampleWalkthrough: ChangeWalkthrough = {
   nodes: [
     { id: 'export', title: '导出 section 级 diff', kind: 'source', business: 'CLI 把 hunk 拆成多个连续改动 section，并为每个 section 生成稳定 fingerprint。这里故意写长一点，用来验证 DAG 节点是否会按照真实文本高度撑开，而不是被固定高度裁掉。', anchor: { repoRoot: REPO_ROOT, filePath: 'src/server/cli.ts', hunkIndex: 0, sectionIndex: 0 } },
     { id: 'prompt', title: '约束 AI 输出', kind: 'process', business: '提示词要求先写总览，再逐 section 生成解释。', anchor: { repoRoot: REPO_ROOT, filePath: 'src/lib/components/sidebar/RightSidebar.tsx', hunkIndex: 0 } },
+    { id: 'schema', title: '校验导览结构', kind: 'process', business: '检查节点、边和锚点字段是否完整。', anchor: { repoRoot: REPO_ROOT, filePath: 'src/server/utils/changeAuditStore.ts', hunkIndex: 0 } },
+    { id: 'fallback', title: '补齐兼容字段', kind: 'process', business: '旧版结果缺字段时生成稳定回退值。', anchor: { repoRoot: REPO_ROOT, filePath: 'src/server/utils/changeAuditStore.ts', hunkIndex: 1 } },
     { id: 'store', title: '保存整批导览结构', kind: 'process', business: '服务端把 walkthrough 作为一等数据持久化。', anchor: { repoRoot: REPO_ROOT, filePath: 'src/server/utils/changeAuditStore.ts', hunkIndex: 0 } },
     { id: 'api', title: '前端读取总览', kind: 'api', business: '一次请求拿到 records 和 walkthroughs。', anchor: { repoRoot: REPO_ROOT, filePath: 'src/lib/terminal/api.ts', hunkIndex: 0 } },
     { id: 'panel', title: '渲染 DAG 导览', kind: 'ui', business: '用节点和边表达实现链路，节点可点击。节点内容可能是一两句话，也可能包含较长的业务解释；布局需要先测量 DOM 高度，再重新计算每一行节点的 y 坐标和连线端点。', anchor: { repoRoot: REPO_ROOT, filePath: 'src/lib/components/sidebar/ChangeWalkthroughPanel.tsx', hunkIndex: 0 } },
@@ -29,7 +31,11 @@ const sampleWalkthrough: ChangeWalkthrough = {
   ],
   edges: [
     { from: 'export', to: 'prompt', label: '提供输入', desc: 'sectionFingerprint 让 AI 可以稳定引用。' },
+    { from: 'export', to: 'schema', label: '结构校验', desc: '先确认输入可以稳定落库。' },
+    { from: 'export', to: 'fallback', label: '兼容旧数据', desc: '为历史记录补齐必要字段。' },
     { from: 'prompt', to: 'store', label: '注入', desc: 'AI payload 写回本地服务。' },
+    { from: 'schema', to: 'store', label: '通过后保存', desc: '合法结构进入存储层。' },
+    { from: 'fallback', to: 'store', label: '归一化后保存', desc: '兼容数据与新数据走同一链路。' },
     { from: 'store', to: 'api', label: '读取', desc: '浏览器从服务端拿到导览。' },
     { from: 'api', to: 'panel', label: '渲染', desc: '结构化数据变成导览图。' },
     { from: 'panel', to: 'jump', label: '点击', desc: '节点驱动 diff 定位。' },

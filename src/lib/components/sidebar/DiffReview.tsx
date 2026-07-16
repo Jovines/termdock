@@ -8,6 +8,7 @@ import {
   formatDiffLimitMessage,
   isDiffTooLargeToRender,
   loadVisibleFileDiff,
+  refreshFileDiffCached,
   type DiffInlineMode,
   type DiffViewerPreparedDiff,
   type DiffViewType,
@@ -15,6 +16,8 @@ import {
 import { parseDiffInWorker } from './diffWorkerClient';
 
 // --- ChangeBadge (shared) ---
+
+const PROGRAMMATIC_DETAIL_SCROLL_SYNC_SUPPRESS_MS = 160;
 
 export const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; title: string }> = {
   added: { label: 'A', className: 'text-[color:var(--diff-insert-strong)]', title: 'Added' },
@@ -122,6 +125,9 @@ export interface DiffReviewProps {
 
   // --- Scroll sync ---
   onDetailScroll?: (container: HTMLDivElement) => void;
+  initialDetailScrollTop?: number;
+  scrollToKey?: string | null;
+  scrollToKeyNonce?: number;
 
   // --- Mobile ---
   externalSwiperRef?: { current: SwiperInstance | null };
@@ -170,6 +176,9 @@ export function DiffReview({
   desktopSidePanel,
   desktopListClassName,
   onDetailScroll,
+  initialDetailScrollTop,
+  scrollToKey,
+  scrollToKeyNonce = 0,
   externalSwiperRef,
   onMobileSlideChange,
   slideToDetailOnMobile,
@@ -204,27 +213,43 @@ export function DiffReview({
     return ordered;
   }, [files, groups, mode]);
   const detailScrollerRef = useRef<HTMLDivElement | null>(null);
+  const diffCacheRefreshSeqRef = useRef(0);
+  const handledScrollRequestNonceRef = useRef<number | null>(null);
+  const appliedInitialDetailScrollKeyRef = useRef<string | null>(null);
+  const suppressDetailScrollSyncUntilRef = useRef(0);
   const [detailSnapshot, setDetailSnapshot] = useState<PreparedDiffSnapshot | null>(null);
   const [prepareError, setPrepareError] = useState<string | null>(null);
+  const [cacheRefreshNonce, setCacheRefreshNonce] = useState(0);
   const stableDiffOptions = useMemo(() => diffOptions ? {
     algorithm: diffOptions.algorithm,
     whitespace: diffOptions.whitespace,
   } : undefined, [diffOptions?.algorithm, diffOptions?.whitespace]);
+
+  const orderedFileRequestKey = allOrderedFiles
+    .map((file) => [
+      file.key,
+      file.path,
+      file.status,
+      file.repoRoot ?? '',
+      file.diffOverride ?? '',
+    ].join('\u0001'))
+    .join('\u0002');
 
   const detailPrepareKey = useMemo(() => {
     return allOrderedFiles
       .map((file) => [
         file.key,
         file.path,
+        file.status,
         file.repoRoot ?? '',
         file.diffOverride ?? '',
         diffOptions?.algorithm ?? 'default',
         diffOptions?.whitespace ?? 'default',
         inlineMode ?? 'words',
-        reloadKey,
+        cacheRefreshNonce,
       ].join('\u0001'))
       .join('\u0002');
-  }, [allOrderedFiles, diffOptions?.algorithm, diffOptions?.whitespace, inlineMode, reloadKey]);
+  }, [allOrderedFiles, cacheRefreshNonce, diffOptions?.algorithm, diffOptions?.whitespace, inlineMode]);
 
   useEffect(() => {
     setDetailSnapshot(null);
@@ -274,14 +299,7 @@ export function DiffReview({
         };
       } catch (error) {
         if (controller.signal.aborted || isPreparedDiffAbort(error)) {
-          return {
-            key: file.key,
-            diffContent: null,
-            diffNotice: null,
-            diffError: null,
-            files: [],
-            tokens: new Map(),
-          };
+          throw error;
         }
         return {
           key: file.key,
@@ -317,32 +335,73 @@ export function DiffReview({
     };
   }, [detailPrepareKey]);
 
+  useEffect(() => {
+    if (reloadKey === 0 || allOrderedFiles.length === 0) return;
+    const refreshSeq = diffCacheRefreshSeqRef.current + 1;
+    diffCacheRefreshSeqRef.current = refreshSeq;
+    const refreshes = allOrderedFiles
+      .filter((file) => file.diffOverride === undefined)
+      .map((file) => {
+        const gitRoot = file.repoRoot;
+        const requestPath = toDiffRequestPath(file.path, gitRoot);
+        return refreshFileDiffCached(requestPath, gitRoot ?? undefined, stableDiffOptions);
+      });
+    if (refreshes.length === 0) return;
+    void Promise.allSettled(refreshes).then(() => {
+      if (diffCacheRefreshSeqRef.current !== refreshSeq) return;
+      setCacheRefreshNonce((value) => value + 1);
+    });
+  }, [orderedFileRequestKey, reloadKey, stableDiffOptions]);
+
   const handleDetailScroll = useCallback((container: HTMLDivElement) => {
     detailScrollerRef.current = container;
-    if (!mobile) onDetailScroll?.(container);
-  }, [mobile, onDetailScroll]);
+    if (performance.now() < suppressDetailScrollSyncUntilRef.current) return;
+    onDetailScroll?.(container);
+  }, [onDetailScroll]);
 
   const currentSnapshot = detailSnapshot?.key === detailPrepareKey ? detailSnapshot : null;
   const renderedFiles = currentSnapshot?.files ?? [];
   const renderedPreparedDiffs = currentSnapshot?.preparedDiffs ?? null;
 
   useEffect(() => {
-    if (!selectedKey) return;
-    const target = renderedFiles.find(matchesSelectedKey);
+    if (!scrollToKey) return;
+    if (handledScrollRequestNonceRef.current === scrollToKeyNonce) return;
+    const target = renderedFiles.find((file) => (
+      scrollToKey === file.key
+      || scrollToKey === file.path
+      || scrollToKey === file.absolutePath
+    ));
     if (!target) return;
     const frame = window.requestAnimationFrame(() => {
       const container = detailScrollerRef.current;
       if (!container) return;
       const item = container.querySelector<HTMLElement>(`[data-diff-stream-item="${CSS.escape(target.key)}"]`);
       if (!item) return;
+      handledScrollRequestNonceRef.current = scrollToKeyNonce;
       const containerRect = container.getBoundingClientRect();
       const itemRect = item.getBoundingClientRect();
       if (itemRect.top >= containerRect.top && itemRect.top < containerRect.bottom) return;
       const top = itemRect.top - containerRect.top + container.scrollTop;
+      suppressDetailScrollSyncUntilRef.current = performance.now() + PROGRAMMATIC_DETAIL_SCROLL_SYNC_SUPPRESS_MS;
       container.scrollTo({ top: Math.max(0, top), behavior: 'instant' });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [matchesSelectedKey, renderedFiles, selectedKey]);
+  }, [renderedFiles, scrollToKey, scrollToKeyNonce]);
+
+  useEffect(() => {
+    if (initialDetailScrollTop === undefined) return;
+    const restoreKey = `${currentSnapshot?.key ?? detailPrepareKey}\u0000${selectedKey ?? ''}`;
+    if (appliedInitialDetailScrollKeyRef.current === restoreKey) return;
+    const container = detailScrollerRef.current;
+    if (!container) return;
+    const top = Math.max(0, initialDetailScrollTop);
+    const frame = window.requestAnimationFrame(() => {
+      appliedInitialDetailScrollKeyRef.current = restoreKey;
+      suppressDetailScrollSyncUntilRef.current = performance.now() + PROGRAMMATIC_DETAIL_SCROLL_SYNC_SUPPRESS_MS;
+      container.scrollTo({ top, behavior: 'instant' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [currentSnapshot?.key, detailPrepareKey, initialDetailScrollTop]);
 
   const renderStreamItem = useCallback((item: DiffReviewFile, preparedDiff: DiffViewerPreparedDiff) => {
     const isSelected = matchesSelectedKey(item);

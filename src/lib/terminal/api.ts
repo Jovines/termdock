@@ -2455,25 +2455,36 @@ export type GitActionRequest =
 export interface GitActionResponse {
   ok: true;
   action: GitActionRequest['action'];
+  status?: 'running' | 'done' | 'error';
+  jobId?: string;
+  startedAt?: number;
+  finishedAt?: number;
+  gitRoot?: string;
   message: string;
   output?: string;
-  bundle: GitBundleResponse;
+  error?: string;
+  code?: string;
+  bundle?: GitBundleResponse;
 }
 
-export async function getGitBundle(cwd?: string, signal?: AbortSignal, options: { includeNested?: boolean; refresh?: boolean; action?: string; requestSlotId?: string } = {}): Promise<GitBundleResponse> {
+export async function getGitBundle(cwd?: string, signal?: AbortSignal, options: { includeNested?: boolean; refresh?: boolean; cacheOnly?: boolean; action?: string; requestSlotId?: string; requestTimeoutMs?: number | null } = {}): Promise<GitBundleResponse> {
   const params = new URLSearchParams();
   if (cwd) params.set('cwd', cwd);
   if (options.includeNested) params.set('includeNested', 'true');
   if (options.refresh) params.set('refresh', 'true');
+  if (options.cacheOnly) params.set('cacheOnly', 'true');
   params.set('action', options.action ?? (options.refresh ? 'manual_git_refresh' : 'open_sidebar_git_refresh'));
   if (options.requestSlotId) params.set('requestSlotId', options.requestSlotId);
   const qs = params.toString();
-  const response = await fetchWithTimeout(
-    `/api/terminal/fs/git-bundle${qs ? `?${qs}` : ''}`,
-    { signal },
-    GIT_REQUEST_TIMEOUT_MS,
-    'Git status refresh took too long. The repository may be busy, on slow storage, or locked by another Git process.',
-  );
+  const url = `/api/terminal/fs/git-bundle${qs ? `?${qs}` : ''}`;
+  const response = options.requestTimeoutMs === null
+    ? await fetch(url, { signal })
+    : await fetchWithTimeout(
+      url,
+      { signal },
+      options.requestTimeoutMs ?? GIT_REQUEST_TIMEOUT_MS,
+      'Git status refresh took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+    );
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get git bundle' }));
     throw new Error(error.error || 'Failed to get git bundle');
@@ -2494,6 +2505,19 @@ export async function runGitAction(request: GitActionRequest): Promise<GitAction
       ? `${error.error || 'Git action failed'} (${error.confirmationPhrase})`
       : error.error || 'Git action failed';
     throw new Error(message);
+  }
+  return response.json();
+}
+
+export async function getGitActionStatus(options: { cwd?: string; action?: GitActionRequest['action']; jobId?: string }): Promise<GitActionResponse | { ok: false; status: 'missing'; error?: string }> {
+  const params = new URLSearchParams();
+  if (options.cwd) params.set('cwd', options.cwd);
+  if (options.action) params.set('action', options.action);
+  if (options.jobId) params.set('jobId', options.jobId);
+  const response = await fetch(`/api/terminal/fs/git-action/status?${params}`);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get Git action status' }));
+    throw new Error(error.error || 'Failed to get Git action status');
   }
   return response.json();
 }

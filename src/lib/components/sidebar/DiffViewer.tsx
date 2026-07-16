@@ -125,6 +125,8 @@ export function loadFileDiffCached(filePath: string | undefined, cwd: string | u
   const key = buildDiffCacheKey(filePath, cwd, options);
   if (force) {
     cancelPreloadDiff(key);
+    const existingController = diffPreloadControllers.get(key);
+    existingController?.abort();
     diffResultCache.delete(key);
     diffPromiseCache.delete(key);
     diffCacheVersions.set(key, (diffCacheVersions.get(key) ?? 0) + 1);
@@ -134,6 +136,15 @@ export function loadFileDiffCached(filePath: string | undefined, cwd: string | u
   const cached = diffResultCache.get(key);
   if (cached) return Promise.resolve(cached);
 
+  return requestFileDiffCached(key, filePath, cwd, version, undefined, options);
+}
+
+export function refreshFileDiffCached(filePath: string | undefined, cwd: string | undefined, options?: GitDiffOptions): Promise<DiffLoadResult> {
+  const key = buildDiffCacheKey(filePath, cwd, options);
+  cancelPreloadDiff(key);
+  diffPromiseCache.delete(key);
+  const version = (diffCacheVersions.get(key) ?? 0) + 1;
+  diffCacheVersions.set(key, version);
   return requestFileDiffCached(key, filePath, cwd, version, undefined, options);
 }
 
@@ -799,7 +810,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       return;
     }
 
-    const cachedDiff = !forceReload ? getCachedDiffResult(requestPath, gitRoot ?? undefined, diffOptions) : undefined;
+    const cachedDiff = getCachedDiffResult(requestPath, gitRoot ?? undefined, diffOptions);
     logDiffLoadingEvent('start', {
       loadingId,
       interactionId,
@@ -873,7 +884,9 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     setImagePreview(null);
 
     const loadTextDiff = () => (
-      loadVisibleFileDiff(requestPath, gitRoot ?? undefined, controller.signal, forceReload, traceId, interactionId, requestSlotId, diffOptions)
+      (forceReload && cachedDiff
+        ? refreshFileDiffCached(requestPath, gitRoot ?? undefined, diffOptions)
+        : loadVisibleFileDiff(requestPath, gitRoot ?? undefined, controller.signal, forceReload, traceId, interactionId, requestSlotId, diffOptions))
         .then((result) => {
           if (cancelled) return;
           const notice = formatDiffLimitMessage(result);
@@ -918,6 +931,8 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     if (cachedDiff && !forceReload) {
       setDiffLoading(false);
       endLoading('cache_hit');
+    } else if (cachedDiff && forceReload) {
+      void loadTextDiff();
     } else if (shouldPreferImagePreview(readablePath, changedFileStatus ? { status: changedFileStatus } : null)) {
       readImagePreviewBlob(readablePath as string, controller.signal, 'view_diff_image', requestSlotId ? `${requestSlotId}:image` : undefined)
         .then((result) => {

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
+import type { Swiper as SwiperInstance } from 'swiper';
 import type { BranchAuditRecord, BranchDiffHunk, ChangeAuditRecord, ChangeWalkthrough, ChangeWalkthroughAnchor } from '../../terminal/api';
 import { type DiffNavigatorFile } from './DiffFileNavigator';
 import { DiffReview, type DiffReviewFile, ChangeBadge } from './DiffReview';
@@ -38,9 +39,16 @@ interface UniversalDiffReviewProps {
   onClearAuditRecord?: (id: string) => void;
   walkthroughs?: ChangeWalkthrough[];
   onWalkthroughNavigate?: (anchor: ChangeWalkthroughAnchor) => void;
+  initialDetailScrollTop?: number;
+  onDetailScrollPositionChange?: (scrollTop: number) => void;
+  scrollToKey?: string | null;
+  scrollToKeyNonce?: number;
+  externalSwiperRef?: { current: SwiperInstance | null };
+  onMobileSlideChange?: (index: number) => void;
 }
 
 type ViewMode = 'list' | 'tree';
+type ReviewMode = ViewMode | 'ai';
 const DIFF_CHANGE_LIST_MODE_STORAGE_KEY = 'termdock:right-sidebar:diff-change-list-mode:v1';
 
 function isViewMode(value: unknown): value is ViewMode {
@@ -220,34 +228,6 @@ function syncBranchSelectionFromStream(container: HTMLDivElement, selectedKey: s
   return key;
 }
 
-function scrollBranchDiffItemIntoView(key: string): void {
-  const target = document.querySelector<HTMLElement>(`[data-diff-stream-item="${CSS.escape(key)}"]`);
-  if (!target) return;
-  const scroller = findScrollableDiffStreamScroller(target);
-  if (!scroller) {
-    target.scrollIntoView({ block: 'start', behavior: 'smooth' });
-    return;
-  }
-  const targetTop = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
-  scroller.scrollTo({ top: Math.max(0, targetTop), behavior: 'instant' });
-}
-
-function isVerticalScroller(element: HTMLElement): boolean {
-  const overflowY = window.getComputedStyle(element).overflowY;
-  return (overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight + 1;
-}
-
-function findScrollableDiffStreamScroller(target: HTMLElement): HTMLElement | null {
-  let current: HTMLElement | null = target;
-  while (current) {
-    if (current.classList.contains('termdock-diff-stream-scroller') && isVerticalScroller(current)) {
-      return current;
-    }
-    current = current.parentElement;
-  }
-  return target.closest<HTMLElement>('.termdock-diff-stream-scroller');
-}
-
 export function UniversalDiffReview({
   items,
   selectedKey,
@@ -272,11 +252,18 @@ export function UniversalDiffReview({
   onClearAuditRecord,
   walkthroughs = [],
   onWalkthroughNavigate,
+  initialDetailScrollTop,
+  onDetailScrollPositionChange,
+  scrollToKey,
+  scrollToKeyNonce,
+  externalSwiperRef,
+  onMobileSlideChange,
 }: UniversalDiffReviewProps) {
   const groups = useMemo(() => buildFileGroups(items), [items]);
   const groupByKey = useMemo(() => new Map(groups.map((group) => [group.key, group])), [groups]);
-  const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
+  const [viewMode, setViewMode] = useState<ReviewMode>(() => readViewMode());
   const [collapsedDirectories, setCollapsedDirectories] = useState<Set<string>>(() => new Set());
+  const [navigationScrollRequest, setNavigationScrollRequest] = useState<{ key: string | null; nonce: number }>({ key: null, nonce: 0 });
   const fallbackKey = groups.find((group) => group.explained > 0 || group.stale > 0)?.key ?? groups[0]?.key ?? null;
   const effectiveKey = selectedKey && groups.some((group) => group.key === selectedKey) ? selectedKey : fallbackKey;
   const navigatorGroups = useMemo(() => [{
@@ -392,9 +379,8 @@ export function UniversalDiffReview({
       selectedKey={effectiveKey}
       mode={viewMode}
       onModeChange={(mode) => {
-        if (mode === 'ai') return;
         setViewMode(mode);
-        writeCache(DIFF_CHANGE_LIST_MODE_STORAGE_KEY, mode);
+        if (mode !== 'ai') writeCache(DIFF_CHANGE_LIST_MODE_STORAGE_KEY, mode);
       }}
       compact={mobile}
       collapsedDirectoryKeys={collapsedDirectories}
@@ -408,7 +394,7 @@ export function UniversalDiffReview({
       }}
       onSelectFile={(file) => {
         onSelect(file.key);
-        window.requestAnimationFrame(() => scrollBranchDiffItemIntoView(file.key));
+        setNavigationScrollRequest((current) => ({ key: file.key, nonce: current.nonce + 1 }));
       }}
       renderLeading={(file) => {
         const group = groupByKey.get(file.key);
@@ -436,8 +422,16 @@ export function UniversalDiffReview({
         )
       )}
       renderMobileDetailHeader={mobileDetailHeader}
+      externalSwiperRef={externalSwiperRef}
+      onMobileSlideChange={onMobileSlideChange}
       detailContainerClassName={mobile ? 'termdock-native-select termdock-diff-stream-scroller min-h-0' : undefined}
-      onDetailScroll={(container) => syncBranchSelectionFromStream(container, effectiveKey, onSelect)}
+      initialDetailScrollTop={initialDetailScrollTop}
+      scrollToKey={scrollToKey ?? navigationScrollRequest.key}
+      scrollToKeyNonce={scrollToKey === undefined || scrollToKey === null ? navigationScrollRequest.nonce : scrollToKeyNonce}
+      onDetailScroll={(container) => {
+        syncBranchSelectionFromStream(container, effectiveKey, onSelect);
+        onDetailScrollPositionChange?.(container.scrollTop);
+      }}
       files={files}
       activePane
       wrap={wrap}

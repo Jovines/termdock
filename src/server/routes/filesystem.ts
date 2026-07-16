@@ -19,7 +19,6 @@ const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100MB per file
 const MAX_UPLOAD_FILES = 50; // max 50 files per upload
 const GIT_TIMEOUT_MS = 5000;
 const GIT_UNTRACKED_TIMEOUT_MS = 800;
-const GIT_UNTRACKED_BACKGROUND_TIMEOUT_MS = 120_000;
 const GIT_BUNDLE_CACHE_TTL_MS = 60_000;
 const MAX_DIRECTORY_ENTRIES = 1000;
 const MAX_FALLBACK_SEARCH_VISITED = 30_000;
@@ -41,6 +40,7 @@ const NESTED_GIT_DISCOVERY_CACHE_TTL_MS = 60_000;
 const FS_ROUTE_TIMEOUT_MS = 6_000;
 const GIT_ROUTE_TIMEOUT_MS = 8_000;
 const GIT_FILE_DIFF_ROUTE_TIMEOUT_MS = 45_000;
+const GIT_ACTION_TIMEOUT_MS = 10 * 60_000;
 const RESTORE_CONFIRM_PHRASES = new Set(['丢弃改动', 'discard changes']);
 const FS_IO_LOG_NAME = 'fs-io.log';
 const activeDiffSlots = new Map<string, { controller: AbortController; requestId: number }>();
@@ -54,11 +54,29 @@ const untrackedJobs = new Map<string, {
   code?: string;
   promise?: Promise<void>;
 }>();
+interface GitActionJob {
+  id: string;
+  key: string;
+  status: 'running' | 'done' | 'error';
+  action: GitAction;
+  cwd: string;
+  gitRoot: string;
+  startedAt: number;
+  finishedAt?: number;
+  message?: string;
+  output?: string;
+  error?: string;
+  code?: string;
+  bundle?: GitBundlePayload;
+  promise?: Promise<void>;
+}
 const nestedGitRootsCache = new Map<string, {
   result: { repositories: DiscoveredGitRepository[]; truncated: boolean };
   expiresAt: number;
   promise?: Promise<{ repositories: DiscoveredGitRepository[]; truncated: boolean }>;
 }>();
+const gitActionJobs = new Map<string, GitActionJob>();
+let gitActionJobSeq = 0;
 
 type GitChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted' | 'unknown';
 
@@ -751,11 +769,11 @@ function countStagedFiles(files: GitChangedFile[]): number {
   return files.reduce((count, file) => count + (file.staged ? 1 : 0), 0);
 }
 
-async function getChangedFiles(gitRoot: string, signal?: AbortSignal, options: { includeUntracked?: boolean; untrackedTimeoutMs?: number } = {}): Promise<ChangedFilesResult> {
+async function getChangedFiles(gitRoot: string, signal?: AbortSignal, options: { includeUntracked?: boolean; untrackedTimeoutMs?: number; gitTimeoutMs?: number | null } = {}): Promise<ChangedFilesResult> {
   const includeUntracked = options.includeUntracked !== false;
   const [stagedOutput, unstagedOutput, untrackedResult] = await Promise.all([
-    execGit(['diff', '--cached', '--name-status', '-M', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError),
-    execGit(['diff', '--name-status', '-M', '-z'], gitRoot, signal).catch(emptyOnNonAbortGitError),
+    execGit(['diff', '--cached', '--name-status', '-M', '-z'], gitRoot, signal, options.gitTimeoutMs).catch(emptyOnNonAbortGitError),
+    execGit(['diff', '--name-status', '-M', '-z'], gitRoot, signal, options.gitTimeoutMs).catch(emptyOnNonAbortGitError),
     includeUntracked
       ? execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot, signal, options.untrackedTimeoutMs ?? GIT_UNTRACKED_TIMEOUT_MS)
         .then((output) => ({ output, deferred: false }))
@@ -871,10 +889,11 @@ function startUntrackedJob(gitRoot: string, nestedDisplayRoots: Set<string> = ne
     status: 'running',
     startedAt,
   };
-  const promise = execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot, undefined, GIT_UNTRACKED_BACKGROUND_TIMEOUT_MS)
+  const promise = execGit(['ls-files', '--others', '--exclude-standard', '-z'], gitRoot, undefined, null)
     .then((output) => {
       job.status = 'done';
       job.files = buildUntrackedFiles(gitRoot, output, nestedDisplayRoots);
+      updateGitBundleCachesWithUntracked(gitRoot, job.files);
       job.finishedAt = Date.now();
     })
     .catch((error) => {
@@ -948,10 +967,10 @@ function buildNestedRepoDisplayRootSet(workspaceRoot: string, repositories: Disc
   )));
 }
 
-async function buildGitBundle(resolvedCwd: string, gitRoot: string, signal?: AbortSignal): Promise<GitBundlePayload> {
+async function buildGitBundle(resolvedCwd: string, gitRoot: string, signal?: AbortSignal, options: { gitTimeoutMs?: number | null } = {}): Promise<GitBundlePayload> {
   const [branchOutput, changedResult] = await Promise.all([
-    execGit(['branch', '--show-current'], gitRoot, signal).catch(emptyOnNonAbortGitError),
-    getChangedFiles(gitRoot, signal, { includeUntracked: false }),
+    execGit(['branch', '--show-current'], gitRoot, signal, options.gitTimeoutMs).catch(emptyOnNonAbortGitError),
+    getChangedFiles(gitRoot, signal, { includeUntracked: false, gitTimeoutMs: options.gitTimeoutMs }),
   ]);
   const files = changedResult.files;
   const annotatedFiles = annotateRepoFiles(files, gitRoot, gitRoot);
@@ -980,10 +999,10 @@ async function buildGitBundle(resolvedCwd: string, gitRoot: string, signal?: Abo
   };
 }
 
-async function buildGitRepositoryBundle(workspaceRoot: string, resolvedCwd: string, repoRoot: string, displayRoot: string = repoRoot, signal?: AbortSignal): Promise<GitRepositoryBundle> {
+async function buildGitRepositoryBundle(workspaceRoot: string, resolvedCwd: string, repoRoot: string, displayRoot: string = repoRoot, signal?: AbortSignal, options: { gitTimeoutMs?: number | null } = {}): Promise<GitRepositoryBundle> {
   try {
     if (signal) throwIfAborted(signal, 'git.bundle');
-    const bundle = await buildGitBundle(repoRoot === workspaceRoot ? resolvedCwd : repoRoot, repoRoot, signal);
+    const bundle = await buildGitBundle(repoRoot === workspaceRoot ? resolvedCwd : repoRoot, repoRoot, signal, options);
     if (signal) throwIfAborted(signal, 'git.bundle');
     const relativeRoot = getRepoRelativeRoot(workspaceRoot, repoRoot, displayRoot);
     const files = annotateRepoFiles(bundle.files, workspaceRoot, repoRoot, displayRoot);
@@ -1046,10 +1065,72 @@ function buildGitRepositoryFilters(workspaceRoot: string, repositories: GitRepos
     });
 }
 
-async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, includeNested: boolean, signal?: AbortSignal): Promise<GitBundlePayload> {
+function mergeChangedFilesByPath(current: GitChangedFile[], incoming: GitChangedFile[]): GitChangedFile[] {
+  const files = new Map<string, GitChangedFile>();
+  for (const file of current) files.set(file.path, file);
+  for (const file of incoming) files.set(file.path, file);
+  return Array.from(files.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function updateGitBundleCachesWithUntracked(repoRoot: string, files: GitChangedFile[]): void {
+  if (files.length === 0) return;
+  const now = Date.now();
+  for (const [cacheKey, cached] of gitBundleCache.entries()) {
+    const bundle = cached.bundle;
+    const repositories = bundle.repositories;
+    if (repositories?.length) {
+      let changed = false;
+      const nextRepositories = repositories.map((repo) => {
+        if (repo.root !== repoRoot) return repo;
+        const annotatedFiles = annotateRepoFiles(files, repo.root, repo.root, repo.displayRoot ?? repo.root);
+        const mergedFiles = mergeChangedFilesByPath(repo.files, annotatedFiles);
+        changed = true;
+        return {
+          ...repo,
+          files: mergedFiles,
+          context: repo.context ? {
+            ...repo.context,
+            changedFiles: toContextFiles(mergedFiles),
+            truncated: mergedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES,
+          } : repo.context,
+          untrackedDeferred: false,
+        };
+      });
+      if (!changed) continue;
+      const primary = nextRepositories[0];
+      const nextBundle: GitBundlePayload = {
+        ...bundle,
+        files: nextRepositories.flatMap((repo) => repo.files),
+        context: primary?.context ?? bundle.context,
+        repositories: nextRepositories,
+        repoFilters: buildGitRepositoryFilters(primary?.root ?? repoRoot, nextRepositories),
+        untrackedDeferred: nextRepositories.some((repo) => repo.untrackedDeferred),
+      };
+      gitBundleCache.set(cacheKey, { bundle: nextBundle, expiresAt: now + GIT_BUNDLE_CACHE_TTL_MS });
+      continue;
+    }
+
+    if (bundle.context?.root !== repoRoot) continue;
+    const mergedFiles = mergeChangedFilesByPath(bundle.files, files);
+    const nextContext = bundle.context ? {
+      ...bundle.context,
+      changedFiles: toContextFiles(mergedFiles),
+      truncated: mergedFiles.length >= MAX_GIT_CONTEXT_CHANGED_FILES,
+    } : bundle.context;
+    const nextBundle: GitBundlePayload = {
+      ...bundle,
+      files: mergedFiles,
+      context: nextContext,
+      untrackedDeferred: false,
+    };
+    gitBundleCache.set(cacheKey, { bundle: nextBundle, expiresAt: now + GIT_BUNDLE_CACHE_TTL_MS });
+  }
+}
+
+async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, includeNested: boolean, signal?: AbortSignal, options: { gitTimeoutMs?: number | null } = {}): Promise<GitBundlePayload> {
   if (!includeNested) {
     if (signal) throwIfAborted(signal, 'git.bundle');
-    const bundle = await buildGitBundle(resolvedCwd, gitRoot, signal);
+    const bundle = await buildGitBundle(resolvedCwd, gitRoot, signal, options);
     const repository: GitRepositoryBundle = {
       id: gitRoot,
       root: gitRoot,
@@ -1076,8 +1157,8 @@ async function buildWorkspaceGitBundle(resolvedCwd: string, gitRoot: string, inc
   if (signal) throwIfAborted(signal, 'git.bundle');
   const nestedDisplayRoots = buildNestedRepoDisplayRootSet(gitRoot, nestedRepositories);
   const repositories = await Promise.all([
-    buildGitRepositoryBundle(gitRoot, resolvedCwd, gitRoot, gitRoot, signal),
-    ...nestedRepositories.map((repo) => buildGitRepositoryBundle(gitRoot, resolvedCwd, repo.root, repo.displayRoot, signal)),
+    buildGitRepositoryBundle(gitRoot, resolvedCwd, gitRoot, gitRoot, signal, options),
+    ...nestedRepositories.map((repo) => buildGitRepositoryBundle(gitRoot, resolvedCwd, repo.root, repo.displayRoot, signal, options)),
   ]);
   if (signal) throwIfAborted(signal, 'git.bundle');
   const primary = repositories[0];
@@ -1137,6 +1218,22 @@ async function getCachedGitBundle(resolvedCwd: string, gitRoot: string, includeN
   return promise;
 }
 
+async function refreshGitBundleCacheDetached(resolvedCwd: string, gitRoot: string, includeNested: boolean, options: { gitTimeoutMs?: number | null } = {}): Promise<GitBundlePayload> {
+  const cacheKey = getGitBundleCacheKey(gitRoot, includeNested);
+  const pending = gitBundleBuildPromises.get(cacheKey);
+  if (pending) return pending;
+  const promise = buildWorkspaceGitBundle(resolvedCwd, gitRoot, includeNested, undefined, options)
+    .then((bundle) => {
+      gitBundleCache.set(cacheKey, { bundle, expiresAt: Date.now() + GIT_BUNDLE_CACHE_TTL_MS });
+      return bundle;
+    })
+    .finally(() => {
+      if (gitBundleBuildPromises.get(cacheKey) === promise) gitBundleBuildPromises.delete(cacheKey);
+    });
+  gitBundleBuildPromises.set(cacheKey, promise);
+  return promise;
+}
+
 function getGitBundleCache(gitRoot: string, includeNested: boolean, allowStale = false): GitBundlePayload | null {
   const cacheKey = getGitBundleCacheKey(gitRoot, includeNested);
   const cached = gitBundleCache.get(cacheKey);
@@ -1186,6 +1283,86 @@ function getBranchName(branch: unknown): string | undefined {
     throw new Error('Invalid branch name');
   }
   return normalized;
+}
+
+function getGitActionJobKey(gitRoot: string, action: GitAction): string {
+  return `${gitRoot}\0${action}`;
+}
+
+function serializeGitActionJob(job: GitActionJob) {
+  return {
+    jobId: job.id,
+    status: job.status,
+    action: job.action,
+    cwd: job.cwd,
+    gitRoot: job.gitRoot,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    message: job.message,
+    output: job.output,
+    error: job.error,
+    code: job.code,
+    bundle: job.bundle,
+  };
+}
+
+async function runGitActionCommand(
+  body: { action?: GitAction; paths?: unknown; message?: unknown; confirm?: { acknowledged?: boolean; phrase?: string }; remote?: unknown; branch?: unknown },
+  gitRoot: string,
+): Promise<string> {
+  const { action, paths, message, confirm } = body;
+  if (!action) throw new Error('Unsupported git action');
+  const now = new Date().toISOString().replace(/[:.]/g, '-');
+  if (action === 'stage-all') {
+    return execGit(['add', '-A'], gitRoot, undefined, GIT_ACTION_TIMEOUT_MS);
+  }
+  if (action === 'stash-all') {
+    const stashMessage = getStashMessage(message, `Termdock stash all ${now}`);
+    return execGit(['stash', 'push', '--include-untracked', '-m', stashMessage], gitRoot, undefined, GIT_ACTION_TIMEOUT_MS);
+  }
+  if (action === 'commit') {
+    return execGit(['commit', '-m', getCommitMessage(message)], gitRoot, undefined, GIT_ACTION_TIMEOUT_MS);
+  }
+  if (action === 'push') {
+    const remote = getRemoteName(body.remote);
+    const branch = getBranchName(body.branch);
+    const pushArgs = remote && branch ? ['push', '-u', remote, branch] : remote ? ['push', remote] : ['push'];
+    return execGit(pushArgs, gitRoot, undefined, GIT_ACTION_TIMEOUT_MS);
+  }
+  if (action === 'pull') {
+    const remote = getRemoteName(body.remote);
+    const branch = getBranchName(body.branch);
+    const pullArgs = remote && branch ? ['pull', '--ff-only', remote, branch] : remote ? ['pull', '--ff-only', remote] : ['pull', '--ff-only'];
+    return execGit(pullArgs, gitRoot, undefined, GIT_ACTION_TIMEOUT_MS);
+  }
+  if (action === 'switch-branch') {
+    const branch = getBranchName(body.branch);
+    if (!branch) throw new Error('Branch is required');
+    return execGit(['switch', branch], gitRoot, undefined, GIT_ACTION_TIMEOUT_MS);
+  }
+
+  const requestedPath = getSinglePath(paths);
+  const pathspec = await toGitPathspec(gitRoot, requestedPath);
+  if (action === 'stage-file') {
+    return execGit(['--literal-pathspecs', 'add', '--', pathspec], gitRoot, undefined, GIT_ACTION_TIMEOUT_MS);
+  }
+  if (action === 'unstage-file') {
+    return execGit(['--literal-pathspecs', 'restore', '--staged', '--', pathspec], gitRoot, undefined, GIT_ACTION_TIMEOUT_MS);
+  }
+  if (action === 'stash-file') {
+    const stashMessage = getStashMessage(message, `Termdock stash ${pathspec} ${now}`);
+    return execGit(['--literal-pathspecs', 'stash', 'push', '--include-untracked', '-m', stashMessage, '--', pathspec], gitRoot, undefined, GIT_ACTION_TIMEOUT_MS);
+  }
+  if (action === 'restore-worktree-file') {
+    if (!confirm?.acknowledged || !RESTORE_CONFIRM_PHRASES.has((confirm.phrase ?? '').trim())) {
+      const error = new Error('Confirmation required before discarding changes') as Error & { code?: string; confirmationPhrase?: string };
+      error.code = 'CONFIRMATION_REQUIRED';
+      error.confirmationPhrase = '丢弃改动';
+      throw error;
+    }
+    return execGit(['--literal-pathspecs', 'restore', '--worktree', '--', pathspec], gitRoot, undefined, GIT_ACTION_TIMEOUT_MS);
+  }
+  throw new Error('Unsupported git action');
 }
 
 async function readBytesPrefix(filePath: string, bytesToRead: number): Promise<Buffer> {
@@ -1646,10 +1823,10 @@ function streamContentSearchWithRipgrep(rootPath: string, query: string, showHid
   });
 }
 
-function execGit(args: string[], cwd: string, signal?: AbortSignal, timeoutMs = GIT_TIMEOUT_MS): Promise<string> {
+function execGit(args: string[], cwd: string, signal?: AbortSignal, timeoutMs: number | null = GIT_TIMEOUT_MS): Promise<string> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => {
+    const timer = timeoutMs === null ? null : setTimeout(() => {
       if (settled) return;
       settled = true;
       proc.kill();
@@ -1659,7 +1836,7 @@ function execGit(args: string[], cwd: string, signal?: AbortSignal, timeoutMs = 
     const proc = execFile('git', args, { cwd, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       signal?.removeEventListener('abort', abortHandler);
       if (err) {
         reject(err);
@@ -1671,7 +1848,7 @@ function execGit(args: string[], cwd: string, signal?: AbortSignal, timeoutMs = 
     const abortHandler = () => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       proc.kill();
       const reason = signal?.reason;
       reject(reason instanceof Error ? reason : new GitCommandAbortError());
@@ -2064,14 +2241,14 @@ function clearGitBundleCacheForRoot(root: string): void {
 }
 
 /** Find the top-level directory of the git repo containing `cwd`, or null. */
-async function findGitRoot(cwd: string): Promise<string | null> {
+async function findGitRoot(cwd: string, timeoutMs: number | null = GIT_TIMEOUT_MS): Promise<string | null> {
   const now = Date.now();
   const cached = gitRootCache.get(cwd);
   if (cached && cached.expiresAt > now) {
     return cached.root;
   }
   try {
-    const root = (await execGit(['rev-parse', '--show-toplevel'], cwd)).trim() || null;
+    const root = (await execGit(['rev-parse', '--show-toplevel'], cwd, undefined, timeoutMs)).trim() || null;
     gitRootCache.set(cwd, { root, expiresAt: now + GIT_ROOT_CACHE_TTL_MS });
     return root;
   } catch {
@@ -2178,6 +2355,9 @@ async function getCachedNestedGitRoots(workspaceRoot: string, options: { refresh
   }
   const promise = discoverNestedGitRoots(workspaceRoot, options.signal)
     .then((result) => {
+      if (result.truncated && cached?.result.repositories.length) {
+        return { ...cached.result, truncated: true };
+      }
       nestedGitRootsCache.set(workspaceRoot, {
         result,
         expiresAt: Date.now() + NESTED_GIT_DISCOVERY_CACHE_TTL_MS,
@@ -2617,7 +2797,8 @@ router.get('/git-blob', async (req: Request, res: Response) => {
       return;
     }
     const resolvedCwd = cwd ? await pathValidator.validatePathAsync(cwd) : process.cwd();
-    const gitRoot = await findGitRoot(resolvedCwd);
+    const refresh = req.query.refresh === 'true';
+    const gitRoot = await findGitRoot(resolvedCwd, refresh ? null : GIT_TIMEOUT_MS);
     if (!gitRoot) {
       res.status(400).json({ error: 'Not a git repository' });
       return;
@@ -3250,6 +3431,7 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
   logFsIoEvent({ id: requestId, action, op: 'git.bundle', event: 'request-start', cwd, extra: { inflight, requestSlotId, includeNestedQuery: req.query.includeNested === 'true', refreshQuery: req.query.refresh === 'true' } });
   try {
     const refresh = req.query.refresh === 'true';
+    const cacheOnly = req.query.cacheOnly === 'true';
     const includeNested = req.query.includeNested === 'true';
     if (!cwd) {
       res.json({ available: false, files: [], context: null, error: 'No cwd provided' });
@@ -3258,7 +3440,7 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
 
     const resolvedCwd = await pathValidator.validatePathAsync(cwd);
     throwIfAborted(controller.signal, 'git.bundle');
-    const gitRoot = await findGitRoot(resolvedCwd);
+    const gitRoot = await findGitRoot(resolvedCwd, refresh ? null : GIT_TIMEOUT_MS);
     throwIfAborted(controller.signal, 'git.bundle');
     gitRootForLog = gitRoot;
     if (!gitRoot) {
@@ -3272,19 +3454,51 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
       res.json(payload);
       return;
     }
-    logFsIoEvent({ id: requestId, action, op: 'git.bundle', event: 'git-root-resolved', cwd: resolvedCwd, repoRoot: gitRoot, extra: { requestSlotId, includeNested, refresh } });
+    logFsIoEvent({ id: requestId, action, op: 'git.bundle', event: 'git-root-resolved', cwd: resolvedCwd, repoRoot: gitRoot, extra: { requestSlotId, includeNested, refresh, cacheOnly } });
     const allowStale = !refresh;
     const cachedBundle = allowStale && includeNested ? getGitBundleCache(gitRoot, true, true) : null;
     const effectiveIncludeNested = includeNested;
     const nestedDeferred = false;
 
-    const bundle = cachedBundle ?? await withTimeout(
-      getCachedGitBundle(resolvedCwd, gitRoot, effectiveIncludeNested, refresh, allowStale, controller.signal),
-      GIT_ROUTE_TIMEOUT_MS,
-      'Git status refresh took too long. The repository may be busy, on slow storage, or locked by another Git process.',
-      'GIT_BUNDLE_TIMEOUT',
-      () => controller.abort(new OperationTimeoutError('Git status refresh took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_BUNDLE_TIMEOUT')),
-    );
+    if (cacheOnly) {
+      const bundle = cachedBundle ?? getGitBundleCache(gitRoot, effectiveIncludeNested, true);
+      const payload = bundle ?? {
+        available: true,
+        files: [],
+        context: { available: true, cwd: resolvedCwd, root: gitRoot, changedFiles: [] },
+        repositories: [],
+        repoFilters: [],
+        cached: false,
+        stale: true,
+        cacheAgeMs: undefined,
+      };
+      logFsIo({
+        id: requestId,
+        action,
+        op: 'git.bundle',
+        startedAt,
+        status: payload.error ? 'error' : 'ok',
+        cwd: resolvedCwd,
+        repoRoot: gitRoot,
+        count: payload.files.length,
+        code: payload.error ? 'GIT_BUNDLE_ERROR' : undefined,
+        error: payload.error,
+        truncated: Boolean(payload.truncatedRepositories),
+        extra: { requestSlotId, repositories: payload.repositories?.length ?? 1, includeNested: effectiveIncludeNested, requestedIncludeNested: includeNested, nestedDeferred, untrackedDeferred: Boolean(payload.untrackedDeferred), refresh, cacheOnly, cached: Boolean(payload.cached), stale: Boolean(payload.stale), cacheAgeMs: payload.cacheAgeMs },
+      });
+      res.json(payload);
+      return;
+    }
+
+    const bundle = cachedBundle ?? (refresh
+      ? await refreshGitBundleCacheDetached(resolvedCwd, gitRoot, effectiveIncludeNested, { gitTimeoutMs: null })
+      : await withTimeout(
+        getCachedGitBundle(resolvedCwd, gitRoot, effectiveIncludeNested, false, allowStale, controller.signal),
+        GIT_ROUTE_TIMEOUT_MS,
+        'Git status refresh took too long. The repository may be busy, on slow storage, or locked by another Git process.',
+        'GIT_BUNDLE_TIMEOUT',
+        () => controller.abort(new OperationTimeoutError('Git status refresh took too long. The repository may be busy, on slow storage, or locked by another Git process.', 'GIT_BUNDLE_TIMEOUT')),
+      ));
     logFsIo({
       id: requestId,
       action,
@@ -3297,7 +3511,7 @@ router.get('/git-bundle', async (req: Request, res: Response) => {
       code: bundle.error ? 'GIT_BUNDLE_ERROR' : undefined,
       error: bundle.error,
       truncated: Boolean(bundle.truncatedRepositories),
-      extra: { requestSlotId, repositories: bundle.repositories?.length ?? 1, includeNested: effectiveIncludeNested, requestedIncludeNested: includeNested, nestedDeferred, untrackedDeferred: Boolean(bundle.untrackedDeferred), refresh, cached: Boolean(bundle.cached), stale: Boolean(bundle.stale), cacheAgeMs: bundle.cacheAgeMs },
+      extra: { requestSlotId, repositories: bundle.repositories?.length ?? 1, includeNested: effectiveIncludeNested, requestedIncludeNested: includeNested, nestedDeferred, untrackedDeferred: Boolean(bundle.untrackedDeferred), refresh, cacheOnly, cached: Boolean(bundle.cached), stale: Boolean(bundle.stale), cacheAgeMs: bundle.cacheAgeMs },
     });
     res.json(bundle);
   } catch (error) {
@@ -3586,13 +3800,16 @@ router.delete('/branch-audit', (req: Request, res: Response) => {
 // strict allowlist — never accept arbitrary git arguments from the browser.
 router.post('/git-action', async (req: Request, res: Response) => {
   try {
-    const { action, cwd, paths, message, confirm } = req.body as {
+    const body = req.body as {
       action?: GitAction;
       cwd?: string;
       paths?: unknown;
       message?: unknown;
       confirm?: { acknowledged?: boolean; phrase?: string };
+      remote?: unknown;
+      branch?: unknown;
     };
+    const { action, cwd } = body;
 
     if (!cwd) {
       res.status(400).json({ error: 'Missing cwd', code: 'MISSING_CWD' });
@@ -3610,66 +3827,73 @@ router.post('/git-action', async (req: Request, res: Response) => {
       return;
     }
 
-    const now = new Date().toISOString().replace(/[:.]/g, '-');
-    let output = '';
-
-    if (action === 'stage-all') {
-      output = await execGit(['add', '-A'], gitRoot);
-    } else if (action === 'stash-all') {
-      const stashMessage = getStashMessage(message, `Termdock stash all ${now}`);
-      output = await execGit(['stash', 'push', '--include-untracked', '-m', stashMessage], gitRoot);
-    } else if (action === 'commit') {
-      output = await execGit(['commit', '-m', getCommitMessage(message)], gitRoot);
-    } else if (action === 'push') {
-      const remote = getRemoteName((req.body as { remote?: unknown }).remote);
-      const branch = getBranchName((req.body as { branch?: unknown }).branch);
-      const pushArgs = remote && branch ? ['push', '-u', remote, branch] : remote ? ['push', remote] : ['push'];
-      output = await execGit(pushArgs, gitRoot);
-    } else if (action === 'pull') {
-      const remote = getRemoteName((req.body as { remote?: unknown }).remote);
-      const branch = getBranchName((req.body as { branch?: unknown }).branch);
-      const pullArgs = remote && branch ? ['pull', '--ff-only', remote, branch] : remote ? ['pull', '--ff-only', remote] : ['pull', '--ff-only'];
-      output = await execGit(pullArgs, gitRoot);
-    } else if (action === 'switch-branch') {
-      const branch = getBranchName((req.body as { branch?: unknown }).branch);
-      if (!branch) throw new Error('Branch is required');
-      output = await execGit(['switch', branch], gitRoot);
-    } else {
-      const requestedPath = getSinglePath(paths);
-      const pathspec = await toGitPathspec(gitRoot, requestedPath);
-
-      if (action === 'stage-file') {
-        output = await execGit(['--literal-pathspecs', 'add', '--', pathspec], gitRoot);
-      } else if (action === 'unstage-file') {
-        output = await execGit(['--literal-pathspecs', 'restore', '--staged', '--', pathspec], gitRoot);
-      } else if (action === 'stash-file') {
-        const stashMessage = getStashMessage(message, `Termdock stash ${pathspec} ${now}`);
-        output = await execGit(['--literal-pathspecs', 'stash', 'push', '--include-untracked', '-m', stashMessage, '--', pathspec], gitRoot);
-      } else if (action === 'restore-worktree-file') {
-        if (!confirm?.acknowledged || !RESTORE_CONFIRM_PHRASES.has((confirm.phrase ?? '').trim())) {
-          res.status(428).json({
-            error: 'Confirmation required before discarding changes',
-            code: 'CONFIRMATION_REQUIRED',
-            confirmationPhrase: '丢弃改动',
-          });
-          return;
-        }
-        output = await execGit(['--literal-pathspecs', 'restore', '--worktree', '--', pathspec], gitRoot);
-      }
+    const existing = gitActionJobs.get(getGitActionJobKey(gitRoot, action));
+    if (existing?.status === 'running') {
+      res.json({ ok: true, ...serializeGitActionJob(existing) });
+      return;
     }
 
-    clearGitBundleCacheForRoot(gitRoot);
-    res.json({
-      ok: true,
+    const job: GitActionJob = {
+      id: `git-action-${Date.now().toString(36)}-${(++gitActionJobSeq).toString(36)}`,
+      key: getGitActionJobKey(gitRoot, action),
+      status: 'running',
       action,
-      message: output.trim() || 'Git action completed',
-      output,
-      bundle: await getCachedGitBundle(resolvedCwd, gitRoot, false, true),
-    });
+      cwd: resolvedCwd,
+      gitRoot,
+      startedAt: Date.now(),
+    };
+    gitActionJobs.set(job.key, job);
+    job.promise = (async () => {
+      try {
+        const output = await runGitActionCommand(body, gitRoot);
+        clearGitBundleCacheForRoot(gitRoot);
+        const bundle = await refreshGitBundleCacheDetached(resolvedCwd, gitRoot, true);
+        job.status = 'done';
+        job.output = output;
+        job.message = output.trim() || 'Git action completed';
+        job.bundle = bundle;
+      } catch (error) {
+        job.status = 'error';
+        job.error = error instanceof Error ? error.message : 'Git action failed';
+        job.code = (error as Error & { code?: string }).code ?? 'GIT_ACTION_FAILED';
+        if ((error as Error & { confirmationPhrase?: string }).confirmationPhrase) {
+          job.message = (error as Error & { confirmationPhrase?: string }).confirmationPhrase;
+        }
+      } finally {
+        job.finishedAt = Date.now();
+      }
+    })();
+    void job.promise;
+    res.json({ ok: true, ...serializeGitActionJob(job) });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Git action failed';
-    res.status(500).json({ error: message, code: 'GIT_ACTION_FAILED' });
+    const code = (error as Error & { code?: string }).code ?? 'GIT_ACTION_FAILED';
+    const confirmationPhrase = (error as Error & { confirmationPhrase?: string }).confirmationPhrase;
+    res.status(code === 'CONFIRMATION_REQUIRED' ? 428 : 500).json({ error: message, code, confirmationPhrase });
   }
+});
+
+router.get('/git-action/status', async (req: Request, res: Response) => {
+  const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined;
+  const action = typeof req.query.action === 'string' ? req.query.action as GitAction : undefined;
+  const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
+  if (jobId) {
+    const job = Array.from(gitActionJobs.values()).find((candidate) => candidate.id === jobId);
+    res.json(job ? { ok: true, ...serializeGitActionJob(job) } : { ok: false, status: 'missing' });
+    return;
+  }
+  if (!cwd || !action || !['stage-file', 'stage-all', 'unstage-file', 'stash-file', 'stash-all', 'restore-worktree-file', 'commit', 'push', 'pull', 'switch-branch'].includes(action)) {
+    res.status(400).json({ ok: false, error: 'Missing cwd or action' });
+    return;
+  }
+  const resolvedCwd = await pathValidator.validatePathAsync(cwd);
+  const gitRoot = await findGitRoot(resolvedCwd);
+  if (!gitRoot) {
+    res.status(404).json({ ok: false, error: 'Not a git repository' });
+    return;
+  }
+  const job = gitActionJobs.get(getGitActionJobKey(gitRoot, action));
+  res.json(job ? { ok: true, ...serializeGitActionJob(job) } : { ok: false, status: 'missing' });
 });
 
 // ---- File upload ----

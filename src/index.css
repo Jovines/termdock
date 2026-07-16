@@ -974,11 +974,12 @@ html[data-theme='light'] .termdock-diff {
 }
 
 /*
- * Markdown tables in the mobile file preview are nested inside the sidebar
- * scroller. iOS is stricter than Android about routing horizontal pans through
- * nested scroll containers, so keep the table's x axis explicit and local while
- * allowing vertical pans to bubble to the preview scroller.
+ * Horizontally scrollable content in the mobile file preview is nested inside
+ * the sidebar's file-list swiper. iOS is stricter than Android about routing
+ * horizontal pans through nested scroll containers, so keep the x axis explicit
+ * and local while allowing vertical pans to bubble to the preview scroller.
  */
+.termdock-file-preview-horizontal-scroll,
 .termdock-md-table-scroll {
   touch-action: pan-x pan-y;
   overscroll-behavior-x: contain;

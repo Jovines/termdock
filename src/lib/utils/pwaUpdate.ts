@@ -1,6 +1,9 @@
 const SW_UPDATE_CHECK_INTERVAL_MS = 60_000;
+const BUILD_ID_STORAGE_KEY = 'termdock:build-id:v1';
 
 let reloadPending = false;
+
+declare const __TERMDOCK_BUILD_ID__: string;
 
 function reloadOnceForUpdatedServiceWorker(): void {
   if (reloadPending) return;
@@ -12,6 +15,12 @@ function reloadOnceForUpdatedServiceWorker(): void {
 
 function askWaitingWorkerToActivate(registration: ServiceWorkerRegistration): void {
   registration.waiting?.postMessage({ type: 'SKIP_WAITING' });
+}
+
+async function clearCachesForNewBuild(): Promise<void> {
+  if (typeof caches === 'undefined') return;
+  const keys = await caches.keys();
+  await Promise.all(keys.map((key) => caches.delete(key)));
 }
 
 function watchRegistration(registration: ServiceWorkerRegistration): void {
@@ -28,6 +37,19 @@ function watchRegistration(registration: ServiceWorkerRegistration): void {
 
 export function setupPwaUpdateReload(): void {
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
+
+  const buildId = typeof __TERMDOCK_BUILD_ID__ === 'string' ? __TERMDOCK_BUILD_ID__ : '';
+  const previousBuildId = window.localStorage.getItem(BUILD_ID_STORAGE_KEY);
+  if (buildId && previousBuildId && previousBuildId !== buildId) {
+    void clearCachesForNewBuild().finally(() => {
+      window.localStorage.setItem(BUILD_ID_STORAGE_KEY, buildId);
+      reloadOnceForUpdatedServiceWorker();
+    });
+    return;
+  }
+  if (buildId && previousBuildId !== buildId) {
+    window.localStorage.setItem(BUILD_ID_STORAGE_KEY, buildId);
+  }
 
   let intervalId: number | null = null;
   navigator.serviceWorker.addEventListener('controllerchange', reloadOnceForUpdatedServiceWorker);
