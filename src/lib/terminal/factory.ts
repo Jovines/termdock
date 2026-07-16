@@ -11,6 +11,12 @@ const getRetryPolicy = (options?: TerminalStreamOptions) => {
   };
 };
 
+// createTermdockAPI is the primary DI seam between the React component tree and
+// the terminal backend. Every MultiTerminalView instance gets its own API facade
+// so multi-window setups don't share connection state. The returned object is
+// intentionally lightweight — no class instances, just a plain object closure —
+// so it can be passed through React context without triggering unnecessary
+// re-renders from reference changes.
 export const createTermdockAPI = (): TerminalAPI => ({
   async createSession(options: CreateTerminalOptions): Promise<TerminalSession> {
     return createTerminalSession(options);

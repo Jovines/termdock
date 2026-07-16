@@ -1,3 +1,9 @@
+// TerminalTheme defines the ANSI 16-color palette + additional rendering tokens
+// consumed by xterm.js at initialization time. The palette is applied via
+// xterm.options.theme and is NOT reactive — changing it requires destroying and
+// recreating the terminal instance. If you need runtime theme switching, wire
+// it through the terminal factory's recreate path rather than mutating options
+// in place, as xterm silently ignores post-constructor theme reassignment.
 export interface TerminalTheme {
   background: string;
   foreground: string;
