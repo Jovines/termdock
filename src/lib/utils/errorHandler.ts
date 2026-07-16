@@ -282,6 +282,11 @@ export class ErrorReporter {
 /**
  * 全局错误处理器
  */
+// globalErrorHandler wires window-level unhandledrejection / error events and
+// also patches console.error so framework-level exceptions that get swallowed
+// by React error boundaries still land in the ErrorReporter. This is a last-resort
+// safety net — it catches things that escape component-level try/catch and is
+// NOT a replacement for per-operation error handling.
 export const globalErrorHandler = {
   /**
    * 初始化全局错误处理

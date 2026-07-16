@@ -37,6 +37,10 @@ function readEnabledChannels(): Set<string> {
   return all;
 }
 
+// Diagnostic helper: temporarily toggle all channels during internal QA sessions.
+// Set ?debug=* in the URL or localStorage to enable verbose logging for keyboard,
+// viewport, terminal, and session events. This is intentionally undocumented because
+// the format may change without notice; external users should not depend on this.
 export function isDebugChannelEnabled(channel: DebugChannel): boolean {
   const channels = readEnabledChannels();
   return channels.has('*') || channels.has(channel);
