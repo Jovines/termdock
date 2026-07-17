@@ -1315,10 +1315,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       const customEvent = event as CustomEvent<{ text?: string; focus?: boolean }>;
       const text = customEvent.detail?.text;
       if (!text) return;
-      handleViewportInput(text, {
-        skipModifierTransform: true,
-        consumeModifier: false,
-      });
+      // 引用插入也是带外输入：重置输入模型后发送，避免 textarea diff 拿
+      // 过期基线算错
+      terminalControllerRef.current?.sendSequence(text);
       if (customEvent.detail?.focus !== false) {
         focusTerminalIfActive();
       }
@@ -1326,7 +1325,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     window.addEventListener('termdock-insert-reference', handleInsertReference);
     return () => window.removeEventListener('termdock-insert-reference', handleInsertReference);
-  }, [focusTerminalIfActive, handleViewportInput]);
+  }, [focusTerminalIfActive]);
 
   // 推 resize 给服务端。本组件不再做 debounce / skip-if-same —— 编排器在
   // TerminalViewport 内部已经决定了 first-fit immediate / 90ms debounce /
@@ -1552,12 +1551,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         return;
       }
       const shouldConsumeModifier = activeModifier !== null;
-      handleViewportInput(sequence, {
-        skipModifierTransform: true,
+      // 走 controller 的带外输入入口：先重置输入模型（textarea + 光标基线），
+      // 再发 PTY。直接调 handleViewportInput 会让方向键移动 PTY 光标而
+      // 模型不知情，后续删除/输入全部错位。
+      terminalControllerRef.current?.sendSequence(sequence, {
         consumeModifier: shouldConsumeModifier,
       });
     },
-    [activeModifier, handleViewportInput]
+    [activeModifier]
   );
 
   const handleToolbarTextPress = React.useCallback((sequence: string) => {
@@ -1566,19 +1567,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
     const consumeModifier = activeModifier !== null;
-    handleViewportInput(decodeToolbarSequence(segments[0]), {
-      skipModifierTransform: true,
+    terminalControllerRef.current?.sendSequence(decodeToolbarSequence(segments[0]), {
       consumeModifier,
     });
     for (let i = 1; i < segments.length; i += 1) {
       const segment = segments[i];
       window.setTimeout(() => {
-        handleViewportInput(decodeToolbarSequence(segment), {
-          skipModifierTransform: true,
-        });
+        terminalControllerRef.current?.sendSequence(decodeToolbarSequence(segment));
       }, TOOLBAR_SEGMENT_DELAY_MS * i);
     }
-  }, [activeModifier, handleViewportInput]);
+  }, [activeModifier]);
 
   const handleMobilePastePress = React.useCallback(() => {
     void terminalControllerRef.current?.pasteClipboardText();
@@ -1788,7 +1786,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onTmuxScroll={isTmuxMode ? handleViewportTmuxScroll : undefined}
               tmuxScrollSensitivity={0.38}
               onDoubleTap={isMobile ? () => {
-                handleViewportInput('\t', { skipModifierTransform: true });
+                terminalControllerRef.current?.sendSequence('\t');
               } : undefined}
               onInputFocusChange={handleInputFocusChange}
               onMobileLongPressCopyResult={handleMobileLongPressCopyResult}

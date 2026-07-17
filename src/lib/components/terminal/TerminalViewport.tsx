@@ -29,6 +29,11 @@ import { vibrate as hapticVibrate } from 'browser-haptic';
 import { TerminalLoading, TerminalInitializing } from './TerminalLoading';
 import { TerminalError } from './TerminalError';
 import { createDebugLogger } from '../../utils/debug';
+import {
+  computeCursorAwareEdit,
+  textareaCursorInCodePoints,
+  type LineEditOps,
+} from '../../terminal/lineEditSync';
 
 const TERMINAL_HAPTIC_PATTERN_MS = 8;
 const TMUX_TOUCH_AXIS_THRESHOLD_PX = 10;
@@ -280,6 +285,14 @@ export type TerminalController = {
   clear: () => void;
   copySelectionOrViewport: () => Promise<boolean>;
   pasteClipboardText: () => Promise<boolean>;
+  /**
+   * 带外输入统一入口：移动端工具栏按键 / 双击 Tab / 引用插入等
+   * 不经过隐藏 textarea 的字节流必须走这里，而不是直接调 onInput。
+   * 发送前先把输入模型（textarea + sent 内容基线 + 光标模型）重置
+   * 为「未知」——否则工具栏方向键移动了 PTY 光标而模型不知情，
+   * 后续 textarea diff / 退格会全部打在错误的位置上。
+   */
+  sendSequence: (seq: string, options?: { consumeModifier?: boolean }) => void;
   /** 当前 xterm 的 cols/rows；xterm 未初始化时返回 null */
   getDimensions: () => { cols: number; rows: number } | null;
   /**
@@ -717,6 +730,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const swallowNextEnterRef = React.useRef(false);
     const swallowEnterTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const sentValueRef = React.useRef('');
+    // 「对端行光标在哪儿」的模型（code point 计数，相对 sentValueRef）。
+    // 移动端键盘的括号自动配对 / type-over / 滑动光标会让编辑点离开行尾，
+    // 只靠内容 diff 不够，光标也要同步（箭头键）。与 sentValueRef 同步重置。
+    const sentCursorRef = React.useRef(0);
     const pendingTextareaSyncTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingTextareaSyncTargetRef = React.useRef<HTMLTextAreaElement | null>(null);
     const wheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
@@ -1115,39 +1132,100 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       pendingTextareaSyncTargetRef.current = null;
     }, []);
 
+    /**
+     * 把 LineEditOps 序列编码成一段 PTY 字节流：箭头用与 mapSpecialKey
+     * 一致的 application/normal 模式序列，退格 \x7f，插入原样文本。
+     * 整段合并为一次 inputHandler 调用 = 一次 websocket 发送。
+     */
+    const buildEditOpsPayload = React.useCallback((ops: LineEditOps[]): string => {
+      const term = terminalRef.current;
+      let payload = '';
+      for (const op of ops) {
+        if (op.left) {
+          payload += (term ? buildArrowSeq(term, 'D') : '\x1b[D').repeat(op.left);
+        }
+        if (op.right) {
+          payload += (term ? buildArrowSeq(term, 'C') : '\x1b[C').repeat(op.right);
+        }
+        if (op.backspace) {
+          payload += '\x7f'.repeat(op.backspace);
+        }
+        if (op.insert) {
+          payload += op.insert;
+        }
+      }
+      return payload;
+    }, []);
+
     const performTextareaSyncToPty = React.useCallback(
       (textarea: HTMLTextAreaElement) => {
         const raw = textarea.value;
         const sanitized = sanitizeTerminalInput(raw);
         const sent = sentValueRef.current;
 
-        if (sanitized === sent) return;
+        // 光标感知同步只在移动端启用：桌面键盘没有自动配对/type-over，
+        // 光标恒在行尾，旧的前缀 diff 行为完全不变。内容含 \r（多行）时
+        // 行内光标坐标系失效，同样回退旧路径。
+        const cursorSyncEnabled =
+          enableTouchScrollRef.current &&
+          !sanitized.includes('\r') &&
+          !sent.includes('\r');
 
-        let commonLen = 0;
-        while (commonLen < sent.length && commonLen < sanitized.length && sent[commonLen] === sanitized[commonLen]) {
-          commonLen++;
+        if (!cursorSyncEnabled) {
+          if (sanitized === sent) return;
+
+          let commonLen = 0;
+          while (commonLen < sent.length && commonLen < sanitized.length && sent[commonLen] === sanitized[commonLen]) {
+            commonLen++;
+          }
+
+          // Send backspaces for characters no longer present
+          // (user deletion via keyboard or voice autocorrect both flow through here)
+          const toDelete = sent.length - commonLen;
+          if (toDelete > 0) {
+            // Send the whole delete run as one payload.  This preserves terminal
+            // semantics while avoiding N websocket sends for one long deletion.
+            inputHandlerRef.current('\x7f'.repeat(toDelete));
+          }
+
+          // Send new content
+          const newPart = sanitized.slice(commonLen);
+          if (newPart) {
+            // 与 xterm 默认行为一致：输入即清选区，避免选区残留遮挡输出
+            try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
+            inputHandlerRef.current(newPart);
+          }
+
+          sentValueRef.current = sanitized;
+          // 旧路径不感知光标：发完后 PTY 光标停在行尾，模型记为行尾。
+          // 这样一旦切换到移动端路径，光标模型仍然是自洽的。
+          sentCursorRef.current = Array.from(sanitized).length;
+          return;
         }
 
-        // Send backspaces for characters no longer present
-        // (user deletion via keyboard or voice autocorrect both flow through here)
-        const toDelete = sent.length - commonLen;
-        if (toDelete > 0) {
-          // Send the whole delete run as one payload.  This preserves terminal
-          // semantics while avoiding N websocket sends for one long deletion.
-          inputHandlerRef.current('\x7f'.repeat(toDelete));
+        // —— 光标感知路径（移动端）——
+        // 公共前缀 + 公共后缀圈定最小编辑区间，用箭头键把 PTY 光标搬到
+        // 编辑点，退格/插入后对齐到 textarea 光标。括号自动配对、type-over、
+        // 中间纠错等"编辑点不在行尾"的场景全部收敛为最小操作序列。
+        const nextCursor = textareaCursorInCodePoints(textarea);
+        const { ops, cursor } = computeCursorAwareEdit(
+          sent,
+          sanitized,
+          sentCursorRef.current,
+          nextCursor
+        );
+        const payload = buildEditOpsPayload(ops);
+        if (payload) {
+          // 与旧路径一致：有实际文本插入时清选区
+          if (ops.some((op) => op.insert)) {
+            try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
+          }
+          inputHandlerRef.current(payload);
         }
-
-        // Send new content
-        const newPart = sanitized.slice(commonLen);
-        if (newPart) {
-          // 与 xterm 默认行为一致：输入即清选区，避免选区残留遮挡输出
-          try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
-          inputHandlerRef.current(newPart);
-        }
-
         sentValueRef.current = sanitized;
+        sentCursorRef.current = cursor;
       },
-      []
+      [buildEditOpsPayload]
     );
 
     const syncTextareaToPty = React.useCallback(
@@ -1200,6 +1278,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         inputHandlerRef.current('\r');
         textarea.value = '';
         sentValueRef.current = '';
+        sentCursorRef.current = 0;
       },
       [syncTextareaToPty]
     );
@@ -1210,7 +1289,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
      * 2. clearSelection()：与 xterm 默认"输入即清选区"行为一致
      * 3. 带 skipModifierTransform 让 TerminalView 不再叠加移动端修饰符工具栏的状态
      */
-    const sendTerminalSeq = React.useCallback((seq: string, textarea?: HTMLTextAreaElement | null) => {
+    const sendTerminalSeq = React.useCallback((seq: string, textarea?: HTMLTextAreaElement | null, options?: { consumeModifier?: boolean }) => {
       if (!seq) return;
       clearPendingTextareaSync();
       const target = textarea ?? hiddenInputRef.current;
@@ -1218,8 +1297,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         target.value = '';
       }
       sentValueRef.current = '';
+      sentCursorRef.current = 0;
       try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
-      inputHandlerRef.current(seq, { skipModifierTransform: true });
+      inputHandlerRef.current(seq, { skipModifierTransform: true, consumeModifier: options?.consumeModifier });
     }, [clearPendingTextareaSync]);
 
     const pasteTextIntoTerminal = React.useCallback((rawText: string, textarea?: HTMLTextAreaElement | null): boolean => {
@@ -3428,6 +3508,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       resetWriteState();
       lastReportedSizeRef.current = null;
       sentValueRef.current = '';
+      sentCursorRef.current = 0;
       if (hiddenInputRef.current) {
         hiddenInputRef.current.value = '';
       }
@@ -3445,6 +3526,53 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionKey, terminalReadyVersion, requestRefresh, resetWriteState]);
+
+    // 键盘侧光标移动（滑动移光标 / 括号 type-over / 点按）不产生 input 事件，
+    // 但会动 textarea 的 selection——监听 selectionchange，把纯光标移动
+    // 翻译成箭头键发给 PTY，让「终端光标」始终跟住「键盘光标」。
+    // 否则后续删除键会打在错误的 PTY 位置上（或在光标 0 处被浏览器吞掉）。
+    React.useEffect(() => {
+      if (!enableTouchScroll || typeof document === 'undefined') {
+        return;
+      }
+      let rafId: number | null = null;
+      const syncSelectionToPty = () => {
+        rafId = null;
+        const textarea = hiddenInputRef.current;
+        if (!textarea || document.activeElement !== textarea) return;
+        if (isComposingRef.current) return;
+        const sent = sentValueRef.current;
+        const sanitized = sanitizeTerminalInput(textarea.value);
+        // 内容与模型不一致时，光标对齐交给下一次 input diff 一并完成
+        if (sanitized !== sent || sanitized.includes('\r')) return;
+        // 键盘未打开时的 caret 变化（如点按终端）不同步——全屏 app
+        // （vim/htop）里一次普通点按不应变成光标键
+        if (!isViewportKeyboardLikelyOpen()) return;
+        const nextCursor = Math.min(
+          textareaCursorInCodePoints(textarea),
+          Array.from(sanitized).length
+        );
+        const delta = nextCursor - sentCursorRef.current;
+        if (delta === 0) return;
+        const term = terminalRef.current;
+        const seq = delta < 0
+          ? (term ? buildArrowSeq(term, 'D') : '\x1b[D').repeat(-delta)
+          : (term ? buildArrowSeq(term, 'C') : '\x1b[C').repeat(delta);
+        inputHandlerRef.current(seq);
+        sentCursorRef.current = nextCursor;
+      };
+      const handleSelectionChange = () => {
+        if (rafId !== null) return;
+        rafId = requestAnimationFrame(syncSelectionToPty);
+      };
+      document.addEventListener('selectionchange', handleSelectionChange);
+      return () => {
+        document.removeEventListener('selectionchange', handleSelectionChange);
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+        }
+      };
+    }, [enableTouchScroll, isViewportKeyboardLikelyOpen]);
 
     React.useEffect(() => {
       if (!enableTouchScroll) return;
@@ -3560,6 +3688,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           onMobilePasteResultRef.current?.(ok);
           return ok;
         },
+        sendSequence: (seq: string, options?: { consumeModifier?: boolean }) => {
+          sendTerminalSeq(seq, null, options);
+        },
         getDimensions: () => {
           const terminal = terminalRef.current;
           if (!terminal || !terminal.cols || !terminal.rows) return null;
@@ -3577,6 +3708,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         focusHiddenInput,
         resetWriteState,
         readClipboardIntoTerminal,
+        sendTerminalSeq,
         requestRefresh,
         notifyServerSize,
         ensureSizeMatches,
@@ -3867,6 +3999,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                     // Prevent browser default and send \x7f directly.
                     event.preventDefault();
                     inputHandlerRef.current('\x7f');
+                    return;
+                  }
+                  if (
+                    nativeEvent.inputType === 'deleteContentBackward' &&
+                    event.currentTarget.selectionStart === 0 &&
+                    event.currentTarget.selectionEnd === 0
+                  ) {
+                    // 光标已在文本开头：浏览器的退格是空操作，且不会再
+                    // 产生 input 事件——按键会被无声吞掉（括号自动配对后
+                    // 把光标滑到行首再删除，就死在这条路径上）。直接转发
+                    // \x7f 给 PTY，让每一次删除键都有字节落地。PTY 光标
+                    // 若也在行首，readline 合法地什么都不做，屏幕上的
+                    // 光标位置会解释原因。
+                    event.preventDefault();
+                    inputHandlerRef.current('\x7f');
+                    return;
                   }
                   // Non-empty: let the browser handle the textarea deletion.
                   // onInput → syncTextareaToPty will send \x7f for the diff.
@@ -3935,6 +4083,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                     }
                     event.currentTarget.value = '';
                     sentValueRef.current = '';
+                    sentCursorRef.current = 0;
                     return;
                   }
 
@@ -4086,6 +4235,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                     // Textarea empty — user is deleting from the terminal.
                     event.preventDefault();
                     inputHandlerRef.current('\x7f');
+                    return;
+                  }
+                  if (
+                    event.currentTarget.selectionStart === 0 &&
+                    event.currentTarget.selectionEnd === 0
+                  ) {
+                    // 光标在文本开头：浏览器退格是空操作且不会产生
+                    // input 事件（按键被吞）。keydown 先于 beforeinput，
+                    // preventDefault 会阻断后续 beforeinput，不会重复发。
+                    event.preventDefault();
+                    inputHandlerRef.current('\x7f');
+                    return;
                   }
                   // Non-empty: let the browser handle deletion.
                   // onBeforeInput won't preventDefault, browser deletes from
