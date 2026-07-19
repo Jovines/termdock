@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 
 import { config as loadDotenv } from 'dotenv';
+import os from 'os';
 import { resolve } from 'path';
 
-// 从项目根目录（或 CWD）加载 .env，在其他模块读取 process.env 之前执行。
-// CLI 子命令经常输出机器可读 JSON，dotenv 的运行提示不能混入 stdout。
+// 加载 .env 配置：用户级 ~/.termdock/.env 为基准，项目级 CWD .env 可覆盖
+// dotenv 不会覆盖已存在的环境变量，因此系统环境变量和命令行参数优先级最高
+loadDotenv({ path: resolve(os.homedir(), '.termdock', '.env'), quiet: true });
 loadDotenv({ path: resolve(process.cwd(), '.env'), quiet: true });
 
 import fs from 'fs';
 import http from 'http';
 import https from 'https';
-import os from 'os';
 import path from 'path';
 import readline from 'readline';
 import { createHash, randomUUID } from 'crypto';
@@ -18,8 +19,9 @@ import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { Writable } from 'stream';
 import { createRequire } from 'module';
-import { PORT, DEFAULT_HOST } from './config.js';
+import { PORT, DEFAULT_HOST, TMUX } from './config.js';
 import { isFirstRunCompleted, markFirstRunCompleted, normalizeLocalAccessName, setLocalAccessSetting, getLocalAccessSetting, getPreventSleepSetting } from './utils/settings.js';
+import { runBootChecks, formatBootCheckReport } from './utils/bootCheck.js';
 import { localAccessManager, getLanIPv4Addresses } from './utils/localAccess.js';
 import type { CertificateRefreshResult, StartServerResult } from './entry.js';
 import {
@@ -48,10 +50,7 @@ const TERMDOCK_VERSION: string = (() => {
 })();
 const TERMDOCK_HOST = os.hostname();
 const TERMDOCK_PID = String(process.pid);
-const parsedTmuxHistoryLimit = Number.parseInt(process.env.TERMDOCK_TMUX_HISTORY_LIMIT || '10000', 10);
-const TERMDOCK_TMUX_HISTORY_LIMIT = Number.isFinite(parsedTmuxHistoryLimit) && parsedTmuxHistoryLimit > 0
-  ? parsedTmuxHistoryLimit
-  : 10000;
+const TERMDOCK_TMUX_HISTORY_LIMIT = TMUX.historyLimit;
 
 const stateDir = path.join(os.homedir(), '.termdock');
 const stateFilePath = path.join(stateDir, 'server.json');
@@ -2649,6 +2648,8 @@ async function main(): Promise<void> {
   }
 
   if (options.foreground) {
+    // Boot check (marker prevents re-run if parent already completed)
+    runBootChecks();
     warnIfAuthDisabled(options.host ?? DEFAULT_HOST);
     // Dynamic import keeps terminal.ts side-effects (loadClientStatesFromDisk
     // etc.) out of fast paths like `termdock --tls` / `--status`.
@@ -2721,6 +2722,16 @@ async function main(): Promise<void> {
   if (runningState) {
     printRunningState(runningState);
     process.exit(0);
+  }
+
+  // —— Boot check: 确保原生模块和系统依赖可用 ——
+  const bootChecks = runBootChecks();
+  if (!bootChecks.nodePty.ok || !bootChecks.tmux.ok) {
+    console.log(c.dim("Boot checks:"));
+    for (const line of formatBootCheckReport(bootChecks, colorsEnabled)) {
+      console.log(line);
+    }
+    console.log("");
   }
 
   await runFirstRunWizard();

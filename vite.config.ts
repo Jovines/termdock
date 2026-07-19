@@ -77,16 +77,10 @@ export default defineConfig({
         navigateFallbackDenylist: [/^\/api\//, /^\/health$/],
         runtimeCaching: [
           {
+            // API 响应不应被 SW 缓存——NetworkOnly 避免 NetworkFirst 在网络慢时
+            // 从空缓存返回 "no-response"，导致 SW 拦截报错
             urlPattern: /\/api\/.*/i,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'api-cache',
-              expiration: {
-                maxEntries: 50,
-                maxAgeSeconds: 60 * 60, // 1 hour
-              },
-              networkTimeoutSeconds: 10,
-            },
+            handler: 'NetworkOnly',
           },
         ],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,

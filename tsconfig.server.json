@@ -5,12 +5,22 @@
     "moduleResolution": "NodeNext",
     "outDir": "dist/server",
     "rootDir": "src/server",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022"
+    ],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src/server/**/*.ts", "src/server/**/*.d.ts"]
+  "include": [
+    "src/server/**/*.ts",
+    "src/server/**/*.d.ts"
+  ],
+  "exclude": [
+    "src/server/**/*.test.ts"
+  ]
 }

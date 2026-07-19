@@ -11,6 +11,7 @@ import { promisify } from 'util';
 import type { WebSocket } from 'ws';
 import { caffeinateManager } from '../utils/caffeinate.js';
 import { pathValidator } from '../utils/pathValidator.js';
+import { TERMINAL, TMUX } from '../config.js';
 import { localAccessManager } from '../utils/localAccess.js';
 import { normalizeLocalAccessName } from '../utils/settings.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
@@ -747,22 +748,16 @@ function schedulePersistToolbarPresets(): void {
 void loadToolbarPresetsFromDisk();
 // ── end toolbar presets persistence ──
 
-// 开发模式下使用更激进的清理策略
-const isDevelopment = process.env.NODE_ENV === 'development';
-// idle 超时：手机锁屏后客户端 JS 被 OS 暂停 → 无法发心跳维持活动。
-// DEV 原本是 5 分钟，太短，手机后台一会儿就被清掉触发 auto-recreate；
-// 调到 30 分钟覆盖大多数日常使用。生产 6 小时保持不变。
-const TERMINAL_IDLE_TIMEOUT = parseInt(process.env.TERMINAL_IDLE_TIMEOUT || (isDevelopment ? '1800000' : '21600000'), 10);
-const CLEANUP_INTERVAL = isDevelopment ? 60 * 1000 : 5 * 60 * 1000;
-const RECONNECT_SCROLLBACK = parseInt(process.env.TERMINAL_RECONNECT_SCROLLBACK || '200', 10);
+// 终端配置（从 config.ts 读环境变量，getter 保证 dotenv 加载后仍然正确）
+// 以下常量从 config.ts getter 读取，不再直接读 process.env
+const TERMINAL_IDLE_TIMEOUT = TERMINAL.idleTimeout;
+const CLEANUP_INTERVAL = TERMINAL.cleanupInterval;
+const RECONNECT_SCROLLBACK = TERMINAL.reconnectScrollback;
 const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10);
 const ACTIVE_PROGRAM_POLL_INTERVAL = parseInt(process.env.TERMINAL_ACTIVE_PROGRAM_POLL_INTERVAL || '1200', 10);
-const FLOW_CONTROL_PAUSE_LEASE_MS = parseInt(process.env.TERMINAL_FLOW_CONTROL_PAUSE_LEASE_MS || '15000', 10);
+const FLOW_CONTROL_PAUSE_LEASE_MS = TERMINAL.flowControlPauseLeaseMs;
 const TMUX_DELIMITER = '\x1f';
-const parsedTmuxHistoryLimit = Number.parseInt(process.env.TERMDOCK_TMUX_HISTORY_LIMIT || '10000', 10);
-const TERMDOCK_TMUX_HISTORY_LIMIT = Number.isFinite(parsedTmuxHistoryLimit) && parsedTmuxHistoryLimit > 0
-  ? parsedTmuxHistoryLimit
-  : 10000;
+const TERMDOCK_TMUX_HISTORY_LIMIT = TMUX.historyLimit;
 // 输出历史缓冲区（限制大小）
 const MAX_HISTORY_SIZE = 100 * 1024; // 100KB per session
 // 给每个 chunk 加单调递增 seq，用于短线重连时按需补发增量。
@@ -1357,7 +1352,22 @@ async function openInventorySession(
 }
 
 function getTmuxBinary(): string {
-  return process.env.TMUX_BIN || 'tmux';
+  if (process.env.TMUX_BIN) return process.env.TMUX_BIN;
+
+  // macOS 非交互式 SSH 的 PATH 不含 Homebrew，手动探测常见路径
+  const candidates = [
+    'tmux',                    // PATH lookup
+    '/opt/homebrew/bin/tmux',
+    '/usr/local/bin/tmux',
+    '/opt/local/bin/tmux',     // MacPorts
+  ];
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch { /* not here */ }
+  }
+  return 'tmux';  // fallback to PATH
 }
 
 async function runTmux(args: string[]): Promise<string> {
@@ -3710,7 +3720,15 @@ async function spawnTerminalSession(req: express.Request, input: {
   const rows = input.rows || 24;
   const sessionId = Math.random().toString(36).substring(2, 15) +
                     Math.random().toString(36).substring(2, 15);
-  const mode = normalizeMode(input.mode);
+  let mode = normalizeMode(input.mode);
+  // tmux 不可用时自动降级为 shell 模式，避免 "spawn tmux ENOENT" 错误
+  if (mode === 'tmux') {
+    const tmuxStatus = await getTmuxStatus();
+    if (!tmuxStatus.available) {
+      console.warn('[termdock] tmux not available, falling back to shell mode:', tmuxStatus.reason);
+      mode = 'shell';
+    }
+  }
   const tmuxSessionName = mode === 'tmux' ? normalizeTmuxSessionName(input.tmuxSessionName) : null;
 
   if (mode === 'tmux' && tmuxSessionName) {
