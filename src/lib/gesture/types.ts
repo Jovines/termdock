@@ -26,7 +26,7 @@ export interface GestureHandler {
   name: string;
   /**
    * Higher = earlier chance to claim.  Leave gaps between tiers.
-   *   100 — edge-swipe (sidebar)
+   *   100 — (reserved; sidebar drawers handle edge drags outside this manager)
    *    90 — long-press arrows + double-tap
    *    80 — tmux-mode touch scroll (SGR mouse wheel via PTY)
    *    70 — normal-mode touch scroll (xterm.js scrollLines)
@@ -60,7 +60,6 @@ export interface GestureHandler {
   onPointerCancel: (e: PointerEvent) => void;
 }
 
-export const PRIORITY_EDGE_SWIPE = 100;
 export const PRIORITY_LONG_PRESS = 90;
 export const PRIORITY_TMUX_SCROLL = 80;
 export const PRIORITY_NORMAL_SCROLL = 70;

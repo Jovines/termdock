@@ -1,5 +1,13 @@
 import React, { useCallback, useEffect, useRef } from 'react';
 import { useDrag } from '@use-gesture/react';
+import {
+  prefersReducedMotion,
+  projectMomentum,
+  rubberband,
+  sampleSpringKeyframes,
+  SPRING_SHEET,
+  type SpringSolver,
+} from '../../utils/spring';
 
 interface SidebarProps {
   side: 'left' | 'right';
@@ -16,10 +24,14 @@ interface SidebarProps {
 }
 
 const EDGE_ZONE_WIDTH = 15;
-const SNAP_PROGRESS_THRESHOLD = 0.5;
-// @use-gesture reports velocity in px/ms.
-const SNAP_VELOCITY_THRESHOLD = 0.5;
-const SNAP_DURATION_MS = 250;
+// A release faster than this (px/s) counts as a flick. Only flicks earn a
+// little bounce (damping 0.8) — overshoot feels right when the gesture
+// itself carried momentum, and wrong otherwise. Slower snaps and
+// programmatic toggles stay critically damped (no overshoot).
+const FLING_VELOCITY_THRESHOLD = 500;
+const REDUCED_MOTION_FADE_MS = 200;
+// Grace period between the spring finishing and the deferred state commit.
+const COMMIT_BUFFER_MS = 50;
 const PANEL_GESTURE_IGNORE_SELECTOR = '[data-sidebar-gesture-ignore]';
 
 function clamp(value: number, min: number, max: number): number {
@@ -48,6 +60,29 @@ function shouldIgnorePanelDrag(event: unknown): boolean {
   return target instanceof Element && Boolean(target.closest(PANEL_GESTURE_IGNORE_SELECTOR));
 }
 
+/** Temporary diagnostics for gesture/snap debugging (enable via window.__SIDEBAR_DEBUG__). */
+function dbg(...args: unknown[]): void {
+  if (typeof window !== 'undefined' && (window as unknown as { __SIDEBAR_DEBUG__?: boolean }).__SIDEBAR_DEBUG__) {
+    console.log('[Sidebar]', ...args);
+  }
+}
+
+/**
+ * Overlay drawer driven by a spring, following Apple's fluid-interface model:
+ *
+ *  - Drag tracks the finger 1:1; at the open/closed boundary the panel
+ *    rubber-bands with progressive resistance instead of hard-stopping.
+ *  - On release, the resting point is *projected* from the release velocity
+ *    (exponential decay, d ≈ 0.998) and the drawer snaps to whichever state
+ *    the gesture was heading toward — a flick throws the drawer open/closed.
+ *  - The release velocity is handed off into the spring, so there is no
+ *    visible seam between dragging and animating.
+ *  - Snaps are sampled into WAAPI keyframes, so they run on the compositor
+ *    and stay smooth even when React blocks the main thread mid-animation.
+ *    Grabbing the panel mid-animation interrupts the spring at its exact
+ *    analytical (wall-clock) position and velocity — no jumps, no locks.
+ *  - `prefers-reduced-motion` replaces the slide with a gentle cross-fade.
+ */
 export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Sidebar(
   { side, isOpen, drawerWidthPx, onClose, onOpen, children },
   forwardedRef,
@@ -61,8 +96,52 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   const pendingXRef = useRef<number | null>(null);
   const positionFrameRef = useRef<number | null>(null);
   const dragStartXRef = useRef(0);
+  /**
+   * In-flight WAAPI spring. The sampled keyframes run on the compositor
+   * (smooth even when React blocks the main thread mid-animation — e.g. the
+   * heavy right-sidebar re-render on close); the solver is kept so an
+   * interruption reads the exact live value/velocity analytically.
+   */
+  interface SpringPlayback {
+    solver: SpringSolver;
+    startTime: number;
+    target: number;
+    animations: Animation[];
+  }
+  const playbackRef = useRef<SpringPlayback | null>(null);
+  // Deferred state commit: the app-level open/close flip (and its heavy
+  // React re-render) is scheduled AFTER the animation has played out, so
+  // main-thread work can never stall the gesture→animation handoff.
+  const commitTimerRef = useRef<number | null>(null);
+  // Per-gesture ownership: true while THIS touch sequence owns the drawer
+  // position. Guards the release path against ignored starts and duplicate
+  // release events.
+  const panelDragActiveRef = useRef(false);
+  const edgeDragActiveRef = useRef(false);
+  // Position history of the current gesture. @use-gesture reports velocity
+  // as an UNSIGNED magnitude (sign lives in `direction`) and zeroes it on
+  // some release paths — a signed release velocity for momentum projection
+  // and spring handoff must come from our own history instead.
+  const dragHistoryRef = useRef<Array<{ t: number; x: number }>>([]);
+
+  // Frozen at mount so React never rewrites transform/opacity after the
+  // first commit — from then on both are driven imperatively by the spring /
+  // drag path (a re-render must not stomp an in-flight animation).
+  const initialXRef = useRef(currentXRef.current);
+  const initialBackdropOpacityRef = useRef(isOpen ? 1 : 0);
+
   const isOpenRef = useRef(isOpen);
   isOpenRef.current = isOpen;
+  const closedXRef = useRef(closedX);
+  closedXRef.current = closedX;
+  const drawerWidthRef = useRef(drawerWidthPx);
+  drawerWidthRef.current = drawerWidthPx;
+  const isLeftRef = useRef(isLeft);
+  isLeftRef.current = isLeft;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
 
   const setPanelRef = useCallback((node: HTMLElement | null) => {
     panelRef.current = node;
@@ -81,16 +160,19 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     pendingXRef.current = null;
   }, []);
 
+  const progressForX = useCallback((x: number): number => {
+    const w = drawerWidthRef.current;
+    return isLeftRef.current ? (x + w) / w : (w - x) / w;
+  }, []);
+
   const setBackdropOpacity = useCallback((x: number) => {
     const backdrop = backdropRef.current;
     if (!backdrop) return;
-    const progress = isLeft
-      ? (x + drawerWidthPx) / drawerWidthPx
-      : (drawerWidthPx - x) / drawerWidthPx;
-    backdrop.style.opacity = String(clamp(progress, 0, 1));
-  }, [drawerWidthPx, isLeft]);
+    backdrop.style.opacity = String(clamp(progressForX(x), 0, 1));
+  }, [progressForX]);
 
   const applyPosition = useCallback((nextX: number) => {
+    currentXRef.current = nextX;
     const panel = panelRef.current;
     if (!panel) return;
     panel.style.transform = `translateX(${nextX}px)`;
@@ -98,7 +180,6 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   }, [setBackdropOpacity]);
 
   const setPosition = useCallback((nextX: number) => {
-    currentXRef.current = nextX;
     pendingXRef.current = nextX;
     if (positionFrameRef.current !== null) return;
     positionFrameRef.current = window.requestAnimationFrame(() => {
@@ -111,105 +192,308 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     });
   }, [applyPosition]);
 
-  const prepareInstantPositioning = useCallback(() => {
-    cancelPendingPositionFrame();
+  /**
+   * Apply the latest batched drag position NOW (if any) instead of waiting
+   * for its rAF. Needed before reading currentXRef for snap decisions and
+   * spring handoffs — otherwise they see a one-frame-stale position.
+   */
+  const flushPendingPosition = useCallback(() => {
+    if (positionFrameRef.current !== null) {
+      window.cancelAnimationFrame(positionFrameRef.current);
+      positionFrameRef.current = null;
+    }
+    const pendingX = pendingXRef.current;
+    pendingXRef.current = null;
+    if (pendingX !== null) {
+      applyPosition(pendingX);
+    }
+  }, [applyPosition]);
+
+  /** Clamp a rendered position to the flush drawer bounds (no edge gap). */
+  const clampToBounds = useCallback((x: number): number => {
+    const closed = closedXRef.current;
+    return clamp(x, Math.min(0, closed), Math.max(0, closed));
+  }, []);
+
+  /**
+   * Stop the in-flight WAAPI spring (if any) and return its exact live
+   * value/velocity — analytical (wall-clock), so it's correct even if frames
+   * were dropped while the main thread was busy.
+   */
+  const stopPlayback = useCallback((): { value: number; velocity: number } | null => {
+    const playback = playbackRef.current;
+    if (!playback) return null;
+    playbackRef.current = null;
+    const t = (performance.now() - playback.startTime) / 1000;
+    const live = { value: playback.solver.value(t), velocity: playback.solver.velocity(t) };
+    playback.animations.forEach((animation) => animation.cancel());
+    return live;
+  }, []);
+
+  /** Cancel a deferred open/close commit (interrupt, programmatic flip, unmount). */
+  const cancelPendingCommit = useCallback(() => {
+    if (commitTimerRef.current !== null) {
+      window.clearTimeout(commitTimerRef.current);
+      commitTimerRef.current = null;
+    }
+  }, []);
+
+  /**
+   * Stop any in-flight snap and pin the panel at its live on-screen position
+   * — grabbing a moving drawer must follow the finger from exactly where it
+   * is, not from the animation's target.
+   */
+  const grabLivePosition = useCallback(() => {
+    flushPendingPosition();
+    cancelPendingCommit();
+    const live = stopPlayback();
+    if (live) {
+      applyPosition(clampToBounds(live.value));
+    }
     const panel = panelRef.current;
     const backdrop = backdropRef.current;
     panel?.getAnimations().forEach((animation) => animation.cancel());
-    if (panel) panel.style.transition = 'none';
+    if (panel) {
+      panel.style.transition = 'none';
+      panel.style.opacity = '1';
+    }
     backdrop?.getAnimations().forEach((animation) => animation.cancel());
     if (backdrop) backdrop.style.transition = 'none';
-  }, [cancelPendingPositionFrame]);
+  }, [applyPosition, cancelPendingCommit, clampToBounds, flushPendingPosition, stopPlayback]);
 
-  const animateToState = useCallback((open: boolean) => {
-    cancelPendingPositionFrame();
-    const panel = panelRef.current;
-    const backdrop = backdropRef.current;
-    const targetX = open ? 0 : closedX;
-    currentXRef.current = targetX;
+  const animateToState = useCallback(
+    (open: boolean, opts?: { velocity?: number }): number => {
+      flushPendingPosition();
+      cancelPendingCommit();
+      const panel = panelRef.current;
+      const backdrop = backdropRef.current;
+      const targetX = open ? 0 : closedXRef.current;
 
-    if (panel) {
-      panel.style.transition = `transform ${SNAP_DURATION_MS}ms ease-out`;
-      panel.style.transform = `translateX(${targetX}px)`;
-    }
-    if (backdrop) {
-      const progress = isLeft
-        ? (targetX + drawerWidthPx) / drawerWidthPx
-        : (drawerWidthPx - targetX) / drawerWidthPx;
-      backdrop.style.transition = `opacity ${SNAP_DURATION_MS}ms ease-out`;
-      backdrop.style.opacity = String(clamp(progress, 0, 1));
-    }
+      // The state flip hasn't happened yet (deferred) — drive hit-testing
+      // imperatively in the meantime: a closing drawer's invisible backdrop
+      // must not eat touches while the animation plays out.
+      if (backdrop) backdrop.style.pointerEvents = open ? 'auto' : 'none';
 
-    const cleanup = () => {
-      if (panel) panel.style.transition = 'none';
+      // Start from the live on-screen position: an in-flight spring's
+      // analytical value, or the (drag-tracked / settled) inline position.
+      const live = stopPlayback();
+      const startX = live ? clampToBounds(live.value) : currentXRef.current;
+      const startVelocity = opts?.velocity ?? live?.velocity ?? 0;
+
+      if (prefersReducedMotion()) {
+        // Reduced motion: no slide, no spring — settle instantly and
+        // cross-fade at the final position.
+        currentXRef.current = targetX;
+        if (panel) {
+          panel.style.transition = `opacity ${REDUCED_MOTION_FADE_MS}ms ease`;
+          panel.style.opacity = open ? '1' : '0';
+          panel.style.transform = `translateX(${targetX}px)`;
+        }
+        if (backdrop) {
+          backdrop.style.transition = `opacity ${REDUCED_MOTION_FADE_MS}ms ease`;
+          backdrop.style.opacity = open ? '1' : '0';
+        }
+        return REDUCED_MOTION_FADE_MS;
+      }
+
+      if (panel) {
+        panel.style.transition = 'none';
+        panel.style.opacity = '1';
+      }
       if (backdrop) backdrop.style.transition = 'none';
-    };
-    panel?.addEventListener('transitionend', cleanup, { once: true });
-    setTimeout(cleanup, SNAP_DURATION_MS + 50);
-  }, [cancelPendingPositionFrame, closedX, drawerWidthPx, isLeft]);
 
-  useEffect(() => cancelPendingPositionFrame, [cancelPendingPositionFrame]);
+      // Bounce (damping 0.8) only when the gesture itself carried momentum.
+      const flung = Math.abs(opts?.velocity ?? 0) > FLING_VELOCITY_THRESHOLD;
+      const { frames, durationMs, solver } = sampleSpringKeyframes(
+        {
+          dampingRatio: flung ? SPRING_SHEET.dampingRatio : 1.0,
+          response: SPRING_SHEET.response,
+        },
+        startX,
+        startVelocity,
+        targetX,
+        clampToBounds,
+      );
+
+      if (!panel || (Math.abs(startX - targetX) < 0.5 && Math.abs(startVelocity) < 5)) {
+        applyPosition(targetX);
+        return 0;
+      }
+
+      // Sampled keyframes → WAAPI → the motion runs on the compositor and
+      // cannot stutter when the main thread is busy (e.g. heavy sidebar
+      // re-renders during close). The solver is kept for analytical
+      // interruption (stopPlayback).
+      const panelAnim = panel.animate(
+        frames.map((x) => ({ transform: `translateX(${x}px)` })),
+        { duration: durationMs, easing: 'linear', fill: 'forwards' },
+      );
+      const animations: Animation[] = [panelAnim];
+      if (backdrop) {
+        animations.push(
+          backdrop.animate(
+            frames.map((x) => ({ opacity: String(clamp(progressForX(x), 0, 1)) })),
+            { duration: durationMs, easing: 'linear', fill: 'forwards' },
+          ),
+        );
+      }
+      playbackRef.current = { solver, startTime: performance.now(), target: targetX, animations };
+      dbg('spring start', { startX, startVelocity, targetX, frames: frames.length, durationMs });
+      panelAnim.onfinish = () => {
+        const playback = playbackRef.current;
+        if (!playback || !playback.animations.includes(panelAnim)) return;
+        playbackRef.current = null;
+        applyPosition(targetX);
+        playback.animations.forEach((animation) => animation.cancel());
+        dbg('spring finish', { targetX });
+      };
+      return durationMs;
+    },
+    [applyPosition, cancelPendingCommit, clampToBounds, flushPendingPosition, progressForX, stopPlayback],
+  );
+
+  /**
+   * Snap decision on release: project the resting point from the release
+   * velocity and pick the nearest state — then hand the velocity into the
+   * spring so drag and animation join seamlessly.
+   *
+   * @param velocityPxPerSec SIGNED release velocity from the drag history.
+   */
+  const decideSnap = useCallback(
+    (velocityPxPerSec: number) => {
+      flushPendingPosition();
+      const velocity = velocityPxPerSec;
+      const open = 0;
+      const closed = closedXRef.current;
+      const projected = currentXRef.current + projectMomentum(velocity);
+      const shouldOpen = Math.abs(projected - open) <= Math.abs(projected - closed);
+      dbg('decideSnap', { velocity, currentX: currentXRef.current, projected, shouldOpen });
+
+      const durationMs = animateToState(shouldOpen, { velocity });
+      // Defer the app-level state flip (and the heavy React re-render it
+      // triggers) until the spring has played out — this is what keeps the
+      // close of a heavy pane (e.g. Changes/diff) visually free of jank:
+      // zero main-thread work competes with the animation.
+      if (shouldOpen && !isOpenRef.current) {
+        commitTimerRef.current = window.setTimeout(() => {
+          commitTimerRef.current = null;
+          onOpenRef.current?.();
+        }, durationMs + COMMIT_BUFFER_MS);
+      } else if (!shouldOpen && isOpenRef.current) {
+        commitTimerRef.current = window.setTimeout(() => {
+          commitTimerRef.current = null;
+          onCloseRef.current();
+        }, durationMs + COMMIT_BUFFER_MS);
+      }
+    },
+    [animateToState, flushPendingPosition],
+  );
+
+  // Rubber-band past the open/closed bounds: progressive resistance instead
+  // of a frozen hard stop.
+  const softClampX = useCallback((raw: number): number => {
+    const closed = closedXRef.current;
+    const min = Math.min(0, closed);
+    const max = Math.max(0, closed);
+    const w = drawerWidthRef.current;
+    if (raw < min) return min - rubberband(min - raw, w);
+    if (raw > max) return max + rubberband(raw - max, w);
+    return raw;
+  }, []);
+
+  /** Record a tracked drag position (called on every drag move). */
+  const trackDragPosition = useCallback((x: number) => {
+    const history = dragHistoryRef.current;
+    const now = performance.now();
+    history.push({ t: now, x });
+    const cutoff = now - 120;
+    while (history.length > 0 && history[0].t < cutoff) {
+      history.shift();
+    }
+  }, []);
+
+  /**
+   * Signed release velocity (px/s) from the last ~100ms of tracked movement.
+   * Returns 0 when there isn't enough recent motion (e.g. finger held still
+   * before lifting) — a held release must not fling.
+   */
+  const releaseVelocity = useCallback((): number => {
+    const history = dragHistoryRef.current;
+    if (history.length < 2) return 0;
+    const last = history[history.length - 1];
+    if (performance.now() - last.t > 60) return 0;
+    const first = history[0];
+    const dtSec = (last.t - first.t) / 1000;
+    if (dtSec < 0.016) return 0;
+    return (last.x - first.x) / dtSec;
+  }, []);
 
   useEffect(() => {
+    // A programmatic flip (Esc / backdrop / toggle) cancels any deferred
+    // gesture commit — the prop is now the source of truth.
+    cancelPendingCommit();
+    // If a gesture already started the spring toward this exact state (with
+    // its velocity handoff), don't restart it as a plain retarget.
+    const playback = playbackRef.current;
+    const targetX = isOpen ? 0 : closedXRef.current;
+    if (playback && playback.target === targetX) return;
     animateToState(isOpen);
-  }, [isOpen, animateToState]);
+  }, [isOpen, animateToState, cancelPendingCommit]);
 
   // Keep the drawer aligned when viewport-derived width changes.
   useEffect(() => {
-    prepareInstantPositioning();
+    grabLivePosition();
     setPosition(isOpenRef.current ? 0 : closedX);
-  }, [closedX, prepareInstantPositioning, setPosition]);
+  }, [closedX, grabLivePosition, setPosition]);
+
+  useEffect(() => {
+    return () => {
+      cancelPendingPositionFrame();
+      cancelPendingCommit();
+      stopPlayback();
+    };
+  }, [cancelPendingCommit, cancelPendingPositionFrame, stopPlayback]);
 
   // ESC 由 App 顶层统一处理（按层级关闭 modal/drawer/sidebar，并走 history overlay）。
   // 这里不再单独监听，避免和全局 handler 同时触发 history.back() 两次。
 
-  const decideSnap = useCallback((velocity: number, direction: number) => {
-    const hasFling = Math.abs(velocity) > SNAP_VELOCITY_THRESHOLD;
-    const flingClose = hasFling && (isLeft ? direction < 0 : direction > 0);
-    const flingOpen = hasFling && (isLeft ? direction > 0 : direction < 0);
-
-    if (flingClose) {
-      if (isOpenRef.current) onClose();
-      else animateToState(false);
-    } else if (flingOpen) {
-      if (!isOpenRef.current) onOpen?.();
-      else animateToState(true);
-    } else {
-      const currentX = currentXRef.current;
-      const progress = isLeft
-        ? (currentX + drawerWidthPx) / drawerWidthPx
-        : (drawerWidthPx - currentX) / drawerWidthPx;
-      if (progress > SNAP_PROGRESS_THRESHOLD) {
-        if (!isOpenRef.current) onOpen?.();
-        else animateToState(true);
-      } else if (isOpenRef.current) {
-        onClose();
-      } else {
-        animateToState(false);
-      }
-    }
-  }, [drawerWidthPx, isLeft, onClose, onOpen, animateToState]);
-
   const bindPanel = useDrag(
-    ({ active, cancel, first, movement: [mx], velocity: [vx], direction: [dx], event }) => {
+    ({ active, cancel, first, last, movement: [mx], event }) => {
+      dbg('bindPanel', { active, first, last, mx });
       if (!isTouchLikePointer(event)) {
         return;
       }
-      if (shouldIgnorePanelDrag(event)) {
-        cancel();
-        return;
-      }
       if (first) {
+        // The gesture-ignore check belongs at gesture START only. Checking it
+        // again on release swallows the snap and freezes the panel wherever
+        // the finger lifted (e.g. mid rubber-band) when the release lands on
+        // an ignored child.
+        if (shouldIgnorePanelDrag(event)) {
+          panelDragActiveRef.current = false;
+          cancel();
+          return;
+        }
+        panelDragActiveRef.current = true;
+        dragHistoryRef.current = [];
+        grabLivePosition();
         dragStartXRef.current = currentXRef.current;
-        prepareInstantPositioning();
       }
       if (!active) {
-        decideSnap(vx, dx);
+        // use-gesture may deliver the release twice (e.g. after cancel());
+        // only the gesture that owned the drag decides, exactly once —
+        // a duplicate would retarget the spring with velocity 0 and kill
+        // the handoff.
+        if (panelDragActiveRef.current) {
+          panelDragActiveRef.current = false;
+          decideSnap(releaseVelocity());
+        }
         return;
       }
-      const min = isLeft ? closedX : 0;
-      const max = isLeft ? 0 : drawerWidthPx;
-      setPosition(clamp(dragStartXRef.current + mx, min, max));
+      if (panelDragActiveRef.current) {
+        const nextX = softClampX(dragStartXRef.current + mx);
+        trackDragPosition(nextX);
+        setPosition(nextX);
+      }
     },
     {
       axis: 'x',
@@ -222,7 +506,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   );
 
   const bindEdge = useDrag(
-    ({ active, cancel, first, movement: [mx], velocity: [vx], direction: [dx], event }) => {
+    ({ active, cancel, first, movement: [mx], event }) => {
       if (!isTouchLikePointer(event)) {
         cancel();
         return;
@@ -231,16 +515,24 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
         cancel();
         return;
       }
+      if (first) {
+        edgeDragActiveRef.current = true;
+        dragHistoryRef.current = [];
+        grabLivePosition();
+        dragStartXRef.current = currentXRef.current;
+      }
       if (!active) {
-        decideSnap(vx, dx);
+        if (edgeDragActiveRef.current) {
+          edgeDragActiveRef.current = false;
+          decideSnap(releaseVelocity());
+        }
         return;
       }
-      if (first) {
-        prepareInstantPositioning();
+      if (edgeDragActiveRef.current) {
+        const nextX = softClampX(dragStartXRef.current + mx);
+        trackDragPosition(nextX);
+        setPosition(nextX);
       }
-      const min = isLeft ? closedX : 0;
-      const max = isLeft ? 0 : drawerWidthPx;
-      setPosition(clamp(closedX + mx, min, max));
     },
     {
       axis: 'x',
@@ -257,9 +549,9 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     event.preventDefault();
     event.stopPropagation();
     if (!isOpenRef.current) {
-      onOpen?.();
+      onOpenRef.current?.();
     }
-  }, [onOpen]);
+  }, []);
 
   // ── Overlay mode (used on both desktop & mobile) — fixed, draggable ──
   return (
@@ -285,7 +577,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
         data-sidebar-backdrop={side}
         className="fixed inset-0 z-sidebar-backdrop bg-[var(--app-backdrop)] cursor-default"
         style={{
-          opacity: isOpen ? 1 : 0,
+          opacity: initialBackdropOpacityRef.current,
           pointerEvents: isOpen ? 'auto' : 'none',
           transition: 'none',
           willChange: 'opacity',
@@ -305,7 +597,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
           ...(isLeft ? { left: 0 } : { right: 0 }),
           width: drawerWidthPx,
           maxWidth: '94vw',
-          transform: `translateX(${isOpen ? 0 : closedX}px)`,
+          transform: `translateX(${initialXRef.current}px)`,
           transition: 'none',
           touchAction: 'pan-y',
           pointerEvents: isOpen ? 'auto' : 'none',

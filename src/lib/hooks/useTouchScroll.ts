@@ -10,7 +10,12 @@ export interface TouchScrollConfig {
   velocityAlpha?: number;
   maxVelocity?: number;
   minVelocity?: number;
-  deceleration?: number;
+  /**
+   * Exponential velocity retention per millisecond during the kinetic glide —
+   * the model UIScrollView uses (WWDC 2018 momentum projection: d ≈ 0.998).
+   * Higher = longer glide. 0.998 is the iOS-standard scroll feel.
+   */
+  decelerationRate?: number;
   enableKinetic?: boolean;
   shouldCaptureTouch?: () => boolean;
   canStartScrollGesture?: () => boolean;
@@ -47,7 +52,7 @@ const {
     velocityAlpha = 0.15,
     maxVelocity = 15,
     minVelocity = 0.3,
-    deceleration = 0.0008,
+    decelerationRate = 0.998,
     enableKinetic = true,
     shouldCaptureTouch,
     canStartScrollGesture,
@@ -56,7 +61,7 @@ const {
     onTap,
     onClickWithCoords,
     onClaimChange,
-  tapThreshold = 8,
+  tapThreshold = 10,
   gestureName = 'normal-scroll',
   } = config;
 
@@ -294,7 +299,7 @@ const {
             const dt = cTime - (state.lastTime || cTime);
             state.lastTime = cTime;
 
-            state.velocity *= (1 - deceleration * dt);
+            state.velocity *= Math.pow(decelerationRate, dt);
             if (Math.abs(state.velocity) < minVelocity) {
               state.velocity = 0;
               stopKinetic();
@@ -347,7 +352,7 @@ const {
     velocityAlpha,
     maxVelocity,
     minVelocity,
-    deceleration,
+    decelerationRate,
     nowMs,
     stopKinetic,
     scrollByPixels,
@@ -464,7 +469,7 @@ const {
       if (enableKinetic && wasScrolling && !endedHorizontalGesture && state.didMove && Math.abs(state.velocity) > minVelocity) {
         const animate = () => {
           const dt = 16;
-          state.velocity *= (1 - deceleration * dt);
+          state.velocity *= Math.pow(decelerationRate, dt);
 
           if (Math.abs(state.velocity) < minVelocity) {
             state.velocity = 0;
@@ -508,7 +513,7 @@ const {
     maxScrollBoost,
     boostDenominator,
     minVelocity,
-    deceleration,
+    decelerationRate,
     stopKinetic,
     scrollByPixels,
     accumulateAndRequestScroll,

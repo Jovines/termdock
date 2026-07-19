@@ -1102,6 +1102,43 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     onInsertDiffReference(filePath ? `${titleParts.name} diff` : t('diffViewer.allDiffLabel'), wholeDiffText, wholeDiffReferenceKey);
   }, [filePath, onInsertDiffReference, t, titleParts.name, wholeDiffReferenceKey, wholeDiffText]);
 
+  // Per-hunk derived data (sections, inline moved-line candidates, split-view
+  // alignment). findMovedLineCandidates is O(deleted × inserted) similarity
+  // work — recomputing it inside the JSX map on EVERY render made unrelated
+  // re-renders (e.g. the sidebar drawer closing) block the main thread for
+  // hundreds of ms. Keyed by hunk object identity: `files` only changes when
+  // new diff data arrives, which is exactly when a recompute is needed.
+  const hunkDerivedMap = useMemo(() => {
+    const map = new Map<object, {
+      hunkSections: ReturnType<typeof buildHunkSections>;
+      movedCandidates: ReturnType<typeof findMovedLineCandidates>;
+      movedOldLines: Set<number>;
+      movedNewLines: Set<number>;
+      importOnlyHunk: boolean;
+      displayHunk: (typeof files)[number]['hunks'][number];
+    }>();
+    for (const file of files) {
+      for (const hunk of file.hunks) {
+        const deletedChanges = lightweight ? [] : hunk.changes
+          .filter((change) => change.type === 'delete')
+          .map((change) => ({ content: change.content, lineNumber: change.lineNumber }));
+        const insertedChanges = lightweight ? [] : hunk.changes
+          .filter((change) => change.type === 'insert')
+          .map((change) => ({ content: change.content, lineNumber: change.lineNumber }));
+        const movedCandidates = lightweight ? [] : findMovedLineCandidates(deletedChanges, insertedChanges);
+        map.set(hunk, {
+          hunkSections: lightweight ? [] : buildHunkSections(hunk),
+          movedCandidates,
+          movedOldLines: new Set(movedCandidates.map((candidate) => candidate.oldLineNumber)),
+          movedNewLines: new Set(movedCandidates.map((candidate) => candidate.newLineNumber)),
+          importOnlyHunk: isImportOnlyHunk(hunk),
+          displayHunk: viewType === 'split' ? alignAdjacentChangesForSplitView(hunk) : hunk,
+        });
+      }
+    }
+    return map;
+  }, [files, lightweight, viewType]);
+
   const renderFileDiffs = (hideSingleFileHeader: boolean) => (
     <>
       {files.map((file) => {
@@ -1203,19 +1240,14 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     const hunkReferenceKey = `diff:hunk:${displayPath}:${index}`;
                     const hunkReferenceActive = insertedReferenceKey === hunkReferenceKey || copiedReferenceKey === hunkReferenceKey;
                     const importCollapseKey = `${displayPath}\0${index}\0${hunk.content}`;
-                    const hunkSections = lightweight ? [] : buildHunkSections(hunk);
-                    const deletedChanges = lightweight ? [] : hunk.changes
-                      .filter((change) => change.type === 'delete')
-                      .map((change) => ({ content: change.content, lineNumber: change.lineNumber }));
-                    const insertedChanges = lightweight ? [] : hunk.changes
-                      .filter((change) => change.type === 'insert')
-                      .map((change) => ({ content: change.content, lineNumber: change.lineNumber }));
-                    const movedCandidates = lightweight ? [] : findMovedLineCandidates(deletedChanges, insertedChanges);
-                    const importOnlyHunk = isImportOnlyHunk(hunk);
+                    const derived = hunkDerivedMap.get(hunk);
+                    const hunkSections = derived?.hunkSections ?? [];
+                    const movedCandidates = derived?.movedCandidates ?? [];
+                    const importOnlyHunk = derived?.importOnlyHunk ?? false;
                     const importCollapsed = importOnlyHunk && !expandedImportHunks.has(importCollapseKey);
-                    const movedOldLines = new Set(movedCandidates.map((candidate) => candidate.oldLineNumber));
-                    const movedNewLines = new Set(movedCandidates.map((candidate) => candidate.newLineNumber));
-                    const displayHunk = viewType === 'split' ? alignAdjacentChangesForSplitView(hunk) : hunk;
+                    const movedOldLines = derived?.movedOldLines ?? new Set<number>();
+                    const movedNewLines = derived?.movedNewLines ?? new Set<number>();
+                    const displayHunk = derived?.displayHunk ?? hunk;
                     const sectionWidgets = hunkSections.reduce<Record<string, ReactNode>>((widgets, section) => {
                       const sectionFingerprint = buildSectionFingerprint(section);
                       const sectionAudit = getSectionAudit(effectiveAuditRecords, auditRepoRoot, displayPath, hunk.content, hunkFingerprint, section.index, sectionFingerprint);

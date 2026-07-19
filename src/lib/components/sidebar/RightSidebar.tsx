@@ -102,6 +102,10 @@ const FILE_TREE_WIDTH_WRITE_MS = 120;
 const GIT_BUNDLE_SLOW_MS = 700;
 const SIDEBAR_BACKGROUND_IO_DELAY_MS = 600;
 const MOBILE_SIDEBAR_OPEN_SETTLE_DELAY_MS = 320;
+// Closing: the settled reset is deferred past the close spring so the
+// gesture only pays ONE heavy RightSidebar render pass (the isOpen flip)
+// instead of two back-to-back.
+const MOBILE_SIDEBAR_CLOSE_SETTLE_DELAY_MS = 500;
 const RECENT_COMMITS_PAGE_SIZE = 20;
 const FILE_PREVIEW_STUCK_TIMEOUT_MS = 12_000;
 const DEFAULT_FILE_TREE_WIDTH_PX = 300;
@@ -5841,8 +5845,10 @@ export function RightSidebar(
       return;
     }
     if (!isOpen) {
-      setMobileSidebarSettled(false);
-      return;
+      const handle = window.setTimeout(() => {
+        setMobileSidebarSettled(false);
+      }, MOBILE_SIDEBAR_CLOSE_SETTLE_DELAY_MS);
+      return () => window.clearTimeout(handle);
     }
     setMobileSidebarSettled(false);
     const handle = window.setTimeout(() => {
