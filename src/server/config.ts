@@ -2,7 +2,7 @@
  * Termdock 配置中心
  *
  * —— 如何新增可配置值（三步法） ——
- * 1. 选辅助函数：envInt(envKey, fallback) / envStr(envKey, fallback) / envBool(envKey, fallback)
+ * 1. 选辅助函数：envInt(envKey, fallback) / envStr(envKey, fallback)
  * 2. 在对应命名空间对象上加 getter（不要直接赋值——ESM import hoisting 会导致
  *    dotenv 加载前就读值，getter 懒求值可规避此问题）
  * 3. 在 .env.example 补充文档，在 docs/configuration.md 补充速查表条目
@@ -32,11 +32,6 @@ function envStr(key: string, fallback: string): string {
   return process.env[key] || fallback;
 }
 
-function envBool(key: string, fallback: boolean): boolean {
-  const v = process.env[key];
-  if (v === undefined) return fallback;
-  return v === '1' || v === 'true' || v === 'yes';
-}
 
 // 判断是否为开发模式（NODE_ENV === 'development'）
 function isDev(): boolean {

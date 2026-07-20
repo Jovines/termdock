@@ -31,7 +31,7 @@ export function getToolbarActionLabel(action: MobileToolbarAction, index: number
 // actions/programs changed). The App reads this on startup and, when the
 // stored version differs, overwrites all built-in preset ids with the latest
 // definitions while keeping any user-authored custom presets intact.
-export const BUILTIN_TOOLBAR_PRESETS_VERSION = 11;
+export const BUILTIN_TOOLBAR_PRESETS_VERSION = 12;
 
 export function getBuiltinToolbarPresetIds(): string[] {
   return DEFAULT_PRESETS.map((preset) => preset.id);
@@ -71,6 +71,21 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
       { id: 'claude-undo', label: '/undo', sequence: '/undo', doubleTapSequence: '/undo\r' },
       { id: 'claude-clear', label: '/clear', sequence: '/clear', doubleTapSequence: '/clear\r' },
       { id: 'claude-compact', label: '/compact', sequence: '/compact', doubleTapSequence: '/compact\r' },
+    ],
+    showOnDesktop: true,
+  },
+  {
+    id: 'codex',
+    label: 'Codex',
+    programs: ['codex'],
+    includeAlt: false,
+    rowLayout: [6],
+    actions: [
+      { id: 'codex-undo', label: '/undo', sequence: '/undo', doubleTapSequence: '/undo\r' },
+      { id: 'codex-clear', label: '/clear', sequence: '/clear', doubleTapSequence: '/clear\r' },
+      { id: 'codex-model', label: '/model', sequence: '/model', doubleTapSequence: '/model\r' },
+      { id: 'codex-compact', label: '/compact', sequence: '/compact', doubleTapSequence: '/compact\r' },
+      { id: 'codex-resume', label: '/resume', sequence: '/resume', doubleTapSequence: '/resume\r' },
     ],
     showOnDesktop: true,
   },
