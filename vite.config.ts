@@ -75,14 +75,6 @@ export default defineConfig({
         // dev 模式下经常涉及一些没缓存好的资源（HMR 客户端、新加的模块等），
         // 让 SW 在拿不到 precached 内容时回到 network 而不是报 404。
         navigateFallbackDenylist: [/^\/api\//, /^\/health$/],
-        runtimeCaching: [
-          {
-            // API 响应不应被 SW 缓存——NetworkOnly 避免 NetworkFirst 在网络慢时
-            // 从空缓存返回 "no-response"，导致 SW 拦截报错
-            urlPattern: /\/api\/.*/i,
-            handler: 'NetworkOnly',
-          },
-        ],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
       },
     }),

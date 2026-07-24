@@ -2736,7 +2736,7 @@ async function main(): Promise<void> {
 
   await runFirstRunWizard();
 
-  await refreshDefaultHttpsCertificateSafely();
+  // HTTPS certs are only generated when user explicitly runs --setup-local-https
   const refreshedHttps = resolveHttpsOptions(options);
   const activeHttps = refreshedHttps;
 
