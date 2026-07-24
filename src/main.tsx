@@ -15,6 +15,7 @@ import {
   type AuthStatus,
 } from './lib/terminal/api';
 import { setupPwaUpdateReload } from './lib/utils/pwaUpdate';
+import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
 
 syncInitialViewportCssVars();
 setupPwaUpdateReload();
@@ -23,6 +24,7 @@ try {
   const storedTheme = JSON.parse(window.localStorage.getItem('termdock-color-theme') || 'null') as unknown;
   if (storedTheme === 'dark' || storedTheme === 'light') {
     document.documentElement.dataset.theme = storedTheme;
+    syncThemeColorMeta(storedTheme);
   }
 } catch {
   // Ignore corrupt storage; App will fall back to the default theme.

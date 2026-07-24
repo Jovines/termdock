@@ -3,50 +3,61 @@
 @tailwind utilities;
 
 :root {
-  --background: #100F0F;
-  --foreground: #CECDC3;
-  --surface: #282726;
-  --surface-2: #343331;
-  --surface-elevated: #403E3C;
-  --background-subtle: #1C1B1A;
-  --muted: #575653;
-  --muted-foreground: #878580;
-  --border: #403E3C;
-  --border-strong: #575653;
-  --input: #282726;
-  --primary: #879A39;
+  /* ── Flexoki 深色色板(唯一来源, https://stephango.com/flexoki ) ──
+     每个变量右侧标注官方 token,改色只能整组换成官方值,不许凭手感调。
+     分层约定:bg-2 = 安全区/tab/终端同一块沉浸面;ui 阶梯 = 浮层,
+     normal → hover(ui-2) → active(ui-3);强调色只用官方 400 值。 */
+  --background: #100F0F; /* bg (black) */
+  --foreground: #CECDC3; /* tx  (base-200) */
+  --surface: #282726; /* ui  (base-900) */
+  --surface-2: #343331; /* ui-2 (base-850) */
+  --surface-elevated: #403E3C; /* ui-3 (base-800) */
+  --background-subtle: #1C1B1A; /* bg-2 (base-950) */
+  /* 主界面 chrome(安全区/tab 条/键盘栏)的沉浸底色,与终端同一块面。
+     深色 = bg-2;浅色 = paper(见下方 light 块),否则终端上下会框一圈脏灰。 */
+  --chrome-bg: #1C1B1A;
+  --muted: #575653; /* tx-3 (base-700) */
+  --muted-foreground: #878580; /* tx-2 (base-500) */
+  --border: #403E3C; /* ui-3 */
+  --border-strong: #575653; /* tx-3 */
+  --input: #282726; /* ui */
+  --primary: #879A39; /* green-400 */
   --primary-foreground: #100F0F;
-  --accent: #4385BE;
+  --accent: #4385BE; /* blue-400 */
   --accent-foreground: #100F0F;
-  --destructive: #D14D41;
+  --destructive: #D14D41; /* red-400 */
   --destructive-foreground: #100F0F;
-  --warning: #D0A215;
+  --warning: #D0A215; /* yellow-400 */
   --warning-foreground: #100F0F;
   --warning-rgb: 208 162 21;
-  --success: #879A39;
+  --success: #879A39; /* green-400 */
   --success-foreground: #100F0F;
   --success-rgb: 135 154 57;
-  --folder: #D0A215;
-  --tmux: #8B7EC8;
+  --folder: #D0A215; /* yellow-400 */
+  --tmux: #8B7EC8; /* purple-400 */
   --tmux-rgb: 139 126 200;
-  --ring: #4385BE;
-  --hover: #CECDC3;
+  --ring: #4385BE; /* blue-400 */
+  --hover: #CECDC3; /* tx */
   --primary-rgb: 135 154 57;
   --accent-rgb: 67 133 190;
   --app-backdrop: rgba(0, 0, 0, 0.55);
   --app-backdrop-soft: rgba(0, 0, 0, 0.4);
-  --app-shadow-strong: rgba(0, 0, 0, 0.28);
-  --app-shadow-soft: rgba(0, 0, 0, 0.18);
-  --overlay-foreground: #FFFCF0;
+  --app-shadow-strong: rgba(0, 0, 0, 0.38);
+  --app-shadow-soft: rgba(0, 0, 0, 0.24);
+  --overlay-foreground: #FFFCF0; /* paper */
   --overlay-foreground-rgb: 255 252 240;
   --overlay-background: rgb(16 15 15 / 0.76);
   --overlay-control-bg: rgb(255 252 240 / 0.22);
   --overlay-control-muted: rgb(255 252 240 / 0.34);
-  --diff-accent-rgb: 67, 133, 190;
-  --diff-insert-rgb: 135, 154, 57;
-  --diff-delete-rgb: 209, 77, 65;
-  --diff-border-rgb: 64, 62, 60;
+  --diff-accent-rgb: 67, 133, 190; /* blue-400 */
+  --diff-insert-rgb: 135, 154, 57; /* green-400 */
+  --diff-delete-rgb: 209, 77, 65; /* red-400 */
+  --diff-border-rgb: 64, 62, 60; /* ui-3 */
   --skeleton-base-rgb: 255, 255, 255;
+  /* 同色系橄榄微光(spec green-400):grazes the top edge of chrome surfaces,
+     给扁平 surface 一点"被照亮"的深度。这是 Flexoki 体系之外的加法,
+     色彩本身取自官方色板。 */
+  --chrome-glow: radial-gradient(120% 90px at 20% 0%, rgba(135, 154, 57, 0.09), transparent 70%);
   --safe-top-inset: env(safe-area-inset-top, 0px);
   --safe-right-inset: env(safe-area-inset-right, 0px);
   --safe-bottom-inset: env(safe-area-inset-bottom, 0px);
@@ -133,8 +144,12 @@ html[data-theme='light'] {
   --surface-2: #DAD8CE;
   --surface-elevated: #CECDC3;
   --background-subtle: #F2F0E5;
+  --chrome-bg: #FFFCF0;
   --muted: #B7B5AC;
-  --muted-foreground: #6F6E69;
+  /* 官方 light tx-2 是 base-600 #6F6E69,但大量灰字是 10-11px 小字且叠
+     /75 /60 透明度,有效对比掉到 ~2.9:1 看不清。降一档到族内 base-700,
+     全强度 ~5.9:1、75% 变体 ~4.0:1,全部可用。 */
+  --muted-foreground: #575653;
   --border: #CECDC3;
   --border-strong: #B7B5AC;
   --input: #E6E4D9;
@@ -173,13 +188,25 @@ html[data-theme='light'] {
   --skeleton-base-rgb: 16, 15, 15;
 }
 
+/* 浅色下撤掉抽屉微光:它是为深色面设计的"提光",叠在 paper 上
+   会变成一层发闷的卡其灰。浅色 chrome 保持干净纸面。 */
+html[data-theme='light'] .chrome-glow-panel {
+  background: var(--surface);
+}
+
+
 body {
   margin: 0;
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: var(--background-subtle);
+  /* 安全区 / tab chrome / 终端共用 --chrome-bg 一块面,上下完全沉浸。 */
+  background-color: var(--chrome-bg);
   color: var(--foreground);
+}
+
+.app-chrome-bg {
+  background-color: var(--chrome-bg);
 }
 
 html {
@@ -229,12 +256,21 @@ body {
    Native 100dvh is not reliable enough with iOS/PWA soft-keyboard animation
    and can override the visualViewport-based shrink logic. */
 
+/*
+ * Chrome glow: 同色系微光 grazes the top of drawer panels(顶 tab 不用——
+ * 那里用户要求和终端底色完全一致)。`chrome-glow-panel` 是抽屉面板的完整处理。
+ */
+.chrome-glow-panel {
+  background: var(--chrome-glow), var(--surface);
+}
+
 .terminal-viewport-container {
   cursor: text;
   /* 触摸滚动优化 */
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: none;
 }
+
 
 .terminal-viewport-container:focus {
   outline: none;
@@ -408,7 +444,7 @@ textarea:focus-within {
  */
 * {
   -webkit-tap-highlight-color: transparent;
-  /* Tailwind's `ring-*` utility falls back to a hard-coded blue (#3b82f6) when no
+  /* Tailwind's `ring-*` utility falls back to its own hard-coded blue when no
      ring color is set. Re-point the default to our theme border so utilities like
      `ring-1` don't suddenly bleed bright blue around inputs/cards. */
   --tw-ring-color: var(--border);
@@ -604,7 +640,7 @@ body {
     height: var(--app-base-vh, 100lvh);
     width: 100vw;
     touch-action: pan-y;
-    background-color: var(--background-subtle) !important;
+    background-color: var(--chrome-bg) !important;
     color: var(--foreground) !important;
   }
 

@@ -63,9 +63,6 @@ export function DiffReviewFrame({
   const desktopFrameRef = useRef<HTMLDivElement | null>(null);
   const desktopResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
   const [desktopListWidthPx, setDesktopListWidthPx] = useState(readDesktopListWidth);
-  const syncMobileSwiperTouch = useCallback((instance: SwiperInstance) => {
-    instance.allowTouchMove = true;
-  }, []);
 
   useEffect(() => {
     if (mobile || desktopLayout !== 'split') return;
@@ -110,13 +107,11 @@ export function DiffReviewFrame({
     const slideToDetail = () => {
       const swiper = swiperRef.current;
       if (!swiper) return;
-      syncMobileSwiperTouch(swiper);
       swiper.slideTo(1);
     };
     const slideToList = () => {
       const swiper = swiperRef.current;
       if (!swiper) return;
-      syncMobileSwiperTouch(swiper);
       swiper.slideTo(0);
     };
     const listContent = typeof list === 'function' ? list({ slideToDetail }) : list;
@@ -131,17 +126,19 @@ export function DiffReviewFrame({
         noSwiping
         noSwipingClass="swiper-no-swiping"
         noSwipingSelector=".swiper-no-swiping"
-        allowTouchMove
+        // Touch moves stay frozen until the sidebar's gesture arbiter hands
+        // a horizontal drag to this swiper (flipped live, then restored on
+        // touch end). The wide touchAngle keeps the mid-gesture handoff
+        // from being misread as vertical on noisy frames.
+        allowTouchMove={false}
+        touchAngle={75}
         touchStartPreventDefault={false}
         onSwiper={(instance) => {
           swiperRef.current = instance;
-          syncMobileSwiperTouch(instance);
           if (externalSwiperRef) externalSwiperRef.current = instance;
         }}
         onSlideChange={(instance) => {
-          const nextIndex = instance.activeIndex;
-          syncMobileSwiperTouch(instance);
-          onMobileSlideChange?.(nextIndex);
+          onMobileSlideChange?.(instance.activeIndex);
         }}
       >
         <SwiperSlide className="h-full min-h-0">
@@ -156,8 +153,8 @@ export function DiffReviewFrame({
             </div>
           </div>
         </SwiperSlide>
-        <SwiperSlide className="h-full min-h-0" data-sidebar-gesture-ignore>
-          <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface" data-sidebar-gesture-ignore>
+        <SwiperSlide className="h-full min-h-0">
+          <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface">
             <div className="shrink-0 border-b border-border/15 px-3 py-2">
               {detailHeader ?? (
                 <button
@@ -174,7 +171,6 @@ export function DiffReviewFrame({
               className={detailOwnsScroll
                 ? 'min-h-0 flex-1 overflow-hidden'
                 : 'termdock-diff-stream-scroller min-h-0 flex-1 overflow-y-auto overscroll-contain'}
-              data-sidebar-gesture-ignore
               onScroll={detailOwnsScroll ? undefined : (event) => onDetailScroll?.(event.currentTarget)}
             >
               {detail}

@@ -214,7 +214,7 @@ function renderFileRow(
         'data-diff-status': file.status,
       }}
     >
-      <span className="select-text" data-sidebar-gesture-ignore>
+      <span className="select-text">
         <span className={`block truncate leading-snug ${selected ? 'font-medium' : ''}`}>{display.name}</span>
         {props.mode !== 'tree' && display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
         {props.renderSubtitle?.(file)}

@@ -504,10 +504,7 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
             )}
           </div>
           <div
-            className="swiper-no-swiping overflow-x-auto rounded-md border border-border/15 bg-surface-2 p-1.5"
-            data-sidebar-gesture-ignore
-            onPointerDown={(event) => event.stopPropagation()}
-            onTouchStart={(event) => event.stopPropagation()}
+            className="overflow-x-auto rounded-md border border-border/15 bg-surface-2 p-1.5"
             onWheel={(event) => event.stopPropagation()}
           >
             <div className="relative" style={{ width: dag.width, height: dag.height }}>

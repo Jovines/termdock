@@ -122,7 +122,11 @@ const MARKDOWN_TABLE_CELL_CLASS = 'border-r px-2 py-1.5 sm:px-3 sm:py-2';
 const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'max-w-[18rem] whitespace-normal break-words sm:max-w-[27rem]';
 const MARKDOWN_TABLE_HEADER_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-b border-border/15 font-semibold last:border-r-0`;
 const MARKDOWN_TABLE_BODY_CELL_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-border/10 align-top text-muted-foreground last:border-r-0`;
-const FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS = 'termdock-file-preview-horizontal-scroll swiper-no-swiping';
+// Native horizontal-scroll regions inside the sidebar (code blocks, tables).
+// The sidebar gesture arbiter resolves these against the enclosing swiper and
+// the drawer per touch sequence, so no swiper-no-swiping / gesture-ignore
+// markers are needed — the class only carries the touch-action CSS rule.
+const FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS = 'termdock-file-preview-horizontal-scroll';
 const MARKDOWN_TABLE_SCROLL_CLASS = `${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-md-table-scroll max-w-full overflow-x-auto overflow-y-hidden rounded-lg border border-border/20 bg-surface`;
 
 type GitActionKey = GitActionRequest['action'];
@@ -837,6 +841,36 @@ function resolveMarkdownImageSrc(src: string, markdownFilePath: string | null, r
   return `/api/terminal/fs/blob?path=${encodeURIComponent(absolutePath)}`;
 }
 
+// Markdown image with a load-time collapse fix. SVGs without intrinsic
+// dimensions (no width/height attributes, only a viewBox — or percentage
+// dimensions) collapse to 0×0 inside the shrink-to-fit button wrapper below:
+// the img's percentage max-width and the wrapper's content-derived width form
+// a cyclic dependency that Chrome resolves to zero. When that happens, pin the
+// width to the natural size to give the img a definite used width. Images that
+// render fine on their own are left untouched so the max-width/max-height
+// joint constraint keeps their aspect ratio (an explicit width would break it
+// for images larger than the max-height cap).
+function MarkdownImage({ src, alt, title }: { src: string; alt: string; title?: string }) {
+  const [pinnedWidth, setPinnedWidth] = useState<number | null>(null);
+  return (
+    <img
+      src={src}
+      alt={alt}
+      title={title}
+      loading="lazy"
+      decoding="async"
+      className="block max-h-[480px] max-w-full object-contain"
+      style={pinnedWidth ? { width: pinnedWidth } : undefined}
+      onLoad={(event) => {
+        const img = event.currentTarget;
+        if (img.clientWidth === 0 && img.naturalWidth > 0) {
+          setPinnedWidth(img.naturalWidth);
+        }
+      }}
+    />
+  );
+}
+
 function renderMarkdownImage(
   key: string,
   alt: string,
@@ -849,16 +883,7 @@ function renderMarkdownImage(
 
   const imageIndex = context.images.length;
   context.images.push({ kind: 'image', src: imageSrc, alt, title });
-  const image = (
-      <img
-        src={imageSrc}
-        alt={alt}
-        title={title}
-        loading="lazy"
-        decoding="async"
-        className="block max-h-[480px] max-w-full object-contain"
-      />
-  );
+  const image = <MarkdownImage src={imageSrc} alt={alt} title={title} />;
 
   return context.onImageOpen ? (
     <button
@@ -1552,7 +1577,7 @@ function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: 
         index += 1;
       }
       nodes.push(
-        <div key={`${keyPrefix}-table-${blockStart}`} className={MARKDOWN_TABLE_SCROLL_CLASS} data-file-preview-horizontal-scroll data-markdown-table-scroll>
+        <div key={`${keyPrefix}-table-${blockStart}`} className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
             <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
               <thead className="bg-surface-2 text-foreground">
               <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(cell, `${keyPrefix}-th-${blockStart}-${cellIndex}`, true, context)}</div></th>)}</tr>
@@ -1809,7 +1834,7 @@ function MarkdownCodeBlock({ code, lang, blockKey }: MarkdownCodeBlockProps) {
   return (
     <div className="overflow-hidden rounded-lg border border-border/20 bg-surface shadow-sm">
       {lang && <div className="border-b border-border/15 bg-surface-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">{lang}</div>}
-      <pre className={`${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-code overflow-auto p-3 text-[11px] leading-relaxed text-foreground`} data-file-preview-horizontal-scroll><code>{highlighted ?? (code || ' ')}</code></pre>
+      <pre className={`${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-code overflow-auto p-3 text-[11px] leading-relaxed text-foreground`}><code>{highlighted ?? (code || ' ')}</code></pre>
     </div>
   );
 }
@@ -2099,7 +2124,7 @@ export function buildMarkdownPreviewRenderResult(
         content: (lineRange) => {
           const isSelectedLine = (line: number) => Boolean(lineRange && line >= lineRange.start && line <= lineRange.end);
           return (
-            <div className={MARKDOWN_TABLE_SCROLL_CLASS} data-file-preview-horizontal-scroll data-markdown-table-scroll>
+            <div className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
               <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
                 <thead className="bg-surface-2 text-foreground">
                   <tr data-markdown-table-row-line={blockStart + 1} data-selected={isSelectedLine(blockStart + 1) ? 'true' : undefined}>{renderedHeader.map((cellContent, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{cellContent}</div></th>)}</tr>
@@ -3822,8 +3847,9 @@ interface ZoomableViewportProps {
 
 // Pinch-to-zoom viewer. Supports touch pinch (mobile), trackpad pinch and
 // ctrl/⌘ + wheel (desktop), and double-tap / double-click to toggle zoom. The
-// container carries `data-sidebar-gesture-ignore` so the drawer's swipe-to-close
-// gesture never hijacks a pan while content is zoomed in.
+// container carries `data-sidebar-gesture-ignore` only while zoomed, so pans
+// of enlarged content are never hijacked — while an unzoomed horizontal swipe
+// still flows to the sidebar's gesture arbiter (e.g. swiper back-navigation).
 function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: ZoomableViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
@@ -3976,7 +4002,7 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
   return (
     <div
       ref={containerRef}
-      data-sidebar-gesture-ignore
+      data-sidebar-gesture-ignore={zoomed ? '' : undefined}
       className="flex h-full w-full touch-none select-none items-center justify-center overflow-hidden"
       style={{ cursor: zoomed ? 'grab' : 'zoom-in' }}
       onDoubleClick={(event) => {
@@ -4209,13 +4235,6 @@ function FilePreview({
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
   const lineRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const horizontalPreviewSwipeRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    scroller: HTMLElement;
-    closed: boolean;
-  } | null>(null);
   // Floating "引用" button position relative to the scroller. Mouse clicks set
   // this near the cursor; non-pointer jumps fall back to the selected line.
   const [floatingInsertPos, setFloatingInsertPos] = useState<{ top: number; left: number } | null>(null);
@@ -4474,48 +4493,6 @@ function FilePreview({
     return () => ro.disconnect();
   }, [lineRange, floatingInsertPos, previewState, markdownViewMode, filePath, rootPath, highlightedLines]);
 
-  const handleHorizontalPreviewPointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    if (!isMobile || !onClose) return;
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    const target = event.target instanceof HTMLElement
-      ? event.target.closest<HTMLElement>('[data-file-preview-horizontal-scroll]')
-      : null;
-    if (!target) return;
-    horizontalPreviewSwipeRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      scroller: target,
-      closed: false,
-    };
-  }, [isMobile, onClose]);
-
-  const handleHorizontalPreviewPointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    const gesture = horizontalPreviewSwipeRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId || gesture.closed) return;
-    const dx = event.clientX - gesture.startX;
-    const dy = event.clientY - gesture.startY;
-    if (Math.abs(dx) < 36 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
-
-    const maxScrollLeft = Math.max(0, gesture.scroller.scrollWidth - gesture.scroller.clientWidth);
-    const atLeftEdge = gesture.scroller.scrollLeft <= 1;
-    const canScrollLeft = gesture.scroller.scrollLeft > 1;
-    const canScrollRight = gesture.scroller.scrollLeft < maxScrollLeft - 1;
-
-    if ((dx > 0 && canScrollLeft) || (dx < 0 && canScrollRight)) return;
-    if (dx > 0 && atLeftEdge && onClose) {
-      gesture.closed = true;
-      event.preventDefault();
-      onClose();
-    }
-  }, [onClose]);
-
-  const clearHorizontalPreviewSwipe = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    if (horizontalPreviewSwipeRef.current?.pointerId === event.pointerId) {
-      horizontalPreviewSwipeRef.current = null;
-    }
-  }, []);
-
   if (!filePath) {
     return <div className="mx-3 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
   }
@@ -4749,7 +4726,7 @@ function FilePreview({
           </div>
         </div>
       ) : previewState.kind === 'image' ? (
-        <div className="min-h-0 flex-1 overflow-hidden bg-surface p-3" data-sidebar-gesture-ignore>
+        <div className="min-h-0 flex-1 overflow-hidden bg-surface p-3">
           <ZoomableImage
             src={previewState.objectUrl}
             alt={display.name}
@@ -4768,13 +4745,8 @@ function FilePreview({
         <div
           ref={scrollerRef}
           className="termdock-native-select relative min-h-0 flex-1 overflow-auto bg-surface"
-          data-sidebar-gesture-ignore
           data-markdown-preview-scroller
           onScroll={handleMarkdownPreviewScroll}
-          onPointerDown={handleHorizontalPreviewPointerDown}
-          onPointerMove={handleHorizontalPreviewPointerMove}
-          onPointerUp={clearHorizontalPreviewSwipe}
-          onPointerCancel={clearHorizontalPreviewSwipe}
           style={{ touchAction: 'pan-x pan-y' }}
         >
           <MarkdownPreview
@@ -4811,12 +4783,7 @@ function FilePreview({
         <div
           ref={scrollerRef}
           onScroll={handleSourcePreviewScroll}
-          onPointerDown={handleHorizontalPreviewPointerDown}
-          onPointerMove={handleHorizontalPreviewPointerMove}
-          onPointerUp={clearHorizontalPreviewSwipe}
-          onPointerCancel={clearHorizontalPreviewSwipe}
           className={`${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-surface p-2 font-mono text-[11px] leading-relaxed text-foreground`}
-          data-file-preview-horizontal-scroll
         >
           {lines.length > 0 ? (
             <div className="min-w-full">
@@ -5768,12 +5735,23 @@ export function RightSidebar(
     if (!isMobile) return;
     setMobileFilePreviewOpen(rightSidebarFilePreviewOpen);
     if (!rightSidebarFilePreviewOpen) {
+      // The App-level close only flips state — also slide the swiper back to
+      // the file list. Without this, mobileFileSlideIndex stays 1, which keeps
+      // the FilePreview mounted and visible (filePath prop stays truthy), so
+      // the preview pane looks stuck and the back button appears to need two
+      // taps: one to clear App state, one to actually navigate back.
+      setMobileFileSlideIndex(0);
+      mobileFileSwiperRef.current?.slideTo(0);
       setLineRange(null);
     }
   }, [isMobile, rightSidebarFilePreviewOpen, rootPath]);
 
   useEffect(() => {
     if (rightSidebarFilePreviewCloseSignal !== undefined) {
+      // Same slide-back as above, for close paths that only bump the signal
+      // (e.g. Android/hardware back handled via popstate).
+      setMobileFileSlideIndex(0);
+      mobileFileSwiperRef.current?.slideTo(0);
       setMobileFilePreviewOpen(false);
       setLineRange(null);
     }
@@ -9292,8 +9270,12 @@ export function RightSidebar(
               noSwiping
               noSwipingClass="swiper-no-swiping"
               noSwipingSelector=".swiper-no-swiping"
+              // Frozen until the sidebar gesture arbiter hands a horizontal
+              // drag to this swiper (see gestureArbiter.ts). touchAngle is
+              // widened so the mid-gesture handoff isn't misread as vertical.
+              allowTouchMove={false}
+              touchAngle={75}
               touchStartPreventDefault={false}
-              {...(mobileFileSlideIndex === 1 ? { 'data-sidebar-gesture-ignore': true } : {})}
               onSwiper={(instance) => {
                 mobileFileSwiperRef.current = instance;
                 instance.slideTo(mobileFileSlideIndex, 0);
@@ -9347,8 +9329,8 @@ export function RightSidebar(
                   />
                 </div>
               </SwiperSlide>
-              <SwiperSlide className="h-full min-h-0" data-sidebar-gesture-ignore>
-                <div className="h-full overflow-hidden bg-surface" data-sidebar-gesture-ignore>
+              <SwiperSlide className="h-full min-h-0">
+                <div className="h-full overflow-hidden bg-surface">
                   <FilePreview
                     filePath={filesPaneActive && (mobileFilePreviewOpen || mobileFileSlideIndex === 1) ? selectedFilePath : null}
                     onInsertReference={insertPathReference}

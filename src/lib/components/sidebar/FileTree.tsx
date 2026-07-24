@@ -436,7 +436,7 @@ const FileTreeItem = memo(function FileTreeItem({
             </span>
           </>
         )}
-        <span className={`min-w-0 flex-1 select-text whitespace-normal break-all text-left leading-snug ${isSelected ? 'font-medium' : ''}`} data-sidebar-gesture-ignore>
+        <span className={`min-w-0 flex-1 select-text whitespace-normal break-all text-left leading-snug ${isSelected ? 'font-medium' : ''}`}>
           {node.name}
           {node.isSymlink && (
             <span className="ml-1 inline-flex align-middle text-muted-foreground/70" title="Symbolic link">
@@ -707,7 +707,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
             <span className={isSelected ? 'text-primary' : 'text-muted-foreground/80'}>{getFileIcon(node.name, node.type)}</span>
           </>
         )}
-        <span className="min-w-0 flex-1 select-text" data-sidebar-gesture-ignore>
+        <span className="min-w-0 flex-1 select-text">
           <span className={`block whitespace-normal break-all leading-snug ${isSelected ? 'font-medium' : ''}`}>
             {node.name}
             {node.isSymlink && (
@@ -889,7 +889,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
       >
         {expanded ? <RiChevronDown size={14} className="shrink-0 text-muted-foreground/80" /> : <RiChevronRight size={14} className="shrink-0 text-muted-foreground/80" />}
         <span className={isSelected ? 'text-primary' : 'text-muted-foreground/80'}>{getFileIcon(entry.name, 'file')}</span>
-        <span className="min-w-0 flex-1 select-text" data-sidebar-gesture-ignore>
+        <span className="min-w-0 flex-1 select-text">
           <span className="block whitespace-normal break-all font-medium leading-snug">{entry.name}</span>
           <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, entry.path)}</span>
         </span>
@@ -930,7 +930,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
               title={`${getRelativePath(rootPath, entry.path)}:${match.line}`}
             >
               <span className="shrink-0 select-none tabular-nums text-muted-foreground/60">{match.line}</span>
-              <span className="min-w-0 flex-1 truncate whitespace-pre select-text" data-sidebar-gesture-ignore>{highlightMatch(match.text, query)}</span>
+              <span className="min-w-0 flex-1 truncate whitespace-pre select-text">{highlightMatch(match.text, query)}</span>
             </div>
           ))}
           {hiddenCount > 0 && (

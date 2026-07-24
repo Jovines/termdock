@@ -8,6 +8,12 @@ import {
   SPRING_SHEET,
   type SpringSolver,
 } from '../../utils/spring';
+import {
+  buildConsumerChain,
+  hasActiveTextSelection,
+  resolveGestureOwner,
+  yieldToSwiper,
+} from './gestureArbiter';
 
 interface SidebarProps {
   side: 'left' | 'right';
@@ -24,6 +30,13 @@ interface SidebarProps {
 }
 
 const EDGE_ZONE_WIDTH = 15;
+// Horizontal dominance needed before a drag is recognized (use-gesture
+// `axis` + `axisThreshold`): the first movement callback after this slop
+// is the arbitration moment — before it the drawer stays frozen so inner
+// content never double-moves, and vertical scrolls never touch the drawer.
+const AXIS_LOCK_THRESHOLD_PX = 8;
+// The drag config types only accept the per-pointer-type object form.
+const AXIS_LOCK_THRESHOLD = { touch: AXIS_LOCK_THRESHOLD_PX, pen: AXIS_LOCK_THRESHOLD_PX };
 // A release faster than this (px/s) counts as a flick. Only flicks earn a
 // little bounce (damping 0.8) — overshoot feels right when the gesture
 // itself carried momentum, and wrong otherwise. Slower snaps and
@@ -123,6 +136,8 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   // some release paths — a signed release velocity for momentum projection
   // and spring handoff must come from our own history instead.
   const dragHistoryRef = useRef<Array<{ t: number; x: number }>>([]);
+  /** Restore handle for a swiper we handed a gesture to (allowTouchMove flip). */
+  const swiperYieldRestoreRef = useRef<(() => void) | null>(null);
 
   // Frozen at mount so React never rewrites transform/opacity after the
   // first commit — from then on both are driven imperatively by the spring /
@@ -236,6 +251,17 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       window.clearTimeout(commitTimerRef.current);
       commitTimerRef.current = null;
     }
+  }, []);
+
+  /**
+   * Restore a swiper handed a previous gesture (safety net — the arbiter's
+   * own touchend listeners normally do this). Must run before any new
+   * gesture setup so a stale allowTouchMove=true can never cause a
+   * double-move.
+   */
+  const restoreYieldedSwiper = useCallback(() => {
+    swiperYieldRestoreRef.current?.();
+    swiperYieldRestoreRef.current = null;
   }, []);
 
   /**
@@ -451,12 +477,34 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       cancelPendingPositionFrame();
       cancelPendingCommit();
       stopPlayback();
+      restoreYieldedSwiper();
     };
-  }, [cancelPendingCommit, cancelPendingPositionFrame, stopPlayback]);
+  }, [cancelPendingCommit, cancelPendingPositionFrame, restoreYieldedSwiper, stopPlayback]);
 
   // ESC 由 App 顶层统一处理（按层级关闭 modal/drawer/sidebar，并走 history overlay）。
   // 这里不再单独监听，避免和全局 handler 同时触发 history.back() 两次。
 
+  /**
+   * Panel drag with single-ownership arbitration.
+   *
+   * `axis: 'x'` + `axisThreshold` block every emit until the drag is
+   * horizontally dominant past the slop — so `first` fires at the
+   * axis-lock moment with the drag direction already known (and vertical
+   * gestures never reach this handler at all). That makes `first` the
+   * single arbitration point for the whole touch sequence: the consumer
+   * chain under the finger (inner x-scrollers → swipers → drawer) is
+   * resolved once, and exactly one owner takes it from there —
+   *
+   *  - a scroller that can scroll this way  → native scroll (we cancel)
+   *  - else a swiper that can slide this way → flipped live via
+   *    allowTouchMove, restored on touch end (we cancel)
+   *  - else a close-direction drag          → the drawer tracks the finger
+   *  - else                                 → nearest consumer's own edge
+   *    resistance / drawer rubber-band feedback
+   *
+   * Because the drawer's drag is cancelled before it ever moved when it
+   * loses, drawer and content can never translate together.
+   */
   const bindPanel = useDrag(
     ({ active, cancel, first, last, movement: [mx], event }) => {
       dbg('bindPanel', { active, first, last, mx });
@@ -464,17 +512,40 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
         return;
       }
       if (first) {
+        restoreYieldedSwiper();
+        panelDragActiveRef.current = false;
+        dragHistoryRef.current = [];
         // The gesture-ignore check belongs at gesture START only. Checking it
         // again on release swallows the snap and freezes the panel wherever
         // the finger lifted (e.g. mid rubber-band) when the release lands on
         // an ignored child.
         if (shouldIgnorePanelDrag(event)) {
-          panelDragActiveRef.current = false;
           cancel();
           return;
         }
+        const panel = panelRef.current;
+        const chain = panel ? buildConsumerChain(event.target, panel) : null;
+        // A long-press text selection in progress owns the touch outright.
+        if (!chain || hasActiveTextSelection()) {
+          cancel();
+          return;
+        }
+        const owner = resolveGestureOwner(chain, mx, isLeftRef.current ? -1 : 1);
+        dbg('arbitrate', { owner: owner.kind, mx });
+        if (owner.kind === 'swiper') {
+          swiperYieldRestoreRef.current = yieldToSwiper(owner.instance);
+          cancel();
+          return;
+        }
+        if (owner.kind === 'scroller') {
+          // Native scroll already tracks the finger; just stay out.
+          cancel();
+          return;
+        }
+        // The drawer owns the gesture. Anchor at the live position; the
+        // movement offset keeps tracking 1:1 from the touch start, so the
+        // pre-lock slop shows up as a single-frame catch-up, not a lag.
         panelDragActiveRef.current = true;
-        dragHistoryRef.current = [];
         grabLivePosition();
         dragStartXRef.current = currentXRef.current;
       }
@@ -497,6 +568,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     },
     {
       axis: 'x',
+      axisThreshold: AXIS_LOCK_THRESHOLD,
       filterTaps: true,
       // Only enable drag-to-close from touch / pen — desktop mouse users
       // close via backdrop click, the X button, or Esc. This prevents
@@ -536,6 +608,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     },
     {
       axis: 'x',
+      axisThreshold: AXIS_LOCK_THRESHOLD,
       filterTaps: true,
       pointer: { touch: true },
     },
@@ -590,7 +663,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
         {...bindPanel()}
         ref={setPanelRef}
         data-sidebar={side}
-        className={`fixed inset-y-0 z-sidebar-panel flex flex-col bg-surface will-change-transform ${
+        className={`fixed inset-y-0 z-sidebar-panel flex flex-col chrome-glow-panel will-change-transform ${
           isLeft ? 'border-r border-border/15' : 'border-l border-border/15'
         }`}
         style={{

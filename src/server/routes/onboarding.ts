@@ -51,15 +51,15 @@ function createPage(caAvailable: boolean, qrItems: Array<{ label: string; addres
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Termdock Local Access</title>
   <style>
-    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f1115; color: #f5f5f5; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #100F0F; color: #CECDC3; }
     main { max-width: 720px; margin: 0 auto; padding: 32px 20px 48px; }
     .card { border: 1px solid rgba(255,255,255,.12); border-radius: 20px; background: rgba(255,255,255,.05); padding: 20px; }
     h1 { font-size: 28px; margin: 0 0 8px; }
     h2 { font-size: 18px; margin: 24px 0 8px; }
     p, li { color: rgba(255,255,255,.78); line-height: 1.6; }
-    code { word-break: break-all; color: #8bd5ff; }
-    .button { display: inline-flex; margin: 12px 0; padding: 12px 16px; border-radius: 999px; background: #41d17d; color: #08110b; font-weight: 700; text-decoration: none; }
-    .warn { margin: 12px 0; padding: 12px; border-radius: 12px; background: rgba(255, 193, 7, .15); color: #ffd36a; }
+    code { word-break: break-all; color: #4385BE; }
+    .button { display: inline-flex; margin: 12px 0; padding: 12px 16px; border-radius: 999px; background: #879A39; color: #100F0F; font-weight: 700; text-decoration: none; }
+    .warn { margin: 12px 0; padding: 12px; border-radius: 12px; background: rgba(208, 162, 21, .15); color: #D0A215; }
     .muted { color: rgba(255,255,255,.55); font-size: 13px; }
     .qr { display: inline-block; margin: 12px 0; padding: 10px; border-radius: 16px; background: #fff; }
     .qr img { display: block; width: 160px; height: 160px; }

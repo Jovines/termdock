@@ -36,6 +36,7 @@ import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
 import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
+import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
 import {
   getStoredPwaAiNotificationsEnabled,
   getStoredPwaNotificationAlertStyle,
@@ -553,6 +554,7 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = colorTheme;
+    syncThemeColorMeta(colorTheme);
     writeCache(COLOR_THEME_CACHE_KEY, colorTheme);
   }, [colorTheme]);
 
@@ -2013,12 +2015,12 @@ function App() {
 
   return (
     <div
-      className="w-screen h-full flex flex-col bg-background-subtle text-foreground"
+      className="w-screen h-full flex flex-col app-chrome-bg text-foreground"
     >
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
-        <div className="flex h-full w-full min-h-0 flex-col overflow-visible bg-background-subtle">
+        <div className="flex h-full w-full min-h-0 flex-col overflow-visible app-chrome-bg">
           <div
-            className={`flex shrink-0 items-center justify-between gap-1 bg-background-subtle px-1 sm:px-1.5 ${
+            className={`flex shrink-0 items-center justify-between gap-1 app-chrome-bg px-1 sm:px-1.5 ${
               groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'
             }`}
           >
@@ -2247,7 +2249,7 @@ function App() {
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 flex overflow-hidden bg-background-subtle">
+          <div className="min-h-0 flex-1 flex overflow-hidden app-chrome-bg">
             <div className="min-h-0 flex-1 overflow-hidden">
               <MultiTerminalView
                 terminalSettings={terminalSettings}

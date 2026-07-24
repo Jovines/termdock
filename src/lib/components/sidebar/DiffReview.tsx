@@ -457,7 +457,6 @@ export function DiffReview({
     <div
       ref={detailScrollerRef}
       className="termdock-diff-stream termdock-diff-stream-scroller h-full max-h-full min-h-0 overflow-y-auto overscroll-contain bg-surface"
-      data-sidebar-gesture-ignore
       onScroll={(event) => handleDetailScroll(event.currentTarget)}
     >
       {detailBody}

@@ -16,6 +16,25 @@
 - 搜索用 `rg`(ripgrep),不要 `grep -r`;查文件用 `Glob`,不要 `find`。
 - 改完 `src/` 用 `termdock-deploy` skill 验证;若编译错属他人 WIP,先停。
 
+## 色彩体系 (Flexoki)
+
+- 项目色板 = **Flexoki 深色主题**(https://stephango.com/flexoki),亮色主题
+  在 `html[data-theme='light']` 同族对应。
+- 颜色只允许出自两个 token 文件:`src/index.css`(`:root` 每个 var 右侧
+  标注了官方 token)和 `src/lib/terminal/theme.ts`(终端 ANSI,600→400 爬坡)。
+  组件/服务端**禁止**新写十六进制色值;需要新色先在 token 文件里加变量。
+- 强调色一律用**官方 400 值**(绿 #879A39 / 蓝 #4385BE / 红 #D14D41 /
+  黄 #D0A215 / 紫 #8B7EC8),不要凭手感"提亮/调暗"——作者已按深底调好对比。
+- 分层约定:主界面 chrome(安全区 / tab 条 / 键盘栏)用 `--chrome-bg`,
+  必须**与终端底色同一块面**才沉浸(深色 = bg-2 `#1C1B1A`,浅色 = paper
+  `#FFFCF0`;浅色若用 background-subtle 会在终端上下框出脏灰);`ui` 阶梯
+  (#282726→#343331→#403E3C)= 浮层,normal → hover → active 递升;
+  `bg`(#100F0F)只用于最深画布/遮罩叠色。
+- 服务端发往客户端的颜色(onboarding 页、agent 状态点)同样只能在
+  Flexoki 家族内取。
+- `src/lib/flexokiPalette.test.ts` 守卫:核心变量值逐项对账官方值 +
+  全库 hex 必须在 Flexoki 家族内。改色板 = 同步改该测试的 CORE_VARS。
+
 ## UI 层级 (z-index)
 
 - 全屏浮层(`fixed` 的遮罩/抽屉/弹窗/浮窗)**禁止**写裸 `z-[数字]`。

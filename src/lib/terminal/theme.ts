@@ -69,6 +69,9 @@ export const FLEXOKI_DARK: TerminalTheme = {
 };
 
 // Flexoki Light — same ANSI contract as dark, on paper background.
+// 浅色下 ANSI white/brightWhite 必须"反转"成深色调:7 号白给中深灰(tx-3),
+// 15 号亮白给最深的 tx——否则白字/加粗白字在纸面上直接隐形(TUI 大量
+// 用 bright white 做强调)。其余彩色仍按作者规则走 600(正常)/400(明亮)。
 export const FLEXOKI_LIGHT: TerminalTheme = {
   background: '#FFFCF0',
   foreground: '#100F0F',
@@ -84,7 +87,7 @@ export const FLEXOKI_LIGHT: TerminalTheme = {
   blue: '#205EA6',
   magenta: '#A02F6F',
   cyan: '#24837B',
-  white: '#CECDC3',
+  white: '#575653',
   brightBlack: '#6F6E69',
   brightRed: '#D14D41',
   brightGreen: '#879A39',
@@ -92,7 +95,7 @@ export const FLEXOKI_LIGHT: TerminalTheme = {
   brightBlue: '#4385BE',
   brightMagenta: '#CE5D97',
   brightCyan: '#3AA99F',
-  brightWhite: '#FFFCF0',
+  brightWhite: '#100F0F',
 };
 
 export function getTerminalTheme(colorTheme: TermdockColorTheme): TerminalTheme {

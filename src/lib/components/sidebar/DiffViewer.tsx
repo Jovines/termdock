@@ -1223,7 +1223,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
               {t('diffViewer.binaryOrEmpty')}
             </div>
           ) : (
-            <div className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${viewType === 'split' ? 'diff-split' : ''} ${wrap ? 'termdock-diff-wrap' : ''}`} data-sidebar-gesture-ignore>
+            <div className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${viewType === 'split' ? 'diff-split' : ''} ${wrap ? 'termdock-diff-wrap' : ''}`}>
               <div className="min-w-full">
                 {file.hunks.map((hunk, index) => {
                     const diffHeader = `diff --git ${formatDiffEndpoint('a', referenceOldPath)} ${formatDiffEndpoint('b', referenceNewPath)}`;

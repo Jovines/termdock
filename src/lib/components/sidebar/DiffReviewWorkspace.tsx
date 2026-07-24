@@ -178,7 +178,6 @@ export function DiffReviewWorkspace({
       detail={(
         <div
           className={detailOwnsScroll ? 'h-full min-h-0' : detailContainerClassName}
-          data-sidebar-gesture-ignore
         >
           {detail}
         </div>
