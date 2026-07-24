@@ -678,7 +678,8 @@ describe('right sidebar Markdown preview rendering', () => {
     const stage = container.querySelector('[data-markdown-image-lightbox-stage]');
     expect(stage).toBeTruthy();
     fireEvent.click(stage as Element);
-    vi.advanceTimersByTime(299);
+    // tap-close waits 450ms so a double-tap's second tap can veto it
+    vi.advanceTimersByTime(449);
     expect(onClose).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -687,7 +688,7 @@ describe('right sidebar Markdown preview rendering', () => {
     const image = screen.getByRole('img', { name: 'One' });
     fireEvent.click(stage as Element);
     fireEvent.doubleClick(image, { clientX: 120, clientY: 120 });
-    vi.advanceTimersByTime(350);
+    vi.advanceTimersByTime(500);
     expect(onClose).not.toHaveBeenCalled();
 
     const imgStyle = image.getAttribute('style') ?? '';

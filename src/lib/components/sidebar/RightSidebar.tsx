@@ -2464,10 +2464,13 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
   const scheduleTapClose = useCallback(() => {
     if (imageZoomed || Date.now() < suppressTapCloseUntilRef.current) return;
     clearTapCloseTimer();
+    // 450ms gives the second tap of a double-tap time to arrive and veto the
+    // close (see ZoomableViewport's pointer-level double-tap detection) —
+    // at 300ms the close used to win the race and double-tap "didn't work".
     closeTapTimerRef.current = window.setTimeout(() => {
       closeTapTimerRef.current = null;
       onClose();
-    }, 300);
+    }, 450);
   }, [clearTapCloseTimer, imageZoomed, onClose]);
 
   const goTo = useCallback((nextIndex: number) => {
@@ -4049,7 +4052,11 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
   const [animateTransform, setAnimateTransform] = useState(false);
-  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number; moved: boolean } | null>(null);
+  const activePointersRef = useRef<Set<number>>(new Set());
+  const sequenceWasMultiRef = useRef(false);
+  const lastTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
+  const manualDoubleTapAtRef = useRef(0);
   const transformRef = useRef(transform);
   transformRef.current = transform;
 
@@ -4109,17 +4116,51 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
     const el = containerRef.current;
     if (!el) return;
 
+    // NOTE: no stopPropagation on pointerdown/move except for the ACTIVE
+    // single-finger pan. The pinch listener (use-gesture, below) attaches in
+    // the bubble phase on this same element, and a capture-phase
+    // stopPropagation starves it — that used to kill pinch-to-zoom entirely
+    // whenever the touch landed on the image itself.
     const handlePointerDown = (event: globalThis.PointerEvent) => {
-      event.stopPropagation();
       if (event.pointerType === 'mouse' && event.button !== 0) return;
+      const isFirstPointer = activePointersRef.current.size === 0;
+      activePointersRef.current.add(event.pointerId);
+
+      // Manual double-tap detection instead of relying on dblclick: a second
+      // tap within 350ms / 24px toggles zoom and vetoes the lightbox's
+      // tap-to-close (whose timer would otherwise win the race on touch).
+      if (isFirstPointer) {
+        const now = Date.now();
+        const last = lastTapRef.current;
+        if (last && now - last.time < 350 && Math.hypot(event.clientX - last.x, event.clientY - last.y) < 24) {
+          lastTapRef.current = null;
+          manualDoubleTapAtRef.current = now;
+          onDoubleTap?.();
+          toggleZoom(event.clientX, event.clientY);
+          return;
+        }
+      }
+
+      // A second finger ends any single-finger pan — the pinch gesture owns
+      // the sequence from here.
+      if (activePointersRef.current.size > 1) {
+        sequenceWasMultiRef.current = true;
+        dragRef.current = null;
+        return;
+      }
+
       if (transformRef.current.scale <= 1) return;
       event.preventDefault();
+      // Pending pan: only engages once the finger moves past the tap
+      // threshold — otherwise the pointer-up counts as a tap (and can form a
+      // double-tap to zoom back out).
       dragRef.current = {
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
         originX: transformRef.current.x,
         originY: transformRef.current.y,
+        moved: false,
       };
       try {
         el.setPointerCapture?.(event.pointerId);
@@ -4133,10 +4174,16 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
     const handlePointerMove = (event: globalThis.PointerEvent) => {
       const drag = dragRef.current;
       if (!drag || drag.pointerId !== event.pointerId) return;
-      event.stopPropagation();
-      event.preventDefault();
       const dx = event.clientX - drag.startX;
       const dy = event.clientY - drag.startY;
+      if (!drag.moved) {
+        if (Math.hypot(dx, dy) < 6) return;
+        drag.moved = true;
+      }
+      // Only the ACTIVE pan swallows the event — pinch pointers must keep
+      // flowing to the gesture listeners.
+      event.stopPropagation();
+      event.preventDefault();
       setTransform((prev) => ({
         ...prev,
         ...clampOffset(prev.scale, drag.originX + dx, drag.originY + dy),
@@ -4144,13 +4191,25 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
     };
 
     const handlePointerEnd = (event: globalThis.PointerEvent) => {
-      if (dragRef.current?.pointerId !== event.pointerId) return;
-      event.stopPropagation();
-      dragRef.current = null;
-      try {
-        el.releasePointerCapture?.(event.pointerId);
-      } catch {
-        // Best effort only; a missing capture should not break pan cleanup.
+      const drag = dragRef.current;
+      const wasPanPointer = drag?.pointerId === event.pointerId && drag.moved;
+      if (drag?.pointerId === event.pointerId) {
+        if (drag.moved) event.stopPropagation();
+        dragRef.current = null;
+        try {
+          el.releasePointerCapture?.(event.pointerId);
+        } catch {
+          // Best effort only; a missing capture should not break pan cleanup.
+        }
+      }
+      if (!activePointersRef.current.delete(event.pointerId)) return;
+      if (activePointersRef.current.size === 0) {
+        // A completed single-pointer, non-pan sequence is a tap candidate for
+        // double-tap detection. Pinch and pan sequences are not.
+        if (!sequenceWasMultiRef.current && !wasPanPointer) {
+          lastTapRef.current = { time: Date.now(), x: event.clientX, y: event.clientY };
+        }
+        sequenceWasMultiRef.current = false;
       }
     };
 
@@ -4164,7 +4223,7 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
       window.removeEventListener('pointerup', handlePointerEnd, { capture: true });
       window.removeEventListener('pointercancel', handlePointerEnd, { capture: true });
     };
-  }, [clampOffset]);
+  }, [clampOffset, onDoubleTap, toggleZoom]);
 
   useGesture(
     {
@@ -4207,6 +4266,9 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
       style={{ cursor: zoomed ? 'grab' : 'zoom-in' }}
       onDoubleClick={(event) => {
         event.stopPropagation();
+        // The pointer-level double-tap detection already toggled zoom for
+        // this sequence — don't let the trailing dblclick toggle it back.
+        if (Date.now() - manualDoubleTapAtRef.current < 500) return;
         onDoubleTap?.();
         toggleZoom(event.clientX, event.clientY);
       }}
