@@ -454,7 +454,7 @@ function sanMatches(required: string, sans: string[]): boolean {
 }
 
 async function defaultCertificateNeedsRefresh(): Promise<boolean> {
-  if (!fileExists(defaultHttpsCertPath) || !fileExists(defaultHttpsKeyPath)) return false;
+  if (!fileExists(defaultHttpsCertPath) || !fileExists(defaultHttpsKeyPath)) return true;
   const sans = await readCertificateSans(defaultHttpsCertPath);
   if (sans.length === 0) return true;
   return getRequiredLocalHttpsNames().some((name) => !sanMatches(name, sans));
@@ -2616,6 +2616,7 @@ async function main(): Promise<void> {
   }
 
   const localApiToken = getOrCreateLocalApiToken();
+  await refreshDefaultHttpsCertificateSafely();
   const https = resolveHttpsOptions(options);
   const isManagedDefaultHttps = Boolean(https.cert === defaultHttpsCertPath && https.key === defaultHttpsKeyPath);
 
@@ -2736,7 +2737,7 @@ async function main(): Promise<void> {
 
   await runFirstRunWizard();
 
-  // HTTPS certs are only generated when user explicitly runs --setup-local-https
+  await refreshDefaultHttpsCertificateSafely();
   const refreshedHttps = resolveHttpsOptions(options);
   const activeHttps = refreshedHttps;
 
