@@ -102,6 +102,22 @@ function checkNodePty(): PtyCheckResult {
     }
     const pty = require_(ptyPath);
 
+    // 修复 spawn-helper 可能因 npm 安装丢失的执行权限
+    try {
+      const prebuildsDir = path.join(ptyPath, 'prebuilds');
+      if (fs.existsSync(prebuildsDir)) {
+        for (const entry of fs.readdirSync(prebuildsDir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const helperPath = path.join(prebuildsDir, entry.name, 'spawn-helper');
+          if (!fs.existsSync(helperPath)) continue;
+          try {
+            const mode = fs.statSync(helperPath).mode;
+            if ((mode & 0o111) === 0) fs.chmodSync(helperPath, mode | 0o111);
+          } catch { /* skip */ }
+        }
+      }
+    } catch { /* prebuilds dir may not exist (compiled from source) */ }
+
     // 实际 spawn 测试（不仅仅是 require，macOS ARM 预编译包可能 require 成功但 spawn 失败）
     const proc = pty.spawn(process.env.SHELL || '/bin/bash', [], { name: 'xterm', cols: 80, rows: 24 });
     proc.kill();

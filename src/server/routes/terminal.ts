@@ -3707,6 +3707,23 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
   });
 }
 
+
+/**
+ * Wrap node-pty spawn errors with actionable messages for common failure modes.
+ */
+function wrapPtySpawnError(error: unknown): Error {
+  if (!(error instanceof Error)) return new Error(String(error));
+  const msg = error.message || '';
+  if (/EACCES|spawn.*helper|Permission denied/i.test(msg)) {
+    return new Error(
+      `终端启动失败：node-pty spawn-helper 可能没有执行权限。\n` +
+      `请运行: chmod +x node_modules/node-pty/prebuilds/*/spawn-helper\n` +
+      `原始错误: ${msg}`,
+    );
+  }
+  return error;
+}
+
 async function spawnTerminalSession(req: express.Request, input: {
   cwd?: string;
   cols?: number;
@@ -3779,24 +3796,28 @@ async function spawnTerminalSession(req: express.Request, input: {
     }
 
     if (!ptyProcess) {
-      throw lastError ?? new Error('Failed to start shell');
+      throw wrapPtySpawnError(lastError ?? new Error("Failed to start shell"));
     }
   } else {
-    ptyProcess = pty.spawn(command, args, {
-      name: termValue,
-      cols,
-      rows,
-      cwd,
-      env: baseEnv,
-      // Windows: 用 node-pty 自带的新版 conpty.dll（Windows Terminal 同源），
-      // 系统内置 conhost 的 ConPTY 差分在「输出中 resize/宽字符」场景下会与
-      // 终端真实状态分叉，表现为滚动 TUI（如 claude code）时行首 CJK 残影。
-      ...(process.platform === 'win32' ? { useConptyDll: true } : {}),
-    });
+    try {
+      ptyProcess = pty.spawn(command, args, {
+        name: termValue,
+        cols,
+        rows,
+        cwd,
+        env: baseEnv,
+        // Windows: 用 node-pty 自带的新版 conpty.dll（Windows Terminal 同源），
+        // 系统内置 conhost 的 ConPTY 差分在「输出中 resize/宽字符」场景下会与
+        // 终端真实状态分叉，表现为滚动 TUI（如 claude code）时行首 CJK 残影。
+        ...(process.platform === 'win32' ? { useConptyDll: true } : {}),
+      });
+    } catch (error) {
+      throw wrapPtySpawnError(error);
+    }
   }
 
   if (!ptyProcess) {
-    throw new Error('Failed to start PTY process');
+    throw new Error("终端启动失败：PTY 进程创建返回空值，请检查 node-pty 安装");
   }
 
   const session: TerminalSession = {

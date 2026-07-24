@@ -49,6 +49,32 @@ function which(bin) {
 console.log('\n=== Rebuilding native modules ===');
 
 const PTY_PATH = require_.resolve('node-pty/package.json', { paths: [pkgRoot] }).replace('/package.json', '');
+
+// Ensure node-pty prebuild spawn-helper binaries have execute permissions.
+// npm may strip +x during install, which causes terminal creation to fail.
+function fixSpawnHelperPermissions() {
+  const prebuildsDir = path.join(PTY_PATH, 'prebuilds');
+  if (!fs.existsSync(prebuildsDir)) return 0;
+  let fixed = 0;
+  try {
+    for (const entry of fs.readdirSync(prebuildsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const helperPath = path.join(prebuildsDir, entry.name, 'spawn-helper');
+      if (!fs.existsSync(helperPath)) continue;
+      try {
+        const mode = fs.statSync(helperPath).mode;
+        const needsX = (mode & 0o111) === 0;
+        if (needsX) {
+          fs.chmodSync(helperPath, mode | 0o111);
+          fixed++;
+        }
+      } catch { /* skip permission errors */ }
+    }
+  } catch { /* directory listing failed */ }
+  if (fixed > 0) console.log(`  ✓ fixed execute permissions on ${fixed} spawn-helper(s)`);
+  return fixed;
+}
+fixSpawnHelperPermissions();
 function testPty() {
   try {
     const pty = require_(PTY_PATH);
