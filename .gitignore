@@ -18,6 +18,10 @@ npm-debug.log*
 .dev-*.pid
 .dev-*.log
 
+# 本地临时目录（测试 fixture 等，不入库）
+.tmp
+.tmp-*/
+
 # vite-plugin-pwa dev mode service worker artifacts
 dev-dist/
 

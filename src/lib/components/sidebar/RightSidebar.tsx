@@ -841,33 +841,226 @@ function resolveMarkdownImageSrc(src: string, markdownFilePath: string | null, r
   return `/api/terminal/fs/blob?path=${encodeURIComponent(absolutePath)}`;
 }
 
-// Markdown image with a load-time collapse fix. SVGs without intrinsic
-// dimensions (no width/height attributes, only a viewBox — or percentage
-// dimensions) collapse to 0×0 inside the shrink-to-fit button wrapper below:
-// the img's percentage max-width and the wrapper's content-derived width form
-// a cyclic dependency that Chrome resolves to zero. When that happens, pin the
-// width to the natural size to give the img a definite used width. Images that
-// render fine on their own are left untouched so the max-width/max-height
-// joint constraint keeps their aspect ratio (an explicit width would break it
-// for images larger than the max-height cap).
+// Display-height band for normalizing SVGs in the markdown preview. SVG files
+// carry arbitrary declared sizes (a 24×24 icon vs a 1000×1000 diagram), which
+// made some render tiny and others flood the panel. SVGs are vector and scale
+// cleanly, so they are sized from a clamped target height with the aspect
+// ratio following. Raster images keep their intrinsic size — upscaling them
+// would blur.
+const MARKDOWN_SVG_MIN_DISPLAY_HEIGHT = 128;
+const MARKDOWN_SVG_MAX_DISPLAY_HEIGHT = 360;
+const MARKDOWN_IMAGE_MAX_DISPLAY_HEIGHT = 480;
+
+export function isSvgImageSrc(src: string): boolean {
+  try {
+    // Markdown images are served as /api/terminal/fs/blob?path=<encoded>, so
+    // the .svg extension lives inside the query string, not the URL path.
+    return /\.svg(?=$|[?#&])/i.test(decodeURIComponent(src));
+  } catch {
+    return false;
+  }
+}
+
+// Computes the exact display box (px) for a markdown image once its natural
+// size is known: SVG normalization (height band above), then caps at the
+// container width and the 480px max height, ratio always preserved. Returns
+// null when the natural size is unusable. The same box drives the loading
+// placeholder and the final img, so swapping them causes no layout shift.
+export function computeMarkdownImageDisplayBox(
+  src: string,
+  naturalWidth: number,
+  naturalHeight: number,
+  containerWidth: number,
+): { width: number; height: number } | null {
+  if (!naturalWidth || !naturalHeight) return null;
+  let width: number;
+  let height: number;
+  if (isSvgImageSrc(src)) {
+    height = Math.min(Math.max(naturalHeight, MARKDOWN_SVG_MIN_DISPLAY_HEIGHT), MARKDOWN_SVG_MAX_DISPLAY_HEIGHT);
+    width = (naturalWidth * height) / naturalHeight;
+  } else {
+    width = naturalWidth;
+    height = naturalHeight;
+  }
+  if (containerWidth > 0 && width > containerWidth) {
+    height = (height * containerWidth) / width;
+    width = containerWidth;
+  }
+  if (height > MARKDOWN_IMAGE_MAX_DISPLAY_HEIGHT) {
+    width = (width * MARKDOWN_IMAGE_MAX_DISPLAY_HEIGHT) / height;
+    height = MARKDOWN_IMAGE_MAX_DISPLAY_HEIGHT;
+  }
+  return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
+}
+
+// Extracts the local absolute path back out of an /api/terminal/fs/blob URL.
+// Returns null for remote (https://) images, which are passed through as-is.
+function getLocalPathFromBlobSrc(src: string): string | null {
+  if (!src.startsWith('/api/terminal/fs/blob?')) return null;
+  try {
+    const params = new URLSearchParams(src.slice(src.indexOf('?')));
+    return params.get('path');
+  } catch {
+    return null;
+  }
+}
+
+type MarkdownImageState =
+  | { status: 'loading' }
+  | { status: 'ready'; objectUrl: string }
+  | { status: 'fallback' }; // fetch failed — render the plain <img> natively
+
+// Markdown image that reserves its final display box BEFORE downloading, so
+// the preview never jumps when the image arrives:
+//  1. IntersectionObserver starts the fetch only near the viewport (the lazy
+//     behavior loading="lazy" used to give us).
+//  2. The blob endpoint returns X-Image-Width/Height, so the display box
+//     (computeMarkdownImageDisplayBox) is known as soon as headers land.
+//  3. A pulsing placeholder occupies exactly that box; the ready img is
+//     rendered at the same explicit size and fades in — zero layout shift.
+// The URL is also tied to the file watcher's per-path version: when the image
+// file changes on disk, the version bump appends `&v=N` so the browser
+// refetches — otherwise the preview kept showing the stale image.
 function MarkdownImage({ src, alt, title }: { src: string; alt: string; title?: string }) {
-  const [pinnedWidth, setPinnedWidth] = useState<number | null>(null);
+  const localPath = getLocalPathFromBlobSrc(src);
+  const fileVersion = useSidebarStore((s) => (localPath ? s.fileChangeVersions.get(localPath) ?? 0 : 0));
+  const versionedSrc = localPath && fileVersion > 0 ? `${src}&v=${fileVersion}` : src;
+
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [nearViewport, setNearViewport] = useState(false);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [state, setState] = useState<MarkdownImageState>({ status: 'loading' });
+  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
+
+  // Measure the enclosing block container (placeholder → button/span wrapper →
+  // <p>) so width-capped boxes match the CSS max-w-full constraint exactly.
+  // Tracked with a ResizeObserver because the sidebar width can change.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const container = root?.parentElement?.parentElement ?? root?.parentElement;
+    if (!container) return;
+    const update = () => setContainerWidth(container.clientWidth);
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  // Lazy-start: only fetch when the image scrolls near the viewport.
+  useEffect(() => {
+    if (nearViewport) return;
+    const root = rootRef.current;
+    if (!root || typeof IntersectionObserver === 'undefined') {
+      setNearViewport(true);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setNearViewport(true);
+        observer.disconnect();
+      }
+    }, { rootMargin: '400px' });
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [nearViewport]);
+
+  useEffect(() => {
+    if (!nearViewport) return;
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    setState({ status: 'loading' });
+    // If the fetch hangs (slow/blocked storage, dev server restart), fall
+    // back to the native <img> instead of parking on the placeholder forever.
+    const hangTimer = window.setTimeout(() => {
+      controller.abort(new DOMException('Image fetch timed out', 'TimeoutError'));
+    }, 15_000);
+    fetch(versionedSrc, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const width = Number(response.headers.get('X-Image-Width')) || 0;
+        const height = Number(response.headers.get('X-Image-Height')) || 0;
+        const blob = await response.blob();
+        return { blob, width, height };
+      })
+      .then(({ blob, width, height }) => {
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(blob);
+        if (width > 0 && height > 0) setNaturalSize({ width, height });
+        setState({ status: 'ready', objectUrl });
+      })
+      .catch(() => {
+        // Plain cleanup aborts (unmount / src change) must not overwrite the
+        // next effect's state; the hang-timer abort and real errors fall back
+        // to the native <img>.
+        const reason = controller.signal.reason;
+        const abortedByCleanup = controller.signal.aborted && !(reason instanceof DOMException && reason.name === 'TimeoutError');
+        if (!abortedByCleanup) setState({ status: 'fallback' });
+      })
+      .finally(() => {
+        window.clearTimeout(hangTimer);
+      });
+    return () => {
+      window.clearTimeout(hangTimer);
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [nearViewport, versionedSrc]);
+
+  const box = computeMarkdownImageDisplayBox(src, naturalSize?.width ?? 0, naturalSize?.height ?? 0, containerWidth);
+  // While headers are pending, reserve a rough guess; the exact size follows
+  // as soon as headers land (usually the same round-trip).
+  const placeholderBox = box ?? { width: MARKDOWN_SVG_MIN_DISPLAY_HEIGHT * 2, height: MARKDOWN_SVG_MIN_DISPLAY_HEIGHT };
+
   return (
-    <img
-      src={src}
-      alt={alt}
-      title={title}
-      loading="lazy"
-      decoding="async"
-      className="block max-h-[480px] max-w-full object-contain"
-      style={pinnedWidth ? { width: pinnedWidth } : undefined}
-      onLoad={(event) => {
-        const img = event.currentTarget;
-        if (img.clientWidth === 0 && img.naturalWidth > 0) {
-          setPinnedWidth(img.naturalWidth);
-        }
-      }}
-    />
+    <div ref={rootRef} className="block max-w-full" style={box ? { width: box.width, height: box.height } : undefined}>
+      {state.status === 'ready' ? (
+        <img
+          src={state.objectUrl}
+          alt={alt}
+          title={title}
+          decoding="async"
+          className="termdock-fade-in block max-h-[480px] max-w-full object-contain"
+          style={box ? { width: box.width, height: box.height } : undefined}
+          onLoad={(event) => {
+            // No dimension headers (older server / remote image): measure
+            // after decode and resize the box once, like before.
+            if (naturalSize) return;
+            const img = event.currentTarget;
+            if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+              setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+            }
+          }}
+        />
+      ) : state.status === 'fallback' ? (
+        <img
+          src={versionedSrc}
+          alt={alt}
+          title={title}
+          loading="lazy"
+          decoding="async"
+          className="block max-h-[480px] max-w-full object-contain"
+          style={box ? { width: box.width, height: box.height } : undefined}
+          onLoad={(event) => {
+            // Fetch failed or remote image without headers: measure after
+            // decode and resize once (also rescues 0×0-collapsed SVGs).
+            if (naturalSize) return;
+            const img = event.currentTarget;
+            if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+              setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+            }
+          }}
+        />
+      ) : (
+        <div
+          aria-hidden
+          className="flex max-w-full animate-pulse items-center justify-center rounded bg-surface-elevated/60"
+          style={{ width: placeholderBox.width, height: placeholderBox.height }}
+        >
+          <span className="text-[10px] text-muted-foreground/60">{alt || '…'}</span>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -3828,6 +4021,8 @@ function clampImageScale(scale: number): number {
 interface ZoomableImageProps {
   src: string;
   alt: string;
+  /** Content is a vector image (SVG) — allows upscaling to fit the stage. */
+  vector?: boolean;
   onLoad: (event: React.SyntheticEvent<HTMLImageElement>) => void;
   onError: () => void;
   onZoomChange?: (zoomed: boolean) => void;
@@ -3863,13 +4058,18 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
     setTransform({ scale: 1, x: 0, y: 0 });
   }, [resetKey]);
 
-  // Clamp the pan offset so the (scaled) image can't be dragged completely out
-  // of the viewport. Bounds grow with the scale factor.
+  // Clamp the pan offset so the (scaled) content can't be dragged completely
+  // out of the viewport. Uses the content element's real layout size — with
+  // fit-to-stage sizing the content no longer necessarily matches the
+  // viewport, and oversized content allows proportionally more pan.
   const clampOffset = useCallback((scale: number, x: number, y: number) => {
     const el = containerRef.current;
     if (!el) return { x, y };
-    const maxX = (el.clientWidth * (scale - 1)) / 2;
-    const maxY = (el.clientHeight * (scale - 1)) / 2;
+    const content = el.firstElementChild instanceof HTMLElement ? el.firstElementChild : null;
+    const contentWidth = content?.clientWidth || el.clientWidth;
+    const contentHeight = content?.clientHeight || el.clientHeight;
+    const maxX = Math.max(0, (contentWidth * scale - el.clientWidth) / 2);
+    const maxY = Math.max(0, (contentHeight * scale - el.clientHeight) / 2);
     return {
       x: Math.min(maxX, Math.max(-maxX, x)),
       y: Math.min(maxY, Math.max(-maxY, y)),
@@ -4025,7 +4225,22 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
   );
 }
 
-function ZoomableImage({ src, alt, onLoad, onError, onZoomChange, onDoubleTap }: ZoomableImageProps) {
+// Lightbox/preview image with fit-to-stage initial sizing. Previously images
+// rendered at their intrinsic size capped by the stage, so a 100×100 SVG
+// showed up as a postage stamp in a full-size viewer and pinch-zooming it
+// felt broken. Now the initial size fits the stage: SVGs (vector, upscale
+// cleanly) fit in both directions; raster images only shrink (upscaling
+// would blur).
+function ZoomableImage({ src, alt, vector, onLoad, onError, onZoomChange, onDoubleTap }: ZoomableImageProps) {
+  const [fitSize, setFitSize] = useState<{ width: number; height: number } | null>(null);
+  // blob: object URLs carry no extension, so callers with a known MIME type
+  // pass `vector` explicitly; otherwise fall back to the URL's .svg suffix.
+  const isVector = vector ?? isSvgImageSrc(src);
+
+  useEffect(() => {
+    setFitSize(null);
+  }, [src]);
+
   return (
     <ZoomableViewport resetKey={src} onZoomChange={onZoomChange} onDoubleTap={onDoubleTap}>
       {({ transformStyle }) => (
@@ -4034,8 +4249,22 @@ function ZoomableImage({ src, alt, onLoad, onError, onZoomChange, onDoubleTap }:
         alt={alt}
         draggable={false}
         className="max-h-full max-w-full touch-none select-none rounded border border-border/15 bg-surface object-contain shadow-sm"
-        style={transformStyle}
-        onLoad={onLoad}
+        style={fitSize ? { ...transformStyle, width: fitSize.width, height: fitSize.height } : transformStyle}
+        onLoad={(event) => {
+          const img = event.currentTarget;
+          const container = img.parentElement;
+          if (container && img.naturalWidth > 0 && img.naturalHeight > 0) {
+            const availableWidth = Math.max(1, container.clientWidth - 2);
+            const availableHeight = Math.max(1, container.clientHeight - 2);
+            const fitScale = Math.min(availableWidth / img.naturalWidth, availableHeight / img.naturalHeight);
+            const scale = isVector ? fitScale : Math.min(fitScale, 1);
+            setFitSize({
+              width: Math.max(1, Math.round(img.naturalWidth * scale)),
+              height: Math.max(1, Math.round(img.naturalHeight * scale)),
+            });
+          }
+          onLoad(event);
+        }}
         onError={onError}
       />
       )}
@@ -4730,6 +4959,7 @@ function FilePreview({
           <ZoomableImage
             src={previewState.objectUrl}
             alt={display.name}
+            vector={previewState.meta.mimeType === 'image/svg+xml'}
             onLoad={(event) => {
               const img = event.currentTarget;
               setPreviewState((current) => (
@@ -6075,7 +6305,11 @@ export function RightSidebar(
 
   const refreshExplorerRoot = useCallback(() => {
     if (!fileTreeRoot) return;
-    invalidateDirectoryCache(fileTreeRoot, false);
+    // Recursive: expanded subdirectories keep their own cached listings, so a
+    // root-only invalidation left them stale and the refresh appeared to do
+    // nothing. Expanded dirs whose cache entry disappears refetch themselves
+    // (FileTreeItem's isExpanded && !children effect).
+    invalidateDirectoryCache(fileTreeRoot, true);
   }, [fileTreeRoot, invalidateDirectoryCache]);
 
   const togglePinnedExplorerRoot = useCallback(() => {
@@ -6101,13 +6335,24 @@ export function RightSidebar(
     else pinExplorerRoot(path, 'file');
   }, [pinExplorerRoot, pinnedExplorerRootSet, rootPath, unpinExplorerRoot]);
 
-  const watchedFileRootKey = useMemo(() => {
-    if (!filesPaneActive && !previewPaneActive) return null;
-    if (!rootPath || !selectedFilePath) return null;
-    const selectedAbsolutePath = selectedFilePath.startsWith('/') ? selectedFilePath : `${rootPath}/${selectedFilePath}`;
-    return getParentPath(selectedAbsolutePath);
-  }, [filesPaneActive, previewPaneActive, rootPath, selectedFilePath]);
-  const watchedFileRoots = useMemo(() => (watchedFileRootKey ? [watchedFileRootKey] : []), [watchedFileRootKey]);
+  const watchedFileRoots = useMemo(() => {
+    const roots = new Set<string>();
+    // Watch the visible tree root. The server-side watcher (@parcel/watcher)
+    // is recursive per root, so this keeps the whole expanded tree fresh via
+    // applyFileWatchEvents' incremental directoryCache updates — previously
+    // only the selected file's parent was watched, so the tree never updated
+    // on its own (and with no file selected there was no watcher at all).
+    if (filesPaneActive && fileTreeRoot) roots.add(fileTreeRoot);
+    // The previewed file can live outside the explorer root (e.g. browsing a
+    // subdirectory while a project file is open); keep its parent watched so
+    // external edits still reload the preview.
+    if ((filesPaneActive || previewPaneActive) && rootPath && selectedFilePath) {
+      const selectedAbsolutePath = selectedFilePath.startsWith('/') ? selectedFilePath : `${rootPath}/${selectedFilePath}`;
+      const selectedParent = getParentPath(selectedAbsolutePath);
+      if (selectedParent) roots.add(selectedParent);
+    }
+    return [...roots];
+  }, [filesPaneActive, previewPaneActive, fileTreeRoot, rootPath, selectedFilePath]);
 
   useEffect(() => {
     if (!isOpen || watchedFileRoots.length === 0) return;

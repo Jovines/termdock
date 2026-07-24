@@ -3,7 +3,7 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { __testParseMarkdownListBlock, MarkdownImageLightbox, MarkdownPreview, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, getNextMarkdownPreviewLineRange, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
+import { __testParseMarkdownListBlock, MarkdownImageLightbox, MarkdownPreview, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, computeMarkdownImageDisplayBox, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, getNextMarkdownPreviewLineRange, isSvgImageSrc, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
 
 const mermaidRender = vi.fn(async () => ({ svg: '<svg xmlns="http://www.w3.org/2000/svg" width="100%" style="max-width: 100%;" viewBox="0 0 96 48"><text>Graph</text></svg>' }));
 const mermaidInitialize = vi.fn();
@@ -83,8 +83,13 @@ describe('right sidebar Markdown preview rendering', () => {
   afterEach(() => {
     svgElementPrototype.getBBox = originalGetBBox;
     globalThis.ResizeObserver = originalResizeObserver;
+    // jsdom defines clientWidth/clientHeight on Element.prototype, so the
+    // saved HTMLElement descriptor is undefined — in that case the mock must
+    // be deleted off HTMLElement.prototype or it leaks into later tests.
     if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth);
+    else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
     if (originalClientHeight) Object.defineProperty(HTMLElement.prototype, 'clientHeight', originalClientHeight);
+    else delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
     cleanup();
     mermaidInitialize.mockClear();
     mermaidRender.mockClear();
@@ -98,17 +103,19 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(getNextMarkdownPreviewLineRange({ start: 7, end: 7 }, 7, 7)).toBeNull();
   });
 
-  it('renders images, strikethrough, and autolinks in inline content', () => {
+  it('renders images, strikethrough, and autolinks in inline content', async () => {
     const { container } = renderPreview([
       'Preview ![Icon](../assets/icon.png "App icon") and ![Vector](./diagram.svg) with ~~old~~ text and https://example.com/docs.',
       '',
       'Also <https://example.com/raw>, www.example.com, <team@example.com>, and owner@example.com.',
     ].join('\n'));
 
-    const image = screen.getByRole('img', { name: 'Icon' });
+    // MarkdownImage resolves to its fallback <img> asynchronously (the jsdom
+    // fetch of the blob URL rejects), so wait for the images to appear.
+    const image = await screen.findByRole('img', { name: 'Icon' });
     expect(image.getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fassets%2Ficon.png');
     expect(image.getAttribute('title')).toBe('App icon');
-    expect(screen.getByRole('img', { name: 'Vector' }).getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fdiagram.svg');
+    expect((await screen.findByRole('img', { name: 'Vector' })).getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fdiagram.svg');
     expect(container.querySelector('del')?.textContent).toBe('old');
     expect(screen.getByRole('link', { name: 'https://example.com/docs' }).getAttribute('href')).toBe('https://example.com/docs');
     expect(screen.getByRole('link', { name: 'https://example.com/raw' }).getAttribute('href')).toBe('https://example.com/raw');
@@ -520,7 +527,7 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(within(screen.getByText(/unsafe/).closest('p') as HTMLElement).getByText(/!\[bad\]/)).toBeTruthy();
   });
 
-  it('renders reference links and images without showing definition rows', () => {
+  it('renders reference links and images without showing definition rows', async () => {
     const { container } = renderPreview([
       'Read [docs][guide], [Guide], [Guide File], [Local](docs/local.md), [Paren](docs/A_(B).md), [Spaced](<docs/my file.md> \'Spaced title\'), and inspect ![Diagram][diagram] plus ![Logo], ![WideRef], ![ParenImage](images/a_(b).png), and ![Wide](<images/my chart.png> (Chart title)).',
       '',
@@ -541,17 +548,18 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(screen.getByRole('link', { name: 'Paren' }).getAttribute('href')).toBe('docs/A_(B).md');
     expect(screen.getByRole('link', { name: 'Spaced' }).getAttribute('href')).toBe('docs/my file.md');
     expect(screen.getByRole('link', { name: 'Spaced' }).getAttribute('title')).toBe('Spaced title');
-    const image = screen.getByRole('img', { name: 'Diagram' });
+    // Images appear asynchronously (fallback <img> after the blob fetch rejects).
+    const image = await screen.findByRole('img', { name: 'Diagram' });
     expect(image.getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fdiagram.webp');
     expect(image.getAttribute('title')).toBe('System diagram');
-    const shortcutImage = screen.getByRole('img', { name: 'Logo' });
+    const shortcutImage = await screen.findByRole('img', { name: 'Logo' });
     expect(shortcutImage.getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Flogo.png');
     expect(shortcutImage.getAttribute('title')).toBe('Logo title');
-    const wideRefImage = screen.getByRole('img', { name: 'WideRef' });
+    const wideRefImage = await screen.findByRole('img', { name: 'WideRef' });
     expect(wideRefImage.getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fimages%2Fwide%20ref.png');
     expect(wideRefImage.getAttribute('title')).toBe('Wide ref title');
-    expect(screen.getByRole('img', { name: 'ParenImage' }).getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fimages%2Fa_(b).png');
-    const spacedImage = screen.getByRole('img', { name: 'Wide' });
+    expect((await screen.findByRole('img', { name: 'ParenImage' })).getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fimages%2Fa_(b).png');
+    const spacedImage = await screen.findByRole('img', { name: 'Wide' });
     expect(spacedImage.getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fimages%2Fmy%20chart.png');
     expect(spacedImage.getAttribute('title')).toBe('Chart title');
     expect(container.textContent).not.toContain('[guide]:');
@@ -810,7 +818,7 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(shouldCloseMarkdownImageLightboxDrag(20, 0.8)).toBe(false);
   });
 
-  it('keeps escaped table pipes inside the same cell', () => {
+  it('keeps escaped table pipes inside the same cell', async () => {
     renderPreview([
       '| Key | Value | More |',
       '| --- | --- | --- |',
@@ -822,7 +830,7 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(cells[1].textContent).toBe('a | b');
     expect(cells[2].textContent).toContain('x|y and a `|` b plus a|b and');
     expect(within(cells[2]).getByRole('link', { name: 'a|b' }).getAttribute('href')).toBe('docs/a.md');
-    expect(within(cells[2]).getByRole('img', { name: 'x|y' }).getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fxy.png');
+    expect((await within(cells[2]).findByRole('img', { name: 'x|y' })).getAttribute('src')).toBe('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fxy.png');
   });
 
   it('renders footnote references, definitions, continuations, and backrefs', () => {
@@ -921,5 +929,70 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(container.querySelector('[onclick]')).toBeNull();
     expect(container.querySelector('a')?.getAttribute('href')).toBeNull();
     expect(container.querySelector('.note')).toBeTruthy();
+  });
+});
+
+describe('markdown image SVG sizing', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('detects svg sources inside blob-url query strings', () => {
+    expect(isSvgImageSrc('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fdiagram.svg')).toBe(true);
+    expect(isSvgImageSrc('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fdiagram.svg&action=view_file')).toBe(true);
+    expect(isSvgImageSrc('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2FDIAGRAM.SVG')).toBe(true);
+    expect(isSvgImageSrc('https://example.com/icon.svg')).toBe(true);
+    expect(isSvgImageSrc('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Ficon.png')).toBe(false);
+    expect(isSvgImageSrc('/api/terminal/fs/blob?path=%2Frepo%2Fdocs%2Fsvg-notes.md')).toBe(false);
+    expect(isSvgImageSrc('%E0%A4%A')).toBe(false); // malformed encoding must not throw
+  });
+
+  it('normalizes SVG display boxes into the 128–360 height band, ratio preserved', () => {
+    const svg = '/api/terminal/fs/blob?path=%2Frepo%2Fx.svg';
+    // small icons scale up to the 128px floor
+    expect(computeMarkdownImageDisplayBox(svg, 24, 24, 0)).toEqual({ width: 128, height: 128 });
+    expect(computeMarkdownImageDisplayBox(svg, 100, 100, 0)).toEqual({ width: 128, height: 128 });
+    // inside the band: natural size is kept
+    expect(computeMarkdownImageDisplayBox(svg, 150, 150, 0)).toEqual({ width: 150, height: 150 });
+    expect(computeMarkdownImageDisplayBox(svg, 300, 150, 0)).toEqual({ width: 300, height: 150 });
+    // big diagrams scale down to the 360px cap
+    expect(computeMarkdownImageDisplayBox(svg, 1000, 1000, 0)).toEqual({ width: 360, height: 360 });
+    // tall image: height capped at 360, width follows the ratio
+    expect(computeMarkdownImageDisplayBox(svg, 120, 1200, 0)).toEqual({ width: 36, height: 360 });
+    // degenerate inputs never produce a box
+    expect(computeMarkdownImageDisplayBox(svg, 0, 100, 0)).toBeNull();
+    expect(computeMarkdownImageDisplayBox(svg, 100, 0, 0)).toBeNull();
+  });
+
+  it('caps boxes by container width and the 480px max height, ratio preserved', () => {
+    const svg = '/api/terminal/fs/blob?path=%2Frepo%2Fx.svg';
+    const png = '/api/terminal/fs/blob?path=%2Frepo%2Fphoto.png';
+    // container cap shrinks both dimensions proportionally
+    expect(computeMarkdownImageDisplayBox(svg, 1000, 1000, 300)).toEqual({ width: 300, height: 300 });
+    expect(computeMarkdownImageDisplayBox(png, 1200, 1200, 795)).toEqual({ width: 480, height: 480 });
+    // 480px height cap applies after the width cap, still ratio-preserving
+    expect(computeMarkdownImageDisplayBox(png, 1200, 1200, 2000)).toEqual({ width: 480, height: 480 });
+    // healthy raster images keep their intrinsic size when nothing binds
+    expect(computeMarkdownImageDisplayBox(png, 640, 480, 0)).toEqual({ width: 640, height: 480 });
+    expect(computeMarkdownImageDisplayBox(png, 100, 100, 795)).toEqual({ width: 100, height: 100 });
+  });
+
+  it('renders a fallback img sized from its decoded natural size', async () => {
+    // jsdom fetch rejects relative URLs, so MarkdownImage takes the native
+    // fallback path; on decode it measures and applies the display box.
+    renderPreview('![Icon](./icon.svg)\n\n![Photo](./photo.png)');
+    const svgImg = await screen.findByRole('img', { name: 'Icon' });
+    Object.defineProperty(svgImg, 'naturalWidth', { value: 24, configurable: true });
+    Object.defineProperty(svgImg, 'naturalHeight', { value: 24, configurable: true });
+    fireEvent.load(svgImg);
+    expect(svgImg.style.width).toBe('128px');
+    expect(svgImg.style.height).toBe('128px');
+
+    const pngImg = await screen.findByRole('img', { name: 'Photo' });
+    Object.defineProperty(pngImg, 'naturalWidth', { value: 640, configurable: true });
+    Object.defineProperty(pngImg, 'naturalHeight', { value: 480, configurable: true });
+    fireEvent.load(pngImg);
+    expect(pngImg.style.width).toBe('640px');
+    expect(pngImg.style.height).toBe('480px');
   });
 });

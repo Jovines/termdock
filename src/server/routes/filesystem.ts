@@ -6,6 +6,7 @@ import { execFile, spawn } from 'child_process';
 import watcher from '@parcel/watcher';
 import busboy from 'busboy';
 import { pathValidator } from '../utils/pathValidator.js';
+import { getImageDimensions } from '../utils/imageDimensions.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog } from '../utils/serverLogger.js';
 import { clearBranchAuditRecords, clearChangeAuditRecords, listBranchAuditRecords, listChangeAuditRecords, buildChangeAuditFingerprint } from '../utils/changeAuditStore.js';
 import { getLanIPv4Addresses } from '../utils/localAccess.js';
@@ -2891,6 +2892,15 @@ router.get('/blob', async (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(resolvedPath)));
+
+    // Expose dimensions so markdown image previews can reserve the final
+    // display box before downloading (loading placeholder without a jump).
+    // Best-effort: parsing failure just omits the headers.
+    const dimensions = await getImageDimensions(resolvedPath, mimeType).catch(() => null);
+    if (dimensions) {
+      res.setHeader('X-Image-Width', String(dimensions.width));
+      res.setHeader('X-Image-Height', String(dimensions.height));
+    }
 
     const stream = fs.createReadStream(resolvedPath);
     controller.signal.addEventListener('abort', () => stream.destroy(controller.signal.reason instanceof Error ? controller.signal.reason : undefined), { once: true });

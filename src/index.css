@@ -668,6 +668,11 @@ body {
   }
 }
 
+/* Markdown 预览图片加载完成后的淡入（配合占位框防跳动）。 */
+.termdock-fade-in {
+  animation: fade-in 0.18s ease-out;
+}
+
 @keyframes slide-down {
   from {
     opacity: 0;

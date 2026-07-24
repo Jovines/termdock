@@ -24,6 +24,11 @@ allowed-tools: Bash, Read
 - 开发前端：`9833`
 - 开发后端：`9835`
 - 正式/本地安装服务：`9834`
+- **部署默认目标 = 9834 正式服务**（用户手机 PWA 走这里）。"部署"一词
+  未加限定时就指把当前版本装到 9834 正式服务并重启验证；不要部署到
+  dev 端口（9833/9835），也不要只 `npm run build` 或只发 npm 就收工。
+- **发版与部署分离**：日常改动不要求发 npm 版，用户明确要发版时才发；
+  但只要说"部署"，就必须走本 skill 的 9834 正式部署，不用 dev 端口凑合。
 - HTTPS 开启后，正式服务 URL 是 `https://localhost:9834`；未配置证书时是 `http://localhost:9834`。
 - onboarding 是独立 HTTP 临时端口，由 `termdock --status` 输出，例如 `http://<LAN-IP>:<port>/onboarding`。
 
