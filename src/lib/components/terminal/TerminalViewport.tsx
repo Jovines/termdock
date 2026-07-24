@@ -3775,7 +3775,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           <button
             type="button"
             data-terminal-copy-popover="true"
-            className="fixed z-popover inline-flex h-9 w-[88px] select-none items-center justify-center gap-1.5 rounded-full border border-white/15 bg-[rgb(28_28_30_/_0.92)] px-3 text-[13px] font-semibold text-white shadow-[0_10px_28px_rgb(0_0_0_/_0.32),0_2px_8px_rgb(0_0_0_/_0.18)] backdrop-blur-xl transition-transform duration-100 ease-out active:scale-[0.96]"
+            // z-chrome-hint(30)：chrome 层瞬时提示——高于键盘条(20)，低于侧栏
+            // 抽屉(40+)。抽屉/lightbox 一打开就被盖住，曾经用 z-popover(200)
+            // 导致它浮在全屏浮层上面。
+            className="fixed z-chrome-hint inline-flex h-9 w-[88px] select-none items-center justify-center gap-1.5 rounded-full border border-white/15 bg-[rgb(28_28_30_/_0.92)] px-3 text-[13px] font-semibold text-white shadow-[0_10px_28px_rgb(0_0_0_/_0.32),0_2px_8px_rgb(0_0_0_/_0.18)] backdrop-blur-xl transition-transform duration-100 ease-out active:scale-[0.96]"
             style={{
               left: mobileCopyPopover.left,
               top: mobileCopyPopover.top,
@@ -4303,7 +4306,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             <div
               ref={arrowIndicatorRef}
               aria-hidden
-              className="fixed left-1/2 top-6 z-30 pointer-events-none transition-opacity duration-150 ease-out"
+              className="fixed left-1/2 top-6 z-chrome-hint pointer-events-none transition-opacity duration-150 ease-out"
               style={{
                 opacity: arrowIndicator.visible ? 1 : 0,
                 transform: arrowIndicator.visible

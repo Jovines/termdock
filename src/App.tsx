@@ -3763,7 +3763,7 @@ function App() {
 
       {/* Debug Info Panel */}
       {showDebug && (
-        <div className="fixed bottom-0 left-0 right-0 z-40 max-h-48 overflow-y-auto border-t border-border/15 bg-surface p-3 animate-fade-in">
+        <div className="fixed bottom-0 left-0 right-0 z-toast max-h-48 overflow-y-auto border-t border-border/15 bg-surface p-3 animate-fade-in">
           <div className="flex items-center justify-between mb-2">
             <h4 className="ui-kicker">Debug Info</h4>
             <button

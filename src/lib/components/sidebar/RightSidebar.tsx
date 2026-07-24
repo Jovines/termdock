@@ -2851,7 +2851,7 @@ export function MarkdownPreview({
     <>
       <div ref={previewRootRef} className="relative min-w-0 max-w-full">
         {activeHeadingPath.length > 0 && (
-          <div className="sticky top-0 z-menu-panel border-b border-border/15 bg-surface px-2 py-1 shadow-sm sm:px-3" data-markdown-heading-sticky>
+          <div className="sticky top-0 z-10 border-b border-border/15 bg-surface px-2 py-1 shadow-sm sm:px-3" data-markdown-heading-sticky>
             <div className="flex min-w-0 items-center gap-2 overflow-hidden" title={activeHeadingPath.map((heading) => heading.text).join(' / ')}>
               <span className="h-4 w-0.5 shrink-0 rounded-full bg-primary/70" aria-hidden="true" />
               <span className="min-w-0 flex-1 truncate text-[12px] font-semibold leading-5 text-foreground sm:text-[13px]" data-markdown-heading-current>
@@ -2879,9 +2879,9 @@ export function MarkdownPreview({
         )}
         {outlineOpen && (
           <>
-            <div className="fixed inset-0 z-drawer-backdrop bg-[rgb(var(--background-rgb)_/_0.18)] sm:hidden" onClick={onOutlineClose} />
+            <div className="fixed inset-0 z-menu-backdrop bg-[rgb(var(--background-rgb)_/_0.18)] sm:hidden" onClick={onOutlineClose} />
             <div
-              className="hidden fixed z-popover w-80 max-w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border/20 bg-surface p-2 shadow-xl sm:block"
+              className="hidden fixed z-menu-panel w-80 max-w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border/20 bg-surface p-2 shadow-xl sm:block"
               style={outlineDesktopPos ? { top: `${outlineDesktopPos.top}px`, right: `${outlineDesktopPos.right}px` } : { top: -9999, right: -9999 }}
               data-markdown-heading-outline-desktop
             >
@@ -3666,7 +3666,10 @@ function getReferenceFloatingButtonClass(isMobile: boolean, completed: boolean):
   const toneClass = completed
     ? 'bg-surface-elevated text-foreground ring-border-strong/40 hover:bg-surface-2'
     : 'bg-primary text-primary-foreground ring-primary/30 hover:bg-primary/90';
-  return `pointer-events-auto absolute z-popover inline-flex items-center gap-1 rounded-full font-semibold shadow-lg ring-1 transition active:scale-95 ${sizeClass} ${toneClass}`;
+  // 局部刻度 z-30（面板内部悬浮钮铁律 < 40）：高于 sticky 表头(z-10)，
+  // 但任何全屏浮层（lightbox / modal / drawer）打开时必然盖住它。
+  // 曾经用 z-popover(200) → lightbox(110) 打开后按钮还浮在图上面。
+  return `pointer-events-auto absolute z-30 inline-flex items-center gap-1 rounded-full font-semibold shadow-lg ring-1 transition active:scale-95 ${sizeClass} ${toneClass}`;
 }
 
 function toChangedFileMap(files: GitChangedFile[]): Map<string, GitChangedFile> {
@@ -3872,7 +3875,7 @@ function GitActionMenu({ actions, running, completed }: {
         {activeAction ? <RiLoader size={13} className="animate-spin" /> : completedAction ? <span className="text-[12px] font-semibold">✓</span> : <RiMoreHorizontal size={14} />}
       </button>
       {open && (
-        <div className="absolute right-0 top-[calc(100%+2px)] z-menu-panel w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+        <div className="absolute right-0 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {actions.map((action) => {
             const isRunning = running?.action === action.key;
             const isCompleted = completed?.action === action.key;
@@ -10183,7 +10186,7 @@ export function RightSidebar(
       </div>
         {renderRepoSwitcher()}
         {confirmGitAction && (
-          <div className="fixed inset-0 z-modal-panel bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>
+          <div className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>
             <div
               className="fixed inset-x-3 bottom-6 mx-auto max-w-md rounded-2xl border border-border/20 bg-surface-elevated p-4 shadow-2xl"
               onClick={(event) => event.stopPropagation()}

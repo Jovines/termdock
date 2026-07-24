@@ -43,6 +43,8 @@ export default {
       // 业务里只用 z-drawer-panel / z-modal-panel 这类语义类，禁止裸 z-[数字]。
       // 新增浮层先在 index.css 选/加档位，再在这里补一个映射。
       zIndex: {
+        'chrome': 'var(--z-chrome)',
+        'chrome-hint': 'var(--z-chrome-hint)',
         'sidebar-backdrop': 'var(--z-sidebar-backdrop)',
         'sidebar-panel': 'var(--z-sidebar-panel)',
         'menu-backdrop': 'var(--z-menu-backdrop)',

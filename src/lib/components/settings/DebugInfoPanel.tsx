@@ -12,7 +12,7 @@ export const DebugInfoPanel: React.FC<DebugInfoPanelProps> = ({ debugInfo, showD
   }
 
   return (
-    <div className="fixed bottom-24 right-6 w-80 max-w-[90vw] bg-surface text-foreground rounded-2xl shadow-xl border border-border/15 z-50 overflow-hidden">
+    <div className="fixed bottom-24 right-6 w-80 max-w-[90vw] bg-surface text-foreground rounded-2xl shadow-xl border border-border/15 z-toast overflow-hidden">
       <div className="px-4 py-3 bg-surface-elevated border-b border-border/15 flex items-center justify-between rounded-t-2xl">
         <h3 className="font-bold text-sm flex items-center gap-2">
           <span className="w-2 h-2 bg-accent rounded-full"></span>

@@ -1179,7 +1179,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
           style={diffGutterStyle}
         >
           {showFileHeader && (
-            <div className="sticky top-0 z-menu-panel flex items-center justify-between gap-3 border-b border-border/15 bg-surface-2/95 px-2 py-1.5 backdrop-blur">
+            <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-border/15 bg-surface-2/95 px-2 py-1.5 backdrop-blur">
               <div className="min-w-0" title={file.newPath || file.oldPath}>
                 <div className="truncate font-mono text-[11px] text-foreground">{pathParts.name}</div>
                 {pathParts.dir && <div className="truncate font-mono text-[10px] text-muted-foreground/70">{pathParts.dir}</div>}
@@ -1572,7 +1572,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       data-diff-inline-mode={inlineMode}
     >
       {getReferenceLongPressHandlers.popoverNode}
-      <div className="sticky top-0 z-menu-panel border-b border-border/15 bg-surface/95 px-1 pb-2 pt-0 backdrop-blur">
+      <div className="sticky top-0 z-10 border-b border-border/15 bg-surface/95 px-1 pb-2 pt-0 backdrop-blur">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="truncate text-sm font-medium text-foreground" title={filePath ?? undefined}>

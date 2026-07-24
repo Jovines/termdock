@@ -108,7 +108,7 @@ export function DiffStreamItem({
       data-diff-absolute-path={absolutePath}
       className={`scroll-mt-3 border-b border-border/15 last:border-b-0 ${selected ? 'bg-surface-elevated/35' : ''}`}
     >
-      <div className={`sticky top-0 z-menu-panel flex min-w-0 items-center gap-2 border-b border-border/15 px-3 py-2 backdrop-blur ${
+      <div className={`sticky top-0 z-10 flex min-w-0 items-center gap-2 border-b border-border/15 px-3 py-2 backdrop-blur ${
         selected ? 'bg-surface-elevated/95' : 'bg-surface/95'
       }`}>
         {renderBadge(file.status)}

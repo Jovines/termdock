@@ -637,7 +637,8 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
           bottom: '10rem',
           ...(isLeft ? { left: 0 } : { right: 0 }),
           width: EDGE_ZONE_WIDTH,
-          zIndex: 30,
+          // chrome-hint 档(30)：高于终端/键盘等常驻内容，低于抽屉遮罩(40)。
+          zIndex: 'var(--z-chrome-hint)',
           touchAction: 'none',
           pointerEvents: isOpen ? 'none' : 'auto',
         }}

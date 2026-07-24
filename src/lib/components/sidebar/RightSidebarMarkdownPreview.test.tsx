@@ -808,8 +808,10 @@ describe('right sidebar Markdown preview rendering', () => {
     );
 
     const sticky = document.querySelector('[data-markdown-heading-sticky]');
-    expect(sticky?.className).toContain('z-menu-panel');
-    expect(sticky?.className).not.toContain('z-popover');
+    // 局部刻度 z-10（< 40）：高于预览内容，但任何全屏浮层（lightbox/modal，
+    // 最低全局档 sidebar-backdrop=40）打开时必然盖住它。
+    expect(sticky?.className).toContain('z-10');
+    expect(sticky?.className).not.toMatch(/z-(?:chrome|chrome-hint|sidebar|menu|drawer|modal|toast|popover)\b/);
   });
 
   it('uses iOS-like downward swipe thresholds for closing the Markdown image lightbox', () => {

@@ -37,11 +37,18 @@
 
 ## UI 层级 (z-index)
 
-- 全屏浮层(`fixed` 的遮罩/抽屉/弹窗/浮窗)**禁止**写裸 `z-[数字]`。
-- 统一用语义类:`z-sidebar-* / z-menu-* / z-drawer-* / z-modal-* / z-toast /
-  z-popover`。数值单一来源在 `src/index.css` 的 `--z-*`,映射在
-  `tailwind.config.js`。
+分「全局浮层刻度」与「面板局部刻度」两个世界:
+
+- **全局刻度**(`fixed` 的遮罩/抽屉/弹窗/浮窗):**禁止**写裸 `z-[数字]`,
+  统一用语义类:`z-chrome / z-chrome-hint / z-sidebar-* / z-menu-* /
+  z-drawer-* / z-modal-* / z-toast / z-popover`。数值单一来源在
+  `src/index.css` 的 `--z-*`,映射在 `tailwind.config.js`。
+- **局部刻度**(面板/滚动容器内部的 `absolute`/`sticky` 控件:sticky 表头、
+  悬浮「引用」按钮、局部下拉菜单):只用裸 `z-10 / z-20 / z-30`,铁律
+  **< 40**(低于最低全局档),且**禁止**占用全局语义类——局部控件占全局
+  档位就会和全屏浮层抢层级(「引用」按钮浮在 lightbox 图片上面就是这么
+  来的)。
 - 新增浮层:先在 `src/index.css` 选/加一个档位,再用对应 `z-*` 类。
 - 规则:子浮层必须高于弹出它的载体(例如设置抽屉里再弹的弹窗用
   `z-modal-*`,要盖住 `z-drawer-*`)。`src/lib/zIndexTokens.test.ts` 会守卫
-  刻度有序且无裸数值。
+  刻度有序、无裸数值、局部控件不碰全局档位。
