@@ -16,19 +16,21 @@ const GROUP_BY_FOLDER_KEY = 'termdock-sidebar-group-by-folder';
 const COLLAPSED_GROUPS_KEY = 'termdock-sidebar-collapsed-folder-groups';
 
 function readGroupByFolder(): boolean {
-  if (typeof window === 'undefined') return false;
+  if (typeof window === "undefined") return true;
   try {
-    return window.localStorage.getItem(GROUP_BY_FOLDER_KEY) === '1';
+    const stored = window.localStorage.getItem(GROUP_BY_FOLDER_KEY);
+    if (stored === null) return true; // default: grouped
+    return stored === "1";
   } catch {
-    return false;
+    return true;
   }
 }
 
 function writeGroupByFolder(enabled: boolean): void {
-  if (typeof window === 'undefined') return;
+  if (typeof window === "undefined") return;
   try {
-    if (enabled) window.localStorage.setItem(GROUP_BY_FOLDER_KEY, '1');
-    else window.localStorage.removeItem(GROUP_BY_FOLDER_KEY);
+    if (enabled) window.localStorage.setItem(GROUP_BY_FOLDER_KEY, "1");
+    else window.localStorage.setItem(GROUP_BY_FOLDER_KEY, "0");
   } catch {
     // best-effort
   }
