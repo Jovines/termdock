@@ -20,6 +20,7 @@ import { AgentSessionDot, AgentCountBadge } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSidebarStore } from '../../stores/useSidebarStore';
+import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 
 const AUTO_SORT_ACTIVE_SESSIONS_STORAGE_KEY = 'termdock-sidebar-auto-sort-active-sessions';
 const MANUAL_SESSION_ORDER_BEFORE_AUTO_SORT_STORAGE_KEY = 'termdock-sidebar-manual-order-before-auto-sort';
@@ -158,6 +159,9 @@ interface LeftSidebarProps {
   onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => void;
   onCloseSession: (sessionId: string) => void;
   onReorderSessions: (sessionIds: string[]) => void;
+  // 打开某个会话的操作菜单（重命名/复制目录/关闭等）。触屏用「超长按」触发，
+  // 桌面端同时挂到右键 contextmenu；不传则两种手势都不生效。
+  onSessionMenu?: (sessionId: string) => void;
   onOpenSettings: () => void;
   tmuxAvailable?: boolean;
   defaultSessionMode?: 'shell' | 'tmux';
@@ -192,7 +196,7 @@ export function LeftSidebar(
   {
     isOpen, drawerWidthPx, onClose, onOpen,
     sessions, activeSessionId, sessionStates,
-    onNewSession, onCloseSession, onReorderSessions, onOpenSettings,
+    onNewSession, onCloseSession, onReorderSessions, onSessionMenu, onOpenSettings,
     tmuxAvailable = true,
     defaultSessionMode = 'shell',
     push,
@@ -397,6 +401,7 @@ export function LeftSidebar(
 
   // 会话行主体（切换按钮 + 关闭按钮），flat / 分组两种布局共用。
   // dragHandleProps 仅在可拖拽的 flat 模式传入。
+  const bindSessionLongPress = useSuperLongPress();
   const renderSessionRowBody = useCallback((
     session: LeftSidebarProps['sessions'][number],
     dragHandleProps?: DraggableProvidedDragHandleProps | null,
@@ -430,6 +435,14 @@ export function LeftSidebar(
           ref={isActive ? activeItemRef : null}
           type="button"
           {...(dragHandleProps ?? {})}
+          {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
+          onContextMenu={(event) => {
+            // 桌面右键 = 打开会话操作菜单；触屏超长按由 pointer 手势触发，
+            // 与 dnd 的 120ms 拖拽抬起共存（松手无移动不会排序）。
+            if (!onSessionMenu) return;
+            event.preventDefault();
+            onSessionMenu(session.id);
+          }}
           onClick={() => {
             window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
             closeIfOverlay();
@@ -489,7 +502,7 @@ export function LeftSidebar(
         </button>
       </>
     );
-  }, [activeSessionId, sessionStates, onCloseSession, t]);
+  }, [activeSessionId, sessionStates, onCloseSession, onSessionMenu, bindSessionLongPress, t]);
 
   // 分组模式下：按 cwd 把当前可见会话归组。
   const folderGroups = useMemo(() => {

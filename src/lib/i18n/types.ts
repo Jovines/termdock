@@ -492,6 +492,7 @@ export type TranslationDictionary = {
     new: string;
     rename: string;
     renameHint: string;
+    renamePlaceholder: string;
     copyCwd: string;
     copyCwdHint: string;
     copied: string;

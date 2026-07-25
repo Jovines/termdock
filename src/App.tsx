@@ -30,6 +30,7 @@ import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableP
 import { useTerminalSettings } from './lib/hooks/useTerminalSettings';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
+import { useSuperLongPress } from './lib/hooks/useSuperLongPress';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
@@ -625,6 +626,9 @@ function App() {
   const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
   const [sidebarCloseChoiceSessionId, setSidebarCloseChoiceSessionId] = useState<string | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
+  // 移动端重命名卡片每次打开只自动聚焦一次——父组件会随终端输出频繁重渲染，
+  // 回调 ref 不设防的话会反复 focus/select，把用户正在输入的内容全选掉。
+  const renameSheetFocusedRef = React.useRef(false);
   const activeSessionTabRef = React.useRef<HTMLDivElement | null>(null);
   const closeTabMenu = useCallback(() => {
     setTabMenuSessionId(null);
@@ -1658,11 +1662,24 @@ function App() {
     if (editingSessionId && renameInputRef.current) {
       renameInputRef.current.select();
     }
+    if (!editingSessionId) {
+      renameSheetFocusedRef.current = false;
+    }
   }, [editingSessionId]);
 
   const handleTabClick = useCallback((sessionId: string) => {
     window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
   }, []);
+
+  // 触屏设备上系统 contextmenu 不可用（全局禁用了 touch-callout / user-select，
+  // iOS PWA 不会触发），而 dnd 又占用了 120ms 长按进入拖拽排序。「超长按」
+  // （按住不动 ~550ms）是唯一不与「点按切换 / 按住拖动排序」冲突的手势，
+  // 用它打开 tab 操作菜单；左侧边栏会话行复用同一手势（见 LeftSidebar）。
+  const openTabMenu = useCallback((sessionId: string) => {
+    setTabMenuAnchor(null);
+    setTabMenuSessionId(sessionId);
+  }, []);
+  const bindTabLongPress = useSuperLongPress();
 
   // 请求聚焦某个 session：若它已在当前会话列表里，立即切换；否则记下来，
   // 等会话恢复 / inventory 同步后由下面的 effect 补发。
@@ -1924,12 +1941,17 @@ function App() {
           ? 'var(--warning)'
           : null;
 
-    if (isEditing) {
+    // 内联重命名输入只在桌面端使用；移动端改用独立重命名卡片
+    //（32px/12px 的内联输入在触屏上太小，且 <16px 字号会触发 iOS 聚焦缩放）。
+    if (isEditing && isDesktopViewport) {
+      // 预填「当前显示名」：reset 只翻 customName 标志，旧自定义名会残留在
+      // session.name 里，直接预填 name 会显示界面上看不到的旧名字。
+      const nameSeed = session.customName ? session.name : displayName;
       const commitRename = (sessionId: string, value: string) => {
         const trimmed = value.trim();
         if (!trimmed) {
           resetSessionName(sessionId);
-        } else if (trimmed !== session.name) {
+        } else if (trimmed !== nameSeed) {
           renameSession(sessionId, trimmed);
         }
         setEditingSessionId(null);
@@ -1938,9 +1960,9 @@ function App() {
         <input
           ref={(el) => { renameInputRef.current = el; }}
           type="text"
-          defaultValue={session.name}
+          defaultValue={nameSeed}
           className="h-8 shrink-0 rounded-md bg-surface-elevated px-2 text-[12px] leading-none text-foreground outline-none ring-1 ring-primary/50 sm:h-8 min-w-[5rem]"
-          style={{ width: `${Math.max(session.name.length, 5)}ch` }}
+          style={{ width: `${Math.max(nameSeed.length, 5)}ch` }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               commitRename(session.id, (e.target as HTMLInputElement).value);
@@ -1961,6 +1983,7 @@ function App() {
           setTabMenuAnchor({ x: e.clientX, y: e.clientY });
           setTabMenuSessionId(session.id);
         }}
+        {...bindTabLongPress(() => openTabMenu(session.id))}
         className={
           compact
             ? `group relative inline-flex h-5 shrink-0 items-center rounded-sm text-[11px] leading-none transition ${
@@ -3206,6 +3229,110 @@ function App() {
         );
       })()}
 
+      {/* 移动端重命名卡片 —— 触屏上替代 tab 栏内联输入。
+          放在顶部而不是底部：iOS 软键盘弹出会遮住屏幕下缘的浮层；
+          16px 字号避免 iOS 聚焦时的自动缩放。语义与桌面端 commitRename 一致：
+          留空 = 恢复默认名称，未修改 = 直接关闭。 */}
+      {editingSessionId && !isDesktopViewport && (() => {
+        const editingSession = sessions.find((s) => s.id === editingSessionId);
+        if (!editingSession) return null;
+        // 预填「当前显示名」而不是原始 session.name：reset 只翻 customName 标志、
+        // 旧自定义名会留在 name 里，直接预填 name 会显示一个界面上根本看不到的旧名字；
+        // 而且输入恰好等于残留旧名时会被当成「未修改」静默丢弃。
+        const editingTs = terminalSessions.get(editingSession.id);
+        const { primary: editingDisplayName } = getSessionDisplayLines(
+          editingSession,
+          editingTs?.activeProgram ?? null,
+          editingTs?.cwd ?? null,
+          SHELL_NAMES,
+          editingTs?.shellTitle ?? null,
+          editingTs?.promptState ?? null,
+        );
+        const nameSeed = editingSession.customName ? editingSession.name : editingDisplayName;
+        const commitMobileRename = (value: string) => {
+          const trimmed = value.trim();
+          if (!trimmed) {
+            resetSessionName(editingSession.id);
+          } else if (trimmed !== nameSeed) {
+            // 与当前显示名相同则视为未修改——否则会把动态程序标签冻结成静态自定义名
+            renameSession(editingSession.id, trimmed);
+          }
+          setEditingSessionId(null);
+        };
+        return (
+          <>
+            <button
+              type="button"
+              className="fixed inset-0 z-menu-backdrop cursor-default animate-fade-in bg-[var(--app-backdrop-soft)] backdrop-blur-sm"
+              onClick={() => setEditingSessionId(null)}
+              aria-label={t('common.cancel')}
+            />
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label={t('tab.rename')}
+              className="fixed inset-x-3 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in"
+              style={{ top: `calc(${safeTopInset} + 3.5rem)` }}
+            >
+              <div className="border-b border-border/15 px-4 py-3">
+                <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{t('tab.session')}</div>
+                <div className="mt-0.5 text-[14px] font-medium text-foreground">{t('tab.rename')}</div>
+              </div>
+              <form
+                className="px-4 py-3"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const value = new FormData(event.currentTarget).get('session-name');
+                  commitMobileRename(typeof value === 'string' ? value : '');
+                }}
+              >
+                <input
+                  ref={(el) => {
+                    renameInputRef.current = el;
+                    if (el && !renameSheetFocusedRef.current) {
+                      renameSheetFocusedRef.current = true;
+                      el.focus({ preventScroll: true });
+                      el.select();
+                    }
+                  }}
+                  type="text"
+                  name="session-name"
+                  defaultValue={nameSeed}
+                  placeholder={t('tab.renamePlaceholder')}
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  enterKeyHint="done"
+                  className="w-full rounded-lg bg-surface-2 px-3 py-2.5 text-[16px] leading-snug text-foreground outline-none ring-1 ring-primary/40 placeholder:text-muted-foreground/60 focus:ring-primary/70"
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.stopPropagation();
+                      setEditingSessionId(null);
+                    }
+                  }}
+                />
+                <div className="mt-3 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingSessionId(null)}
+                    className="flex-1 rounded-full bg-surface-2 px-3 py-2 text-[12px] font-medium text-muted-foreground transition hover:bg-surface hover:text-foreground"
+                  >
+                    {t('common.cancel')}
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 rounded-full bg-primary/20 px-3 py-2 text-[12px] font-medium text-primary transition hover:bg-primary/30"
+                  >
+                    {t('common.save')}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </>
+        );
+      })()}
+
       {isNotificationsOpen && (
         <>
           <button
@@ -3711,6 +3838,7 @@ function App() {
         onNewSession={(opts) => dispatchNewSession(opts)}
         onCloseSession={handleSidebarCloseSession}
         onReorderSessions={applySessionOrder}
+        onSessionMenu={openTabMenu}
         onOpenSettings={handleOpenSettings}
         tmuxAvailable={tmuxStatus.available}
         defaultSessionMode={newSessionMode}
