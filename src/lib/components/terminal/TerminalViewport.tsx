@@ -2001,6 +2001,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       longPressMode: 'arrows' | 'copy';
       copyStart: { col: number; row: number } | null;
       copyDidSelect: boolean;
+      gestureLocked: boolean;
       joystickDir: '' | 'up' | 'down' | 'left' | 'right';
       joystickRepeatTimer: ReturnType<typeof setTimeout> | null;
       repeatIntervalMs: number;
@@ -2020,6 +2021,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       longPressMode: 'arrows',
       copyStart: null,
       copyDidSelect: false,
+      gestureLocked: false,
       joystickDir: '',
       joystickRepeatTimer: null,
       repeatIntervalMs: 260,
@@ -2040,6 +2042,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const mobileLongPressModeRef = React.useRef(mobileLongPressMode);
     mobileLongPressModeRef.current = mobileLongPressMode;
 
+    // Idempotent wrapper around the session-Swiper gesture lock: only
+    // dispatches on actual transitions so every exit path can call it
+    // unconditionally without spamming lock events.
+    const lpSetGestureLock = React.useCallback((locked: boolean) => {
+      const s = lpStateRef.current;
+      if (s.gestureLocked === locked) return;
+      s.gestureLocked = locked;
+      notifyGestureLock(locked);
+    }, [notifyGestureLock]);
+
     const lp_onPointerDown = React.useCallback((e: PointerEvent): boolean => {
       if (e.pointerType !== 'touch') return false;
 
@@ -2054,7 +2066,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const s = lpStateRef.current;
       s.longPressMode = mobileLongPressModeRef.current;
 
-      if (s.mode === 'arrow' || s.mode === 'copy') return true;
+      // A gesture is already owned by the primary pointer. Extra fingers
+      // (palm brush, edge grip) must be claimed but otherwise ignored —
+      // resetting state here used to silently kill an in-flight long-press,
+      // turning the intended selection drag into a Swiper page-flip.
+      if (s.pointerId !== null) return true;
       longPressGestureBlocksScrollRef.current = false;
 
       if (onDoubleTapRef.current) {
@@ -2096,6 +2112,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       s.tapDidMove = false;
       s.mode = 'holding';
 
+      // Copy mode: freeze the session Swiper from touch-down so a selection
+      // drag can never page-flip, even before the long-press fires. Released
+      // on every gesture exit; a plain swipe (>20px before 350ms) unlocks
+      // mid-gesture — Swiper 12 re-syncs its touch origin while
+      // allowTouchMove is false, so the handoff has no jump.
+      if (s.longPressMode === 'copy') {
+        lpSetGestureLock(true);
+      }
+
       s.holdTimer = setTimeout(() => {
         s.holdTimer = null;
         if (s.mode === 'holding') {
@@ -2115,6 +2140,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             tmuxStopRaf();
             term.clearSelection();
             hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
+            lpSetGestureLock(true);
             return;
           }
           s.mode = 'arrow';
@@ -2123,7 +2149,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           stopAllScroll();
           tmuxStopRaf();
           hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
-          notifyGestureLock(true);
+          lpSetGestureLock(true);
           requestAnimationFrame(() => {
             setArrowIndicator({ visible: true, activeDir: '' });
           });
@@ -2131,7 +2157,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }, 350);
 
       return true;
-    }, [notifyGestureLock]);
+    }, [lpSetGestureLock]);
 
     const lp_onPointerMove = React.useCallback((e: PointerEvent, isClaimed: boolean): GestureAction => {
       if (e.pointerType !== 'touch') return 'neutral';
@@ -2155,6 +2181,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             clearTimeout(s.holdTimer);
             s.holdTimer = null;
           }
+          lpSetGestureLock(false);
           longPressGestureBlocksScrollRef.current = false;
           s.mode = 'idle';
           return 'neutral';
@@ -2166,6 +2193,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             clearTimeout(s.holdTimer);
             s.holdTimer = null;
           }
+          lpSetGestureLock(false);
           longPressGestureBlocksScrollRef.current = false;
           s.mode = 'idle';
           return 'release';
@@ -2175,6 +2203,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             clearTimeout(s.holdTimer);
             s.holdTimer = null;
           }
+          lpSetGestureLock(false);
           s.mode = 'idle';
           return 'release';
         }
@@ -2283,7 +2312,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         return 'claim';
       }
       return 'neutral';
-    }, []);
+    }, [lpSetGestureLock]);
 
     const lp_onPointerUp = React.useCallback((e: PointerEvent) => {
       if (e.pointerType !== 'touch' || e.pointerId !== lpStateRef.current.pointerId) return;
@@ -2293,6 +2322,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (s.mode === 'copy') {
         stopAllScroll();
         tmuxStopRaf();
+        lpSetGestureLock(false);
         const term = terminalRef.current;
         if (term && s.copyStart) {
           const end = getTerminalCellFromPoint(term, e.clientX, e.clientY);
@@ -2319,7 +2349,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (s.mode === 'arrow') {
         stopAllScroll();
         tmuxStopRaf();
-        notifyGestureLock(false);
+        lpSetGestureLock(false);
         setArrowIndicator({ visible: false, activeDir: '' });
         if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
         if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
@@ -2345,17 +2375,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
       if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
       s.joystickDir = '';
+      lpSetGestureLock(false);
       longPressGestureBlocksScrollRef.current = false;
       s.copyStart = null;
       s.copyDidSelect = false;
       s.pointerId = null;
       s.mode = 'idle';
-    }, [notifyGestureLock, stopAllScroll, suppressMobileTapFocus]);
+    }, [lpSetGestureLock, stopAllScroll, suppressMobileTapFocus]);
 
     const lp_onPointerCancel = React.useCallback(() => {
       const s = lpStateRef.current;
+      lpSetGestureLock(false);
       if (s.mode === 'arrow') {
-        notifyGestureLock(false);
         setArrowIndicator({ visible: false, activeDir: '' });
       }
       if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
@@ -2367,7 +2398,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       s.pointerId = null;
       s.tapDidMove = false;
       s.mode = 'idle';
-    }, [notifyGestureLock]);
+    }, [lpSetGestureLock]);
 
     useGesture({
       name: `long-press:${sessionKey}`,
