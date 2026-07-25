@@ -160,6 +160,7 @@ interface TerminalSession {
   cols: number;
   rows: number;
   lastActivity: number;
+  lastOutputAt: number;
   clients: Map<string, express.Response>;
   createdAt: number;
   hasWrittenData: boolean;
@@ -320,6 +321,85 @@ const inventoryOpenLocks = new Map<string, Promise<OpenInventoryResult>>();
 
 const CONTROL_BROADCAST_COALESCE_MS = 50;
 const SESSION_INVENTORY_CACHE_TTL_MS = 1500;
+
+// 最近活跃优先排序：不是竞速榜，只分「最近活跃」和「非活跃」两组。
+// 活跃组整体在前，组内保持当前相对顺序，避免两个持续输出的 session
+// 按毫秒级 lastActivity 来回抢第一个位置。
+const RECENT_ACTIVITY_WINDOW_MS = 60_000;
+const ACTIVITY_REORDER_COOLDOWN_MS = 5_000;
+const ACTIVITY_REORDER_PERIODIC_MS = 30_000;
+
+let activityReorderTimer: ReturnType<typeof setTimeout> | null = null;
+let activityReorderPeriodicTimer: ReturnType<typeof setInterval> | null = null;
+let activityReorderEnabled = true;
+
+function getEffectiveLastActivity(session: PersistedClientSession): number {
+  // 只用 PTY 输出时间判断「最近活跃」——resize / input / connect
+  // 不参与排序，避免拖窗口尺寸等非输出操作导致 session 跳到前面。
+  if (session.backendSessionId) {
+    const backend = terminalSessions.get(session.backendSessionId);
+    if (backend) return backend.lastOutputAt;
+  }
+  return session.lastActivity;
+}
+
+function applyActivityBasedReorder(): void {
+  if (!activityReorderEnabled) return;
+  const sessions = globalSessionState.sessions;
+  if (sessions.length <= 1) return;
+
+  const now = Date.now();
+  const recentlyActive: PersistedClientSession[] = [];
+  const inactive: PersistedClientSession[] = [];
+
+  for (const session of sessions) {
+    const la = getEffectiveLastActivity(session);
+    if (now - la <= RECENT_ACTIVITY_WINDOW_MS) {
+      recentlyActive.push(session);
+    } else {
+      inactive.push(session);
+    }
+  }
+
+  // 两个 bucket 内各自保持原有相对顺序，只是活跃组整体提前
+  const reordered = [...recentlyActive, ...inactive];
+  const orderChanged = sessions.map(s => s.sessionId).join('\x00') !== reordered.map(s => s.sessionId).join('\x00');
+  if (!orderChanged) return;
+
+  globalSessionState = {
+    sessions: reordered,
+    updatedAt: Date.now(),
+  };
+  persistAndBroadcastGlobalState();
+}
+
+function scheduleActivityReorder(): void {
+  if (activityReorderTimer) return;
+  activityReorderTimer = setTimeout(() => {
+    activityReorderTimer = null;
+    applyActivityBasedReorder();
+  }, ACTIVITY_REORDER_COOLDOWN_MS);
+  activityReorderTimer.unref?.();
+}
+
+function startActivityReorderPeriodic(): void {
+  if (activityReorderPeriodicTimer) return;
+  activityReorderPeriodicTimer = setInterval(() => {
+    applyActivityBasedReorder();
+  }, ACTIVITY_REORDER_PERIODIC_MS);
+  activityReorderPeriodicTimer.unref?.();
+}
+
+function stopActivityReorderPeriodic(): void {
+  if (activityReorderPeriodicTimer) {
+    clearInterval(activityReorderPeriodicTimer);
+    activityReorderPeriodicTimer = null;
+  }
+  if (activityReorderTimer) {
+    clearTimeout(activityReorderTimer);
+    activityReorderTimer = null;
+  }
+}
 
 async function getSessionInventorySnapshot(options: { refresh?: boolean } = {}): Promise<SessionInventory> {
   const now = Date.now();
@@ -610,8 +690,8 @@ function flushPersistAndExit(): void {
     fs.writeFileSync(GLOBAL_SESSION_STATE_FILE, JSON.stringify(globalSessionState, null, 2), 'utf-8');
   } catch { /* best effort */ }
 }
-process.on('SIGTERM', () => { flushPersistAndExit(); void persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
-process.on('SIGINT', () => { flushPersistAndExit(); void persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
+process.on('SIGTERM', () => { stopActivityReorderPeriodic(); flushPersistAndExit(); void persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
+process.on('SIGINT', () => { stopActivityReorderPeriodic(); flushPersistAndExit(); void persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
 
 // 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
 void (async () => {
@@ -619,6 +699,8 @@ void (async () => {
   await watchGlobalSessionStateFile();
   pruneOrphanSessions();
   await backfillPersistedTmuxMetadata();
+  startActivityReorderPeriodic();
+  applyActivityBasedReorder();
 })();
 caffeinateManager.startNetworkMonitor();
 
@@ -3629,7 +3711,9 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
 
   session.dataDisposable = session.ptyProcess.onData((data: string) => {
     session.lastActivity = Date.now();
+    session.lastOutputAt = Date.now();
     session.hasWrittenData = true;
+    scheduleActivityReorder();
     let seq: number | undefined;
     if (session.mode === 'shell') {
       seq = addToHistory(sessionId, data);
@@ -3829,6 +3913,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     cols,
     rows,
     lastActivity: Date.now(),
+    lastOutputAt: Date.now(),
     clients: new Map(),
     createdAt: Date.now(),
     hasWrittenData: false,
@@ -4214,6 +4299,7 @@ router.get('/client-state', async (_req, res) => {
 
 router.get('/session-inventory', async (_req, res) => {
   try {
+    applyActivityBasedReorder();
     const inventory = await getSessionInventorySnapshot();
     res.json(inventory);
   } catch (error) {
@@ -4404,6 +4490,30 @@ async function getSettingsPayload() {
     },
   };
 }
+
+// ── Activity reorder preference ──────────────────────────────────────
+router.get('/settings/activity-reorder', (_req, res) => {
+  res.json({ enabled: activityReorderEnabled });
+});
+
+router.put('/settings/activity-reorder', (req, res) => {
+  const body = req.body ?? {};
+  if (typeof body.enabled === 'boolean') {
+    activityReorderEnabled = body.enabled;
+    // 关闭后立刻停掉还在队列里的 reorder timer
+    if (!activityReorderEnabled && activityReorderTimer) {
+      clearTimeout(activityReorderTimer);
+      activityReorderTimer = null;
+    }
+    // 如果重新开启,立刻执行一次排序
+    if (activityReorderEnabled) {
+      applyActivityBasedReorder();
+    }
+    res.json({ enabled: activityReorderEnabled });
+    return;
+  }
+  res.status(400).json({ error: '"enabled" must be a boolean' });
+});
 
 // ── Settings (prevent sleep) ──────────────────────────────────────────
 router.get('/settings', async (_req, res) => {

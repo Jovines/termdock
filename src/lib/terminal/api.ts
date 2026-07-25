@@ -1214,6 +1214,27 @@ export async function updateSettings(settings: { preventSleep?: boolean; localAc
   return response.json();
 }
 
+// ---- Activity reorder preference ----
+
+export async function getActivityReorderEnabled(): Promise<boolean> {
+  const response = await fetch('/api/terminal/settings/activity-reorder', { method: 'GET' });
+  if (!response.ok) return true; // 默认开启
+  const data = await response.json();
+  return data.enabled !== false;
+}
+
+export async function setActivityReorderEnabled(enabled: boolean): Promise<boolean> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/settings/activity-reorder', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!response.ok) return enabled; // 失败返回原值
+  const data = await response.json();
+  return data.enabled;
+}
+
 // ---- Auth ----
 
 export interface AuthStatus {

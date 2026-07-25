@@ -6,132 +6,22 @@ import {
   LayoutGrid as RiLayoutGridLine,
   Search as RiSearchLine,
   LoaderCircle as RiLoaderCircle,
-  ArrowDownWideNarrow as RiSortDescLine,
   FolderTree as RiFolderTreeLine,
   ChevronRight as RiChevronRightLine,
   Bell as RiBellLine,
+  ArrowDownWideNarrow as RiSortDescLine,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport } from '../../terminal/types';
+import { getActivityReorderEnabled, setActivityReorderEnabled } from '../../terminal/api';
 import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, reorderSessionsWithinGroup, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
 import { AgentSessionDot, AgentCountBadge } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
-import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 
-const AUTO_SORT_ACTIVE_SESSIONS_STORAGE_KEY = 'termdock-sidebar-auto-sort-active-sessions';
-const MANUAL_SESSION_ORDER_BEFORE_AUTO_SORT_STORAGE_KEY = 'termdock-sidebar-manual-order-before-auto-sort';
-// 最近活跃排序不是竞速榜：只分「最近活跃」和「非活跃」两组。
-// 活跃组整体在前，但组内保持当前相对顺序，避免两个持续输出的 session
-// 按毫秒级 lastOutputAt 来回抢第一个位置。
-const RECENT_ACTIVITY_WINDOW_MS = 60_000;
-// 输出可能每帧到达，侧边栏无需每帧重排。低频采样让排序更 lazy，也减少 UI 抖动。
-const ACTIVITY_SNAPSHOT_THROTTLE_MS = 2_000;
-// 即使没有新输出，也定期刷新一次 now，让超过窗口的 session 能自然退回非活跃组。
-const ACTIVITY_WINDOW_REFRESH_MS = 10_000;
-
-function readAutoSortActiveSessionsEnabled(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    return window.localStorage.getItem(AUTO_SORT_ACTIVE_SESSIONS_STORAGE_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function writeAutoSortActiveSessionsEnabled(enabled: boolean): void {
-  if (typeof window === 'undefined') return;
-  try {
-    if (enabled) window.localStorage.setItem(AUTO_SORT_ACTIVE_SESSIONS_STORAGE_KEY, '1');
-    else window.localStorage.removeItem(AUTO_SORT_ACTIVE_SESSIONS_STORAGE_KEY);
-  } catch {
-    // ignore storage failures
-  }
-}
-
-function readStoredManualSessionOrder(): string[] | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(MANUAL_SESSION_ORDER_BEFORE_AUTO_SORT_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.every((id) => typeof id === 'string') ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredManualSessionOrder(sessionIds: string[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(MANUAL_SESSION_ORDER_BEFORE_AUTO_SORT_STORAGE_KEY, JSON.stringify(sessionIds));
-  } catch {
-    // ignore storage failures
-  }
-}
-
-function clearStoredManualSessionOrder(): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.removeItem(MANUAL_SESSION_ORDER_BEFORE_AUTO_SORT_STORAGE_KEY);
-  } catch {
-    // ignore storage failures
-  }
-}
-
-function readOutputActivitySnapshot(): Map<string, number> {
-  const snapshot = new Map<string, number>();
-  for (const [id, state] of useTerminalStore.getState().sessions) {
-    if (typeof state.lastOutputAt === 'number') {
-      snapshot.set(id, state.lastOutputAt);
-    }
-  }
-  return snapshot;
-}
-
-function areOutputActivitySnapshotsEqual(a: Map<string, number>, b: Map<string, number>): boolean {
-  if (a.size !== b.size) return false;
-  for (const [id, value] of b) {
-    if (a.get(id) !== value) return false;
-  }
-  return true;
-}
-
-function isSessionRecentlyActive(
-  sessionId: string,
-  outputActivityBySession: Map<string, number>,
-  now: number,
-): boolean {
-  const activity = outputActivityBySession.get(sessionId) ?? 0;
-  return activity > 0 && now - activity <= RECENT_ACTIVITY_WINDOW_MS;
-}
-
-function compareSessionsByActivityBucket<T extends { id: string }>(
-  a: T,
-  b: T,
-  outputActivityBySession: Map<string, number>,
-  currentIndexBySession: Map<string, number>,
-  now: number,
-): number {
-  const aActive = isSessionRecentlyActive(a.id, outputActivityBySession, now);
-  const bActive = isSessionRecentlyActive(b.id, outputActivityBySession, now);
-  if (aActive !== bActive) return aActive ? -1 : 1;
-  return (currentIndexBySession.get(a.id) ?? 0) - (currentIndexBySession.get(b.id) ?? 0);
-}
-
-function getActivityBucketSortedSessionIds<T extends { id: string }>(
-  sessions: T[],
-  outputActivityBySession: Map<string, number>,
-  now: number,
-): string[] {
-  const currentIndexBySession = new Map(sessions.map((session, index) => [session.id, index]));
-  return [...sessions]
-    .sort((a, b) => compareSessionsByActivityBucket(a, b, outputActivityBySession, currentIndexBySession, now))
-    .map((session) => session.id);
-}
 
 interface LeftSidebarProps {
   isOpen: boolean;
@@ -206,12 +96,10 @@ export function LeftSidebar(
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [confirmNewMode, setConfirmNewMode] = useState<'shell' | 'tmux' | null>(null);
-  const [autoSortByActivity, setAutoSortByActivity] = useState(readAutoSortActiveSessionsEnabled);
+  const [autoSortByActivity, setAutoSortByActivity] = useState(true); // 默认开启，启动时会从服务端拉取真实值
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
-  const [outputActivityBySession, setOutputActivityBySession] = useState<Map<string, number>>(readOutputActivitySnapshot);
-  const [activityClock, setActivityClock] = useState(() => Date.now());
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
   // 由「翻页→自动展开」机制维护的分组 key 集合，用于区分：
   //  - 自动展开（翻页进来时我们手动 expand）：翻走后允许自动收起
@@ -222,53 +110,22 @@ export function LeftSidebar(
   const trimmedQuery = query.trim();
   const isFiltering = trimmedQuery.length > 0;
   // 分组模式下禁用拖拽（与搜索 / 自动排序一致）。
-  const dragDisabled = isFiltering || autoSortByActivity || groupByFolder;
-
+  // 启动时从服务端拉取活动排序开关状态
   useEffect(() => {
-    writeAutoSortActiveSessionsEnabled(autoSortByActivity);
-    if (!autoSortByActivity) return;
-
-    const publishSnapshot = (state = useTerminalStore.getState()) => {
-      setActivityClock(Date.now());
-      const next = new Map<string, number>();
-      for (const [id, sessionState] of state.sessions) {
-        if (typeof sessionState.lastOutputAt === 'number') {
-          next.set(id, sessionState.lastOutputAt);
-        }
-      }
-      setOutputActivityBySession((current) => (
-        areOutputActivitySnapshotsEqual(current, next) ? current : next
-      ));
-    };
-
-    publishSnapshot();
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const refreshTimer = setInterval(() => publishSnapshot(), ACTIVITY_WINDOW_REFRESH_MS);
-    const unsubscribe = useTerminalStore.subscribe(() => {
-      if (timer) return;
-      timer = setTimeout(() => {
-        timer = null;
-        publishSnapshot();
-      }, ACTIVITY_SNAPSHOT_THROTTLE_MS);
+    getActivityReorderEnabled().then((enabled) => {
+      setAutoSortByActivity(enabled);
+    }).catch(() => {
+      // 服务端不可达时保持默认值
     });
-    return () => {
-      unsubscribe();
-      if (timer) clearTimeout(timer);
-      clearInterval(refreshTimer);
-    };
-  }, [autoSortByActivity]);
+  }, []);
+
+  const dragDisabled = isFiltering || groupByFolder;
+
 
   const visibleSessions = useMemo(() => {
     return sessions.filter((session) => matchesSession(trimmedQuery, session, sessionStates.get(session.id)));
   }, [trimmedQuery, sessions, sessionStates]);
 
-  useEffect(() => {
-    if (!autoSortByActivity || isFiltering) return;
-    const sortedIds = getActivityBucketSortedSessionIds(sessions, outputActivityBySession, activityClock);
-    const currentIds = sessions.map((session) => session.id);
-    if (sortedIds.join('\u0000') === currentIds.join('\u0000')) return;
-    onReorderSessions(sortedIds);
-  }, [activityClock, autoSortByActivity, isFiltering, onReorderSessions, outputActivityBySession, sessions]);
 
   const { runningCount, reviewCount } = useMemo(() => {
     let running = 0;
@@ -370,34 +227,19 @@ export function LeftSidebar(
     onReorderSessions(reordered.map((session) => session.id));
   }, [dragDisabled, onReorderSessions, sessions]);
 
-  const handleToggleAutoSortByActivity = useCallback(() => {
-    setAutoSortByActivity((enabled) => {
-      const nextEnabled = !enabled;
-      if (nextEnabled) {
-        writeStoredManualSessionOrder(sessions.map((session) => session.id));
-      } else {
-        const storedOrder = readStoredManualSessionOrder();
-        if (storedOrder) {
-          onReorderSessions(storedOrder);
-        }
-        clearStoredManualSessionOrder();
-      }
-      return nextEnabled;
-    });
-  }, [onReorderSessions, sessions]);
 
   // 分组与「最近活跃排序」互斥：开启分组时关掉自动排序并恢复手动顺序。
-  // 分组开关本身存在共享 store，互斥副作用（autoSort 仍是本地 state）留在这里。
+  const handleToggleAutoSortByActivity = useCallback(() => {
+    setAutoSortByActivity((enabled) => {
+      const next = !enabled;
+      setActivityReorderEnabled(next).catch(() => {});
+      return next;
+    });
+  }, []);
+
   const handleToggleGroupByFolder = useCallback(() => {
-    const willEnable = !useSidebarStore.getState().groupByFolder;
     useSidebarStore.getState().toggleGroupByFolder();
-    if (willEnable && readAutoSortActiveSessionsEnabled()) {
-      setAutoSortByActivity(false);
-      const storedOrder = readStoredManualSessionOrder();
-      if (storedOrder) onReorderSessions(storedOrder);
-      clearStoredManualSessionOrder();
-    }
-  }, [onReorderSessions]);
+  }, []);
 
   // 会话行主体（切换按钮 + 关闭按钮），flat / 分组两种布局共用。
   // dragHandleProps 仅在可拖拽的 flat 模式传入。
