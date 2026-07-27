@@ -846,6 +846,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   agentRich: event.agentRich === true,
                   agentActivity: event.agentActivity ?? 0,
                   agentCwd: event.agentCwd ?? null,
+                  reviewed: event.reviewed ?? null,
                 });
                 break;
               }
