@@ -285,7 +285,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         const newSessions = new Map(get().sessions);
         newSessions.set(id, { ...session, agentNeedsReview: false, updatedAt: Date.now() });
         set({ sessions: newSessions });
-        sendAgentReviewAck(id);
+        if (session.terminalSessionId) {
+          sendAgentReviewAck(session.terminalSessionId);
+        }
       }
     }
   },
