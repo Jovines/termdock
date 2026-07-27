@@ -19,6 +19,7 @@ import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport } from '../../terminal/types';
 import { getActivityReorderEnabled, setActivityReorderEnabled } from '../../terminal/api';
 import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, reorderSessionsWithinGroup, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
+import { getCachedShellTitle } from '../../stores/useTerminalStore';
 import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 import { useSidebarStore } from '../../stores/useSidebarStore';
@@ -265,7 +266,7 @@ export function LeftSidebar(
       ts?.activeProgram ?? null,
       ts?.cwd ?? null,
       DEFAULT_SESSION_DISPLAY_SHELL_NAMES,
-      ts?.shellTitle ?? null,
+      ts?.shellTitle ?? getCachedShellTitle(session.id),
       ts?.promptState ?? null,
     );
     const cwdSecondary = cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null;

@@ -106,6 +106,11 @@ function readCachedShellTitles(): Record<string, string> {
   } catch { return {}; }
 }
 
+/** Public API for sidebar fallback: reads the cached shell title synchronously. */
+export function getCachedShellTitle(sessionId: string): string | null {
+  return readCachedShellTitles()[sessionId] ?? null;
+}
+
 function writeCachedShellTitle(sessionId: string, title: string | null): void {
   if (typeof window === 'undefined') return;
   try {
