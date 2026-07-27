@@ -2089,47 +2089,8 @@ function App() {
 
   const showPinnedLeft = sidebarLeftPinned && isDesktopViewport;
 
-  const pinnedSidebarGap = showPinnedLeft ? sidebarLeftWidth + 5 : 0;
-
-  return (
-    <div
-      className="w-screen h-full flex flex-col app-chrome-bg text-foreground"
-      style={showPinnedLeft ? { marginLeft: pinnedSidebarGap, width: `calc(100vw - ${pinnedSidebarGap}px)` } : undefined}
-    >
-      {showPinnedLeft && (
-        <>
-          <div
-            style={{ position: 'fixed', left: 0, top: 0, bottom: 0, width: sidebarLeftWidth, zIndex: 20 }}
-            className="flex flex-col"
-          >
-            <LeftSidebar
-              isOpen={sidebarLeftOpen}
-              drawerWidthPx={sidebarLeftWidth}
-              onClose={handleClosePinnedLeft}
-              onOpen={handleOpenLeftSidebar}
-              sessions={sessions}
-              activeSessionId={activeSessionId}
-              sessionStates={terminalSessions}
-              onNewSession={(opts) => dispatchNewSession(opts)}
-              onCloseSession={handleSidebarCloseSession}
-              onReorderSessions={applySessionOrder}
-              onSessionMenu={openTabMenu}
-              onOpenSettings={handleOpenSettings}
-              tmuxAvailable={tmuxStatus.available}
-              defaultSessionMode={newSessionMode}
-              pinned={true}
-              onTogglePinned={handleToggleLeftPinned}
-            />
-          </div>
-          <div
-            role="separator"
-            tabIndex={-1}
-            style={{ position: 'fixed', left: sidebarLeftWidth, top: 0, bottom: 0, width: 5, zIndex: 21 }}
-            className="cursor-col-resize bg-border/10 hover:bg-primary/30 active:bg-primary/50 transition-colors"
-            onMouseDown={handleResizeMouseDown}
-          />
-        </>
-      )}
+  const body = (
+    <div className="w-full h-full flex flex-col app-chrome-bg text-foreground">
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="flex h-full w-full min-h-0 flex-col overflow-visible app-chrome-bg">
           <div
@@ -3997,6 +3958,44 @@ function App() {
       )}
     </div>
   );
+
+  if (showPinnedLeft) {
+    return (
+      <div className="w-screen h-full flex flex-row">
+        <div style={{ width: sidebarLeftWidth, flexShrink: 0, height: '100%' }}>
+          <LeftSidebar
+            isOpen={sidebarLeftOpen}
+            drawerWidthPx={sidebarLeftWidth}
+            onClose={handleClosePinnedLeft}
+            onOpen={handleOpenLeftSidebar}
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            sessionStates={terminalSessions}
+            onNewSession={(opts) => dispatchNewSession(opts)}
+            onCloseSession={handleSidebarCloseSession}
+            onReorderSessions={applySessionOrder}
+            onSessionMenu={openTabMenu}
+            onOpenSettings={handleOpenSettings}
+            tmuxAvailable={tmuxStatus.available}
+            defaultSessionMode={newSessionMode}
+            pinned={true}
+            onTogglePinned={handleToggleLeftPinned}
+          />
+        </div>
+        <div
+          role="separator"
+          tabIndex={-1}
+          className="shrink-0 w-[5px] h-full cursor-col-resize bg-border/10 hover:bg-primary/30 active:bg-primary/50 transition-colors"
+          onMouseDown={handleResizeMouseDown}
+        />
+        <div style={{ flex: '1 1 0%', minWidth: 0, height: '100%', overflow: 'hidden' }}>
+          {body}
+        </div>
+      </div>
+    );
+  }
+
+  return body;
 }
 
 export default App;
