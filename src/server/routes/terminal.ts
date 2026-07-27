@@ -2577,6 +2577,8 @@ interface AgentStatusWirePayload {
     iconVersion?: number;
   } | null;
   agentMessage: string | null;
+  /** Whether the user has acknowledged the current 'done' turn result. Server-authoritative. */
+  reviewed: boolean | null;
   /** The agent's native session id, for resume. */
   agentNativeSessionId: string | null;
   /** Whether state comes from installed hooks (rich) vs the notification fallback. */
@@ -2632,6 +2634,7 @@ function buildAgentStatusPayload(sessionId: string, session: TerminalSession): A
       ? { slug: agent.slug, displayName: agent.displayName, accentColor: agent.accentColor, icon: agent.icon, isPlugin: agent.isPlugin ?? false, iconMode: agent.iconMode, iconVersion: agent.iconVersion }
       : null,
     agentMessage: state?.message ?? null,
+    reviewed: state?.reviewed ?? null,
     agentNativeSessionId: nativeSessionId,
     agentRich: state?.rich ?? false,
     agentActivity: state?.activity ?? 0,
@@ -6109,6 +6112,13 @@ export function handleTerminalWebSocket(
           if (typeof msg.paused === 'boolean') {
             const reason = typeof msg.reason === 'string' ? msg.reason : 'client-flow-control';
             setClientFlowPaused(sessionId, session, clientId, msg.paused, reason);
+          }
+          break;
+        }
+        case 'agent-review-ack': {
+          if (session.agentSession && session.agentSession.reviewed === false) {
+            session.agentSession.reviewed = true;
+            broadcastAgentStatus(sessionId, session, true);
           }
           break;
         }

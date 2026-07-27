@@ -194,6 +194,7 @@ export interface TerminalStreamEvent {
   agentRich?: boolean;
   agentActivity?: number;
   agentCwd?: string | null;
+  reviewed?: boolean | null;
   tuiProgress?: TuiProgressReport | null;
   gitStatus?: GitStatusReport | null;
   focusTrackingRequested?: boolean;

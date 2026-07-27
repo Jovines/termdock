@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { AgentStatusPayload } from '../terminal/api';
+import { sendAgentReviewAck } from '../terminal/api';
 import type { TerminalSession, TerminalChunk, TerminalSessionState, TuiProgressReport } from '../terminal';
 import { getStoredPwaAiNotificationsEnabled, showPwaNotification } from '../utils/pwaNotifications';
 
@@ -133,6 +134,55 @@ function removeCachedShellTitle(sessionId: string): void {
   } catch { /* ignore */ }
 }
 
+
+// Agent identity localStorage cache: persists the last-known agent identity per
+// session so the sidebar icon (AgentBrandAvatar) renders immediately on page refresh.
+const AGENT_CACHE_KEY = 'termdock-agent-cache-v1';
+
+function readCachedAgents(): Record<string, import('../terminal/types').AgentIdentity> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(AGENT_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+  } catch { return {}; }
+}
+
+function writeCachedAgent(sessionId: string, agent: import('../terminal/types').AgentIdentity | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const agents = readCachedAgents();
+    if (agent) {
+      agents[sessionId] = agent;
+    } else {
+      delete agents[sessionId];
+    }
+    localStorage.setItem(AGENT_CACHE_KEY, JSON.stringify(agents));
+  } catch { /* ignore */ }
+}
+
+function removeCachedAgent(sessionId: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const agents = readCachedAgents();
+    delete agents[sessionId];
+    localStorage.setItem(AGENT_CACHE_KEY, JSON.stringify(agents));
+  } catch { /* ignore */ }
+}
+
+function clearAllCachedAgents(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(AGENT_CACHE_KEY);
+  } catch { /* ignore */ }
+}
+
+/** Public API for sidebar fallback: reads the cached agent identity synchronously. */
+export function getCachedAgentIdentity(sessionId: string): import('../terminal/types').AgentIdentity | null {
+  return readCachedAgents()[sessionId] ?? null;
+}
+
 function clearAllCachedShellTitles(): void {
   if (typeof window === 'undefined') return;
   try {
@@ -228,12 +278,14 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   setActiveSessionId: (id: string | null) => {
     set({ activeSessionId: id });
     // When user switches to a session, clear its needs-review flag
+    // and tell the server so it survives page refresh.
     if (id) {
       const session = get().sessions.get(id);
       if (session?.agentNeedsReview) {
         const newSessions = new Map(get().sessions);
         newSessions.set(id, { ...session, agentNeedsReview: false, updatedAt: Date.now() });
         set({ sessions: newSessions });
+        sendAgentReviewAck(id);
       }
     }
   },
@@ -392,6 +444,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     const nextRich = payload.agentRich ?? existing.agentRich;
     const nextActivity = payload.agentActivity ?? existing.agentActivity;
     const nextAgentCwd = payload.agentCwd !== undefined ? payload.agentCwd : existing.agentCwd;
+    const nextReviewed = payload.reviewed !== undefined ? payload.reviewed : null;
 
     if (
       existing.agentStatus === agentStatus &&
@@ -406,9 +459,14 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
 
     const userNotViewing = state.activeSessionId !== sessionId;
     const wasActive = existing.agentStatus === 'working' || existing.agentStatus === 'waiting' || existing.agentStatus === 'done';
-    // 回合结束（done）或 agent 退出（null）时用户不在该 tab → 黄点提醒
-    const finishedNow = (agentStatus === 'done' && existing.agentStatus !== 'done') || (agentStatus === null && wasActive);
-    const agentNeedsReview = (finishedNow && userNotViewing) || (existing.agentNeedsReview && agentStatus !== 'working');
+    // Server-authoritative reviewed flag: false means the current turn's result
+    // hasn't been acknowledged by any client. Survives page refresh because
+    // the server broadcasts it on every WS reconnect.
+    const agentNeedsReview = payload.reviewed === false
+      // Fallback for agent-exit (null status, no session): old heuristic as
+      // a one-shot frontend-side flag. Won't survive refresh, which is fine
+      // because the browser reload itself is a strong "reviewed" signal.
+      || (payload.reviewed === null && agentStatus === null && wasActive && userNotViewing);
 
     const newSessions = new Map(state.sessions);
     newSessions.set(sessionId, {
@@ -425,6 +483,11 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       updatedAt: Date.now(),
     });
     set({ sessions: newSessions });
+
+    // Cache agent identity for sidebar fallback on page refresh.
+    if (nextAgent) {
+      writeCachedAgent(sessionId, nextAgent);
+    }
 
     if (!getStoredPwaAiNotificationsEnabled()) return;
 
@@ -632,6 +695,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       return { sessions: newSessions };
     });
     removeCachedShellTitle(sessionId);
+    removeCachedAgent(sessionId);
   },
 
   clearAllTerminalSessions: () => {
@@ -643,6 +707,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     }
     set({ sessions: new Map(), nextChunkId: 1 });
     clearAllCachedShellTitles();
+    clearAllCachedAgents();
   },
   };
 });

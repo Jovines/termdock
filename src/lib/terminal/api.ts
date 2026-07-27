@@ -44,6 +44,7 @@ export interface AgentStatusPayload {
   agentRich?: boolean;
   agentActivity?: number;
   agentCwd?: string | null;
+  reviewed?: boolean | null;
 }
 
 const FS_REQUEST_TIMEOUT_MS = 8_000;
@@ -520,6 +521,7 @@ export function connectTerminalStream(
             agentRich: msg.agentRich === true,
             agentActivity: typeof msg.agentActivity === 'number' ? msg.agentActivity : 0,
             agentCwd: msg.agentCwd ?? null,
+            reviewed: typeof msg.reviewed === 'boolean' ? msg.reviewed : null,
           });
           return;
         }
@@ -765,6 +767,16 @@ export function sendTerminalFocusState(
     conn.ws.send(JSON.stringify({ type: 'focus', focused, reason }));
   } catch {
     // Focus state is advisory; the heartbeat/reconnect path will repair stale sockets.
+  }
+}
+
+export function sendAgentReviewAck(sessionId: string): void {
+  const conn = wsConnections.get(sessionId);
+  if (!conn || conn.ws.readyState !== WebSocket.OPEN) return;
+  try {
+    conn.ws.send(JSON.stringify({ type: 'agent-review-ack' }));
+  } catch {
+    // Advisory; the next agent-status broadcast will correct any inconsistency.
   }
 }
 

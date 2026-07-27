@@ -21,7 +21,8 @@ function readLeftPinned(): boolean {
   if (typeof window === 'undefined') return false;
   try {
     const stored = window.localStorage.getItem(LEFT_PINNED_KEY);
-    return stored === '1';
+    if (stored !== null) return stored === '1';
+    return window.matchMedia('(min-width: 1024px)').matches;
   } catch {
     return false;
   }

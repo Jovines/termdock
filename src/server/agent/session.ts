@@ -78,6 +78,9 @@ export interface AgentSessionState {
    *  Monotonic within a session and never reset — only the *change* means
    *  anything. */
   activity: number;
+  /** Whether the user has acknowledged the current turn's result. Server-
+   *  authoritative so the 'needs review' indicator survives page refresh. */
+  reviewed: boolean;
 }
 
 export function defaultAgentSessionState(): AgentSessionState {
@@ -89,6 +92,7 @@ export function defaultAgentSessionState(): AgentSessionState {
     rich: false,
     agentCwd: null,
     activity: 0,
+    reviewed: true,
   };
 }
 
@@ -109,6 +113,7 @@ export function applyAgentEvent(state: AgentSessionState, ev: AgentEvent): void 
     case 'prompt-submit':
       state.status = 'working';
       state.message = null;
+      state.reviewed = true;
       break;
     // Explicit blocks from agents that distinguish them (Codex/OpenCode
     // plugins): always the urgent "needs you" state.
@@ -142,11 +147,13 @@ export function applyAgentEvent(state: AgentSessionState, ev: AgentEvent): void 
       if (state.status === 'waiting') {
         state.status = 'working';
         state.message = null;
+        state.reviewed = true;
       }
       break;
     case 'stop':
       state.status = 'done';
       state.message = ev.message;
+      state.reviewed = false;
       break;
     // The agent session ended but its id stays: agents can resume an *ended*
     // session, which is exactly what restore does. Its cwd claim does NOT
@@ -155,6 +162,7 @@ export function applyAgentEvent(state: AgentSessionState, ev: AgentEvent): void 
       state.status = 'idle';
       state.message = null;
       state.agentCwd = null;
+      state.reviewed = true;
       break;
   }
 }
