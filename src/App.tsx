@@ -2127,7 +2127,6 @@ function App() {
       )}
       <main
         className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0"
-        style={showPinnedLeft ? { paddingLeft: sidebarLeftWidth + 5 } : undefined}
       >
         <div className="flex h-full w-full min-h-0 flex-col overflow-visible app-chrome-bg">
           <div
