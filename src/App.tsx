@@ -2089,13 +2089,19 @@ function App() {
 
   const showPinnedLeft = sidebarLeftPinned && isDesktopViewport;
 
+  const pinnedSidebarGap = showPinnedLeft ? sidebarLeftWidth + 5 : 0;
+
   return (
     <div
-      className={`w-screen h-full app-chrome-bg text-foreground ${showPinnedLeft ? 'flex flex-row' : 'flex flex-col'}`}
+      className="w-screen h-full flex flex-col app-chrome-bg text-foreground"
+      style={showPinnedLeft ? { marginLeft: pinnedSidebarGap, width: `calc(100vw - ${pinnedSidebarGap}px)` } : undefined}
     >
       {showPinnedLeft && (
         <>
-          <div style={{ width: sidebarLeftWidth }} className="shrink-0 h-full">
+          <div
+            style={{ position: 'fixed', left: 0, top: 0, bottom: 0, width: sidebarLeftWidth, zIndex: 20 }}
+            className="flex flex-col"
+          >
             <LeftSidebar
               isOpen={sidebarLeftOpen}
               drawerWidthPx={sidebarLeftWidth}
@@ -2118,7 +2124,8 @@ function App() {
           <div
             role="separator"
             tabIndex={-1}
-            className="shrink-0 w-[5px] h-full cursor-col-resize bg-border/10 hover:bg-primary/30 active:bg-primary/50 transition-colors"
+            style={{ position: 'fixed', left: sidebarLeftWidth, top: 0, bottom: 0, width: 5, zIndex: 21 }}
+            className="cursor-col-resize bg-border/10 hover:bg-primary/30 active:bg-primary/50 transition-colors"
             onMouseDown={handleResizeMouseDown}
           />
         </>
