@@ -14,44 +14,6 @@ const SHOW_HIDDEN_FILES_CACHE_KEY = 'termdock:right-sidebar:show-hidden-files:v1
 // 因此这里用专用 reader/writer 沿用旧格式。
 const GROUP_BY_FOLDER_KEY = 'termdock-sidebar-group-by-folder';
 const COLLAPSED_GROUPS_KEY = 'termdock-sidebar-collapsed-folder-groups';
-const LEFT_PINNED_KEY = 'termdock-left-sidebar-pinned';
-const LEFT_SIDEBAR_WIDTH_KEY = 'termdock-left-sidebar-width';
-
-function readLeftPinned(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    const stored = window.localStorage.getItem(LEFT_PINNED_KEY);
-    return stored === '1';
-  } catch {
-    return false;
-  }
-}
-
-function writeLeftPinned(pinned: boolean): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(LEFT_PINNED_KEY, pinned ? '1' : '0');
-  } catch { /* best-effort */ }
-}
-
-function readLeftSidebarWidth(): number {
-  if (typeof window === 'undefined') return 300;
-  try {
-    const stored = window.localStorage.getItem(LEFT_SIDEBAR_WIDTH_KEY);
-    if (!stored) return 300;
-    const parsed = parseInt(stored, 10);
-    return Number.isFinite(parsed) && parsed >= 200 && parsed <= 500 ? parsed : 300;
-  } catch {
-    return 300;
-  }
-}
-
-function writeLeftSidebarWidth(width: number): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(LEFT_SIDEBAR_WIDTH_KEY, String(width));
-  } catch { /* best-effort */ }
-}
 
 function readGroupByFolder(): boolean {
   if (typeof window === "undefined") return true;
@@ -264,10 +226,6 @@ interface SidebarState {
   leftOpen: boolean;
   rightOpen: boolean;
 
-  // Left sidebar pinned mode (desktop inline layout)
-  leftPinned: boolean;
-  leftSidebarWidth: number;
-
   // Right sidebar tab
   rightTab: RightSidebarTab;
 
@@ -311,9 +269,6 @@ interface SidebarState {
   openLeft: () => void;
   closeLeft: () => void;
   toggleLeft: () => void;
-  toggleLeftPinned: () => void;
-  setLeftPinned: (pinned: boolean) => void;
-  setLeftSidebarWidth: (width: number) => void;
   openRight: () => void;
   closeRight: () => void;
   toggleRight: () => void;
@@ -346,8 +301,6 @@ interface SidebarState {
 export const useSidebarStore = create<SidebarState>((set) => ({
   leftOpen: false,
   rightOpen: false,
-  leftPinned: readLeftPinned(),
-  leftSidebarWidth: readLeftSidebarWidth(),
   rightTab: 'files',
   rightSearchOpen: false,
   rootPath: null,
@@ -372,24 +325,6 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   openLeft: () => set({ leftOpen: true }),
   closeLeft: () => set({ leftOpen: false }),
   toggleLeft: () => set((s) => ({ leftOpen: !s.leftOpen, rightOpen: s.leftOpen ? s.rightOpen : false })),
-  toggleLeftPinned: () =>
-    set((s) => {
-      const next = !s.leftPinned;
-      writeLeftPinned(next);
-      return { leftPinned: next, leftOpen: true };
-    }),
-  setLeftPinned: (pinned) =>
-    set(() => {
-      writeLeftPinned(pinned);
-      return { leftPinned: pinned };
-    }),
-  setLeftSidebarWidth: (width) =>
-    set((s) => {
-      const clamped = Math.min(Math.max(width, 200), 500);
-      if (s.leftSidebarWidth === clamped) return s;
-      writeLeftSidebarWidth(clamped);
-      return { leftSidebarWidth: clamped };
-    }),
   openRight: () => set({ rightOpen: true }),
   closeRight: () => set({ rightOpen: false, rightSearchOpen: false }),
   toggleRight: () => set((s) => ({ rightOpen: !s.rightOpen, rightSearchOpen: s.rightOpen ? false : s.rightSearchOpen, leftOpen: s.rightOpen ? s.leftOpen : false })),

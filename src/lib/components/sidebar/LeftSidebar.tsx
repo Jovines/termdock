@@ -10,8 +10,6 @@ import {
   ChevronRight as RiChevronRightLine,
   Bell as RiBellLine,
   ArrowDownWideNarrow as RiSortDescLine,
-  Pin as RiPushpinLine,
-  PinOff as RiPinOffLine,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
@@ -19,7 +17,6 @@ import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport } from '../../terminal/types';
 import { getActivityReorderEnabled, setActivityReorderEnabled } from '../../terminal/api';
 import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, reorderSessionsWithinGroup, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
-import { getCachedShellTitle, getCachedAgentIdentity } from '../../stores/useTerminalStore';
 import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 import { useSidebarStore } from '../../stores/useSidebarStore';
@@ -61,8 +58,6 @@ interface LeftSidebarProps {
   tmuxAvailable?: boolean;
   defaultSessionMode?: 'shell' | 'tmux';
   push?: boolean;
-  pinned?: boolean;
-  onTogglePinned?: () => void;
 }
 
 function matchesSession(
@@ -97,8 +92,6 @@ export function LeftSidebar(
     tmuxAvailable = true,
     defaultSessionMode = 'shell',
     push,
-    pinned,
-    onTogglePinned,
   }: LeftSidebarProps,
 ) {
   const { t } = useI18n();
@@ -212,7 +205,7 @@ export function LeftSidebar(
   }, [defaultSessionMode, tmuxAvailable]);
 
   const closeIfOverlay = () => {
-    if (!push && !pinned) onClose();
+    if (!push) onClose();
   };
   const shellConfirming = confirmNewMode === 'shell';
   const tmuxConfirming = confirmNewMode === 'tmux';
@@ -266,7 +259,7 @@ export function LeftSidebar(
       ts?.activeProgram ?? null,
       ts?.cwd ?? null,
       DEFAULT_SESSION_DISPLAY_SHELL_NAMES,
-      ts?.shellTitle ?? getCachedShellTitle(session.id),
+      ts?.shellTitle ?? null,
       ts?.promptState ?? null,
     );
     const cwdSecondary = cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null;
@@ -316,8 +309,8 @@ export function LeftSidebar(
           }`}>
             {ts?.isConnecting || (tuiProgressActive && !ts?.agentStatus) ? (
               <RiLoaderCircle size={12} className="animate-spin" />
-            ) : (ts?.agent ?? getCachedAgentIdentity(session.id)) ? (
-              <AgentBrandAvatar agent={ts?.agent ?? getCachedAgentIdentity(session.id)!} size={16} />
+            ) : ts?.agent ? (
+              <AgentBrandAvatar agent={ts.agent} size={16} />
             ) : session.mode === 'tmux' ? (
               <RiLayoutGridLine size={12} />
             ) : (
@@ -409,8 +402,15 @@ export function LeftSidebar(
     });
   }, [groupByFolder, visibleSessions, sessionStates]);
 
-  const inner = (
-    <>
+  return (
+    <Sidebar
+      side="left"
+      isOpen={isOpen}
+      drawerWidthPx={drawerWidthPx}
+      onClose={onClose}
+      onOpen={onOpen}
+      push={push}
+    >
       {/* Header — single compact row */}
       <div className="shrink-0 border-b border-border/15 px-2 py-2">
         <div className="flex items-center gap-1.5">
@@ -453,22 +453,7 @@ export function LeftSidebar(
           >
             <RiSettings4Line size={14} />
           </button>
-          {onTogglePinned && (
-            <button
-              type="button"
-              onClick={onTogglePinned}
-              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
-                pinned
-                  ? 'bg-primary/15 text-primary hover:bg-primary/20'
-                  : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-              }`}
-              aria-label={pinned ? 'Unpin sidebar' : 'Pin sidebar'}
-              title={pinned ? t('common.close') : 'Pin sidebar'}
-            >
-              {pinned ? <RiPinOffLine size={14} /> : <RiPushpinLine size={14} />}
-            </button>
-          )}
-          {(!push || pinned) && (
+          {!push && (
             <button
               type="button"
               onClick={onClose}
@@ -788,23 +773,6 @@ export function LeftSidebar(
           </button>
         </div>
       </div>
-    </>
-  );
-
-  return pinned ? (
-    <div className="h-full flex flex-col app-chrome-bg border-r border-border/15">
-      {inner}
-    </div>
-  ) : (
-    <Sidebar
-      side="left"
-      isOpen={isOpen}
-      drawerWidthPx={drawerWidthPx}
-      onClose={onClose}
-      onOpen={onOpen}
-      push={push}
-    >
-      {inner}
     </Sidebar>
   );
 }
