@@ -14,10 +14,10 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
-import type { AgentStatus, TuiProgressReport } from '../../terminal/types';
+import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport } from '../../terminal/types';
 import { getActivityReorderEnabled, setActivityReorderEnabled } from '../../terminal/api';
 import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, reorderSessionsWithinGroup, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
-import { AgentSessionDot, AgentCountBadge } from '../AgentIndicators';
+import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
@@ -41,10 +41,12 @@ interface LeftSidebarProps {
     inCopyMode?: boolean;
     isConnecting?: boolean;
     agentStatus: AgentStatus | null;
+    agent?: AgentIdentity | null;
     agentNeedsReview?: boolean;
     shellTitle?: string | null;
     promptState?: 'idle' | 'running' | null;
     tuiProgress?: TuiProgressReport | null;
+    gitStatus?: GitStatusReport | null;
   }>; 
   onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => void;
   onCloseSession: (sessionId: string) => void;
@@ -132,7 +134,7 @@ export function LeftSidebar(
     let review = 0;
     for (const s of sessions) {
       const ts = sessionStates.get(s.id);
-      if (ts?.agentStatus === 'running') running += 1;
+      if (ts?.agentStatus === 'working') running += 1;
       if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) review += 1;
     }
     return { runningCount: running, reviewCount: review };
@@ -263,7 +265,7 @@ export function LeftSidebar(
     // Shell integration (OSC 133) provides real-time running state.
     // Fall back to agentStatus for AI tools that don't emit OSC 133.
     const tuiProgressActive = Boolean(ts?.tuiProgress && ts.tuiProgress.state !== 'remove');
-    const isRunning = ts?.promptState === 'running' || ts?.agentStatus === 'running' || tuiProgressActive;
+    const isRunning = ts?.promptState === 'running' || ts?.agentStatus === 'working' || tuiProgressActive;
     const accentClass = isRunning
       ? 'bg-[var(--success)]'
       : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
@@ -306,6 +308,8 @@ export function LeftSidebar(
           }`}>
             {ts?.isConnecting || (tuiProgressActive && !ts?.agentStatus) ? (
               <RiLoaderCircle size={12} className="animate-spin" />
+            ) : ts?.agent ? (
+              <AgentBrandAvatar agent={ts.agent} size={16} />
             ) : session.mode === 'tmux' ? (
               <RiLayoutGridLine size={12} />
             ) : (
@@ -323,9 +327,21 @@ export function LeftSidebar(
             } ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>
               {displayName}
             </span>
-            {cwdSecondary && (
+            {(cwdSecondary || ts?.gitStatus) && (
               <span className="block truncate text-[10.5px] leading-tight text-muted-foreground/75">
                 {cwdSecondary}
+                {ts?.gitStatus && (
+                  <span className={cwdSecondary ? 'ml-1.5' : ''} title={ts.gitStatus.branch}>
+                    ⎇ {ts.gitStatus.branch.length > 14 ? `${ts.gitStatus.branch.slice(0, 14)}…` : ts.gitStatus.branch}
+                    {(ts.gitStatus.added > 0 || ts.gitStatus.removed > 0) && (
+                      <span className="ml-1">
+                        <span className="text-[color:var(--success)]">+{ts.gitStatus.added}</span>
+                        {' '}
+                        <span className="text-[rgb(var(--warning-rgb))]">−{ts.gitStatus.removed}</span>
+                      </span>
+                    )}
+                  </span>
+                )}
               </span>
             )}
           </span>
@@ -562,7 +578,7 @@ export function LeftSidebar(
               let groupReview = 0;
               for (const session of group.sessions) {
                 const ts = sessionStates.get(session.id);
-                if (ts?.agentStatus === 'running') groupRunning += 1;
+                if (ts?.agentStatus === 'working') groupRunning += 1;
                 if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) groupReview += 1;
               }
               // 「其他」组（无 cwd）永远排最后，禁止整组拖动；搜索过滤时也禁用整组拖动。

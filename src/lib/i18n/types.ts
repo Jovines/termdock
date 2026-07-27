@@ -410,6 +410,15 @@ export type TranslationDictionary = {
     tabIndicator: string;
     toolbarPresets: string;
     detectionRules: string;
+    agentHooksHint: string;
+    agentHooksInstall: string;
+    agentHooksInstalled: string;
+    agentHooksOutdated: string;
+    agentHooksNotInstalled: string;
+    agentHooksUninstall: string;
+    agentHooksReinstall: string;
+    agentHooksDevMode: string;
+    agentHooksTarget: string;
     mobileKeyboard: string;
     saving: string;
     rulesHint: string;
@@ -495,6 +504,8 @@ export type TranslationDictionary = {
     renamePlaceholder: string;
     copyCwd: string;
     copyCwdHint: string;
+    resumeAgent: string;
+    resumeAgentHint: string;
     copied: string;
     close: string;
     closeHint: string;

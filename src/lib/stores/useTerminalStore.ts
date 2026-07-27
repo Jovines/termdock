@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import type { TerminalSession, TerminalChunk, TerminalSessionState, AgentStatus, AgentIndicator, TuiProgressReport } from '../terminal';
+import type { AgentStatusPayload } from '../terminal/api';
+import type { TerminalSession, TerminalChunk, TerminalSessionState, TuiProgressReport } from '../terminal';
 import { getStoredPwaAiNotificationsEnabled, showPwaNotification } from '../utils/pwaNotifications';
 
 export interface TerminalStore {
@@ -21,8 +22,9 @@ export interface TerminalStore {
   setSessionShellTitle: (sessionId: string, title: string | null) => void;
   setSessionPromptState: (sessionId: string, state: 'idle' | 'running', exitCode?: number | null) => void;
   setSessionTuiProgress: (sessionId: string, report: TuiProgressReport | null) => void;
+  setSessionGitStatus: (sessionId: string, gitStatus: import('../terminal/types').GitStatusReport | null) => void;
   setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => void;
-  setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null, agentIndicator?: AgentIndicator | null) => void;
+  setSessionAgentStatus: (sessionId: string, payload: AgentStatusPayload) => void;
   clearAgentNeedsReview: (sessionId: string) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string, options?: { markActivity?: boolean }) => void;
@@ -69,13 +71,19 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     inCopyMode: false,
     isConnecting: false,
     agentStatus: null,
-    agentColor: null,
     agentIndicator: null,
+    agent: null,
+    agentMessage: null,
+    agentNativeSessionId: null,
+    agentRich: false,
+    agentActivity: 0,
+    agentCwd: null,
     agentNeedsReview: false,
     shellTitle: null,
     promptState: null,
     shellExitCode: null,
     tuiProgress: null,
+    gitStatus: null,
     bufferChunks: [],
     bufferLength: 0,
     lastOutputAt: null,
@@ -298,6 +306,18 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     });
   },
 
+  setSessionGitStatus: (sessionId: string, gitStatus) => {
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      const existing = newSessions.get(sessionId);
+      if (!existing) return state;
+      const same = JSON.stringify(existing.gitStatus) === JSON.stringify(gitStatus);
+      if (same) return state;
+      newSessions.set(sessionId, { ...existing, gitStatus, updatedAt: Date.now() });
+      return { sessions: newSessions };
+    });
+  },
+
   setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => {
     set((state) => {
       const newSessions = new Map(state.sessions);
@@ -308,47 +328,73 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     });
   },
 
-  setSessionAgentStatus: (sessionId: string, agentStatus: AgentStatus | null, agentColor?: string | null, agentIndicator?: AgentIndicator | null) => {
+  setSessionAgentStatus: (sessionId: string, payload: AgentStatusPayload) => {
     const state = get();
     const existing = state.sessions.get(sessionId);
     if (!existing) return;
 
-    const nextAgentColor = agentStatus ? (agentColor ?? existing.agentColor) : null;
-    const nextAgentIndicator = agentStatus ? (agentIndicator ?? existing.agentIndicator ?? null) : null;
+    const agentStatus = payload.agentStatus ?? null;
+    const nextAgentIndicator = agentStatus && agentStatus !== 'idle' ? (payload.agentIndicator ?? existing.agentIndicator ?? null) : null;
+    const nextAgent = payload.agent !== undefined ? payload.agent : existing.agent;
+    const nextMessage = payload.agentMessage !== undefined ? payload.agentMessage : (agentStatus ? existing.agentMessage : null);
+    const nextNativeId = payload.agentNativeSessionId !== undefined ? payload.agentNativeSessionId : existing.agentNativeSessionId;
+    const nextRich = payload.agentRich ?? existing.agentRich;
+    const nextActivity = payload.agentActivity ?? existing.agentActivity;
+    const nextAgentCwd = payload.agentCwd !== undefined ? payload.agentCwd : existing.agentCwd;
+
     if (
       existing.agentStatus === agentStatus &&
-      existing.agentColor === nextAgentColor &&
-      existing.agentIndicator === nextAgentIndicator
+      existing.agentIndicator === nextAgentIndicator &&
+      existing.agent === nextAgent &&
+      existing.agentMessage === nextMessage &&
+      existing.agentNativeSessionId === nextNativeId &&
+      existing.agentRich === nextRich &&
+      existing.agentActivity === nextActivity &&
+      existing.agentCwd === nextAgentCwd
     ) return;
 
-    // any status → null: AI stopped. If user is NOT on this session, mark needs-review.
-    const wasActive = existing.agentStatus !== null;
-    const nowStopped = agentStatus === null;
     const userNotViewing = state.activeSessionId !== sessionId;
-    const agentNeedsReview = wasActive && nowStopped && userNotViewing;
+    const wasActive = existing.agentStatus === 'working' || existing.agentStatus === 'waiting' || existing.agentStatus === 'done';
+    // 回合结束（done）或 agent 退出（null）时用户不在该 tab → 黄点提醒
+    const finishedNow = (agentStatus === 'done' && existing.agentStatus !== 'done') || (agentStatus === null && wasActive);
+    const agentNeedsReview = (finishedNow && userNotViewing) || (existing.agentNeedsReview && agentStatus !== 'working');
 
     const newSessions = new Map(state.sessions);
     newSessions.set(sessionId, {
       ...existing,
       agentStatus,
-      agentColor: nextAgentColor,
       agentIndicator: nextAgentIndicator,
-      agentNeedsReview: agentNeedsReview || (existing.agentNeedsReview && !agentStatus),
+      agent: nextAgent,
+      agentMessage: nextMessage,
+      agentNativeSessionId: nextNativeId,
+      agentRich: nextRich,
+      agentActivity: nextActivity,
+      agentCwd: nextAgentCwd,
+      agentNeedsReview,
       updatedAt: Date.now(),
     });
     set({ sessions: newSessions });
 
-    if (wasActive && nowStopped && getStoredPwaAiNotificationsEnabled()) {
+    if (!getStoredPwaAiNotificationsEnabled()) return;
+
+    const agentName = nextAgent?.displayName ?? existing.activeProgram ?? 'Agent';
+    // waiting：agent 回合中停下来等人（权限/提问）——这是整个功能的核心时刻。
+    if (agentStatus === 'waiting' && existing.agentStatus !== 'waiting' && userNotViewing) {
+      void showPwaNotification({
+        title: `${agentName} 需要你的输入`,
+        body: nextMessage ?? `${agentName} is waiting for your input.`,
+        tag: `agent-waiting-${sessionId}`,
+        data: { url: '/', sessionId },
+      });
+      return;
+    }
+    // done / 退出：回合完成或 agent 停止。
+    if (finishedNow && userNotViewing) {
       void showPwaNotification({
         title: 'Termdock',
-        body: existing.activeProgram
-          ? `${existing.activeProgram} finished and needs your attention.`
-          : 'A terminal task finished and needs your attention.',
+        body: `${agentName} finished and needs your attention.`,
         tag: `agent-finished-${sessionId}`,
-        data: {
-          url: '/',
-          sessionId,
-        },
+        data: { url: '/', sessionId },
       });
     }
   },
@@ -484,8 +530,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
           terminalSessionId: null,
           isConnecting: false,
           agentStatus: null,
-          agentColor: null,
           agentIndicator: null,
+          agent: null,
+          agentMessage: null,
           agentNeedsReview: false,
           updatedAt: Date.now(),
         });

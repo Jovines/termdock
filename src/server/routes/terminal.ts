@@ -10,6 +10,8 @@ import { randomUUID } from 'crypto';
 import { promisify } from 'util';
 import type { WebSocket } from 'ws';
 import { caffeinateManager } from '../utils/caffeinate.js';
+import { gitStatusCache, type GitStatus } from '../utils/gitStatus.js';
+import { getPtyHostManager, type PtyHostClient } from '../ptyhost/manager.js';
 import { pathValidator } from '../utils/pathValidator.js';
 import { TERMINAL, TMUX } from '../config.js';
 import { localAccessManager } from '../utils/localAccess.js';
@@ -30,6 +32,27 @@ import {
   tmuxMetadataChanged,
   type TmuxProcessRow,
 } from '../utils/tmuxProgramDetection.js';
+import {
+  agentBySlug,
+  buildResumeCommand,
+  detectAgentFromCommand,
+  type AgentInfo,
+} from '../agent/registry.js';
+import {
+  applyAgentEvent,
+  defaultAgentSessionState,
+  parseAgentEvent,
+  type AgentEvent,
+  type AgentSessionState,
+  type AgentSessionStatus,
+} from '../agent/session.js';
+import {
+  installHooks,
+  listHookAgents,
+  refreshStaleHooksAtLaunch,
+  uninstallHooks,
+  type HookAgentSlug,
+} from '../agent/installers.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -170,6 +193,16 @@ interface TerminalSession {
     rawArgs: string | null;
     updatedAt: number;
   } | null;
+  // Recognized coding-agent identity (from argv against the registry) and the
+  // rich hook-driven session state; see server/agent/*. agentSession exists
+  // only while an agent is detected in the foreground.
+  agent: AgentInfo | null;
+  agentSession: AgentSessionState | null;
+  // Shared git snapshot for the pane's cwd (branch +N −M), refreshed on cwd
+  // change / command end / agent tool activity via the repo-root cache.
+  gitStatus: GitStatus | null;
+  gitStatusKey: string | null;
+  gitAgentActivitySeen: number;
   dataDisposable?: { dispose: () => void };
   exitDisposable?: { dispose: () => void };
   tmuxControl?: TmuxControl;
@@ -178,12 +211,6 @@ interface TerminalSession {
   lastOscTitle: string | null;
   lastPromptState: 'idle' | 'running' | null;
   tuiProgress: TuiProgressReport | null;
-  agentStatus: string | null;
-  agentColor: string | null;
-  agentIndicator: AgentIndicator | null;
-  agentStatusBuf: string;      // 去除 ANSI 后的纯文本滚动缓冲区
-  agentStatusTimer: ReturnType<typeof setTimeout> | null;
-  agentStatusClearDelayMs: number;
   focusTrackingRequested: boolean;
   focusModeSniffBuf: string;
   focusAggregation: FocusAggregationState;
@@ -207,6 +234,17 @@ interface PersistedClientSession {
   createdAt: number;
   lastActivity: number;
   cwd?: string | null;
+  // 最后检测到的前台程序名（last-known）：live 检测只写非空值、不用 null 覆盖,
+  // 这样 server 重启 / backend 掉线后 tab 标题仍能回退到最近一次识别结果。
+  activeProgram?: string | null;
+  // 最近一次的 agent 会话恢复信息（last-known）：agent 退出 / server 重启后
+  // 仍可用其原生 session id + 启动参数重建 `claude --resume …` 恢复命令。
+  agentResume?: {
+    slug: string;
+    sessionId: string | null;
+    launchArgv: string[] | null;
+    updatedAt: number;
+  } | null;
 }
 
 interface GlobalSessionState {
@@ -697,6 +735,12 @@ process.on('SIGINT', () => { stopActivityReorderPeriodic(); flushPersistAndExit(
 void (async () => {
   await loadGlobalSessionStateFromDisk();
   await watchGlobalSessionStateFile();
+  // pty-host adoption runs after the state load (its record upserts must not
+  // be clobbered) and before pruning (surviving shell records' backends are
+  // live in the host, so they're not orphans).
+  await adoptPtyHostSessions().catch((error) => {
+    console.warn('[pty-host] adoption failed:', (error as Error).message);
+  });
   pruneOrphanSessions();
   await backfillPersistedTmuxMetadata();
   startActivityReorderPeriodic();
@@ -763,15 +807,40 @@ async function backfillPersistedTmuxMetadata(): Promise<void> {
         '@termdock-version': TERMDOCK_VERSION,
         '@termdock-host': TERMDOCK_HOST,
         '@termdock-pid': TERMDOCK_PID,
+        // Agent-hook plumbing (see ensureManagedTmuxSessionReady): backfilled
+        // at startup so sessions created before this feature get it too.
+        'allow-passthrough': 'on',
       };
       const existingCreatedAt = await getTmuxOption(s.tmuxSessionName, '@termdock-created-at');
       if (!existingCreatedAt) {
         baseOptions['@termdock-created-at'] = String(Date.now());
       }
       await setTmuxOptions(s.tmuxSessionName, baseOptions);
+      try {
+        await runTmux(['set-environment', '-t', s.tmuxSessionName, 'TERMDOCK', '1']);
+      } catch { /* best effort */ }
 
       if (s.customName === true && typeof s.name === 'string' && s.name.trim().length > 0) {
         await setTmuxOption(s.tmuxSessionName, '@termdock-friendly-name', s.name);
+      }
+
+      // label/program/cwd 是动态值，正常由在线轮询维护；这里只在缺失时补——
+      // 用持久化记录里的 last-known 计算,保证 server 重启后、首个客户端连上前,
+      // CLI(td --tls / tmux show)已经能看到名字。已有值不覆盖(可能更新鲜)。
+      const existingLabel = await getTmuxOption(s.tmuxSessionName, '@termdock-label');
+      if (!existingLabel) {
+        const program = normalizeMetadataProgram(s.activeProgram ?? null);
+        const label = buildTermdockLabel({
+          friendlyName: s.customName === true && s.name.trim().length > 0 ? s.name : null,
+          program,
+          cwd: s.cwd ?? null,
+          sessionName: s.tmuxSessionName,
+        });
+        await setTmuxOptions(s.tmuxSessionName, {
+          '@termdock-label': label,
+          '@termdock-program': program ?? '',
+          '@termdock-cwd': s.cwd ?? '',
+        });
       }
     } catch (error) {
       console.warn(
@@ -959,6 +1028,9 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
     cwd: typeof candidate.cwd === 'string' && candidate.cwd.trim().length > 0
       ? candidate.cwd
       : null,
+    activeProgram: typeof candidate.activeProgram === 'string' && candidate.activeProgram.trim().length > 0
+      ? candidate.activeProgram
+      : null,
   };
 }
 
@@ -1051,7 +1123,7 @@ function makeTerminalSessionPayload(
     rows,
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
-    activeProgram: session.activeProgram?.command ?? null,
+    activeProgram: session.activeProgram?.command ?? getPersistedActiveProgramForBackend(backendSessionId),
     activeProgramRaw: session.activeProgram?.rawArgs ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
     cwd: session.cwd ?? null,
@@ -1319,6 +1391,24 @@ function updateGlobalBindingForBackendSession(
   };
   upsertGlobalSessionRecord(updated);
   return true;
+}
+
+// 把检测到的前台程序名写进持久化记录（last-known 语义）：
+// - 只在非空且与已存值不同才写,null 不覆盖（检测瞬时空窗不该抹掉上次结果）;
+// - 变化频率低（程序切换才触发）,debounce 落盘即可。
+function persistActiveProgramBinding(backendSessionId: string, command: string | null | undefined): void {
+  if (!command) return;
+  const record = globalSessionState.sessions.find((session) => session.backendSessionId === backendSessionId);
+  if (!record || record.activeProgram === command) return;
+  upsertGlobalSessionRecord({ ...record, activeProgram: command });
+  schedulePersistGlobalState();
+}
+
+// connected / open 响应用的兜底:live 检测还没出结果时,回退到磁盘上的 last-known,
+// 前端首帧就能显示上次的程序名而不是裸 session 名。
+function getPersistedActiveProgramForBackend(backendSessionId: string): string | null {
+  const record = globalSessionState.sessions.find((session) => session.backendSessionId === backendSessionId);
+  return record?.activeProgram ?? null;
 }
 
 async function openInventorySession(
@@ -2031,29 +2121,40 @@ async function buildSessionInventory(): Promise<SessionInventory> {
   }
 
   const liveTmuxByName = new Map(refreshedTmuxSessions.map((session) => [session.name, session]));
-  let synchronizedTmuxFriendlyName = false;
+  let synchronizedPersistedFields = false;
   globalSessionState = {
     sessions: globalSessionState.sessions.map((session) => {
-      if (session.mode !== 'tmux' || !session.tmuxSessionName) {
-        return session;
+      let next = session;
+
+      // CLI 侧改了 @termdock-friendly-name → 反向同步进持久化记录（tmux 限定）。
+      if (next.mode === 'tmux' && next.tmuxSessionName) {
+        const friendlyName = liveTmuxByName.get(next.tmuxSessionName)?.friendlyName?.trim();
+        if (friendlyName && !(next.customName === true && next.name === friendlyName)) {
+          next = { ...next, name: friendlyName, customName: true };
+          synchronizedPersistedFields = true;
+        }
       }
-      const friendlyName = liveTmuxByName.get(session.tmuxSessionName)?.friendlyName?.trim();
-      if (!friendlyName) {
-        return session;
+
+      // 展示名数据（activeProgram / cwd）回写:last-known 持久化,server 重启 /
+      // backend 掉线后 inventory hint 仍能给出上次的程序名与目录。
+      // live 值只以非空覆盖——检测空窗(null)不抹掉已存结果。
+      const backend = next.backendSessionId ? terminalSessions.get(next.backendSessionId) : undefined;
+      const tmuxMeta = next.tmuxSessionName ? liveTmuxByName.get(next.tmuxSessionName) : undefined;
+      const liveProgram = backend?.activeProgram?.command ?? tmuxMeta?.program ?? null;
+      const liveCwd = backend?.cwd ?? tmuxMeta?.cwd ?? null;
+      if (liveProgram && liveProgram !== (next.activeProgram ?? null)) {
+        next = { ...next, activeProgram: liveProgram };
+        synchronizedPersistedFields = true;
       }
-      if (session.customName === true && session.name === friendlyName) {
-        return session;
+      if (liveCwd && liveCwd !== (next.cwd ?? null)) {
+        next = { ...next, cwd: liveCwd };
+        synchronizedPersistedFields = true;
       }
-      synchronizedTmuxFriendlyName = true;
-      return {
-        ...session,
-        name: friendlyName,
-        customName: true,
-      };
+      return next;
     }),
-    updatedAt: synchronizedTmuxFriendlyName ? Date.now() : globalSessionState.updatedAt,
+    updatedAt: synchronizedPersistedFields ? Date.now() : globalSessionState.updatedAt,
   };
-  if (synchronizedTmuxFriendlyName) {
+  if (synchronizedPersistedFields) {
     schedulePersistGlobalState();
   }
 
@@ -2064,11 +2165,12 @@ async function buildSessionInventory(): Promise<SessionInventory> {
 
     // 展示名提示（activeProgram / cwd）：优先取在线 backend session 的实时值，
     // 其次回退到 tmux 清单里的 program/cwd（tmux 模式即使 backend 未 attach，
-    // tmux 服务端仍能给出当前 pane 的程序与目录）。让前端 hydrate 即可显示。
+    // tmux 服务端仍能给出当前 pane 的程序与目录），最后回退到持久化记录里的
+    // last-known 值（server 重启 / tmux 已死也能显示上次的标题）。让前端 hydrate 即可显示。
     const backend = backendLive ? terminalSessions.get(session.backendSessionId!) : undefined;
     const tmuxMeta = session.tmuxSessionName ? liveTmuxByName.get(session.tmuxSessionName) : undefined;
-    const activeProgram = backend?.activeProgram?.command ?? tmuxMeta?.program ?? null;
-    const cwd = backend?.cwd ?? tmuxMeta?.cwd ?? null;
+    const activeProgram = backend?.activeProgram?.command ?? tmuxMeta?.program ?? session.activeProgram ?? null;
+    const cwd = backend?.cwd ?? tmuxMeta?.cwd ?? session.cwd ?? null;
 
     return {
       ...session,
@@ -2296,6 +2398,11 @@ export interface OscSniffResult {
   promptState: 'idle' | 'running' | null;
   exitCode: number | null;
   tuiProgress: TuiProgressReport | null;
+  /** Rich agent events sniffed from OSC 777 sentinel notifications. */
+  agentEvents: AgentEvent[];
+  /** Opaque notification body (plain OSC 9 or non-sentinel OSC 777) — the
+   *  no-hooks fallback signal that an agent pinged the user. */
+  notification: string | null;
   remaining: string;
 }
 
@@ -2333,6 +2440,8 @@ function sniffOsc(buf: string, home: string): OscSniffResult {
   let promptState: 'idle' | 'running' | null = null;
   let exitCode: number | null = null;
   let tuiProgress: TuiProgressReport | null = null;
+  const agentEvents: AgentEvent[] = [];
+  let notification: string | null = null;
   let lastMatchEnd = 0;
 
   OSC_ANY_PATTERN.lastIndex = 0;
@@ -2368,304 +2477,369 @@ function sniffOsc(buf: string, home: string): OscSniffResult {
       }
     } else if (oscNum === '9') {
       const progress = parseConEmuProgressReport(oscData);
-      if (progress) tuiProgress = progress;
+      if (progress) {
+        tuiProgress = progress;
+      } else if (oscData.trim().length > 0) {
+        // Plain OSC 9 notification (iTerm2-style): an agent pinging the user.
+        notification = oscData;
+      }
+    } else if (oscNum === '777') {
+      // OSC 777 notification: `notify;<title>;<body>`. termdock's agent hooks
+      // use the sentinel title carrying a JSON event; anything else is an
+      // opaque notification from an agent without hooks installed.
+      const event = parseAgentEvent(`777;${oscData}`);
+      if (event) {
+        agentEvents.push(event);
+      } else {
+        const body = parseOsc777NotificationBody(oscData);
+        if (body) notification = body;
+      }
     }
   }
 
   const remaining = buf.slice(lastMatchEnd).slice(-128);
 
-  return { cwd: lastCwd, title: lastTitle, promptState, exitCode, tuiProgress, remaining };
+  return { cwd: lastCwd, title: lastTitle, promptState, exitCode, tuiProgress, agentEvents, notification, remaining };
+}
+
+/** The body of a `notify;<title>;<body>` OSC 777 payload, or null. */
+function parseOsc777NotificationBody(data: string): string | null {
+  if (!data.startsWith('notify;')) return null;
+  const rest = data.slice('notify;'.length);
+  const sep = rest.indexOf(';');
+  const body = sep >= 0 ? rest.slice(sep + 1) : rest;
+  return body.trim().length > 0 ? body : null;
 }
 
 // ── end OSC sniffing ──
 
-// ── Agent status detection for AI coding tools (DISABLED — see setupPtyHandlers) ──
-
-// const AGENT_BUF_CAP = 4096;  // 滚动缓冲区容量
-
-// ── Agent detection rules (user-configurable) ──
-
-interface AgentRule {
-  pattern: string;   // regex pattern string
-  status: string;    // status label, e.g. "running"
-  color?: string;    // CSS color for the tab dot, e.g. "#4ade80" or "green"
-  indicator?: AgentIndicator;
-  clearDelayMs?: number;
-}
-
 type AgentIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal' | 'question';
 
-const AGENT_INDICATORS = new Set<AgentIndicator>(['spinner', 'pulse', 'dot', 'ring', 'badge', 'terminal', 'question']);
-const DEFAULT_AGENT_CLEAR_DELAY_MS = 450;
-const MIN_AGENT_CLEAR_DELAY_MS = 80;
-const MAX_AGENT_CLEAR_DELAY_MS = 10_000;
-const COCO_WAITING_RULE_PATTERN = '(?:Tab/Arrow keys to navigate[\\s\\S]{0,200}(?:select ·|Enter))|Coco\\s*等待态采样';
 
-interface AgentProgramConfig {
-  // 兼容旧格式：单程序字段
-  program?: string;
-  // 新格式：一组程序名
-  programs?: string[];
-  rules: AgentRule[];
+// ── Rich agent session tracking (identity registry + OSC 777 hook events) ──
+//
+// Two tiers, ported from tty7:
+// 1. Identity: the activeProgram poll's rawArgs matched against the agent
+//    registry answers "*which* agent runs here" (brand, accent, icon, resume).
+// 2. Rich status: agent-side hooks emit OSC 777 sentinel events that the
+//    sniffer collects; they drive a per-pane state machine
+//    (idle/working/waiting/done) pushed to clients as `agent-status`.
+// A plain OSC 9/777 notification is the no-hooks fallback: it only means
+// "the agent pinged you" and never overrides rich state.
+
+/** User-defined wrapper→agent rules from the program-detection config. */
+function agentCustomCommands(): Record<string, string> {
+  return agentCommandsMap;
 }
 
-// Built-in default rules
-const BUILTIN_AGENT_RULES: AgentProgramConfig[] = [
-  {
-    program: 'claude',
-    rules: [
-      // 雪花符号(spinner) + 1-25 个中英文字母 + 3 个点(英文 ... 或中文 …)
-      // 严格按"结构"匹配,不依赖具体词,排除 token 数字/输入回显
-      { pattern: '[✢✶✻✽][A-Za-z\\u4E00-\\u9FA5]{1,25}(?:\\.{3}|…)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-    ],
-  },
-  {
-    program: 'opencode',
-    rules: [
-      { pattern: 'thinking|working|generating', status: 'running', color: '#4ade80', indicator: 'pulse', clearDelayMs: 900 },
-      { pattern: '~ Asking questions', status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
-    ],
-  },
-  {
-    program: 'coco',
-    rules: [
-      { pattern: COCO_WAITING_RULE_PATTERN, status: 'waiting', color: '#facc15', indicator: 'question', clearDelayMs: 10000 },
-      { pattern: '[·✢❋❇✽] (thinking|working|generating)', status: 'running', color: '#4ade80', indicator: 'spinner', clearDelayMs: 700 },
-    ],
-  },
-];
-
-function isSameAgentRule(a: AgentRule, b: AgentRule): boolean {
-  return a.pattern === b.pattern &&
-    a.status === b.status &&
-    a.color === b.color &&
-    a.indicator === b.indicator &&
-    a.clearDelayMs === b.clearDelayMs;
+/** Naive whitespace split of a captured command line into argv tokens. */
+function splitCommandToArgv(command: string): string[] {
+  return command
+    .split(/\s+/)
+    .map((t) => t.replace(/^["']+|["']+$/g, ''))
+    .filter((t) => t.length > 0);
 }
 
-function isSingleProgramConfig(config: AgentProgramConfig, program: string): boolean {
-  const programs = Array.isArray(config.programs)
-    ? config.programs.filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
-    : (typeof config.program === 'string' && config.program.trim().length > 0 ? [config.program] : []);
-  return programs.length === 1 && programs[0]?.trim().toLowerCase() === program;
-}
-
-function migrateAgentRules(rules: AgentProgramConfig[]): { rules: AgentProgramConfig[]; changed: boolean } {
-  let changed = false;
-  const deprecatedCocoConfirmRule: AgentRule = {
-    pattern: 'confirm|approve|permission|continue\\?',
-    status: 'waiting',
-    color: '#facc15',
-    indicator: 'question',
-    clearDelayMs: 10000,
-  };
-  const deprecatedCocoBroadWaitingRule: AgentRule = {
-    pattern: 'Tab/Arrow keys to navigate|Esc to|select ·|Coco 等待态采样|AskUserQuestion|User\'s answers',
-    status: 'waiting',
-    color: '#facc15',
-    indicator: 'question',
-    clearDelayMs: 10000,
-  };
-  const cocoWaitingRule: AgentRule = {
-    pattern: COCO_WAITING_RULE_PATTERN,
-    status: 'waiting',
-    color: '#facc15',
-    indicator: 'question',
-    clearDelayMs: 10000,
-  };
-
-  const nextRules = rules
-    .filter((config) => {
-      const shouldRemove = isSingleProgramConfig(config, 'aider') &&
-        config.rules.length === 1 &&
-        isSameAgentRule(config.rules[0]!, {
-          pattern: 'Thinking|Generating|Working',
-          status: 'running',
-          color: '#4ade80',
-          indicator: 'pulse',
-          clearDelayMs: 900,
-        });
-      if (shouldRemove) changed = true;
-      return !shouldRemove;
-    })
-    .map((config) => {
-      if (!isSingleProgramConfig(config, 'coco')) return config;
-      let nextRules = config.rules.filter((rule) => !isSameAgentRule(rule, deprecatedCocoConfirmRule));
-      nextRules = nextRules.map((rule) => isSameAgentRule(rule, deprecatedCocoBroadWaitingRule) ? cocoWaitingRule : rule);
-      if (nextRules.length === config.rules.length && nextRules.every((rule, index) => isSameAgentRule(rule, config.rules[index]!))) return config;
-      changed = true;
-      return { ...config, rules: nextRules };
-    });
-
-  return { rules: nextRules, changed };
-}
-
-// Runtime cache: program → compiled rules
-let agentRulesCache: Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]> = new Map();
-let agentRulesVersion = 0;
-
-function normalizeAgentIndicator(value: unknown): AgentIndicator {
-  return typeof value === 'string' && AGENT_INDICATORS.has(value as AgentIndicator)
-    ? value as AgentIndicator
-    : 'pulse';
-}
-
-function normalizeAgentClearDelay(value: unknown): number {
-  const n = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : DEFAULT_AGENT_CLEAR_DELAY_MS;
-  return Math.min(MAX_AGENT_CLEAR_DELAY_MS, Math.max(MIN_AGENT_CLEAR_DELAY_MS, n));
-}
-
-function compileAgentRules(rules: AgentProgramConfig[]): Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]> {
-  const map = new Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]>();
-  for (const config of rules) {
-    const compiled = config.rules.map(r => ({
-      status: r.status,
-      color: r.color,
-      indicator: normalizeAgentIndicator(r.indicator),
-      clearDelayMs: normalizeAgentClearDelay(r.clearDelayMs),
-      regex: new RegExp(r.pattern, 'i'),
-    }));
-
-    const programNames = Array.isArray(config.programs)
-      ? config.programs
-      : (typeof config.program === 'string' ? [config.program] : []);
-
-    for (const name of programNames) {
-      const normalized = typeof name === 'string' ? name.trim().toLowerCase() : '';
-      if (!normalized) continue;
-      map.set(normalized, compiled);
-    }
+/** The coding agent running in this session's foreground, per activeProgram. */
+function detectSessionAgent(session: TerminalSession): AgentInfo | null {
+  const ap = session.activeProgram;
+  if (!ap) return null;
+  const custom = agentCustomCommands();
+  if (ap.rawArgs) {
+    const hit = detectAgentFromCommand(ap.rawArgs, custom);
+    if (hit) return hit;
   }
-  agentRulesCache = map;
-  agentRulesVersion++;
-  return map;
-}
-
-const AGENT_RULES_FILE = `${TERMDOCK_DIR}/agent-rules.json`;
-
-async function loadAgentRulesFromDisk(): Promise<AgentProgramConfig[]> {
-  try {
-    const parsed = await readJsonFileIfExists<unknown>(AGENT_RULES_FILE);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      const migrated = migrateAgentRules(parsed);
-      if (migrated.changed) {
-        await writeJsonFile(AGENT_RULES_FILE, migrated.rules);
-      }
-      return migrated.rules;
-    }
-  } catch { /* file doesn't exist or invalid, use builtins */ }
-  return BUILTIN_AGENT_RULES;
-}
-
-async function loadAgentRules(): Promise<Map<string, { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number; regex: RegExp }[]>> {
-  return compileAgentRules(await loadAgentRulesFromDisk());
-}
-
-async function saveAgentRulesToDisk(rules: AgentProgramConfig[]): Promise<void> {
-  await writeJsonFile(AGENT_RULES_FILE, rules);
-  compileAgentRules(rules);
-}
-
-// Initialize on startup
-void loadAgentRules();
-
-function isAiToolProgram(command: string | null | undefined): boolean {
-  if (!command) return false;
-  return agentRulesCache.has(command.toLowerCase());
-}
-
-/**
- * 去除 ANSI 转义序列，保留纯文本内容
- */
-function stripAnsi(data: string): string {
-  return data
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')           // CSI sequences
-    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')  // OSC sequences
-    .replace(/\x1b[()][AB0-2]/g, '')                   // Charset
-    .replace(/\x1b[^[\]()0-9]/g, '')                   // Other escapes
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');    // Control chars
-}
-// Retained for potential future re-enablement of agent status detection.
-void stripAnsi;
-
-/**
- * 基于可配置规则匹配检测 AI 工具状态
- * 只看实际输出文本，不受 resize/布局变化影响
- */
-function detectAgentStatus(command: string, buf: string): { status: string; color: string | undefined; indicator: AgentIndicator; clearDelayMs: number } | null {
-  if (!buf || buf.length < 2) return null;
-
-  const rules = agentRulesCache.get(command.toLowerCase());
-  if (!rules) return null;
-
-  // 只看最后 1KB，这是最新的输出
-  const tail = buf.slice(-1024);
-
-  for (const rule of rules) {
-    if (rule.regex.test(tail)) {
-      return { status: rule.status, color: rule.color, indicator: rule.indicator, clearDelayMs: rule.clearDelayMs };
-    }
+  if (ap.command) {
+    return detectAgentFromCommand(ap.command, custom);
   }
-
   return null;
 }
 
-function clearAgentStatusTimer(session: TerminalSession): void {
-  if (session.agentStatusTimer) {
-    clearTimeout(session.agentStatusTimer);
-    session.agentStatusTimer = null;
-  }
+interface AgentStatusWirePayload {
+  type: 'agent-status';
+  /** State-machine value; null when no agent session is tracked. */
+  agentStatus: AgentSessionStatus | null;
+  agentIndicator: AgentIndicator | null;
+  agent: {
+    slug: string;
+    displayName: string;
+    accentColor: string;
+    icon: string | null;
+  } | null;
+  agentMessage: string | null;
+  /** The agent's native session id, for resume. */
+  agentNativeSessionId: string | null;
+  /** Whether state comes from installed hooks (rich) vs the notification fallback. */
+  agentRich: boolean;
+  /** Monotonic tool-completion counter; only the *change* means anything. */
+  agentActivity: number;
+  /** The agent's own cwd claim (tracks internal chdirs e.g. worktrees). */
+  agentCwd: string | null;
 }
 
-function evaluateAgentStatus(sessionId: string, session: TerminalSession, latestChunk?: string): void {
-  const previousStatus = session.agentStatus;
+/** Status → indicator glyph. Colors stay client-side (CSS theme vars) so
+ *  dark/light themes render correctly; the wire carries semantics only. */
+const AGENT_STATUS_INDICATOR: Record<AgentSessionStatus, AgentIndicator | null> = {
+  idle:    null,
+  working: 'spinner',
+  waiting: 'question',
+  done:    'badge',
+};
+
+/** The pane sits at a shell prompt (no foreground program, or a shell). Only
+ *  then does an agent-resume offer make sense — pasting a resume command into
+ *  vim/htop would corrupt its input. */
+function isPaneAtShellPrompt(session: TerminalSession): boolean {
   const command = session.activeProgram?.command;
+  if (!command) return true;
+  return shellNamesBackend.has(command.toLowerCase());
+}
 
-  if (!command || !isAiToolProgram(command)) {
-    if (previousStatus !== null) {
-      clearAgentStatusTimer(session);
-      session.agentStatus = null;
-      session.agentColor = null;
-      session.agentIndicator = null;
-      session.agentStatusClearDelayMs = DEFAULT_AGENT_CLEAR_DELAY_MS;
-      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null, agentColor: null, agentIndicator: null });
-    }
-    return;
-  }
-
-  const detected = detectAgentStatus(command, latestChunk || session.agentStatusBuf);
-
-  if (detected) {
-    clearAgentStatusTimer(session);
-    const newStatus = detected.status;
-    const newColor = detected.color ?? null;
-    const newIndicator = detected.indicator;
-    session.agentStatusClearDelayMs = detected.clearDelayMs;
-    if (newStatus !== previousStatus || newColor !== session.agentColor || newIndicator !== session.agentIndicator) {
-      session.agentStatus = newStatus;
-      session.agentColor = newColor;
-      session.agentIndicator = newIndicator;
-      broadcastEvent(sessionId, { type: 'agent-status', agentStatus: newStatus, agentColor: newColor, agentIndicator: newIndicator });
-    }
-    return;
-  }
-
-  if (previousStatus !== null && !session.agentStatusTimer) {
-    session.agentStatusTimer = setTimeout(() => {
-      session.agentStatusTimer = null;
-      const recheck = detectAgentStatus(command, session.agentStatusBuf.slice(-256));
-      if (!recheck) {
-        session.agentStatus = null;
-        session.agentColor = null;
-        session.agentIndicator = null;
-        session.agentStatusClearDelayMs = DEFAULT_AGENT_CLEAR_DELAY_MS;
-        broadcastEvent(sessionId, { type: 'agent-status', agentStatus: null, agentColor: null, agentIndicator: null });
+function buildAgentStatusPayload(sessionId: string, session: TerminalSession): AgentStatusWirePayload {
+  const state = session.agentSession;
+  const status = state ? state.status : null;
+  const indicator = status ? AGENT_STATUS_INDICATOR[status] : null;
+  let agent = session.agent;
+  let nativeSessionId = state?.sessionId ?? null;
+  // The agent just exited: keep offering its last conversation for resume
+  // (brand + native id from the persisted last-known record) while the pane
+  // sits at a shell prompt.
+  if (!agent && !nativeSessionId && isPaneAtShellPrompt(session)) {
+    const record = globalSessionState.sessions.find((s) => s.backendSessionId === sessionId);
+    if (record?.agentResume?.sessionId) {
+      const persistedAgent = agentBySlug(record.agentResume.slug);
+      if (persistedAgent) {
+        agent = persistedAgent;
+        nativeSessionId = record.agentResume.sessionId;
       }
-    }, session.agentStatusClearDelayMs);
+    }
+  }
+  return {
+    type: 'agent-status',
+    agentStatus: status,
+    agentIndicator: indicator ?? null,
+    agent: agent
+      ? { slug: agent.slug, displayName: agent.displayName, accentColor: agent.accentColor, icon: agent.icon }
+      : null,
+    agentMessage: state?.message ?? null,
+    agentNativeSessionId: nativeSessionId,
+    agentRich: state?.rich ?? false,
+    agentActivity: state?.activity ?? 0,
+    agentCwd: state?.agentCwd ?? null,
+  };
+}
+
+let lastAgentStatusSnapshots = new Map<string, string>();
+
+function broadcastAgentStatus(sessionId: string, session: TerminalSession, force = false): void {
+  const payload = buildAgentStatusPayload(sessionId, session);
+  const snapshot = JSON.stringify(payload);
+  if (!force && lastAgentStatusSnapshots.get(sessionId) === snapshot) return;
+  lastAgentStatusSnapshots.set(sessionId, snapshot);
+  broadcastEvent(sessionId, payload);
+}
+
+/** Persist the info needed to resume this pane's agent conversation after the
+ *  agent exits / the server restarts (last-known semantics, debounced). */
+function persistAgentResumeBinding(backendSessionId: string, session: TerminalSession): void {
+  const record = globalSessionState.sessions.find((s) => s.backendSessionId === backendSessionId);
+  if (!record) return;
+  const agent = session.agent;
+  const sess = session.agentSession;
+  if (!agent || !sess?.sessionId) return;
+  const next = {
+    slug: agent.slug,
+    sessionId: sess.sessionId,
+    launchArgv: sess.launchArgv,
+    updatedAt: Date.now(),
+  };
+  if (JSON.stringify(record.agentResume ?? null) === JSON.stringify(next)) return;
+  upsertGlobalSessionRecord({ ...record, agentResume: next });
+  schedulePersistGlobalState();
+}
+
+/**
+ * React to activeProgram changes: detect agent identity, end the rich session
+ * when the agent leaves the foreground, and stamp the launch argv (for resume
+ * flag replay) while the agent is present. Called from every activeProgram
+ * assignment site.
+ */
+function syncAgentIdentity(sessionId: string, session: TerminalSession): void {
+  const detected = detectSessionAgent(session);
+
+  if (detected !== session.agent) {
+    // The agent leaving the foreground ends its session: clear the rich state
+    // so a stale "waiting" dot can't outlive the process. The poll can blip
+    // momentarily (an agent-spawned subcommand takes the foreground group),
+    // but events re-establish state on the next signal.
+    if (session.agent && session.agentSession) {
+      persistAgentResumeBinding(sessionId, session);
+      session.agentSession = null;
+    }
+    session.agent = detected;
+    broadcastAgentStatus(sessionId, session);
+  }
+
+  // Stamp the launch argv the identity poll captured — resume gets the flags.
+  if (detected && session.activeProgram?.rawArgs) {
+    const argv = splitCommandToArgv(session.activeProgram.rawArgs);
+    if (argv.length > 0) {
+      const sess = session.agentSession;
+      if (sess && sess.launchArgv === null) {
+        sess.launchArgv = argv;
+        persistAgentResumeBinding(sessionId, session);
+        broadcastAgentStatus(sessionId, session);
+      } else if (!sess) {
+        // No session state yet (no hook events seen): remember the argv on a
+        // pending field via the resume record so an exited agent can still be
+        // resumed with its flags even if hooks never fired.
+        const record = globalSessionState.sessions.find((s) => s.backendSessionId === sessionId);
+        if (record?.agentResume && record.agentResume.slug === detected.slug && !record.agentResume.launchArgv) {
+          upsertGlobalSessionRecord({ ...record, agentResume: { ...record.agentResume, launchArgv: argv } });
+          schedulePersistGlobalState();
+        }
+      }
+    }
   }
 }
 
-// ── end Agent status detection ──
+/**
+ * Fold the sniffer's agent signals into the pane's session state and push any
+ * resulting change. Called from the PTY data path.
+ */
+function applyAgentSignals(
+  sessionId: string,
+  session: TerminalSession,
+  events: AgentEvent[],
+  notification: string | null,
+): void {
+  if (events.length === 0 && !notification) return;
+
+  let identityChanged = false;
+  for (const event of events) {
+    // An event naming an agent brands the pane even when the process poll
+    // can't see through a wrapper: identity via protocol.
+    if (!session.agent && event.agent) {
+      session.agent = event.agent;
+      identityChanged = true;
+    }
+    const state = session.agentSession ?? defaultAgentSessionState();
+    session.agentSession = state;
+    applyAgentEvent(state, event);
+    if (event.kind === 'session-start' || event.kind === 'session-end' || event.kind === 'stop') {
+      persistAgentResumeBinding(sessionId, session);
+    }
+    // The agent's cwd claim: allow file APIs to follow it (worktree hops).
+    if (state.agentCwd) {
+      void pathValidator.allowSessionCwd(state.agentCwd);
+    }
+  }
+
+  // Opaque fallback: only meaningful when we know an agent runs here, and
+  // never on top of rich state (the hooks channel owns it then).
+  if (notification && session.agent && !session.agentSession?.rich) {
+    const state = session.agentSession ?? defaultAgentSessionState();
+    session.agentSession = state;
+    if (state.status !== 'waiting' || state.message !== notification) {
+      state.status = 'waiting';
+      state.message = notification;
+    }
+  }
+
+  // Seed the launch argv the identity poll captured, so resume gets the
+  // flags no matter which side observed the pane first.
+  if (session.agentSession && session.agentSession.launchArgv === null && session.activeProgram?.rawArgs) {
+    const argv = splitCommandToArgv(session.activeProgram.rawArgs);
+    if (argv.length > 0) {
+      session.agentSession.launchArgv = argv;
+      persistAgentResumeBinding(sessionId, session);
+    }
+  }
+
+  // Agent activity (a tool completed → the working tree may have changed) is
+  // one of the git probe's triggers.
+  maybeRefreshGitStatusForAgent(sessionId, session);
+
+  broadcastAgentStatus(sessionId, session, identityChanged);
+}
+
+// ── Git status (branch + diff size) ──
+//
+// Probes are cheap (two git shell-outs) and shared through the repo-root
+// cache; triggers are event-driven rather than a timer: cwd change, command
+// end (prompt-state running→idle), and agent tool activity mid-turn.
+
+const lastGitStatusSnapshots = new Map<string, string>();
+
+function refreshGitStatus(sessionId: string, session: TerminalSession, opts: { minIntervalMs?: number } = {}): void {
+  // The agent's own cwd claim (worktree hops) wins over the pane's proc cwd.
+  const key = session.agentSession?.agentCwd ?? session.cwd ?? null;
+  if (!key) {
+    if (session.gitStatus !== null) {
+      session.gitStatus = null;
+      session.gitStatusKey = null;
+      broadcastEvent(sessionId, { type: 'git-status', gitStatus: null });
+    }
+    return;
+  }
+  session.gitStatusKey = key;
+  const probe = gitStatusCache.beginProbe(key, opts.minIntervalMs);
+  if (!probe) return;
+  void probe.then((status) => {
+    // The pane may have moved on while the probe ran; publish only if the
+    // probe's key is still the pane's tree (or the session switched away —
+    // then the new cwd's own trigger will publish its own).
+    if (session.gitStatusKey !== key) return;
+    const snapshot = JSON.stringify(status);
+    if (lastGitStatusSnapshots.get(sessionId) === snapshot) return;
+    lastGitStatusSnapshots.set(sessionId, snapshot);
+    session.gitStatus = status;
+    broadcastEvent(sessionId, { type: 'git-status', gitStatus: status });
+  }).catch(() => { /* probe failure keeps the previous snapshot */ });
+}
+
+/**
+ * Git probe trigger: agent tool activity means the working tree may have
+ * changed mid-turn.
+ */
+function maybeRefreshGitStatusForAgent(sessionId: string, session: TerminalSession): void {
+  const activity = session.agentSession?.activity ?? 0;
+  if (activity === 0 || activity === session.gitAgentActivitySeen) return;
+  session.gitAgentActivitySeen = activity;
+  refreshGitStatus(sessionId, session);
+}
+
+/**
+ * The command that resumes this pane's last agent conversation, or null.
+ * Live state wins; falls back to the persisted last-known record.
+ */
+function resolveAgentResumeCommand(sessionId: string, session: TerminalSession): string | null {
+  const liveAgent = session.agent;
+  const live = session.agentSession;
+  if (liveAgent && live?.sessionId) {
+    const cmd = buildResumeCommand(liveAgent, live.sessionId, live.launchArgv);
+    if (cmd) return cmd;
+  }
+  if (!isPaneAtShellPrompt(session)) return null;
+  const record = globalSessionState.sessions.find((s) => s.backendSessionId === sessionId);
+  const persisted = record?.agentResume;
+  if (!persisted?.sessionId) return null;
+  const agent = agentBySlug(persisted.slug);
+  if (!agent) return null;
+  return buildResumeCommand(agent, persisted.sessionId, persisted.launchArgv);
+}
+
+/**
+ * Deliver a prompt into an agent's PTY: bracketed paste (so multi-line
+ * prompts insert as one block instead of submitting line by line — every
+ * recognized agent's TUI enables bracketed paste), followed by CR to submit.
+ * ESC bytes are stripped so embedded content can't fake the paste terminator.
+ */
+function buildBracketedSubmitBytes(prompt: string): string {
+  return `\x1b[200~${prompt.replace(/\x1b/g, '')}\x1b[201~\r`;
+}
+
+// ── end Rich agent session tracking ──
 
 /**
  * Resolve the "real" program name for a tmux pane.
@@ -2684,17 +2858,22 @@ interface ProgramDetectionConfig {
   genericProgramNames: string[];
   wrapperScriptNames: string[];
   shellNames: string[];
+  /** User-defined wrapper→agent rules: a personal launcher (`cc`) is branded
+   *  like the agent it launches (`claude`). Applies to the launcher only. */
+  agentCommands?: Record<string, string>;
 }
 
 const DEFAULT_PROGRAM_DETECTION: ProgramDetectionConfig = {
   genericProgramNames: ['node', 'python', 'python3', 'ruby', 'perl', 'java'],
   wrapperScriptNames: ['aiden', 'ttadk', 'npx', 'yarn', 'dlx'],
   shellNames: ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu'],
+  agentCommands: {},
 };
 
 let genericProgramNames = new Set(DEFAULT_PROGRAM_DETECTION.genericProgramNames);
 let wrapperScriptNames = new Set(DEFAULT_PROGRAM_DETECTION.wrapperScriptNames);
 let shellNamesBackend = new Set(DEFAULT_PROGRAM_DETECTION.shellNames);
+let agentCommandsMap: Record<string, string> = { ...DEFAULT_PROGRAM_DETECTION.agentCommands };
 
 async function loadProgramDetectionFromDisk(): Promise<ProgramDetectionConfig> {
   try {
@@ -2704,6 +2883,12 @@ async function loadProgramDetectionFromDisk(): Promise<ProgramDetectionConfig> {
       genericProgramNames: Array.isArray(parsed.genericProgramNames) ? parsed.genericProgramNames : DEFAULT_PROGRAM_DETECTION.genericProgramNames,
       wrapperScriptNames: Array.isArray(parsed.wrapperScriptNames) ? parsed.wrapperScriptNames : DEFAULT_PROGRAM_DETECTION.wrapperScriptNames,
       shellNames: Array.isArray(parsed.shellNames) ? parsed.shellNames : DEFAULT_PROGRAM_DETECTION.shellNames,
+      agentCommands: parsed.agentCommands && typeof parsed.agentCommands === 'object' && !Array.isArray(parsed.agentCommands)
+        ? Object.fromEntries(
+            Object.entries(parsed.agentCommands as Record<string, unknown>)
+              .filter(([k, v]) => typeof k === 'string' && typeof v === 'string') as Array<[string, string]>,
+          )
+        : {},
     };
   } catch { /* file doesn't exist or invalid, use defaults */ }
   return { ...DEFAULT_PROGRAM_DETECTION };
@@ -2713,6 +2898,7 @@ function applyProgramDetectionConfig(config: ProgramDetectionConfig): void {
   genericProgramNames = new Set(config.genericProgramNames);
   wrapperScriptNames = new Set(config.wrapperScriptNames);
   shellNamesBackend = new Set(config.shellNames);
+  agentCommandsMap = { ...(config.agentCommands ?? {}) };
 }
 
 async function saveProgramDetectionToDisk(config: ProgramDetectionConfig): Promise<void> {
@@ -2722,6 +2908,12 @@ async function saveProgramDetectionToDisk(config: ProgramDetectionConfig): Promi
 
 // Initialize on startup
 void loadProgramDetectionFromDisk().then(applyProgramDetectionConfig);
+
+// Startup keeper: rewrite hook integrations that point at a stale termdock
+// (package moved/updated) so they keep firing into the right emitter.
+try {
+  refreshStaleHooksAtLaunch();
+} catch { /* hook refresh must never block startup */ }
 
 async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
   command: string | null;
@@ -3130,6 +3322,7 @@ async function injectTmuxShellIntegration(sessionName: string): Promise<void> {
     const scriptPath = path.join(integrationDir, 'termdock.fish');
     await runTmux(['set-environment', '-t', sessionName, 'TERMDOCK_FISH_INTEGRATION', scriptPath]);
   }
+
 }
 
 async function enableTmuxFocusEvents(): Promise<void> {
@@ -3180,6 +3373,18 @@ async function ensureManagedTmuxSessionReady(sessionName: string): Promise<void>
 
   await applyTmuxScrollbackProfile(sessionName);
   await stampTmuxMetadata(sessionName);
+
+  // Agent-hook plumbing for panes in this session: TERMDOCK marks panes
+  // spawned here as ours (the emitter's gate), and allow-passthrough lets
+  // hooks' DCS-wrapped sentinel OSC reach us through tmux. Set here (not in
+  // the shell-integration path, which early-returns) so every managed
+  // session gets them regardless of shell type.
+  try {
+    await runTmux(['set-environment', '-t', sessionName, 'TERMDOCK', '1']);
+    await runTmux(['set-option', '-t', sessionName, 'allow-passthrough', 'on']);
+  } catch (error) {
+    console.warn(`Failed to enable agent-hook plumbing for ${sessionName}: ${getErrorMessage(error)}`);
+  }
 }
 
 async function prepareManagedTmuxSession(sessionName: string, cwd?: string): Promise<void> {
@@ -3427,12 +3632,10 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
     return;
   }
 
-  if (session.agentStatusTimer) {
-    clearTimeout(session.agentStatusTimer);
-    session.agentStatusTimer = null;
-  }
   session.dataDisposable?.dispose();
   session.exitDisposable?.dispose();
+  lastAgentStatusSnapshots.delete(sessionId);
+  lastGitStatusSnapshots.delete(sessionId);
   destroyTmuxControl(session.tmuxControl);
   session.tmuxControl = undefined;
   for (const timer of session.flowPausedClientTimers.values()) {
@@ -3706,24 +3909,30 @@ function updateFocusTrackingFromOutput(sessionId: string, session: TerminalSessi
   }
 }
 
-function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
+/**
+ * The PTY output pipeline: history append + OSC sniffing + push. Live output
+ * runs with broadcast on; pty-host *replay* (adoption after a server restart)
+ * runs with broadcast off — it rebuilds history and sniffed state (cwd,
+ * prompt-state, agent sessions) without re-sending stale output to clients.
+ */
+function processSessionOutput(sessionId: string, session: TerminalSession, data: string, opts: { broadcast: boolean }): void {
   const home = (process.env.HOME || '/root').replace(/\/+$/, '') || '/';
-
-  session.dataDisposable = session.ptyProcess.onData((data: string) => {
+  if (opts.broadcast) {
     session.lastActivity = Date.now();
     session.lastOutputAt = Date.now();
     session.hasWrittenData = true;
     scheduleActivityReorder();
-    let seq: number | undefined;
-    if (session.mode === 'shell') {
-      seq = addToHistory(sessionId, data);
-    }
-    if (session.mode === 'tmux') {
-      updateFocusTrackingFromOutput(sessionId, session, data);
-    }
+  }
+  let seq: number | undefined;
+  if (session.mode === 'shell') {
+    seq = addToHistory(sessionId, data);
+  }
+  if (session.mode === 'tmux') {
+    updateFocusTrackingFromOutput(sessionId, session, data);
+  }
 
-    // Sniff OSC sequences for CWD tracking + prompt state + title
-    try {
+  // Sniff OSC sequences for CWD tracking + prompt state + title
+  try {
       const buf = session.oscSniffBuf + data;
       if (buf.length > OSC_SNIFF_CAP) {
         session.oscSniffBuf = buf.slice(-OSC_SNIFF_CAP / 4); // trim
@@ -3742,6 +3951,7 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
           schedulePersistGlobalState();
         }
         broadcastEvent(sessionId, { type: 'cwd', cwd: result.cwd });
+        refreshGitStatus(sessionId, session, { minIntervalMs: 0 });
       }
 
       // Title change — broadcast so the frontend can update tab/sidebar
@@ -3752,12 +3962,17 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
 
       // Prompt state change (OSC 133)
       if (result.promptState !== null && result.promptState !== session.lastPromptState) {
+        const wasRunning = session.lastPromptState === 'running';
         session.lastPromptState = result.promptState;
         broadcastJsonWs(sessionId, {
           type: 'prompt-state',
           state: result.promptState,
           exitCode: result.exitCode,
         });
+        // A command just finished — the working tree may have changed.
+        if (wasRunning && result.promptState === 'idle') {
+          refreshGitStatus(sessionId, session);
+        }
       }
 
       if (result.tuiProgress !== null) {
@@ -3767,21 +3982,22 @@ function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
           tuiProgress: session.tuiProgress,
         });
       }
-    } catch { /* sniff failure should never block data */ }
 
-    // Agent status content-based detection — DISABLED.
-    // OSC 133 promptState now provides real-time running/idle state for all
-    // programs (not just AI tools). The content-based detection was inaccurate
-    // (false positives from spinner characters in normal output, false negatives
-    // when AI tools changed their output format). Keeping the code for potential
-    // future re-enablement but not calling it.
-    // try {
-    //   if (isAiToolProgram(session.activeProgram?.command)) {
-    //     ...evaluateAgentStatus...
-    //   }
-    // } catch {}
+      // Rich agent events (OSC 777 sentinel from installed hooks) + the
+      // opaque notification fallback drive the per-pane agent session state.
+      if (result.agentEvents.length > 0 || result.notification) {
+        applyAgentSignals(sessionId, session, result.agentEvents, result.notification);
+      }
+  } catch { /* sniff failure should never block data */ }
 
+  if (opts.broadcast) {
     broadcastEvent(sessionId, seq !== undefined ? { type: 'data', data, seq } : { type: 'data', data });
+  }
+}
+
+function setupPtyHandlers(sessionId: string, session: TerminalSession): void {
+  session.dataDisposable = session.ptyProcess.onData((data: string) => {
+    processSessionOutput(sessionId, session, data, { broadcast: true });
   });
 
   session.exitDisposable = session.ptyProcess.onExit(({ exitCode, signal }) => {
@@ -3806,6 +4022,18 @@ function wrapPtySpawnError(error: unknown): Error {
     );
   }
   return error;
+}
+
+/**
+ * Shell-mode persistence via the pty-host daemon: shells live in a detached
+ * host process and survive server restarts. Set TERMDOCK_PTY_HOST=off to
+ * fall back to in-process PTYs (Windows always uses the in-process path).
+ */
+function ptyHostShellModeEnabled(): boolean {
+  // The host daemon always uses node-pty; under a Bun runtime that's the
+  // backend with known issues, so keep the in-process path there.
+  const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined';
+  return process.platform !== 'win32' && !isBun && process.env.TERMDOCK_PTY_HOST !== 'off';
 }
 
 async function spawnTerminalSession(req: express.Request, input: {
@@ -3844,7 +4072,12 @@ async function spawnTerminalSession(req: express.Request, input: {
     : (process.platform === 'win32' ? buildPowerShellCwdHookArgs() : []);
 
   const envPath = buildAugmentedPath();
-  const resolvedEnv = { ...process.env, PATH: envPath };
+  const resolvedEnv: Record<string, string | undefined> = { ...process.env, PATH: envPath };
+  // The server itself may run under tmux; spawned shells are NOT tmux panes.
+  // Inheriting TMUX/TMUX_PANE makes tmux-aware programs (incl. our own
+  // agent-hook emitter's passthrough decision) misdetect their context.
+  delete resolvedEnv.TMUX;
+  delete resolvedEnv.TMUX_PANE;
 
   const pty = await getPtyProvider();
   const termValue = resolveTerminalTermType(input.termType);
@@ -3852,6 +4085,9 @@ async function spawnTerminalSession(req: express.Request, input: {
     ...resolvedEnv,
     TERM: termValue,
     COLORTERM: 'truecolor',
+    // Gates the agent-hook emitter: hooks installed globally stay silent
+    // unless the agent runs inside a termdock-spawned shell.
+    TERMDOCK: '1',
   };
 
   let ptyProcess: PtyProcess | null = null;
@@ -3863,13 +4099,27 @@ async function spawnTerminalSession(req: express.Request, input: {
     for (const shellCandidate of shellCandidates) {
       try {
         const env = await injectShellIntegration(shellCandidate, baseEnv);
-        ptyProcess = pty.spawn(shellCandidate, [], {
-          name: termValue,
-          cols,
-          rows,
-          cwd,
-          env,
-        });
+        if (ptyHostShellModeEnabled()) {
+          // The PTY lives in the detached pty-host daemon: this session
+          // survives server restarts and is re-adopted on launch.
+          ptyProcess = await getPtyHostManager().spawnChannel(sessionId, {
+            shell: shellCandidate,
+            args: [],
+            cwd,
+            cols,
+            rows,
+            env,
+            termName: termValue,
+          });
+        } else {
+          ptyProcess = pty.spawn(shellCandidate, [], {
+            name: termValue,
+            cols,
+            rows,
+            cwd,
+            env,
+          });
+        }
         break;
       } catch (error) {
         lastError = error;
@@ -3906,7 +4156,7 @@ async function spawnTerminalSession(req: express.Request, input: {
 
   const session: TerminalSession = {
     ptyProcess,
-    ptyBackend: pty.backend,
+    ptyBackend: mode === 'shell' && ptyHostShellModeEnabled() ? 'pty-host' : pty.backend,
     cwd,
     mode,
     tmuxSessionName,
@@ -3918,17 +4168,16 @@ async function spawnTerminalSession(req: express.Request, input: {
     createdAt: Date.now(),
     hasWrittenData: false,
     activeProgram: null,
+    agent: null,
+    agentSession: null,
+    gitStatus: null,
+    gitStatusKey: null,
+    gitAgentActivitySeen: 0,
     oscSniffBuf: '',
     lastOscCwd: null,
     lastOscTitle: null,
     lastPromptState: null,
     tuiProgress: null,
-    agentStatus: null,
-    agentColor: null,
-    agentIndicator: null,
-    agentStatusBuf: '',
-    agentStatusTimer: null,
-    agentStatusClearDelayMs: DEFAULT_AGENT_CLEAR_DELAY_MS,
     focusTrackingRequested: false,
     focusModeSniffBuf: '',
     focusAggregation: {
@@ -3941,6 +4190,8 @@ async function spawnTerminalSession(req: express.Request, input: {
   };
 
   terminalSessions.set(sessionId, session);
+  // First git snapshot for the pane's spawn cwd (throttle-free).
+  refreshGitStatus(sessionId, session, { minIntervalMs: 0 });
   setupPtyHandlers(sessionId, session);
 
   if (mode === 'tmux' && tmuxSessionName) {
@@ -3965,6 +4216,93 @@ async function spawnTerminalSession(req: express.Request, input: {
 
   return { sessionId, session, cols, rows };
 }
+
+// ── pty-host adoption (shell-mode persistence across server restarts) ──
+
+/**
+ * Adopt every shell session that survived in the pty-host daemon. Rebuilds
+ * the TerminalSession around a PtyHostClient, feeds the host's replay ring
+ * through the output pipeline (history + OSC/agent state, no broadcast), and
+ * re-links — or creates — the persisted client record so the session shows
+ * up as a tab again.
+ */
+async function adoptPtyHostSessions(): Promise<void> {
+  if (!ptyHostShellModeEnabled()) return;
+  const adopted = await getPtyHostManager().adoptChannels();
+  if (adopted.length === 0) return;
+
+  let createdRecords = 0;
+  for (const { meta, client } of adopted) {
+    if (terminalSessions.has(meta.id)) continue;
+
+    const session: TerminalSession = {
+      ptyProcess: client,
+      ptyBackend: 'pty-host',
+      cwd: meta.cwd,
+      mode: 'shell',
+      tmuxSessionName: null,
+      cols: meta.cols,
+      rows: meta.rows,
+      lastActivity: Date.now(),
+      lastOutputAt: Date.now(),
+      clients: new Map(),
+      createdAt: meta.startedAt,
+      hasWrittenData: true,
+      activeProgram: null,
+      agent: null,
+      agentSession: null,
+      gitStatus: null,
+      gitStatusKey: null,
+      gitAgentActivitySeen: 0,
+      oscSniffBuf: '',
+      lastOscCwd: null,
+      lastOscTitle: null,
+      lastPromptState: null,
+      tuiProgress: null,
+      focusTrackingRequested: false,
+      focusModeSniffBuf: '',
+      focusAggregation: {
+        focusedClients: new Map(),
+        effectiveFocused: false,
+      },
+      flowPausedClients: new Set(),
+      flowPausedClientTimers: new Map(),
+      ptyPausedForFlowControl: false,
+    };
+    terminalSessions.set(meta.id, session);
+
+    // The host's replay ring rebuilds this server's history + sniffed state
+    // (cwd / prompt-state / agent sessions) without re-broadcasting.
+    (client as PtyHostClient).onReplay((data: string) => {
+      processSessionOutput(meta.id, session, data, { broadcast: false });
+    });
+    setupPtyHandlers(meta.id, session);
+    refreshGitStatus(meta.id, session, { minIntervalMs: 0 });
+
+    // Re-link or create the persisted record so the session appears as a tab.
+    const existing = globalSessionState.sessions.find((s) => s.backendSessionId === meta.id);
+    if (!existing) {
+      const now = Date.now();
+      upsertGlobalSessionRecord({
+        sessionId: randomUUID(),
+        name: `terminal-${now.toString(36)}`,
+        backendSessionId: meta.id,
+        mode: 'shell',
+        tmuxSessionName: null,
+        createdAt: meta.startedAt,
+        lastActivity: now,
+        cwd: meta.cwd,
+      });
+      createdRecords++;
+    }
+  }
+
+  console.log(`[pty-host] adopted ${adopted.length} surviving shell session(s)${createdRecords > 0 ? `, created ${createdRecords} record(s)` : ''}`);
+  if (createdRecords > 0) {
+    persistAndBroadcastGlobalState();
+  }
+}
+
 
 function detectShellType(shellPath: string): 'bash' | 'zsh' | 'fish' | 'other' {
   const base = shellPath.split('/').pop()?.toLowerCase() || '';
@@ -4547,69 +4885,33 @@ router.put('/settings', async (req, res) => {
   res.json(await getSettingsPayload());
 });
 
-// ── Agent detection rules API ──
+// ── Agent hooks API (rich status channel installers) ──
 
-router.get('/agent-rules', async (_req, res) => {
-  res.json(await loadAgentRulesFromDisk());
+router.get('/agent-hooks', (_req, res) => {
+  res.json({ agents: listHookAgents() });
 });
 
-router.put('/agent-rules', async (req, res) => {
-  const rules = req.body;
-  if (!Array.isArray(rules)) {
-    res.status(400).json({ error: 'Expected array of program configs' });
-    return;
+router.post('/agent-hooks/:agent/install', async (req, res) => {
+  const agent = req.params.agent as HookAgentSlug;
+  try {
+    const result = await installHooks(agent);
+    res.json({ agent, ...result, state: 'installed' });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
   }
-  // Basic validation
-  for (const config of rules) {
-    const hasProgram = typeof config.program === 'string' && config.program.trim().length > 0;
-    const hasPrograms = Array.isArray(config.programs) && config.programs.some((name: unknown) => typeof name === 'string' && name.trim().length > 0);
-    if ((!hasProgram && !hasPrograms) || !Array.isArray(config.rules)) {
-      res.status(400).json({ error: 'Each config must have program/programs and rules' });
-      return;
-    }
-    for (const rule of config.rules) {
-      if (!rule.pattern || !rule.status) {
-        res.status(400).json({ error: 'Each rule must have pattern and status' });
-        return;
-      }
-      // Validate regex
-      try { new RegExp(rule.pattern, 'i'); } catch {
-        res.status(400).json({ error: `Invalid regex: ${rule.pattern}` });
-        return;
-      }
-      if (rule.indicator !== undefined && !AGENT_INDICATORS.has(rule.indicator)) {
-        res.status(400).json({ error: `Invalid indicator: ${rule.indicator}` });
-        return;
-      }
-      if (rule.clearDelayMs !== undefined) {
-        const delay = Number(rule.clearDelayMs);
-        if (!Number.isFinite(delay) || delay < MIN_AGENT_CLEAR_DELAY_MS || delay > MAX_AGENT_CLEAR_DELAY_MS) {
-          res.status(400).json({ error: `clearDelayMs must be ${MIN_AGENT_CLEAR_DELAY_MS}-${MAX_AGENT_CLEAR_DELAY_MS}` });
-          return;
-        }
-      }
-    }
-  }
-  await saveAgentRulesToDisk(rules);
-  broadcastControlEvent({
-    type: 'config-updated',
-    key: 'agent-rules',
-    updatedAt: Date.now(),
-  });
-  res.json(rules);
 });
 
-router.delete('/agent-rules', async (_req, res) => {
-  // Remove custom rules file so builtins take effect again
-  await fs.promises.unlink(AGENT_RULES_FILE).catch(() => undefined);
-  compileAgentRules(BUILTIN_AGENT_RULES);
-  broadcastControlEvent({
-    type: 'config-updated',
-    key: 'agent-rules',
-    updatedAt: Date.now(),
-  });
-  res.json(BUILTIN_AGENT_RULES);
+router.post('/agent-hooks/:agent/uninstall', async (req, res) => {
+  const agent = req.params.agent as HookAgentSlug;
+  try {
+    const summary = await uninstallHooks(agent);
+    res.json({ agent, summary, state: 'not-installed' });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
 });
+
+// ── end Agent hooks API ──
 
 // ── Program detection config API ──
 
@@ -4757,14 +5059,23 @@ router.get('/:sessionId/stream', async (req, res) => {
     mode: session.mode,
     tmuxSessionName: session.tmuxSessionName,
     cwd: session.cwd ?? null,
-    activeProgram: session.activeProgram?.command ?? null,
+    activeProgram: session.activeProgram?.command ?? getPersistedActiveProgramForBackend(sessionId),
     activeProgramRaw: session.activeProgram?.rawArgs ?? null,
     activeProgramSource: session.activeProgram?.source ?? null,
-    agentStatus: session.agentStatus,
-    agentColor: session.agentColor,
-    agentIndicator: session.agentIndicator,
     tuiProgress: session.tuiProgress,
+    // 标题/prompt 状态只在「变化」时广播，且去重基准在 server 端——刷新后的
+    // 新客户端不会收到重发。连接即推当前值，否则 tab 名塌回默认直到下次变化。
+    shellTitle: session.lastOscTitle,
+    promptState: session.lastPromptState,
   });
+  // Rich agent state rides its own message so the connected payload stays
+  // backward compatible; force past the dedupe snapshot.
+  if (session.agent || session.agentSession) {
+    writeSse(res, buildAgentStatusPayload(sessionId, session));
+  }
+  if (session.gitStatus) {
+    writeSse(res, { type: 'git-status', gitStatus: session.gitStatus });
+  }
 
   let tmuxInterval: ReturnType<typeof setInterval> | null = null;
   let activeProgramInterval: ReturnType<typeof setInterval> | null = null;
@@ -4781,9 +5092,10 @@ router.get('/:sessionId/stream', async (req, res) => {
 
     lastActiveProgramSnapshot = snapshot;
     session.activeProgram = activeProgram;
+    persistActiveProgramBinding(sessionId, activeProgram?.command);
 
     // Agent status: react to AI tool start/exit
-    evaluateAgentStatus(sessionId, session);
+    syncAgentIdentity(sessionId, session);
 
     console.log(
       `[active-program][shell-sse] session=${sessionId} client=${clientId} cmd=${activeProgram?.command ?? null} source=${activeProgram?.source ?? null}`,
@@ -4830,6 +5142,7 @@ router.get('/:sessionId/stream', async (req, res) => {
           schedulePersistGlobalState();
         }
         writeSse(res, { type: 'cwd', cwd: newCwd });
+        refreshGitStatus(sessionId, session, { minIntervalMs: 0 });
       }
       // tmux 消费了 inner shell 发的 OSC 2/133，不透传到外层 PTY。
       // 从 tmux layout 提取 active pane 的 title 和 command 来推导。
@@ -4843,8 +5156,12 @@ router.get('/:sessionId/stream', async (req, res) => {
         const inferredState: 'idle' | 'running' =
           paneCmd && !shellNamesBackend.has(paneCmd) ? 'running' : 'idle';
         if (inferredState !== session.lastPromptState) {
+          const wasRunning = session.lastPromptState === 'running';
           session.lastPromptState = inferredState;
           writeSse(res, { type: 'prompt-state', state: inferredState });
+          if (wasRunning && inferredState === 'idle') {
+            refreshGitStatus(sessionId, session);
+          }
         }
       }
       // Mirror dynamic metadata onto tmux user options (cheap when nothing
@@ -5006,6 +5323,54 @@ router.post('/:sessionId/input', express.text({ type: '*/*' }), (req, res) => {
     console.error('Failed to write to terminal:', errorMessage);
     res.status(500).json({ error: errorMessage || 'Failed to write to terminal' });
   }
+});
+
+/**
+ * Resume the pane's last agent conversation: rebuild the agent's native
+ * resume command (carrying the original launch flags) and deliver it via
+ * bracketed paste. Refused while an agent turn is in flight — pasting a
+ * resume into a busy TUI would corrupt its input.
+ */
+router.post('/:sessionId/agent-resume', (req, res) => {
+  const { sessionId } = req.params;
+  const session = terminalSessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Terminal session not found' });
+  }
+
+  const live = session.agentSession;
+  if (session.agent && live && (live.status === 'working' || live.status === 'waiting')) {
+    return res.status(409).json({ error: 'agent is busy; wait for the turn to finish' });
+  }
+
+  const command = resolveAgentResumeCommand(sessionId, session);
+  if (!command) {
+    return res.status(404).json({ error: 'no resumable agent session for this pane' });
+  }
+
+  try {
+    session.ptyProcess.write(buildBracketedSubmitBytes(command));
+    session.lastActivity = Date.now();
+    res.json({ success: true, command });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: errorMessage || 'Failed to write to terminal' });
+  }
+});
+
+/** Whether this pane has a resumable agent conversation (for the UI affordance). */
+router.get('/:sessionId/agent-resume', (req, res) => {
+  const { sessionId } = req.params;
+  const session = terminalSessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Terminal session not found' });
+  }
+  const command = resolveAgentResumeCommand(sessionId, session);
+  const busy = !!(session.agent && session.agentSession
+    && (session.agentSession.status === 'working' || session.agentSession.status === 'waiting'));
+  res.json({ available: command !== null, command, busy });
 });
 
 router.post('/:sessionId/resize', (req, res) => {
@@ -5434,13 +5799,12 @@ export function handleTerminalWebSocket(
       mode: session.mode,
       tmuxSessionName: session.tmuxSessionName,
       cwd: session.cwd ?? null,
-      activeProgram: session.activeProgram?.command ?? null,
+      activeProgram: session.activeProgram?.command ?? getPersistedActiveProgramForBackend(sessionId),
       activeProgramRaw: session.activeProgram?.rawArgs ?? null,
       activeProgramSource: session.activeProgram?.source ?? null,
-      agentStatus: session.agentStatus,
-      agentColor: session.agentColor,
-      agentIndicator: session.agentIndicator,
       tuiProgress: session.tuiProgress,
+      shellTitle: session.lastOscTitle,
+      promptState: session.lastPromptState,
       focusTrackingRequested: session.focusTrackingRequested,
       // 短线重连补帧：
       // replayChunks 为补发数据；replayLastSeq 是客户端应记录的新基线；
@@ -5449,6 +5813,13 @@ export function handleTerminalWebSocket(
       replayLastSeq,
       replayOutOfWindow,
     }));
+    // Rich agent state rides its own message (see the SSE path above).
+    if (session.agent || session.agentSession) {
+      ws.send(JSON.stringify(buildAgentStatusPayload(sessionId, session)));
+    }
+    if (session.gitStatus) {
+      ws.send(JSON.stringify({ type: 'git-status', gitStatus: session.gitStatus }));
+    }
   })();
 
   // Tmux layout polling (per-client, like the SSE stream does)
@@ -5482,9 +5853,10 @@ export function handleTerminalWebSocket(
         if (apSnapshot !== lastActiveProgramSnapshot) {
           lastActiveProgramSnapshot = apSnapshot;
           session.activeProgram = ap;
+          persistActiveProgramBinding(sessionId, ap?.command);
 
           // Agent status: react to AI tool start/exit
-          evaluateAgentStatus(sessionId, session);
+          syncAgentIdentity(sessionId, session);
 
           console.log(
             `[active-program][ws] session=${sessionId} cmd=${ap?.command ?? null} source=${ap?.source ?? null}`,
@@ -5505,6 +5877,7 @@ export function handleTerminalWebSocket(
             schedulePersistGlobalState();
           }
           ws.send(JSON.stringify({ type: 'cwd', cwd: newCwd }));
+          refreshGitStatus(sessionId, session, { minIntervalMs: 0 });
         }
         // tmux 消费了 inner shell 发的 OSC 2（存入 pane_title）和 OSC 133，
         // 不透传到外层 PTY。因此从 tmux layout 提取 active pane 的 title
@@ -5520,8 +5893,12 @@ export function handleTerminalWebSocket(
         const inferredState: 'idle' | 'running' =
           paneCmd && !shellNamesBackend.has(paneCmd) ? 'running' : 'idle';
         if (inferredState !== session.lastPromptState) {
+          const wasRunning = session.lastPromptState === 'running';
           session.lastPromptState = inferredState;
           ws.send(JSON.stringify({ type: 'prompt-state', state: inferredState }));
+          if (wasRunning && inferredState === 'idle') {
+            refreshGitStatus(sessionId, session);
+          }
           }
         }
         // Mirror dynamic metadata onto tmux user options.
@@ -5559,9 +5936,10 @@ export function handleTerminalWebSocket(
         if (snapshot !== lastApSnapshot) {
           lastApSnapshot = snapshot;
           session.activeProgram = ap;
+          persistActiveProgramBinding(sessionId, ap?.command);
 
           // Agent status: react to AI tool start/exit
-          evaluateAgentStatus(sessionId, session);
+          syncAgentIdentity(sessionId, session);
 
           ws.send(JSON.stringify({
             type: 'active-program',

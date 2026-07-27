@@ -119,6 +119,9 @@ describe('Flexoki palette single source of truth', () => {
     const offenders: string[] = [];
     for (const file of walk(join(srcRoot))) {
       const text = readFileSync(file, 'utf-8');
+      // 文件级豁免：含 flexoki-allow-file 注释的文件允许非 Flexoki hex——
+      // 用于 vendor 品牌色等刻意与主题无关的固定值（如 agent 品牌注册表）。
+      if (text.includes('flexoki-allow-file')) continue;
       for (const match of text.matchAll(/#[0-9A-Fa-f]{6}\b/g)) {
         const hex = match[0].toUpperCase();
         if (!FLEXOKI_FAMILY.has(hex)) {

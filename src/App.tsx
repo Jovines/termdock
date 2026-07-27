@@ -13,6 +13,7 @@ import {
   Keyboard as RiKeyboardLine,
   SlidersHorizontal as RiEqualizerLine,
   Layers as RiStackLine,
+  History as RiHistoryLine,
   Trash2 as RiDeleteBinLine,
   Unplug as RiLogoutBoxRLine,
   Bot as RiBotLine,
@@ -34,8 +35,8 @@ import { useSuperLongPress } from './lib/hooks/useSuperLongPress';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, getAgentRules, replaceAgentRules, resetAgentRules, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection } from './lib/terminal/api';
-import type { AgentProgramConfig, ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession } from './lib/terminal/api';
+import type { ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
 import {
@@ -59,13 +60,12 @@ import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
 import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay } from './lib/components/AgentIndicators';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
-import { AgentRulesSettings } from './lib/components/settings/AgentRulesSettings';
+import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 import type { TermdockColorTheme } from './lib/terminal/theme';
 
 // Cache keys for app-level lazy data fetched from the server. 缓存只是"上次看到"的
 // 快照，每次启动还是会发 HTTP 校准；命中时让 UI 不再闪烁默认值 → 自定义值。
-const AGENT_RULES_CACHE_KEY = 'termdock-agent-rules-cache';
 const PROGRAM_RULES_CACHE_KEY = 'termdock-program-rules-cache';
 const TOOLBAR_PRESETS_CACHE_KEY = 'termdock-toolbar-presets-cache';
 const SETTINGS_CACHE_KEY = 'termdock-settings-cache';
@@ -141,15 +141,6 @@ function isGitDiffWhitespaceMode(value: unknown): value is GitDiffWhitespaceMode
   return value === 'default' || value === 'trim' || value === 'ignore' || value === 'ignore-blank-lines';
 }
 
-function isAgentRulesArray(v: unknown): v is AgentProgramConfig[] {
-  return Array.isArray(v) && v.every((entry) => {
-    if (typeof entry !== 'object' || entry === null) return false;
-    const cfg = entry as { program?: unknown; programs?: unknown; rules?: unknown };
-    const hasLegacyProgram = typeof cfg.program === 'string';
-    const hasPrograms = Array.isArray(cfg.programs) && cfg.programs.every((item) => typeof item === 'string');
-    return (hasLegacyProgram || hasPrograms) && Array.isArray(cfg.rules);
-  });
-}
 
 function isProgramRulesArray(v: unknown): v is ProgramLabelRule[] {
   return Array.isArray(v) && v.every((entry) => {
@@ -401,9 +392,13 @@ type TabTerminalSessionState = Pick<
   | 'inCopyMode'
   | 'isConnecting'
   | 'agentStatus'
-  | 'agentColor'
   | 'agentIndicator'
+  | 'agent'
+  | 'agentMessage'
+  | 'agentNativeSessionId'
+  | 'terminalSessionId'
   | 'agentNeedsReview'
+  | 'gitStatus'
   | 'shellTitle'
   | 'promptState'
   | 'tuiProgress'
@@ -421,9 +416,13 @@ function pickTabTerminalSessions(
       inCopyMode: state.inCopyMode,
       isConnecting: state.isConnecting,
       agentStatus: state.agentStatus,
-      agentColor: state.agentColor,
       agentIndicator: state.agentIndicator,
+      agent: state.agent,
+      agentMessage: state.agentMessage,
+      agentNativeSessionId: state.agentNativeSessionId,
+      terminalSessionId: state.terminalSessionId,
       agentNeedsReview: state.agentNeedsReview,
+      gitStatus: state.gitStatus,
       shellTitle: state.shellTitle,
       promptState: state.promptState,
       tuiProgress: state.tuiProgress,
@@ -448,9 +447,12 @@ function areTabTerminalSessionsEqual(
       currentState.inCopyMode !== nextState.inCopyMode ||
       currentState.isConnecting !== nextState.isConnecting ||
       currentState.agentStatus !== nextState.agentStatus ||
-      currentState.agentColor !== nextState.agentColor ||
       currentState.agentIndicator !== nextState.agentIndicator ||
+      currentState.agent !== nextState.agent ||
+      currentState.agentMessage !== nextState.agentMessage ||
+      currentState.agentNativeSessionId !== nextState.agentNativeSessionId ||
       currentState.agentNeedsReview !== nextState.agentNeedsReview ||
+      currentState.gitStatus !== nextState.gitStatus ||
       currentState.shellTitle !== nextState.shellTitle ||
       currentState.promptState !== nextState.promptState ||
       currentState.tuiProgress?.state !== nextState.tuiProgress?.state ||
@@ -1274,13 +1276,7 @@ function App() {
 
   // Agent detection rules — owned by server (~/.termdock/agent-rules.json)
   // 同样缓存到 localStorage，让 agent 检测在冷启动后立即生效。
-  const cachedAgentRules = React.useRef<AgentProgramConfig[] | null>(
-    readCache(AGENT_RULES_CACHE_KEY, isAgentRulesArray)
-  ).current;
   const [isAgentRulesOpen, setIsAgentRulesOpen] = React.useState(false);
-  const [agentRules, setAgentRules] = React.useState<AgentProgramConfig[]>(cachedAgentRules ?? []);
-  const [agentRulesLoaded, setAgentRulesLoaded] = React.useState(cachedAgentRules !== null);
-  const [agentRulesSaving, setAgentRulesSaving] = React.useState(false);
 
   const cachedProgramRules = React.useRef<ProgramLabelRule[] | null>(
     readCache(PROGRAM_RULES_CACHE_KEY, isProgramRulesArray)
@@ -1380,20 +1376,6 @@ function App() {
   });
   const [, setProgramDetectionLoaded] = React.useState(false);
 
-  const refreshAgentRulesFromServer = React.useCallback(() => {
-    return getAgentRules()
-      .then((rules) => {
-        writeCache(AGENT_RULES_CACHE_KEY, rules);
-        setAgentRules((current) => (shallowJsonEqual(current, rules) ? current : rules));
-        setAgentRulesLoaded(true);
-      })
-      .catch(() => { /* use empty state */ });
-  }, []);
-
-  useEffect(() => {
-    void refreshAgentRulesFromServer();
-  }, [refreshAgentRulesFromServer]);
-
   const refreshProgramDetectionFromServer = React.useCallback(() => {
     return getProgramDetection()
       .then((config) => {
@@ -1419,15 +1401,11 @@ function App() {
           });
         return;
       }
-      if (event.key === 'agent-rules') {
-        void refreshAgentRulesFromServer();
-        return;
-      }
       if (event.key === 'program-detection') {
         void refreshProgramDetectionFromServer();
       }
     });
-  }, [applyToolbarPresetsDoc, refreshAgentRulesFromServer, refreshProgramDetectionFromServer]);
+  }, [applyToolbarPresetsDoc, refreshProgramDetectionFromServer]);
 
   // Initial load from server: merge any stored custom presets with the latest
   // built-ins, force-overwriting built-in ids when the server's stored version
@@ -1645,7 +1623,7 @@ function App() {
     let review = 0;
     for (const s of sessions) {
       const ts = terminalSessions.get(s.id);
-      if (ts?.agentStatus === 'running') running += 1;
+      if (ts?.agentStatus === 'working') running += 1;
       if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) review += 1;
     }
     return { running, review };
@@ -1931,9 +1909,10 @@ function App() {
     const tabDirLabel = showDir
       ? (displaySubName ?? (cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null))
       : null;
-    const tooltip = ts?.cwd || session.name;
+    const git = ts?.gitStatus;
+    const tooltip = `${ts?.cwd || session.name}${git ? `\n⎇ ${git.branch}  +${git.added} −${git.removed}` : ''}`;
     const tuiProgressActive = Boolean(ts?.tuiProgress && ts.tuiProgress.state !== 'remove');
-    const accentColor = ts?.agentStatus === 'running' || tuiProgressActive
+    const accentColor = ts?.agentStatus === 'working' || tuiProgressActive
       ? 'var(--success)'
       : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
         ? 'var(--warning)'
@@ -2088,7 +2067,7 @@ function App() {
                 let groupReview = 0;
                 for (const s of group.sessions) {
                   const ts = terminalSessions.get(s.id);
-                  if (ts?.agentStatus === 'running') groupRunning += 1;
+                  if (ts?.agentStatus === 'working') groupRunning += 1;
                   if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) groupReview += 1;
                 }
                 const hasActive = group.sessions.some((s) => s.id === activeSessionId);
@@ -2912,7 +2891,7 @@ function App() {
                   <span className="font-medium text-foreground">{t('settings.aiAgentDetection')}</span>
                 </span>
                 <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                  <span>{agentRulesLoaded ? `${agentRules.length} prog${agentRules.length === 1 ? '' : 's'}` : '…'}</span>
+                  <span>hooks</span>
                   <span>›</span>
                 </span>
               </button>
@@ -3138,6 +3117,30 @@ function App() {
                     <span className="ml-auto text-[11px] text-primary">{t('tab.copied')}</span>
                   )}
                 </button>
+                {ts?.agentNativeSessionId && ts.agentStatus !== 'working' && ts.agentStatus !== 'waiting' && ts.terminalSessionId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const backendId = ts.terminalSessionId;
+                      if (!backendId) return;
+                      closeTabMenu();
+                      void resumeAgentSession(backendId).catch((error) => {
+                        console.warn('[agent-resume] failed:', error);
+                      });
+                    }}
+                    className={`${menuItemClassName} text-foreground hover:bg-surface-2`}
+                  >
+                    <span className={`${menuIconClassName} bg-[rgb(var(--success-rgb)_/_0.14)] text-[color:var(--success)]`}>
+                      <RiHistoryLine size={14} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-medium">
+                        {t('tab.resumeAgent')}{ts.agent?.displayName ? ` · ${ts.agent.displayName}` : ''}
+                      </span>
+                      <span className="block text-[11px] text-muted-foreground">{t('tab.resumeAgentHint')}</span>
+                    </span>
+                  </button>
+                )}
                 <div className="my-1 border-t border-border/15" />
                 {menuSession.mode === 'tmux' ? (
                   <>
@@ -3555,9 +3558,6 @@ function App() {
                 <h2 className="section-title mt-1">{t('settings.detectionRules')}</h2>
               </div>
               <div className="flex items-center gap-2">
-                {agentRulesSaving && (
-                  <span className="text-[11px] text-muted-foreground">{t('settings.saving')}</span>
-                )}
                 <button
                   type="button"
                   onClick={() => setIsAgentRulesOpen(false)}
@@ -3570,35 +3570,9 @@ function App() {
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
               <p className="mb-4 text-[11px] text-muted-foreground">
-                Configure regex patterns to detect what an AI tool is doing in a terminal tab.
-                Each rule can choose its label, color, icon style and how long the indicator is kept after output quiets down.
-                When it stops and you haven't viewed the tab yet, the tab keeps a yellow review hint.
+                {t('settings.agentHooksHint')}
               </p>
-              <AgentRulesSettings
-                rules={agentRules}
-                onChange={(rules) => {
-                  setAgentRules(rules);
-                  writeCache(AGENT_RULES_CACHE_KEY, rules);
-                  setAgentRulesSaving(true);
-                  replaceAgentRules(rules)
-                    .then((saved) => {
-                      setAgentRules(saved);
-                      writeCache(AGENT_RULES_CACHE_KEY, saved);
-                    })
-                    .catch(() => { /* keep local state */ })
-                    .finally(() => setAgentRulesSaving(false));
-                }}
-                onResetDefaults={() => {
-                  setAgentRulesSaving(true);
-                  resetAgentRules()
-                    .then((rules) => {
-                      setAgentRules(rules);
-                      writeCache(AGENT_RULES_CACHE_KEY, rules);
-                    })
-                    .catch(() => { /* keep local state */ })
-                    .finally(() => setAgentRulesSaving(false));
-                }}
-              />
+              <AgentHooksSettings />
 
               <div className="mt-6 border-t border-border/15 pt-4">
                 <div className="ui-kicker">{t('settings.programLabelResolution')}</div>

@@ -1,0 +1,153 @@
+import { describe, expect, it } from 'vitest';
+import {
+  applyAgentEvent,
+  buildHookSequence,
+  defaultAgentSessionState,
+  parseAgentEvent,
+  type AgentEvent,
+  type AgentEventKind,
+} from './session.js';
+import { agentBySlug } from './registry.js';
+
+function ev(kind: AgentEventKind, opts: Partial<AgentEvent> = {}): AgentEvent {
+  return {
+    agent: agentBySlug('claude'),
+    kind,
+    sessionId: null,
+    message: null,
+    cwd: null,
+    ...opts,
+  };
+}
+
+describe('parseAgentEvent', () => {
+  it('parses well-formed sentinel events', () => {
+    const parsed = parseAgentEvent(
+      '777;notify;termdock://cli-agent;{"v":1,"agent":"claude","event":"permission-request","session_id":"abc-123","message":"Claude needs your permission to use Bash"}',
+    );
+    expect(parsed?.agent?.slug).toBe('claude');
+    expect(parsed?.kind).toBe('permission-request');
+    expect(parsed?.sessionId).toBe('abc-123');
+    expect(parsed?.message).toContain('permission');
+  });
+
+  it('rejects non-sentinel payloads, unknown events, and malformed JSON', () => {
+    expect(parseAgentEvent('777;notify;Build;done')).toBeNull();
+    expect(parseAgentEvent('777;notify;termdock://cli-agent;{"event":"quantum-leap"}')).toBeNull();
+    expect(parseAgentEvent('777;notify;termdock://cli-agent;{oops')).toBeNull();
+    expect(parseAgentEvent('9;4;3;0')).toBeNull();
+  });
+});
+
+describe('buildHookSequence ↔ parseAgentEvent round-trip', () => {
+  it('locks the two ends of the protocol together', () => {
+    const seq = buildHookSequence(
+      'claude',
+      'notification',
+      '{"session_id":"abc-123","message":"Claude needs your permission","cwd":"/w"}',
+    );
+    // Strip OSC framing (ESC ] … BEL) to get the payload the sniffer delivers
+    const payload = seq.slice(2, -1);
+    const parsed = parseAgentEvent(payload);
+    expect(parsed?.agent?.slug).toBe('claude');
+    expect(parsed?.kind).toBe('notification');
+    expect(parsed?.sessionId).toBe('abc-123');
+    expect(parsed?.message).toContain('permission');
+    expect(parsed?.cwd).toBe('/w');
+
+    // Garbage stdin still yields a well-formed bare event
+    const bare = parseAgentEvent(buildHookSequence('claude', 'stop', 'not json at all').slice(2, -1));
+    expect(bare?.kind).toBe('stop');
+    expect(bare?.sessionId).toBeNull();
+
+    // Grok's envelope is camelCase; the fields must land in snake_case
+    const grok = parseAgentEvent(
+      buildHookSequence('grok', 'session-start', '{"hookEventName":"session_start","sessionId":"g-42","cwd":"/w"}').slice(2, -1),
+    );
+    expect(grok?.agent?.slug).toBe('grok');
+    expect(grok?.sessionId).toBe('g-42');
+  });
+});
+
+describe('agent session state machine', () => {
+  it('follows the turn lifecycle', () => {
+    const s = defaultAgentSessionState();
+    expect(s.status).toBe('idle');
+
+    applyAgentEvent(s, ev('session-start', { sessionId: 'sid-1' }));
+    expect(s.status).toBe('idle');
+    expect(s.sessionId).toBe('sid-1');
+    expect(s.rich).toBe(true);
+
+    applyAgentEvent(s, ev('prompt-submit'));
+    expect(s.status).toBe('working');
+
+    // A Notification arriving MID-TURN (while working) is a real block
+    applyAgentEvent(s, ev('notification', { message: 'Claude needs your permission' }));
+    expect(s.status).toBe('waiting');
+    expect(s.message).toContain('permission');
+
+    // The user approved: the granted tool completes → back to work
+    applyAgentEvent(s, ev('tool-complete'));
+    expect(s.status).toBe('working');
+    expect(s.message).toBeNull();
+
+    // Tool completions during normal work are a no-op, not state churn
+    applyAgentEvent(s, ev('tool-complete'));
+    expect(s.status).toBe('working');
+
+    applyAgentEvent(s, ev('stop'));
+    expect(s.status).toBe('done');
+
+    // A straggler tool-complete after the turn ended must not resurrect working
+    applyAgentEvent(s, ev('tool-complete'));
+    expect(s.status).toBe('done');
+
+    // A Notification BETWEEN turns (idle nudge) must not fabricate a block
+    applyAgentEvent(s, ev('notification', { message: 'Claude is waiting for your input' }));
+    expect(s.status).toBe('done');
+
+    // Session end goes idle but KEEPS the id — ended sessions resume
+    applyAgentEvent(s, ev('session-end'));
+    expect(s.status).toBe('idle');
+    expect(s.sessionId).toBe('sid-1');
+  });
+
+  it('counts tool completions even when the status holds still', () => {
+    const s = defaultAgentSessionState();
+    applyAgentEvent(s, ev('prompt-submit'));
+    expect(s.activity).toBe(0);
+
+    for (let n = 1; n <= 3; n++) {
+      applyAgentEvent(s, ev('tool-complete'));
+      expect(s.status).toBe('working');
+      expect(s.activity).toBe(n);
+    }
+
+    applyAgentEvent(s, ev('stop'));
+    applyAgentEvent(s, ev('tool-complete'));
+    expect(s.status).toBe('done');
+    expect(s.activity).toBe(4);
+
+    // Session end resets plenty of state but not the counter
+    applyAgentEvent(s, ev('session-end'));
+    expect(s.activity).toBe(4);
+  });
+
+  it('tracks and releases the agent cwd claim', () => {
+    const s = defaultAgentSessionState();
+    applyAgentEvent(s, ev('session-start', { cwd: '/repo' }));
+    expect(s.agentCwd).toBe('/repo');
+
+    // EnterWorktree lands as a tool-complete carrying the new directory
+    applyAgentEvent(s, ev('tool-complete', { cwd: '/repo/.claude/worktrees/fix-x' }));
+    expect(s.agentCwd).toBe('/repo/.claude/worktrees/fix-x');
+
+    // An event without a cwd keeps the previous claim
+    applyAgentEvent(s, ev('stop'));
+    expect(s.agentCwd).toBe('/repo/.claude/worktrees/fix-x');
+
+    applyAgentEvent(s, ev('session-end'));
+    expect(s.agentCwd).toBeNull();
+  });
+});

@@ -688,17 +688,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 lastSentFlowPausedRef.current = null;
                 reportFlowControl(flowPausedRef.current, 'stream-connected');
 
-                // Sync agent status from server on connect
-                if (event.agentStatus !== undefined) {
-                  setSessionAgentStatus(
-                    storeSessionId,
-                    event.agentStatus ?? null,
-                    event.agentColor ?? null,
-                    event.agentIndicator ?? null,
-                  );
-                }
+                // Agent status syncs via the dedicated agent-status message.
                 if (event.tuiProgress !== undefined) {
                   useTerminalStore.getState().setSessionTuiProgress(storeSessionId, event.tuiProgress ?? null);
+                }
+                // 标题/prompt 状态连接即同步（广播只在变化时发，刷新后不会重发）。
+                if (event.shellTitle !== undefined) {
+                  useTerminalStore.getState().setSessionShellTitle(storeSessionId, event.shellTitle ?? null);
+                }
+                if (event.promptState !== undefined && event.promptState !== null) {
+                  useTerminalStore.getState().setSessionPromptState(storeSessionId, event.promptState);
                 }
 
                 const sessionState = useTerminalStore.getState().getTerminalSession(storeSessionId);
@@ -838,12 +837,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 break;
               }
               case 'agent-status': {
-                setSessionAgentStatus(
-                  storeSessionId,
-                  event.agentStatus ?? null,
-                  event.agentColor ?? null,
-                  event.agentIndicator ?? null,
-                );
+                setSessionAgentStatus(storeSessionId, {
+                  agentStatus: event.agentStatus ?? null,
+                  agentIndicator: event.agentIndicator ?? null,
+                  agent: event.agent ?? null,
+                  agentMessage: event.agentMessage ?? null,
+                  agentNativeSessionId: event.agentNativeSessionId ?? null,
+                  agentRich: event.agentRich === true,
+                  agentActivity: event.agentActivity ?? 0,
+                  agentCwd: event.agentCwd ?? null,
+                });
+                break;
+              }
+              case 'git-status': {
+                useTerminalStore.getState().setSessionGitStatus(storeSessionId, event.gitStatus ?? null);
                 break;
               }
               case 'focus-mode': {

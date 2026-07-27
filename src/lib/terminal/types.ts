@@ -1,12 +1,38 @@
 export type TerminalMode = 'shell' | 'tmux';
 
-export type AgentStatus = string;
+/** Agent session status, driven server-side by hook events (OSC 777):
+ *  idle = session open, no turn in flight; working = turn in flight;
+ *  waiting = blocked on the user (permission/question); done = turn finished. */
+export type AgentStatus = 'idle' | 'working' | 'waiting' | 'done';
 export type AgentIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal' | 'question';
+
+/** Recognized coding-agent identity (server registry). */
+export interface AgentIdentity {
+  slug: string;
+  displayName: string;
+  accentColor: string;
+  icon: string | null;
+}
+
+/** Last-known resumable agent conversation, persisted server-side. */
+export interface AgentResumeInfo {
+  slug: string;
+  sessionId: string | null;
+  launchArgv: string[] | null;
+  updatedAt: number;
+}
 export type TuiProgressState = 'remove' | 'set' | 'error' | 'indeterminate' | 'pause';
 
 export interface TuiProgressReport {
   state: TuiProgressState;
   progress: number | null;
+}
+
+/** Server-probed git snapshot for the pane's cwd (branch +N −M vs HEAD). */
+export interface GitStatusReport {
+  branch: string;
+  added: number;
+  removed: number;
 }
 
 export interface TmuxPane {
@@ -140,7 +166,7 @@ export interface TerminalSession {
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size' | 'shell-title' | 'prompt-state' | 'tui-progress';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size' | 'shell-title' | 'prompt-state' | 'tui-progress' | 'git-status';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -156,13 +182,23 @@ export interface TerminalStreamEvent {
   activeProgramRaw?: string | null;
   activeProgramSource?: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   agentStatus?: AgentStatus | null;
-  agentColor?: string | null;
   agentIndicator?: AgentIndicator | null;
+  agent?: AgentIdentity | null;
+  agentMessage?: string | null;
+  agentNativeSessionId?: string | null;
+  agentRich?: boolean;
+  agentActivity?: number;
+  agentCwd?: string | null;
   tuiProgress?: TuiProgressReport | null;
+  gitStatus?: GitStatusReport | null;
   focusTrackingRequested?: boolean;
   // Shell-reported title (OSC 2) — the raw string the shell set, which may
   // be a cwd path (idle) or a command name (running).
   title?: string;
+  // connected 事件携带的当前标题（lastOscTitle），解决刷新后不重发问题。
+  shellTitle?: string | null;
+  // connected 事件携带的当前 prompt 状态。
+  promptState?: 'idle' | 'running' | null;
   // Shell-reported prompt state (OSC 133): 'idle' = at prompt, 'running' = command executing.
   state?: 'idle' | 'running';
   // 短线重连补帧（仅 connected 事件携带）：
@@ -293,15 +329,21 @@ export interface TerminalSessionState {
   inCopyMode: boolean;
   isConnecting: boolean;
   agentStatus: AgentStatus | null;
-  agentColor: string | null;
   agentIndicator: AgentIndicator | null;
-  agentNeedsReview: boolean;  // 前端状态：AI 从运行变为停止时，用户未查看 → 黄点提醒
+  agent: AgentIdentity | null;         // 识别到的 agent 身份（品牌）
+  agentMessage: string | null;         // waiting/done 的上下文（如"需要 Bash 权限"）
+  agentNativeSessionId: string | null; // agent 原生会话 id（resume 用）
+  agentRich: boolean;                  // 状态来自 hooks（rich）还是通知兜底
+  agentActivity: number;               // 工具完成计数（只比较变化）
+  agentCwd: string | null;             // agent 自己上报的工作目录（worktree 跟踪）
+  agentNeedsReview: boolean;  // 前端状态：AI 回合结束/停止时，用户未查看 → 黄点提醒
   // Shell integration (OSC 133/2) — shell-reported title and prompt state.
   // These provide real-time, shell-driven updates (faster than server polling).
   shellTitle: string | null;     // OSC 2 title: cwd when idle, command name when running
   promptState: 'idle' | 'running' | null;  // OSC 133: 'idle' at prompt, 'running' executing
   shellExitCode: number | null;  // last reported exit code from OSC 133;D
   tuiProgress: TuiProgressReport | null;  // OSC 9;4 progress/loading reports from TUIs
+  gitStatus: GitStatusReport | null;  // server-probed branch + diff size for the pane's cwd
   // 已删: 之前维护 `buffer: string` 派生字段,每次 setState 都 map+join 整个
   // chunks 数组(1MB 字符串 copy)。view 端自己用 useMemo 从 bufferChunks
   // 派生,节省 store setState 时的字符串复制。

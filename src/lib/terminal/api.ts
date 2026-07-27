@@ -34,6 +34,18 @@ export class TerminalApiError extends Error {
   }
 }
 
+/** Full agent-status payload pushed by the server (OSC 777 hook-driven). */
+export interface AgentStatusPayload {
+  agentStatus: import('./types').AgentStatus | null;
+  agentIndicator?: AgentIndicator | null;
+  agent?: import('./types').AgentIdentity | null;
+  agentMessage?: string | null;
+  agentNativeSessionId?: string | null;
+  agentRich?: boolean;
+  agentActivity?: number;
+  agentCwd?: string | null;
+}
+
 const FS_REQUEST_TIMEOUT_MS = 8_000;
 const GIT_REQUEST_TIMEOUT_MS = 10_000;
 const GIT_FILE_DIFF_REQUEST_TIMEOUT_MS = 45_000;
@@ -501,9 +513,20 @@ export function connectTerminalStream(
           onEvent({
             type: 'agent-status',
             agentStatus: msg.agentStatus ?? null,
-            agentColor: msg.agentColor ?? null,
             agentIndicator: msg.agentIndicator ?? null,
+            agent: msg.agent ?? null,
+            agentMessage: msg.agentMessage ?? null,
+            agentNativeSessionId: msg.agentNativeSessionId ?? null,
+            agentRich: msg.agentRich === true,
+            agentActivity: typeof msg.agentActivity === 'number' ? msg.agentActivity : 0,
+            agentCwd: msg.agentCwd ?? null,
           });
+          return;
+        }
+
+        // Handle git-status broadcast
+        if (msg.type === 'git-status') {
+          onEvent({ type: 'git-status', gitStatus: msg.gitStatus ?? null });
           return;
         }
 
@@ -1291,24 +1314,6 @@ export async function logout(): Promise<void> {
   resetCsrfTokenCache();
 }
 
-// ---- Agent detection rules API ----
-
-export interface AgentRule {
-  pattern: string;
-  status: string;
-  color?: string;
-  indicator?: AgentIndicator;
-  clearDelayMs?: number;
-}
-
-export interface AgentProgramConfig {
-  // 新格式：一个规则配置可匹配多个程序
-  programs?: string[];
-  // 兼容旧格式：单程序字段
-  program?: string;
-  rules: AgentRule[];
-}
-
 export interface ProgramLabelRule {
   id: string;
   enabled?: boolean;
@@ -1319,34 +1324,57 @@ export interface ProgramLabelRule {
   source?: Array<'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown'>;
 }
 
-export async function getAgentRules(): Promise<AgentProgramConfig[]> {
-  const response = await fetch('/api/terminal/agent-rules');
-  if (!response.ok) throw new Error('Failed to get agent rules');
-  return response.json();
+// ---- Agent hooks (rich status channel installers) ----
+
+export interface AgentHookInfo {
+  slug: string;
+  displayName: string;
+  targetDisplay: string;
+  state: 'not-installed' | 'installed' | 'outdated';
+  accentColor: string | null;
+  icon: string | null;
 }
 
-export async function replaceAgentRules(rules: AgentProgramConfig[]): Promise<AgentProgramConfig[]> {
-  const csrfTokenHeader = await getCsrfToken();
-  const response = await fetch('/api/terminal/agent-rules', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
-    body: JSON.stringify(rules),
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to update agent rules' }));
-    throw new Error(error.error || 'Failed to update agent rules');
-  }
-  return response.json();
+export async function getAgentHooks(): Promise<AgentHookInfo[]> {
+  const response = await fetch('/api/terminal/agent-hooks');
+  if (!response.ok) throw new Error('Failed to get agent hooks');
+  const data = await response.json();
+  return Array.isArray(data?.agents) ? data.agents : [];
 }
 
-export async function resetAgentRules(): Promise<AgentProgramConfig[]> {
+export async function installAgentHooks(agent: string): Promise<{ summary: string; devMode: boolean }> {
   const csrfTokenHeader = await getCsrfToken();
-  const response = await fetch('/api/terminal/agent-rules', {
-    method: 'DELETE',
+  const response = await fetch(`/api/terminal/agent-hooks/${encodeURIComponent(agent)}/install`, {
+    method: 'POST',
     headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
   });
-  if (!response.ok) throw new Error('Failed to reset agent rules');
-  return response.json();
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Failed to install agent hooks');
+  return { summary: data.summary ?? 'Installed', devMode: data.devMode === true };
+}
+
+export async function uninstallAgentHooks(agent: string): Promise<string> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/agent-hooks/${encodeURIComponent(agent)}/uninstall`, {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Failed to uninstall agent hooks');
+  return data.summary ?? 'Removed';
+}
+
+/** Resume the pane's last agent conversation (server writes the agent's
+ *  native resume command into the PTY via bracketed paste). */
+export async function resumeAgentSession(terminalSessionId: string): Promise<{ command: string }> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/${encodeURIComponent(terminalSessionId)}/agent-resume`, {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Failed to resume agent session');
+  return { command: data.command ?? '' };
 }
 
 export async function getProgramRules(): Promise<ProgramLabelRule[]> {

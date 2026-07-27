@@ -1,10 +1,12 @@
 /**
  * Agent / 会话状态相关的展示原语，统一收敛在这里。
  *
- * 设计约定：
- *   - "running"   → 绿色 + 动效（常见为 spinner/pulse）
- *   - "waiting"   → 黄色问号图标 + 跳动动效（indicator=question）
- *   - "review/copy-mode" → 黄色呼吸动效（needsReview/inCopyMode）
+ * 设计约定（hook 驱动的四态状态机）：
+ *   - working → 绿色 spinner（回合进行中）
+ *   - waiting → 黄色问号跳动（等你授权/回答——最需要关注的时刻）
+ *   - done    → 绿色对勾（回合完成，结果待读）
+ *   - idle    → agent 品牌头像（无状态点），无身份时回落 shell/tmux 图标
+ *   - review/copy-mode → 黄色呼吸动效（needsReview/inCopyMode）
  */
 
 import React from 'react';
@@ -13,27 +15,71 @@ import {
   LayoutGrid as RiLayoutGridLine,
   LoaderCircle as RiLoaderCircle,
   CircleHelp as RiCircleHelp,
+  Check as RiCheck,
+  Bot as RiBot,
 } from 'lucide-react';
-import type { AgentStatus, AgentIndicator } from '../terminal/types';
+import type { AgentStatus, AgentIdentity } from '../terminal/types';
 import { useI18n } from '../i18n';
 
 /** 黄色（待查看 / 等待用户 / copy mode） */
 export const AGENT_COLOR_ATTENTION = 'var(--warning)';
-/** 绿色（running） */
+/** 绿色（working/done） */
 export const AGENT_COLOR_RUNNING = 'var(--success)';
 
 /** 给 tab 图标 / dot 共享的轻量 session 状态 */
 export interface AgentVisualState {
   inCopyMode?: boolean;
   agentStatus: AgentStatus | null;
-  agentColor?: string | null;
-  agentIndicator?: AgentIndicator | null;
+  agent?: AgentIdentity | null;
+  agentMessage?: string | null;
   agentNeedsReview?: boolean;
 }
 
 /**
- * 顶部 tab 上的图标。会按 agent indicator 规则渲染对应的状态图标，
- * 都没有就回落到 shell/tmux 默认图标。
+ * agent 品牌头像：品牌色圆角方块 + 白色剪影。
+ * SVG 资产来自 tty7（Apache-2.0），用 CSS mask 着色，几何为准。
+ */
+export function AgentBrandAvatar({
+  agent,
+  size = 12,
+}: {
+  agent: AgentIdentity;
+  size?: number;
+}): React.ReactElement {
+  const inner = size - 4;
+  if (!agent.icon) {
+    return (
+      <span
+        className="flex shrink-0 items-center justify-center rounded-[3px]"
+        style={{ width: size, height: size, backgroundColor: agent.accentColor }}
+        title={agent.displayName}
+      >
+        <RiBot size={inner} className="text-white" />
+      </span>
+    );
+  }
+  return (
+    <span
+      className="flex shrink-0 items-center justify-center rounded-[3px]"
+      style={{ width: size, height: size, backgroundColor: agent.accentColor }}
+      title={agent.displayName}
+    >
+      <span
+        className="block bg-white"
+        style={{
+          width: inner,
+          height: inner,
+          WebkitMask: `url(/icons/agents/${agent.icon}.svg) center / contain no-repeat`,
+          mask: `url(/icons/agents/${agent.icon}.svg) center / contain no-repeat`,
+        }}
+      />
+    </span>
+  );
+}
+
+/**
+ * 顶部 tab 上的图标。working/waiting/done 渲染状态图标；
+ * idle（或无状态但有身份）渲染品牌头像；都没有回落 shell/tmux 默认图标。
  */
 export function AgentTabIcon({
   sessionMode,
@@ -44,48 +90,35 @@ export function AgentTabIcon({
   state?: AgentVisualState;
   size?: number;
 }): React.ReactElement {
-  const baseIcon = sessionMode === 'tmux'
-    ? <RiLayoutGridLine size={size} className="shrink-0" />
-    : <RiTerminalLine size={size} className="shrink-0" />;
+  const baseIcon = state?.agent
+    ? <AgentBrandAvatar agent={state.agent} size={size + 1} />
+    : sessionMode === 'tmux'
+      ? <RiLayoutGridLine size={size} className="shrink-0" />
+      : <RiTerminalLine size={size} className="shrink-0" />;
 
-  const isAttention = state?.agentStatus === 'waiting' || state?.agentNeedsReview || state?.inCopyMode;
-  const color = state?.agentColor || (isAttention ? AGENT_COLOR_ATTENTION : undefined);
-
-  if (state?.agentStatus) {
-    const indicator = state.agentIndicator || (state.agentStatus === 'running' ? 'spinner' : 'pulse');
-    const style = color ? { color } : undefined;
-    if (indicator === 'spinner') {
-      return <RiLoaderCircle size={size} className="shrink-0 animate-spin" style={style} />;
-    }
-    if (indicator === 'dot') {
-      return <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color || AGENT_COLOR_RUNNING }} />;
-    }
-    if (indicator === 'ring') {
-      return <span className="h-2.5 w-2.5 shrink-0 rounded-full border-2 animate-pulse" style={{ borderColor: color || AGENT_COLOR_ATTENTION }} />;
-    }
-    if (indicator === 'question') {
-      return <RiCircleHelp size={size} className="shrink-0 animate-bounce-y" style={style} />;
-    }
-    if (indicator === 'badge') {
-      return (
-        <span
-          className="shrink-0 rounded bg-surface px-1 text-[8px] font-semibold uppercase leading-3"
-          style={style}
-        >
-          {state.agentStatus.slice(0, 2)}
-        </span>
-      );
-    }
-    if (indicator === 'terminal') {
-      return sessionMode === 'tmux'
-        ? <RiLayoutGridLine size={size} className="shrink-0" style={style} />
-        : <RiTerminalLine size={size} className="shrink-0" style={style} />;
-    }
-    // 默认 / pulse：呼吸的小圆
-    return <span className="h-2 w-2 shrink-0 animate-pulse rounded-full" style={{ backgroundColor: color || AGENT_COLOR_RUNNING }} />;
+  if (state?.agentStatus === 'working') {
+    return (
+      <span title={state.agentMessage ?? state.agent?.displayName}>
+        <RiLoaderCircle size={size} className="shrink-0 animate-spin" style={{ color: AGENT_COLOR_RUNNING }} />
+      </span>
+    );
+  }
+  if (state?.agentStatus === 'waiting') {
+    return (
+      <span title={state.agentMessage ?? undefined}>
+        <RiCircleHelp size={size} className="shrink-0 animate-bounce-y" style={{ color: AGENT_COLOR_ATTENTION }} />
+      </span>
+    );
+  }
+  if (state?.agentStatus === 'done') {
+    return (
+      <span title={state.agentMessage ?? undefined}>
+        <RiCheck size={size} className="shrink-0" style={{ color: AGENT_COLOR_RUNNING }} />
+      </span>
+    );
   }
 
-  // 没有 agentStatus（已停止），但仍是"未读"：黄色呼吸动效图标
+  // 没有活跃状态，但"未读"：黄色呼吸动效图标
   if (state?.agentNeedsReview || state?.inCopyMode) {
     return sessionMode === 'tmux'
       ? <RiLayoutGridLine size={size} className="shrink-0 text-[color:var(--warning)] animate-pulse" />
@@ -96,7 +129,8 @@ export function AgentTabIcon({
 }
 
 /**
- * 左栏 session 项右上角的小圆点（绿色 = running，黄色 = review/waiting/copy）。
+ * 左栏 session 项右上角的小圆点。
+ * working=绿，waiting/review=黄，done=绿（静态），copy-mode=黄。
  * 不显示则返回 null。
  */
 export function AgentSessionDot({
@@ -109,7 +143,7 @@ export function AgentSessionDot({
   inCopyMode?: boolean;
 }): React.ReactElement | null {
   const { t } = useI18n();
-  if (status === 'running') {
+  if (status === 'working') {
     return (
       <span
         className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--success)] ring-2 ring-surface animate-pulse"
@@ -122,6 +156,14 @@ export function AgentSessionDot({
       <span
         className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--warning)] ring-2 ring-surface animate-pulse"
         title={needsReview ? t('agent.finishedReview') : t('agent.aiWaiting')}
+      />
+    );
+  }
+  if (status === 'done') {
+    return (
+      <span
+        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--success)] ring-2 ring-surface"
+        title={t('agent.finishedReview')}
       />
     );
   }
