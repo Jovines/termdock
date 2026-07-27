@@ -3988,7 +3988,7 @@ function App() {
           className="shrink-0 w-[5px] h-full cursor-col-resize bg-border/10 hover:bg-primary/30 active:bg-primary/50 transition-colors"
           onMouseDown={handleResizeMouseDown}
         />
-        <div style={{ flex: '1 1 0%', minWidth: 0, height: '100%', overflow: 'hidden' }}>
+        <div className="flex-1 min-w-0 h-full overflow-hidden">
           {body}
         </div>
       </div>
