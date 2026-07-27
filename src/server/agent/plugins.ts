@@ -57,6 +57,8 @@ export interface AgentPluginManifest {
   displayName: string;
   aliases: string[];
   accentColor: string;
+  /** Icon rendering mode: 'mask' = CSS mask+accentColor (default, monochrome); 'native' = raw SVG colors. */
+  iconMode?: 'mask' | 'native';
   hooks?: PluginHookConfig;
   resume?: PluginResumeConfig;
 }
@@ -67,6 +69,8 @@ export interface LoadedPlugin {
   dir: string;
   /** Absolute path to the icon SVG, if present. */
   iconPath: string | null;
+  /** Icon file's mtime (ms), for cache-busting. */
+  iconMtime: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +154,12 @@ function validateManifest(raw: unknown, dir: string): { manifest: AgentPluginMan
   const accentColor = m.accentColor;
   if (typeof accentColor !== 'string' || !HEX_COLOR_RE.test(accentColor)) {
     errors.push('accentColor must be a 6-digit hex color (e.g. "#4385BE")');
+  }
+
+  // Optional iconMode
+  const iconMode = m.iconMode;
+  if (iconMode !== undefined && iconMode !== 'mask' && iconMode !== 'native') {
+    errors.push('iconMode must be "mask" or "native" if provided');
   }
 
   // Optional hooks
@@ -238,6 +248,7 @@ function validateManifest(raw: unknown, dir: string): { manifest: AgentPluginMan
       displayName: (displayName as string).trim(),
       aliases: (aliases as string[]).map((a) => (a as string).trim().toLowerCase()),
       accentColor: accentColor as string,
+      iconMode: iconMode as 'mask' | 'native' | undefined,
       hooks,
       resume: resumeConfig,
     },
@@ -295,10 +306,16 @@ export function loadPlugins(): PluginLoadResult {
     }
 
     const iconPath = path.join(dir, ICON_FILE);
+    let iconMtime = 0;
+    const iconExists = fs.existsSync(iconPath);
+    if (iconExists) {
+      try { iconMtime = fs.statSync(iconPath).mtimeMs; } catch { /* keep 0 */ }
+    }
     plugins.push({
       manifest: result.manifest,
       dir,
-      iconPath: fs.existsSync(iconPath) ? iconPath : null,
+      iconPath: iconExists ? iconPath : null,
+      iconMtime,
     });
   }
 

@@ -34,6 +34,10 @@ export interface AgentInfo {
   icon: string | null;
   /** Whether this agent is user-defined (plugin) vs built-in. */
   isPlugin?: boolean;
+  /** Plugin icon rendering: 'mask' (CSS mask, monochrome, default) or 'native' (original SVG colors). */
+  iconMode?: 'mask' | 'native';
+  /** Plugin icon file mtime (ms), for cache-busting query param. */
+  iconVersion?: number;
 }
 
 // Registry order matters only for iteration stability; lookup is by alias.
@@ -320,6 +324,8 @@ export function registerPluginAgents(plugins: LoadedPlugin[]): { registered: num
       accentColor: manifest.accentColor,
       icon: manifest.slug, // plugins use slug as icon key; frontend checks /agent-plugin-icon/<slug>
       isPlugin: true,
+      iconMode: manifest.iconMode,
+      iconVersion: p.iconMtime || undefined,
     };
     BY_SLUG.set(info.slug, info);
     for (const alias of info.aliases) BY_ALIAS.set(alias, info);

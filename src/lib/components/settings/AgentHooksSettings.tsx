@@ -143,6 +143,8 @@ function AgentHooksSettings(): React.ReactElement {
                 accentColor: agent.accentColor ?? '#878580',
                 icon: agent.icon,
                 isPlugin,
+                iconMode: agent.iconMode as 'mask' | 'native' | undefined,
+                iconVersion: agent.iconVersion ?? undefined,
               }}
               size={18}
             />

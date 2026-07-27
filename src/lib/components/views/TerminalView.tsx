@@ -1073,6 +1073,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             debugSession(`[ensureSession] Session ${terminalId} is NOT healthy (healthy=${health.healthy}), will create new session`);
             debugSession(`[ensureSession] Health check details:`, health);
             shouldCreateNewSession = true;
+            // 404 响应现在也带 mode/tmuxSessionName（来自持久化 globalSessionState），
+            // 修正 store 中的 session mode，避免 tmux 会话误重建为 shell。
+            if (health.mode && currentState?.terminalSessionId) {
+              store.setTerminalSession(sessionId, {
+                sessionId: currentState.terminalSessionId,
+                cols: 80,
+                rows: 24,
+                mode: health.mode,
+                tmuxSessionName: health.tmuxSessionName ?? null,
+              });
+            }
             store.clearTerminalSession(sessionId);
             debugSession(`[ensureSession] Cleared unhealthy session from store`);
           } else {

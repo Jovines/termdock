@@ -33,6 +33,10 @@ export interface HookAgentInfo {
   state: HooksState;
   accentColor: string | null;
   icon: string | null;
+  /** Plugin icon rendering mode, if set. */
+  iconMode: string | null;
+  /** Plugin icon file mtime (ms) for cache-busting, if set. */
+  iconVersion: number | null;
 }
 
 export const HOOK_AGENTS: HookAgentSlug[] = ['claude', 'codex', 'copilot', 'opencode', 'pi', 'grok'];
@@ -519,6 +523,8 @@ export function listHookAgents(): HookAgentInfo[] {
     state: hooksState(slug),
     accentColor: agentBySlug(slug)?.accentColor ?? null,
     icon: agentBySlug(slug)?.icon ?? null,
+    iconMode: agentBySlug(slug)?.iconMode ?? null,
+    iconVersion: agentBySlug(slug)?.iconVersion ?? null,
   }));
 }
 
@@ -601,22 +607,32 @@ function hookCommandForPlugin(slug: string, event: string): string {
  * Plugin agents appear after built-in agents.
  */
 export function listAllHookAgents(): HookAgentInfo[] {
-  const builtIn = HOOK_AGENTS.map((slug) => ({
-    slug,
-    displayName: DISPLAY_NAMES[slug],
-    targetDisplay: abbreviateHome(targetPath(slug)),
-    state: hooksState(slug),
-    accentColor: agentBySlug(slug)?.accentColor ?? null,
-    icon: agentBySlug(slug)?.icon ?? null,
-  }));
-  const pluginAgents = pluginHookEntries().map((entry) => ({
-    slug: entry.slug,
-    displayName: entry.displayName,
-    targetDisplay: abbreviateHome(entry.targetPath),
-    state: pluginHooksState(entry.slug, entry.targetPath, entry.events.map(([h, s]) => [h, s]) as Array<[string, string]>),
-    accentColor: agentBySlug(entry.slug)?.accentColor ?? '#878580',
-    icon: agentBySlug(entry.slug)?.icon ?? null,
-  }));
+  const builtIn = HOOK_AGENTS.map((slug) => {
+    const agent = agentBySlug(slug);
+    return {
+      slug,
+      displayName: DISPLAY_NAMES[slug],
+      targetDisplay: abbreviateHome(targetPath(slug)),
+      state: hooksState(slug),
+      accentColor: agent?.accentColor ?? null,
+      icon: agent?.icon ?? null,
+      iconMode: agent?.iconMode ?? null,
+      iconVersion: agent?.iconVersion ?? null,
+    };
+  });
+  const pluginAgents = pluginHookEntries().map((entry) => {
+    const agent = agentBySlug(entry.slug);
+    return {
+      slug: entry.slug,
+      displayName: entry.displayName,
+      targetDisplay: abbreviateHome(entry.targetPath),
+      state: pluginHooksState(entry.slug, entry.targetPath, entry.events.map(([h, s]) => [h, s]) as Array<[string, string]>),
+      accentColor: agent?.accentColor ?? '#878580',
+      icon: agent?.icon ?? null,
+      iconMode: agent?.iconMode ?? null,
+      iconVersion: agent?.iconVersion ?? null,
+    };
+  });
   return [...builtIn, ...pluginAgents];
 }
 

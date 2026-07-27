@@ -1333,6 +1333,8 @@ export interface AgentHookInfo {
   state: 'not-installed' | 'installed' | 'outdated';
   accentColor: string | null;
   icon: string | null;
+  iconMode: string | null;
+  iconVersion: number | null;
 }
 
 export async function getAgentHooks(): Promise<AgentHookInfo[]> {
@@ -1371,6 +1373,7 @@ export interface AgentPluginInfo {
   displayName: string;
   aliases: string[];
   accentColor: string;
+  iconMode: 'mask' | 'native';
   hasHooks: boolean;
   hasResume: boolean;
   hasIcon: boolean;

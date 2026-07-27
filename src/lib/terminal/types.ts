@@ -13,6 +13,10 @@ export interface AgentIdentity {
   accentColor: string;
   icon: string | null;
   isPlugin?: boolean;
+  /** Plugin icon rendering: 'mask' (CSS mask, monochrome, default) or 'native' (original SVG colors). */
+  iconMode?: 'mask' | 'native';
+  /** Plugin icon file mtime (ms), for cache-busting query param. */
+  iconVersion?: number;
 }
 
 /** Last-known resumable agent conversation, persisted server-side. */

@@ -2573,6 +2573,8 @@ interface AgentStatusWirePayload {
     accentColor: string;
     icon: string | null;
     isPlugin?: boolean;
+    iconMode?: 'mask' | 'native';
+    iconVersion?: number;
   } | null;
   agentMessage: string | null;
   /** The agent's native session id, for resume. */
@@ -2627,7 +2629,7 @@ function buildAgentStatusPayload(sessionId: string, session: TerminalSession): A
     agentStatus: status,
     agentIndicator: indicator ?? null,
     agent: agent
-      ? { slug: agent.slug, displayName: agent.displayName, accentColor: agent.accentColor, icon: agent.icon, isPlugin: agent.isPlugin ?? false }
+      ? { slug: agent.slug, displayName: agent.displayName, accentColor: agent.accentColor, icon: agent.icon, isPlugin: agent.isPlugin ?? false, iconMode: agent.iconMode, iconVersion: agent.iconVersion }
       : null,
     agentMessage: state?.message ?? null,
     agentNativeSessionId: nativeSessionId,
@@ -4946,6 +4948,7 @@ router.get('/agent-plugins', (_req, res) => {
       displayName: p.manifest.displayName,
       aliases: p.manifest.aliases,
       accentColor: p.manifest.accentColor,
+      iconMode: p.manifest.iconMode ?? 'mask',
       hasHooks: p.manifest.hooks !== undefined,
       hasResume: p.manifest.resume !== undefined,
       hasIcon: p.iconPath !== null,
@@ -5341,8 +5344,16 @@ router.get('/:sessionId/health', (req, res) => {
   const session = terminalSessions.get(sessionId);
   
   if (!session) {
-    console.log(`Health check: session ${sessionId} not found`);
-    return res.status(404).json({ healthy: false, error: 'Session not found' });
+    // TD 重启后 terminalSessions 清空，但从 globalSessionState（持久化到磁盘）
+    // 可恢复 mode / tmuxSessionName，避免前端把 tmux 会话误重建为 shell。
+    const persistedRecord = globalSessionState.sessions.find(
+      (s) => s.backendSessionId === sessionId,
+    ) ?? null;
+    const recovered = persistedRecord
+      ? { mode: persistedRecord.mode, tmuxSessionName: persistedRecord.tmuxSessionName }
+      : {};
+    console.log(`Health check: session ${sessionId} not found${persistedRecord ? `, recovered mode=${persistedRecord.mode} from persisted state` : ''}`);
+    return res.status(404).json({ healthy: false, error: 'Session not found', ...recovered });
   }
   
   console.log(`Health check: session ${sessionId} healthy, cwd=${session.cwd}, clients=${getTotalClients(sessionId)}, lastActivity=${Date.now() - session.lastActivity}ms ago`);

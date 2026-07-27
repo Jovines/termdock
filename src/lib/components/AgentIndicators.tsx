@@ -38,6 +38,10 @@ export interface AgentVisualState {
 /**
  * agent 品牌头像：品牌色圆角方块 + 白色剪影。
  * SVG 资产来自 tty7（Apache-2.0），用 CSS mask 着色，几何为准。
+ *
+ * 支持两种渲染模式：
+ *   - mask（默认）：CSS mask + accentColor 背景，品牌色背景上白色剪影
+ *   - native：直接渲染 SVG，保留其原始 fill 颜色（用于多色/渐变 logo）
  */
 export function AgentBrandAvatar({
   agent,
@@ -58,9 +62,30 @@ export function AgentBrandAvatar({
       </span>
     );
   }
-  const iconUrl = agent.isPlugin
-    ? `/api/terminal/agent-plugin-icon/${agent.slug}`
-    : `/icons/agents/${agent.icon}.svg`;
+  let iconUrl: string;
+  if (agent.isPlugin) {
+    iconUrl = `/api/terminal/agent-plugin-icon/${agent.slug}`;
+    if (agent.iconVersion) {
+      iconUrl += `?v=${Math.floor(agent.iconVersion)}`;
+    }
+  } else {
+    iconUrl = `/icons/agents/${agent.icon}.svg`;
+  }
+  if (agent.iconMode === 'native') {
+    return (
+      <span
+        className="flex shrink-0 items-center justify-center rounded-[3px]"
+        style={{ width: size, height: size }}
+        title={agent.displayName}
+      >
+        <img
+          src={iconUrl}
+          alt={agent.displayName}
+          style={{ width: inner, height: inner }}
+        />
+      </span>
+    );
+  }
   return (
     <span
       className="flex shrink-0 items-center justify-center rounded-[3px]"

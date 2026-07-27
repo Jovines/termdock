@@ -136,6 +136,10 @@ interface CliOptions {
   changeAuditList?: string | true;
   changeAuditShow?: { id: string; cwd?: string };
   injectChangeAuditHunk?: { id: string; cwd?: string };
+  pluginInit: boolean;
+  pluginCreate?: string;
+  pluginList: boolean;
+  pluginRemove?: string;
 }
 
 interface ServerState {
@@ -218,10 +222,22 @@ Options:
                      Print one hunk's diff/context by Termdock hunk ID.
   --change-audit-explain <id> [cwd]
                      Read a natural-language explanation from stdin and inject
-                     it for the specified Termdock hunk ID.
+                      it for the specified Termdock hunk ID.
+  --plugin-init      Print the agent plugin manifest schema reference
+  --plugin-create <file>
+                     Create a plugin from a manifest JSON file
+  --plugin-list      List installed agent plugins
+  --plugin-remove <slug>
+                     Remove an installed agent plugin
   -h, --help         Show this help message
 
 Short commands:
+  pi                 Same as --plugin-init
+  plugin-create <file>
+                     Same as --plugin-create <file>
+  plugin-list        Same as --plugin-list
+  plugin-remove <slug>
+                     Same as --plugin-remove <slug>
   s                  Same as --status
   st                 Same as --status
   x                  Same as --stop
@@ -550,6 +566,10 @@ function parseArgs(argv: string[]): CliOptions {
   let changeAuditList: string | true | undefined;
   let changeAuditShow: { id: string; cwd?: string } | undefined;
   let injectChangeAuditHunk: { id: string; cwd?: string } | undefined;
+  let pluginInit = false;
+  let pluginCreate: string | undefined;
+  let pluginList = false;
+  let pluginRemove: string | undefined;
 
   // Short command aliases for the common path. Keep these positional-only so
   // long-form flags remain the single source of truth for option semantics.
@@ -625,6 +645,28 @@ function parseArgs(argv: string[]): CliOptions {
       if (command === 'audit-show') changeAuditShow = { id: next, cwd };
       else injectChangeAuditHunk = { id: next, cwd };
       argv = argv.slice(cwd ? 3 : 2);
+    } else if (command === 'pi' || command === 'plugin-init') {
+      pluginInit = true;
+      argv = argv.slice(1);
+    } else if (command === 'pcreate' || command === 'plugin-create') {
+      if (next && !next.startsWith('-')) {
+        pluginCreate = next;
+        argv = argv.slice(2);
+      } else {
+        pluginCreate = undefined;
+        argv = argv.slice(1);
+      }
+    } else if (command === 'pinfo' || command === 'plugin-list') {
+      pluginList = true;
+      argv = argv.slice(1);
+    } else if (command === 'premove' || command === 'plugin-remove') {
+      if (next && !next.startsWith('-')) {
+        pluginRemove = next;
+        argv = argv.slice(2);
+      } else {
+        pluginRemove = undefined;
+        argv = argv.slice(1);
+      }
     }
   }
 
@@ -823,6 +865,38 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === '--plugin-init') {
+      pluginInit = true;
+      continue;
+    }
+
+    if (arg === '--plugin-create') {
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        pluginCreate = next;
+        index += 1;
+      } else {
+        pluginCreate = undefined;
+      }
+      continue;
+    }
+
+    if (arg === '--plugin-list') {
+      pluginList = true;
+      continue;
+    }
+
+    if (arg === '--plugin-remove') {
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        pluginRemove = next;
+        index += 1;
+      } else {
+        pluginRemove = undefined;
+      }
+      continue;
+    }
+
     if (!arg.startsWith('-')) {
       if (attachTmux && !attachTmuxName) {
         attachTmuxName = arg;
@@ -866,6 +940,10 @@ function parseArgs(argv: string[]): CliOptions {
     changeAuditList,
     changeAuditShow,
     injectChangeAuditHunk,
+    pluginInit,
+    pluginCreate,
+    pluginList,
+    pluginRemove,
   };
 }
 
@@ -1040,6 +1118,34 @@ async function postLocalJson(baseUrl: string, token: string, endpoint: string, p
     });
     req.on('error', reject);
     req.write(body);
+    req.end();
+  });
+}
+
+async function getLocalJson(baseUrl: string, token: string, endpoint: string): Promise<{ statusCode: number; body: string }> {
+  const url = new URL(endpoint, baseUrl);
+  const isHttps = url.protocol === 'https:';
+  const requestImpl = isHttps ? https.request : http.request;
+  const ca = isHttps && fs.existsSync(defaultHttpsCaPath) ? fs.readFileSync(defaultHttpsCaPath) : undefined;
+
+  return new Promise((resolve, reject) => {
+    const req = requestImpl({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port,
+      path: `${url.pathname}${url.search}`,
+      method: 'GET',
+      ca,
+      headers: {
+        'X-Termdock-Local-Token': token,
+      },
+    }, (res) => {
+      let responseBody = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { responseBody += chunk; });
+      res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: responseBody }));
+    });
+    req.on('error', reject);
     req.end();
   });
 }
@@ -1640,6 +1746,228 @@ async function runInjectChangeAuditHunk(request: { id: string; cwd?: string }): 
     }],
   };
   await postChangeAuditPayload(payload);
+}
+
+// ── Agent plugin CLI commands ──
+
+function resolveServerBaseUrl(state: ServerState): string {
+  return state.localUrl ?? `${state.scheme ?? 'http'}://${state.host === '0.0.0.0' ? 'localhost' : state.host}:${state.port}`;
+}
+
+function requireRunningServer(): { baseUrl: string; token: string } {
+  const state = getRunningState();
+  if (!state) {
+    console.error(`${ICON.err} ${c.red('Termdock is not running. Start it first: td')}`);
+    process.exit(1);
+  }
+  const token = state.localApiToken;
+  if (!token) {
+    console.error(`${ICON.err} ${c.red('Running server has no local API token. Restart Termdock first.')}`);
+    process.exit(1);
+  }
+  return { baseUrl: resolveServerBaseUrl(state), token };
+}
+
+function runPluginInit(): void {
+  console.log(`\
+${c.bold('Agent Plugin Reference')}
+${c.dim('─────────────────────')}
+
+A plugin is a directory under ${c.cyan('~/.termdock/agent-plugins/<slug>/')} containing:
+
+  ${c.cyan('manifest.json')}    required – agent identity, hooks, and resume config
+  ${c.cyan('icon.svg')}         optional – brand icon (rendered as mask silhouette or native)
+
+${c.bold('manifest.json schema')}
+${c.dim('───────────────────')}
+
+{
+  ${c.dim('// Manifest version. Must be')} ${c.green('1')}${c.dim('.')}
+  "version": 1,
+
+  ${c.dim('// Unique slug (lowercase alphanum + hyphens, max 40 chars).')}
+  ${c.dim('// Must not collide with built-in agent slugs.')}
+  "slug": "trae",
+
+  ${c.dim('// Human-readable label shown in tabs and settings.')}
+  "displayName": "Trae Agent",
+
+  ${c.dim('// Command names that identify this agent at runtime.')}
+  ${c.dim('// First alias is the primary binary name; extras match npm/pip wrappers.')}
+  "aliases": ["trae", "traecli"],
+
+  ${c.dim('// Brand accent color as 6-digit hex. Used for avatar background in mask mode,')}
+  ${c.dim('// and as the status-dot color. Must be Flexoki-family or brand theme-safe.')}
+  "accentColor": "#4385BE",
+
+  ${c.dim('// ── optional ──')}
+  ${c.dim('// Icon rendering mode (default "mask"):')}
+  ${c.dim('//   "mask"   - SVG is a white-on-accent silhouette (CSS mask). Mono-color.')}
+  ${c.dim('//   "native" - SVG rendered directly, preserving original fills/gradients.')}
+  "iconMode": "native",
+
+  ${c.dim('// ── optional: hook installation (bring your own hooks.json surface) ──')}
+  "hooks": {
+    ${c.dim("// Path to the agent's hooks config file (~-abbreviated).")}
+    ${c.dim('// termdock inserts marker-carrying entries; leaves user entries untouched.')}
+    "target": "~/.trae/settings.json",
+
+    ${c.dim('// Event mappings: agent-native hook name → termdock sentinel event.')}
+    ${c.dim('// Optional matcher narrows the subscription (e.g. permission type).')}
+    "events": [
+      { "hook": "SessionStart",       "event": "session-start" },
+      { "hook": "UserPromptSubmit",   "event": "prompt-submit" },
+      { "hook": "Notification",       "event": "notification", "matcher": "elicitation_dialog" },
+      { "hook": "PostToolUse",        "event": "tool-complete" },
+      { "hook": "Stop",               "event": "stop" },
+      { "hook": "SessionEnd",         "event": "session-end" }
+    ]
+  },
+
+  ${c.dim('// ── optional: resume command (for session picker re-entry) ──')}
+  "resume": {
+    ${c.dim('// Shell command template. {sessionId} is replaced with the native session id.')}
+    "command": "trae --resume {sessionId}",
+    ${c.dim('// Flags to strip from the original launch argv when replaying the resume.')}
+    "staleFlags": ["--resume", "-r", "--session-id", "--continue"]
+  }
+}
+
+${c.bold('Sentinel event kinds')}
+${c.dim('─────────────────────')}
+
+  session-start           Agent session opened (binary started / first prompt)
+  prompt-submit           A new prompt/turn was submitted
+  permission-request      Agent is blocked waiting for a tool-permission grant
+  question-asked          Agent asked the user a question (elicitation dialog)
+  tool-complete           A tool execution completed (unblocks waiting state)
+  notification            Generic notification from the agent (heuristic gated)
+  stop                    Agent turn finished / went idle
+  session-end             Agent session closed / binary exited
+
+${c.bold('Creating a plugin')}
+${c.dim('──────────────────')}
+
+  # 1. Create the plugin directory with manifest + icon
+  mkdir -p ~/.termdock/agent-plugins/trae
+  cp manifest.json icon.svg ~/.termdock/agent-plugins/trae/
+
+  ${c.dim('# 2. Install the plugin via CLI (needs running server)')}
+  td plugin-create ~/.termdock/agent-plugins/trae/manifest.json
+
+  ${c.dim('# 3. Or create directly from the manifest JSON')}
+  td plugin-create ./trae-manifest.json
+
+  ${c.dim('# 4. List installed plugins')}
+  td plugin-list
+
+  ${c.dim('# 5. Remove a plugin')}
+  td plugin-remove trae
+
+${c.bold('Manifest validation at startup')}
+${c.dim('───────────────────────────────')}
+
+  Termdock validates every plugin manifest on server start. Errors are logged
+  to ${c.cyan('~/.termdock/server.log')} and visible via ${c.cyan('td plugin-list')}${c.dim('.')}
+  Slugs/aliases that collide with built-in agents are skipped.
+`);
+}
+
+async function runPluginCreate(manifestPath: string): Promise<void> {
+  const resolved = path.resolve(manifestPath);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(resolved, 'utf8');
+  } catch {
+    console.error(`${ICON.err} ${c.red(`Cannot read manifest file: ${resolved}`)}`);
+    process.exit(1);
+  }
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(raw);
+  } catch (error) {
+    console.error(`${ICON.err} ${c.red(`Invalid JSON in ${resolved}: ${(error as Error).message}`)}`);
+    process.exit(1);
+  }
+  const { baseUrl, token } = requireRunningServer();
+  const response = await postLocalJson(baseUrl, token, '/api/terminal/agent-plugins', manifest);
+  const body = JSON.parse(response.body || '{}') as { slug?: string; error?: string; dir?: string };
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    console.error(`${ICON.err} ${c.red(body.error || 'Failed to create plugin')}`);
+    process.exit(1);
+  }
+  console.log(`${ICON.ok} ${c.green(`Plugin "${body.slug}" created.`)}`);
+  console.log(`  ${c.dim('Directory:')} ${c.cyan(body.dir ?? resolved)}`);
+  console.log(`  ${c.dim('Restart Termdock to activate:')} ${c.cyan('td --stop && td')}`);
+}
+
+async function runPluginList(): Promise<void> {
+  const { baseUrl, token } = requireRunningServer();
+  const response = await getLocalJson(baseUrl, token, '/api/terminal/agent-plugins');
+  const body = JSON.parse(response.body || '{}') as {
+    plugins?: Array<{ slug: string; displayName: string; aliases: string[]; accentColor: string; iconMode: string; hasHooks: boolean; hasResume: boolean; hasIcon: boolean }>;
+    errors?: Array<{ slug: string; errors: string[] }>;
+  };
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    console.error(`${ICON.err} ${c.red('Failed to list plugins')}`);
+    process.exit(1);
+  }
+  const plugins = body.plugins ?? [];
+  if (plugins.length === 0) {
+    console.log(`${c.dim('No plugins installed.')}`);
+    console.log(`  ${c.dim('See:')} ${c.cyan('td plugin-init')}`);
+  } else {
+    console.log(`${c.bold('Installed plugins')} ${c.dim(`(${plugins.length})`)}`);
+    console.log('');
+    for (const p of plugins) {
+      const flags: string[] = [];
+      if (p.hasIcon) flags.push('icon');
+      if (p.hasHooks) flags.push('hooks');
+      if (p.hasResume) flags.push('resume');
+      if (p.iconMode !== 'mask') flags.push(p.iconMode);
+      console.log(`  ${c.cyan(p.slug)}  ${c.dim(p.displayName)}  ${c.gray(p.accentColor)}  ${c.dim(flags.length > 0 ? `[${flags.join(', ')}]` : '')}`);
+    }
+  }
+  const errors = body.errors ?? [];
+  if (errors.length > 0) {
+    console.log('');
+    console.log(`${c.yellow('Validation errors')}`);
+    for (const e of errors) {
+      console.log(`  ${c.red('✗')} ${c.cyan(e.slug)}${c.dim(':')} ${e.errors.join('; ')}`);
+    }
+  }
+}
+
+async function runPluginRemove(slug: string): Promise<void> {
+  const { baseUrl, token } = requireRunningServer();
+  const response = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
+    const url = new URL(`/api/terminal/agent-plugins/${encodeURIComponent(slug)}`, baseUrl);
+    const isHttps = url.protocol === 'https:';
+    const requestImpl = isHttps ? https.request : http.request;
+    const ca = isHttps && fs.existsSync(defaultHttpsCaPath) ? fs.readFileSync(defaultHttpsCaPath) : undefined;
+    const req = requestImpl({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: 'DELETE',
+      ca,
+      headers: { 'X-Termdock-Local-Token': token },
+    }, (res) => {
+      let responseBody = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { responseBody += chunk; });
+      res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: responseBody }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  const body = JSON.parse(response.body || '{}') as { slug?: string; state?: string; error?: string };
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    console.error(`${ICON.err} ${c.red(body.error || `Failed to remove plugin "${slug}"`)}`);
+    process.exit(1);
+  }
+  console.log(`${ICON.ok} ${c.green(`Plugin "${body.slug ?? slug}" removed.`)}`);
 }
 
 const options = parseArgs(process.argv.slice(2));
@@ -2618,6 +2946,34 @@ async function main(): Promise<void> {
 
   if (options.clearPassword) {
     runClearPassword();
+    process.exit(0);
+  }
+
+  if (options.pluginInit) {
+    runPluginInit();
+    process.exit(0);
+  }
+
+  if (options.pluginCreate !== undefined) {
+    if (!options.pluginCreate) {
+      console.error(`${ICON.err} ${c.red('plugin-create requires a manifest file path')}`);
+      process.exit(1);
+    }
+    await runPluginCreate(options.pluginCreate);
+    process.exit(0);
+  }
+
+  if (options.pluginList) {
+    await runPluginList();
+    process.exit(0);
+  }
+
+  if (options.pluginRemove !== undefined) {
+    if (!options.pluginRemove) {
+      console.error(`${ICON.err} ${c.red('plugin-remove requires a plugin slug')}`);
+      process.exit(1);
+    }
+    await runPluginRemove(options.pluginRemove);
     process.exit(0);
   }
 
