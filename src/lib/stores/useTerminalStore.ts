@@ -91,6 +91,50 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
   };
 }
 
+// Shell-title localStorage cache: persists the last-known OSC 2 title per session
+// so that on page refresh the sidebar shows the real title immediately instead of
+// the default session name, before the WebSocket reconnects and delivers the live title.
+const SHELL_TITLE_CACHE_KEY = 'termdock-shell-titles-v1';
+
+function readCachedShellTitles(): Record<string, string> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(SHELL_TITLE_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+  } catch { return {}; }
+}
+
+function writeCachedShellTitle(sessionId: string, title: string | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const titles = readCachedShellTitles();
+    if (title) {
+      titles[sessionId] = title;
+    } else {
+      delete titles[sessionId];
+    }
+    localStorage.setItem(SHELL_TITLE_CACHE_KEY, JSON.stringify(titles));
+  } catch { /* ignore */ }
+}
+
+function removeCachedShellTitle(sessionId: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const titles = readCachedShellTitles();
+    delete titles[sessionId];
+    localStorage.setItem(SHELL_TITLE_CACHE_KEY, JSON.stringify(titles));
+  } catch { /* ignore */ }
+}
+
+function clearAllCachedShellTitles(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(SHELL_TITLE_CACHE_KEY);
+  } catch { /* ignore */ }
+}
+
 export const useTerminalStore = create<TerminalStore>((set, get) => {
   // 闭包内批处理状态。详见顶部 BatchState 接口注释。
   const batch: BatchState = {
@@ -215,6 +259,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         activeProgramRaw: terminalSession.activeProgramRaw ?? existing?.activeProgramRaw ?? baseState.activeProgramRaw,
         activeProgramSource: terminalSession.activeProgramSource ?? existing?.activeProgramSource ?? baseState.activeProgramSource,
         cwd: terminalSession.cwd ?? existing?.cwd ?? baseState.cwd,
+        shellTitle: existing?.shellTitle ?? readCachedShellTitles()[sessionId] ?? baseState.shellTitle,
         sessionId,
         isConnecting: false,
         history,
@@ -274,6 +319,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       newSessions.set(sessionId, { ...existing, shellTitle: title, updatedAt: Date.now() });
       return { sessions: newSessions };
     });
+    writeCachedShellTitle(sessionId, title);
   },
 
   setSessionPromptState: (sessionId: string, promptState: 'idle' | 'running', exitCode?: number | null) => {
@@ -580,6 +626,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       newSessions.delete(sessionId);
       return { sessions: newSessions };
     });
+    removeCachedShellTitle(sessionId);
   },
 
   clearAllTerminalSessions: () => {
@@ -590,6 +637,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       batch.batchFlushRafRef = null;
     }
     set({ sessions: new Map(), nextChunkId: 1 });
+    clearAllCachedShellTitles();
   },
   };
 });
