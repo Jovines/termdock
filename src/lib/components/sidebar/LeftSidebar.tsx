@@ -19,7 +19,7 @@ import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport } from '../../terminal/types';
 import { getActivityReorderEnabled, setActivityReorderEnabled } from '../../terminal/api';
 import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, reorderSessionsWithinGroup, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
-import { getCachedShellTitle } from '../../stores/useTerminalStore';
+import { getCachedShellTitle, getCachedAgentIdentity } from '../../stores/useTerminalStore';
 import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
 import { useSidebarStore } from '../../stores/useSidebarStore';
@@ -316,8 +316,8 @@ export function LeftSidebar(
           }`}>
             {ts?.isConnecting || (tuiProgressActive && !ts?.agentStatus) ? (
               <RiLoaderCircle size={12} className="animate-spin" />
-            ) : ts?.agent ? (
-              <AgentBrandAvatar agent={ts.agent} size={16} />
+            ) : (ts?.agent ?? getCachedAgentIdentity(session.id)) ? (
+              <AgentBrandAvatar agent={ts?.agent ?? getCachedAgentIdentity(session.id)!} size={16} />
             ) : session.mode === 'tmux' ? (
               <RiLayoutGridLine size={12} />
             ) : (
