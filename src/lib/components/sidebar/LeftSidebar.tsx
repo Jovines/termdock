@@ -249,6 +249,7 @@ export function LeftSidebar(
   const renderSessionRowBody = useCallback((
     session: LeftSidebarProps['sessions'][number],
     dragHandleProps?: DraggableProvidedDragHandleProps | null,
+    grouped?: boolean,
   ) => {
     const isActive = session.id === activeSessionId;
     const ts = sessionStates.get(session.id);
@@ -333,7 +334,7 @@ export function LeftSidebar(
                 {ts?.gitStatus && (
                   <span className={cwdSecondary ? 'ml-1.5' : ''} title={ts.gitStatus.branch}>
                     ⎇ {ts.gitStatus.branch.length > 14 ? `${ts.gitStatus.branch.slice(0, 14)}…` : ts.gitStatus.branch}
-                    {(ts.gitStatus.added > 0 || ts.gitStatus.removed > 0) && (
+                    {!grouped && (ts.gitStatus.added > 0 || ts.gitStatus.removed > 0) && (
                       <span className="ml-1">
                         <span className="text-[color:var(--success)]">+{ts.gitStatus.added}</span>
                         {' '}
@@ -562,7 +563,7 @@ export function LeftSidebar(
                             : 'text-muted-foreground hover:bg-surface-2'
                         }`}
                       >
-                        {renderSessionRowBody(session)}
+                        {renderSessionRowBody(session, undefined, true)}
                       </div>
                     );
                   })}
@@ -576,10 +577,16 @@ export function LeftSidebar(
               const collapsed = collapsedGroups.has(group.key);
               let groupRunning = 0;
               let groupReview = 0;
+              let groupAdded = 0;
+              let groupRemoved = 0;
               for (const session of group.sessions) {
                 const ts = sessionStates.get(session.id);
                 if (ts?.agentStatus === 'working') groupRunning += 1;
                 if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) groupReview += 1;
+                if (ts?.gitStatus) {
+                  groupAdded += ts.gitStatus.added;
+                  groupRemoved += ts.gitStatus.removed;
+                }
               }
               // 「其他」组（无 cwd）永远排最后，禁止整组拖动；搜索过滤时也禁用整组拖动。
               const groupDragDisabled = group.key === '' || isFiltering;
@@ -625,6 +632,13 @@ export function LeftSidebar(
                       <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--warning)]" />
                     )}
                     <span className="shrink-0 text-[10.5px] text-muted-foreground/70">{group.sessions.length}</span>
+                    {(groupAdded > 0 || groupRemoved > 0) && (
+                      <span className="shrink-0 text-[9px] text-muted-foreground/70">
+                        <span className="text-[color:var(--success)]">+{groupAdded}</span>
+                        {' '}
+                        <span className="text-[rgb(var(--warning-rgb))]">−{groupRemoved}</span>
+                      </span>
+                    )}
                   </button>
                   {!collapsed && (
                     <Droppable droppableId={`group-sessions:${group.key}`} type="session" direction="vertical">
@@ -656,7 +670,7 @@ export function LeftSidebar(
                                           : 'text-muted-foreground hover:bg-surface-2'
                                     } ${isFiltering ? '' : 'cursor-grab active:cursor-grabbing'}`}
                                   >
-                                    {renderSessionRowBody(session, sessionDragProvided.dragHandleProps)}
+                                    {renderSessionRowBody(session, sessionDragProvided.dragHandleProps, true)}
                                   </div>
                                 )}
                               </Draggable>
