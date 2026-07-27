@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback, useState } from 'react';
+import React, { useEffect, useCallback, useState, useRef } from 'react';
 // test comment
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
 import {
@@ -598,6 +598,8 @@ function App() {
   // Sidebar state — only subscribe to the booleans we render, not the whole store.
   const sidebarLeftOpen = useSidebarStore((s) => s.leftOpen);
   const sidebarRightOpen = useSidebarStore((s) => s.rightOpen);
+  const sidebarLeftPinned = useSidebarStore((s) => s.leftPinned);
+  const sidebarLeftWidth = useSidebarStore((s) => s.leftSidebarWidth);
   const sidebarRootPath = useSidebarStore((s) => s.rootPath);
   const sidebarSelectedFilePath = useSidebarStore((s) => s.selectedFilePath);
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
@@ -842,12 +844,74 @@ function App() {
   }, []);
 
   const handleToggleLeftSidebar = useCallback(() => {
+    const store = useSidebarStore.getState();
+    // If pinned, toggle unpins and closes.
+    if (store.leftPinned) {
+      store.setLeftPinned(false);
+      store.closeLeft();
+      return;
+    }
     if (sidebarLeftOpen) {
       requestCloseHistoryOverlay('left-sidebar');
       return;
     }
     handleOpenLeftSidebar();
   }, [handleOpenLeftSidebar, requestCloseHistoryOverlay, sidebarLeftOpen]);
+
+  const handleToggleLeftPinned = useCallback(() => {
+    const store = useSidebarStore.getState();
+    if (store.leftPinned) {
+      // Unpin but keep open in overlay mode
+      store.setLeftPinned(false);
+      store.openLeft();
+    } else {
+      // Pin and open
+      store.setLeftPinned(true);
+      store.openLeft();
+    }
+  }, []);
+
+  const handleClosePinnedLeft = useCallback(() => {
+    const store = useSidebarStore.getState();
+    store.setLeftPinned(false);
+    store.closeLeft();
+  }, []);
+
+  // Resize handle for pinned sidebar
+  const resizeStartXRef = useRef<number>(0);
+  const resizeStartWidthRef = useRef<number>(0);
+  const resizeRafRef = useRef<number | null>(null);
+
+  const handleResizeMouseDown = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    resizeStartXRef.current = event.clientX;
+    resizeStartWidthRef.current = useSidebarStore.getState().leftSidebarWidth;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (resizeRafRef.current !== null) return;
+      resizeRafRef.current = requestAnimationFrame(() => {
+        resizeRafRef.current = null;
+        const delta = moveEvent.clientX - resizeStartXRef.current;
+        useSidebarStore.getState().setLeftSidebarWidth(resizeStartWidthRef.current + delta);
+      });
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      if (resizeRafRef.current !== null) {
+        cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = null;
+      }
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  }, []);
 
   const handleToggleRightSidebar = useCallback(() => {
     if (sidebarRightOpen) {
@@ -1345,7 +1409,13 @@ function App() {
       }
       if (sidebarLeftOpen) {
         event.preventDefault();
-        requestCloseHistoryOverlay('left-sidebar');
+        // When pinned (inline layout), ESC unpins the sidebar; side panels
+        // in a split layout aren't "overlays" you dismiss with Esc.
+        if (sidebarLeftPinned) {
+          handleClosePinnedLeft();
+        } else {
+          requestCloseHistoryOverlay('left-sidebar');
+        }
       }
     };
     document.addEventListener('keydown', handler);
@@ -1359,7 +1429,9 @@ function App() {
     isDrawerOpen,
     sidebarRightOpen,
     sidebarLeftOpen,
+    sidebarLeftPinned,
     handleCloseSettings,
+    handleClosePinnedLeft,
     requestCloseHistoryOverlay,
   ]);
 
@@ -2015,10 +2087,10 @@ function App() {
     );
   };
 
-  return (
-    <div
-      className="w-screen h-full flex flex-col app-chrome-bg text-foreground"
-    >
+  const showPinnedLeft = sidebarLeftPinned && isDesktopViewport;
+
+  const body = (
+    <div className="w-full h-full flex flex-col app-chrome-bg text-foreground">
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="flex h-full w-full min-h-0 flex-col overflow-visible app-chrome-bg">
           <div
@@ -3800,7 +3872,9 @@ function App() {
 
       {/* Overlay sidebars (both desktop and mobile) — overlays prevent the
           terminal area from resizing when the user toggles them, which would
-          otherwise force xterm.js to refit on every open/close. */}
+          otherwise force xterm.js to refit on every open/close.
+          Only rendered when not in pinned-desktop mode (pinned sidebar renders inline above). */}
+      {!showPinnedLeft && (
       <LeftSidebar
         isOpen={sidebarLeftOpen}
         drawerWidthPx={leftDrawerWidthPx}
@@ -3816,7 +3890,8 @@ function App() {
         onOpenSettings={handleOpenSettings}
         tmuxAvailable={tmuxStatus.available}
         defaultSessionMode={newSessionMode}
-      />
+        onTogglePinned={isDesktopViewport ? handleToggleLeftPinned : undefined}
+      />)}
       <RightSidebar
         isOpen={sidebarRightOpen}
         drawerWidthPx={rightDrawerWidthPx}
@@ -3883,6 +3958,44 @@ function App() {
       )}
     </div>
   );
+
+  if (showPinnedLeft) {
+    return (
+      <div className="w-screen h-full flex flex-row">
+        <div style={{ width: sidebarLeftWidth, flexShrink: 0, height: '100%' }}>
+          <LeftSidebar
+            isOpen={sidebarLeftOpen}
+            drawerWidthPx={sidebarLeftWidth}
+            onClose={handleClosePinnedLeft}
+            onOpen={handleOpenLeftSidebar}
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            sessionStates={terminalSessions}
+            onNewSession={(opts) => dispatchNewSession(opts)}
+            onCloseSession={handleSidebarCloseSession}
+            onReorderSessions={applySessionOrder}
+            onSessionMenu={openTabMenu}
+            onOpenSettings={handleOpenSettings}
+            tmuxAvailable={tmuxStatus.available}
+            defaultSessionMode={newSessionMode}
+            pinned={true}
+            onTogglePinned={handleToggleLeftPinned}
+          />
+        </div>
+        <div
+          role="separator"
+          tabIndex={-1}
+          className="shrink-0 w-[5px] h-full cursor-col-resize bg-border/10 hover:bg-primary/30 active:bg-primary/50 transition-colors"
+          onMouseDown={handleResizeMouseDown}
+        />
+        <div className="flex-1 min-w-0 h-full overflow-hidden">
+          {body}
+        </div>
+      </div>
+    );
+  }
+
+  return body;
 }
 
 export default App;
