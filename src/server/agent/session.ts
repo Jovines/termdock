@@ -158,11 +158,12 @@ export function applyAgentEvent(state: AgentSessionState, ev: AgentEvent): void 
     // The agent session ended but its id stays: agents can resume an *ended*
     // session, which is exactly what restore does. Its cwd claim does NOT
     // stay: with no agent running, the pane's real directory is the truth.
+    // reviewed is deliberately NOT reset — user still needs to acknowledge
+    // the previous turn's result.
     case 'session-end':
       state.status = 'idle';
       state.message = null;
       state.agentCwd = null;
-      state.reviewed = true;
       break;
   }
 }

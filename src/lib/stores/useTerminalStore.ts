@@ -444,18 +444,6 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     const nextRich = payload.agentRich ?? existing.agentRich;
     const nextActivity = payload.agentActivity ?? existing.agentActivity;
     const nextAgentCwd = payload.agentCwd !== undefined ? payload.agentCwd : existing.agentCwd;
-    const nextReviewed = payload.reviewed !== undefined ? payload.reviewed : null;
-
-    if (
-      existing.agentStatus === agentStatus &&
-      existing.agentIndicator === nextAgentIndicator &&
-      existing.agent === nextAgent &&
-      existing.agentMessage === nextMessage &&
-      existing.agentNativeSessionId === nextNativeId &&
-      existing.agentRich === nextRich &&
-      existing.agentActivity === nextActivity &&
-      existing.agentCwd === nextAgentCwd
-    ) return;
 
     const userNotViewing = state.activeSessionId !== sessionId;
     const wasActive = existing.agentStatus === 'working' || existing.agentStatus === 'waiting' || existing.agentStatus === 'done';
@@ -467,6 +455,18 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       // a one-shot frontend-side flag. Won't survive refresh, which is fine
       // because the browser reload itself is a strong "reviewed" signal.
       || (payload.reviewed === null && agentStatus === null && wasActive && userNotViewing);
+
+    if (
+      existing.agentStatus === agentStatus &&
+      existing.agentIndicator === nextAgentIndicator &&
+      existing.agent === nextAgent &&
+      existing.agentMessage === nextMessage &&
+      existing.agentNativeSessionId === nextNativeId &&
+      existing.agentRich === nextRich &&
+      existing.agentActivity === nextActivity &&
+      existing.agentCwd === nextAgentCwd &&
+      existing.agentNeedsReview === agentNeedsReview
+    ) return;
 
     const newSessions = new Map(state.sessions);
     newSessions.set(sessionId, {
