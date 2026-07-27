@@ -35,7 +35,7 @@ export function getSessionDisplayLines(
     const cwdLeaf = getCwdLeafName(cwd);
     const titleLooksLikeCwd = shellTitle === cwd || shellTitle === cwdLeaf;
     // If the shell reports a running state, the title is the command name.
-    if (promptState === 'running' && !shellNames.has(shellTitle) && !titleLooksLikeCwd) {
+    if (promptState !== 'idle' && !shellNames.has(shellTitle) && !titleLooksLikeCwd) {
       return { primary: shellTitle, secondary: cwdLeaf };
     }
     // If idle, the title is typically the cwd — fall through to show cwd leaf.
