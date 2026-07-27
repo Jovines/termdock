@@ -205,6 +205,9 @@ interface TerminalSession {
   // only while an agent is detected in the foreground.
   agent: AgentInfo | null;
   agentSession: AgentSessionState | null;
+  // Carries reviewed across agentSession nullification in syncAgentIdentity so
+  // the yellow unread dot survives the poll window. Cleared on manual ack.
+  lastAgentReviewed: boolean | null;
   // Shared git snapshot for the pane's cwd (branch +N −M), refreshed on cwd
   // change / command end / agent tool activity via the repo-root cache.
   gitStatus: GitStatus | null;
@@ -2634,7 +2637,7 @@ function buildAgentStatusPayload(sessionId: string, session: TerminalSession): A
       ? { slug: agent.slug, displayName: agent.displayName, accentColor: agent.accentColor, icon: agent.icon, isPlugin: agent.isPlugin ?? false, iconMode: agent.iconMode, iconVersion: agent.iconVersion }
       : null,
     agentMessage: state?.message ?? null,
-    reviewed: state?.reviewed ?? null,
+    reviewed: state?.reviewed ?? session.lastAgentReviewed ?? null,
     agentNativeSessionId: nativeSessionId,
     agentRich: state?.rich ?? false,
     agentActivity: state?.activity ?? 0,
@@ -2687,6 +2690,7 @@ function syncAgentIdentity(sessionId: string, session: TerminalSession): void {
     // but events re-establish state on the next signal.
     if (session.agent && session.agentSession) {
       persistAgentResumeBinding(sessionId, session);
+      session.lastAgentReviewed = session.agentSession.reviewed;
       session.agentSession = null;
     }
     session.agent = detected;
@@ -4198,6 +4202,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     activeProgram: null,
     agent: null,
     agentSession: null,
+    lastAgentReviewed: null,
     gitStatus: null,
     gitStatusKey: null,
     gitAgentActivitySeen: 0,
@@ -4279,6 +4284,7 @@ async function adoptPtyHostSessions(): Promise<void> {
       activeProgram: null,
       agent: null,
       agentSession: null,
+      lastAgentReviewed: null,
       gitStatus: null,
       gitStatusKey: null,
       gitAgentActivitySeen: 0,
@@ -6118,6 +6124,10 @@ export function handleTerminalWebSocket(
         case 'agent-review-ack': {
           if (session.agentSession && session.agentSession.reviewed === false) {
             session.agentSession.reviewed = true;
+            session.lastAgentReviewed = null;
+            broadcastAgentStatus(sessionId, session, true);
+          } else if (session.lastAgentReviewed === false) {
+            session.lastAgentReviewed = null;
             broadcastAgentStatus(sessionId, session, true);
           }
           break;
