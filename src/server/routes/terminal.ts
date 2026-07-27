@@ -47,12 +47,19 @@ import {
   type AgentSessionStatus,
 } from '../agent/session.js';
 import {
-  installHooks,
-  listHookAgents,
+  listAllHookAgents,
   refreshStaleHooksAtLaunch,
-  uninstallHooks,
-  type HookAgentSlug,
+  installHooksForSlug,
+  uninstallHooksForSlug,
 } from '../agent/installers.js';
+import {
+  loadPlugins,
+  savePlugin,
+  removePlugin,
+  readPluginIcon,
+  type AgentPluginManifest,
+} from '../agent/plugins.js';
+import { registerPluginAgents } from '../agent/registry.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -2565,6 +2572,7 @@ interface AgentStatusWirePayload {
     displayName: string;
     accentColor: string;
     icon: string | null;
+    isPlugin?: boolean;
   } | null;
   agentMessage: string | null;
   /** The agent's native session id, for resume. */
@@ -2619,7 +2627,7 @@ function buildAgentStatusPayload(sessionId: string, session: TerminalSession): A
     agentStatus: status,
     agentIndicator: indicator ?? null,
     agent: agent
-      ? { slug: agent.slug, displayName: agent.displayName, accentColor: agent.accentColor, icon: agent.icon }
+      ? { slug: agent.slug, displayName: agent.displayName, accentColor: agent.accentColor, icon: agent.icon, isPlugin: agent.isPlugin ?? false }
       : null,
     agentMessage: state?.message ?? null,
     agentNativeSessionId: nativeSessionId,
@@ -2914,6 +2922,21 @@ void loadProgramDetectionFromDisk().then(applyProgramDetectionConfig);
 try {
   refreshStaleHooksAtLaunch();
 } catch { /* hook refresh must never block startup */ }
+
+// Load user-defined agent plugins into the identity registry
+try {
+  const { plugins, errors } = loadPlugins();
+  const result = registerPluginAgents(plugins);
+  if (result.registered > 0) {
+    console.log(`[agent-plugins] loaded ${result.registered} plugin(s)`);
+  }
+  for (const skip of result.skipped) {
+    console.warn(`[agent-plugins] skipped: ${skip}`);
+  }
+  for (const err of errors) {
+    console.warn(`[agent-plugins] validation error in "${err.slug}": ${err.errors.join('; ')}`);
+  }
+} catch { /* plugin loading must never block startup */ }
 
 async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
   command: string | null;
@@ -4885,16 +4908,16 @@ router.put('/settings', async (req, res) => {
   res.json(await getSettingsPayload());
 });
 
-// ── Agent hooks API (rich status channel installers) ──
+// ── Agent hooks API (rich status channel installers, built-in + plugin) ──
 
 router.get('/agent-hooks', (_req, res) => {
-  res.json({ agents: listHookAgents() });
+  res.json({ agents: listAllHookAgents() });
 });
 
 router.post('/agent-hooks/:agent/install', async (req, res) => {
-  const agent = req.params.agent as HookAgentSlug;
+  const agent = req.params.agent;
   try {
-    const result = await installHooks(agent);
+    const result = await installHooksForSlug(agent);
     res.json({ agent, ...result, state: 'installed' });
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
@@ -4902,9 +4925,9 @@ router.post('/agent-hooks/:agent/install', async (req, res) => {
 });
 
 router.post('/agent-hooks/:agent/uninstall', async (req, res) => {
-  const agent = req.params.agent as HookAgentSlug;
+  const agent = req.params.agent;
   try {
-    const summary = await uninstallHooks(agent);
+    const summary = await uninstallHooksForSlug(agent);
     res.json({ agent, summary, state: 'not-installed' });
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
@@ -4912,6 +4935,70 @@ router.post('/agent-hooks/:agent/uninstall', async (req, res) => {
 });
 
 // ── end Agent hooks API ──
+
+// ── Agent plugins API (user-defined agent plugins) ──
+
+router.get('/agent-plugins', (_req, res) => {
+  const { plugins, errors } = loadPlugins();
+  res.json({
+    plugins: plugins.map((p) => ({
+      slug: p.manifest.slug,
+      displayName: p.manifest.displayName,
+      aliases: p.manifest.aliases,
+      accentColor: p.manifest.accentColor,
+      hasHooks: p.manifest.hooks !== undefined,
+      hasResume: p.manifest.resume !== undefined,
+      hasIcon: p.iconPath !== null,
+    })),
+    errors: errors.map((e) => ({ slug: e.slug, errors: e.errors })),
+  });
+});
+
+router.post('/agent-plugins', async (req, res) => {
+  const manifest = req.body;
+  if (!manifest || typeof manifest !== 'object') {
+    res.status(400).json({ error: 'Request body must be a plugin manifest JSON object' });
+    return;
+  }
+  try {
+    // validate through the loader
+    const { plugins } = loadPlugins();
+    // Check for duplicate slug
+    const existing = plugins.find((p) => p.manifest.slug === (manifest as Record<string, unknown>).slug);
+    if (existing) {
+      res.status(409).json({ error: `Plugin "${existing.manifest.slug}" already exists` });
+      return;
+    }
+    const dir = savePlugin(manifest as AgentPluginManifest);
+    res.json({ slug: (manifest as Record<string, unknown>).slug, dir, state: 'created' });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
+});
+
+router.delete('/agent-plugins/:slug', async (req, res) => {
+  const { slug } = req.params;
+  try {
+    removePlugin(slug);
+    res.json({ slug, state: 'removed' });
+  } catch (error) {
+    res.status(404).json({ error: (error as Error).message });
+  }
+});
+
+router.get('/agent-plugin-icon/:slug', (req, res) => {
+  const { slug } = req.params;
+  const svg = readPluginIcon(slug);
+  if (svg === null) {
+    res.status(404).json({ error: 'No icon found' });
+    return;
+  }
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.send(svg);
+});
+
+// ── end Agent plugins API ──
 
 // ── Program detection config API ──
 

@@ -1,3 +1,5 @@
+import type { LoadedPlugin } from './plugins.js';
+
 /**
  * Third-party CLI coding-agent registry + detection.
  * （设计移植自 tty7 的 core/cli_agent.rs，Apache-2.0；此处为 TypeScript 重写）
@@ -19,10 +21,7 @@
  *    from command basename to agent slug, for personal wrappers (`cc`).
  */
 
-export type AgentSlug =
-  | 'claude' | 'codex' | 'gemini' | 'aider' | 'amp' | 'opencode'
-  | 'copilot' | 'cursor' | 'goose' | 'droid' | 'pi' | 'auggie'
-  | 'hermes' | 'vibe' | 'antigravity' | 'grok' | 'qwen';
+export type AgentSlug = string;
 
 export interface AgentInfo {
   slug: AgentSlug;
@@ -31,8 +30,10 @@ export interface AgentInfo {
   aliases: string[];
   /** brand accent for the tab dot / avatar background */
   accentColor: string;
-  /** icon asset name under /icons/agents (null → generic bot glyph) */
+  /** icon asset name under /icons/agents, or abs path for plugin SVG (null → generic bot glyph) */
   icon: string | null;
+  /** Whether this agent is user-defined (plugin) vs built-in. */
+  isPlugin?: boolean;
 }
 
 // Registry order matters only for iteration stability; lookup is by alias.
@@ -264,6 +265,90 @@ export function buildResumeCommand(
   launchArgv: string[] | null | undefined,
 ): string | null {
   if (!sessionId || !/^[A-Za-z0-9._-]+$/.test(sessionId)) return null;
+  // Plugin-defined resume: use the command template
+  if (agent.isPlugin) {
+    const pluginResume = getPluginResumeConfig(agent.slug);
+    if (pluginResume) {
+      const safe = (t: string) => /^[A-Za-z0-9._-]+$/.test(t);
+      if (!safe(sessionId)) return null;
+      const cmd = pluginResume.command.replace('{sessionId}', sessionId);
+      // Shell-safety: refuse anything non-alphanumeric
+      if (!/^[A-Za-z0-9_[\]{},./:;@+=~'"!?#&()<>*|$ -]+$/.test(cmd)) return null;
+      return cmd;
+    }
+    return null;
+  }
   const flags = launchArgv ? replayFlags(agent, launchArgv) ?? [] : [];
   return resumeCommandFor(agent, sessionId, flags);
+}
+
+// ---------------------------------------------------------------------------
+// Plugin agent integration
+// ---------------------------------------------------------------------------
+
+/** Plugin-defined resume configs, keyed by slug. */
+const pluginResumeConfigs = new Map<string, { command: string; staleFlags: string[] }>();
+
+/**
+ * Register plugin agents into the lookup maps. Plugins whose slug or aliases
+ * collide with built-in agents are skipped. Call `clearPluginAgents()` first
+ * when reloading.
+ */
+export function registerPluginAgents(plugins: LoadedPlugin[]): { registered: number; skipped: string[] } {
+  let registered = 0;
+  const skipped: string[] = [];
+  for (const p of plugins) {
+    const { manifest } = p;
+    if (BY_SLUG.has(manifest.slug)) {
+      skipped.push(`${manifest.slug} (slug conflicts with built-in)`);
+      continue;
+    }
+    let aliasConflict = false;
+    for (const alias of manifest.aliases) {
+      if (BY_ALIAS.has(alias)) {
+        skipped.push(`${manifest.slug} (alias "${alias}" conflicts with built-in)`);
+        aliasConflict = true;
+        break;
+      }
+    }
+    if (aliasConflict) continue;
+
+    const info: AgentInfo = {
+      slug: manifest.slug,
+      displayName: manifest.displayName,
+      aliases: manifest.aliases,
+      accentColor: manifest.accentColor,
+      icon: manifest.slug, // plugins use slug as icon key; frontend checks /agent-plugin-icon/<slug>
+      isPlugin: true,
+    };
+    BY_SLUG.set(info.slug, info);
+    for (const alias of info.aliases) BY_ALIAS.set(alias, info);
+
+    if (manifest.resume) {
+      pluginResumeConfigs.set(manifest.slug, {
+        command: manifest.resume.command,
+        staleFlags: manifest.resume.staleFlags ?? [],
+      });
+    }
+    registered++;
+  }
+  return { registered, skipped };
+}
+
+export function clearPluginAgents(): void {
+  for (const [slug, info] of BY_SLUG) {
+    if (info.isPlugin) BY_SLUG.delete(slug);
+  }
+  for (const [alias, info] of BY_ALIAS) {
+    if (info.isPlugin) BY_ALIAS.delete(alias);
+  }
+  pluginResumeConfigs.clear();
+}
+
+export function getPluginResumeConfig(slug: string): { command: string; staleFlags: string[] } | undefined {
+  return pluginResumeConfigs.get(slug);
+}
+
+export function isPluginAgent(slug: string): boolean {
+  return BY_SLUG.get(slug)?.isPlugin === true;
 }

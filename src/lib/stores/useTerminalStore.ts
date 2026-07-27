@@ -388,8 +388,18 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       });
       return;
     }
-    // done / 退出：回合完成或 agent 停止。
-    if (finishedNow && userNotViewing) {
+    // done：回合完成。
+    if (agentStatus === 'done' && existing.agentStatus !== 'done' && userNotViewing) {
+      void showPwaNotification({
+        title: 'Termdock',
+        body: `${agentName} finished and needs your attention.`,
+        tag: `agent-finished-${sessionId}`,
+        data: { url: '/', sessionId },
+      });
+      return;
+    }
+    // 退出：agent 在工作中/等待中直接退出（done 已通知过，不重复）。
+    if (agentStatus === null && (existing.agentStatus === 'working' || existing.agentStatus === 'waiting') && userNotViewing) {
       void showPwaNotification({
         title: 'Termdock',
         body: `${agentName} finished and needs your attention.`,

@@ -18,14 +18,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { agentBySlug } from './registry.js';
+import { agentBySlug, isPluginAgent } from './registry.js';
+import { loadPlugins, resolveHookTarget, type PluginHookEvent } from './plugins.js';
 
 export type HookAgentSlug = 'claude' | 'codex' | 'copilot' | 'opencode' | 'pi' | 'grok';
 
 export type HooksState = 'not-installed' | 'installed' | 'outdated';
 
 export interface HookAgentInfo {
-  slug: HookAgentSlug;
+  slug: string;
   displayName: string;
   /** The file the integration installs into, ~-abbreviated for display. */
   targetDisplay: string;
@@ -498,7 +499,7 @@ function ownedFileUninstall(file: string, mark: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Public API — built-in agents
 // ---------------------------------------------------------------------------
 
 export function hooksState(agent: HookAgentSlug): HooksState {
@@ -560,10 +561,209 @@ export async function uninstallHooks(agent: HookAgentSlug): Promise<string> {
   return ownedFileUninstall(file, marker(agent));
 }
 
+// ---------------------------------------------------------------------------
+// Public API — plugin agents (generic hookmap installer)
+// ---------------------------------------------------------------------------
+
+interface PluginHookAgentEntry {
+  slug: string;
+  displayName: string;
+  targetPath: string;
+  events: Array<[string, string, string | null, number?]>;
+}
+
+/** Collect all plugin agents that define hooks. */
+function pluginHookEntries(): PluginHookAgentEntry[] {
+  const { plugins } = loadPlugins();
+  return plugins
+    .filter((p) => p.manifest.hooks && p.manifest.hooks.events.length > 0)
+    .map((p) => {
+      const events: Array<[string, string, string | null, number?]> = p.manifest.hooks!.events.map(
+        (e: PluginHookEvent) => [e.hook, e.event, e.matcher ?? null, e.timeout],
+      );
+      return {
+        slug: p.manifest.slug,
+        displayName: p.manifest.displayName,
+        targetPath: resolveHookTarget(p.manifest.hooks!.target),
+        events,
+      };
+    });
+}
+
+/** Hook command for a plugin agent. Uses the same emitter script but with the plugin slug. */
+function hookCommandForPlugin(slug: string, event: string): string {
+  const { script } = resolveHookScript();
+  return `"${process.execPath}" "${script}" agent-hook ${slug} ${event}`;
+}
+
+/**
+ * List all agents with hook support — both built-in and plugin-defined.
+ * Plugin agents appear after built-in agents.
+ */
+export function listAllHookAgents(): HookAgentInfo[] {
+  const builtIn = HOOK_AGENTS.map((slug) => ({
+    slug,
+    displayName: DISPLAY_NAMES[slug],
+    targetDisplay: abbreviateHome(targetPath(slug)),
+    state: hooksState(slug),
+    accentColor: agentBySlug(slug)?.accentColor ?? null,
+    icon: agentBySlug(slug)?.icon ?? null,
+  }));
+  const pluginAgents = pluginHookEntries().map((entry) => ({
+    slug: entry.slug,
+    displayName: entry.displayName,
+    targetDisplay: abbreviateHome(entry.targetPath),
+    state: pluginHooksState(entry.slug, entry.targetPath, entry.events.map(([h, s]) => [h, s]) as Array<[string, string]>),
+    accentColor: agentBySlug(entry.slug)?.accentColor ?? '#878580',
+    icon: agentBySlug(entry.slug)?.icon ?? null,
+  }));
+  return [...builtIn, ...pluginAgents];
+}
+
+export function hooksStateForSlug(slug: string): HooksState {
+  if (isPluginAgent(slug)) {
+    const entries = pluginHookEntries();
+    const entry = entries.find((e) => e.slug === slug);
+    if (!entry) return 'not-installed';
+    return pluginHooksState(
+      slug,
+      entry.targetPath,
+      entry.events.map(([h, s]) => [h, s]) as Array<[string, string]>,
+    );
+  }
+  return hooksState(slug as HookAgentSlug);
+}
+
+export async function installHooksForSlug(slug: string): Promise<InstallResult> {
+  if (isPluginAgent(slug)) {
+    const entries = pluginHookEntries();
+    const entry = entries.find((e) => e.slug === slug);
+    if (!entry) throw new Error(`No hook config for plugin "${slug}"`);
+    return installPluginHooks(slug, entry.targetPath, entry.events);
+  }
+  return installHooks(slug as HookAgentSlug);
+}
+
+export async function uninstallHooksForSlug(slug: string): Promise<string> {
+  if (isPluginAgent(slug)) {
+    const entries = pluginHookEntries();
+    const entry = entries.find((e) => e.slug === slug);
+    if (!entry) throw new Error(`No hook config for plugin "${slug}"`);
+    return uninstallPluginHooks(slug, entry.targetPath);
+  }
+  return uninstallHooks(slug as HookAgentSlug);
+}
+
+// ---------------------------------------------------------------------------
+// Generic hookmap logic (shared with built-in Claude/Codex + all plugins)
+// ---------------------------------------------------------------------------
+
+/** Generic state check for a hookmap-style hooks file. */
+function pluginHooksState(
+  slug: string,
+  file: string,
+  events: Array<[string, string]>,
+): HooksState {
+  const root = readJsonObject(file);
+  if (!root) return 'not-installed';
+  const mark = marker(slug as HookAgentSlug);
+  const hooks = root.hooks;
+  let any = false;
+  let complete = true;
+  for (const [hookEvent, sentinel] of events) {
+    const list = hooks && typeof hooks === 'object'
+      ? (hooks as JsonObject)[hookEvent]
+      : null;
+    const ours = Array.isArray(list)
+      ? list.map((entry) => markerCommand(entry, mark)).find((c) => c !== null) ?? null
+      : null;
+    if (ours !== null) {
+      any = true;
+      if (ours !== hookCommandForPlugin(slug, sentinel)) complete = false;
+    } else {
+      complete = false;
+    }
+  }
+  if (!any) return 'not-installed';
+  return complete ? 'installed' : 'outdated';
+}
+
+/** Generic install for a hookmap-style hooks file. */
+function installPluginHooks(
+  slug: string,
+  file: string,
+  events: Array<[string, string, string | null, number?]>,
+): InstallResult {
+  const { devMode } = resolveHookScript();
+  let root: JsonObject = {};
+  try {
+    const text = fs.readFileSync(file, 'utf8');
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`${file} is not a JSON object; not touching it`);
+    }
+    root = parsed as JsonObject;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  if (!root.hooks || typeof root.hooks !== 'object' || Array.isArray(root.hooks)) {
+    if (root.hooks !== undefined) {
+      throw new Error(`"hooks" in ${file} is not an object; not touching it`);
+    }
+    root.hooks = {};
+  }
+  const hooks = root.hooks as JsonObject;
+  const mark = marker(slug as HookAgentSlug);
+
+  for (const [hookEvent, sentinel, matcher] of events) {
+    const command = hookCommandForPlugin(slug, sentinel);
+    let list = hooks[hookEvent];
+    if (list === undefined) {
+      list = [];
+      hooks[hookEvent] = list;
+    }
+    if (!Array.isArray(list)) continue;
+    const kept = list.filter((entry) => markerCommand(entry, mark) === null);
+    const entry: JsonObject = { hooks: [{ type: 'command', command }] };
+    if (matcher) entry.matcher = matcher;
+    kept.push(entry);
+    hooks[hookEvent] = kept;
+  }
+
+  writeAtomic(file, JSON.stringify(root, null, 2));
+  return { summary: 'Installed', devMode };
+}
+
+/** Generic uninstall for a hookmap-style hooks file. */
+function uninstallPluginHooks(slug: string, file: string): string {
+  const root = readJsonObject(file);
+  if (!root) return 'Nothing installed; nothing to remove';
+  const mark = marker(slug as HookAgentSlug);
+  let removed = 0;
+  if (root.hooks && typeof root.hooks === 'object') {
+    const hooks = root.hooks as JsonObject;
+    for (const eventName of Object.keys(hooks)) {
+      const list = hooks[eventName];
+      if (!Array.isArray(list)) continue;
+      const kept = list.filter((entry) => markerCommand(entry, mark) === null);
+      removed += list.length - kept.length;
+      if (kept.length === 0) {
+        delete hooks[eventName];
+      } else {
+        hooks[eventName] = kept;
+      }
+    }
+  }
+  if (removed === 0) return 'No termdock hooks found; nothing to remove';
+  writeAtomic(file, JSON.stringify(root, null, 2));
+  return 'Removed';
+}
+
 /**
  * Startup keeper: rewrite any integration that is installed but stale so
  * hooks keep pointing at a real termdock after the package moves or updates.
- * Returns how many integrations were refreshed.
+ * Covers both built-in and plugin agents. Returns how many were refreshed.
  */
 export function refreshStaleHooksAtLaunch(): number {
   let refreshed = 0;
@@ -575,6 +775,22 @@ export function refreshStaleHooksAtLaunch(): number {
       console.log(`[agent-hooks] refreshed stale ${agent} hooks at ${abbreviateHome(targetPath(agent))}`);
     } catch (error) {
       console.warn(`[agent-hooks] could not refresh stale ${agent} hooks:`, (error as Error).message);
+    }
+  }
+  // Plugin agents
+  for (const entry of pluginHookEntries()) {
+    const state = pluginHooksState(
+      entry.slug,
+      entry.targetPath,
+      entry.events.map(([h, s]) => [h, s]) as Array<[string, string]>,
+    );
+    if (state !== 'outdated') continue;
+    try {
+      void installPluginHooks(entry.slug, entry.targetPath, entry.events);
+      refreshed++;
+      console.log(`[agent-hooks] refreshed stale plugin ${entry.slug} hooks at ${abbreviateHome(entry.targetPath)}`);
+    } catch (error) {
+      console.warn(`[agent-hooks] could not refresh stale plugin ${entry.slug} hooks:`, (error as Error).message);
     }
   }
   return refreshed;

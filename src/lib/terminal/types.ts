@@ -12,6 +12,7 @@ export interface AgentIdentity {
   displayName: string;
   accentColor: string;
   icon: string | null;
+  isPlugin?: boolean;
 }
 
 /** Last-known resumable agent conversation, persisted server-side. */

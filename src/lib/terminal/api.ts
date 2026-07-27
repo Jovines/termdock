@@ -1364,6 +1364,53 @@ export async function uninstallAgentHooks(agent: string): Promise<string> {
   return data.summary ?? 'Removed';
 }
 
+// ---- Agent plugins (user-defined agent plugins) ----
+
+export interface AgentPluginInfo {
+  slug: string;
+  displayName: string;
+  aliases: string[];
+  accentColor: string;
+  hasHooks: boolean;
+  hasResume: boolean;
+  hasIcon: boolean;
+}
+
+export interface AgentPluginErrors {
+  slug: string;
+  errors: string[];
+}
+
+export async function getAgentPlugins(): Promise<{ plugins: AgentPluginInfo[]; errors: AgentPluginErrors[] }> {
+  const response = await fetch('/api/terminal/agent-plugins');
+  if (!response.ok) throw new Error('Failed to get agent plugins');
+  return await response.json();
+}
+
+export async function createAgentPlugin(manifest: Record<string, unknown>): Promise<{ slug: string; dir: string }> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/agent-plugins', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(manifest),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Failed to create agent plugin');
+  return data;
+}
+
+export async function deleteAgentPlugin(slug: string): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/agent-plugins/${encodeURIComponent(slug)}`, {
+    method: 'DELETE',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to delete agent plugin');
+  }
+}
+
 /** Resume the pane's last agent conversation (server writes the agent's
  *  native resume command into the PTY via bracketed paste). */
 export async function resumeAgentSession(terminalSessionId: string): Promise<{ command: string }> {

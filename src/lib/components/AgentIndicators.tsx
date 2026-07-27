@@ -58,6 +58,9 @@ export function AgentBrandAvatar({
       </span>
     );
   }
+  const iconUrl = agent.isPlugin
+    ? `/api/terminal/agent-plugin-icon/${agent.slug}`
+    : `/icons/agents/${agent.icon}.svg`;
   return (
     <span
       className="flex shrink-0 items-center justify-center rounded-[3px]"
@@ -69,8 +72,8 @@ export function AgentBrandAvatar({
         style={{
           width: inner,
           height: inner,
-          WebkitMask: `url(/icons/agents/${agent.icon}.svg) center / contain no-repeat`,
-          mask: `url(/icons/agents/${agent.icon}.svg) center / contain no-repeat`,
+          WebkitMask: `url(${iconUrl}) center / contain no-repeat`,
+          mask: `url(${iconUrl}) center / contain no-repeat`,
         }}
       />
     </span>
@@ -110,10 +113,12 @@ export function AgentTabIcon({
       </span>
     );
   }
-  if (state?.agentStatus === 'done') {
+  // done 即「未读完成」标记：离开时完成 → 绿勾（带呼吸提醒）；
+  // 查看之后（needsReview 已清）→ 回落到品牌头像。
+  if (state?.agentStatus === 'done' && state.agentNeedsReview) {
     return (
       <span title={state.agentMessage ?? undefined}>
-        <RiCheck size={size} className="shrink-0" style={{ color: AGENT_COLOR_RUNNING }} />
+        <RiCheck size={size} className="shrink-0 animate-pulse" style={{ color: AGENT_COLOR_RUNNING }} />
       </span>
     );
   }
@@ -159,10 +164,10 @@ export function AgentSessionDot({
       />
     );
   }
-  if (status === 'done') {
+  if (status === 'done' && needsReview) {
     return (
       <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--success)] ring-2 ring-surface"
+        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--success)] ring-2 ring-surface animate-pulse"
         title={t('agent.finishedReview')}
       />
     );

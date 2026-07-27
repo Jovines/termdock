@@ -419,6 +419,11 @@ export type TranslationDictionary = {
     agentHooksReinstall: string;
     agentHooksDevMode: string;
     agentHooksTarget: string;
+    agentPlugins: string;
+    agentPluginAdd: string;
+    agentPluginHint: string;
+    agentPluginCreate: string;
+    agentPluginDelete: string;
     mobileKeyboard: string;
     saving: string;
     rulesHint: string;

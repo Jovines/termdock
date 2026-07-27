@@ -741,7 +741,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       return;
     }
     const controller = new AbortController();
-    const source = changedFile?.unstaged ? 'index' : 'ref';
+    const source = 'ref';
     getGitBlobContent(filePath, gitRoot, 'HEAD', controller.signal, source)
       .then((result) => {
         if (!controller.signal.aborted) setOldSourceContent(result.truncated || result.error ? null : result.content);

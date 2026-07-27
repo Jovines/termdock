@@ -185,6 +185,7 @@ Options:
   --foreground       Run in the foreground
   --status           Show background server status
   --stop             Stop the background server
+  -v, --version      Print version and exit
   --set-password     Set or update the access password (interactive prompt)
   --clear-password   Remove the access password and disable authentication
   --tls              List termdock-managed tmux sessions (reads tmux directly,
@@ -632,6 +633,11 @@ function parseArgs(argv: string[]): CliOptions {
 
     if (arg === '-h' || arg === '--help') {
       printHelp();
+      process.exit(0);
+    }
+
+    if (arg === '-v' || arg === '-V' || arg === '--version') {
+      console.log(TERMDOCK_VERSION);
       process.exit(0);
     }
 

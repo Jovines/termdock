@@ -3097,10 +3097,9 @@ router.get('/diff', async (req: Request, res: Response) => {
         return args;
       };
 
-      // Default sidebar diffs should represent every changed file from the list:
-      // staged-only changes, unstaged changes, and untracked files. Plain
-      // `git diff` only shows unstaged tracked edits, which made staged-only
-      // additions/deletions/renames look empty in the UI.
+      // Use `git diff HEAD` to present a merged view of all worktree changes
+      // (staged + unstaged) against HEAD. Untracked files are handled separately
+      // with `--no-index` below.
       let truncatedByGit = false;
       const readLimitedDiff = async (args: string[], maxBytes = MAX_DIFF_BYTES) => {
         const gitResult = await execGitLimited(args, gitCwd, maxBytes, false, controller.signal, { id: requestId, action, op: 'git.diff', path: requestedPath, extra: { traceId, interactionId, requestSlotId } });
@@ -3113,12 +3112,15 @@ router.get('/diff', async (req: Request, res: Response) => {
         return gitResult.stdout;
       };
 
+      const buildHeadDiffArgs = () => {
+        const args = ['diff', '-M', ...diffOptionArgs, 'HEAD'];
+        if (pathspec) args.push('--', pathspec);
+        return args;
+      };
+
       let diff = cached
         ? await readLimitedDiff(buildDiffArgs(true))
-        : [
-            await readLimitedDiff(buildDiffArgs(true)),
-            await readLimitedDiff(buildDiffArgs(false)),
-          ].filter(Boolean).join('\n');
+        : await readLimitedDiff(buildHeadDiffArgs());
 
       let totalBytes = getDiffByteLength(diff);
 
