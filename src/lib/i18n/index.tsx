@@ -105,11 +105,22 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
       // ignore
     }
     // Push to server so other connected clients pick up the change.
-    fetch('/api/terminal/settings', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ locale }),
-    }).catch(() => { /* best effort */ });
+    (async () => {
+      try {
+        // Read CSRF token from cookie (server sets XSRF-TOKEN cookie).
+        const cookies = document.cookie.split('; ');
+        const csrfCookie = cookies.find((c) => c.startsWith('XSRF-TOKEN='));
+        const csrfToken = csrfCookie ? decodeURIComponent(csrfCookie.split('=')[1]) : '';
+        await fetch('/api/terminal/settings', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(csrfToken ? { 'X-XSRF-TOKEN': csrfToken } : {}),
+          },
+          body: JSON.stringify({ locale }),
+        });
+      } catch { /* best effort */ }
+    })();
     // Reflect on <html lang> for accessibility tools and CSS selectors.
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
   }, [locale]);
