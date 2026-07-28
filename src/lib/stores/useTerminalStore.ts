@@ -4,6 +4,25 @@ import { sendAgentReviewAck } from '../terminal/api';
 import type { TerminalSession, TerminalChunk, TerminalSessionState, TuiProgressReport } from '../terminal';
 import { getStoredPwaAiNotificationsEnabled, showPwaNotification } from '../utils/pwaNotifications';
 
+function getStoredLocale(): string {
+  try { return localStorage.getItem('termdock:locale') || 'en'; } catch { return 'en'; }
+}
+
+function getAgentNotificationText(locale: string, agentName: string) {
+  if (locale === 'zh') {
+    return {
+      waitingTitle: `${agentName} 需要你的输入`,
+      waitingBody: `${agentName} 需要你的输入。`,
+      finishedBody: `${agentName} 已完成，需要你的关注。`,
+    };
+  }
+  return {
+    waitingTitle: `${agentName} needs your input`,
+    waitingBody: `${agentName} is waiting for your input.`,
+    finishedBody: `${agentName} finished and needs your attention.`,
+  };
+}
+
 export interface TerminalStore {
   sessions: Map<string, TerminalSessionState>;
   nextChunkId: number;
@@ -494,11 +513,13 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     if (!getStoredPwaAiNotificationsEnabled()) return;
 
     const agentName = nextAgent?.displayName ?? existing.activeProgram ?? 'Agent';
+    const locale = getStoredLocale();
+    const nt = getAgentNotificationText(locale, agentName);
     // waiting：agent 回合中停下来等人（权限/提问）——这是整个功能的核心时刻。
     if (agentStatus === 'waiting' && existing.agentStatus !== 'waiting' && userNotViewing) {
       void showPwaNotification({
-        title: `${agentName} 需要你的输入`,
-        body: nextMessage ?? `${agentName} is waiting for your input.`,
+        title: nt.waitingTitle,
+        body: nextMessage ?? nt.waitingBody,
         tag: `agent-waiting-${sessionId}`,
         data: { url: '/', sessionId },
       });
@@ -508,7 +529,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     if (agentStatus === 'done' && existing.agentStatus !== 'done' && userNotViewing) {
       void showPwaNotification({
         title: 'Termdock',
-        body: `${agentName} finished and needs your attention.`,
+        body: nt.finishedBody,
         tag: `agent-finished-${sessionId}`,
         data: { url: '/', sessionId },
       });
@@ -518,7 +539,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     if (agentStatus === null && (existing.agentStatus === 'working' || existing.agentStatus === 'waiting') && userNotViewing) {
       void showPwaNotification({
         title: 'Termdock',
-        body: `${agentName} finished and needs your attention.`,
+        body: nt.finishedBody,
         tag: `agent-finished-${sessionId}`,
         data: { url: '/', sessionId },
       });
