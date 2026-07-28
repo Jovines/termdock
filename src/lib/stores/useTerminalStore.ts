@@ -526,6 +526,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
   },
 
   clearAgentNeedsReview: (sessionId: string) => {
+    const session = get().sessions.get(sessionId);
+    if (!session?.agentNeedsReview) return;
     set((state) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
@@ -533,6 +535,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       newSessions.set(sessionId, { ...existing, agentNeedsReview: false, updatedAt: Date.now() });
       return { sessions: newSessions };
     });
+    if (session.terminalSessionId) {
+      sendAgentReviewAck(session.terminalSessionId);
+    }
   },
 
   setConnecting: (sessionId: string, isConnecting: boolean) => {

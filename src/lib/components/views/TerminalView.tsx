@@ -1311,6 +1311,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           }
 
           await terminal.sendInput(terminalId, payload);
+          // If user is on the session and agent just finished, user input = reviewed
+          terminalStore.clearAgentNeedsReview(sessionId);
         } catch (error) {
           setConnectionError(error instanceof Error ? error.message : 'Failed to send input');
         }
