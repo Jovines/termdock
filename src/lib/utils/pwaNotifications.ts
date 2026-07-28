@@ -32,6 +32,41 @@ export function isPwaNotificationSupported(): boolean {
     && 'serviceWorker' in navigator
     && window.isSecureContext;
 }
+/** Detect whether the current browser is iOS Safari / iPadOS Safari. */
+export function isIOSSafari(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent;
+  return /iPad|iPhone|iPod/.test(ua) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+/**
+ * Whether the PWA is running in standalone (installed to Home Screen) mode.
+ * On iOS this is the only way Web Push notifications are actually delivered.
+ */
+export function isPwaStandalone(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (window.matchMedia('(display-mode: standalone)').matches) return true;
+  // Safari iOS standalone sets navigator.standalone = true
+  if ('standalone' in navigator && (navigator as any).standalone === true) return true;
+  return false;
+}
+
+/**
+ * Whether notifications are actually deliverable (API supported AND not blocked
+ * by platform restrictions such as iOS requiring standalone PWA mode).
+ *
+ * isPwaNotificationSupported() checks raw API availability; this function
+ * tells you whether showPwaNotification() will actually produce a notification.
+ */
+export function isPwaNotificationEffective(): boolean {
+  if (!isPwaNotificationSupported()) return false;
+  // iOS Safari only delivers notifications in standalone PWA mode (iOS 16.4+).
+  if (isIOSSafari() && !isPwaStandalone()) return false;
+  return true;
+}
+
+
 
 export function getPwaNotificationPermission(): NotificationPermission | 'unsupported' {
   if (typeof Notification === 'undefined') return 'unsupported';
