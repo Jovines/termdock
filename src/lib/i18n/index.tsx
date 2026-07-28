@@ -82,7 +82,21 @@ function format(template: unknown, params?: InterpolationParams): string {
 export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(() => detectInitialLocale());
 
-  // Persist + notify when locale changes.
+  // Sync locale from server on mount (server-authoritative, shared across clients).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    fetch('/api/terminal/settings')
+      .then((r) => r.json())
+      .then((s) => {
+        if (s?.locale === 'zh' || s?.locale === 'en') {
+          setLocaleState(s.locale);
+          try { window.localStorage.setItem(STORAGE_KEY, s.locale); } catch { /* ignore */ }
+        }
+      })
+      .catch(() => { /* keep local default */ });
+  }, []);
+
+  // Persist to localStorage + server when locale changes.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
@@ -90,6 +104,12 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore
     }
+    // Push to server so other connected clients pick up the change.
+    fetch('/api/terminal/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locale }),
+    }).catch(() => { /* best effort */ });
     // Reflect on <html lang> for accessibility tools and CSS selectors.
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
   }, [locale]);

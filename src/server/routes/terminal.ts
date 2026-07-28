@@ -15,7 +15,7 @@ import { getPtyHostManager, type PtyHostClient } from '../ptyhost/manager.js';
 import { pathValidator } from '../utils/pathValidator.js';
 import { TERMINAL, TMUX } from '../config.js';
 import { localAccessManager } from '../utils/localAccess.js';
-import { normalizeLocalAccessName } from '../utils/settings.js';
+import { normalizeLocalAccessName, getLocaleSetting, setLocaleSetting } from '../utils/settings.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
 import {
   getFocusSequence,
@@ -4855,6 +4855,7 @@ async function getSettingsPayload() {
     preventSleep: caffeinateManager.getPreventSleep(),
     caffeinateActive: caffeinateManager.isActive(),
     networkAvailable: caffeinateManager.isNetworkAvailable(),
+    locale: getLocaleSetting(),
     localAccess: {
       ...localAccess,
       interfaces,
@@ -4896,6 +4897,10 @@ router.put('/settings', async (req, res) => {
   const body = req.body ?? {};
   if (typeof body.preventSleep === 'boolean') {
     caffeinateManager.setPreventSleep(body.preventSleep);
+  }
+
+  if (typeof body.locale === 'string' && (body.locale === 'zh' || body.locale === 'en')) {
+    setLocaleSetting(body.locale);
   }
 
   if (body.localAccess && typeof body.localAccess === 'object') {

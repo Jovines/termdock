@@ -19,6 +19,8 @@ export interface SettingsDoc {
   preventSleep: boolean;
   localAccess: LocalAccessSettings;
   firstRunCompleted: boolean;
+  /** 'zh' | 'en' — persisted server-side so all connected clients share one choice. */
+  locale: string;
   updatedAt: number;
 }
 
@@ -72,6 +74,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
     preventSleep: raw.preventSleep === true,
     localAccess: normalizeLocalAccessSettings(raw.localAccess),
     firstRunCompleted: (raw as { firstRunCompleted?: unknown }).firstRunCompleted === true,
+    locale: typeof (raw as { locale?: unknown }).locale === 'string' && (raw as { locale: string }).locale === 'zh' ? 'zh' : 'en',
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -182,4 +185,14 @@ export function markFirstRunCompleted(): SettingsDoc {
 
 export function isFirstRunCompleted(): boolean {
   return loadSettings().firstRunCompleted;
+}
+
+export function getLocaleSetting(): string {
+  return loadSettings().locale ?? 'en';
+}
+
+export function setLocaleSetting(locale: string): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.locale = locale;
+  });
 }
