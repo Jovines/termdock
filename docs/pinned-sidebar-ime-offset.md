@@ -50,17 +50,34 @@ flex 分配宽度，无 padding/margin，终端通过外层容器获得正确宽
 - **`readLeftPinned` 默认值**：已修正为 `false`（之前错误地返回
   `matchMedia("(min-width: 1024px)").matches`）
 
+## 根因分析
+
+Swiper 的 `.swiper-wrapper` 始终有 `transform: translateZ(0)`（来自
+`swiper-bundle.min.css`），按 CSS Transforms 规范创建了一个新的 containing block。
+
+桌面端 IME 覆盖层 textarea（`TerminalViewport.tsx:3865`）使用 `position: fixed`，
+但其 `left`/`top` 值是通过 `containerRef.getBoundingClientRect().left/top +
+imeAnchor.x/y` 计算的——这是 viewport 坐标。由于 containing block 已变成
+Swiper wrapper 而非 viewport，textara 的 `left`/`top` 实际是相对于 Swiper
+wrapper 的偏移。
+
+当 sidebar pin 后 content area 左移 ~305px，`containerRect.left` = 305，
+Swiper wrapper 也在 viewport x=305 处。textarea 最终 viewport x =
+`305 (swiper wrapper) + 305 (containerRect.left) + imeAnchor.x` = 610 +
+imeAnchor.x → 侧边栏宽度被算了两次（"双倍右移"）。
+
+Overlay 模式不触发是因为 `containerRect.left` ≈ 0，双重叠加的效应为零。
+
+## 修复
+
+`TerminalViewport.tsx:3910-3922`：桌面端 IME 覆盖层 textarea 的坐标改为
+直接使用 `imeAnchor.x` / `imeAnchor.y`（terminal 内部坐标），不再叠加
+`containerRect.left/top`（viewport 坐标）。imeAnchor 的坐标天然以 terminal
+元素为基准，在 Swiper wrapper 的 containing block 下直接可用。
+
 ## 待排查方向
 
-1. **Chrome IME 含 transform 时的坐标计算**：Swiper 的 `transform: translateX()`
-   可能在 Chromium 合成器层面影响 IME 候选框的位置计算，与 `getBoundingClientRect`
-   的 transform-aware 返回值不一致
-2. **`overflow: hidden` 祖先**：`min-w-0 overflow-hidden` wrapper 可能干扰
-   Chrome 对 caret 位置的检测
-3. **ResizeObserver 未触发 xterm refit**：pin 后终端容器宽度变化（1280→975px），
-   `@xterm/addon-fit` 可能未重新计算 cols/rows，导致 cell 尺寸基于旧宽度
-
-## 临时规避
-
-IME 偏移不影响终端输入功能，仅候选框位置不理想。用户明确表示**先保留 pin 功能，
-容忍此 bug，后续跟进修复**。
+1. ~~Chrome IME 含 transform 时的坐标计算~~ → 已确认：CSS `transform` 创建
+   containing block 导致 `position:fixed` 坐标参照系改变
+2. ~~`overflow: hidden` 祖先~~ → 非根因
+3. ~~ResizeObserver 未触发 xterm refit~~ → 非根因

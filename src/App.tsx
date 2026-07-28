@@ -1757,6 +1757,61 @@ function App() {
     window.history.replaceState(window.history.state, '', nextUrl);
   }, []);
 
+  // 通知弹窗自检：SW openWindow 时带了 _notif=1 标记，检测是否已有其他实例在运行。
+  // 有则把 session 切换委托给已有实例并自动关闭自身，避免用户看到重复窗口。
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('_notif') !== '1') return;
+
+    const sessionId = params.get('session');
+    params.delete('_notif');
+    const nextSearch = params.toString();
+    const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+    window.history.replaceState(window.history.state, '', nextUrl);
+
+    const channel = new BroadcastChannel('termdock:notif');
+    let closed = false;
+
+    const pongHandler = (e: MessageEvent) => {
+      if (e.data?.type === 'termdock:notif-pong' && !closed) {
+        closed = true;
+        channel.close();
+        window.close();
+      }
+    };
+    channel.addEventListener('message', pongHandler);
+    channel.postMessage({ type: 'termdock:notif-ping', sessionId });
+
+    // 500ms 内无应答则视为唯一实例，正常处理（后续 ?session= effect 会接管）。
+    const timeout = setTimeout(() => {
+      if (!closed) channel.close();
+    }, 500);
+
+    return () => {
+      clearTimeout(timeout);
+      if (!closed) channel.close();
+    };
+  }, []);
+
+  // 响应其他弹窗的 ping：告知对方本实例存在，并切到目标 session。
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const channel = new BroadcastChannel('termdock:notif');
+
+    const pingHandler = (e: MessageEvent) => {
+      if (e.data?.type === 'termdock:notif-ping') {
+        channel.postMessage({ type: 'termdock:notif-pong' });
+        if (typeof e.data.sessionId === 'string') {
+          requestFocusSession(e.data.sessionId);
+        }
+      }
+    };
+    channel.addEventListener('message', pingHandler);
+
+    return () => channel.close();
+  }, [requestFocusSession]);
+
   // 监听 SW 转发的「已有窗口」聚焦消息：点击通知时若 PWA 已开着，SW 走
   // postMessage 而非新开窗口，这里收到后切到目标 session。
   useEffect(() => {

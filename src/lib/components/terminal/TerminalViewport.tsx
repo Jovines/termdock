@@ -3907,9 +3907,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                       // 普通桌面键盘输入也可能触发页面/visualViewport 被顶上去，
                       // 表现为整个 terminal 先上抬再落回。fixed 元素不参与文档
                       // 滚动布局，同时仍可作为 IME candidate window 的锚点。
-                      const containerRect = containerRef.current?.getBoundingClientRect();
-                      const viewportLeft = Math.round((containerRect?.left ?? 0) + imeAnchor.x);
-                      const viewportTop = Math.round((containerRect?.top ?? 0) + imeAnchor.y);
+                      //
+                      // ⚠️ 坐标必须相对于 containing block，不是 viewport：
+                      // Swiper 的 .swiper-wrapper 始终有 transform:translateZ(0)
+                      // （见 swiper-bundle.min.css），按 CSS Transforms 规范这会
+                      // 创建一个新的 containing block，使 position:fixed 的
+                      // left/top 不再相对于 viewport，而是相对于 swiper-wrapper。
+                      // 若叠加 containerRect.left（视口坐标），sidebar pin 后
+                      // 该值 ≈ 305px，会被 containing block 再偏移一次，表现为
+                      // IME 候选框"双倍右移"。imeAnchor 的 x/y 本身就是 terminal
+                      // 内部坐标，在 containing block 坐标系下直接使用即可。
+                      // 详见 docs/pinned-sidebar-ime-offset.md
+                      const viewportLeft = imeAnchor.x;
+                      const viewportTop = imeAnchor.y;
                       const base: React.CSSProperties = {
                         position: 'fixed',
                         left: viewportLeft,
