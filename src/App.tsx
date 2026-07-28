@@ -45,6 +45,7 @@ import {
   getPwaNotificationPermission,
   getStoredPwaNotificationsEnabled,
   isPwaNotificationSupported,
+  isPwaNotificationEffective,
   requestPwaNotificationPermission,
   setStoredPwaAiNotificationsEnabled,
   setStoredPwaNotificationAlertStyle,
@@ -1795,6 +1796,11 @@ function App() {
   // 一键轮转到下一个待处理 session：从当前 active 之后找第一个，环回到列表头。
   const handleJumpToNextAttention = useCallback(() => {
     if (attentionSessionIds.length === 0) return;
+    // If current session needs review, clear it first — the bell click itself
+    // is the user acknowledging they've seen the notification.
+    if (activeSessionId) {
+      useTerminalStore.getState().clearAgentNeedsReview(activeSessionId);
+    }
     const fromIndex = activeSessionId ? sessions.findIndex((s) => s.id === activeSessionId) : -1;
     const next = attentionSessionIds.find((id) => sessions.findIndex((s) => s.id === id) > fromIndex)
       ?? attentionSessionIds[0];
@@ -3446,6 +3452,11 @@ function App() {
                           ? t('settings.notificationsUnsupported')
                           : t('settings.notificationsMasterHint')}
                     </div>
+                  {isPwaNotificationSupported() && !isPwaNotificationEffective() && (
+                    <div className="mt-1.5 text-[11px] leading-relaxed text-[var(--warning)]">
+                      {t('settings.notificationsIOSInstallHint')}
+                    </div>
+                  )}
                   </div>
                   <button
                     type="button"
