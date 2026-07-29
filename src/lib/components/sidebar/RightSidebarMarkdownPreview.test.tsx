@@ -698,6 +698,42 @@ describe('right sidebar Markdown preview rendering', () => {
     vi.useRealTimers();
   });
 
+  it('repaints SVG images at the zoomed layout size instead of scaling a rasterized layer', () => {
+    vi.useFakeTimers();
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 400 });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 200 });
+
+    const { container } = render(
+      <MarkdownImageLightbox
+        images={[
+          { kind: 'image', src: '/diagram.svg', alt: 'Vector diagram' },
+        ]}
+        index={0}
+        onChange={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+
+    let image = screen.getByRole('img', { name: 'Vector diagram' }) as HTMLImageElement;
+    Object.defineProperty(image, 'naturalWidth', { value: 100, configurable: true });
+    Object.defineProperty(image, 'naturalHeight', { value: 100, configurable: true });
+    fireEvent.load(image);
+    image = screen.getByRole('img', { name: 'Vector diagram' }) as HTMLImageElement;
+
+    expect(image.style.width).toBe('198px');
+    expect(image.style.height).toBe('198px');
+    fireEvent.doubleClick(image, { clientX: 100, clientY: 100 });
+    vi.advanceTimersByTime(250);
+
+    expect(image.style.width).toBe('495px');
+    expect(image.style.height).toBe('495px');
+    expect(image.style.transform).toBe('translate3d(-50%, -50%, 0)');
+    expect(image.style.willChange).toBe('');
+    expect(container.querySelector('[data-vector-zoom-surface]')).toBeTruthy();
+
+    vi.useRealTimers();
+  });
+
   it('renders Mermaid diagrams in the Markdown image lightbox with zoom support', () => {
     vi.useFakeTimers();
     const observed: Element[] = [];
@@ -736,8 +772,8 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(diagram.className).toContain('h-full');
     expect(diagram.className).toContain('w-full');
     expect(diagram.className).toContain('overflow-hidden');
-    expect(diagram.className).toContain('[&_svg]:max-h-full');
-    expect(diagram.className).toContain('[&_svg]:max-w-full');
+    expect(diagram.className).not.toContain('[&_svg]:max-h-full');
+    expect(diagram.className).not.toContain('[&_svg]:max-w-full');
     expect(diagram.className).not.toContain('max-w-none');
     const svg = within(diagram).getByText('Flow').closest('svg');
     expect(svg?.style.width).toBe('264px');
@@ -747,7 +783,10 @@ describe('right sidebar Markdown preview rendering', () => {
 
     fireEvent.doubleClick(diagram, { clientX: 100, clientY: 100 });
     vi.advanceTimersByTime(250);
-    expect(diagram.getAttribute('style') ?? '').toContain('scale(2.5)');
+    expect(svg?.style.width).toBe('660px');
+    expect(svg?.style.height).toBe('440px');
+    expect(svg?.style.transform).not.toContain('scale(');
+    expect(svg?.style.willChange).toBe('');
     expect(onChange).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
 

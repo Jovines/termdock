@@ -895,6 +895,7 @@ type MarkdownImageState =
 // refetches — otherwise the preview kept showing the stale image.
 function MarkdownImage({ src, alt, title }: { src: string; alt: string; title?: string }) {
   const localPath = getLocalPathFromBlobSrc(src);
+  const isVector = isSvgImageSrc(src);
   const fileVersion = useSidebarStore((s) => (localPath ? s.fileChangeVersions.get(localPath) ?? 0 : 0));
   const versionedSrc = localPath && fileVersion > 0 ? `${src}&v=${fileVersion}` : src;
 
@@ -992,7 +993,7 @@ function MarkdownImage({ src, alt, title }: { src: string; alt: string; title?: 
           alt={alt}
           title={title}
           decoding="async"
-          className="termdock-fade-in block max-h-[480px] max-w-full object-contain"
+          className={`${isVector ? '' : 'termdock-fade-in '}block max-h-[480px] max-w-full object-contain`}
           style={box ? { width: box.width, height: box.height } : undefined}
           onLoad={(event) => {
             // No dimension headers (older server / remote image): measure
@@ -4013,6 +4014,8 @@ interface ZoomableViewportProps {
   onDoubleTap?: () => void;
   children: (state: {
     transformStyle: CSSProperties;
+    vectorTransformStyle: CSSProperties;
+    scale: number;
     zoomed: boolean;
     animateTransform: boolean;
   }) => ReactNode;
@@ -4249,6 +4252,7 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
       }}
     >
       {children({
+        scale: transform.scale,
         zoomed,
         animateTransform,
         transformStyle: {
@@ -4256,6 +4260,15 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
           transformOrigin: 'center center',
           transition: animateTransform ? 'transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none',
           willChange: 'transform',
+        },
+        // Scaling an SVG's composited layer makes WebKit/Chromium reuse the
+        // rasterization created at scale=1. Vector viewers instead use this
+        // translation-only style and grow the SVG's layout box, which forces
+        // a fresh vector paint at every zoom level.
+        vectorTransformStyle: {
+          transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
+          transformOrigin: 'center center',
+          transition: animateTransform ? 'transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none',
         },
       })}
     </div>
@@ -4280,40 +4293,74 @@ function ZoomableImage({ src, alt, vector, onLoad, onError, onZoomChange, onDoub
 
   return (
     <ZoomableViewport resetKey={src} onZoomChange={onZoomChange} onDoubleTap={onDoubleTap}>
-      {({ transformStyle }) => (
-      <img
-        src={src}
-        alt={alt}
-        draggable={false}
-        className="max-h-full max-w-full touch-none select-none rounded border border-border/15 bg-surface object-contain shadow-sm"
-        style={fitSize ? { ...transformStyle, width: fitSize.width, height: fitSize.height } : transformStyle}
-        onLoad={(event) => {
-          const img = event.currentTarget;
-          const container = img.parentElement;
-          if (container && img.naturalWidth > 0 && img.naturalHeight > 0) {
-            const availableWidth = Math.max(1, container.clientWidth - 2);
-            const availableHeight = Math.max(1, container.clientHeight - 2);
-            const fitScale = Math.min(availableWidth / img.naturalWidth, availableHeight / img.naturalHeight);
-            const scale = isVector ? fitScale : Math.min(fitScale, 1);
-            setFitSize({
-              width: Math.max(1, Math.round(img.naturalWidth * scale)),
-              height: Math.max(1, Math.round(img.naturalHeight * scale)),
-            });
-          }
-          onLoad(event);
-        }}
-        onError={onError}
-      />
-      )}
+      {({ transformStyle, vectorTransformStyle, scale, animateTransform }) => {
+        const image = (
+          <img
+            src={src}
+            alt={alt}
+            draggable={false}
+            className="max-h-full max-w-full touch-none select-none rounded border border-border/15 bg-surface object-contain shadow-sm"
+            style={isVector && fitSize
+              ? {
+                  position: 'absolute',
+                  left: '50%',
+                  top: '50%',
+                  width: fitSize.width * scale,
+                  height: fitSize.height * scale,
+                  maxWidth: 'none',
+                  maxHeight: 'none',
+                  transform: 'translate3d(-50%, -50%, 0)',
+                  transition: animateTransform ? 'width 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), height 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none',
+                }
+              : fitSize
+                ? { ...transformStyle, width: fitSize.width, height: fitSize.height }
+                : isVector
+                  ? vectorTransformStyle
+                  : transformStyle}
+            onLoad={(event) => {
+              const img = event.currentTarget;
+              const container = img.parentElement;
+              if (container && img.naturalWidth > 0 && img.naturalHeight > 0) {
+                const availableWidth = Math.max(1, container.clientWidth - 2);
+                const availableHeight = Math.max(1, container.clientHeight - 2);
+                const fitScale = Math.min(availableWidth / img.naturalWidth, availableHeight / img.naturalHeight);
+                const nextScale = isVector ? fitScale : Math.min(fitScale, 1);
+                setFitSize({
+                  width: Math.max(1, Math.round(img.naturalWidth * nextScale)),
+                  height: Math.max(1, Math.round(img.naturalHeight * nextScale)),
+                });
+              }
+              onLoad(event);
+            }}
+            onError={onError}
+          />
+        );
+
+        if (!isVector || !fitSize) return image;
+        return (
+          <div
+            data-vector-zoom-surface
+            className="relative shrink-0 touch-none select-none"
+            style={{ ...vectorTransformStyle, width: fitSize.width, height: fitSize.height }}
+          >
+            {image}
+          </div>
+        );
+      }}
     </ZoomableViewport>
   );
 }
 
-function ZoomableMermaidDiagram({ svg, title, onZoomChange, onDoubleTap }: {
+function ZoomableMermaidContent({
+  svg,
+  title,
+  scale,
+  vectorTransformStyle,
+}: {
   svg: string;
   title: string;
-  onZoomChange?: (zoomed: boolean) => void;
-  onDoubleTap?: () => void;
+  scale: number;
+  vectorTransformStyle: CSSProperties;
 }) {
   const diagramRef = useRef<HTMLDivElement | null>(null);
 
@@ -4335,27 +4382,47 @@ function ZoomableMermaidDiagram({ svg, title, onZoomChange, onDoubleTap }: {
 
       const availableWidth = Math.max(1, root.clientWidth - 24);
       const availableHeight = Math.max(1, root.clientHeight - 24);
-      const scale = Math.min(availableWidth / width, availableHeight / height, 1);
-      svgNode.style.width = `${Math.max(1, Math.floor(width * scale))}px`;
-      svgNode.style.height = `${Math.max(1, Math.floor(height * scale))}px`;
+      const fitScale = Math.min(availableWidth / width, availableHeight / height, 1);
+      svgNode.style.width = `${Math.max(1, Math.floor(width * fitScale * scale))}px`;
+      svgNode.style.height = `${Math.max(1, Math.floor(height * fitScale * scale))}px`;
+      svgNode.style.maxWidth = 'none';
+      svgNode.style.maxHeight = 'none';
+      svgNode.style.transform = String(vectorTransformStyle.transform ?? '');
+      svgNode.style.transformOrigin = 'center center';
+      svgNode.style.transition = String(vectorTransformStyle.transition ?? 'none');
     };
 
     fitSvg();
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(fitSvg);
     observer?.observe(root);
     return () => observer?.disconnect();
-  }, [svg]);
+  }, [scale, svg, vectorTransformStyle]);
 
   return (
+    <div
+      ref={diagramRef}
+      role="img"
+      aria-label={title}
+      className="flex h-full w-full touch-none select-none items-center justify-center overflow-hidden rounded border border-border/15 bg-white p-3 text-slate-900 shadow-sm [&_svg]:block"
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+}
+
+function ZoomableMermaidDiagram({ svg, title, onZoomChange, onDoubleTap }: {
+  svg: string;
+  title: string;
+  onZoomChange?: (zoomed: boolean) => void;
+  onDoubleTap?: () => void;
+}) {
+  return (
     <ZoomableViewport resetKey={svg} onZoomChange={onZoomChange} onDoubleTap={onDoubleTap}>
-      {({ transformStyle }) => (
-        <div
-          ref={diagramRef}
-          role="img"
-          aria-label={title}
-          className="flex h-full w-full touch-none select-none items-center justify-center overflow-hidden rounded border border-border/15 bg-white p-3 text-slate-900 shadow-sm [&_svg]:block [&_svg]:max-h-full [&_svg]:max-w-full"
-          style={transformStyle}
-          dangerouslySetInnerHTML={{ __html: svg }}
+      {({ vectorTransformStyle, scale }) => (
+        <ZoomableMermaidContent
+          svg={svg}
+          title={title}
+          scale={scale}
+          vectorTransformStyle={vectorTransformStyle}
         />
       )}
     </ZoomableViewport>
