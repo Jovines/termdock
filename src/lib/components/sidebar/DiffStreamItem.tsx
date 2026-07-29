@@ -82,7 +82,12 @@ export function DiffStreamItem({
 
   const scheduleSettledNotification = useCallback(() => {
     if (!viewerReadyRef.current || settledNotifiedRef.current) return;
-    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    // Content-ready can be reported again whenever the canvas re-renders while
+    // scrolling. Treat the settle window as a one-shot grace period from the
+    // first ready frame instead of a debounce: a debounce is starved by a
+    // continuous gesture and keeps an already-rendered neighbour behind the
+    // loading frontier until scrolling stops.
+    if (settleTimerRef.current !== null) return;
     settleTimerRef.current = window.setTimeout(() => {
       settleTimerRef.current = null;
       if (!viewerReadyRef.current || settledNotifiedRef.current) return;
@@ -113,7 +118,10 @@ export function DiffStreamItem({
     if (!body) return;
 
     const recordHeight = () => {
-      const nextHeight = Math.ceil(body.getBoundingClientRect().height);
+      const nextHeight = Math.ceil(Math.max(
+        body.getBoundingClientRect().height,
+        body.scrollHeight,
+      ));
       const previousHeight = measuredBodyHeightRef.current;
       if (nextHeight > 0 && previousHeight !== nextHeight) {
         measuredBodyHeightRef.current = nextHeight;
@@ -163,7 +171,7 @@ export function DiffStreamItem({
         className="relative"
         data-diff-stream-body
         style={visible
-          ? { minHeight: contentReady ? 64 : measuredBodyHeight ?? 64, contentVisibility: 'auto' }
+          ? { minHeight: contentReady ? 64 : measuredBodyHeight ?? 64 }
           : { height: measuredBodyHeight ?? 64 }}
       >
         {visible ? (

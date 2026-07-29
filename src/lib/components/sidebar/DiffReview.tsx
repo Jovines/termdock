@@ -514,6 +514,11 @@ export function DiffReview({
   pumpLoadQueueRef.current = pumpLoadQueue;
 
   const prioritizeLoad = useCallback((key: string) => {
+    // Scroll-driven selection sync frequently points at the file that is
+    // already mounted under the viewport. It must not cancel an adjacent
+    // background mount; otherwise every slow scroll aborts the next file and
+    // only restarts it after the user hits the loading frontier.
+    if (mountedKeysRef.current.has(key)) return;
     const currentLoading = loadingKeyRef.current;
     if (currentLoading && currentLoading !== key && !stableMountedKeysRef.current.has(currentLoading)) {
       const next = new Set(mountedKeysRef.current);
@@ -523,7 +528,6 @@ export function DiffReview({
       replaceMountedKeys(next);
       loadingKeyRef.current = null;
     }
-    if (mountedKeysRef.current.has(key)) return;
     stableMountedKeysRef.current.delete(key);
     loadingKeyRef.current = key;
     replaceMountedKeys(new Set(mountedKeysRef.current).add(key));
