@@ -7,8 +7,9 @@ import { cancelIoSlot, getFileDiff, getGitBlobContent, isPreviewableImagePath, r
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 import { readCache, writeCache } from '../../utils/localStorageCache';
-import { findMovedLineCandidates } from './inlineDiff';
+import { findMovedLineCandidates, pairChangedLinesForDisplay } from './inlineDiff';
 import { parseDiffInWorker } from './diffWorkerClient';
+import { resolveLanguage } from '../../utils/syntaxHighlight';
 
 const MAX_DIFF_CACHE_ENTRIES = 24;
 const MAX_RENDER_DIFF_LINES = 8_000;
@@ -521,11 +522,22 @@ function alignAdjacentChangesForSplitView(hunk: HunkData): HunkData {
     }
     const deletes = block.filter((item) => item.type === 'delete');
     const inserts = block.filter((item) => item.type === 'insert');
-    const pairs = Math.min(deletes.length, inserts.length);
-    for (let index = 0; index < pairs; index += 1) {
-      changes.push(deletes[index], inserts[index]);
+    const pairs = pairChangedLinesForDisplay(
+      deletes.map((item) => ({ content: item.content, lineNumber: getChangeLineNumber(item) ?? -1 })),
+      inserts.map((item) => ({ content: item.content, lineNumber: getChangeLineNumber(item) ?? -1 })),
+    );
+    const pairedInsertByDeleteLine = new Map(pairs.map((pair) => [pair.oldLineNumber, pair.newLineNumber]));
+    const consumedInsertLines = new Set(pairs.map((pair) => pair.newLineNumber));
+    for (const item of block) {
+      const lineNumber = getChangeLineNumber(item) ?? -1;
+      if (item.type === 'insert' && consumedInsertLines.has(lineNumber)) continue;
+      changes.push(item);
+      if (item.type !== 'delete') continue;
+      const pairedInsertLine = pairedInsertByDeleteLine.get(lineNumber);
+      if (pairedInsertLine === undefined) continue;
+      const pairedInsert = inserts.find((candidate) => getChangeLineNumber(candidate) === pairedInsertLine);
+      if (pairedInsert) changes.push(pairedInsert);
     }
-    changes.push(...deletes.slice(pairs), ...inserts.slice(pairs));
   }
   return { ...hunk, changes };
 }
@@ -990,7 +1002,12 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     }
     let cancelled = false;
     const startedAt = performance.now();
-    parseDiffInWorker(diffContent, lightweight ? 'none' : inlineMode, oldSourceContent ?? undefined)
+    parseDiffInWorker(
+      diffContent,
+      lightweight ? 'none' : inlineMode,
+      oldSourceContent ?? undefined,
+      resolveLanguage(filePath) ?? undefined,
+    )
       .then((result) => {
         if (cancelled) return;
         setParsedFiles(result.files);

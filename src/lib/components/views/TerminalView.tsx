@@ -1,4 +1,5 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout } from '../../terminal';
@@ -22,6 +23,12 @@ const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'termdock:mobile-keyboard-preset
 const MOBILE_LONG_PRESS_MODE_STORAGE_KEY = 'termdock:mobile-long-press-mode';
 
 type Modifier = 'ctrl' | 'alt';
+
+function detectMobileTerminalLayout(): boolean {
+  if (typeof window === 'undefined') return false;
+  const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+  return hasTouch && window.innerWidth < 768;
+}
 
 const STREAM_OPTIONS = {
   retry: {
@@ -47,6 +54,10 @@ interface TerminalViewProps {
   resumeRequestToken?: number;
   resumeRequestReason?: Extract<RefreshReason, 'visibility' | 'bfcache' | 'online'>;
   onKeyboardVisibilityChange?: (sessionId: string, isOpen: boolean) => void;
+  suppressKeyboard?: boolean;
+  keyboardPortalTarget?: HTMLElement | null;
+  sharedMobileKeyboardLayout?: boolean;
+  suppressPageFlipRefresh?: boolean;
   showDebug?: boolean;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
 }
@@ -63,6 +74,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   resumeRequestToken = 0,
   resumeRequestReason = 'visibility',
   onKeyboardVisibilityChange,
+  suppressKeyboard = false,
+  keyboardPortalTarget = null,
+  sharedMobileKeyboardLayout = false,
+  suppressPageFlipRefresh = false,
   showDebug: externalShowDebug,
   onStatusChange,
 }) => {
@@ -83,7 +98,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }), [terminalSettings, fontSize]);
 
   const [sessionId] = React.useState(initialSessionId || uuidv4());
-  const [isMobile, setIsMobile] = React.useState(false);
+  // Must be correct on the first render. A false desktop default briefly sends
+  // autoFocus=true to TerminalViewport when split panes are reparented, which
+  // opens the soft keyboard before the mobile-detection effect can run.
+  const [isMobile, setIsMobile] = React.useState(detectMobileTerminalLayout);
   const [isIOS, setIsIOS] = React.useState(false);
   const [isInputFocused, setIsInputFocused] = React.useState(false);
   const [isViewportFocused, setIsViewportFocused] = React.useState(false);
@@ -251,6 +269,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
     wasActiveRef.current = true;
+    if (suppressPageFlipRefresh) {
+      return;
+    }
     // 双 rAF 等 swiper 的 transform 收尾，容器尺寸稳定后再 fit
     let raf1 = 0;
     let raf2 = 0;
@@ -267,7 +288,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       cancelAnimationFrame(raf2);
       window.clearTimeout(postTransitionTimer);
     };
-  }, [isActive, terminalSessionId]);
+  }, [isActive, suppressPageFlipRefresh, terminalSessionId]);
 
   React.useEffect(() => {
     isMobileRef.current = isMobile;
@@ -603,17 +624,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [mobileLongPressMode]);
 
   React.useEffect(() => {
-    const checkIsMobile = () => {
-      if (typeof window === 'undefined') return false;
-      const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
-      const isNarrow = window.innerWidth < 768;
-      return hasTouch && isNarrow;
-    };
-
-    setIsMobile(checkIsMobile());
+    setIsMobile(detectMobileTerminalLayout());
 
     const handleResize = () => {
-      setIsMobile(checkIsMobile());
+      setIsMobile(detectMobileTerminalLayout());
     };
 
     window.addEventListener('resize', handleResize);
@@ -1738,7 +1752,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // 让非激活 slide（已在 Swiper 视图外，用户看不见）保持展开，切进来时直接就是
   // 展开态，同类 tab 间切换不再闪动。交互仍由 isKeyboardInteractive=isActive 控制，
   // 非激活 tab 的按钮照旧禁用，不会误触。
-  const isKeyboardVisible = isMobile || toolbarPreset.showOnDesktop === true;
+  const isKeyboardVisible = !suppressKeyboard && (isMobile || toolbarPreset.showOnDesktop === true);
   const isKeyboardInteractive = isActive;
 
   // The translateY / margin-top formulas are always applied on mobile.
@@ -1747,19 +1761,49 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // avoids a 1-frame race between the CSS-variable rAF (useViewportHeight)
   // and the React-state rAF (useViewportKeyboardState).  Layout depends
   // ONLY on CSS custom properties, not React state.
-  const wrapperStyle = isMobile
+  const wrapperStyle = isMobile && !sharedMobileKeyboardLayout
     ? {
         transform: 'translateY(var(--kb-translate-y, 0px))',
         transition: 'none',
       } as React.CSSProperties
     : undefined;
 
-  const keyboardShrinkStyle = isMobile
+  const keyboardShrinkStyle = isMobile && !sharedMobileKeyboardLayout
     ? {
         marginTop: 'var(--kb-margin-top, 0px)',
         transition: 'none',
       } as React.CSSProperties
     : undefined;
+
+  const keyboard = (
+    <MobileKeyboard
+      visible={isKeyboardVisible}
+      interactive={isKeyboardInteractive}
+      presentation={isMobile ? 'mobile' : 'desktop-actions'}
+      activeModifier={activeModifier}
+      lockedModifier={lockedModifier}
+      disabled={quickKeysDisabled}
+      defaultShowExtended={showExtendedKeyboard}
+      presetLabel={presetLabel}
+      presetModeLabel={presetModeLabel}
+      presetMode={renderPresetMode}
+      presetOptions={presetOptions}
+      includeAlt={toolbarPreset.includeAlt}
+      presetRowLayout={toolbarPreset.rowLayout}
+      extraActions={runtimeToolbarActions}
+      onKeyPress={handleMobileKeyPress}
+      onTextPress={handleToolbarTextPress}
+      onPastePress={isMobile ? handleMobilePastePress : undefined}
+      longPressMode={mobileLongPressMode}
+      copyFeedback={mobileCopyFeedback}
+      onLongPressModeToggle={handleLongPressModeToggle}
+      onModifierToggle={handleModifierToggle}
+      onPresetSelect={handlePresetSelect}
+      onExpandedChange={handleExpandedChange}
+    />
+  );
+  const touchCapable = typeof window !== 'undefined' &&
+    (navigator.maxTouchPoints > 0 || 'ontouchstart' in window);
 
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden" style={wrapperStyle}>
@@ -1815,7 +1859,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               theme={xtermTheme}
               enableTouchScroll={isMobile}
               mobileLongPressMode={mobileLongPressMode}
-              autoFocus={!isMobile}
+              autoFocus={!isMobile && !touchCapable}
             />
           </ErrorBoundary>
         </div>
@@ -1830,31 +1874,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       </div>
 
-      <MobileKeyboard
-        visible={isKeyboardVisible}
-        interactive={isKeyboardInteractive}
-        presentation={isMobile ? 'mobile' : 'desktop-actions'}
-        activeModifier={activeModifier}
-        lockedModifier={lockedModifier}
-        disabled={quickKeysDisabled}
-        defaultShowExtended={showExtendedKeyboard}
-        presetLabel={presetLabel}
-        presetModeLabel={presetModeLabel}
-        presetMode={renderPresetMode}
-        presetOptions={presetOptions}
-        includeAlt={toolbarPreset.includeAlt}
-        presetRowLayout={toolbarPreset.rowLayout}
-        extraActions={runtimeToolbarActions}
-        onKeyPress={handleMobileKeyPress}
-        onTextPress={handleToolbarTextPress}
-        onPastePress={isMobile ? handleMobilePastePress : undefined}
-        longPressMode={mobileLongPressMode}
-        copyFeedback={mobileCopyFeedback}
-        onLongPressModeToggle={handleLongPressModeToggle}
-        onModifierToggle={handleModifierToggle}
-        onPresetSelect={handlePresetSelect}
-        onExpandedChange={handleExpandedChange}
-      />
+      {keyboardPortalTarget
+        ? (suppressKeyboard ? null : createPortal(keyboard, keyboardPortalTarget))
+        : keyboard}
     </div>
   );
 };

@@ -12,6 +12,8 @@ import {
   ArrowDownWideNarrow as RiSortDescLine,
   Pin as RiPushpinLine,
   PinOff as RiPinOffLine,
+  Columns2 as RiSplitLine,
+  Rows2 as RiSplitRowsLine,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
@@ -52,7 +54,12 @@ interface LeftSidebarProps {
     gitStatus?: GitStatusReport | null;
   }>; 
   onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => void;
-  onCloseSession: (sessionId: string) => void;
+  onCloseSession: (sessionId: string, event: React.MouseEvent) => void;
+  onSplitSession: (sessionId: string) => void;
+  onCloseSplit: () => void;
+  splitSessionIds: string[];
+  splitDirection: 'horizontal' | 'vertical';
+  onSetSplitDirection: (direction: 'horizontal' | 'vertical') => void;
   onReorderSessions: (sessionIds: string[]) => void;
   // 打开某个会话的操作菜单（重命名/复制目录/关闭等）。触屏用「超长按」触发，
   // 桌面端同时挂到右键 contextmenu；不传则两种手势都不生效。
@@ -93,7 +100,9 @@ export function LeftSidebar(
   {
     isOpen, drawerWidthPx, onClose, onOpen,
     sessions, activeSessionId, sessionStates,
-    onNewSession, onCloseSession, onReorderSessions, onSessionMenu, onOpenSettings,
+    onNewSession, onCloseSession, onSplitSession, onCloseSplit, splitSessionIds,
+    splitDirection, onSetSplitDirection,
+    onReorderSessions, onSessionMenu, onOpenSettings,
     tmuxAvailable = true,
     defaultSessionMode = 'shell',
     push,
@@ -259,6 +268,7 @@ export function LeftSidebar(
     grouped?: boolean,
   ) => {
     const isActive = session.id === activeSessionId;
+    const isSplit = splitSessionIds.includes(session.id);
     const ts = sessionStates.get(session.id);
     const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
     const displayName = getSessionDisplayName(
@@ -358,7 +368,25 @@ export function LeftSidebar(
           type="button"
           onClick={(event) => {
             event.stopPropagation();
-            onCloseSession(session.id);
+            if (isSplit) {
+              onCloseSplit();
+            } else {
+              onSplitSession(session.id);
+            }
+          }}
+          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition hover:bg-primary/15 hover:text-primary active:scale-95 ${
+            isSplit ? 'bg-primary/15 text-primary' : 'text-muted-foreground/70'
+          }`}
+          aria-label={`${isSplit ? t('tab.splitClose') : t('tab.split')} ${displayName}`}
+          title={isSplit ? t('tab.splitClose') : t('tab.split')}
+        >
+          <RiSplitLine size={13} />
+        </button>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onCloseSession(session.id, event);
           }}
           className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition hover:bg-destructive/15 hover:text-destructive active:scale-95"
           aria-label={t('sidebar.closeSession', { name: displayName })}
@@ -368,7 +396,7 @@ export function LeftSidebar(
         </button>
       </>
     );
-  }, [activeSessionId, sessionStates, onCloseSession, onSessionMenu, bindSessionLongPress, t]);
+  }, [activeSessionId, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onSessionMenu, bindSessionLongPress, t]);
 
   // 分组模式下：按 cwd 把当前可见会话归组。
   const folderGroups = useMemo(() => {
@@ -745,6 +773,42 @@ export function LeftSidebar(
           </DragDropContext>
         )}
       </div>
+
+      {splitSessionIds.length === 2 && (
+        <div className="hidden shrink-0 items-center gap-1.5 border-t border-border/15 px-2 py-1.5 md:flex">
+          <span className="min-w-0 flex-1 truncate px-1 text-[11px] font-medium text-muted-foreground">
+            {t('tab.splitLayout')}
+          </span>
+          <button
+            type="button"
+            onClick={() => onSetSplitDirection('horizontal')}
+            className={`inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11px] transition-colors ${
+              splitDirection === 'horizontal'
+                ? 'bg-primary/15 text-primary'
+                : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+            }`}
+            title={`${t('tab.splitHorizontal')} · Ctrl/⌘+Shift+←/→`}
+            aria-label={t('tab.splitHorizontal')}
+          >
+            <RiSplitLine size={13} />
+            {t('tab.splitHorizontal')}
+          </button>
+          <button
+            type="button"
+            onClick={() => onSetSplitDirection('vertical')}
+            className={`inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11px] transition-colors ${
+              splitDirection === 'vertical'
+                ? 'bg-primary/15 text-primary'
+                : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+            }`}
+            title={`${t('tab.splitVertical')} · Ctrl/⌘+Shift+↑/↓`}
+            aria-label={t('tab.splitVertical')}
+          >
+            <RiSplitRowsLine size={13} />
+            {t('tab.splitVertical')}
+          </button>
+        </div>
+      )}
 
       {/* Footer — split new-session button */}
       <div className="shrink-0 border-t border-border/15 p-2">

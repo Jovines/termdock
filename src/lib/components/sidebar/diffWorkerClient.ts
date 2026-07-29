@@ -62,10 +62,15 @@ function getWorker(): Worker {
   return worker;
 }
 
-export function parseDiffInWorker(diffContent: string, inlineMode: DiffInlineMode, oldSource?: string): Promise<DiffWorkerResult> {
+export function parseDiffInWorker(
+  diffContent: string,
+  inlineMode: DiffInlineMode,
+  oldSource?: string,
+  language?: string,
+): Promise<DiffWorkerResult> {
   const id = ++requestSeq;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    getWorker().postMessage({ id, diffContent, inlineMode, oldSource });
+    getWorker().postMessage({ id, diffContent, inlineMode, oldSource, language });
   });
 }

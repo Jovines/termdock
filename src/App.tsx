@@ -542,6 +542,8 @@ function App() {
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
+  const [splitSessionIds, setSplitSessionIds] = React.useState<string[]>([]);
+  const [splitDirection, setSplitDirection] = React.useState<'horizontal' | 'vertical'>('horizontal');
   // Only re-render the chrome when tab metadata changes, not on every terminal output chunk.
   const [terminalSessions, setTerminalSessions] = useState(() =>
     pickTabTerminalSessions(useTerminalStore.getState().sessions),
@@ -630,6 +632,7 @@ function App() {
   const [tabMenuAnchor, setTabMenuAnchor] = useState<{ x: number; y: number } | null>(null);
   const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
   const [sidebarCloseChoiceSessionId, setSidebarCloseChoiceSessionId] = useState<string | null>(null);
+  const [sidebarCloseAnchor, setSidebarCloseAnchor] = useState<{ x: number; y: number } | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   // 移动端重命名卡片每次打开只自动聚焦一次——父组件会随终端输出频繁重渲染，
   // 回调 ref 不设防的话会反复 focus/select，把用户正在输入的内容全选掉。
@@ -1879,9 +1882,16 @@ function App() {
     }
   }, []);
 
-  const handleSessionDataUpdate = useCallback((data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => {
+  const handleSessionDataUpdate = useCallback((data: {
+    sessions: TerminalSessionInfo[];
+    activeSessionId: string | null;
+    splitSessionIds: string[];
+    splitDirection: 'horizontal' | 'vertical';
+  }) => {
     setSessions(data.sessions);
     setActiveSessionId(data.activeSessionId);
+    setSplitSessionIds(data.splitSessionIds);
+    setSplitDirection(data.splitDirection);
     useTerminalStore.getState().setActiveSessionId(data.activeSessionId);
   }, []);
 
@@ -1956,13 +1966,24 @@ function App() {
     window.dispatchEvent(new CustomEvent('close-terminal-session', { detail }));
   }, []);
 
-  const handleSidebarCloseSession = useCallback((sessionId: string) => {
+  const dispatchOpenSplitChooser = useCallback((sessionId?: string | null) => {
+    const targetSessionId = sessionId ?? activeSessionId;
+    if (!targetSessionId) return;
+    window.dispatchEvent(new CustomEvent('open-terminal-split-chooser', { detail: targetSessionId }));
+  }, [activeSessionId]);
+
+  const dispatchSetSplitDirection = useCallback((direction: 'horizontal' | 'vertical') => {
+    window.dispatchEvent(new CustomEvent('set-terminal-split-direction', { detail: direction }));
+  }, []);
+
+  const handleSidebarCloseSession = useCallback((sessionId: string, event: React.MouseEvent) => {
     const session = sessions.find((s) => s.id === sessionId);
     if (!session) return;
     if (session.mode !== 'tmux') {
       dispatchCloseSession({ sessionId, source: 'sidebar', closeMode: 'auto' });
       return;
     }
+    setSidebarCloseAnchor({ x: event.clientX, y: event.clientY });
     setSidebarCloseChoiceSessionId(sessionId);
     setTmuxKillError(null);
   }, [sessions, dispatchCloseSession]);
@@ -3086,13 +3107,21 @@ function App() {
             className="fixed inset-0 z-menu-backdrop bg-[var(--app-backdrop-soft)] backdrop-blur-sm cursor-default animate-fade-in"
             onClick={() => {
               setSidebarCloseChoiceSessionId(null);
+              setSidebarCloseAnchor(null);
               setTmuxKillError(null);
             }}
             aria-label="Close close-session chooser"
           />
           <div
-            className="fixed inset-x-3 bottom-6 z-menu-panel mx-auto max-w-sm rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in sm:bottom-auto sm:top-[15%]"
-            style={{ paddingBottom: safeBottomInset }}
+            className={`fixed z-menu-panel rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in ${
+              sidebarCloseAnchor && isDesktopViewport
+                ? ''
+                : 'inset-x-3 bottom-6 mx-auto max-w-sm sm:bottom-auto sm:top-[15%]'
+            }`}
+            style={sidebarCloseAnchor && isDesktopViewport
+              ? { ...getDesktopTabMenuPosition(sidebarCloseAnchor), paddingBottom: safeBottomInset }
+              : { paddingBottom: safeBottomInset }
+            }
           >
             <div className="border-b border-border/15 px-4 py-3">
               <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Tmux session</div>
@@ -3109,6 +3138,7 @@ function App() {
                     closeMode: 'detach',
                   });
                   setSidebarCloseChoiceSessionId(null);
+                  setSidebarCloseAnchor(null);
                   setTmuxKillError(null);
                 }}
                 className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-foreground transition hover:bg-surface-2"
@@ -3130,6 +3160,7 @@ function App() {
                     closeMode: 'destroy',
                   });
                   setSidebarCloseChoiceSessionId(null);
+                  setSidebarCloseAnchor(null);
                 }}
                 className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-destructive transition hover:bg-destructive/10"
               >
@@ -3150,6 +3181,7 @@ function App() {
                 type="button"
                 onClick={() => {
                   setSidebarCloseChoiceSessionId(null);
+                  setSidebarCloseAnchor(null);
                   setTmuxKillError(null);
                 }}
                 className="w-full rounded-full bg-surface-2 px-3 py-2 text-[12px] font-medium text-muted-foreground transition hover:bg-surface hover:text-foreground"
@@ -3951,6 +3983,11 @@ function App() {
         sessionStates={terminalSessions}
         onNewSession={(opts) => dispatchNewSession(opts)}
         onCloseSession={handleSidebarCloseSession}
+        onSplitSession={dispatchOpenSplitChooser}
+        onCloseSplit={() => window.dispatchEvent(new CustomEvent('close-terminal-split'))}
+        splitSessionIds={splitSessionIds}
+        splitDirection={splitDirection}
+        onSetSplitDirection={dispatchSetSplitDirection}
         onReorderSessions={applySessionOrder}
         onSessionMenu={openTabMenu}
         onOpenSettings={handleOpenSettings}
@@ -4039,6 +4076,11 @@ function App() {
             sessionStates={terminalSessions}
             onNewSession={(opts) => dispatchNewSession(opts)}
             onCloseSession={handleSidebarCloseSession}
+            onSplitSession={dispatchOpenSplitChooser}
+            onCloseSplit={() => window.dispatchEvent(new CustomEvent('close-terminal-split'))}
+            splitSessionIds={splitSessionIds}
+            splitDirection={splitDirection}
+            onSetSplitDirection={dispatchSetSplitDirection}
             onReorderSessions={applySessionOrder}
             onSessionMenu={openTabMenu}
             onOpenSettings={handleOpenSettings}

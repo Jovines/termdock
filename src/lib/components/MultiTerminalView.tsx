@@ -10,9 +10,11 @@ import { getDefaultTerminalSettings, type TerminalSettings } from '../terminal/s
 import type { TermdockColorTheme } from '../terminal/theme';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
-import { deriveGroupedOrder } from '../terminal/display';
+import { deriveGroupedOrder, getCwdLeafName, getSessionDisplayLines } from '../terminal/display';
 import { createDebugLogger } from '../utils/debug';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
+import { Check, Columns2, Folder, Plus, X } from 'lucide-react';
+import { useI18n } from '../i18n';
 
 interface TerminalSession {
   id: string;
@@ -57,6 +59,89 @@ type ResumeRequest = {
   token: number;
   reason: 'visibility' | 'bfcache' | 'online';
 };
+
+type SplitWorkspace = {
+  primaryId: string;
+  secondaryId: string;
+  ratio: number;
+  direction: 'horizontal' | 'vertical';
+};
+
+type WorkspaceSlide = {
+  key: string;
+  sessions: TerminalSession[];
+};
+
+const SPLIT_WORKSPACE_STORAGE_KEY = 'termdock:split-workspace:v1';
+const MIN_SPLIT_RATIO = 0.1;
+const MAX_SPLIT_RATIO = 0.9;
+const MOBILE_MIN_SPLIT_RATIO = 0.28;
+const MOBILE_SPLIT_LONG_PRESS_MS = 300;
+const MOBILE_SPLIT_MOVE_CANCEL_PX = 8;
+const MOBILE_SPLIT_HIT_SLOP_PX = 12;
+const DESKTOP_SPLIT_MIN_WIDTH_PX = 280;
+const DESKTOP_SPLIT_MIN_HEIGHT_PX = 160;
+
+function clampSplitRatio(value: number): number {
+  return Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, value));
+}
+
+function detectMobileSplitLayout(): { mobile: boolean; landscape: boolean } {
+  if (typeof window === 'undefined') return { mobile: false, landscape: false };
+  const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+  const mobile = hasTouch && Math.min(window.innerWidth, window.innerHeight) < 768;
+  return {
+    mobile,
+    landscape: mobile && window.innerWidth > window.innerHeight,
+  };
+}
+
+function readSplitWorkspace(): SplitWorkspace | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(SPLIT_WORKSPACE_STORAGE_KEY) || 'null') as Partial<SplitWorkspace> | null;
+    if (
+      !parsed ||
+      typeof parsed.primaryId !== 'string' ||
+      typeof parsed.secondaryId !== 'string' ||
+      parsed.primaryId === parsed.secondaryId
+    ) {
+      return null;
+    }
+    return {
+      primaryId: parsed.primaryId,
+      secondaryId: parsed.secondaryId,
+      ratio: clampSplitRatio(typeof parsed.ratio === 'number' ? parsed.ratio : 0.5),
+      direction: parsed.direction === 'vertical' ? 'vertical' : 'horizontal',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildWorkspaceSlides(sessions: TerminalSession[], split: SplitWorkspace | null): WorkspaceSlide[] {
+  if (!split) {
+    return sessions.map((session) => ({ key: session.id, sessions: [session] }));
+  }
+  const primary = sessions.find((session) => session.id === split.primaryId);
+  const secondary = sessions.find((session) => session.id === split.secondaryId);
+  if (!primary || !secondary) {
+    return sessions.map((session) => ({ key: session.id, sessions: [session] }));
+  }
+  const pairIds = new Set([primary.id, secondary.id]);
+  const pair = [primary, secondary];
+  const slides: WorkspaceSlide[] = [];
+  for (const session of sessions) {
+    if (!pairIds.has(session.id)) {
+      slides.push({ key: session.id, sessions: [session] });
+      continue;
+    }
+    if (!slides.some((slide) => slide.key === `split:${primary.id}:${secondary.id}`)) {
+      slides.push({ key: `split:${primary.id}:${secondary.id}`, sessions: pair });
+    }
+  }
+  return slides;
+}
 
 function cancelSwiperWrapperAnimations(swiper: SwiperInstance): void {
   const wrapper = (swiper as unknown as { wrapperEl?: HTMLElement }).wrapperEl;
@@ -238,7 +323,12 @@ interface MultiTerminalViewProps {
   defaultSessionMode?: TerminalMode;
   defaultTmuxSessionName?: string;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
-  onSessionDataUpdate?: (data: { sessions: TerminalSessionInfo[]; activeSessionId: string | null }) => void;
+  onSessionDataUpdate?: (data: {
+    sessions: TerminalSessionInfo[];
+    activeSessionId: string | null;
+    splitSessionIds: string[];
+    splitDirection: 'horizontal' | 'vertical';
+  }) => void;
 }
 
 function pickCwdById(sessions: Map<string, { cwd: string | null }>): Map<string, string | null> {
@@ -278,6 +368,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   onStatusChange,
   onSessionDataUpdate,
 }) => {
+  const { t } = useI18n();
   const debugSession = useMemo(() => createDebugLogger('session'), []);
   const debugTerminal = useMemo(() => createDebugLogger('terminal'), []);
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
@@ -288,26 +379,37 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const swiperRef = useRef<SwiperInstance | null>(null);
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
   const [focusTransferRequest, setFocusTransferRequest] = useState<{ sessionId: string; token: number } | null>(null);
+  const [splitWorkspace, setSplitWorkspace] = useState<SplitWorkspace | null>(() => readSplitWorkspace());
+  const [splitChooserOpen, setSplitChooserOpen] = useState(false);
+  const [splitNotice, setSplitNotice] = useState<string | null>(null);
+  const [isCreatingSplitSession, setIsCreatingSplitSession] = useState(false);
+  const [isMobileLayout, setIsMobileLayout] = useState(() => detectMobileSplitLayout().mobile);
+  const [isMobileLandscape, setIsMobileLandscape] = useState(() => detectMobileSplitLayout().landscape);
+  const [splitKeyboardPortalTarget, setSplitKeyboardPortalTarget] = useState<HTMLDivElement | null>(null);
+  const [mobileKeyboardOpenSessionId, setMobileKeyboardOpenSessionId] = useState<string | null>(null);
   const terminalFocusAvailableRef = useRef(terminalFocusAvailable);
   const isTouchSwipeRef = useRef(false);
   const touchSwipeReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const swiperDrivenActiveSessionIdRef = useRef<string | null>(null);
-  const isMobileRef = useRef(false);
+  const isMobileRef = useRef(isMobileLayout);
   const activeSessionIdRef = useRef<string | null>(null);
   const sessionsRef = useRef<TerminalSession[]>([]);
   const activeSessionIndexRef = useRef(0);
   const persistedActiveIdRef = useRef<string | null>(null);
   const isLoadingRef = useRef(false);
   const isRestoringRef = useRef(true);
-  const handleNewSessionRef = useRef<((options?: NewSessionEventDetail) => Promise<void>) | null>(null);
+  const handleNewSessionRef = useRef<((options?: NewSessionEventDetail) => Promise<string | null>) | null>(null);
   const lastDuplicateMappingSnapshotRef = useRef('');
+  const splitDragCleanupRef = useRef<(() => void) | null>(null);
+  const suppressMobileKeyboardOpenUntilRef = useRef(0);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const check = () => {
-      const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
-      const isNarrow = window.innerWidth < 768;
-      isMobileRef.current = hasTouch && isNarrow;
+      const next = detectMobileSplitLayout();
+      isMobileRef.current = next.mobile;
+      setIsMobileLayout(next.mobile);
+      setIsMobileLandscape(next.landscape);
     };
     check();
     window.addEventListener('resize', check);
@@ -354,6 +456,46 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   );
   const arrangedRef = useRef<TerminalSession[]>(arranged);
   arrangedRef.current = arranged;
+  const workspaceSlides = useMemo(
+    () => buildWorkspaceSlides(arranged, splitWorkspace),
+    [arranged, splitWorkspace],
+  );
+  const workspaceSlidesRef = useRef<WorkspaceSlide[]>(workspaceSlides);
+  workspaceSlidesRef.current = workspaceSlides;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (splitWorkspace) {
+      window.localStorage.setItem(SPLIT_WORKSPACE_STORAGE_KEY, JSON.stringify(splitWorkspace));
+    } else {
+      window.localStorage.removeItem(SPLIT_WORKSPACE_STORAGE_KEY);
+    }
+  }, [splitWorkspace]);
+
+  useEffect(() => {
+    if (isLoading || isRestoring || !splitWorkspace) return;
+    const primary = sessions.find((session) => session.id === splitWorkspace.primaryId);
+    const secondary = sessions.find((session) => session.id === splitWorkspace.secondaryId);
+    if (!primary || !secondary) {
+      setSplitWorkspace(null);
+      return;
+    }
+    if (!groupByFolder) return;
+    const primaryCwd = cwdById.get(primary.id) ?? null;
+    const secondaryCwd = cwdById.get(secondary.id) ?? null;
+    if ((primaryCwd ?? '') !== (secondaryCwd ?? '')) {
+      setSplitWorkspace(null);
+      setSplitNotice(t('tab.splitEndedGrouped'));
+    }
+  }, [cwdById, groupByFolder, isLoading, isRestoring, sessions, splitWorkspace, t]);
+
+  useEffect(() => {
+    if (!splitNotice) return;
+    const timer = window.setTimeout(() => setSplitNotice(null), 3200);
+    return () => window.clearTimeout(timer);
+  }, [splitNotice]);
+
+  useEffect(() => () => splitDragCleanupRef.current?.(), []);
 
   activeSessionIdRef.current = activeSessionId;
   sessionsRef.current = sessions;
@@ -369,6 +511,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const targetTranslate = swiper ? getSwiperTargetTranslate(swiper, targetIndex) : null;
     return {
       sessionsLength: sessionsRef.current.length,
+      workspaceSlidesLength: workspaceSlidesRef.current.length,
       sessionIds: sessionsRef.current.map((session) => session.id),
       activeSessionId: activeSessionIdRef.current,
       activeSessionIndex: targetIndex,
@@ -417,9 +560,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (!activeSessionId) {
       return 0;
     }
-    const foundIndex = arranged.findIndex((s) => s.id === activeSessionId);
+    const foundIndex = workspaceSlides.findIndex((slide) =>
+      slide.sessions.some((session) => session.id === activeSessionId)
+    );
     return foundIndex >= 0 ? foundIndex : 0;
-  }, [arranged, activeSessionId]);
+  }, [workspaceSlides, activeSessionId]);
 
   activeSessionIndexRef.current = activeSessionIndex;
 
@@ -441,11 +586,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const syncSwiperToActiveIndex = useCallback((reason: string, options: SyncSwiperOptions = {}) => {
     const swiper = swiperRef.current;
     const targetIndex = activeSessionIndexRef.current;
-    const currentSessions = sessionsRef.current;
-    if (!swiper || currentSessions.length === 0) {
+    const currentSlides = workspaceSlidesRef.current;
+    if (!swiper || currentSlides.length === 0) {
       return;
     }
-    if (targetIndex < 0 || targetIndex >= currentSessions.length) {
+    if (targetIndex < 0 || targetIndex >= currentSlides.length) {
       return;
     }
     if (isTouchSwipeRef.current) {
@@ -545,12 +690,23 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [sessions, activeSessionId]);
 
   const handleKeyboardVisibilityChange = useCallback((sessionId: string, isOpen: boolean) => {
+    if (isOpen && Date.now() < suppressMobileKeyboardOpenUntilRef.current) {
+      keyboardOpenBySessionRef.current[sessionId] = false;
+      return;
+    }
     keyboardOpenBySessionRef.current[sessionId] = isOpen;
+    setMobileKeyboardOpenSessionId((current) => {
+      if (isOpen) return sessionId;
+      return current === sessionId ? null : current;
+    });
   }, []);
 
   const handleSwiperChange = useCallback((instance: SwiperInstance) => {
     // instance.activeIndex 与 arranged（slide 渲染顺序）对应。
-    const nextSessionId = arrangedRef.current[instance.activeIndex]?.id;
+    const nextSlide = workspaceSlidesRef.current[instance.activeIndex];
+    const nextSessionId = nextSlide?.sessions.some((session) => session.id === activeSessionId)
+      ? activeSessionId
+      : nextSlide?.sessions[0]?.id;
     logSwiperState('[swiper:slide-change]', {
       nextSessionId: nextSessionId ?? null,
       instanceActiveIndex: instance.activeIndex,
@@ -610,12 +766,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   useEffect(() => {
     const swiper = swiperRef.current;
     if (!swiper) return;
-    const nextAllow = arranged.length > 1 && !sidebarOverlayOpen;
+    const nextAllow = workspaceSlides.length > 1 && !sidebarOverlayOpen && !splitChooserOpen;
     if (swiper.allowTouchMove !== nextAllow) {
       swiper.allowTouchMove = nextAllow;
       logSwiperState('[swiper:allow-touch-sync]', { nextAllow, sidebarOverlayOpen });
     }
-  }, [arranged.length, logSwiperState, sidebarOverlayOpen]);
+  }, [workspaceSlides.length, logSwiperState, sidebarOverlayOpen, splitChooserOpen]);
 
   const updateSwiperLayout = useCallback((reason: string) => {
     const swiper = swiperRef.current;
@@ -649,7 +805,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   // 分组开关 / 排列顺序变化后，slide 顺序改变 → 让 Swiper 重算 snapGrid 并把
   // translate 对齐到当前 active 的位置。
-  const arrangedKey = arranged.map((s) => s.id).join('\u0000');
+  const arrangedKey = workspaceSlides.map((slide) => slide.key).join('\u0000');
   useEffect(() => {
     requestAnimationFrame(() => updateSwiperLayout('group-change'));
   }, [groupByFolder, arrangedKey, updateSwiperLayout]);
@@ -734,8 +890,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         tmuxSessionName: s.tmuxSessionName,
       })),
       activeSessionId,
+      splitSessionIds: splitWorkspace
+        ? [splitWorkspace.primaryId, splitWorkspace.secondaryId]
+        : [],
+      splitDirection: splitWorkspace?.direction ?? 'horizontal',
     });
-  }, [sessions, activeSessionId, onSessionDataUpdate]);
+  }, [sessions, activeSessionId, splitWorkspace, onSessionDataUpdate]);
 
   // 恢复会话（尝试复用现有 session）- 只执行一次
   useEffect(() => {
@@ -938,11 +1098,166 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         mode: nextSession.mode,
         tmuxSessionName: nextSession.tmuxSessionName,
       });
+      return nextSession.id;
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);
+      return null;
     }
   }, [defaultSessionMode, defaultTmuxSessionName, activeSessionId, openSession, debugSession]);
   handleNewSessionRef.current = handleNewSession;
+
+  const activateSplitPane = useCallback((
+    sessionId: string,
+    options: { preserveMobileKeyboard?: boolean } = {},
+  ) => {
+    const previousSessionId = activeSessionIdRef.current;
+    const shouldKeepKeyboardOpen = !!previousSessionId &&
+      keyboardOpenBySessionRef.current[previousSessionId] === true;
+    setActiveSessionId(sessionId);
+    if (isMobileRef.current && options.preserveMobileKeyboard === false) {
+      suppressMobileKeyboardOpenUntilRef.current = Date.now() + 600;
+      if (previousSessionId) {
+        keyboardOpenBySessionRef.current[previousSessionId] = false;
+      }
+      setMobileKeyboardOpenSessionId(null);
+      setFocusTransferRequest(null);
+      const activeElement = document.activeElement;
+      if (
+        activeElement instanceof HTMLTextAreaElement &&
+        activeElement.closest('.terminal-viewport-container')
+      ) {
+        activeElement.blur();
+      }
+      return;
+    }
+    if (shouldKeepKeyboardOpen && isMobileRef.current) {
+      setMobileKeyboardOpenSessionId(sessionId);
+    }
+    if (terminalFocusAvailableRef.current && (!isMobileRef.current || shouldKeepKeyboardOpen)) {
+      setFocusTransferRequest({ sessionId, token: Date.now() });
+    }
+  }, []);
+
+  const openSplitChooser = useCallback((sessionId: string) => {
+    setActiveSessionId(sessionId);
+    setSplitChooserOpen(true);
+    setSplitNotice(null);
+  }, []);
+
+  const pairWithExistingSession = useCallback((secondaryId: string) => {
+    const primaryId = activeSessionIdRef.current;
+    if (!primaryId || primaryId === secondaryId) return;
+    const primaryCwd = cwdById.get(primaryId) ?? null;
+    const secondaryCwd = cwdById.get(secondaryId) ?? null;
+    if (groupByFolder && (primaryCwd ?? '') !== (secondaryCwd ?? '')) {
+      setSplitNotice(t('tab.splitUnavailableGrouped'));
+      return;
+    }
+    setSplitWorkspace({ primaryId, secondaryId, ratio: 0.5, direction: 'horizontal' });
+    setSplitChooserOpen(false);
+    activateSplitPane(primaryId, { preserveMobileKeyboard: false });
+  }, [activateSplitPane, cwdById, groupByFolder, t]);
+
+  const createSessionInSplit = useCallback(async () => {
+    const primaryId = activeSessionIdRef.current;
+    if (!primaryId || isCreatingSplitSession) return;
+    setIsCreatingSplitSession(true);
+    const cwd = useTerminalStore.getState().sessions.get(primaryId)?.cwd ?? undefined;
+    const secondaryId = await handleNewSession({
+      cwd: cwd || undefined,
+      mode: defaultSessionMode,
+    });
+    setIsCreatingSplitSession(false);
+    if (!secondaryId) {
+      setSplitNotice(t('common.error'));
+      return;
+    }
+    setSplitWorkspace({ primaryId, secondaryId, ratio: 0.5, direction: 'horizontal' });
+    setSplitChooserOpen(false);
+    activateSplitPane(primaryId, { preserveMobileKeyboard: false });
+  }, [activateSplitPane, defaultSessionMode, handleNewSession, isCreatingSplitSession, t]);
+
+  const closeSplitWorkspace = useCallback((focusSessionId?: string) => {
+    setSplitWorkspace(null);
+    if (focusSessionId) {
+      activateSplitPane(focusSessionId, { preserveMobileKeyboard: false });
+    }
+  }, [activateSplitPane]);
+
+  const startSplitResize = useCallback((
+    event: React.PointerEvent<HTMLButtonElement>,
+    container: HTMLDivElement,
+    vertical: boolean,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const divider = event.currentTarget;
+    const pointerId = event.pointerId;
+    const pointerStart = { x: event.clientX, y: event.clientY };
+    divider.setPointerCapture?.(pointerId);
+    const rect = container.getBoundingClientRect();
+    let dragging = !isMobileLayout;
+    let longPressTimer: number | null = null;
+
+    const update = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId !== pointerId) return;
+      if (!dragging) {
+        const distance = Math.hypot(
+          pointerEvent.clientX - pointerStart.x,
+          pointerEvent.clientY - pointerStart.y,
+        );
+        if (distance > MOBILE_SPLIT_MOVE_CANCEL_PX && longPressTimer !== null) {
+          window.clearTimeout(longPressTimer);
+          longPressTimer = null;
+        }
+        return;
+      }
+      pointerEvent.preventDefault();
+      const rawRatio = vertical
+        ? (pointerEvent.clientY - rect.top) / rect.height
+        : (pointerEvent.clientX - rect.left) / rect.width;
+      const dimension = vertical ? rect.height : rect.width;
+      const minPanePx = isMobileLayout
+        ? 0
+        : vertical
+          ? DESKTOP_SPLIT_MIN_HEIGHT_PX
+          : DESKTOP_SPLIT_MIN_WIDTH_PX;
+      const minimumRatio = minPanePx > 0
+        ? Math.min(0.5, minPanePx / Math.max(1, dimension))
+        : MOBILE_MIN_SPLIT_RATIO;
+      const nextRatio = Math.min(1 - minimumRatio, Math.max(minimumRatio, rawRatio));
+      setSplitWorkspace((current) => current ? { ...current, ratio: nextRatio } : current);
+    };
+    const stop = () => {
+      if (longPressTimer !== null) {
+        window.clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
+      window.removeEventListener('pointermove', update);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      divider.classList.remove('bg-primary');
+      if (isMobileLayout) {
+        document.dispatchEvent(new CustomEvent('termdock:gesture-lock', { detail: { locked: false } }));
+      }
+      splitDragCleanupRef.current = null;
+    };
+    splitDragCleanupRef.current?.();
+    splitDragCleanupRef.current = stop;
+    window.addEventListener('pointermove', update);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+
+    if (isMobileLayout) {
+      document.dispatchEvent(new CustomEvent('termdock:gesture-lock', { detail: { locked: true } }));
+      longPressTimer = window.setTimeout(() => {
+        longPressTimer = null;
+        dragging = true;
+        divider.classList.add('bg-primary');
+        navigator.vibrate?.(8);
+      }, MOBILE_SPLIT_LONG_PRESS_MS);
+    }
+  }, [isMobileLayout]);
 
   // Handle session switching from custom event
   const handleSwitchSession = useCallback((sessionId: string) => {
@@ -1086,6 +1401,22 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       setFocusTransferRequest({ sessionId, token: Date.now() });
     };
 
+    const handleOpenSplitChooserEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<string>;
+      if (!customEvent.detail) return;
+      openSplitChooser(customEvent.detail);
+    };
+
+    const handleCloseSplitEvent = () => {
+      closeSplitWorkspace(activeSessionIdRef.current ?? undefined);
+    };
+
+    const handleSetSplitDirectionEvent = (event: Event) => {
+      const direction = (event as CustomEvent<'horizontal' | 'vertical'>).detail;
+      if (direction !== 'horizontal' && direction !== 'vertical') return;
+      setSplitWorkspace((current) => current ? { ...current, direction } : current);
+    };
+
     const handleCycleSessionEvent = (event: Event) => {
       const customEvent = event as CustomEvent<{ direction: 'prev' | 'next' } | undefined>;
       const direction = customEvent.detail?.direction;
@@ -1140,6 +1471,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     window.addEventListener('new-terminal-session', handleNewSessionEvent);
     window.addEventListener('switch-terminal-session', handleSwitchSessionEvent);
     window.addEventListener('focus-active-terminal-session', handleFocusActiveSessionEvent);
+    window.addEventListener('open-terminal-split-chooser', handleOpenSplitChooserEvent);
+    window.addEventListener('close-terminal-split', handleCloseSplitEvent);
+    window.addEventListener('set-terminal-split-direction', handleSetSplitDirectionEvent);
     window.addEventListener('cycle-terminal-session', handleCycleSessionEvent);
     window.addEventListener('close-terminal-session', handleCloseSessionEvent);
     window.addEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
@@ -1151,6 +1485,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('new-terminal-session', handleNewSessionEvent);
       window.removeEventListener('switch-terminal-session', handleSwitchSessionEvent);
       window.removeEventListener('focus-active-terminal-session', handleFocusActiveSessionEvent);
+      window.removeEventListener('open-terminal-split-chooser', handleOpenSplitChooserEvent);
+      window.removeEventListener('close-terminal-split', handleCloseSplitEvent);
+      window.removeEventListener('set-terminal-split-direction', handleSetSplitDirectionEvent);
       window.removeEventListener('cycle-terminal-session', handleCycleSessionEvent);
       window.removeEventListener('close-terminal-session', handleCloseSessionEvent);
       window.removeEventListener('close-terminal-session-by-backend', handleCloseSessionByBackendIdEvent);
@@ -1158,7 +1495,37 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('reset-terminal-session-name', handleResetSessionNameEvent);
       window.removeEventListener('reorder-terminal-session', handleReorderSessionEvent);
     };
-  }, [handleNewSession, handleSwitchSession, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleResetSessionName, handleReorderSessions]);
+  }, [handleNewSession, handleSwitchSession, openSplitChooser, closeSplitWorkspace, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleResetSessionName, handleReorderSessions]);
+
+  useEffect(() => {
+    if (!splitWorkspace || isMobileLayout) return;
+    const handleSplitShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return;
+
+      const directionMatches =
+        splitWorkspace.direction === 'horizontal'
+          ? event.key === 'ArrowLeft' || event.key === 'ArrowRight'
+          : event.key === 'ArrowUp' || event.key === 'ArrowDown';
+      if (directionMatches) {
+        event.preventDefault();
+        event.stopPropagation();
+        const targetId =
+          event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+            ? splitWorkspace.primaryId
+            : splitWorkspace.secondaryId;
+        activateSplitPane(targetId);
+        return;
+      }
+
+      if (event.key === 'Backspace') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSplitWorkspace(activeSessionIdRef.current ?? undefined);
+      }
+    };
+    window.addEventListener('keydown', handleSplitShortcut, true);
+    return () => window.removeEventListener('keydown', handleSplitShortcut, true);
+  }, [activateSplitPane, closeSplitWorkspace, isMobileLayout, splitWorkspace]);
 
   // 注意：以前这里有 `if (isRestoring) { 全屏 spinner }`，但它在两种场景下都很烦：
   // 1. PWA 从后台返回（iOS 会把页面踢出内存重新加载）：每次都看一遍全屏 loading
@@ -1167,13 +1534,72 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   // 瞬间 false，UI 直接渲染；缓存未命中且服务端确实没有会话时，restore 阶段
   // 只走一次 createIfEmpty，由服务端保证多客户端并发时只创建同一条默认会话。
 
+  const getSessionLabel = (session: TerminalSession): { primary: string; secondary: string | null } => {
+    const state = useTerminalStore.getState().sessions.get(session.id);
+    return getSessionDisplayLines(
+      session,
+      state?.activeProgram ?? null,
+      state?.cwd ?? null,
+      undefined,
+      state?.shellTitle ?? null,
+      state?.promptState ?? null,
+    );
+  };
+
+  const renderTerminal = (
+    session: TerminalSession,
+    options: {
+      suppressKeyboard?: boolean;
+      keyboardPortalTarget?: HTMLElement | null;
+      sharedMobileKeyboardLayout?: boolean;
+      suppressPageFlipRefresh?: boolean;
+      hidden?: boolean;
+    } = {},
+  ) => {
+    const isActive = session.id === activeSessionId;
+    return (
+      <div
+        key={session.id}
+        className={`relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden ${
+          options.hidden ? 'invisible pointer-events-none' : ''
+        }`}
+        aria-hidden={options.hidden || undefined}
+        onPointerDown={() => {
+          if (!isActive) activateSplitPane(session.id);
+        }}
+      >
+        <div className="min-h-0 flex-1">
+          <TerminalView
+            sessionId={session.id}
+            mode={session.mode}
+            tmuxSessionName={session.tmuxSessionName}
+            terminalSettings={terminalSettings}
+            colorTheme={colorTheme}
+            toolbarPresets={toolbarPresets}
+            isActive={isActive}
+            suppressKeyboard={options.suppressKeyboard}
+            keyboardPortalTarget={options.keyboardPortalTarget}
+            sharedMobileKeyboardLayout={options.sharedMobileKeyboardLayout}
+            suppressPageFlipRefresh={options.suppressPageFlipRefresh}
+            focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
+            resumeRequestToken={resumeRequest.token}
+            resumeRequestReason={resumeRequest.reason}
+            onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
+            showDebug={showDebug}
+            onStatusChange={isActive ? onStatusChange : undefined}
+          />
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className="h-full flex flex-col">
+    <div className="relative h-full flex flex-col">
       <div className="flex-1 overflow-hidden">
         <Swiper
           onSwiper={(instance) => {
             swiperRef.current = instance;
-            instance.allowTouchMove = arranged.length > 1 && !sidebarOverlayOpen;
+            instance.allowTouchMove = workspaceSlides.length > 1 && !sidebarOverlayOpen && !splitChooserOpen;
             logSwiperState('[swiper:on-swiper]', { allowTouchMove: instance.allowTouchMove });
             requestAnimationFrame(() => updateSwiperLayout('on-swiper'));
           }}
@@ -1240,33 +1666,223 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           noSwipingSelector="[data-mobile-keyboard='true']"
           className="h-full"
         >
-          {arranged.map((session) => {
-            const isActive = session.id === activeSessionId;
+          {workspaceSlides.map((slide) => {
+            const isSplit = slide.sessions.length === 2;
+            const verticalSplit = isMobileLayout
+              ? !isMobileLandscape
+              : splitWorkspace?.direction === 'vertical';
+            const storedRatio = splitWorkspace?.ratio ?? 0.5;
+            const ratio = isMobileLayout
+              ? Math.min(1 - MOBILE_MIN_SPLIT_RATIO, Math.max(MOBILE_MIN_SPLIT_RATIO, storedRatio))
+              : storedRatio;
+            const keyboardFocusSessionIndex = mobileKeyboardOpenSessionId
+              ? slide.sessions.findIndex((session) => session.id === mobileKeyboardOpenSessionId)
+              : -1;
+            const mobileKeyboardFocusMode = isMobileLayout && mobileKeyboardOpenSessionId
+              ? slide.sessions.some((session) => session.id === mobileKeyboardOpenSessionId)
+              : false;
+            const splitToolbarOwnerId = slide.sessions.some((session) => session.id === activeSessionId)
+              ? activeSessionId
+              : slide.sessions[0]?.id;
+            const splitGridStyle: React.CSSProperties = {
+              ...(verticalSplit
+                ? {
+                    gridTemplateRows: mobileKeyboardFocusMode
+                      ? (keyboardFocusSessionIndex === 0 ? 'minmax(0, 1fr) 0px 0px' : '0px 0px minmax(0, 1fr)')
+                      : `minmax(0, ${ratio}fr) 1px minmax(0, ${1 - ratio}fr)`,
+                  }
+                : {
+                    gridTemplateColumns: mobileKeyboardFocusMode
+                      ? (keyboardFocusSessionIndex === 0 ? 'minmax(0, 1fr) 0px 0px' : '0px 0px minmax(0, 1fr)')
+                      : `minmax(0, ${ratio}fr) 1px minmax(0, ${1 - ratio}fr)`,
+                  }),
+              ...(isMobileLayout
+                ? {
+                    marginTop: 'var(--kb-margin-top, 0px)',
+                    transition: 'none',
+                  }
+                : {}),
+            };
             return (
               <SwiperSlide
-                key={session.id}
+                key={slide.key}
                 className="h-full"
               >
-                <TerminalView
-                  sessionId={session.id}
-                  mode={session.mode}
-                  tmuxSessionName={session.tmuxSessionName}
-                  terminalSettings={terminalSettings}
-                  colorTheme={colorTheme}
-                  toolbarPresets={toolbarPresets}
-                  isActive={isActive}
-                  focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
-                  resumeRequestToken={resumeRequest.token}
-                  resumeRequestReason={resumeRequest.reason}
-                  onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
-                  showDebug={showDebug}
-                  onStatusChange={isActive ? onStatusChange : undefined}
-                />
+                {isSplit ? (
+                  <div
+                    className="flex h-full min-h-0 min-w-0 flex-col bg-[var(--chrome-bg)]"
+                    style={isMobileLayout
+                      ? {
+                          transform: 'translateY(var(--kb-translate-y, 0px))',
+                          transition: 'none',
+                        }
+                      : undefined
+                    }
+                  >
+                    <div
+                      data-split-container="true"
+                      className="grid min-h-0 min-w-0 flex-1 overflow-hidden"
+                      style={splitGridStyle}
+                    >
+                      {renderTerminal(slide.sessions[0]!, {
+                        suppressKeyboard: isMobileLayout && slide.sessions[0]!.id !== splitToolbarOwnerId,
+                        keyboardPortalTarget: isMobileLayout ? splitKeyboardPortalTarget : null,
+                        sharedMobileKeyboardLayout: isMobileLayout,
+                        suppressPageFlipRefresh: true,
+                        hidden: mobileKeyboardFocusMode && keyboardFocusSessionIndex !== 0,
+                      })}
+                      <button
+                        type="button"
+                        className={`swiper-no-swiping relative z-20 touch-none select-none bg-[var(--border-strong)] transition-colors hover:bg-primary active:bg-primary ${
+                          verticalSplit ? 'cursor-row-resize' : 'cursor-col-resize'
+                        } ${mobileKeyboardFocusMode ? 'invisible pointer-events-none' : ''}`}
+                        onPointerDownCapture={(event) => {
+                          const container = event.currentTarget.closest('[data-split-container="true"]');
+                          if (container instanceof HTMLDivElement) {
+                            startSplitResize(event, container, verticalSplit);
+                          }
+                        }}
+                        onDoubleClick={(event) => {
+                          if (isMobileLayout) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setSplitWorkspace((current) => current ? { ...current, ratio: 0.5 } : current);
+                        }}
+                        onContextMenu={(event) => {
+                          if (isMobileLayout) event.preventDefault();
+                        }}
+                        aria-label={t('tab.split')}
+                      >
+                        <span
+                          aria-hidden="true"
+                          data-split-divider-hitarea="true"
+                          className={`absolute ${verticalSplit ? 'inset-x-0' : 'inset-y-0'}`}
+                          style={verticalSplit
+                            ? { top: -MOBILE_SPLIT_HIT_SLOP_PX, bottom: -MOBILE_SPLIT_HIT_SLOP_PX }
+                            : { left: -MOBILE_SPLIT_HIT_SLOP_PX, right: -MOBILE_SPLIT_HIT_SLOP_PX }
+                          }
+                        />
+                      </button>
+                      {renderTerminal(slide.sessions[1]!, {
+                        suppressKeyboard: isMobileLayout && slide.sessions[1]!.id !== splitToolbarOwnerId,
+                        keyboardPortalTarget: isMobileLayout ? splitKeyboardPortalTarget : null,
+                        sharedMobileKeyboardLayout: isMobileLayout,
+                        suppressPageFlipRefresh: true,
+                        hidden: mobileKeyboardFocusMode && keyboardFocusSessionIndex !== 1,
+                      })}
+                    </div>
+                    {isMobileLayout && (
+                      <div
+                        ref={setSplitKeyboardPortalTarget}
+                        className="relative shrink-0 app-chrome-bg"
+                        data-split-keyboard-host="true"
+                      />
+                    )}
+                  </div>
+                ) : renderTerminal(slide.sessions[0]!)}
               </SwiperSlide>
             );
           })}
         </Swiper>
       </div>
+
+      {splitChooserOpen && activeSessionId && (
+        <>
+          <button
+            type="button"
+            className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop-soft)] backdrop-blur-sm"
+            onClick={() => setSplitChooserOpen(false)}
+            aria-label={t('common.close')}
+          />
+          <section
+            className="fixed inset-x-3 bottom-3 z-modal-panel mx-auto max-h-[min(78svh,620px)] max-w-md overflow-hidden rounded-2xl border border-border/20 bg-surface shadow-[0_24px_70px_var(--app-shadow-strong)] sm:bottom-auto sm:top-1/2 sm:-translate-y-1/2"
+            style={{ paddingBottom: 'var(--safe-bottom-inset)' }}
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('tab.splitTitle')}
+          >
+            <header className="flex items-start gap-3 border-b border-border/20 px-4 py-3.5">
+              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary">
+                <Columns2 size={17} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h2 className="text-[14px] font-semibold text-foreground">{t('tab.splitTitle')}</h2>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                  {groupByFolder ? t('tab.splitUnavailableGrouped') : t('tab.splitExistingHint')}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-surface-2 hover:text-foreground"
+                onClick={() => setSplitChooserOpen(false)}
+                aria-label={t('common.close')}
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            <div className="max-h-[calc(min(78svh,620px)-72px)] overflow-y-auto overscroll-contain p-2">
+              <button
+                type="button"
+                disabled={isCreatingSplitSession}
+                onClick={() => void createSessionInSplit()}
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-surface-2 active:bg-surface-elevated disabled:opacity-60"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary">
+                  <Plus size={17} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[13px] font-medium text-foreground">{t('tab.splitNew')}</span>
+                  <span className="mt-0.5 block text-[11px] text-muted-foreground">{t('tab.splitNewHint')}</span>
+                </span>
+              </button>
+
+              <div className="px-3 pb-1 pt-3 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+                {t('tab.splitExisting')}
+              </div>
+              {sessions.filter((session) => session.id !== activeSessionId).length === 0 ? (
+                <p className="px-3 py-4 text-[12px] text-muted-foreground">{t('tab.splitNoOtherSessions')}</p>
+              ) : sessions.filter((session) => session.id !== activeSessionId).map((session) => {
+                const activeCwd = cwdById.get(activeSessionId) ?? null;
+                const sessionCwd = cwdById.get(session.id) ?? null;
+                const unavailable = groupByFolder && (activeCwd ?? '') !== (sessionCwd ?? '');
+                const label = getSessionLabel(session);
+                return (
+                  <button
+                    key={session.id}
+                    type="button"
+                    disabled={unavailable}
+                    onClick={() => pairWithExistingSession(session.id)}
+                    className="group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-surface-2 active:bg-surface-elevated disabled:cursor-not-allowed disabled:opacity-40"
+                    title={unavailable ? t('tab.splitUnavailableGrouped') : undefined}
+                  >
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground">
+                      {sessionCwd ? <Folder size={15} /> : <Columns2 size={15} />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12px] font-medium text-foreground">{label.primary}</span>
+                      <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
+                        {sessionCwd ? (getCwdLeafName(sessionCwd) ?? sessionCwd) : session.name}
+                      </span>
+                    </span>
+                    {unavailable ? (
+                      <X size={14} className="text-muted-foreground" />
+                    ) : (
+                      <Check size={14} className="text-primary opacity-0 transition group-hover:opacity-100" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        </>
+      )}
+
+      {splitNotice && (
+        <div className="fixed inset-x-3 bottom-4 z-toast mx-auto max-w-md rounded-xl border border-border/20 bg-surface-elevated px-4 py-3 text-center text-[12px] text-foreground shadow-lg">
+          {splitNotice}
+        </div>
+      )}
     </div>
   );
 };

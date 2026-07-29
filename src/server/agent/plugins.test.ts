@@ -1,12 +1,11 @@
 import { describe, expect, it, afterEach } from 'vitest';
-import { loadPlugins, savePlugin, removePlugin, type AgentPluginManifest } from './plugins.js';
+import { loadPlugins, savePlugin, removePlugin, type AgentPluginManifest, type LoadedPlugin } from './plugins.js';
 import {
   agentBySlug,
   buildResumeCommand,
   clearPluginAgents,
   detectAgentFromArgv,
   registerPluginAgents,
-  type AgentInfo,
 } from './registry.js';
 
 const TEST_PLUGIN: AgentPluginManifest = {
@@ -28,14 +27,12 @@ const TEST_PLUGIN: AgentPluginManifest = {
   },
 };
 
-function makeInfo(manifest: AgentPluginManifest): AgentInfo {
+function makePlugin(manifest: AgentPluginManifest): LoadedPlugin {
   return {
-    slug: manifest.slug,
-    displayName: manifest.displayName,
-    aliases: manifest.aliases,
-    accentColor: manifest.accentColor,
-    icon: manifest.slug,
-    isPlugin: true,
+    manifest,
+    dir: '/tmp/test',
+    iconPath: null,
+    iconMtime: 0,
   };
 }
 
@@ -53,7 +50,7 @@ describe('registerPluginAgents', () => {
   });
 
   it('registers plugin agents in the lookup maps', () => {
-    const plugin = { manifest: TEST_PLUGIN, dir: '/tmp/test', iconPath: null };
+    const plugin = makePlugin(TEST_PLUGIN);
     const result = registerPluginAgents([plugin]);
     expect(result.registered).toBe(1);
     expect(result.skipped).toHaveLength(0);
@@ -69,7 +66,7 @@ describe('registerPluginAgents', () => {
   });
 
   it('detects plugin agents from argv', () => {
-    const plugin = { manifest: TEST_PLUGIN, dir: '/tmp/test', iconPath: null };
+    const plugin = makePlugin(TEST_PLUGIN);
     registerPluginAgents([plugin]);
 
     const detected = detectAgentFromArgv(['test-agent', '--flag']);
@@ -81,22 +78,14 @@ describe('registerPluginAgents', () => {
   });
 
   it('skips plugins whose slug conflicts with built-in agents', () => {
-    const plugin = {
-      manifest: { ...TEST_PLUGIN, slug: 'claude', aliases: ['claude'] },
-      dir: '/tmp/test',
-      iconPath: null,
-    };
+    const plugin = makePlugin({ ...TEST_PLUGIN, slug: 'claude', aliases: ['claude'] });
     const result = registerPluginAgents([plugin]);
     expect(result.registered).toBe(0);
     expect(result.skipped.length).toBeGreaterThan(0);
   });
 
   it('skips plugins whose alias conflicts with built-in agents', () => {
-    const plugin = {
-      manifest: { ...TEST_PLUGIN, slug: 'my-claude', aliases: ['my-ai', 'codex'] },
-      dir: '/tmp/test',
-      iconPath: null,
-    };
+    const plugin = makePlugin({ ...TEST_PLUGIN, slug: 'my-claude', aliases: ['my-ai', 'codex'] });
     const result = registerPluginAgents([plugin]);
     expect(result.registered).toBe(0);
     expect(result.skipped.length).toBeGreaterThan(0);
@@ -104,7 +93,7 @@ describe('registerPluginAgents', () => {
   });
 
   it('clears plugin agents without affecting built-ins', () => {
-    const plugin = { manifest: TEST_PLUGIN, dir: '/tmp/test', iconPath: null };
+    const plugin = makePlugin(TEST_PLUGIN);
     registerPluginAgents([plugin]);
     expect(agentBySlug('test-agent')).not.toBeNull();
     expect(agentBySlug('claude')).not.toBeNull();
@@ -121,7 +110,7 @@ describe('plugin resume', () => {
   });
 
   it('builds resume command for plugin agents', () => {
-    const plugin = { manifest: TEST_PLUGIN, dir: '/tmp/test', iconPath: null };
+    const plugin = makePlugin(TEST_PLUGIN);
     registerPluginAgents([plugin]);
 
     const agent = agentBySlug('test-agent')!;
@@ -130,7 +119,7 @@ describe('plugin resume', () => {
   });
 
   it('returns null for unsafe session ids', () => {
-    const plugin = { manifest: TEST_PLUGIN, dir: '/tmp/test', iconPath: null };
+    const plugin = makePlugin(TEST_PLUGIN);
     registerPluginAgents([plugin]);
     const agent = agentBySlug('test-agent')!;
     expect(buildResumeCommand(agent, 'abc; rm -rf /', null)).toBeNull();
@@ -145,7 +134,7 @@ describe('plugin resume', () => {
       aliases: ['nra'],
       accentColor: '#000000',
     };
-    const plugin = { manifest: noResume, dir: '/tmp/test', iconPath: null };
+    const plugin = makePlugin(noResume);
     registerPluginAgents([plugin]);
     const agent = agentBySlug('no-resume-agent')!;
     expect(buildResumeCommand(agent, 'abc', null)).toBeNull();

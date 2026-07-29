@@ -355,6 +355,7 @@ export type TranslationDictionary = {
     notificationsPageHint: string;
     notificationsMaster: string;
     notificationsMasterHint: string;
+    notificationsIOSInstallHint: string;
     notificationsPermission: string;
     notificationsTest: string;
     notificationsAlertStyle: string;
@@ -517,6 +518,20 @@ export type TranslationDictionary = {
     longPressTip: string;
     sessionsTitle: string;
     explorerTitle: string;
+    split: string;
+    splitTitle: string;
+    splitNew: string;
+    splitNewHint: string;
+    splitExisting: string;
+    splitExistingHint: string;
+    splitCurrent: string;
+    splitClose: string;
+    splitLayout: string;
+    splitHorizontal: string;
+    splitVertical: string;
+    splitUnavailableGrouped: string;
+    splitEndedGrouped: string;
+    splitNoOtherSessions: string;
   };
   agent: {
     aiRunning: string;

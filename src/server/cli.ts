@@ -464,8 +464,24 @@ async function readCertificateSans(certPath: string): Promise<string[]> {
 }
 
 function sanMatches(required: string, sans: string[]): boolean {
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(required) || required.includes(':')) {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(required)) {
     return sans.some((san) => san === `IP Address:${required}` || san === `IP:${required}`);
+  }
+  if (required.includes(':')) {
+    const normalizeIpv6 = (value: string): string => {
+      const [left = '', right = ''] = value.toLowerCase().split('::');
+      const leftGroups = left ? left.split(':') : [];
+      const rightGroups = right ? right.split(':') : [];
+      const missing = Math.max(0, 8 - leftGroups.length - rightGroups.length);
+      return [...leftGroups, ...Array<string>(missing).fill('0'), ...rightGroups]
+        .map((group) => Number.parseInt(group || '0', 16).toString(16))
+        .join(':');
+    };
+    const normalizedRequired = normalizeIpv6(required);
+    return sans.some((san) => {
+      const match = /^(?:IP Address|IP):(.+)$/.exec(san);
+      return match ? normalizeIpv6(match[1]) === normalizedRequired : false;
+    });
   }
   return sans.some((san) => san === `DNS:${required}`);
 }

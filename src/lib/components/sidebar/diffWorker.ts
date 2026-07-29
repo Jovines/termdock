@@ -1,4 +1,5 @@
 import { parseDiff, tokenize, type FileData, type HunkData, type HunkTokens } from 'react-diff-view';
+import refractor from 'refractor';
 import { markSmartEdits, type SmartInlineDiffMode } from './inlineDiff';
 
 interface ParseRequest {
@@ -6,6 +7,7 @@ interface ParseRequest {
   diffContent: string;
   inlineMode: 'none' | SmartInlineDiffMode;
   oldSource?: string;
+  language?: string;
 }
 
 interface ParseSuccess {
@@ -28,7 +30,7 @@ function fileTokenKey(file: FileData): string {
 }
 
 self.onmessage = (event: MessageEvent<ParseRequest>) => {
-  const { id, diffContent, inlineMode, oldSource } = event.data;
+  const { id, diffContent, inlineMode, oldSource, language } = event.data;
   const parseStarted = performance.now();
   try {
     const files = parseDiff(diffContent);
@@ -40,13 +42,11 @@ self.onmessage = (event: MessageEvent<ParseRequest>) => {
         if (file.hunks.length === 0) continue;
         try {
           const hunkData = file.hunks as HunkData[];
-          tokens.push([
-            fileTokenKey(file),
-            tokenize(hunkData, {
-              enhancers: [markSmartEdits(hunkData, inlineMode)],
-              oldSource,
-            }),
-          ]);
+          const enhancers = [markSmartEdits(hunkData, inlineMode)];
+          const hunkTokens = language
+            ? tokenize(hunkData, { enhancers, oldSource, highlight: true, refractor, language })
+            : tokenize(hunkData, { enhancers, oldSource });
+          tokens.push([fileTokenKey(file), hunkTokens]);
         } catch {
           // Keep one bad hunk from breaking the whole diff.
         }
