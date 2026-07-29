@@ -55,10 +55,12 @@ describe('DiffStreamItem virtualization', () => {
   });
 
   it('mounts near-viewport diff content and preserves its measured height after recycling', () => {
-    const { container, rerender } = render(<DiffStreamItem {...baseProps} visible />);
+    const onHeightChange = vi.fn();
+    const { container, rerender } = render(<DiffStreamItem {...baseProps} visible onHeightChange={onHeightChange} />);
     expect(container.querySelector('[data-mocked-diff-viewer]')).toBeTruthy();
+    expect(onHeightChange).toHaveBeenCalledWith(baseProps.selectionPath, 64, 240);
 
-    rerender(<DiffStreamItem {...baseProps} visible={false} />);
+    rerender(<DiffStreamItem {...baseProps} visible={false} onHeightChange={onHeightChange} />);
 
     expect(container.querySelector('[data-mocked-diff-viewer]')).toBeNull();
     expect((container.querySelector('[data-diff-stream-body]') as HTMLElement).style.height).toBe('240px');

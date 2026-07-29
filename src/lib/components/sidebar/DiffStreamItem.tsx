@@ -1,6 +1,8 @@
-import { useEffect, useLayoutEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
 import type { ChangeAuditRecord, GitChangedFile, GitDiffOptions } from '../../terminal/api';
 import { DiffViewer, type DiffInlineMode, type DiffViewerPreparedDiff, type DiffViewType } from './DiffViewer';
+
+const DIFF_HEIGHT_SETTLE_MS = 120;
 
 export interface DiffStreamFile {
   path: string;
@@ -17,6 +19,7 @@ interface DiffStreamItemProps {
   selected: boolean;
   activePane: boolean;
   visible: boolean;
+  estimatedHeight?: number;
   lightweight?: boolean;
   wrap: boolean;
   showScrollHint: boolean;
@@ -34,6 +37,7 @@ interface DiffStreamItemProps {
   copiedReferenceKey?: string | null;
   onClearAuditRecord?: (id: string) => void;
   onContentReady?: (selectionPath: string) => void;
+  onHeightChange?: (selectionPath: string, previousHeight: number, nextHeight: number) => void;
 }
 
 export function DiffStreamItem({
@@ -45,6 +49,7 @@ export function DiffStreamItem({
   selected,
   activePane,
   visible,
+  estimatedHeight,
   lightweight = false,
   wrap,
   showScrollHint,
@@ -62,15 +67,44 @@ export function DiffStreamItem({
   copiedReferenceKey,
   onClearAuditRecord,
   onContentReady,
+  onHeightChange,
 }: DiffStreamItemProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const [measuredBodyHeight, setMeasuredBodyHeight] = useState<number | null>(null);
+  const measuredBodyHeightRef = useRef(64);
+  const measuredItemHeightRef = useRef(estimatedHeight ?? 104);
+  const viewerReadyRef = useRef(false);
+  const settledNotifiedRef = useRef(false);
+  const settleTimerRef = useRef<number | null>(null);
   const [contentReady, setContentReady] = useState(false);
   const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
 
+  const scheduleSettledNotification = useCallback(() => {
+    if (!viewerReadyRef.current || settledNotifiedRef.current) return;
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = window.setTimeout(() => {
+      settleTimerRef.current = null;
+      if (!viewerReadyRef.current || settledNotifiedRef.current) return;
+      settledNotifiedRef.current = true;
+      onContentReady?.(selectionPath);
+    }, DIFF_HEIGHT_SETTLE_MS);
+  }, [onContentReady, selectionPath]);
+
   useEffect(() => {
+    viewerReadyRef.current = false;
+    settledNotifiedRef.current = false;
+    if (settleTimerRef.current !== null) {
+      window.clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
     setContentReady(false);
+    return () => {
+      if (settleTimerRef.current !== null) {
+        window.clearTimeout(settleTimerRef.current);
+        settleTimerRef.current = null;
+      }
+    };
   }, [visible, reloadKey]);
 
   useLayoutEffect(() => {
@@ -80,16 +114,26 @@ export function DiffStreamItem({
 
     const recordHeight = () => {
       const nextHeight = Math.ceil(body.getBoundingClientRect().height);
-      if (nextHeight > 0) {
-        setMeasuredBodyHeight((current) => current === nextHeight ? current : nextHeight);
+      const previousHeight = measuredBodyHeightRef.current;
+      if (nextHeight > 0 && previousHeight !== nextHeight) {
+        measuredBodyHeightRef.current = nextHeight;
+        setMeasuredBodyHeight(nextHeight);
+        scheduleSettledNotification();
       }
+      const item = containerRef.current;
+      if (!item) return;
+      const nextItemHeight = Math.ceil(item.getBoundingClientRect().height);
+      const previousItemHeight = measuredItemHeightRef.current;
+      if (nextItemHeight <= 0 || previousItemHeight === nextItemHeight) return;
+      measuredItemHeightRef.current = nextItemHeight;
+      onHeightChange?.(selectionPath, previousItemHeight, nextItemHeight);
     };
     recordHeight();
     if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(recordHeight);
     observer.observe(body);
     return () => observer.disconnect();
-  }, [visible]);
+  }, [onHeightChange, scheduleSettledNotification, selectionPath, visible]);
 
   return (
     <div
@@ -98,7 +142,12 @@ export function DiffStreamItem({
       data-diff-selection-path={selectionPath}
       data-diff-file-path={file.path}
       data-diff-absolute-path={absolutePath}
-      className={`scroll-mt-3 border-b border-border/15 last:border-b-0 ${selected ? 'bg-surface-elevated/35' : ''}`}
+      className={`scroll-mt-3 border-b border-border/15 last:border-b-0 ${
+        visible ? '' : 'overflow-hidden'
+      } ${selected ? 'bg-surface-elevated/35' : ''}`}
+      style={visible
+        ? { minHeight: contentReady ? undefined : estimatedHeight }
+        : { height: estimatedHeight ?? 104 }}
     >
       <div className={`sticky top-0 z-10 flex min-w-0 items-center gap-2 border-b border-border/15 px-3 py-2 backdrop-blur ${
         selected ? 'bg-surface-elevated/95' : 'bg-surface/95'
@@ -136,8 +185,12 @@ export function DiffStreamItem({
             preparedDiff={preparedDiff}
             onClearAuditRecord={onClearAuditRecord}
             onContentReady={() => {
+              if (!viewerReadyRef.current) {
+                viewerReadyRef.current = true;
+                settledNotifiedRef.current = false;
+              }
               setContentReady(true);
-              onContentReady?.(selectionPath);
+              scheduleSettledNotification();
             }}
             onInsertDiffReference={onInsertDiffReference}
             onReferenceCopied={onReferenceCopied}

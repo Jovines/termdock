@@ -5272,7 +5272,9 @@ export function RightSidebar(
   const [, setMobileDiffSlideIndex] = useState(0);
   const [mobileSidebarSettled, setMobileSidebarSettled] = useState(false);
   const [hasMountedGitPane, setHasMountedGitPane] = useState(false);
-  const [hasMountedDiffPane, setHasMountedDiffPane] = useState(false);
+  const [hasMountedDiffPane, setHasMountedDiffPane] = useState(
+    () => useSidebarStore.getState().rightTab === 'diff',
+  );
   const [hasMountedPreviewPane, setHasMountedPreviewPane] = useState(false);
   const [runningGitAction, setRunningGitAction] = useState<{ action: GitActionKey; path?: string } | null>(null);
   const [completedGitAction, setCompletedGitAction] = useState<{ action: GitActionKey; path?: string; label: string } | null>(null);
@@ -6221,8 +6223,8 @@ export function RightSidebar(
 
   useEffect(() => {
     if (!diffPaneActive) return;
-    if (!isMobile || mobileSidebarSettled) setHasMountedDiffPane(true);
-  }, [diffPaneActive, isMobile, mobileSidebarSettled]);
+    setHasMountedDiffPane(true);
+  }, [diffPaneActive]);
 
   useEffect(() => {
     if (previewPaneActive) setHasMountedPreviewPane(true);
@@ -9754,7 +9756,7 @@ export function RightSidebar(
           />
         </Pane>
 
-        <Pane active={diffPaneActive} mounted={hasMountedDiffPane}>
+        <Pane active={diffPaneActive} mounted={hasMountedDiffPane || diffPaneActive}>
           {() => (isWide ? (
             <DiffReview
               mobile={false}

@@ -105,6 +105,10 @@ export function DiffReviewLab() {
   const [selectedKey, setSelectedKey] = useState<string | null>(
     () => (forcedIndex !== null ? files[forcedIndex].key : null),
   );
+  const [scrollRequest, setScrollRequest] = useState<{ key: string | null; nonce: number }>(() => ({
+    key: forcedIndex !== null ? files[forcedIndex].key : null,
+    nonce: forcedIndex !== null ? 1 : 0,
+  }));
   const [mode, setMode] = useState<'list' | 'tree'>('list');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [slideIndex, setSlideIndex] = useState(forcedIndex !== null ? 1 : 0);
@@ -121,6 +125,8 @@ export function DiffReviewLab() {
           files={files}
           groups={groups}
           selectedKey={selectedKey}
+          scrollToKey={scrollRequest.key}
+          scrollToKeyNonce={scrollRequest.nonce}
           mode={mode}
           onModeChange={(nextMode) => {
             if (nextMode !== 'ai') setMode(nextMode);
@@ -131,7 +137,10 @@ export function DiffReviewLab() {
             if (next.has(key)) next.delete(key); else next.add(key);
             return next;
           })}
-          onSelectFile={(navigatorFile) => setSelectedKey(navigatorFile.key)}
+          onSelectFile={(navigatorFile) => {
+            setSelectedKey(navigatorFile.key);
+            setScrollRequest((current) => ({ key: navigatorFile.key, nonce: current.nonce + 1 }));
+          }}
           onMobileSlideChange={setSlideIndex}
           renderLeading={() => null}
           renderStreamBadge={(status) => <span className="text-[10px] text-muted-foreground">{status}</span>}
