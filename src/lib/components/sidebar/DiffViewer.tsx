@@ -149,6 +149,14 @@ export function refreshFileDiffCached(filePath: string | undefined, cwd: string 
   return requestFileDiffCached(key, filePath, cwd, version, undefined, options);
 }
 
+export function invalidateFileDiffCached(filePath: string | undefined, cwd: string | undefined, options?: GitDiffOptions): void {
+  const key = buildDiffCacheKey(filePath, cwd, options);
+  cancelPreloadDiff(key);
+  diffResultCache.delete(key);
+  diffPromiseCache.delete(key);
+  diffCacheVersions.set(key, (diffCacheVersions.get(key) ?? 0) + 1);
+}
+
 export function loadVisibleFileDiff(filePath: string | undefined, cwd: string | undefined, signal: AbortSignal, force = false, traceId?: string, interactionId?: string | null, requestSlotId?: string | null, options?: GitDiffOptions): Promise<DiffLoadResult> {
   const key = buildDiffCacheKey(filePath, cwd, options);
   if (force) {

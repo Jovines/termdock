@@ -37,7 +37,7 @@ import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
 import { UniversalDiffReview } from './DiffReviewPanel';
 import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
-import { DiffReview, type DiffReviewFile, ChangeBadge } from './DiffReview';
+import { DiffReview, type DiffReviewFile, ChangeBadge, nextDiffStreamScrollRequest } from './DiffReview';
 import { ChangeStatusWithAuditBadge, getFileAuditStatus } from './AuditStatusBadge';
 import { ChangeWalkthroughPanel } from './ChangeWalkthroughPanel';
 import type { DiffInlineMode, DiffViewType } from './DiffViewer';
@@ -7991,12 +7991,9 @@ export function RightSidebar(
   }, [branchAuditDetailOpen, branchAuditPreviewDiff, isMobile, slideMobileDiffTo]);
 
   const requestDiffStreamScroll = useCallback((path: string | null) => {
-    if (!path || isMobile) return;
-    setDiffStreamScrollRequest((current) => ({
-      key: path,
-      nonce: current.nonce + 1,
-    }));
-  }, [isMobile]);
+    if (!path) return;
+    setDiffStreamScrollRequest((current) => nextDiffStreamScrollRequest(current, path));
+  }, []);
   const effectiveDiffStreamScrollKey = diffStreamScrollRequest.key === selectedFilePath
     ? diffStreamScrollRequest.key
     : null;
