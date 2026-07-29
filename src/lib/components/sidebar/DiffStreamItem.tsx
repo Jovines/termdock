@@ -160,6 +160,7 @@ export function DiffStreamItem({
       </div>
       <div
         ref={bodyRef}
+        className="relative"
         data-diff-stream-body
         style={visible
           ? { minHeight: contentReady ? 64 : measuredBodyHeight ?? 64, contentVisibility: 'auto' }

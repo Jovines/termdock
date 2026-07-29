@@ -4,11 +4,14 @@ import type { ChangeAuditRecord, GitDiffOptions } from '../../terminal/api';
 import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
 import { DiffReviewWorkspace, type DiffReviewMode } from './DiffReviewWorkspace';
 import { DiffStreamItem, type DiffStreamFile } from './DiffStreamItem';
-import { invalidateFileDiffCached, type DiffInlineMode, type DiffViewType } from './DiffViewer';
+import { invalidateFileDiffCached, preloadPreparedFileDiff, type DiffInlineMode, type DiffViewType } from './DiffViewer';
+import { useSidebarStore } from '../../stores/useSidebarStore';
 
 // --- ChangeBadge (shared) ---
 
 const MAX_RETAINED_DIFF_ITEMS = 3;
+const DESKTOP_PRELOAD_RADIUS = 3;
+const DIFF_PRELOAD_CONCURRENCY = 2;
 const DIFF_CANVAS_PADDING = 1_000_000;
 const DIFF_CANVAS_IDLE_OVERSCAN = 480;
 const DIFF_CANVAS_MEDIUM_AHEAD = 960;
@@ -225,6 +228,7 @@ export function DiffReview({
   onMobileSlideChange,
   slideToDetailOnMobile,
 }: DiffReviewProps) {
+  const sidebarRootPath = useSidebarStore((state) => state.rootPath);
   const matchesSelectedKey = useMemo(() => {
     return (file: DiffReviewFile) => selectedKey === file.key
       || selectedKey === file.path
@@ -399,6 +403,56 @@ export function DiffReview({
   ]);
   loadingFrontierRef.current = loadingFrontier;
 
+  const visibleAnchorIndex = useMemo(() => {
+    const count = canvasLayout.tops.length;
+    if (count === 0) return -1;
+    let low = 0;
+    let high = count;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (canvasLayout.tops[middle] <= canvasViewport.top + 1) low = middle + 1;
+      else high = middle;
+    }
+    return Math.min(count - 1, Math.max(0, low - 1));
+  }, [canvasLayout.tops, canvasViewport.top]);
+
+  useEffect(() => {
+    if (!activePane || mobile || visibleAnchorIndex < 0) return;
+    const directionStep = scrollMotion.direction === 'down' ? 1 : -1;
+    const indices = [visibleAnchorIndex];
+    for (let distance = 1; distance <= DESKTOP_PRELOAD_RADIUS; distance += 1) {
+      indices.push(visibleAnchorIndex + directionStep * distance);
+      indices.push(visibleAnchorIndex - directionStep * distance);
+    }
+    const queue = indices
+      .filter((index, position) => (
+        index >= 0
+        && index < allOrderedFiles.length
+        && indices.indexOf(index) === position
+      ))
+      .map((index) => allOrderedFiles[index])
+      .filter((file) => file.diffOverride === undefined && Boolean(file.repoRoot ?? sidebarRootPath));
+    let cancelled = false;
+    void (async () => {
+      for (let index = 0; index < queue.length && !cancelled; index += DIFF_PRELOAD_CONCURRENCY) {
+        const batch = queue.slice(index, index + DIFF_PRELOAD_CONCURRENCY);
+        await Promise.all(batch.map((file) => {
+          const cwd = file.repoRoot ?? sidebarRootPath;
+          const requestPath = toDiffRequestPath(file.path, cwd);
+          return preloadPreparedFileDiff(
+            requestPath,
+            cwd ?? undefined,
+            inlineMode ?? 'words',
+            diffOptions,
+          ).catch(() => undefined);
+        }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activePane, allOrderedFiles, diffOptions, inlineMode, mobile, scrollMotion.direction, sidebarRootPath, visibleAnchorIndex]);
+
   const replaceMountedKeys = useCallback((next: Set<string>) => {
     mountedKeysRef.current = next;
     setMountedKeys(next);
@@ -549,7 +603,7 @@ export function DiffReview({
         : DIFF_CANVAS_IDLE_OVERSCAN;
     const start = canvasViewport.top - (scrollMotion.direction === 'up' ? ahead : behind);
     const end = canvasViewport.top + canvasViewport.height + (scrollMotion.direction === 'down' ? ahead : behind);
-    const indices: number[] = [];
+    const indexSet = new Set<number>();
     let low = 0;
     let high = canvasLayout.tops.length;
     while (low < high) {
@@ -562,10 +616,16 @@ export function DiffReview({
       const top = canvasLayout.tops[index];
       if (top > end) break;
       const bottom = top + canvasLayout.heights[index];
-      if (bottom >= start && top <= end) indices.push(index);
+      if (bottom >= start && top <= end) indexSet.add(index);
     }
-    return indices;
-  }, [canvasLayout.heights, canvasLayout.tops, canvasViewport.height, canvasViewport.top, scrollMotion]);
+    // Keep the immediate neighbours mounted even when the current diff is
+    // taller than the pixel overscan. Data for ±3 is warmed separately; these
+    // two DOM neighbours provide measured heights and a seamless boundary.
+    for (let index = visibleAnchorIndex - 1; index <= visibleAnchorIndex + 1; index += 1) {
+      if (index >= 0 && index < canvasLayout.tops.length) indexSet.add(index);
+    }
+    return Array.from(indexSet).sort((left, right) => left - right);
+  }, [canvasLayout.heights, canvasLayout.tops, canvasViewport.height, canvasViewport.top, scrollMotion, visibleAnchorIndex]);
 
   useEffect(() => {
     const validKeys = new Set(orderedFileKeysRef.current);

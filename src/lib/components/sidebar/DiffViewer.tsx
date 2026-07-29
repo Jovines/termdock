@@ -8,10 +8,11 @@ import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 import { readCache, writeCache } from '../../utils/localStorageCache';
 import { findMovedLineCandidates, pairChangedLinesForDisplay } from './inlineDiff';
-import { parseDiffInWorker } from './diffWorkerClient';
+import { parseDiffInWorker, type DiffWorkerResult } from './diffWorkerClient';
 import { resolveLanguage } from '../../utils/syntaxHighlight';
 
 const MAX_DIFF_CACHE_ENTRIES = 24;
+const MAX_PARSED_DIFF_CACHE_ENTRIES = 32;
 const MAX_RENDER_DIFF_LINES = 8_000;
 const DIFF_VIEW_TYPE_STORAGE_KEY = 'termdock:diff-viewer:view-type:v1';
 const SPLIT_DIFF_MEDIA_QUERY = '(min-width: 900px)';
@@ -24,6 +25,22 @@ const diffResultCache = new Map<string, DiffLoadResult>();
 const diffPromiseCache = new Map<string, Promise<DiffLoadResult>>();
 const diffCacheVersions = new Map<string, number>();
 const diffPreloadControllers = new Map<string, AbortController>();
+interface ParsedDiffCacheEntry {
+  diffContent: string;
+  oldSource?: string;
+  result: DiffWorkerResult;
+}
+interface ParsedDiffPromiseEntry {
+  diffContent: string;
+  oldSource?: string;
+  promise: Promise<DiffWorkerResult>;
+}
+interface ParsedDiffInput {
+  cacheKey: string;
+  diffContent: string;
+}
+const parsedDiffResultCache = new Map<string, ParsedDiffCacheEntry>();
+const parsedDiffPromiseCache = new Map<string, ParsedDiffPromiseEntry>();
 let diffViewerLogSeq = 0;
 let diffLoadingSeq = 0;
 let diffTraceSeq = 0;
@@ -71,6 +88,69 @@ function getDiffOptionsKey(options?: GitDiffOptions): string {
 
 function buildDiffCacheKey(filePath: string | undefined, cwd: string | undefined, options?: GitDiffOptions): string {
   return `${cwd ?? ''}\u0000${filePath ?? ''}\u0000${getDiffOptionsKey(options)}`;
+}
+
+function buildParsedDiffCacheKey(
+  filePath: string | undefined,
+  cwd: string | undefined,
+  options: GitDiffOptions | undefined,
+  inlineMode: DiffInlineMode,
+  language: string | undefined,
+): string {
+  return `${buildDiffCacheKey(filePath, cwd, options)}\u0000${inlineMode}\u0000${language ?? ''}`;
+}
+
+function rememberParsedDiffResult(key: string, entry: ParsedDiffCacheEntry): DiffWorkerResult {
+  parsedDiffResultCache.delete(key);
+  parsedDiffResultCache.set(key, entry);
+  while (parsedDiffResultCache.size > MAX_PARSED_DIFF_CACHE_ENTRIES) {
+    const oldest = parsedDiffResultCache.keys().next().value;
+    if (oldest === undefined) break;
+    parsedDiffResultCache.delete(oldest);
+  }
+  return entry.result;
+}
+
+function loadParsedDiffCached(
+  diffContent: string,
+  oldSource: string | undefined,
+  filePath: string | undefined,
+  cwd: string | undefined,
+  options: GitDiffOptions | undefined,
+  inlineMode: DiffInlineMode,
+  language: string | undefined,
+): Promise<DiffWorkerResult> {
+  const key = buildParsedDiffCacheKey(filePath, cwd, options, inlineMode, language);
+  const cached = parsedDiffResultCache.get(key);
+  if (cached?.diffContent === diffContent && cached.oldSource === oldSource) {
+    parsedDiffResultCache.delete(key);
+    parsedDiffResultCache.set(key, cached);
+    return Promise.resolve(cached.result);
+  }
+  const pending = parsedDiffPromiseCache.get(key);
+  if (pending?.diffContent === diffContent && pending.oldSource === oldSource) return pending.promise;
+
+  const promise = parseDiffInWorker(diffContent, inlineMode, oldSource, language)
+    .then((result) => (
+      parsedDiffPromiseCache.get(key)?.promise === promise
+        ? rememberParsedDiffResult(key, { diffContent, oldSource, result })
+        : result
+    ))
+    .finally(() => {
+      if (parsedDiffPromiseCache.get(key)?.promise === promise) parsedDiffPromiseCache.delete(key);
+    });
+  parsedDiffPromiseCache.set(key, { diffContent, oldSource, promise });
+  return promise;
+}
+
+function invalidateParsedDiffCached(filePath: string | undefined, cwd: string | undefined, options?: GitDiffOptions): void {
+  const prefix = `${buildDiffCacheKey(filePath, cwd, options)}\u0000`;
+  for (const key of Array.from(parsedDiffResultCache.keys())) {
+    if (key.startsWith(prefix)) parsedDiffResultCache.delete(key);
+  }
+  for (const key of Array.from(parsedDiffPromiseCache.keys())) {
+    if (key.startsWith(prefix)) parsedDiffPromiseCache.delete(key);
+  }
 }
 
 function rememberDiffResult(key: string, result: DiffLoadResult): DiffLoadResult {
@@ -154,6 +234,7 @@ export function invalidateFileDiffCached(filePath: string | undefined, cwd: stri
   cancelPreloadDiff(key);
   diffResultCache.delete(key);
   diffPromiseCache.delete(key);
+  invalidateParsedDiffCached(filePath, cwd, options);
   diffCacheVersions.set(key, (diffCacheVersions.get(key) ?? 0) + 1);
 }
 
@@ -208,6 +289,26 @@ export function preloadSidebarDiff(rootPath: string | null | undefined, filePath
   void loadFileDiffCached(requestPath, cwd, options.force).catch(() => {
     // Preload is best-effort; DiffViewer will surface errors when it becomes visible.
   });
+}
+
+export async function preloadPreparedFileDiff(
+  filePath: string | undefined,
+  cwd: string | undefined,
+  inlineMode: DiffInlineMode,
+  options?: GitDiffOptions,
+): Promise<void> {
+  if (!filePath || !cwd) return;
+  const result = await loadFileDiffCached(filePath, cwd, false, options);
+  if (result.error || result.tooLarge || !result.diff || isDiffTooLargeToRender(result.diff)) return;
+  await loadParsedDiffCached(
+    result.diff,
+    undefined,
+    filePath,
+    cwd,
+    options,
+    inlineMode,
+    resolveLanguage(filePath) ?? undefined,
+  );
 }
 
 interface DiffViewerProps {
@@ -719,6 +820,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   const [diffError, setDiffError] = useState<string | null>(null);
   const [parsedFiles, setParsedFiles] = useState<FileData[]>([]);
   const [workerTokens, setWorkerTokens] = useState<Map<string, HunkTokens>>(() => new Map());
+  const [parsedDiffInput, setParsedDiffInput] = useState<ParsedDiffInput | null>(null);
   const [oldSourceContent, setOldSourceContent] = useState<string | null>(null);
   const [expandedImportHunks, setExpandedImportHunks] = useState<Set<string>>(() => new Set());
   const [imagePreview, setImagePreview] = useState<{
@@ -767,6 +869,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       setOldSourceContent(null);
       return;
     }
+    setOldSourceContent(null);
     const controller = new AbortController();
     const source = 'ref';
     getGitBlobContent(filePath, gitRoot, 'HEAD', controller.signal, source)
@@ -1013,20 +1116,36 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     if (!diffContent || diffContent.trim() === '') {
       setParsedFiles([]);
       setWorkerTokens(new Map());
+      setParsedDiffInput(null);
       return;
     }
     let cancelled = false;
     const startedAt = performance.now();
-    parseDiffInWorker(
+    const gitRoot = changedFileRepoRoot ?? repoRoot ?? (filePath?.startsWith('/') ? null : rootPath);
+    const requestPath = toDiffRequestPath(filePath, gitRoot);
+    const parseInlineMode = lightweight ? 'none' : inlineMode;
+    const parseLanguage = resolveLanguage(filePath) ?? undefined;
+    const parseCacheKey = buildParsedDiffCacheKey(
+      requestPath,
+      gitRoot ?? undefined,
+      diffOptions,
+      parseInlineMode,
+      parseLanguage,
+    );
+    loadParsedDiffCached(
       diffContent,
-      lightweight ? 'none' : inlineMode,
       oldSourceContent ?? undefined,
-      resolveLanguage(filePath) ?? undefined,
+      requestPath,
+      gitRoot ?? undefined,
+      diffOptions,
+      parseInlineMode,
+      parseLanguage,
     )
       .then((result) => {
         if (cancelled) return;
         setParsedFiles(result.files);
         setWorkerTokens(result.tokens);
+        setParsedDiffInput({ cacheKey: parseCacheKey, diffContent });
         logDiffViewerEvent('worker_parse_done', {
           filePath,
           bytes: diffContent.length,
@@ -1040,6 +1159,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         if (cancelled) return;
         setParsedFiles([]);
         setWorkerTokens(new Map());
+        setParsedDiffInput({ cacheKey: parseCacheKey, diffContent });
         setDiffError(error instanceof Error ? error.message : String(error));
         logDiffViewerEvent('worker_parse_error', {
           filePath,
@@ -1051,13 +1171,26 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     return () => {
       cancelled = true;
     };
-  }, [diffContent, filePath, inlineMode, lightweight, oldSourceContent, preparedDiff]);
+  }, [changedFileRepoRoot, diffContent, diffOptions, filePath, inlineMode, lightweight, oldSourceContent, preparedDiff, repoRoot, rootPath]);
 
   const effectiveDiffContent = preparedDiff !== undefined ? preparedDiff?.diffContent ?? null : diffContent;
   const effectiveDiffNotice = preparedDiff !== undefined ? preparedDiff?.diffNotice ?? null : diffNotice;
   const rawEffectiveDiffError = preparedDiff !== undefined ? preparedDiff?.diffError ?? null : diffError;
   const effectiveDiffError = rawEffectiveDiffError?.toLowerCase().includes('signal is aborted') ? null : rawEffectiveDiffError;
-  const effectiveDiffLoading = preparedDiff !== undefined ? false : diffLoading;
+  const parseGitRoot = changedFileRepoRoot ?? repoRoot ?? (filePath?.startsWith('/') ? null : rootPath);
+  const parseRequestPath = toDiffRequestPath(filePath, parseGitRoot);
+  const currentParseCacheKey = buildParsedDiffCacheKey(
+    parseRequestPath,
+    parseGitRoot ?? undefined,
+    diffOptions,
+    lightweight ? 'none' : inlineMode,
+    resolveLanguage(filePath) ?? undefined,
+  );
+  const parsedContentReady = !diffContent || (
+    parsedDiffInput?.cacheKey === currentParseCacheKey
+    && parsedDiffInput.diffContent === diffContent
+  );
+  const effectiveDiffLoading = preparedDiff !== undefined ? false : diffLoading || !parsedContentReady;
   const files = preparedDiff !== undefined ? preparedDiff?.files ?? [] : parsedFiles;
 
   useEffect(() => {
@@ -1479,7 +1612,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
 
   if (effectiveDiffLoading) {
     return embedded ? (
-      <div className="flex items-center justify-center gap-2 bg-surface-2 py-6 text-xs text-muted-foreground">
+      <div className="absolute inset-0 z-20 flex min-h-16 items-center justify-center gap-2 bg-surface-2 text-xs text-muted-foreground">
         <RiLoader size={18} className="animate-spin" />
         <span>{t('diffViewer.loading')}</span>
       </div>

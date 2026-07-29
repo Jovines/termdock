@@ -3266,6 +3266,9 @@ interface AuditPromptScopeButtonProps {
   secondaryLabel?: string;
   secondaryTitle?: string;
   secondaryLoading?: boolean;
+  loading?: boolean;
+  error?: boolean;
+  statusTitle?: string;
   extraContent?: ReactNode;
   renderRepoExtra?: (repo: AuditPromptScopeRepoOption) => ReactNode;
 }
@@ -3295,6 +3298,9 @@ function AuditPromptScopeButton({
   secondaryLabel,
   secondaryTitle,
   secondaryLoading,
+  loading,
+  error,
+  statusTitle,
   extraContent,
   renderRepoExtra,
 }: AuditPromptScopeButtonProps) {
@@ -3307,17 +3313,20 @@ function AuditPromptScopeButton({
           else if (!generateDisabled) onGenerate();
         }}
         disabled={disabled}
-        className={`inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-[11px] font-medium transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
-          inserted
+        className={`relative inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-[11px] font-medium transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${
+          error
+            ? 'text-destructive hover:bg-destructive/5'
+            : inserted
             ? 'bg-surface-elevated text-foreground'
             : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
         }`}
         aria-label={ariaLabel}
-        title={showScopePicker ? `${scopeTitle}: ${scopeLabel}` : title}
+        title={statusTitle ?? (showScopePicker ? `${scopeTitle}: ${scopeLabel}` : title)}
       >
-        <RiSparkles size={13} />
+        {loading ? <RiLoader size={13} className="animate-spin" /> : <RiSparkles size={13} />}
         <span>{inserted ? insertedLabel : buttonLabel}</span>
         {showScopePicker && <RiChevronDown size={11} className={`shrink-0 transition ${open ? 'rotate-180' : ''}`} />}
+        {error && <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-destructive" />}
       </button>
       {showScopePicker && open && (
         <div
@@ -8322,6 +8331,8 @@ export function RightSidebar(
       secondaryLabel={t('rightSidebar.branchAuditViewDiff')}
       secondaryTitle={t('rightSidebar.branchAuditViewDiffTitle')}
       secondaryLoading={branchAuditPreviewLoading}
+      loading={branchAuditDetailsLoadingRoots.size > 0}
+      statusTitle={branchAuditDetailsLoadingRoots.size > 0 ? '正在加载分支候选…' : undefined}
       extraContent={(
         <div className="mb-2 space-y-1.5">
           <label className="flex cursor-pointer items-center justify-between gap-3 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-foreground">
@@ -8339,12 +8350,6 @@ export function RightSidebar(
           {branchAuditMissingBaseRepos.length > 0 && (
             <div className="rounded-md bg-[rgb(var(--warning-rgb)_/_0.12)] px-2 py-1.5 text-[10px] text-[color:var(--warning)]">
               未设置基线的仓库会跳过：{branchAuditMissingBaseRepos.map((repo) => repo.label).join('、')}
-            </div>
-          )}
-          {branchAuditDetailsLoadingRoots.size > 0 && (
-            <div className="flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[10px] text-muted-foreground">
-              <RiLoader size={11} className="animate-spin" />
-              正在加载分支候选…
             </div>
           )}
         </div>
@@ -8413,33 +8418,6 @@ export function RightSidebar(
     locale,
   );
 
-  const changeAuditStatusBar = (changeAuditLoading || changeAuditError || changeAuditRecords.length > 0) ? (
-    <div className="mt-2 flex min-w-0 items-center gap-2">
-      <div className={`min-w-0 flex-1 truncate text-[10px] ${changeAuditError ? 'text-destructive' : 'text-muted-foreground'}`}>
-        <div className="truncate">
-          {changeAuditError ?? (changeAuditLoading ? t('rightSidebar.changeAuditLoading') : t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length }))}
-        </div>
-        {!changeAuditError && latestChangeAuditTime && (
-          <div className="mt-0.5 truncate text-[9px] text-muted-foreground/70">
-            {t('rightSidebar.changeAuditLoadedAt', { time: latestChangeAuditTime })}
-          </div>
-        )}
-      </div>
-      {changeAuditRecords.length > 0 && (
-        <button
-          type="button"
-          onClick={() => void handleClearLoadedChangeAuditRecords()}
-          disabled={changeAuditLoading}
-          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
-          title={t('rightSidebar.clearChangeAuditTitle')}
-          aria-label={t('rightSidebar.clearChangeAudit')}
-        >
-          <RiTrash size={12} />
-        </button>
-      )}
-    </div>
-  ) : null;
-
   const branchAuditModulePanel = rootPath ? (
     <div className="border-b border-border/10 px-1 py-3">
       <button
@@ -8467,9 +8445,9 @@ export function RightSidebar(
             </div>
             {branchAuditPromptButton}
           </div>
-          {(branchAuditPreviewLoading || branchAuditPreviewError) && (
-            <div className={`mb-2 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] ${branchAuditPreviewError ? 'text-destructive' : 'text-muted-foreground'}`}>
-              {branchAuditPreviewError ?? t('rightSidebar.branchAuditDiffLoading')}
+          {branchAuditPreviewError && (
+            <div className="mb-2 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-destructive">
+              {branchAuditPreviewError}
             </div>
           )}
           <div className="mt-2 space-y-1.5">
@@ -8568,9 +8546,6 @@ export function RightSidebar(
   const gitQuickActionsPanel = hasMountedGitPane && rootPath && gitDetailsLoaded ? (
     <div className={effectiveGitQuickActionsOpen ? 'overflow-visible' : 'overflow-hidden'}>
       {branchAuditModulePanel}
-      <div className="px-1">
-        {changeAuditStatusBar}
-      </div>
       <button
         type="button"
         onClick={() => {
@@ -9067,26 +9042,48 @@ export function RightSidebar(
       : `${changeAuditTargetRepos.length} repos`;
 
   const changeAuditButton = rootPath ? (
-    <AuditPromptScopeButton
-      open={changeAuditScopeOpen}
-      onOpenChange={setChangeAuditScopeOpen}
-      showScopePicker={showGitRepoFilter}
-      selectedAll={changeAuditTargetsAllRepos}
-      repos={changeAuditScopeRepos}
-      selectedRoots={changeAuditTargetRepoRoots}
-      onToggleRepo={toggleChangeAuditRepoRoot}
-      onGenerate={() => insertChangeAuditPrompt()}
-      disabled={!rootPath}
-      inserted={insertedReferenceKey === changeAuditPromptKey}
-      buttonLabel={t('rightSidebar.changeAuditShort')}
-      insertedLabel={t('rightSidebar.inserted')}
-      title={t('rightSidebar.insertChangeAuditPromptTitle')}
-      ariaLabel={t('rightSidebar.insertChangeAuditPrompt')}
-      scopeTitle={t('rightSidebar.changeAuditScopeLabel')}
-      scopeLabel={changeAuditScopeLabel}
-      allLabel={t('rightSidebar.changeAuditScopeAll')}
-      generateLabel={t('rightSidebar.changeAuditShort')}
-    />
+    <div className="inline-flex h-7 shrink-0 items-center">
+      <AuditPromptScopeButton
+        open={changeAuditScopeOpen}
+        onOpenChange={setChangeAuditScopeOpen}
+        showScopePicker={showGitRepoFilter}
+        selectedAll={changeAuditTargetsAllRepos}
+        repos={changeAuditScopeRepos}
+        selectedRoots={changeAuditTargetRepoRoots}
+        onToggleRepo={toggleChangeAuditRepoRoot}
+        onGenerate={() => insertChangeAuditPrompt()}
+        disabled={!rootPath}
+        inserted={insertedReferenceKey === changeAuditPromptKey}
+        buttonLabel={t('rightSidebar.changeAuditShort')}
+        insertedLabel={t('rightSidebar.inserted')}
+        title={t('rightSidebar.insertChangeAuditPromptTitle')}
+        ariaLabel={t('rightSidebar.insertChangeAuditPrompt')}
+        scopeTitle={t('rightSidebar.changeAuditScopeLabel')}
+        scopeLabel={changeAuditScopeLabel}
+        allLabel={t('rightSidebar.changeAuditScopeAll')}
+        generateLabel={t('rightSidebar.changeAuditShort')}
+        loading={changeAuditLoading}
+        error={Boolean(changeAuditError)}
+        statusTitle={changeAuditError
+          ?? (changeAuditLoading
+            ? t('rightSidebar.changeAuditLoading')
+            : changeAuditRecords.length > 0
+              ? `${t('rightSidebar.changeAuditLoaded', { count: changeAuditRecords.length })}${latestChangeAuditTime ? ` · ${t('rightSidebar.changeAuditLoadedAt', { time: latestChangeAuditTime })}` : ''}`
+              : undefined)}
+      />
+      <button
+        type="button"
+        onClick={() => void handleClearLoadedChangeAuditRecords()}
+        disabled={changeAuditLoading || changeAuditRecords.length === 0}
+        className={`inline-flex h-7 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none active:scale-95 ${
+          changeAuditRecords.length > 0 ? '' : 'invisible'
+        }`}
+        title={t('rightSidebar.clearChangeAuditTitle')}
+        aria-label={t('rightSidebar.clearChangeAudit')}
+      >
+        <RiTrash size={12} />
+      </button>
+    </div>
   ) : null;
 
   const gitSummaryChips = (changedFiles.size > 0 || gitContext?.available || gitBundleLastLoadedAt) ? (
@@ -9849,7 +9846,6 @@ export function RightSidebar(
                       </button>
                     </div>
                   )}
-                  {changeAuditStatusBar}
                   {!activeGitRepoSummary && showGitRepoFilter && (
                     <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                       <RiGitBranch size={12} className="shrink-0" />
@@ -9935,7 +9931,6 @@ export function RightSidebar(
                       </button>
                     </div>
                   )}
-                  {changeAuditStatusBar}
                   {!activeGitRepoSummary && showGitRepoFilter && (
                     <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                       <RiGitBranch size={12} className="shrink-0" />
@@ -10002,7 +9997,6 @@ export function RightSidebar(
                           {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
                         </div>
                       )}
-                      {changeAuditStatusBar}
                       {!activeGitRepoSummary && showGitRepoFilter && (
                         <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                           <RiGitBranch size={12} className="shrink-0" />
@@ -10178,7 +10172,6 @@ export function RightSidebar(
                           </button>
                         </div>
                       )}
-                      {changeAuditStatusBar}
                       {!activeGitRepoSummary && showGitRepoFilter && (
                         <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
                           <RiGitBranch size={12} className="shrink-0" />
