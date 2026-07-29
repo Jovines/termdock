@@ -94,6 +94,34 @@ describe('DiffLab regression fixtures', () => {
     expect(timeoutRows[0].texts).toEqual(['config.timeoutMs = 1000;', 'config.timeoutMs = 1500;']);
   });
 
+  it('keeps an if wrapper around aligned unchanged lines in source order', async () => {
+    const { container } = renderLab('?diff-lab=1&fixture=ifWrapper&view=split&inline=words&wrap=on');
+    await waitFor(() => expect(container.querySelectorAll('.diff.diff-split .diff-line').length).toBeGreaterThan(0));
+    const rows = Array.from(container.querySelectorAll('.diff.diff-split .diff-line')).map((row) => ({
+      className: row.className,
+      cells: Array.from(row.querySelectorAll('.diff-code')),
+      texts: Array.from(row.querySelectorAll('.diff-code')).map((cell) => cell.textContent?.trim() ?? ''),
+    }));
+    const ifIndex = rows.findIndex((row) => row.texts[0] === '' && row.texts[1].startsWith('if (shouldRun'));
+    const prepareIndex = rows.findIndex((row) => row.texts[0] === 'prepare(context);');
+    const finishIndex = rows.findIndex((row) => row.texts[0] === 'finish(context);');
+    const wrapperCloseIndex = rows.findIndex((row) => row.texts[0] === '' && row.texts[1] === '}');
+    const stableRows = rows.filter((row) => (
+      row.texts[0] === 'prepare(context);'
+      || row.texts[0] === 'executeTask(context);'
+      || row.texts[0] === 'finish(context);'
+    ));
+
+    expect(ifIndex).toBeGreaterThanOrEqual(0);
+    expect(ifIndex).toBeLessThan(prepareIndex);
+    expect(prepareIndex).toBeLessThan(finishIndex);
+    expect(finishIndex).toBeLessThan(wrapperCloseIndex);
+    expect(stableRows).toHaveLength(3);
+    expect(stableRows.every((row) => row.className.includes('diff-line-compare'))).toBe(true);
+    expect(stableRows.every((row) => row.cells[0]?.querySelector('.diff-code-edit') === null)).toBe(true);
+    expect(stableRows.every((row) => row.cells[1]?.querySelector('.diff-code-edit')?.textContent === '  ')).toBe(true);
+  });
+
   it('collapses import-only hunks by default', async () => {
     const { container } = renderLab('?diff-lab=1&fixture=imports&view=unified&inline=words&wrap=on');
 

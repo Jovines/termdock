@@ -526,18 +526,22 @@ function alignAdjacentChangesForSplitView(hunk: HunkData): HunkData {
       deletes.map((item) => ({ content: item.content, lineNumber: getChangeLineNumber(item) ?? -1 })),
       inserts.map((item) => ({ content: item.content, lineNumber: getChangeLineNumber(item) ?? -1 })),
     );
-    const pairedInsertByDeleteLine = new Map(pairs.map((pair) => [pair.oldLineNumber, pair.newLineNumber]));
-    const consumedInsertLines = new Set(pairs.map((pair) => pair.newLineNumber));
-    for (const item of block) {
-      const lineNumber = getChangeLineNumber(item) ?? -1;
-      if (item.type === 'insert' && consumedInsertLines.has(lineNumber)) continue;
-      changes.push(item);
-      if (item.type !== 'delete') continue;
-      const pairedInsertLine = pairedInsertByDeleteLine.get(lineNumber);
-      if (pairedInsertLine === undefined) continue;
-      const pairedInsert = inserts.find((candidate) => getChangeLineNumber(candidate) === pairedInsertLine);
-      if (pairedInsert) changes.push(pairedInsert);
+    const oldIndexByLine = new Map(deletes.map((item, index) => [getChangeLineNumber(item) ?? -1, index]));
+    const newIndexByLine = new Map(inserts.map((item, index) => [getChangeLineNumber(item) ?? -1, index]));
+    let oldCursor = 0;
+    let newCursor = 0;
+    for (const pair of pairs) {
+      const pairedOldIndex = oldIndexByLine.get(pair.oldLineNumber);
+      const pairedNewIndex = newIndexByLine.get(pair.newLineNumber);
+      if (pairedOldIndex === undefined || pairedNewIndex === undefined) continue;
+      while (newCursor < pairedNewIndex) changes.push(inserts[newCursor++]);
+      while (oldCursor < pairedOldIndex) changes.push(deletes[oldCursor++]);
+      changes.push(deletes[pairedOldIndex], inserts[pairedNewIndex]);
+      oldCursor = pairedOldIndex + 1;
+      newCursor = pairedNewIndex + 1;
     }
+    while (oldCursor < deletes.length) changes.push(deletes[oldCursor++]);
+    while (newCursor < inserts.length) changes.push(inserts[newCursor++]);
   }
   return { ...hunk, changes };
 }

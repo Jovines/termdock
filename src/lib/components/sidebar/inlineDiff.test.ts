@@ -3,6 +3,8 @@ import {
   findMovedLineCandidates,
   getChangedInlineTokenIndexes,
   getInlineDiffSimilarity,
+  getJetBrainsStyleDiffRanges,
+  getPreciseWordDiffRanges,
   pairChangedLinesForDisplay,
   tokenizeInlineDiffLine,
 } from './inlineDiff';
@@ -39,6 +41,61 @@ describe('inline diff token heuristics', () => {
 
     expect([...beforeChanged].map((index) => before[index].value)).toContain('basic');
     expect([...afterChanged].map((index) => after[index].value)).toContain('advanced');
+  });
+
+  it('uses IntelliJ word chunks rather than partial identifier affixes', () => {
+    const before = '  config.timeoutMs = 1000;';
+    const after = '  config.timeoutSec = 1500;';
+    const [beforeRanges, afterRanges] = getPreciseWordDiffRanges(before, after);
+
+    expect(beforeRanges.map((range) => before.slice(range.start, range.start + range.length))).toEqual(['timeoutMs', '1000']);
+    expect(afterRanges.map((range) => after.slice(range.start, range.start + range.length))).toEqual(['timeoutSec', '1500']);
+  });
+
+  it('creates one precise chunk for an appended argument', () => {
+    const before = 'tracker.reportClick(searchHintBeen, url)';
+    const after = 'tracker.reportClick(searchHintBeen, url, source = "hint_icon")';
+    const [beforeRanges, afterRanges] = getPreciseWordDiffRanges(before, after);
+
+    expect(beforeRanges).toEqual([]);
+    expect(afterRanges.map((range) => after.slice(range.start, range.start + range.length))).toEqual([
+      ', source = "hint_icon"',
+    ]);
+  });
+
+  it('keeps replacement highlights contiguous instead of fragmenting punctuation', () => {
+    const before = 'const mode = "basic";';
+    const after = 'const mode = "advanced";';
+    const [beforeRanges, afterRanges] = getPreciseWordDiffRanges(before, after);
+
+    expect(beforeRanges.map((range) => before.slice(range.start, range.start + range.length))).toEqual(['basic']);
+    expect(afterRanges.map((range) => after.slice(range.start, range.start + range.length))).toEqual(['advanced']);
+  });
+
+  it('keeps a wrapped code block stable and highlights only the if wrapper and indentation', () => {
+    const before = [
+      '  prepare();',
+      '  executeTask(input);',
+      '  finish();',
+    ].join('\n');
+    const after = [
+      '  if (shouldRun) {',
+      '    prepare();',
+      '    executeTask(input);',
+      '    finish();',
+      '  }',
+    ].join('\n');
+    const [beforeRanges, afterRanges] = getJetBrainsStyleDiffRanges(before, after, 'words');
+    const beforeHighlights = beforeRanges.map((range) => before.slice(range.start, range.start + range.length));
+    const afterHighlights = afterRanges.map((range) => after.slice(range.start, range.start + range.length));
+
+    expect(beforeHighlights).toEqual([]);
+    expect(afterHighlights).toEqual([
+      '  if (shouldRun) {\n  ',
+      '  ',
+      '  ',
+      '\n  }',
+    ]);
   });
 
   it('detects moved unchanged lines as candidates', () => {

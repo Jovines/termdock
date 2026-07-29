@@ -43,7 +43,7 @@ import { ChangeWalkthroughPanel } from './ChangeWalkthroughPanel';
 import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, isPreviewableImagePath, openInFileBrowser, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffAlgorithm, type GitDiffOptions, type GitDiffWhitespaceMode, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, isPreviewableImagePath, openInFileBrowser, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, refractorNodesToReact, type RefractorLike } from '../../utils/syntaxHighlight';
@@ -80,10 +80,6 @@ const MARKDOWN_VIEW_MODE_STORAGE_KEY = 'termdock:right-sidebar:markdown-view-mod
 const DIFF_CHANGE_LIST_MODE_STORAGE_KEY = 'termdock:right-sidebar:diff-change-list-mode:v1';
 const DIFF_WRAP_STORAGE_KEY = 'termdock:right-sidebar:diff-wrap:v1';
 const DIFF_VIEW_TYPE_STORAGE_KEY = 'termdock:diff-viewer:view-type:v1';
-const DIFF_INLINE_MODE_STORAGE_KEY = 'termdock:diff-viewer:inline-mode:v1';
-const DIFF_ALGORITHM_STORAGE_KEY = 'termdock:diff-viewer:algorithm:v1';
-const DIFF_WHITESPACE_STORAGE_KEY = 'termdock:diff-viewer:whitespace:v1';
-const DIFF_SETTINGS_CHANGED_EVENT = 'termdock:diff-settings-changed';
 const FILE_SEARCH_MODE_STORAGE_KEY = 'termdock:right-sidebar:file-search-mode:v1';
 const COLLAPSED_GIT_REPO_GROUPS_STORAGE_KEY = 'termdock:right-sidebar:collapsed-git-repo-groups:v1';
 const COLLAPSED_DIFF_DIRECTORIES_STORAGE_KEY = 'termdock:right-sidebar:collapsed-diff-directories:v1';
@@ -185,30 +181,6 @@ function isDiffViewType(value: unknown): value is DiffViewType {
 
 function readDiffViewType(): DiffViewType {
   return readCache(DIFF_VIEW_TYPE_STORAGE_KEY, isDiffViewType) ?? 'unified';
-}
-
-function isDiffInlineMode(value: unknown): value is DiffInlineMode {
-  return value === 'none' || value === 'words' || value === 'chars';
-}
-
-function readDiffInlineMode(): DiffInlineMode {
-  return readCache(DIFF_INLINE_MODE_STORAGE_KEY, isDiffInlineMode) ?? 'words';
-}
-
-function isGitDiffAlgorithm(value: unknown): value is GitDiffAlgorithm {
-  return value === 'default' || value === 'myers' || value === 'minimal' || value === 'patience' || value === 'histogram';
-}
-
-function readGitDiffAlgorithm(): GitDiffAlgorithm {
-  return readCache(DIFF_ALGORITHM_STORAGE_KEY, isGitDiffAlgorithm) ?? 'default';
-}
-
-function isGitDiffWhitespaceMode(value: unknown): value is GitDiffWhitespaceMode {
-  return value === 'default' || value === 'trim' || value === 'ignore' || value === 'ignore-blank-lines';
-}
-
-function readGitDiffWhitespaceMode(): GitDiffWhitespaceMode {
-  return readCache(DIFF_WHITESPACE_STORAGE_KEY, isGitDiffWhitespaceMode) ?? 'default';
 }
 
 function isFileSearchMode(value: unknown): value is FileSearchMode {
@@ -5188,9 +5160,7 @@ export function RightSidebar(
   // user can opt in per-session without leaving the panel.
   const [diffWrap, setDiffWrap] = useState(() => readDiffWrap());
   const [diffViewType, setDiffViewType] = useState<DiffViewType>(() => readDiffViewType());
-  const [diffInlineMode, setDiffInlineMode] = useState<DiffInlineMode>(() => readDiffInlineMode());
-  const [diffAlgorithm, setDiffAlgorithm] = useState<GitDiffAlgorithm>(() => readGitDiffAlgorithm());
-  const [diffWhitespace, setDiffWhitespace] = useState<GitDiffWhitespaceMode>(() => readGitDiffWhitespaceMode());
+  const diffInlineMode: DiffInlineMode = 'words';
   const [diffRefreshKey, setDiffRefreshKey] = useState(0);
   const [changeAuditRecords, setChangeAuditRecords] = useState<ChangeAuditRecord[]>([]);
   const [changeWalkthroughs, setChangeWalkthroughs] = useState<ChangeWalkthrough[]>([]);
@@ -8080,25 +8050,13 @@ export function RightSidebar(
     writeCache(DIFF_VIEW_TYPE_STORAGE_KEY, mode);
   }, []);
 
-  useEffect(() => {
-    const syncDiffSettings = () => {
-      setDiffInlineMode(readDiffInlineMode());
-      setDiffAlgorithm(readGitDiffAlgorithm());
-      setDiffWhitespace(readGitDiffWhitespaceMode());
-      setDiffRefreshKey((key) => key + 1);
-    };
-    window.addEventListener(DIFF_SETTINGS_CHANGED_EVENT, syncDiffSettings);
-    window.addEventListener('storage', syncDiffSettings);
-    return () => {
-      window.removeEventListener(DIFF_SETTINGS_CHANGED_EVENT, syncDiffSettings);
-      window.removeEventListener('storage', syncDiffSettings);
-    };
-  }, []);
-
+  // Histogram keeps code blocks stable around repeated lines and the precise
+  // word enhancer handles the inner fragments. These are product defaults,
+  // not user-facing tuning knobs.
   const diffOptions = useMemo<GitDiffOptions>(() => ({
-    algorithm: diffAlgorithm,
-    whitespace: diffWhitespace,
-  }), [diffAlgorithm, diffWhitespace]);
+    algorithm: 'histogram',
+    whitespace: 'default',
+  }), []);
 
   const updateSearchMode = useCallback((mode: FileSearchMode) => {
     setSearchMode(mode);

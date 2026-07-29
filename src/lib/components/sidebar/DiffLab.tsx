@@ -227,6 +227,25 @@ const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: string;
    return config;
  }`,
   },
+  ifWrapper: {
+    label: 'Wrap an unchanged block in an if',
+    path: 'TaskRunner.ts',
+    diff: `diff --git a/TaskRunner.ts b/TaskRunner.ts
+--- a/TaskRunner.ts
++++ b/TaskRunner.ts
+@@ -8,7 +8,9 @@ export function runTask(input: Input) {
+   const context = createContext(input);
+-  prepare(context);
+-  executeTask(context);
+-  finish(context);
++  if (shouldRun(context)) {
++    prepare(context);
++    executeTask(context);
++    finish(context);
++  }
+   return context;
+ }`,
+  },
 };
 
 function readInitialFixture(): keyof typeof DIFF_FIXTURES {
