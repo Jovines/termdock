@@ -632,6 +632,9 @@ export function formatDiffLimitMessage(result: DiffLoadResult): string | null {
     const first = result.skippedFiles[0];
     const size = formatBytes(first.size);
     const suffix = result.skippedFiles.length > 1 ? ` and ${result.skippedFiles.length - 1} more file(s)` : '';
+    if (first.reason === 'binary-file') {
+      return `Binary file changed: ${first.path}${size ? ` (${size})` : ''}. Content was not loaded${suffix}.`;
+    }
     return `Skipped large untracked file ${first.path}${size ? ` (${size})` : ''}${suffix}.`;
   }
   return null;

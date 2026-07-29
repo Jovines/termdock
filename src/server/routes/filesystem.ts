@@ -10,6 +10,7 @@ import { getImageDimensions } from '../utils/imageDimensions.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog } from '../utils/serverLogger.js';
 import { clearBranchAuditRecords, clearChangeAuditRecords, listBranchAuditRecords, listChangeAuditRecords, buildChangeAuditFingerprint } from '../utils/changeAuditStore.js';
 import { getLanIPv4Addresses } from '../utils/localAccess.js';
+import { inspectBinaryFile } from '../utils/binaryFile.js';
 
 const router = Router();
 
@@ -637,6 +638,14 @@ function makeSkippedUntracked(pathspec: string, size: number | null): DiffSkippe
     reason: 'untracked-file-too-large',
     size: size ?? undefined,
     maxBytes: MAX_UNTRACKED_DIFF_FILE_BYTES,
+  };
+}
+
+function makeSkippedBinary(pathspec: string, size: number): DiffSkippedFile {
+  return {
+    path: pathspec,
+    reason: 'binary-file',
+    size,
   };
 }
 
@@ -3090,6 +3099,32 @@ router.get('/diff', async (req: Request, res: Response) => {
 
       const pathspec = requestedPath ? await toGitPathspec(gitCwd, requestedPath) : null;
       const skippedFiles: DiffSkippedFile[] = [];
+
+      // The complete sidebar review requests every changed file at once. Git's
+      // output cap cannot prevent the work needed to classify a huge binary, so
+      // cheaply inspect the working-tree prefix before starting Git. Images are
+      // intentionally exempt because the sidebar has a dedicated preview path.
+      if (pathspec && !getImageMimeType(pathspec)) {
+        const candidatePath = path.resolve(gitCwd, pathspec);
+        const inspection = isPathInside(gitCwd, candidatePath)
+          ? await inspectBinaryFile(candidatePath)
+          : null;
+        throwIfAborted(controller.signal, 'git.diff');
+        if (inspection?.binary) {
+          skippedFiles.push(makeSkippedBinary(pathspec, inspection.size));
+          return {
+            payload: {
+              path: requestedPath ?? null,
+              diff: '',
+              size: 0,
+              skippedFiles,
+              truncated: true,
+            } satisfies DiffResponsePayload,
+            pathspec,
+          };
+        }
+      }
+
       const buildDiffArgs = (includeCached: boolean) => {
         const args = ['diff', '-M', ...diffOptionArgs];
         if (includeCached) args.push('--cached');
