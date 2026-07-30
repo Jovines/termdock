@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src http: https: ws: wss:"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Termdock 连接中心</title>
+    <link rel="stylesheet" href="./tokens.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="rail">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"><span>›_</span></div>
+          <div>
+            <p class="brand-name">Termdock</p>
+            <p class="brand-edition">Desktop</p>
+          </div>
+        </div>
+
+        <nav class="rail-nav" aria-label="连接中心">
+          <a class="nav-item active" href="#local">
+            <span class="nav-glyph">⌁</span>
+            <span>本机</span>
+            <i id="nav-local-dot" class="nav-dot"></i>
+          </a>
+          <a class="nav-item" href="#cli">
+            <span class="nav-glyph">›_</span>
+            <span>命令行</span>
+          </a>
+          <a class="nav-item" href="#remote">
+            <span class="nav-glyph">↗</span>
+            <span>其他服务</span>
+            <small id="connection-count">0</small>
+          </a>
+        </nav>
+
+        <div class="rail-foot">
+          <p id="version">Termdock</p>
+          <p>共享 ~/.termdock</p>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="kicker">CONNECTION CENTER</p>
+            <h1>选择工作空间</h1>
+          </div>
+          <button id="refresh" class="icon-button" type="button" aria-label="刷新状态">
+            <span aria-hidden="true">↻</span>
+            <span>刷新</span>
+          </button>
+        </header>
+
+        <p id="notice" class="notice" hidden></p>
+
+        <section id="local" class="local-stage" aria-labelledby="local-title">
+          <div class="stage-head">
+            <div>
+              <p class="section-label">本机服务</p>
+              <h2 id="local-title">这台 Mac</h2>
+            </div>
+            <span id="local-state" class="status"><i></i><span>检查中</span></span>
+          </div>
+
+          <div class="terminal-visual" aria-hidden="true">
+            <div class="terminal-chrome">
+              <span></span><span></span><span></span>
+              <p>termdock — local</p>
+            </div>
+            <div class="terminal-body">
+              <p><b>›</b> termdock status</p>
+              <p class="terminal-result"><span id="visual-status">checking</span><i class="cursor"></i></p>
+            </div>
+          </div>
+
+          <div class="service-line">
+            <div class="service-address">
+              <span>服务地址</span>
+              <strong id="local-address">localhost:9834</strong>
+            </div>
+            <p id="local-detail" class="service-meta">正在读取 ~/.termdock/server.json</p>
+          </div>
+
+          <div class="primary-actions">
+            <button id="connect-local" class="primary" type="button" hidden>
+              <span>打开工作空间</span><i>↗</i>
+            </button>
+            <button id="start-local" class="secondary" type="button">由桌面版启动</button>
+          </div>
+        </section>
+
+        <section id="cli" class="utility-section" aria-labelledby="cli-title">
+          <div class="utility-copy">
+            <div class="utility-icon" aria-hidden="true">›_</div>
+            <div>
+              <div class="inline-title">
+                <h2 id="cli-title">Termdock CLI</h2>
+                <span id="cli-state" class="text-state">检查中</span>
+              </div>
+              <p id="cli-detail">正在扫描 PATH 中的 td 与 termdock。</p>
+            </div>
+          </div>
+          <button id="install-cli" class="secondary compact" type="button">安装 / 修复</button>
+        </section>
+
+        <section id="remote" class="remote-section" aria-labelledby="remote-title">
+          <div class="section-intro">
+            <div>
+              <p class="section-label">其他服务</p>
+              <h2 id="remote-title">连接任意 Termdock</h2>
+            </div>
+            <p>支持本机、局域网与公网地址</p>
+          </div>
+
+          <form id="connection-form" class="connection-form">
+            <label class="url-field">
+              <span>服务地址</span>
+              <input id="connection-url" name="url" type="text" placeholder="https://term.example.com" required />
+            </label>
+            <label>
+              <span>显示名称</span>
+              <input id="connection-label" name="label" type="text" placeholder="工作室 Mac" />
+            </label>
+            <div class="form-actions">
+              <button id="save-connection" class="quiet" type="button">仅保存</button>
+              <button id="probe-connection" class="primary" type="submit">检测并连接 <i>↗</i></button>
+            </div>
+          </form>
+
+          <div id="connections" class="connections"></div>
+        </section>
+      </div>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

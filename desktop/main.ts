@@ -1,0 +1,842 @@
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  net,
+  Notification,
+  shell,
+  type MessageBoxOptions,
+} from 'electron';
+import { execFile, spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import type {
+  CliInstallation,
+  DesktopConfig,
+  DesktopSnapshot,
+  LocalServerState,
+  LocalServiceStatus,
+  SavedConnection,
+  ServiceProbe,
+} from './types.js';
+
+const execFileAsync = promisify(execFile);
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(currentDir, '..');
+const termdockDir = path.join(os.homedir(), '.termdock');
+const desktopConfigPath = path.join(termdockDir, 'desktop.json');
+const serverStatePath = path.join(termdockDir, 'server.json');
+const DEFAULT_LOCAL_URL = 'http://localhost:9834';
+const PROTOCOL_VERSION = 1;
+const HEALTH_TIMEOUT_MS = 3_500;
+const START_TIMEOUT_MS = 90_000;
+
+let mainWindow: BrowserWindow | null = null;
+let activeServiceOrigin: string | null = null;
+let isQuitting = false;
+
+function showDesktopMessageBox(options: MessageBoxOptions) {
+  return mainWindow
+    ? dialog.showMessageBox(mainWindow, options)
+    : dialog.showMessageBox(options);
+}
+
+function defaultConfig(): DesktopConfig {
+  return { version: 1, connections: [], lastConnectionUrl: null };
+}
+
+function normalizeServiceUrl(raw: string): string {
+  const value = raw.trim();
+  if (!value) throw new Error('请输入 Termdock 服务地址');
+  const parsed = new URL(value.includes('://') ? value : `http://${value}`);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('服务地址只支持 http:// 或 https://');
+  }
+  parsed.username = '';
+  parsed.password = '';
+  parsed.hash = '';
+  parsed.search = '';
+  parsed.pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+  return parsed.toString().replace(/\/$/, '');
+}
+
+function isLocalNetworkTarget(url: URL): boolean {
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    hostname === 'localhost'
+    || hostname.endsWith('.local')
+    || !hostname.includes('.')
+  ) {
+    return true;
+  }
+  if (/^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname)) {
+    return true;
+  }
+  const ipv4 = hostname.match(/^172\.(\d{1,3})\./);
+  if (ipv4) {
+    const secondOctet = Number(ipv4[1]);
+    if (secondOctet >= 16 && secondOctet <= 31) return true;
+  }
+  return hostname === '::1'
+    || hostname.startsWith('fe80:')
+    || hostname.startsWith('fc')
+    || hostname.startsWith('fd');
+}
+
+function networkErrorDetails(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause = (error as Error & { cause?: unknown }).cause;
+  return cause ? `${error.message} ${networkErrorDetails(cause)}` : error.message;
+}
+
+function looksLikeLocalNetworkPermissionError(error: unknown): boolean {
+  return /ERR_ADDRESS_UNREACHABLE|ERR_NETWORK_ACCESS_DENIED/i.test(networkErrorDetails(error));
+}
+
+async function requestLocalNetworkPermissionRetry(target: string): Promise<boolean> {
+  const result = await showDesktopMessageBox({
+    type: 'warning',
+    title: '需要本地网络权限',
+    message: 'macOS 阻止了 Termdock 访问局域网服务',
+    detail: `目标：${target}\n\n请在系统提示中选择“允许”。如果之前选择过“不允许”，请前往“系统设置 → 隐私与安全性 → 本地网络”开启 Termdock。`,
+    buttons: ['已允许，重试', '打开系统设置', '取消'],
+    defaultId: 0,
+    cancelId: 2,
+  });
+  if (result.response === 1) {
+    await shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork',
+    );
+  }
+  return result.response === 0;
+}
+
+function readDesktopConfig(): DesktopConfig {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(desktopConfigPath, 'utf8')) as Partial<DesktopConfig>;
+    if (parsed.version !== 1 || !Array.isArray(parsed.connections)) return defaultConfig();
+    return {
+      version: 1,
+      connections: parsed.connections.filter((entry): entry is SavedConnection =>
+        Boolean(entry)
+        && typeof entry.id === 'string'
+        && typeof entry.label === 'string'
+        && typeof entry.url === 'string'),
+      lastConnectionUrl: typeof parsed.lastConnectionUrl === 'string' ? parsed.lastConnectionUrl : null,
+    };
+  } catch {
+    return defaultConfig();
+  }
+}
+
+function writeDesktopConfig(config: DesktopConfig): void {
+  fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
+  const temporaryPath = `${desktopConfigPath}.${process.pid}.tmp`;
+  fs.writeFileSync(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporaryPath, desktopConfigPath);
+}
+
+function readServerState(): LocalServerState | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(serverStatePath, 'utf8')) as Partial<LocalServerState>;
+    if (
+      typeof parsed.pid !== 'number'
+      || !Number.isInteger(parsed.pid)
+      || typeof parsed.host !== 'string'
+      || typeof parsed.port !== 'number'
+    ) {
+      return null;
+    }
+    return parsed as LocalServerState;
+  } catch {
+    return null;
+  }
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stateUrl(state: LocalServerState): string {
+  if (state.localUrl) return normalizeServiceUrl(state.localUrl);
+  const scheme = state.scheme ?? 'http';
+  const host = state.host === '0.0.0.0' ? 'localhost' : state.host;
+  return `${scheme}://${host}:${state.port}`;
+}
+
+async function fetchWithTimeout(url: string): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+  try {
+    // Electron's network stack follows the macOS Keychain trust store. Node's
+    // global fetch does not, so a healthy local service using Termdock's
+    // mkcert certificate could otherwise be reported as a failed start.
+    return await net.fetch(url, {
+      signal: controller.signal,
+      redirect: 'error',
+      headers: { Accept: 'application/json' },
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function probeService(rawUrl: string): Promise<ServiceProbe> {
+  let url: string;
+  try {
+    url = normalizeServiceUrl(rawUrl);
+  } catch (error) {
+    return { ok: false, url: rawUrl, error: error instanceof Error ? error.message : String(error) };
+  }
+
+  try {
+    const healthResponse = await fetchWithTimeout(`${url}/health`);
+    if (!healthResponse.ok) {
+      return { ok: false, url, error: `健康检查返回 HTTP ${healthResponse.status}` };
+    }
+    const health = await healthResponse.json() as { status?: unknown };
+    if (health.status !== 'ok') {
+      return { ok: false, url, error: '目标地址不是可识别的 Termdock 服务' };
+    }
+
+    try {
+      const metadataResponse = await fetchWithTimeout(`${url}/api/meta`);
+      if (metadataResponse.ok) {
+        const metadata = await metadataResponse.json() as {
+          product?: unknown;
+          version?: unknown;
+          protocolVersion?: unknown;
+        };
+        if (metadata.product && metadata.product !== 'termdock') {
+          return { ok: false, url, error: '目标服务的产品标识不是 Termdock' };
+        }
+        return {
+          ok: true,
+          url,
+          version: typeof metadata.version === 'string' ? metadata.version : undefined,
+          protocolVersion: typeof metadata.protocolVersion === 'number'
+            ? metadata.protocolVersion
+            : undefined,
+        };
+      }
+    } catch {
+      // Older Termdock releases do not expose /api/meta. A valid health
+      // response is enough to allow a backwards-compatible connection.
+    }
+    return { ok: true, url };
+  } catch (error) {
+    const message = error instanceof Error && error.name === 'AbortError'
+      ? '连接超时'
+      : (error instanceof Error ? error.message : String(error));
+    return { ok: false, url, error: message };
+  }
+}
+
+async function getLocalServiceStatus(): Promise<LocalServiceStatus> {
+  const state = readServerState();
+  if (!state || !isProcessRunning(state.pid)) {
+    return { running: false, state, probe: null };
+  }
+  const probe = await probeService(stateUrl(state));
+  return { running: probe.ok, state, probe };
+}
+
+function runtimePaths(): {
+  node: string;
+  cli: string;
+  launcher: string;
+  toolchainBin: string;
+} {
+  if (app.isPackaged) {
+    return {
+      node: path.join(process.resourcesPath, 'runtime', 'bin', 'node'),
+      cli: path.join(process.resourcesPath, 'server', 'dist', 'server', 'cli.js'),
+      launcher: path.join(process.resourcesPath, 'cli', 'td'),
+      toolchainBin: path.join(process.resourcesPath, 'toolchain', 'bin'),
+    };
+  }
+  return {
+    node: process.env.TERMDOCK_NODE_BIN || 'node',
+    cli: path.join(projectRoot, 'dist', 'server', 'cli.js'),
+    launcher: path.join(projectRoot, 'desktop', 'cli', 'td'),
+    toolchainBin: path.join(projectRoot, '.desktop-runtime', 'toolchain', 'bin'),
+  };
+}
+
+async function executableVersion(executable: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(executable, ['--version'], {
+      timeout: 5_000,
+      maxBuffer: 128 * 1024,
+    });
+    return stdout.trim().split(/\s+/).at(-1) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function discoverCliInstallations(): Promise<CliInstallation[]> {
+  const candidates = new Set<string>();
+  try {
+    const { stdout } = await execFileAsync('/bin/zsh', ['-lic', 'whence -pa td termdock'], {
+      timeout: 5_000,
+      maxBuffer: 128 * 1024,
+    });
+    for (const line of stdout.split('\n')) {
+      const candidate = line.trim();
+      if (candidate.startsWith('/')) candidates.add(candidate);
+    }
+  } catch {
+    // A clean machine may not have any CLI entry yet.
+  }
+  for (const candidate of ['/usr/local/bin/td', '/opt/homebrew/bin/td']) {
+    if (fs.existsSync(candidate)) candidates.add(candidate);
+  }
+
+  const bundledLauncher = runtimePaths().launcher;
+  return Promise.all([...candidates].map(async (candidate) => {
+    let resolved = candidate;
+    try {
+      resolved = fs.realpathSync(candidate);
+    } catch {
+      // Keep the visible path for a broken symlink so the repair UI can show it.
+    }
+    return {
+      path: candidate,
+      version: await executableVersion(candidate),
+      bundled: resolved === bundledLauncher,
+    };
+  }));
+}
+
+async function bundledCliVersion(): Promise<string> {
+  const runtime = runtimePaths();
+  try {
+    const { stdout } = await execFileAsync(runtime.node, [runtime.cli, '--version'], {
+      timeout: 5_000,
+      maxBuffer: 128 * 1024,
+      env: desktopRuntimeEnv(),
+    });
+    return stdout.trim() || app.getVersion();
+  } catch {
+    return app.getVersion();
+  }
+}
+
+async function snapshot(): Promise<DesktopSnapshot> {
+  const config = readDesktopConfig();
+  const [localService, cliInstallations, cliVersion] = await Promise.all([
+    getLocalServiceStatus(),
+    discoverCliInstallations(),
+    bundledCliVersion(),
+  ]);
+  return {
+    appVersion: app.getVersion(),
+    packaged: app.isPackaged,
+    bundledCliVersion: cliVersion,
+    cliInstallations,
+    localService,
+    connections: config.connections,
+    lastConnectionUrl: config.lastConnectionUrl,
+  };
+}
+
+function desktopRuntimeEnv(): NodeJS.ProcessEnv {
+  const runtime = runtimePaths();
+  const currentPath = process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin';
+  return {
+    ...process.env,
+    PATH: [runtime.toolchainBin, '/opt/homebrew/bin', '/usr/local/bin', currentPath]
+      .filter(Boolean)
+      .join(path.delimiter),
+    TERMDOCK_DESKTOP: '1',
+    TERMDOCK_BUNDLED_RUNTIME: app.isPackaged ? '1' : '0',
+    TERMDOCK_VERSION: app.getVersion(),
+    TMUX_BIN: fs.existsSync(path.join(runtime.toolchainBin, 'tmux'))
+      ? path.join(runtime.toolchainBin, 'tmux')
+      : process.env.TMUX_BIN,
+  };
+}
+
+async function waitForLocalService(): Promise<ServiceProbe> {
+  const deadline = Date.now() + START_TIMEOUT_MS;
+  let lastProbe: ServiceProbe = { ok: false, url: DEFAULT_LOCAL_URL, error: '服务尚未启动' };
+  while (Date.now() < deadline) {
+    const state = readServerState();
+    const url = state ? stateUrl(state) : DEFAULT_LOCAL_URL;
+    lastProbe = await probeService(url);
+    if (lastProbe.ok) return lastProbe;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  return lastProbe;
+}
+
+async function confirmAndStopExisting(status: LocalServiceStatus): Promise<boolean> {
+  if (!status.state) return true;
+  const version = status.probe?.version ? `版本：${status.probe.version}\n` : '';
+  const result = await showDesktopMessageBox({
+    type: 'warning',
+    title: '接管本机 Termdock 服务',
+    message: '检测到正在运行的 Termdock 服务',
+    detail: `${version}地址：${stateUrl(status.state)}\nPID：${status.state.pid}\n\n停止后将由桌面版使用同一个 ~/.termdock 重新启动。tmux 会话不会被删除。`,
+    buttons: ['连接现有服务', '停止并由桌面版接管', '取消'],
+    defaultId: 0,
+    cancelId: 2,
+  });
+  if (result.response === 0) {
+    await connectWindow(stateUrl(status.state));
+    return false;
+  }
+  if (result.response !== 1) return false;
+  if (!isProcessRunning(status.state.pid)) return true;
+  process.kill(status.state.pid, 'SIGTERM');
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline && isProcessRunning(status.state.pid)) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  if (isProcessRunning(status.state.pid)) {
+    throw new Error(`旧服务 PID ${status.state.pid} 未能在超时时间内退出`);
+  }
+  try {
+    const latest = readServerState();
+    if (latest?.pid === status.state.pid) fs.rmSync(serverStatePath, { force: true });
+  } catch {
+    // The exiting CLI normally removes the state file itself.
+  }
+  return true;
+}
+
+async function startLocalService(): Promise<ServiceProbe> {
+  const existing = await getLocalServiceStatus();
+  if (existing.running) {
+    const shouldStart = await confirmAndStopExisting(existing);
+    if (!shouldStart) {
+      return existing.probe ?? { ok: true, url: stateUrl(existing.state!) };
+    }
+  }
+
+  const runtime = runtimePaths();
+  if (!fs.existsSync(runtime.cli)) {
+    throw new Error('未找到 Termdock 服务端构建，请先运行 npm run build');
+  }
+  if (app.isPackaged && !fs.existsSync(runtime.node)) {
+    throw new Error('安装包缺少内嵌 Node Runtime');
+  }
+  fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
+  const logPath = path.join(termdockDir, 'server.log');
+  const logFd = fs.openSync(logPath, 'a');
+  const child = spawn(runtime.node, [
+    runtime.cli,
+    '--foreground',
+    '--host',
+    '0.0.0.0',
+    '--port',
+    '9834',
+  ], {
+    detached: true,
+    stdio: ['ignore', logFd, logFd],
+    env: desktopRuntimeEnv(),
+  });
+  fs.closeSync(logFd);
+  child.unref();
+
+  const probe = await waitForLocalService();
+  if (!probe.ok) {
+    throw new Error(`桌面版服务启动失败：${probe.error ?? '未知错误'}。日志：${logPath}`);
+  }
+  await connectWindow(probe.url);
+  return probe;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function appleScriptQuote(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+async function installCli(): Promise<DesktopSnapshot> {
+  if (!app.isPackaged) {
+    throw new Error('CLI 一键安装只在打包后的 Termdock.app 中可用');
+  }
+  const runtime = runtimePaths();
+  if (!fs.existsSync(runtime.launcher)) {
+    throw new Error('安装包中缺少 CLI 启动器');
+  }
+  const current = await discoverCliInstallations();
+  const detailLines = current.length > 0
+    ? current.map((entry) => `${entry.path}（${entry.version ?? '版本未知'}）`)
+    : ['未检测到已有 td/termdock 命令'];
+  const confirmation = await showDesktopMessageBox({
+    type: 'question',
+    title: '安装 Termdock CLI',
+    message: '将桌面版内嵌 CLI 安装为 td 和 termdock',
+    detail: `${detailLines.join('\n')}\n\n目标目录：/usr/local/bin\n已有同名入口只会在你确认后替换。`,
+    buttons: ['安装', '取消'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (confirmation.response !== 0) return snapshot();
+
+  const command = [
+    'mkdir -p /usr/local/bin',
+    `ln -sfn ${shellQuote(runtime.launcher)} /usr/local/bin/td`,
+    `ln -sfn ${shellQuote(runtime.launcher)} /usr/local/bin/termdock`,
+  ].join(' && ');
+  await execFileAsync('/usr/bin/osascript', [
+    '-e',
+    `do shell script "${appleScriptQuote(command)}" with administrator privileges`,
+  ], { timeout: 120_000, maxBuffer: 256 * 1024 });
+  return snapshot();
+}
+
+async function connectWindow(rawUrl: string): Promise<ServiceProbe> {
+  let probe = await probeService(rawUrl);
+  if (!probe.ok) {
+    let parsedProbeUrl: URL | null = null;
+    try {
+      parsedProbeUrl = new URL(probe.url);
+    } catch {
+      // The probe already contains the normalized URL validation error.
+    }
+    if (
+      parsedProbeUrl
+      && isLocalNetworkTarget(parsedProbeUrl)
+      && looksLikeLocalNetworkPermissionError(probe.error)
+    ) {
+      const shouldRetry = await requestLocalNetworkPermissionRetry(probe.url);
+      if (shouldRetry) {
+        probe = await probeService(rawUrl);
+      } else {
+        return { ...probe, error: 'Termdock 尚未获得 macOS 本地网络权限' };
+      }
+    }
+  }
+  if (!probe.ok) return probe;
+  const parsed = new URL(probe.url);
+  while (mainWindow) {
+    activeServiceOrigin = parsed.origin;
+    try {
+      await mainWindow.loadURL(probe.url);
+      const config = readDesktopConfig();
+      config.lastConnectionUrl = probe.url;
+      const existing = config.connections.find((entry) => entry.url === probe.url);
+      if (existing) existing.lastConnectedAt = Date.now();
+      writeDesktopConfig(config);
+      return probe;
+    } catch (error) {
+      activeServiceOrigin = null;
+      await showConnectionCenter();
+      const message = networkErrorDetails(error);
+      if (isLocalNetworkTarget(parsed) && looksLikeLocalNetworkPermissionError(error)) {
+        if (await requestLocalNetworkPermissionRetry(probe.url)) continue;
+        return { ...probe, ok: false, error: 'Termdock 尚未获得 macOS 本地网络权限' };
+      }
+      await showDesktopMessageBox({
+        type: 'error',
+        title: '连接 Termdock 服务失败',
+        message: `无法打开 ${probe.url}`,
+        detail: message,
+      });
+      return { ...probe, ok: false, error: message };
+    }
+  }
+  return { ...probe, ok: false, error: 'Termdock 窗口已关闭' };
+}
+
+async function showConnectionCenter(): Promise<void> {
+  activeServiceOrigin = null;
+  const rendererPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'renderer', 'index.html')
+    : path.join(projectRoot, 'desktop', 'renderer', 'index.html');
+  await mainWindow?.loadFile(rendererPath);
+  mainWindow?.show();
+  mainWindow?.focus();
+}
+
+function createMainWindow(): BrowserWindow {
+  const window = new BrowserWindow({
+    title: 'Termdock',
+    width: 1280,
+    height: 820,
+    minWidth: 760,
+    minHeight: 520,
+    backgroundColor: 'rgb(28, 27, 26)',
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 16, y: 16 },
+    webPreferences: {
+      preload: path.join(currentDir, 'preload.cjs'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  window.webContents.on('will-navigate', (event, url) => {
+    if (!activeServiceOrigin) return;
+    try {
+      if (new URL(url).origin === activeServiceOrigin) return;
+    } catch {
+      // Block malformed navigations.
+    }
+    event.preventDefault();
+    void shell.openExternal(url);
+  });
+  window.webContents.on('did-finish-load', () => {
+    if (!activeServiceOrigin) return;
+    void window.webContents.insertCSS(`
+      html[data-termdock-desktop='true'] {
+        --safe-top-inset: max(env(safe-area-inset-top, 0px), 38px) !important;
+      }
+    `);
+  });
+  window.on('closed', () => {
+    if (mainWindow === window) mainWindow = null;
+  });
+  window.on('close', (event) => {
+    if (process.platform === 'darwin' && !isQuitting) {
+      event.preventDefault();
+      window.hide();
+    }
+  });
+  return window;
+}
+
+function installIpcHandlers(): void {
+  ipcMain.handle('desktop:snapshot', () => snapshot());
+  ipcMain.handle('desktop:probe', (_event, url: string) => probeService(url));
+  ipcMain.handle('desktop:save-connection', async (_event, input: { url: string; label: string }) => {
+    const url = normalizeServiceUrl(input.url);
+    const config = readDesktopConfig();
+    const existing = config.connections.find((entry) => entry.url === url);
+    if (existing) {
+      existing.label = input.label.trim() || new URL(url).host;
+    } else {
+      config.connections.push({
+        id: crypto.randomUUID(),
+        label: input.label.trim() || new URL(url).host,
+        url,
+      });
+    }
+    writeDesktopConfig(config);
+    return snapshot();
+  });
+  ipcMain.handle('desktop:remove-connection', async (_event, id: string) => {
+    const config = readDesktopConfig();
+    config.connections = config.connections.filter((entry) => entry.id !== id);
+    writeDesktopConfig(config);
+    return snapshot();
+  });
+  ipcMain.handle('desktop:connect', (_event, url: string) => connectWindow(url));
+  ipcMain.handle('desktop:start-local', () => startLocalService());
+  ipcMain.handle('desktop:install-cli', () => installCli());
+  ipcMain.handle('desktop:show-connection-center', () => showConnectionCenter());
+  ipcMain.handle('desktop:reveal-data-directory', async () => {
+    fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
+    const error = await shell.openPath(termdockDir);
+    if (error) throw new Error(error);
+  });
+  ipcMain.handle('desktop:show-notification', (_event, payload: {
+    title?: unknown;
+    body?: unknown;
+    tag?: unknown;
+    sessionId?: unknown;
+    silent?: unknown;
+  }) => {
+    if (!Notification.isSupported() || typeof payload?.title !== 'string') return false;
+    const notification = new Notification({
+      title: payload.title.slice(0, 160),
+      body: typeof payload.body === 'string' ? payload.body.slice(0, 1000) : undefined,
+      silent: payload.silent === true,
+    });
+    notification.on('click', () => {
+      mainWindow?.show();
+      mainWindow?.focus();
+      if (typeof payload.sessionId === 'string') {
+        mainWindow?.webContents.send('desktop:focus-session', payload.sessionId);
+      }
+    });
+    notification.show();
+    return true;
+  });
+}
+
+function installMenu(): void {
+  const sendCommand = (command: string) => {
+    mainWindow?.webContents.send('desktop:command', command);
+  };
+  const menu = Menu.buildFromTemplate([
+    {
+      label: 'Termdock',
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        {
+          label: '设置…',
+          accelerator: 'CmdOrCtrl+,',
+          click: () => mainWindow?.webContents.send('desktop:open-settings'),
+        },
+        {
+          label: '连接中心',
+          accelerator: 'CmdOrCtrl+Shift+O',
+          click: () => void showConnectionCenter(),
+        },
+        {
+          label: '安装或修复 CLI…',
+          click: () => void installCli().catch((error) => {
+            void showDesktopMessageBox({
+              type: 'error',
+              title: 'CLI 安装失败',
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }),
+        },
+        {
+          label: '打开 Termdock 数据目录',
+          click: () => {
+            fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
+            void shell.openPath(termdockDir);
+          },
+        },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: '文件',
+      submenu: [
+        {
+          label: '新建会话',
+          accelerator: 'CmdOrCtrl+T',
+          click: () => sendCommand('new-session'),
+        },
+        {
+          label: '关闭当前会话',
+          accelerator: 'CmdOrCtrl+W',
+          click: () => sendCommand('close-session'),
+        },
+        { type: 'separator' },
+        {
+          label: '上一个会话',
+          accelerator: 'CmdOrCtrl+Shift+[',
+          click: () => sendCommand('previous-session'),
+        },
+        {
+          label: '下一个会话',
+          accelerator: 'CmdOrCtrl+Shift+]',
+          click: () => sendCommand('next-session'),
+        },
+        { type: 'separator' },
+        {
+          label: '上一个待处理',
+          accelerator: 'CmdOrCtrl+Alt+[',
+          click: () => sendCommand('previous-attention'),
+        },
+        {
+          label: '下一个待处理',
+          accelerator: 'CmdOrCtrl+Alt+]',
+          click: () => sendCommand('next-attention'),
+        },
+      ],
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: '显示',
+      submenu: [
+        {
+          label: '切换会话侧栏',
+          accelerator: 'CmdOrCtrl+B',
+          click: () => sendCommand('toggle-left-sidebar'),
+        },
+        {
+          label: '切换文件侧栏',
+          accelerator: 'CmdOrCtrl+Shift+B',
+          click: () => sendCommand('toggle-right-sidebar'),
+        },
+        { type: 'separator' },
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { role: 'front' },
+      ],
+    },
+  ]);
+  Menu.setApplicationMenu(menu);
+}
+
+app.whenReady().then(async () => {
+  installIpcHandlers();
+  installMenu();
+  mainWindow = createMainWindow();
+  await showConnectionCenter();
+  const lastConnectionUrl = readDesktopConfig().lastConnectionUrl;
+  if (lastConnectionUrl) {
+    const probe = await connectWindow(lastConnectionUrl);
+    if (!probe.ok && mainWindow?.webContents.getURL().startsWith('file:') === false) {
+      await showConnectionCenter();
+    }
+  }
+  app.on('activate', () => {
+    if (!mainWindow) {
+      mainWindow = createMainWindow();
+      void showConnectionCenter();
+    }
+  });
+}).catch((error) => {
+  void dialog.showErrorBox('Termdock 启动失败', error instanceof Error ? error.message : String(error));
+  app.quit();
+});
+
+app.on('window-all-closed', () => {
+  // Keep the macOS application lifecycle conventional: closing the last
+  // window keeps the app available in the Dock, while the detached Termdock
+  // service continues independently.
+});
+
+app.on('before-quit', () => {
+  isQuitting = true;
+});
+
+export { PROTOCOL_VERSION };

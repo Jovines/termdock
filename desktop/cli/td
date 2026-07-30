@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+launcher_path="$(readlink "$0" 2>/dev/null || true)"
+if [ -z "$launcher_path" ]; then
+  launcher_path="$0"
+fi
+
+cli_dir="$(CDPATH= cd -- "$(dirname -- "$launcher_path")" && pwd)"
+resources_dir="$(CDPATH= cd -- "$cli_dir/.." && pwd)"
+node_bin="$resources_dir/runtime/bin/node"
+cli_entry="$resources_dir/server/dist/server/cli.js"
+toolchain_bin="$resources_dir/toolchain/bin"
+
+if [ ! -x "$node_bin" ] || [ ! -f "$cli_entry" ]; then
+  echo "Termdock.app is missing or incomplete. Reinstall the desktop application." >&2
+  exit 1
+fi
+
+PATH="$toolchain_bin:/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+export PATH
+export TERMDOCK_BUNDLED_RUNTIME=1
+if [ -x "$toolchain_bin/tmux" ]; then
+  TMUX_BIN="$toolchain_bin/tmux"
+  export TMUX_BIN
+fi
+
+exec "$node_bin" "$cli_entry" "$@"
