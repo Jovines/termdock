@@ -25,6 +25,7 @@ import type {
   SavedConnection,
   ServiceProbe,
 } from './types.js';
+import { checkForDesktopUpdates, configureDesktopUpdater } from './updater.js';
 
 const execFileAsync = promisify(execFile);
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -707,6 +708,10 @@ function installMenu(): void {
           }),
         },
         {
+          label: '检查更新…',
+          click: () => void checkForDesktopUpdates(true),
+        },
+        {
           label: '打开 Termdock 数据目录',
           click: () => {
             fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
@@ -810,6 +815,7 @@ app.whenReady().then(async () => {
   installIpcHandlers();
   installMenu();
   mainWindow = createMainWindow();
+  configureDesktopUpdater(showDesktopMessageBox);
   await showConnectionCenter();
   const lastConnectionUrl = readDesktopConfig().lastConnectionUrl;
   if (lastConnectionUrl) {
