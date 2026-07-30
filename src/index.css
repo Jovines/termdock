@@ -156,14 +156,24 @@ html[data-termdock-desktop='true'] {
   --safe-top-inset: max(env(safe-area-inset-top, 0px), 38px);
 }
 
-/* 桌面端：html/body/#root 显式声明 no-drag，防止 Electron hiddenInset
-   原生标题栏区域产生隐式 drag region 覆盖按钮/链接等交互元素。
-   原生 traffic-light 拖拽区独立于 web 内容，不受 no-drag 影响。 */
-html[data-termdock-desktop='true'],
-html[data-termdock-desktop='true'] body,
-html[data-termdock-desktop='true'] #root {
-  -webkit-app-region: no-drag;
-}
+	/* 桌面端：body 显式声明 no-drag，防止 Electron hiddenInset 原生标题栏
+	   区域产生隐式 drag region 覆盖按钮/链接等交互元素。
+	   同时用 body::after 在顶部放一条 38px 的 drag 把手（与 --safe-top-inset
+	   等高的空白 padding 区），只此区域可拖窗口，不挡 sidebar 按钮/Tab。 */
+	html[data-termdock-desktop='true'],
+	html[data-termdock-desktop='true'] body {
+	  -webkit-app-region: no-drag;
+	}
+	html[data-termdock-desktop='true'] body::after {
+	  content: '';
+	  position: fixed;
+	  top: 0;
+	  left: 0;
+	  right: 0;
+	  height: 38px;
+	  z-index: 99999;
+	  -webkit-app-region: drag;
+	}
 
 html[data-theme='light'] {
   color-scheme: light;
