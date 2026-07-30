@@ -39,6 +39,9 @@ export type TranslationDictionary = {
     copy: string;
     decrease: string;
     increase: string;
+    use: string;
+    previous: string;
+    next: string;
   };
   login: {
     prompt: string;
@@ -62,12 +65,17 @@ export type TranslationDictionary = {
     groupByFolderTitle: string;
     ungrouped: string;
     needsAttention: string;
+    waitingForYou: string;
+    completedUnread: string;
     closeSession: (params: TranslatorParams) => string;
     newShell: string;
     newTmux: string;
     newTmuxDisabled: string;
     confirmNewShell: string;
     confirmNewTmux: string;
+    openLeftSidebar: string;
+    openRightSidebar: string;
+    closeSidebar: string;
   };
   rightSidebar: {
     workspace: string;
@@ -147,6 +155,19 @@ export type TranslationDictionary = {
     tabPreview: string;
     inserted: string;
     copied: string;
+    toggleContextDraft: string;
+    contextDraftTitle: string;
+    contextDraftHint: string;
+    contextDraftPlaceholder: string;
+    contextDraftCollapse: string;
+    contextDraftExpand: string;
+    contextDraftDisable: string;
+    contextDraftClear: string;
+    contextDraftInsert: string;
+    contextDraftInsertAndSend: string;
+    contextDraftInserted: string;
+    contextDraftSent: string;
+    contextDraftCharacterCount: (params: TranslatorParams) => string;
     selectFilePrompt: string;
     backToFileList: string;
     insertLineRef: (params: TranslatorParams) => string;
@@ -261,6 +282,28 @@ export type TranslationDictionary = {
     confirmStashAllTitle: string;
     confirmStashAllDescription: string;
     confirmAction: string;
+    renderingHtml: string;
+    footnotes: string;
+    backToFootnote: (params: TranslatorParams) => string;
+    openMermaidDiagram: string;
+    mermaidDiagram: string;
+    renderingDiagram: string;
+    markdownImage: string;
+    image: string;
+    previousImage: string;
+    nextImage: string;
+    closeImagePreview: string;
+    emptyFile: string;
+    insertReference: (params: TranslatorParams) => string;
+    copyReference: (params: TranslatorParams) => string;
+    byteCount: (params: TranslatorParams) => string;
+    previewTruncated: string;
+    branchCandidatesLoading: string;
+    includeUncommitted: string;
+    includeUncommittedHint: string;
+    missingBaseReposSkipped: (params: TranslatorParams) => string;
+    localBranch: string;
+    remoteBranch: string;
   };
   fileTree: {
     insertRef: string;
@@ -296,6 +339,7 @@ export type TranslationDictionary = {
     contentSearchNeedsRipgrep: string;
     truncatedHint: string;
     dropToUploadHere: string;
+    symbolicLink: string;
   };
   diffViewer: {
     noFileChanges: string;
@@ -337,6 +381,10 @@ export type TranslationDictionary = {
     splitMode: string;
     moreActions: string;
     view: string;
+    loadingPreviousFile: string;
+    loadingNextFile: string;
+    resizeNavigation: string;
+    focusPathHint: string;
   };
   settings: {
     title: string;
@@ -448,6 +496,7 @@ export type TranslationDictionary = {
     httpsActive: string;
     httpsInactive: string;
     caMissing: string;
+    closeSettings: string;
     desktopTitle: string;
     desktopStatusLoading: string;
     desktopSwitchService: string;
@@ -538,6 +587,13 @@ export type TranslationDictionary = {
     splitUnavailableGrouped: string;
     splitEndedGrouped: string;
     splitNoOtherSessions: string;
+    sessionCount: (params: TranslatorParams) => string;
+    closeChooserTitle: string;
+    closeChooserDescription: string;
+    detach: string;
+    detachHint: string;
+    destroySession: string;
+    destroySessionHint: string;
   };
   agent: {
     aiRunning: string;
@@ -554,6 +610,18 @@ export type TranslationDictionary = {
     input: string;
     error: string;
     dropFilesToPastePaths: string;
+    loading: string;
+    initializing: string;
+    failedToLoad: string;
+    unknownError: string;
+    componentFailed: string;
+    paste: string;
+    copied: string;
+    copyFailed: string;
+    longPressSelectsText: string;
+    longPressSendsArrows: string;
+    switchLongPressToArrows: string;
+    switchLongPressToCopy: string;
   };
   errorBoundary: {
     title: string;

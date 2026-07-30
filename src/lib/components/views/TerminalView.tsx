@@ -16,6 +16,7 @@ import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../../terminal/settings';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
+import { useI18n } from '../../i18n';
 
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
@@ -81,6 +82,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   showDebug: externalShowDebug,
   onStatusChange,
 }) => {
+  const { t } = useI18n();
   // Use external fontSize from props, with local override support for pinch-to-zoom
   const [fontSize, setFontSize] = React.useState(terminalSettings.fontSize);
   const terminal = React.useMemo(() => createTermdockAPI(), []);
@@ -1835,7 +1837,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                       <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                     </svg>
                   </div>
-                  <span className="text-sm text-muted-foreground">Terminal component failed to load</span>
+                  <span className="text-sm text-muted-foreground">{t('terminal.componentFailed')}</span>
                 </div>
               </div>
             }

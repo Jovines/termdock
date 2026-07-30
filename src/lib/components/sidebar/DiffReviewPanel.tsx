@@ -7,6 +7,7 @@ import { DiffReview, type DiffReviewFile, ChangeBadge } from './DiffReview';
 import { ChangeStatusWithAuditBadge } from './AuditStatusBadge';
 import { ChangeWalkthroughPanel } from './ChangeWalkthroughPanel';
 import { readCache, writeCache } from '../../utils/localStorageCache';
+import { useI18n } from '../../i18n';
 
 export interface UniversalDiffReviewItem {
   key: string;
@@ -259,6 +260,7 @@ export function UniversalDiffReview({
   externalSwiperRef,
   onMobileSlideChange,
 }: UniversalDiffReviewProps) {
+  const { t } = useI18n();
   const groups = useMemo(() => buildFileGroups(items), [items]);
   const groupByKey = useMemo(() => new Map(groups.map((group) => [group.key, group])), [groups]);
   const [viewMode, setViewMode] = useState<ReviewMode>(() => readViewMode());
@@ -417,7 +419,7 @@ export function UniversalDiffReview({
           />
         ) : (
           <div className="rounded-lg border border-border/15 bg-surface px-3 py-6 text-center text-xs text-muted-foreground">
-            暂无 AI 导览。生成解释后会在这里展示总览、链路和验证点。
+            {t('rightSidebar.changeWalkthroughEmpty')}
           </div>
         )
       )}

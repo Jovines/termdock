@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { useSidebarStore } from './useSidebarStore';
+import { readLeftPinnedPreference, useSidebarStore } from './useSidebarStore';
 
 function resetSidebarStore(): void {
   useSidebarStore.setState({
@@ -59,5 +59,35 @@ describe('useSidebarStore right tab persistence', () => {
     useSidebarStore.getState().setRootPath('/workspace/fresh');
 
     expect(useSidebarStore.getState().rightTab).toBe('files');
+  });
+});
+
+describe('useSidebarStore left sidebar pin preference', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  it('pins the desktop session navigator on first use', () => {
+    expect(readLeftPinnedPreference()).toBe(true);
+  });
+
+  it('preserves an explicit unpin choice', () => {
+    useSidebarStore.getState().setLeftPinned(false);
+
+    expect(window.localStorage.getItem('termdock-left-sidebar-pinned')).toBe('0');
+    expect(readLeftPinnedPreference()).toBe(false);
+  });
+
+  it('preserves an explicit pin choice', () => {
+    useSidebarStore.getState().setLeftPinned(true);
+
+    expect(window.localStorage.getItem('termdock-left-sidebar-pinned')).toBe('1');
+    expect(readLeftPinnedPreference()).toBe(true);
   });
 });

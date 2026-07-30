@@ -32,6 +32,7 @@ import {
   Sparkles as RiSparkles,
   Upload as RiUpload,
   Trash2 as RiTrash,
+  PencilLine as RiPencilLine,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
@@ -48,6 +49,16 @@ import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, refractorNodesToReact, type RefractorLike } from '../../utils/syntaxHighlight';
 import { useReferenceLongPressCopy } from './referenceLongPress';
+import {
+  buildFileReference,
+  buildLineReference,
+  buildPromptReference,
+  buildReferenceInputText,
+  resolveAbsoluteReferencePath,
+} from './referencePaths';
+import { ContextDraftDock } from './ContextDraftDock';
+import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
+import './sidebarSelection.css';
 
 interface RightSidebarProps {
   isOpen: boolean;
@@ -88,6 +99,10 @@ const BRANCH_AUDIT_MODULE_STORAGE_KEY = 'termdock:right-sidebar:branch-audit-mod
 const BRANCH_AUDIT_MODULE_CACHE_WRITE_MS = 150;
 const GIT_BUNDLE_SNAPSHOT_STORAGE_KEY = 'termdock:right-sidebar:git-bundle-snapshots:v1';
 const ACTIVE_GIT_REPO_STORAGE_KEY = 'termdock:right-sidebar:active-git-repo:v1';
+const CONTEXT_DRAFT_ENABLED_STORAGE_KEY = 'termdock:right-sidebar:context-draft-enabled:v1';
+const CONTEXT_DRAFT_COLLAPSED_STORAGE_KEY = 'termdock:right-sidebar:context-draft-collapsed:v1';
+const CONTEXT_DRAFT_TEXT_STORAGE_KEY = 'termdock:right-sidebar:context-draft-text:v1';
+const CONTEXT_DRAFT_WRITE_MS = 300;
 const MAX_FILE_TREE_SCROLL_ROOTS = 20;
 const MAX_FILE_PREVIEW_READING_STATE_FILES = 120;
 const MAX_GIT_BUNDLE_SNAPSHOT_ROOTS = 8;
@@ -169,6 +184,10 @@ function readDiffChangeListMode(): DiffChangeListMode {
 
 function isDiffWrap(value: unknown): value is boolean {
   return typeof value === 'boolean';
+}
+
+function isStringValue(value: unknown): value is string {
+  return typeof value === 'string';
 }
 
 function readDiffWrap(): boolean {
@@ -608,6 +627,8 @@ interface MarkdownRenderContext {
   headingSlugCounts: Map<string, number>;
   images: MarkdownPreviewImage[];
   onImageOpen?: (index: number) => void;
+  footnotesLabel: string;
+  backToFootnoteLabel: (index: number) => string;
 }
 
 interface MarkdownPreviewRenderResult {
@@ -1148,6 +1169,7 @@ function loadDOMPurify(): Promise<DOMPurifyLike> {
 }
 
 function MarkdownSanitizedHtml({ html }: { html: string }) {
+  const { t } = useI18n();
   const [sanitized, setSanitized] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1164,7 +1186,7 @@ function MarkdownSanitizedHtml({ html }: { html: string }) {
     return () => { cancelled = true; };
   }, [html]);
 
-  if (sanitized === null) return <div className="py-2 text-xs text-muted-foreground">Rendering HTML...</div>;
+  if (sanitized === null) return <div className="py-2 text-xs text-muted-foreground">{t('rightSidebar.renderingHtml')}</div>;
   if (!sanitized) return null;
   return <div className="text-muted-foreground" dangerouslySetInnerHTML={{ __html: sanitized }} />;
 }
@@ -1614,13 +1636,13 @@ function renderMarkdownFootnotes(context: MarkdownRenderContext): ReactNode | nu
 
   return (
     <section className="mt-3 border-t border-border/20 pt-2 text-[12px] leading-5 text-muted-foreground">
-      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/80">Footnotes</div>
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/80">{context.footnotesLabel}</div>
       <ol className="list-decimal space-y-1 pl-5">
         {footnotes.map((footnote) => (
           <li key={footnote.id} id={`fn-${footnote.id}`}>
             {renderMarkdownInline(footnote.text, `footnote-${footnote.id}`, true, context)}
             {' '}
-            <a href={`#fnref-${footnote.id}`} className="text-primary no-underline" aria-label={`Back to footnote ${footnote.index}`}>↩</a>
+            <a href={`#fnref-${footnote.id}`} className="text-primary no-underline" aria-label={context.backToFootnoteLabel(footnote.index)}>↩</a>
           </li>
         ))}
       </ol>
@@ -1898,6 +1920,7 @@ function MarkdownMermaidBlock({
   code: string;
   blockKey: string;
 }) {
+  const { t } = useI18n();
   const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const diagramRef = useRef<HTMLDivElement | null>(null);
@@ -1947,7 +1970,7 @@ function MarkdownMermaidBlock({
           <button
             type="button"
             className="block max-w-full rounded text-left focus:outline-none focus:ring-2 focus:ring-ring/45"
-            title="Open Mermaid diagram"
+            title={t('rightSidebar.openMermaidDiagram')}
             onClick={(event) => {
               event.stopPropagation();
               handleOpen();
@@ -1956,13 +1979,13 @@ function MarkdownMermaidBlock({
             <span
               ref={diagramRef}
               role="img"
-              aria-label="Mermaid diagram"
+              aria-label={t('rightSidebar.mermaidDiagram')}
               className="block max-h-[70vh] max-w-full overflow-auto rounded bg-white p-2 text-slate-900 [&_svg]:block [&_svg]:h-auto [&_svg]:max-w-full"
               dangerouslySetInnerHTML={{ __html: svg }}
             />
           </button>
         ) : (
-          <div className="py-6 text-center text-xs text-muted-foreground">Rendering diagram...</div>
+          <div className="py-6 text-center text-xs text-muted-foreground">{t('rightSidebar.renderingDiagram')}</div>
         )}
       </div>
     </div>
@@ -2010,6 +2033,7 @@ export function buildMarkdownPreviewRenderResult(
   markdownFilePath: string | null,
   rootPath: string | null,
   onImageOpen?: (index: number) => void,
+  labels?: { footnotes: string; backToFootnote: (index: number) => string },
 ): MarkdownPreviewRenderResult {
   lines = maskMarkdownHiddenLines(lines);
   const referenceDefinitions = collectMarkdownReferenceDefinitions(lines);
@@ -2023,6 +2047,8 @@ export function buildMarkdownPreviewRenderResult(
     headingSlugCounts: new Map(),
     images,
     onImageOpen,
+    footnotesLabel: labels?.footnotes ?? 'Footnotes',
+    backToFootnoteLabel: labels?.backToFootnote ?? ((index) => `Back to footnote ${index}`),
   };
   const blocks: MarkdownPreviewBlock[] = [];
   let index = 0;
@@ -2418,6 +2444,7 @@ interface MarkdownImageLightboxProps {
 }
 
 export function MarkdownImageLightbox({ images, index, onChange, onClose }: MarkdownImageLightboxProps) {
+  const { t } = useI18n();
   const active = images[index];
   const canNavigate = images.length > 1;
   const swiperRef = useRef<SwiperInstance | null>(null);
@@ -2527,7 +2554,7 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
   );
 
   if (!active) return null;
-  const activeTitle = active.title || active.alt || (active.kind === 'mermaid' ? 'Mermaid diagram' : 'Image');
+  const activeTitle = active.title || active.alt || (active.kind === 'mermaid' ? t('rightSidebar.mermaidDiagram') : t('rightSidebar.image'));
 
   return (
     <>
@@ -2545,8 +2572,8 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
                   type="button"
                   onClick={goPrevious}
                   className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-                  aria-label="Previous image"
-                  title="Previous"
+                  aria-label={t('rightSidebar.previousImage')}
+                  title={t('common.previous')}
                 >
                   <RiArrowLeft size={17} />
                 </button>
@@ -2554,8 +2581,8 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
                   type="button"
                   onClick={goNext}
                   className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-                  aria-label="Next image"
-                  title="Next"
+                  aria-label={t('rightSidebar.nextImage')}
+                  title={t('common.next')}
                 >
                   <RiArrowRight size={17} />
                 </button>
@@ -2565,8 +2592,8 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
               type="button"
               onClick={onClose}
               className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-              aria-label="Close image preview"
-              title="Close"
+              aria-label={t('rightSidebar.closeImagePreview')}
+              title={t('common.close')}
             >
               <RiCloseLine size={18} />
             </button>
@@ -2617,7 +2644,7 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
                     {image.kind === 'image' ? (
                       <ZoomableImage
                         src={image.src}
-                        alt={image.alt || image.title || 'Markdown image'}
+                        alt={image.alt || image.title || t('rightSidebar.markdownImage')}
                         onLoad={() => undefined}
                         onError={() => undefined}
                         onZoomChange={setImageZoomed}
@@ -2626,7 +2653,7 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
                     ) : (
                       <ZoomableMermaidDiagram
                         svg={image.svg}
-                        title={image.title || image.alt || 'Mermaid diagram'}
+                        title={image.title || image.alt || t('rightSidebar.mermaidDiagram')}
                         onZoomChange={setImageZoomed}
                         onDoubleTap={clearTapCloseTimer}
                       />
@@ -2666,12 +2693,21 @@ export function MarkdownPreview({
   const previewRootRef = useRef<HTMLDivElement | null>(null);
   const outlineToggleRef = useRef<HTMLButtonElement | null>(null);
   const { blocks, images } = useMemo(
-    () => buildMarkdownPreviewRenderResult(content.split('\n'), filePath, rootPath, (index) => {
-      setMermaidLightboxImage(null);
-      setLightboxIndex(index);
-      onLightboxOpen?.();
-    }),
-    [content, filePath, rootPath, onLightboxOpen],
+    () => buildMarkdownPreviewRenderResult(
+      content.split('\n'),
+      filePath,
+      rootPath,
+      (index) => {
+        setMermaidLightboxImage(null);
+        setLightboxIndex(index);
+        onLightboxOpen?.();
+      },
+      {
+        footnotes: t('rightSidebar.footnotes'),
+        backToFootnote: (index) => t('rightSidebar.backToFootnote', { index }),
+      },
+    ),
+    [content, filePath, rootPath, onLightboxOpen, t],
   );
   const lightboxImages = useMemo(
     () => mermaidLightboxImage ? [...images, mermaidLightboxImage] : images,
@@ -2817,7 +2853,7 @@ export function MarkdownPreview({
   }, []);
 
   if (blocks.length === 0) {
-    return <div className="min-w-0 max-w-full px-4 py-4 text-sm leading-6 text-foreground"><p className="text-muted-foreground">Empty file.</p></div>;
+    return <div className="min-w-0 max-w-full px-4 py-4 text-sm leading-6 text-foreground"><p className="text-muted-foreground">{t('rightSidebar.emptyFile')}</p></div>;
   }
 
   return (
@@ -2932,7 +2968,7 @@ export function MarkdownPreview({
               >
                 <span className={getReferenceSelectionRailBarClass(blockSelected)} />
               </span>
-              <div className="min-w-0">{renderedContent}</div>
+              <div className="min-w-0" data-sidebar-selectable>{renderedContent}</div>
             </>
           );
           if (block.interactive === false) {
@@ -2966,7 +3002,8 @@ export function MarkdownPreview({
                   </span>
                 )}
                 <div
-                  className="min-w-0 cursor-pointer select-text"
+                  className="min-w-0 cursor-text select-text"
+                  data-sidebar-selectable
                   role="button"
                   tabIndex={0}
                   onPointerDown={handleTablePointerDown}
@@ -3059,6 +3096,7 @@ interface FilePreviewReadingStateEntry {
 }
 
 function GitTargetPicker({ label, value, options, placeholder, searchPlaceholder, emptyText, disabled, onChange }: GitTargetPickerProps) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [menuRect, setMenuRect] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
@@ -3207,7 +3245,7 @@ function GitTargetPicker({ label, value, options, placeholder, searchPlaceholder
                 className="mb-1 flex w-full items-center justify-between gap-2 rounded-md bg-primary/10 px-2 py-1.5 text-left text-[12px] font-medium text-primary transition hover:bg-primary/15"
               >
                 <span className="min-w-0 truncate">{query.trim()}</span>
-                <span className="shrink-0 text-[10px] text-primary/75">Use</span>
+                <span className="shrink-0 text-[10px] text-primary/75">{t('common.use')}</span>
               </button>
             )}
             {filteredOptions.length > 0 ? filteredOptions.map((option) => (
@@ -3576,32 +3614,6 @@ function getParentPath(path: string | null): string | null {
   if (normalized === '/') return null;
   const parent = normalized.slice(0, normalized.lastIndexOf('/')) || '/';
   return parent === normalized ? null : parent;
-}
-
-function buildFileReference(path: string, rootPath: string | null): string {
-  if (!rootPath || !path.startsWith(`${rootPath}/`)) {
-    if (!path.startsWith('/') && !path.startsWith('./')) {
-      return `./${path}`;
-    }
-    return path;
-  }
-  return `./${path.slice(rootPath.length + 1)}`;
-}
-
-function buildReferenceInputText(path: string, rootPath: string | null): string {
-  const reference = buildFileReference(path, rootPath);
-  return reference.includes(' ') ? `"${reference}" ` : `${reference} `;
-}
-
-function buildPromptReference(path: string, rootPath: string | null): string {
-  const reference = buildFileReference(path, rootPath);
-  return reference.includes(' ') ? `"${reference}"` : reference;
-}
-
-function buildLineReference(path: string, rootPath: string | null, lineRange: { start: number; end: number } | null): string {
-  if (!lineRange) return buildPromptReference(path, rootPath);
-  const suffix = lineRange.start === lineRange.end ? `${lineRange.start}` : `${lineRange.start}-${lineRange.end}`;
-  return `${buildPromptReference(path, rootPath)}:${suffix}`;
 }
 
 function getNextReferenceLineRange(
@@ -4575,7 +4587,7 @@ function FilePreview({
   const { t } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
-  const lineRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+  const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   // Floating "引用" button position relative to the scroller. Mouse clicks set
   // this near the cursor; non-pointer jumps fall back to the selected line.
@@ -4852,6 +4864,16 @@ function FilePreview({
   const showMarkdownPreview = previewState.kind === 'text' && isMarkdown && markdownViewMode === 'preview';
   const isImagePreview = previewState.kind === 'image' || (previewState.kind === 'loading' && previewState.mode === 'image');
   const lineReference = buildLineReference(readablePath, rootPath, lineRange);
+  const lineReferenceText = (() => {
+    if (!lineRange || previewState.kind !== 'text' || lines.length === 0) return lineReference;
+    const selected: string[] = [];
+    for (let n = lineRange.start; n <= lineRange.end; n += 1) {
+      selected.push(`${n} ${lines[n - 1] ?? ''}`);
+    }
+    const lang = getFileExtension(readablePath).replace(/^\./, '');
+    const fence = '```';
+    return `${lineReference}\n${fence}${lang}\n${selected.join('\n')}\n${fence}\n`;
+  })();
   const fileReferenceKey = `path:${readablePath}`;
   const lineReferenceKey = lineRange ? `path:${readablePath}:${lineRange.start}-${lineRange.end}` : fileReferenceKey;
   const fileReferenceInserted = insertedReferenceKey === fileReferenceKey;
@@ -4880,7 +4902,8 @@ function FilePreview({
     setFloatingInsertPos({ top, left });
   };
 
-  const handleLineClick = (event: MouseEvent<HTMLButtonElement>, lineNumber: number) => {
+  const handleLineClick = (event: MouseEvent<HTMLElement>, lineNumber: number) => {
+    if (hasNativeTextSelection()) return;
     placeFloatingInsertButton(event);
     onLineRangeChange((current) => {
       const nextRange = getNextReferenceLineRange(current, lineNumber, lineNumber);
@@ -4922,21 +4945,7 @@ function FilePreview({
 
   const insertRangeReference = () => {
     if (!lineRange) return;
-    const suffix = lineRange.start === lineRange.end ? `${lineRange.start}` : `${lineRange.start}-${lineRange.end}`;
-    const reference = `${buildPromptReference(readablePath, rootPath)}:${suffix}`;
-    if (previewState.kind === 'text' && lines.length > 0) {
-      const selected: string[] = [];
-      for (let n = lineRange.start; n <= lineRange.end; n += 1) {
-        const content = lines[n - 1] ?? '';
-        selected.push(`${n} ${content}`);
-      }
-      const lang = getFileExtension(readablePath).replace(/^\./, '');
-      const fence = '```';
-      const text = `${reference}\n${fence}${lang}\n${selected.join('\n')}\n${fence}\n`;
-      onInsertText(text, lineReferenceKey);
-      return;
-    }
-    onInsertReference(`${readablePath}:${suffix}`, lineReferenceKey);
+    onInsertText(lineReferenceText, lineReferenceKey);
   };
 
   const handleDownload = async () => {
@@ -5005,7 +5014,7 @@ function FilePreview({
                     ? 'bg-surface-elevated text-foreground'
                     : 'bg-primary/15 text-primary hover:bg-primary/25'
                 }`}
-                title={`Insert reference: ${reference}`}
+                title={t('rightSidebar.insertReference', { reference })}
               >
                 {fileReferenceCopied ? t('rightSidebar.copied') : fileReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
               </button>
@@ -5014,7 +5023,7 @@ function FilePreview({
               type="button"
               onClick={() => void navigator.clipboard?.writeText(reference)}
               className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-              title={`Copy reference: ${reference}`}
+              title={t('rightSidebar.copyReference', { reference })}
               aria-label={t('rightSidebar.copyFileRef')}
             >
               <RiCopy size={13} />
@@ -5033,8 +5042,8 @@ function FilePreview({
         </div>
         {meta && !(isMobile && showMarkdownPreview) && (
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-            {meta.size !== null && <span>{meta.size.toLocaleString()} bytes</span>}
-            {'truncated' in meta && meta.truncated && <span className="text-[color:var(--warning)]">preview truncated to 1MB</span>}
+            {meta.size !== null && <span>{t('rightSidebar.byteCount', { count: meta.size.toLocaleString() })}</span>}
+            {'truncated' in meta && meta.truncated && <span className="text-[color:var(--warning)]">{t('rightSidebar.previewTruncated')}</span>}
             {'mimeType' in meta && <span>{meta.mimeType}</span>}
             {'dimensions' in previewState && previewState.dimensions && <span>{previewState.dimensions.width} × {previewState.dimensions.height}</span>}
           </div>
@@ -5112,7 +5121,7 @@ function FilePreview({
             <button
               type="button"
               onClick={insertRangeReference}
-              {...getReferenceLongPressHandlers(lineReference, lineReferenceKey)}
+              {...getReferenceLongPressHandlers(lineReferenceText, lineReferenceKey)}
               style={{ top: floatingInsertPos.top, left: floatingInsertPos.left, transform: 'translateY(-50%)' }}
               className={getReferenceFloatingButtonClass(isMobile, lineReferenceCompleted)}
               title={`Insert markdown reference: ${lineReference}`}
@@ -5126,7 +5135,7 @@ function FilePreview({
         <div
           ref={scrollerRef}
           onScroll={handleSourcePreviewScroll}
-          className={`${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-surface p-2 font-mono text-[11px] leading-relaxed text-foreground`}
+          className={`${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-native-select termdock-code relative min-h-0 flex-1 overflow-auto rounded-none bg-surface p-2 font-mono text-[11px] leading-relaxed text-foreground`}
         >
           {lines.length > 0 ? (
             <div className="min-w-full">
@@ -5137,20 +5146,26 @@ function FilePreview({
                   ? highlightedLines[index]
                   : null;
                 return (
-                  <button
+                  <div
                     // eslint-disable-next-line react/no-array-index-key
                     key={index}
                     ref={(node) => {
                       if (node) lineRefs.current.set(lineNumber, node);
                       else lineRefs.current.delete(lineNumber);
                     }}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     onClick={(event) => handleLineClick(event, lineNumber)}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter' && event.key !== ' ') return;
+                      event.preventDefault();
+                      handleLineClick(event as unknown as MouseEvent<HTMLElement>, lineNumber);
+                    }}
                     // Line-number gutter width tracks the file's digit count so a
                     // short file doesn't reserve room for thousands of lines and
                     // leave a big gap between the edge and the numbers.
                     style={{ gridTemplateColumns: `${gutterWidthCh}ch 1fr` }}
-                    className={`group grid w-max min-w-full gap-2 rounded-md pr-1 text-left transition active:scale-[0.998] ${
+                    className={`group grid w-max min-w-full cursor-text gap-2 rounded-md pr-1 text-left transition ${
                       isSelected
                         ? 'bg-[var(--surface-2)] text-foreground'
                         : 'hover:bg-surface-2'
@@ -5158,8 +5173,8 @@ function FilePreview({
                     title={`Tap to reference ${reference}:${lineNumber}`}
                   >
                     <span className={`select-none rounded text-right text-[10px] transition ${isSelected ? 'bg-[var(--surface-elevated)] text-muted-foreground' : 'text-muted-foreground/55'}`}>{lineNumber}</span>
-                    <span className="whitespace-pre">{highlighted ?? (line || ' ')}</span>
-                  </button>
+                    <span className="whitespace-pre select-text" data-sidebar-selectable>{highlighted ?? (line || ' ')}</span>
+                  </div>
                 );
               })}
             </div>
@@ -5170,7 +5185,7 @@ function FilePreview({
             <button
               type="button"
               onClick={insertRangeReference}
-              {...getReferenceLongPressHandlers(lineReference, lineReferenceKey)}
+              {...getReferenceLongPressHandlers(lineReferenceText, lineReferenceKey)}
               style={{ top: floatingInsertPos.top, left: floatingInsertPos.left, transform: 'translateY(-50%)' }}
               className={getReferenceFloatingButtonClass(isMobile, lineReferenceCompleted)}
               title={`Insert code reference: ${lineReference}`}
@@ -5223,6 +5238,15 @@ export function RightSidebar(
   const [repoPickerAnchor, setRepoPickerAnchor] = useState<{ x: number; y: number } | null>(null);
   const [insertedReferenceKey, setInsertedReferenceKey] = useState<string | null>(null);
   const [copiedReferenceKey, setCopiedReferenceKey] = useState<string | null>(null);
+  const [contextDraftEnabled, setContextDraftEnabled] = useState(
+    () => readCache(CONTEXT_DRAFT_ENABLED_STORAGE_KEY, isDiffWrap) ?? false,
+  );
+  const [contextDraftCollapsed, setContextDraftCollapsed] = useState(
+    () => readCache(CONTEXT_DRAFT_COLLAPSED_STORAGE_KEY, isDiffWrap) ?? false,
+  );
+  const [contextDraftText, setContextDraftText] = useState(
+    () => readCache(CONTEXT_DRAFT_TEXT_STORAGE_KEY, isStringValue) ?? '',
+  );
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
   const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
@@ -6250,6 +6274,7 @@ export function RightSidebar(
       flushCacheThrottled(FILE_TREE_SCROLL_STORAGE_KEY);
       flushCacheThrottled(FILE_PREVIEW_READING_STATE_STORAGE_KEY);
       flushCacheThrottled(FILE_TREE_WIDTH_STORAGE_KEY);
+      flushCacheThrottled(CONTEXT_DRAFT_TEXT_STORAGE_KEY);
     };
   }, []);
 
@@ -6363,35 +6388,59 @@ export function RightSidebar(
     window.setTimeout(() => setCopiedReferenceKey((current) => (current === key ? null : current)), 1400);
   }, []);
 
+  useEffect(() => {
+    writeCache(CONTEXT_DRAFT_ENABLED_STORAGE_KEY, contextDraftEnabled);
+  }, [contextDraftEnabled]);
+
+  useEffect(() => {
+    writeCache(CONTEXT_DRAFT_COLLAPSED_STORAGE_KEY, contextDraftCollapsed);
+  }, [contextDraftCollapsed]);
+
+  useEffect(() => {
+    writeCacheThrottled(CONTEXT_DRAFT_TEXT_STORAGE_KEY, contextDraftText, CONTEXT_DRAFT_WRITE_MS);
+  }, [contextDraftText]);
+
+  const routeReferenceText = useCallback((text: string, key: string) => {
+    if (!text) return;
+    if (contextDraftEnabled) {
+      setContextDraftText((current) => appendContextDraft(current, text));
+      setContextDraftCollapsed(false);
+    } else {
+      window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
+        detail: { text, focus: false },
+      }));
+    }
+    markReferenceInserted(key);
+  }, [contextDraftEnabled, markReferenceInserted]);
+
   const getPathReferenceText = useCallback((path: string) => {
-    const absolutePath = rootPath && !path.startsWith('/') ? `${rootPath}/${path}` : path;
+    const absolutePath = resolveAbsoluteReferencePath(path, rootPath);
     return buildPromptReference(absolutePath, rootPath);
   }, [rootPath]);
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(markReferenceCopied);
 
   const insertPathReference = useCallback((path: string, key?: string) => {
-    const absolutePath = rootPath && !path.startsWith('/') ? `${rootPath}/${path}` : path;
-    window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: { text: buildReferenceInputText(absolutePath, rootPath), focus: false },
-    }));
-    markReferenceInserted(key ?? `path:${absolutePath}`);
-  }, [markReferenceInserted, rootPath]);
+    const absolutePath = resolveAbsoluteReferencePath(path, rootPath);
+    routeReferenceText(buildReferenceInputText(absolutePath, rootPath), key ?? `path:${absolutePath}`);
+  }, [rootPath, routeReferenceText]);
 
   const insertReferenceText = useCallback((text: string, key: string) => {
     if (!text) return;
-    window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: { text: text.endsWith('\n') || text.endsWith(' ') ? text : `${text} `, focus: false },
-    }));
-    markReferenceInserted(key);
-  }, [markReferenceInserted]);
+    routeReferenceText(text.endsWith('\n') || text.endsWith(' ') ? text : `${text} `, key);
+  }, [routeReferenceText]);
 
   const insertContextText = useCallback((label: string, text: string, key?: string) => {
     if (!text) return;
+    routeReferenceText(text.endsWith(' ') ? text : `${text} `, key ?? `context:${label}`);
+  }, [routeReferenceText]);
+
+  const sendContextDraftToTerminal = useCallback((submit: boolean) => {
+    const payload = buildDraftTerminalPayload(contextDraftText, submit);
+    if (!payload) return;
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: { text: text.endsWith(' ') ? text : `${text} `, focus: false },
+      detail: { text: payload, focus: false },
     }));
-    markReferenceInserted(key ?? `context:${label}`);
-  }, [markReferenceInserted]);
+  }, [contextDraftText]);
 
   const rootName = useMemo(() => {
     if (!rootPath) return t('rightSidebar.workspace');
@@ -8332,13 +8381,13 @@ export function RightSidebar(
       secondaryTitle={t('rightSidebar.branchAuditViewDiffTitle')}
       secondaryLoading={branchAuditPreviewLoading}
       loading={branchAuditDetailsLoadingRoots.size > 0}
-      statusTitle={branchAuditDetailsLoadingRoots.size > 0 ? '正在加载分支候选…' : undefined}
+      statusTitle={branchAuditDetailsLoadingRoots.size > 0 ? t('rightSidebar.branchCandidatesLoading') : undefined}
       extraContent={(
         <div className="mb-2 space-y-1.5">
           <label className="flex cursor-pointer items-center justify-between gap-3 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-foreground">
             <span className="min-w-0">
-              <span className="block font-medium">包含本地未提交改动</span>
-              <span className="block truncate text-[10px] text-muted-foreground">查看对比或生成解释时纳入 working tree / untracked diff</span>
+              <span className="block font-medium">{t('rightSidebar.includeUncommitted')}</span>
+              <span className="block truncate text-[10px] text-muted-foreground">{t('rightSidebar.includeUncommittedHint')}</span>
             </span>
             <input
               type="checkbox"
@@ -8349,7 +8398,7 @@ export function RightSidebar(
           </label>
           {branchAuditMissingBaseRepos.length > 0 && (
             <div className="rounded-md bg-[rgb(var(--warning-rgb)_/_0.12)] px-2 py-1.5 text-[10px] text-[color:var(--warning)]">
-              未设置基线的仓库会跳过：{branchAuditMissingBaseRepos.map((repo) => repo.label).join('、')}
+              {t('rightSidebar.missingBaseReposSkipped', { repositories: branchAuditMissingBaseRepos.map((repo) => repo.label).join(locale === 'zh' ? '、' : ', ') })}
             </div>
           )}
         </div>
@@ -8364,8 +8413,8 @@ export function RightSidebar(
           branchOptions.push({ value: branch, label: branch, meta });
         };
         addBranch(branchAuditRepoBranches[repo.root] || bundle?.context?.branch, t('rightSidebar.pushCurrentBranchBadge'));
-        for (const branch of bundle?.context?.branches ?? []) addBranch(branch, branch === bundle?.context?.branch ? t('rightSidebar.pushCurrentBranchBadge') : 'local');
-        for (const branch of bundle?.context?.remoteBranches ?? []) addBranch(branch, 'remote');
+        for (const branch of bundle?.context?.branches ?? []) addBranch(branch, branch === bundle?.context?.branch ? t('rightSidebar.pushCurrentBranchBadge') : t('rightSidebar.localBranch'));
+        for (const branch of bundle?.context?.remoteBranches ?? []) addBranch(branch, t('rightSidebar.remoteBranch'));
         const baseOptions: GitPickerOption[] = [];
         const seenBase = new Set<string>();
         const addBase = (branch: string | null | undefined, meta?: string) => {
@@ -9189,6 +9238,26 @@ export function RightSidebar(
               )}
             </div>
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              setContextDraftEnabled((enabled) => !enabled);
+              setContextDraftCollapsed(false);
+            }}
+            className={`relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
+              contextDraftEnabled
+                ? 'bg-primary/15 text-primary'
+                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+            }`}
+            aria-pressed={contextDraftEnabled}
+            aria-label={t('rightSidebar.toggleContextDraft')}
+            title={t('rightSidebar.toggleContextDraft')}
+          >
+            <RiPencilLine size={14} />
+            {!contextDraftEnabled && contextDraftText.trim() && (
+              <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
+            )}
+          </button>
           <button
             type="button"
             onClick={() => setRightSearchOpen(!searchOpen)}
@@ -10201,6 +10270,32 @@ export function RightSidebar(
           ))}
         </Pane>
       </div>
+      {contextDraftEnabled && (
+        <ContextDraftDock
+          value={contextDraftText}
+          collapsed={contextDraftCollapsed}
+          onChange={setContextDraftText}
+          onCollapsedChange={setContextDraftCollapsed}
+          onDisable={() => setContextDraftEnabled(false)}
+          onClear={() => setContextDraftText('')}
+          onInsert={() => sendContextDraftToTerminal(false)}
+          onInsertAndSend={() => sendContextDraftToTerminal(true)}
+          labels={{
+            title: t('rightSidebar.contextDraftTitle'),
+            hint: t('rightSidebar.contextDraftHint'),
+            placeholder: t('rightSidebar.contextDraftPlaceholder'),
+            collapse: t('rightSidebar.contextDraftCollapse'),
+            expand: t('rightSidebar.contextDraftExpand'),
+            disable: t('rightSidebar.contextDraftDisable'),
+            clear: t('rightSidebar.contextDraftClear'),
+            insert: t('rightSidebar.contextDraftInsert'),
+            insertAndSend: t('rightSidebar.contextDraftInsertAndSend'),
+            inserted: t('rightSidebar.contextDraftInserted'),
+            sent: t('rightSidebar.contextDraftSent'),
+            characterCount: (count) => t('rightSidebar.contextDraftCharacterCount', { count }),
+          }}
+        />
+      )}
         {renderRepoSwitcher()}
         {confirmGitAction && (
           <div className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>

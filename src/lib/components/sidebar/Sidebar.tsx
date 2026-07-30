@@ -14,6 +14,7 @@ import {
   resolveGestureOwner,
   yieldToSwiper,
 } from './gestureArbiter';
+import { useI18n } from '../../i18n';
 
 interface SidebarProps {
   side: 'left' | 'right';
@@ -100,6 +101,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   { side, isOpen, drawerWidthPx, onClose, onOpen, children },
   forwardedRef,
 ) {
+  const { t } = useI18n();
   const isLeft = side === 'left';
   const closedX = isLeft ? -drawerWidthPx : drawerWidthPx;
 
@@ -643,7 +645,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
           pointerEvents: isOpen ? 'none' : 'auto',
         }}
         onClick={handleEdgeClick}
-        aria-label={`Open ${side} sidebar`}
+        aria-label={isLeft ? t('sidebar.openLeftSidebar') : t('sidebar.openRightSidebar')}
       />
 
       <div
@@ -657,7 +659,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
           willChange: 'opacity',
         }}
         onClick={onClose}
-        aria-label="Close sidebar"
+        aria-label={t('sidebar.closeSidebar')}
       />
 
       <aside

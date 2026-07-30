@@ -54,6 +54,9 @@ import {
   setStoredPwaNotificationAlertStyle,
   setStoredPwaNotificationsEnabled,
   showPwaNotification,
+  syncPwaPushPreferences,
+  syncPwaPushSubscription,
+  unsubscribePwaPush,
   type PwaNotificationAlertStyle,
 } from './lib/utils/pwaNotifications';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
@@ -1543,10 +1546,25 @@ function App() {
     }
   }, [pwaNotificationsEnabled]);
 
+  useEffect(() => {
+    if (!pwaNotificationsEnabled) return;
+    void syncPwaPushSubscription();
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void syncPwaPushSubscription();
+    };
+    const interval = window.setInterval(() => void syncPwaPushSubscription(), 6 * 60 * 60 * 1000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [pwaNotificationsEnabled]);
+
   const handleTogglePwaNotifications = useCallback(async () => {
     if (pwaNotificationsEnabled) {
       setPwaNotificationsEnabled(false);
       setStoredPwaNotificationsEnabled(false);
+      void unsubscribePwaPush();
       setPwaNotificationPermission(getPwaNotificationPermission());
       return;
     }
@@ -1561,6 +1579,7 @@ function App() {
 
     setPwaNotificationsEnabled(true);
     setStoredPwaNotificationsEnabled(true);
+    await syncPwaPushSubscription(true, true);
     void showPwaNotification({
       title: 'Termdock',
       body: t('settings.notificationsTestBody'),
@@ -1573,11 +1592,13 @@ function App() {
   const handleTogglePwaAiNotifications = useCallback((enabled: boolean) => {
     setPwaAiNotificationsEnabled(enabled);
     setStoredPwaAiNotificationsEnabled(enabled);
+    void syncPwaPushPreferences();
   }, []);
 
   const handleSelectPwaNotificationAlertStyle = useCallback((style: PwaNotificationAlertStyle) => {
     setPwaNotificationAlertStyle(style);
     setStoredPwaNotificationAlertStyle(style);
+    void syncPwaPushPreferences();
   }, []);
 
   useEffect(() => {
@@ -1714,13 +1735,17 @@ function App() {
   // 等会话恢复 / inventory 同步后由下面的 effect 补发。
   const requestFocusSession = useCallback((sessionId: string | null) => {
     if (!sessionId) return;
-    if (sessions.some((s) => s.id === sessionId)) {
+    const target = sessions.find((session) => (
+      session.id === sessionId
+      || terminalSessions.get(session.id)?.backendSessionId === sessionId
+    ));
+    if (target) {
       pendingFocusSessionRef.current = null;
-      window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
+      window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: target.id }));
     } else {
       pendingFocusSessionRef.current = sessionId;
     }
-  }, [sessions]);
+  }, [sessions, terminalSessions]);
 
   // 启动时解析 ?session=<id>（来自通知点击的 SW 导航），切换后清理 query。
   useEffect(() => {
@@ -1798,21 +1823,36 @@ function App() {
       const data = event.data;
       if (data && data.type === 'termdock:focus-session' && typeof data.sessionId === 'string') {
         requestFocusSession(data.sessionId);
+      } else if (data?.type === 'termdock:push-subscription-changed') {
+        void syncPwaPushSubscription(true);
       }
     };
     navigator.serviceWorker.addEventListener('message', handler);
     return () => navigator.serviceWorker.removeEventListener('message', handler);
   }, [requestFocusSession]);
 
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const sessionId = (event as CustomEvent<string>).detail;
+      if (typeof sessionId === 'string') requestFocusSession(sessionId);
+    };
+    window.addEventListener('termdock:focus-session', handler);
+    return () => window.removeEventListener('termdock:focus-session', handler);
+  }, [requestFocusSession]);
+
   // 会话列表变化时，补发尚未兑现的聚焦请求（目标 session 刚恢复出来）。
   useEffect(() => {
     const pending = pendingFocusSessionRef.current;
     if (!pending) return;
-    if (sessions.some((s) => s.id === pending)) {
+    const target = sessions.find((session) => (
+      session.id === pending
+      || terminalSessions.get(session.id)?.backendSessionId === pending
+    ));
+    if (target) {
       pendingFocusSessionRef.current = null;
-      window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: pending }));
+      window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: target.id }));
     }
-  }, [sessions]);
+  }, [sessions, terminalSessions]);
 
   // 按 tab 顺序列出「需要我处理」的 session（waiting / 跑完待查看）。
   const attentionSessionIds = React.useMemo(() => {
@@ -1841,6 +1881,28 @@ function App() {
       window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: next }));
     }
   }, [attentionSessionIds, sessions, activeSessionId]);
+
+  const handleJumpToPreviousAttention = useCallback(() => {
+    if (attentionSessionIds.length === 0) return;
+    if (activeSessionId) useTerminalStore.getState().clearAgentNeedsReview(activeSessionId);
+    const fromIndex = activeSessionId ? sessions.findIndex((s) => s.id === activeSessionId) : sessions.length;
+    const previous = [...attentionSessionIds].reverse()
+      .find((id) => sessions.findIndex((s) => s.id === id) < fromIndex)
+      ?? attentionSessionIds[attentionSessionIds.length - 1];
+    if (previous) window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: previous }));
+  }, [attentionSessionIds, sessions, activeSessionId]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (!event.altKey || !event.shiftKey || event.metaKey || event.ctrlKey) return;
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      if (event.key === 'ArrowUp') handleJumpToPreviousAttention();
+      else handleJumpToNextAttention();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [handleJumpToNextAttention, handleJumpToPreviousAttention]);
 
   const copyCwdToClipboard = useCallback(async (sessionId: string) => {
     const ts = useTerminalStore.getState().sessions.get(sessionId);
@@ -1967,6 +2029,10 @@ function App() {
         handleToggleLeftSidebar();
       } else if (command === 'toggle-right-sidebar') {
         handleToggleRightSidebar();
+      } else if (command === 'previous-attention') {
+        handleJumpToPreviousAttention();
+      } else if (command === 'next-attention') {
+        handleJumpToNextAttention();
       }
     };
     window.addEventListener('termdock:native-command', handleNativeCommand);
@@ -1978,6 +2044,8 @@ function App() {
     dispatchNewSession,
     handleToggleLeftSidebar,
     handleToggleRightSidebar,
+    handleJumpToNextAttention,
+    handleJumpToPreviousAttention,
   ]);
 
   const handleSidebarCloseSession = useCallback((sessionId: string, event: React.MouseEvent) => {
@@ -2184,7 +2252,7 @@ function App() {
               groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'
             }`}
           >
-            <button
+            {!showPinnedLeft && <button
               type="button"
               onClick={handleToggleLeftSidebar}
               className="relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-surface-elevated hover:text-foreground sm:h-8 sm:w-8"
@@ -2197,8 +2265,8 @@ function App() {
                 reviewCount={agentTabCounts.review}
                 className="sm:hidden"
               />
-            </button>
-            {attentionSessionIds.length > 0 && (
+            </button>}
+            {!showPinnedLeft && attentionSessionIds.length > 0 && (
               <button
                 type="button"
                 onClick={handleJumpToNextAttention}
@@ -2210,7 +2278,22 @@ function App() {
                 <span className="text-[11px] font-semibold leading-none">{attentionSessionIds.length}</span>
               </button>
             )}
-            {groupByFolder ? (
+            {showPinnedLeft ? (
+              <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+                {sessions.find((session) => session.id === activeSessionId)
+                  ? renderTabShell(sessions.find((session) => session.id === activeSessionId)!, true)
+                  : <span className="min-w-0 flex-1 truncate px-2 text-[11px] text-muted-foreground">{t('sidebar.sessions')}</span>}
+                <button
+                  type="button"
+                  onClick={() => dispatchNewSession()}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-primary/15 hover:text-primary"
+                  aria-label={t('tab.new')}
+                  title={t('tab.new')}
+                >
+                  <RiAddLine size={14} />
+                </button>
+              </div>
+            ) : groupByFolder ? (
             <DragDropContext onDragEnd={handleGroupedDragEnd}>
             <Droppable droppableId="groups" type="group" direction="horizontal">
               {(groupsProvided) => (
@@ -2276,7 +2359,7 @@ function App() {
                     </button>
                     {/* 展开时显示子 tab（组内可拖动排序）；折叠时显示 session 数，保持高度一致 */}
                     {collapsed ? (
-                      <span className="flex h-5 items-center text-[10px] leading-none text-muted-foreground/50">{group.sessions.length} sessions</span>
+                      <span className="flex h-5 items-center text-[10px] leading-none text-muted-foreground/50">{t('tab.sessionCount', { count: group.sessions.length })}</span>
                     ) : (
                       <Droppable droppableId={`group-sessions:${group.key}`} type="session" direction="horizontal">
                         {(sessionsProvided) => (
@@ -2383,13 +2466,13 @@ function App() {
             </DragDropContext>
             )}
             <div className="flex shrink-0 items-center gap-1.5">
-              {(agentTabCounts.running > 0 || agentTabCounts.review > 0) && (
+              {!showPinnedLeft && (agentTabCounts.running > 0 || agentTabCounts.review > 0) && (
                 <span className="hidden items-center gap-1 sm:inline-flex">
-                  <AgentCountBadge count={agentTabCounts.running} tone="running" title="AI running" />
-                  <AgentCountBadge count={agentTabCounts.review} tone="review" title="Needs review" />
+                <AgentCountBadge count={agentTabCounts.running} tone="running" title={t('agent.aiRunning')} />
+                <AgentCountBadge count={agentTabCounts.review} tone="review" title={t('agent.needsReview')} />
                 </span>
               )}
-              {sessions.length > 0 && (
+              {!showPinnedLeft && sessions.length > 0 && (
               <span
                 className="inline-flex shrink-0 items-center px-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground sm:text-[11px]"
                 title={`Session ${activeSessionIndex + 1} of ${sessions.length}`}
@@ -2433,7 +2516,7 @@ function App() {
             type="button"
             className="fixed inset-0 z-drawer-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm animate-fade-in cursor-default"
             onClick={handleCloseSettings}
-            aria-label="Close settings"
+            aria-label={t('settings.closeSettings')}
           />
           <div
             role="dialog"
@@ -2457,7 +2540,7 @@ function App() {
                 type="button"
                 onClick={handleCloseSettings}
                 className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-destructive/20 hover:text-destructive"
-                aria-label="Close"
+                aria-label={t('common.close')}
               >
                 <RiCloseLine size={16} />
               </button>
@@ -3134,7 +3217,7 @@ function App() {
               setSidebarCloseAnchor(null);
               setTmuxKillError(null);
             }}
-            aria-label="Close close-session chooser"
+            aria-label={t('common.close')}
           />
           <div
             className={`fixed z-menu-panel rounded-2xl bg-surface-elevated border border-border/15 shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in ${
@@ -3148,9 +3231,9 @@ function App() {
             }
           >
             <div className="border-b border-border/15 px-4 py-3">
-              <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Tmux session</div>
+              <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{t('tab.closeChooserTitle')}</div>
               <div className="mt-0.5 truncate text-[14px] font-medium text-foreground">{sidebarCloseChoiceSession.tmuxSessionName ?? sidebarCloseChoiceSession.name}</div>
-              <div className="mt-0.5 text-[11px] text-muted-foreground/80">Choose what "Close" should do for this tmux session.</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground/80">{t('tab.closeChooserDescription')}</div>
             </div>
             <div className="flex flex-col py-1">
               <button
@@ -3171,8 +3254,8 @@ function App() {
                   <RiTerminalLine size={14} />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block font-medium">Detach</span>
-                  <span className="block text-[11px] text-muted-foreground">Close this tab only, keep tmux session running.</span>
+                  <span className="block font-medium">{t('tab.detach')}</span>
+                  <span className="block text-[11px] text-muted-foreground">{t('tab.detachHint')}</span>
                 </span>
               </button>
               <button
@@ -3192,8 +3275,8 @@ function App() {
                   <RiDeleteBinLine size={14} />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block font-medium">Destroy</span>
-                  <span className="block text-[11px] text-muted-foreground">Kill the tmux session and all processes inside it.</span>
+                  <span className="block font-medium">{t('tab.destroySession')}</span>
+                  <span className="block text-[11px] text-muted-foreground">{t('tab.destroySessionHint')}</span>
                 </span>
               </button>
               {tmuxKillError && (
@@ -3210,7 +3293,7 @@ function App() {
                 }}
                 className="w-full rounded-full bg-surface-2 px-3 py-2 text-[12px] font-medium text-muted-foreground transition hover:bg-surface hover:text-foreground"
               >
-                Cancel
+                {t('common.cancel')}
               </button>
             </div>
           </div>
@@ -3350,8 +3433,8 @@ function App() {
                         <RiTerminalLine size={14} />
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block font-medium">Detach</span>
-                        <span className="block text-[11px] text-muted-foreground">Close this tab only, keep tmux session running.</span>
+                        <span className="block font-medium">{t('tab.detach')}</span>
+                        <span className="block text-[11px] text-muted-foreground">{t('tab.detachHint')}</span>
                       </span>
                     </button>
                     <button
@@ -3370,8 +3453,8 @@ function App() {
                         <RiDeleteBinLine size={14} />
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block font-medium">Destroy</span>
-                        <span className="block text-[11px] text-muted-foreground">Kill the tmux session and all processes inside it.</span>
+                        <span className="block font-medium">{t('tab.destroySession')}</span>
+                        <span className="block text-[11px] text-muted-foreground">{t('tab.destroySessionHint')}</span>
                       </span>
                     </button>
                   </>

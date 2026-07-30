@@ -17,13 +17,16 @@ const COLLAPSED_GROUPS_KEY = 'termdock-sidebar-collapsed-folder-groups';
 const LEFT_PINNED_KEY = 'termdock-left-sidebar-pinned';
 const LEFT_SIDEBAR_WIDTH_KEY = 'termdock-left-sidebar-width';
 
-function readLeftPinned(): boolean {
-  if (typeof window === 'undefined') return false;
+export function readLeftPinnedPreference(): boolean {
+  // Desktop is the multi-task surface: keep the session navigator visible on
+  // first use. Mobile never renders the pinned layout, so this default does not
+  // consume phone screen space. Once a user unpins, the explicit "0" wins.
+  if (typeof window === 'undefined') return true;
   try {
     const stored = window.localStorage.getItem(LEFT_PINNED_KEY);
-    return stored === '1';
+    return stored === null ? true : stored === '1';
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -346,7 +349,7 @@ interface SidebarState {
 export const useSidebarStore = create<SidebarState>((set) => ({
   leftOpen: false,
   rightOpen: false,
-  leftPinned: readLeftPinned(),
+  leftPinned: readLeftPinnedPreference(),
   leftSidebarWidth: readLeftSidebarWidth(),
   rightTab: 'files',
   rightSearchOpen: false,

@@ -1,6 +1,7 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AlertTriangle, CheckCircle2, GitBranch, Link2, Sparkles } from 'lucide-react';
 import type { ChangeWalkthrough, ChangeWalkthroughAnchor, ChangeWalkthroughEdge, ChangeWalkthroughNode } from '../../terminal/api';
+import { useI18n } from '../../i18n';
 
 interface ChangeWalkthroughPanelProps {
   walkthroughs: ChangeWalkthrough[];
@@ -413,6 +414,7 @@ function getDagEdgeLabelPosition(edge: DagLayoutEdge): { x: number; y: number; m
 }
 
 export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: ChangeWalkthroughPanelProps) {
+  const { t } = useI18n();
   const instanceId = useId();
   const walkthrough = pickWalkthrough(walkthroughs, repoRoot);
   const nodeRefs = useRef(new Map<string, HTMLElement>());
@@ -500,7 +502,7 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
               DAG
             </div>
             {walkthrough.edges.some((edge) => edge.label?.trim()) && (
-              <span className="normal-case tracking-normal">点击标注聚焦路径</span>
+              <span className="normal-case tracking-normal">{t('diffViewer.focusPathHint')}</span>
             )}
           </div>
           <div

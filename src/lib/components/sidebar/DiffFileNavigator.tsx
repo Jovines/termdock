@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Folder } from 'lucide-react';
+import { hasActiveTextSelection } from './gestureArbiter';
 
 export type DiffFileNavigatorMode = 'list' | 'tree';
 
@@ -198,7 +199,10 @@ function renderFileRow(
       role="button"
       tabIndex={0}
       title={file.title ?? file.absolutePath ?? file.path}
-      onClick={() => props.onSelectFile(file)}
+      onClick={() => {
+        if (hasActiveTextSelection()) return;
+        props.onSelectFile(file);
+      }}
       onKeyDown={(event) => {
         if (event.key !== 'Enter' && event.key !== ' ') return;
         event.preventDefault();
@@ -214,7 +218,7 @@ function renderFileRow(
         'data-diff-status': file.status,
       }}
     >
-      <span className="select-text">
+      <span className="select-text" data-sidebar-selectable>
         <span className={`block truncate leading-snug ${selected ? 'font-medium' : ''}`}>{display.name}</span>
         {props.mode !== 'tree' && display.dir && <span className="block truncate text-[10px] text-muted-foreground/75">{display.dir}</span>}
         {props.renderSubtitle?.(file)}
@@ -243,7 +247,10 @@ function renderDirectory(
       <DiffTreeRowShell
         role="button"
         tabIndex={0}
-        onClick={() => props.onToggleDirectory(directoryKey)}
+        onClick={() => {
+          if (hasActiveTextSelection()) return;
+          props.onToggleDirectory(directoryKey);
+        }}
         onKeyDown={(event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return;
           event.preventDefault();
@@ -257,7 +264,7 @@ function renderDirectory(
       >
         <span className="flex min-w-0 items-center gap-1">
           <Folder size={14} className="shrink-0 text-[color:var(--folder)]" />
-          <span className="min-w-0 flex-1 truncate leading-snug">{displayName}</span>
+          <span className="min-w-0 flex-1 truncate leading-snug select-text" data-sidebar-selectable>{displayName}</span>
         </span>
       </DiffTreeRowShell>
       {!collapsed && (

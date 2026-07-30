@@ -74,6 +74,7 @@ async function copyTextToClipboard(text: string): Promise<void> {
 
 interface LongPressState {
   pointerId: number;
+  pointerType: string;
   startX: number;
   startY: number;
   text: string;
@@ -147,6 +148,7 @@ export function useReferenceLongPressCopy(onCopied?: (key: string) => void) {
       reset();
       stateRef.current = {
         pointerId: event.pointerId,
+        pointerType: event.pointerType,
         startX: event.clientX,
         startY: event.clientY,
         text,
@@ -158,6 +160,11 @@ export function useReferenceLongPressCopy(onCopied?: (key: string) => void) {
         readyRef.current = true;
         suppressNextClickRef.current = true;
         popoverPressingRef.current = false;
+        if (state.pointerType === 'mouse') {
+          void copyTextToClipboard(state.text).then(() => onCopied?.(state.key));
+          timerRef.current = null;
+          return;
+        }
         setPopover({
           text: state.text,
           key: state.key,
@@ -203,7 +210,7 @@ export function useReferenceLongPressCopy(onCopied?: (key: string) => void) {
       event.preventDefault();
       event.stopPropagation();
     },
-  }), [reset]);
+  }), [onCopied, reset]);
 
   const pressPopover = useCallback((event: ReactPointerEvent<HTMLButtonElement> | ReactMouseEvent<HTMLButtonElement>) => {
     event.preventDefault();

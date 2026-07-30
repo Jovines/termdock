@@ -15,6 +15,7 @@ import { WebSocketServer } from 'ws';
 import terminalRoutes, { handleTerminalWebSocket, handleControlWebSocket } from './routes/terminal.js';
 import filesystemRoutes from './routes/filesystem.js';
 import authRoutes from './routes/auth.js';
+import notificationRoutes from './routes/notifications.js';
 import { createOnboardingRouter } from './routes/onboarding.js';
 import { createLocalRouter } from './routes/local.js';
 import { csrfProtection } from './utils/csrfProtection.js';
@@ -30,6 +31,11 @@ import { getCookieSecurityOptions, setSecureCookieMode } from './utils/cookieSec
 import { startOnboardingServer, stopOnboardingServer, getOnboardingServerUrl } from './onboardingServer.js';
 import { CertificateWatcher } from './certificateWatcher.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog, writeTextLog } from './utils/serverLogger.js';
+import {
+  getTermdockVersion,
+  TERMDOCK_CAPABILITIES,
+  TERMDOCK_PROTOCOL_VERSION,
+} from './utils/version.js';
 
 import { PORT, DEFAULT_HOST } from './config.js';
 
@@ -366,6 +372,19 @@ export function createApp(options: AppOptions = {}): express.Express {
     });
   });
 
+  // Public, non-sensitive capability handshake used by desktop clients before
+  // navigating to a local or remote Termdock service. Keep this endpoint
+  // backwards-compatible: older desktops only require /health, while newer
+  // clients can use protocolVersion/capabilities for feature gating.
+  app.get('/api/meta', (_req, res) => {
+    res.json({
+      product: 'termdock',
+      version: getTermdockVersion(),
+      protocolVersion: TERMDOCK_PROTOCOL_VERSION,
+      capabilities: TERMDOCK_CAPABILITIES,
+    });
+  });
+
   // Client-side log relay — enables collecting browser/device logs
   // on the server, critical for debugging mobile Safari / PWA issues.
   app.post('/api/client-log', (req, res) => {
@@ -413,6 +432,10 @@ export function createApp(options: AppOptions = {}): express.Express {
 
   // CSRF令牌获取端点（必须先登录后才能拿，避免未授权探测）
   app.get('/api/csrf-token', requireAuth(), csrfProtection.getTokenHandler());
+
+  app.use('/api/notifications', requireAuth());
+  app.use('/api/notifications', csrfProtection.verifyMiddleware());
+  app.use('/api/notifications', notificationRoutes);
 
   // 安全中间件：将路径验证器注入到请求对象中
   app.use((req, _res, next) => {

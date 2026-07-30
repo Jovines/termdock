@@ -5,6 +5,7 @@ import { Swiper, SwiperSlide } from 'swiper/react';
 import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
+import { useI18n } from '../../i18n';
 
 const DESKTOP_LIST_WIDTH_STORAGE_KEY = 'termdock:diff-review:list-width:v1';
 const DESKTOP_LIST_WIDTH_WRITE_MS = 120;
@@ -59,6 +60,7 @@ export function DiffReviewFrame({
   desktopListClassName,
   detailOwnsScroll = false,
 }: DiffReviewFrameProps) {
+  const { t } = useI18n();
   const swiperRef = useRef<SwiperInstance | null>(null);
   const desktopFrameRef = useRef<HTMLDivElement | null>(null);
   const desktopResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
@@ -234,8 +236,8 @@ export function DiffReviewFrame({
       <div
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize diff navigation"
-        title="Resize diff navigation"
+        aria-label={t('diffViewer.resizeNavigation')}
+        title={t('diffViewer.resizeNavigation')}
         className="group relative z-10 w-2 shrink-0 cursor-col-resize touch-none border-r border-border/15 bg-surface"
         onPointerDown={startDesktopListResize}
         onPointerMove={handleDesktopListResizeMove}

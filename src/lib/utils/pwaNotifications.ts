@@ -4,6 +4,9 @@ const PWA_NOTIFICATION_ALERT_STYLE_KEY = 'termdock-pwa-notification-alert-style'
 const NOTIFICATION_DEDUPE_STORAGE_PREFIX = 'termdock-notification-claim:';
 const NOTIFICATION_DEDUPE_TTL_MS = 5000;
 const SW_READY_TIMEOUT_MS = 1500;
+const PUSH_SYNC_STORAGE_KEY = 'termdock-push-last-sync';
+const PUSH_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const PUSH_RENEWAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type PwaNotificationAlertStyle = 'normal' | 'quiet' | 'persistent';
 
@@ -27,6 +30,7 @@ type BrowserNotificationOptions = NotificationOptions & {
 const notificationClaims = new Map<string, number>();
 
 export function isPwaNotificationSupported(): boolean {
+  if (getTermdockDesktopBridge()) return true;
   return typeof window !== 'undefined'
     && typeof Notification !== 'undefined'
     && 'serviceWorker' in navigator
@@ -60,6 +64,7 @@ export function isPwaStandalone(): boolean {
  * tells you whether showPwaNotification() will actually produce a notification.
  */
 export function isPwaNotificationEffective(): boolean {
+  if (getTermdockDesktopBridge()) return true;
   if (!isPwaNotificationSupported()) return false;
   // iOS Safari only delivers notifications in standalone PWA mode (iOS 16.4+).
   if (isIOSSafari() && !isPwaStandalone()) return false;
@@ -69,6 +74,7 @@ export function isPwaNotificationEffective(): boolean {
 
 
 export function getPwaNotificationPermission(): NotificationPermission | 'unsupported' {
+  if (getTermdockDesktopBridge()) return 'granted';
   if (typeof Notification === 'undefined') return 'unsupported';
   return Notification.permission;
 }
@@ -131,6 +137,7 @@ export function setStoredPwaNotificationAlertStyle(style: PwaNotificationAlertSt
 }
 
 export async function requestPwaNotificationPermission(): Promise<NotificationPermission | 'unsupported'> {
+  if (getTermdockDesktopBridge()) return 'granted';
   if (!isPwaNotificationSupported()) return 'unsupported';
 
   if (Notification.permission === 'default') {
@@ -216,11 +223,132 @@ async function getNotificationRegistration(): Promise<ServiceWorkerRegistration 
   }
 }
 
+function urlBase64ToUint8Array(value: string): Uint8Array<ArrayBuffer> {
+  const padding = '='.repeat((4 - (value.length % 4)) % 4);
+  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const bytes = window.atob(base64);
+  const output = new Uint8Array(new ArrayBuffer(bytes.length));
+  for (let index = 0; index < bytes.length; index += 1) output[index] = bytes.charCodeAt(index);
+  return output;
+}
+
+async function notificationMutation(path: string, body: unknown): Promise<Response> {
+  const tokenResponse = await fetch('/api/csrf-token');
+  if (!tokenResponse.ok) throw new Error('Unable to get notification security token');
+  const { csrfToken } = await tokenResponse.json() as { csrfToken: string };
+  return fetch(`/api/notifications/${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-XSRF-TOKEN': csrfToken,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Reconciles the browser's rotating PushSubscription with the server.
+ * Called on launch, foreground resume, and periodically while the app is open.
+ */
+export async function syncPwaPushSubscription(force = false, allowCreate = false): Promise<boolean> {
+  if (getTermdockDesktopBridge()) return true;
+  if (!getStoredPwaNotificationsEnabled() || !isPwaNotificationEffective()) return false;
+  if (Notification.permission !== 'granted') return false;
+  const registration = await getNotificationRegistration();
+  if (!registration?.pushManager) return false;
+
+  try {
+    const statusResponse = await fetch('/api/notifications/status');
+    if (!statusResponse.ok) return false;
+    const status = await statusResponse.json() as {
+      publicKey: string;
+      subscription: { endpoint?: string; updatedAt?: number } | null;
+    };
+    let subscription = await registration.pushManager.getSubscription();
+    const expiresSoon = Boolean(
+      subscription?.expirationTime
+      && subscription.expirationTime - Date.now() < PUSH_RENEWAL_WINDOW_MS,
+    );
+    if (!subscription) {
+      // The initial subscribe must remain inside the settings-button user
+      // gesture on iOS and some Chromium builds. Rotation normally leaves a
+      // replacement subscription for us to upload without another prompt.
+      if (!allowCreate) return false;
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(status.publicKey),
+      });
+    }
+
+    const lastSync = Number(window.localStorage.getItem(PUSH_SYNC_STORAGE_KEY) ?? '0');
+    const serverIsStale = !status.subscription
+      || status.subscription.endpoint !== subscription.endpoint
+      || Date.now() - (status.subscription.updatedAt ?? 0) >= PUSH_SYNC_INTERVAL_MS;
+    if (force || serverIsStale || Date.now() - lastSync >= PUSH_SYNC_INTERVAL_MS || expiresSoon) {
+      const response = await notificationMutation('subscribe', {
+        subscription: subscription.toJSON(),
+        aiEnabled: getStoredPwaAiNotificationsEnabled(),
+        alertStyle: getStoredPwaNotificationAlertStyle(),
+        locale: navigator.language,
+      });
+      if (!response.ok) return false;
+      window.localStorage.setItem(PUSH_SYNC_STORAGE_KEY, String(Date.now()));
+    }
+    return true;
+  } catch (error) {
+    console.warn('[PWA notifications] Push subscription sync failed:', error);
+    return false;
+  }
+}
+
+export async function unsubscribePwaPush(): Promise<void> {
+  if (getTermdockDesktopBridge()) return;
+  const registration = await getNotificationRegistration();
+  const subscription = await registration?.pushManager?.getSubscription();
+  try {
+    await notificationMutation('unsubscribe', { endpoint: subscription?.endpoint });
+  } finally {
+    await subscription?.unsubscribe();
+    try {
+      window.localStorage.removeItem(PUSH_SYNC_STORAGE_KEY);
+    } catch {
+      // Best-effort cache cleanup.
+    }
+  }
+}
+
+export async function syncPwaPushPreferences(): Promise<void> {
+  if (getTermdockDesktopBridge()) return;
+  if (!getStoredPwaNotificationsEnabled()) return;
+  const response = await notificationMutation('preferences', {
+    aiEnabled: getStoredPwaAiNotificationsEnabled(),
+    alertStyle: getStoredPwaNotificationAlertStyle(),
+    locale: navigator.language,
+  });
+  if (response.status === 404) await syncPwaPushSubscription(true);
+}
+
 export async function showPwaNotification(payload: PwaNotificationPayload): Promise<boolean> {
   if (!getStoredPwaNotificationsEnabled()) return false;
   if (!isPwaNotificationSupported()) return false;
   if (payload.requireHidden !== false && isClientFocused()) return true;
+  const desktopBridge = getTermdockDesktopBridge();
+  if (desktopBridge) {
+    const alertStyle = payload.alertStyle ?? getStoredPwaNotificationAlertStyle();
+    return desktopBridge.showNotification({
+      title: payload.title,
+      body: payload.body,
+      tag: payload.tag,
+      sessionId: payload.data?.sessionId,
+      silent: alertStyle === 'quiet',
+    });
+  }
   if (Notification.permission !== 'granted') return false;
+  const registration = await getNotificationRegistration();
+  if (await registration?.pushManager?.getSubscription()) {
+    // The server-side Web Push path covers background and closed-PWA delivery.
+    return true;
+  }
   if (!claimNotificationPayload(payload)) return true;
 
   const alertStyle = payload.alertStyle ?? getStoredPwaNotificationAlertStyle();
@@ -240,7 +368,6 @@ export async function showPwaNotification(payload: PwaNotificationPayload): Prom
   };
 
   try {
-    const registration = await getNotificationRegistration();
     if (registration && typeof registration.showNotification === 'function') {
       await registration.showNotification(payload.title, notificationOptions);
       return true;
@@ -260,3 +387,4 @@ export async function showPwaNotification(payload: PwaNotificationPayload): Prom
     return false;
   }
 }
+import { getTermdockDesktopBridge } from '../desktop/nativeBridge';

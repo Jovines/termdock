@@ -10,21 +10,110 @@
  */
 
 import React from 'react';
+import { createPortal } from 'react-dom';
 import {
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
   LoaderCircle as RiLoaderCircle,
   CircleHelp as RiCircleHelp,
-  Check as RiCheck,
+  BellDot as RiBellDot,
   Bot as RiBot,
 } from 'lucide-react';
 import type { AgentStatus, AgentIdentity } from '../terminal/types';
 import { useI18n } from '../i18n';
+import { useTerminalStore } from '../stores/useTerminalStore';
+import { useSidebarStore } from '../stores/useSidebarStore';
+import { useViewportKeyboardState } from '../hooks/useViewportKeyboardState';
+import { getNextAttentionSessionId } from '../utils/agentAttention';
+import {
+  MOBILE_ATTENTION_SIZE_PX,
+  clampMobileAttentionDrag,
+  resolveMobileAttentionPosition,
+  snapMobileAttentionPosition,
+  type MobileAttentionPosition,
+  type MobileAttentionPreference,
+  type MobileAttentionViewport,
+} from '../utils/mobileAttentionPosition';
 
 /** 黄色（待查看 / 等待用户 / copy mode） */
 export const AGENT_COLOR_ATTENTION = 'var(--warning)';
 /** 绿色（working/done） */
 export const AGENT_COLOR_RUNNING = 'var(--success)';
+const MOBILE_ATTENTION_POSITION_KEY = 'termdock:mobile-attention-position:v1';
+const MOBILE_ATTENTION_DEFAULT_PREFERENCE: MobileAttentionPreference = {
+  side: 'right',
+  yRatio: 0.68,
+};
+
+function readMobileAttentionPreference(): MobileAttentionPreference {
+  if (typeof window === 'undefined') return MOBILE_ATTENTION_DEFAULT_PREFERENCE;
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(MOBILE_ATTENTION_POSITION_KEY) ?? 'null',
+    ) as Partial<MobileAttentionPreference> | null;
+    if (
+      parsed
+      && (parsed.side === 'left' || parsed.side === 'right')
+      && typeof parsed.yRatio === 'number'
+      && Number.isFinite(parsed.yRatio)
+    ) {
+      return {
+        side: parsed.side,
+        yRatio: Math.min(1, Math.max(0, parsed.yRatio)),
+      };
+    }
+  } catch {
+    // A malformed or unavailable localStorage falls back to the ergonomic default.
+  }
+  return MOBILE_ATTENTION_DEFAULT_PREFERENCE;
+}
+
+function writeMobileAttentionPreference(preference: MobileAttentionPreference): void {
+  try {
+    window.localStorage.setItem(
+      MOBILE_ATTENTION_POSITION_KEY,
+      JSON.stringify(preference),
+    );
+  } catch {
+    // Position persistence is best-effort; dragging still works for this page.
+  }
+}
+
+function readSafeInset(name: string): number {
+  if (typeof document === 'undefined') return 0;
+  const value = Number.parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue(name),
+  );
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function getMobileAttentionViewport(): MobileAttentionViewport {
+  if (typeof window === 'undefined') return { width: 390, height: 664 };
+  const visualViewport = window.visualViewport;
+  return {
+    width: visualViewport?.width ?? window.innerWidth,
+    height: visualViewport?.height ?? window.innerHeight,
+    safeTop: readSafeInset('--safe-top-inset'),
+    safeRight: readSafeInset('--safe-right-inset'),
+    safeBottom: readSafeInset('--safe-bottom-inset'),
+    safeLeft: readSafeInset('--safe-left-inset'),
+  };
+}
+
+function jumpToNextAgentAttention(): void {
+  const store = useTerminalStore.getState();
+  const orderedSessions = Array.from(store.sessions.values());
+  const nextId = getNextAttentionSessionId(orderedSessions, store.activeSessionId);
+  if (!nextId) return;
+
+  const active = store.activeSessionId
+    ? store.sessions.get(store.activeSessionId)
+    : undefined;
+  if (active?.agentNeedsReview) {
+    store.clearAgentNeedsReview(active.sessionId);
+  }
+  window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: nextId }));
+}
 
 /** 给 tab 图标 / dot 共享的轻量 session 状态 */
 export interface AgentVisualState {
@@ -138,18 +227,26 @@ export function AgentTabIcon({
       </span>
     );
   }
-  // done 即「未读完成」标记：离开时完成 → 绿勾（带呼吸提醒）；
-  // 查看之后（needsReview 已清）→ 回落到品牌头像。
+  // done + needsReview 与其他未读统一成黄色铃铛。完成态的绿色勾容易被
+  // 理解成“已经处理”，而这里真正要表达的是“还有一条结果没看”。
   if (state?.agentStatus === 'done' && state.agentNeedsReview) {
     return (
       <span title={state.agentMessage ?? undefined}>
-        <RiCheck size={size} className="shrink-0 animate-pulse" style={{ color: AGENT_COLOR_RUNNING }} />
+        <RiBellDot size={size + 1} className="shrink-0 animate-pulse" style={{ color: AGENT_COLOR_ATTENTION }} />
       </span>
     );
   }
 
-  // 没有活跃状态，但"未读"：黄色呼吸动效图标
-  if (state?.agentNeedsReview || state?.inCopyMode) {
+  // 没有活跃状态但有未读，继续使用同一个铃铛语义，便于横扫多个 tab。
+  if (state?.agentNeedsReview) {
+    return (
+      <span title={state.agentMessage ?? undefined}>
+        <RiBellDot size={size + 1} className="shrink-0 animate-pulse" style={{ color: AGENT_COLOR_ATTENTION }} />
+      </span>
+    );
+  }
+
+  if (state?.inCopyMode) {
     return sessionMode === 'tmux'
       ? <RiLayoutGridLine size={size} className="shrink-0 text-[color:var(--warning)] animate-pulse" />
       : <RiTerminalLine size={size} className="shrink-0 text-[color:var(--warning)] animate-pulse" />;
@@ -184,7 +281,7 @@ export function AgentSessionDot({
   if (status === 'waiting' || needsReview) {
     return (
       <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--warning)] ring-2 ring-surface animate-pulse"
+        className="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full bg-[var(--warning)] ring-2 ring-surface shadow-[0_0_0_1px_rgb(var(--warning-rgb)_/_0.24)] animate-pulse"
         title={needsReview ? t('agent.finishedReview') : t('agent.aiWaiting')}
       />
     );
@@ -192,7 +289,7 @@ export function AgentSessionDot({
   if (status === 'done' && needsReview) {
     return (
       <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--success)] ring-2 ring-surface animate-pulse"
+        className="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full bg-[var(--warning)] ring-2 ring-surface shadow-[0_0_0_1px_rgb(var(--warning-rgb)_/_0.24)] animate-pulse"
         title={t('agent.finishedReview')}
       />
     );
@@ -221,13 +318,32 @@ export function AgentCountBadge({
   tone: 'running' | 'review';
   title?: string;
 }): React.ReactElement | null {
+  const { t } = useI18n();
   if (count <= 0) return null;
   const className = tone === 'running'
     ? 'inline-flex items-center gap-1 rounded-full bg-[rgb(var(--success-rgb)_/_0.12)] px-1.5 py-0.5 text-[10px] font-medium text-[color:var(--success)]'
-    : 'inline-flex items-center gap-1 rounded-full bg-[rgb(var(--warning-rgb)_/_0.12)] px-1.5 py-0.5 text-[10px] font-medium text-[color:var(--warning)]';
+    : 'inline-flex min-h-6 items-center gap-1 rounded-full bg-[rgb(var(--warning-rgb)_/_0.14)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--warning)] ring-1 ring-[rgb(var(--warning-rgb)_/_0.24)] transition hover:bg-[rgb(var(--warning-rgb)_/_0.22)] active:scale-[0.97]';
   const dotClassName = tone === 'running'
     ? 'h-1.5 w-1.5 rounded-full bg-[var(--success)] animate-pulse'
     : 'h-1.5 w-1.5 rounded-full bg-[var(--warning)] animate-pulse';
+
+  if (tone === 'review') {
+    const accessibleTitle = title ?? t('agent.jumpToNext');
+    return (
+      <button
+        type="button"
+        className={className}
+        title={`${accessibleTitle} · ${t('agent.jumpToNext')}`}
+        aria-label={`${accessibleTitle}: ${count}. ${t('agent.jumpToNext')}`}
+        onClick={jumpToNextAgentAttention}
+      >
+        <RiBellDot size={11} className="shrink-0" />
+        <span>{t('agent.needsReview')}</span>
+        <span className="tabular-nums">{count}</span>
+      </button>
+    );
+  }
+
   return (
     <span className={className} title={title}>
       <span className={dotClassName} />
@@ -249,6 +365,75 @@ export function AgentCompactStatusOverlay({
   reviewCount: number;
   className?: string;
 }): React.ReactElement | null {
+  const { t } = useI18n();
+  const sidebarLeftOpen = useSidebarStore((state) => state.leftOpen);
+  const sidebarRightOpen = useSidebarStore((state) => state.rightOpen);
+  const { isOpen: keyboardOpen } = useViewportKeyboardState({ enabled: true });
+  const preferenceRef = React.useRef<MobileAttentionPreference>(
+    readMobileAttentionPreference(),
+  );
+  const [mobilePosition, setMobilePosition] = React.useState<MobileAttentionPosition>(
+    () => resolveMobileAttentionPosition(
+      getMobileAttentionViewport(),
+      preferenceRef.current,
+    ),
+  );
+  const [draggingMobileAttention, setDraggingMobileAttention] = React.useState(false);
+  const dragRef = React.useRef<{
+    pointerId: number;
+    originX: number;
+    originY: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressAttentionClickRef = React.useRef(false);
+
+  React.useEffect(() => {
+    const syncPosition = () => {
+      setMobilePosition(resolveMobileAttentionPosition(
+        getMobileAttentionViewport(),
+        preferenceRef.current,
+      ));
+    };
+    window.addEventListener('resize', syncPosition);
+    window.addEventListener('orientationchange', syncPosition);
+    window.visualViewport?.addEventListener('resize', syncPosition);
+    return () => {
+      window.removeEventListener('resize', syncPosition);
+      window.removeEventListener('orientationchange', syncPosition);
+      window.visualViewport?.removeEventListener('resize', syncPosition);
+    };
+  }, []);
+
+  const finishMobileAttentionDrag = React.useCallback((
+    event: React.PointerEvent<HTMLButtonElement>,
+  ) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDraggingMobileAttention(false);
+    const releasePosition = drag.moved
+      ? clampMobileAttentionDrag(
+          getMobileAttentionViewport(),
+          {
+            x: drag.startX + (event.clientX - drag.originX),
+            y: drag.startY + (event.clientY - drag.originY),
+          },
+        )
+      : mobilePosition;
+    const snapped = snapMobileAttentionPosition(
+      getMobileAttentionViewport(),
+      releasePosition,
+    );
+    preferenceRef.current = snapped.preference;
+    setMobilePosition(snapped.position);
+    writeMobileAttentionPreference(snapped.preference);
+    suppressAttentionClickRef.current = drag.moved;
+    window.setTimeout(() => {
+      suppressAttentionClickRef.current = false;
+    }, 0);
+  }, [mobilePosition]);
   const items: Array<{ key: 'running' | 'review'; count: number; className: string }> = [];
   if (runningCount > 0) {
     items.push({ key: 'running', count: runningCount, className: 'bg-[var(--success)] text-[color:var(--success-foreground)]' });
@@ -258,19 +443,88 @@ export function AgentCompactStatusOverlay({
   }
   if (items.length === 0) return null;
 
+  const showMobileAttentionButton = reviewCount > 0
+    && !sidebarLeftOpen
+    && !sidebarRightOpen
+    && !keyboardOpen
+    && typeof document !== 'undefined';
+
   return (
-    <span
-      aria-hidden="true"
-      className={`pointer-events-none absolute -right-1 ${items.length > 1 ? 'top-0.5 flex flex-col gap-0.5' : '-top-1'} ${className}`}
-    >
-      {items.map((item) => (
-        <span
-          key={item.key}
-          className={`flex h-3 min-w-3 items-center justify-center rounded-full px-0.5 text-[7px] font-bold leading-3 shadow-sm ring-1 ring-background ${item.className}`}
+    <>
+      <span
+        aria-hidden="true"
+        className={`pointer-events-none absolute -right-1 ${items.length > 1 ? 'top-0.5 flex flex-col gap-0.5' : '-top-1'} ${className}`}
+      >
+        {items.map((item) => (
+          <span
+            key={item.key}
+            className={`flex h-3 min-w-3 items-center justify-center rounded-full px-0.5 text-[7px] font-bold leading-3 shadow-sm ring-1 ring-background ${item.className}`}
+          >
+            {item.count > 9 ? '9+' : item.count}
+          </span>
+        ))}
+      </span>
+      {showMobileAttentionButton && createPortal(
+        <button
+          type="button"
+          data-mobile-attention-button
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            dragRef.current = {
+              pointerId: event.pointerId,
+              originX: event.clientX,
+              originY: event.clientY,
+              startX: mobilePosition.x,
+              startY: mobilePosition.y,
+              moved: false,
+            };
+          }}
+          onPointerMove={(event) => {
+            const drag = dragRef.current;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            const dx = event.clientX - drag.originX;
+            const dy = event.clientY - drag.originY;
+            if (!drag.moved && Math.hypot(dx, dy) < 5) return;
+            drag.moved = true;
+            setDraggingMobileAttention(true);
+            setMobilePosition(clampMobileAttentionDrag(
+              getMobileAttentionViewport(),
+              { x: drag.startX + dx, y: drag.startY + dy },
+            ));
+          }}
+          onPointerUp={finishMobileAttentionDrag}
+          onPointerCancel={finishMobileAttentionDrag}
+          onClick={(event) => {
+            // This portal is rendered from inside the Sessions button. React
+            // events still bubble through the component tree across portals,
+            // so stop here to avoid opening the left sidebar as a side effect.
+            event.stopPropagation();
+            if (suppressAttentionClickRef.current) return;
+            jumpToNextAgentAttention();
+          }}
+          className={`fixed z-chrome-hint hidden items-center justify-center rounded-full bg-[var(--warning)] text-[color:var(--warning-foreground)] shadow-[0_8px_24px_var(--app-shadow-strong)] ring-1 ring-[rgb(var(--warning-rgb)_/_0.35)] max-lg:inline-flex animate-fade-in ${
+            draggingMobileAttention
+              ? 'cursor-grabbing scale-[1.04] shadow-[0_12px_30px_var(--app-shadow-strong)]'
+              : 'cursor-grab transition-[left,top,transform,box-shadow] duration-200 active:scale-95'
+          }`}
+          style={{
+            left: mobilePosition.x,
+            top: mobilePosition.y,
+            width: MOBILE_ATTENTION_SIZE_PX,
+            height: MOBILE_ATTENTION_SIZE_PX,
+            touchAction: 'none',
+          }}
+          aria-label={`${t('agent.jumpToNext')}: ${reviewCount}`}
+          title={t('agent.jumpToNext')}
         >
-          {item.count > 9 ? '9+' : item.count}
-        </span>
-      ))}
-    </span>
+          <RiBellDot size={17} className="shrink-0" />
+          <span className="absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-surface px-1 text-[9px] font-bold tabular-nums text-[color:var(--warning)] ring-2 ring-[var(--chrome-bg)]">
+            {reviewCount > 9 ? '9+' : reviewCount}
+          </span>
+        </button>,
+        document.body,
+      )}
+    </>
   );
 }

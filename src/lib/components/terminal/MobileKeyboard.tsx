@@ -1,6 +1,7 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, Move, X } from 'lucide-react';
+import { useI18n } from '../../i18n';
 import { vibrate as hapticVibrate } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from './PresetModeButton';
@@ -92,6 +93,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   onPresetSelect,
   onExpandedChange,
 }) => {
+  const { t } = useI18n();
   const [showExtended, setShowExtended] = React.useState(defaultShowExtended);
   const [suppressExpandedInput, setSuppressExpandedInput] = React.useState(false);
   const suppressExpandedTimerRef = React.useRef<number | null>(null);
@@ -553,8 +555,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           onClick={handleLongPressModeClick}
           tabIndex={-1}
           disabled={buttonDisabled}
-          title={copyFeedback === 'copied' ? 'Copied' : copyFeedback === 'failed' ? 'Copy failed' : longPressMode === 'copy' ? 'Long press selects text' : 'Long press sends arrows'}
-          aria-label={longPressMode === 'copy' ? 'Switch long press to arrow keys' : 'Switch long press to copy selection'}
+          title={copyFeedback === 'copied' ? t('terminal.copied') : copyFeedback === 'failed' ? t('terminal.copyFailed') : longPressMode === 'copy' ? t('terminal.longPressSelectsText') : t('terminal.longPressSendsArrows')}
+          aria-label={longPressMode === 'copy' ? t('terminal.switchLongPressToArrows') : t('terminal.switchLongPressToCopy')}
           className={`h-7 w-full rounded-full shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center ${
             copyFeedback === 'copied'
               ? 'bg-primary/15 text-primary'
@@ -581,8 +583,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           onClick={handlePasteClick}
           tabIndex={-1}
           disabled={buttonDisabled}
-          title="Paste"
-          aria-label="Paste"
+          title={t('terminal.paste')}
+          aria-label={t('terminal.paste')}
           className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
         >
           <ClipboardPaste size={15} />

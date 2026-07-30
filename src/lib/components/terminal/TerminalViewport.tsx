@@ -1,6 +1,7 @@
 import React from 'react';
 import { subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
+import { useI18n } from '../../i18n';
 import { flushSync } from 'react-dom';
 import { Copy as CopyIcon } from 'lucide-react';
 import { Terminal, type FontWeight } from '@xterm/xterm';
@@ -691,6 +692,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     },
     ref
   ) => {
+    const { t } = useI18n();
     const containerRef = React.useRef<HTMLDivElement>(null);
     const viewportRef = React.useRef<HTMLElement | null>(null);
     const terminalRef = React.useRef<Terminal | null>(null);
@@ -3856,7 +3858,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             }}
           >
             <CopyIcon size={14} strokeWidth={2.4} />
-            <span>Copy</span>
+            <span>{t('common.copy')}</span>
           </button>
         )}
         {/* Early initialization loading - shows before xterm.js loads */}
@@ -3880,7 +3882,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           <>
             <textarea
               ref={hiddenInputRef}
-              aria-label="Terminal input"
+              aria-label={t('terminal.input')}
               data-terminal-input-anchor="true"
               inputMode="text"
               enterKeyHint="enter"

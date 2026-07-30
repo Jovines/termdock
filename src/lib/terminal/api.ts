@@ -1253,7 +1253,10 @@ export async function updateSettings(settings: { preventSleep?: boolean; localAc
 
 export async function getActivityReorderEnabled(): Promise<boolean> {
   const response = await fetch('/api/terminal/settings/activity-reorder', { method: 'GET' });
-  if (!response.ok) return true; // 默认开启
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to load activity sorting preference' }));
+    throw new Error(error.error || 'Failed to load activity sorting preference');
+  }
   const data = await response.json();
   return data.enabled !== false;
 }
@@ -1265,9 +1268,12 @@ export async function setActivityReorderEnabled(enabled: boolean): Promise<boole
     headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
     body: JSON.stringify({ enabled }),
   });
-  if (!response.ok) return enabled; // 失败返回原值
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to save activity sorting preference' }));
+    throw new Error(error.error || 'Failed to save activity sorting preference');
+  }
   const data = await response.json();
-  return data.enabled;
+  return data.enabled === true;
 }
 
 // ---- Auth ----

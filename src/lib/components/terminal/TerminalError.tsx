@@ -1,4 +1,5 @@
 import React from 'react';
+import { useI18n } from '../../i18n';
 
 interface TerminalErrorProps {
   message?: string;
@@ -6,6 +7,7 @@ interface TerminalErrorProps {
 }
 
 export const TerminalError: React.FC<TerminalErrorProps> = ({ message, onRetry }) => {
+  const { t } = useI18n();
   return (
     <div className="absolute inset-0 flex items-center justify-center p-4">
       <div className="flex flex-col items-center gap-3 text-center max-w-md">
@@ -17,9 +19,9 @@ export const TerminalError: React.FC<TerminalErrorProps> = ({ message, onRetry }
             stroke="currentColor"
             strokeWidth={2}
             role="img"
-            aria-label="Error"
+            aria-label={t('terminal.error')}
           >
-            <title>Error</title>
+            <title>{t('terminal.error')}</title>
             <path
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -28,8 +30,8 @@ export const TerminalError: React.FC<TerminalErrorProps> = ({ message, onRetry }
           </svg>
         </div>
         <div className="space-y-1">
-          <h3 className="font-medium text-foreground">Failed to load terminal</h3>
-          <p className="text-sm text-muted-foreground">{message || 'An unknown error occurred'}</p>
+          <h3 className="font-medium text-foreground">{t('terminal.failedToLoad')}</h3>
+          <p className="text-sm text-muted-foreground">{message || t('terminal.unknownError')}</p>
         </div>
         {onRetry && (
           <button
@@ -37,7 +39,7 @@ export const TerminalError: React.FC<TerminalErrorProps> = ({ message, onRetry }
             onClick={onRetry}
             className="mt-2 px-5 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-full hover:bg-primary/90 active:scale-[0.97] transition-all shadow-sm"
           >
-            Retry
+            {t('common.retry')}
           </button>
         )}
       </div>

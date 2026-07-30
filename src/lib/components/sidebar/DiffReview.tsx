@@ -6,6 +6,8 @@ import { DiffReviewWorkspace, type DiffReviewMode } from './DiffReviewWorkspace'
 import { DiffStreamItem, type DiffStreamFile } from './DiffStreamItem';
 import { invalidateFileDiffCached, preloadPreparedFileDiff, type DiffInlineMode, type DiffViewType } from './DiffViewer';
 import { useSidebarStore } from '../../stores/useSidebarStore';
+import { useI18n } from '../../i18n';
+import { hasActiveTextSelection } from './gestureArbiter';
 
 // --- ChangeBadge (shared) ---
 
@@ -228,6 +230,7 @@ export function DiffReview({
   onMobileSlideChange,
   slideToDetailOnMobile,
 }: DiffReviewProps) {
+  const { t } = useI18n();
   const sidebarRootPath = useSidebarStore((state) => state.rootPath);
   const matchesSelectedKey = useMemo(() => {
     return (file: DiffReviewFile) => selectedKey === file.key
@@ -805,6 +808,10 @@ export function DiffReview({
       const previousY = touchYRef.current;
       if (currentY === undefined || previousY === null) return;
       touchYRef.current = currentY;
+      if (hasActiveTextSelection()) {
+        releaseElasticOffset();
+        return;
+      }
       const deltaY = previousY - currentY;
       const nativeMax = Math.max(0, container.scrollHeight - container.clientHeight);
       const pushingPastTop = deltaY < 0 && container.scrollTop <= 0.75;
@@ -988,7 +995,7 @@ export function DiffReview({
           style={{ top: 0 }}
         >
           <span className="size-1.5 animate-pulse rounded-full bg-current" />
-          正在加载上一个文件…
+          {t('diffViewer.loadingPreviousFile')}
         </div>
       )}
       {boundaryLoadRequest?.direction === 'down' && (
@@ -1003,7 +1010,7 @@ export function DiffReview({
           }}
         >
           <span className="size-1.5 animate-pulse rounded-full bg-current" />
-          正在加载下一个文件…
+          {t('diffViewer.loadingNextFile')}
         </div>
       )}
     </div>

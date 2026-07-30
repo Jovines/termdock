@@ -439,7 +439,7 @@ const FileTreeItem = memo(function FileTreeItem({
         <span className={`min-w-0 flex-1 select-text whitespace-normal break-all text-left leading-snug ${isSelected ? 'font-medium' : ''}`}>
           {node.name}
           {node.isSymlink && (
-            <span className="ml-1 inline-flex align-middle text-muted-foreground/70" title="Symbolic link">
+            <span className="ml-1 inline-flex align-middle text-muted-foreground/70" title={t('fileTree.symbolicLink')}>
               <RiLink size={11} />
             </span>
           )}
@@ -711,7 +711,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           <span className={`block whitespace-normal break-all leading-snug ${isSelected ? 'font-medium' : ''}`}>
             {node.name}
             {node.isSymlink && (
-              <span className="ml-1 inline-flex align-middle text-muted-foreground/70" title="Symbolic link">
+              <span className="ml-1 inline-flex align-middle text-muted-foreground/70" title={t('fileTree.symbolicLink')}>
                 <RiLink size={11} />
               </span>
             )}

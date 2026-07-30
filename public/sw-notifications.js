@@ -1,9 +1,87 @@
+self.addEventListener('push', (event) => {
+  event.waitUntil((async () => {
+    let payload = {};
+    try {
+      payload = event.data ? event.data.json() : {};
+    } catch {
+      payload = { title: 'Termdock', body: event.data ? event.data.text() : '' };
+    }
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const visibleWindow = windows.find((client) => client.visibilityState === 'visible');
+    if (visibleWindow) {
+      visibleWindow.postMessage({ type: 'termdock:push-received', payload });
+      return;
+    }
+    const alertStyle = payload.alertStyle || 'normal';
+    await self.registration.showNotification(payload.title || 'Termdock', {
+      body: payload.body,
+      tag: payload.tag,
+      icon: '/pwa-192x192.png',
+      badge: '/maskable-icon-512x512.png',
+      silent: alertStyle === 'quiet',
+      requireInteraction: alertStyle === 'persistent',
+      renotify: alertStyle === 'persistent' && Boolean(payload.tag),
+      data: {
+        url: payload.url || '/',
+        sessionId: payload.sessionId,
+      },
+    });
+    if ('setAppBadge' in self.navigator) {
+      const notifications = await self.registration.getNotifications();
+      await self.navigator.setAppBadge(notifications.length);
+    }
+  })());
+});
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil((async () => {
+    try {
+      const statusResponse = await fetch('/api/notifications/status', { credentials: 'same-origin' });
+      if (statusResponse.ok) {
+        const status = await statusResponse.json();
+        const subscription = event.newSubscription || await self.registration.pushManager.getSubscription();
+        if (subscription) {
+          const tokenResponse = await fetch('/api/csrf-token', { credentials: 'same-origin' });
+          if (tokenResponse.ok) {
+            const { csrfToken } = await tokenResponse.json();
+            await fetch('/api/notifications/subscribe', {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-XSRF-TOKEN': csrfToken,
+              },
+              body: JSON.stringify({
+                subscription: subscription.toJSON(),
+                aiEnabled: status.subscription?.aiEnabled !== false,
+                alertStyle: status.subscription?.alertStyle || 'normal',
+                locale: status.subscription?.locale || 'zh-CN',
+              }),
+            });
+          }
+        }
+      }
+    } catch {
+      // App foreground reconciliation is the fallback for browsers that do not
+      // permit re-subscription inside pushsubscriptionchange.
+    }
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of windows) {
+      client.postMessage({ type: 'termdock:push-subscription-changed' });
+    }
+  })());
+});
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
   const data = event.notification.data || {};
 
   event.waitUntil((async () => {
+    if ('setAppBadge' in self.navigator) {
+      const notifications = await self.registration.getNotifications();
+      await self.navigator.setAppBadge(Math.max(0, notifications.length - 1));
+    }
     const clients = await self.clients.matchAll({
       type: 'window',
       includeUncontrolled: true,

@@ -17,6 +17,8 @@ export interface LocalAccessSettings {
 export interface SettingsDoc {
   version: 1;
   preventSleep: boolean;
+  /** Whether sessions with recent terminal output are automatically promoted. */
+  activityReorderEnabled: boolean;
   localAccess: LocalAccessSettings;
   firstRunCompleted: boolean;
   /** 'zh' | 'en' — persisted server-side so all connected clients share one choice. */
@@ -72,6 +74,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
   return {
     version: 1,
     preventSleep: raw.preventSleep === true,
+    activityReorderEnabled: (raw as { activityReorderEnabled?: unknown }).activityReorderEnabled !== false,
     localAccess: normalizeLocalAccessSettings(raw.localAccess),
     firstRunCompleted: (raw as { firstRunCompleted?: unknown }).firstRunCompleted === true,
     locale: typeof (raw as { locale?: unknown }).locale === 'string' && (raw as { locale: string }).locale === 'zh' ? 'zh' : 'en',
@@ -148,6 +151,16 @@ export function setPreventSleepSetting(enabled: boolean): SettingsDoc {
 export async function setPreventSleepSettingAsync(enabled: boolean): Promise<SettingsDoc> {
   return updateSettingsAsync((settings) => {
     settings.preventSleep = enabled;
+  });
+}
+
+export function getActivityReorderSetting(): boolean {
+  return loadSettings().activityReorderEnabled;
+}
+
+export function setActivityReorderSetting(enabled: boolean): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.activityReorderEnabled = enabled;
   });
 }
 

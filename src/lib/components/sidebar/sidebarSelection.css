@@ -1,0 +1,37 @@
+/*
+ * Right-sidebar reading surfaces contain direct text in structural and rich
+ * Markdown elements that the app-wide selection allowlist does not cover.
+ * Keep those nodes selectable while the existing button/nonselectable rules
+ * in index.css continue to protect controls and gestures.
+ */
+.termdock-native-select :where(
+  div,
+  a,
+  strong,
+  em,
+  del,
+  kbd,
+  samp,
+  summary,
+  details,
+  [data-sidebar-selectable],
+  [data-sidebar-selectable] *
+) {
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.termdock-native-select :where(
+  button,
+  button *,
+  svg,
+  .select-none,
+  .select-none *,
+  [data-sidebar-nonselectable],
+  [data-sidebar-nonselectable] *
+) {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}

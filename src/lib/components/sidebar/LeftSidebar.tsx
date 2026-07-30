@@ -114,7 +114,9 @@ export function LeftSidebar(
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [confirmNewMode, setConfirmNewMode] = useState<'shell' | 'tmux' | null>(null);
-  const [autoSortByActivity, setAutoSortByActivity] = useState(true); // 默认开启，启动时会从服务端拉取真实值
+  const [autoSortByActivity, setAutoSortByActivity] = useState(false);
+  const [activitySortLoading, setActivitySortLoading] = useState(true);
+  const [activitySortError, setActivitySortError] = useState(false);
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
@@ -125,19 +127,33 @@ export function LeftSidebar(
   // 用 ref 而非 state：变更不需要触发重渲染，store 自身的 collapsedGroups 才是真相。
   const autoExpandedGroupKeysRef = useRef<Set<string>>(new Set());
   const prevAutoManagedGroupKeyRef = useRef<string | null>(null);
+  const initialGroupByFolderRef = useRef(groupByFolder);
   const trimmedQuery = query.trim();
   const isFiltering = trimmedQuery.length > 0;
   // 分组模式下禁用拖拽（与搜索 / 自动排序一致）。
-  // 启动时从服务端拉取活动排序开关状态
+  // 启动时从服务端拉取活动排序开关状态。旧版本可能同时保存了分组和自动排序，
+  // 迁移时优先保留用户本地可见的分组模式，并同步关闭服务端自动排序。
   useEffect(() => {
-    getActivityReorderEnabled().then((enabled) => {
-      setAutoSortByActivity(enabled);
-    }).catch(() => {
-      // 服务端不可达时保持默认值
-    });
+    let cancelled = false;
+    void (async () => {
+      try {
+        let enabled = await getActivityReorderEnabled();
+        if (enabled && initialGroupByFolderRef.current) {
+          enabled = await setActivityReorderEnabled(false);
+        }
+        if (!cancelled) setAutoSortByActivity(enabled);
+      } catch {
+        if (!cancelled) setActivitySortError(true);
+      } finally {
+        if (!cancelled) setActivitySortLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const dragDisabled = isFiltering || groupByFolder;
+  const dragDisabled = isFiltering || groupByFolder || autoSortByActivity || activitySortLoading;
 
 
   const visibleSessions = useMemo(() => {
@@ -246,18 +262,52 @@ export function LeftSidebar(
   }, [dragDisabled, onReorderSessions, sessions]);
 
 
-  // 分组与「最近活跃排序」互斥：开启分组时关掉自动排序并恢复手动顺序。
-  const handleToggleAutoSortByActivity = useCallback(() => {
-    setAutoSortByActivity((enabled) => {
-      const next = !enabled;
-      setActivityReorderEnabled(next).catch(() => {});
-      return next;
-    });
-  }, []);
+  // 自动排序与文件夹分组是两种互斥的组织方式。切换时先立即更新界面，
+  // 保存失败则完整回滚，避免 UI 和服务端状态悄悄分叉。
+  const handleToggleAutoSortByActivity = useCallback(async () => {
+    if (activitySortLoading) return;
+    const next = !autoSortByActivity;
+    const wasGrouped = groupByFolder;
+    setActivitySortLoading(true);
+    setActivitySortError(false);
+    setAutoSortByActivity(next);
+    if (next && wasGrouped) {
+      useSidebarStore.getState().toggleGroupByFolder();
+    }
+    try {
+      const saved = await setActivityReorderEnabled(next);
+      setAutoSortByActivity(saved);
+    } catch {
+      setAutoSortByActivity(autoSortByActivity);
+      if (next && wasGrouped) {
+        useSidebarStore.getState().toggleGroupByFolder();
+      }
+      setActivitySortError(true);
+    } finally {
+      setActivitySortLoading(false);
+    }
+  }, [activitySortLoading, autoSortByActivity, groupByFolder]);
 
-  const handleToggleGroupByFolder = useCallback(() => {
+  const handleToggleGroupByFolder = useCallback(async () => {
+    if (activitySortLoading) return;
+    const enabling = !groupByFolder;
     useSidebarStore.getState().toggleGroupByFolder();
-  }, []);
+    if (!enabling || !autoSortByActivity) return;
+
+    setActivitySortLoading(true);
+    setActivitySortError(false);
+    setAutoSortByActivity(false);
+    try {
+      const saved = await setActivityReorderEnabled(false);
+      setAutoSortByActivity(saved);
+    } catch {
+      setAutoSortByActivity(true);
+      useSidebarStore.getState().toggleGroupByFolder();
+      setActivitySortError(true);
+    } finally {
+      setActivitySortLoading(false);
+    }
+  }, [activitySortLoading, autoSortByActivity, groupByFolder]);
 
   // 会话行主体（切换按钮 + 关闭按钮），flat / 分组两种布局共用。
   // dragHandleProps 仅在可拖拽的 flat 模式传入。
@@ -426,16 +476,60 @@ export function LeftSidebar(
     onReorderSessions(reorderSessionsWithinGroup(folderGroups, groupKey, result.source.index, result.destination.index));
   }, [isFiltering, folderGroups, onReorderSessions]);
 
-  // 分组模式顶部「待处理」聚合区：跨组聚合所有 waiting / 跑完待查看的会话，
+  // 「待处理」是桌面多任务的工作队列，独立于用户选择的会话组织方式。
   // 按 sessions 原始顺序排列。这样无论会话属于哪个组、组是否折叠，都能在
   // 顶部一眼看到并直接点入——动态紧急度独立于稳定的分组组织。
   const attentionSessions = useMemo(() => {
-    if (!groupByFolder) return [];
     return visibleSessions.filter((session) => {
       const ts = sessionStates.get(session.id);
       return ts?.agentStatus === 'waiting' || ts?.agentNeedsReview;
     });
-  }, [groupByFolder, visibleSessions, sessionStates]);
+  }, [visibleSessions, sessionStates]);
+  const waitingAttentionSessions = useMemo(
+    () => attentionSessions.filter((session) => sessionStates.get(session.id)?.agentStatus === 'waiting'),
+    [attentionSessions, sessionStates],
+  );
+  const completedAttentionSessions = useMemo(
+    () => attentionSessions.filter((session) => sessionStates.get(session.id)?.agentStatus !== 'waiting'),
+    [attentionSessions, sessionStates],
+  );
+  const attentionPanel = attentionSessions.length > 0 ? (
+    <div className="mb-1.5 rounded-lg bg-[rgb(var(--warning-rgb)_/_0.08)] pb-1 ring-1 ring-[rgb(var(--warning-rgb)_/_0.18)]">
+      <div className="flex items-center gap-1.5 px-1.5 py-1 text-[color:var(--warning)]">
+        <RiBellLine size={13} className="shrink-0" />
+        <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold uppercase tracking-wide">
+          {t('sidebar.needsAttention')}
+        </span>
+        <span className="shrink-0 text-[10.5px] text-[rgb(var(--warning-rgb)_/_0.70)]">{attentionSessions.length}</span>
+      </div>
+      {[
+        [t('sidebar.waitingForYou'), waitingAttentionSessions],
+        [t('sidebar.completedUnread'), completedAttentionSessions],
+      ].map(([label, lane]) => {
+        const laneSessions = lane as typeof attentionSessions;
+        if (laneSessions.length === 0) return null;
+        return (
+          <div key={label as string} className="px-1 pb-0.5">
+            <div className="px-1.5 pb-0.5 pt-1 text-[9.5px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+              {label as string} · {laneSessions.length}
+            </div>
+            {laneSessions.map((session) => (
+              <div
+                key={`attention:${session.id}`}
+                className={`group relative flex items-center gap-1 rounded-lg pr-1 transition ${
+                  session.id === activeSessionId
+                    ? 'bg-surface-elevated text-foreground'
+                    : 'text-muted-foreground hover:bg-surface-2'
+                }`}
+              >
+                {renderSessionRowBody(session, undefined, true)}
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  ) : null;
 
   const inner = (
     <>
@@ -539,17 +633,20 @@ export function LeftSidebar(
         <div className="mt-2 flex items-center gap-1.5">
           <button
             type="button"
-            onClick={handleToggleAutoSortByActivity}
+            onClick={() => void handleToggleAutoSortByActivity()}
+            disabled={activitySortLoading}
             className={`flex min-w-0 flex-1 items-center gap-2 rounded-full px-2.5 py-1.5 text-left text-[11px] transition active:scale-[0.99] ${
               autoSortByActivity
                 ? 'bg-primary/15 text-primary'
                 : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-            }`}
+            } disabled:cursor-wait disabled:opacity-70`}
             aria-pressed={autoSortByActivity}
             aria-label={t('sidebar.sortRecent')}
             title={t('sidebar.sortRecentTitle')}
           >
-            <RiSortDescLine size={12} className="shrink-0" />
+            {activitySortLoading
+              ? <RiLoaderCircle size={12} className="shrink-0 animate-spin" />
+              : <RiSortDescLine size={12} className="shrink-0" />}
             <span className="min-w-0 flex-1 truncate">{t('sidebar.sortRecent')}</span>
             <span className={`relative h-4 w-7 shrink-0 rounded-full transition ${autoSortByActivity ? 'bg-primary' : 'bg-muted-foreground/25'}`}>
               <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-[var(--background)] shadow transition ${autoSortByActivity ? 'left-3.5' : 'left-0.5'}`} />
@@ -557,12 +654,13 @@ export function LeftSidebar(
           </button>
           <button
             type="button"
-            onClick={handleToggleGroupByFolder}
+            onClick={() => void handleToggleGroupByFolder()}
+            disabled={activitySortLoading}
             className={`inline-flex h-8 w-9 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
               groupByFolder
                 ? 'bg-primary/15 text-primary'
                 : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-            }`}
+            } disabled:cursor-wait disabled:opacity-70`}
             aria-pressed={groupByFolder}
             aria-label={t('sidebar.groupByFolder')}
             title={t('sidebar.groupByFolderTitle')}
@@ -570,10 +668,21 @@ export function LeftSidebar(
             <RiFolderTreeLine size={14} />
           </button>
         </div>
+        {activitySortError && (
+          <button
+            type="button"
+            onClick={() => setActivitySortError(false)}
+            title={t('common.retry')}
+            className="mt-1.5 w-full px-1 text-left text-[10.5px] text-[color:var(--destructive)]"
+          >
+            {t('common.error')} · {t('common.retry')}
+          </button>
+        )}
       </div>
 
       {/* Session list */}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 py-1.5">
+        {!groupByFolder && attentionPanel}
         {sessions.length === 0 ? (
           <div className="rounded-xl bg-surface-2/60 px-4 py-8 text-center">
             <RiTerminalLine size={26} className="mx-auto mb-2 text-muted-foreground" />
@@ -585,33 +694,7 @@ export function LeftSidebar(
           </div>
         ) : groupByFolder ? (
           <div className="space-y-1.5">
-            {attentionSessions.length > 0 && (
-              <div className="rounded-lg bg-[rgb(var(--warning-rgb)_/_0.08)] pb-1 ring-1 ring-[rgb(var(--warning-rgb)_/_0.18)]">
-                <div className="flex items-center gap-1.5 px-1.5 py-1 text-[color:var(--warning)]">
-                  <RiBellLine size={13} className="shrink-0 animate-pulse" />
-                  <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold uppercase tracking-wide">
-                    {t('sidebar.needsAttention')}
-                  </span>
-                  <span className="shrink-0 text-[10.5px] text-[rgb(var(--warning-rgb)_/_0.70)]">{attentionSessions.length}</span>
-                </div>
-                <div className="space-y-0.5 px-1">
-                  {attentionSessions.map((session) => {
-                    const isActive = session.id === activeSessionId;
-                    return (
-                      <div
-                        key={`attention:${session.id}`}
-                        className={`group relative flex items-center gap-1 rounded-lg pr-1 transition ${
-                          isActive
-                            ? 'bg-surface-elevated text-foreground'
-                            : 'text-muted-foreground hover:bg-surface-2'
-                        }`}
-                      >
-                        {renderSessionRowBody(session, undefined, true)}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>            )}
+            {attentionPanel}
             <DragDropContext onDragEnd={handleGroupedDragEnd}>
             <Droppable droppableId="sidebar-groups" type="group" direction="vertical">
               {(groupsProvided) => (

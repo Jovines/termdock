@@ -15,7 +15,13 @@ import { getPtyHostManager, type PtyHostClient } from '../ptyhost/manager.js';
 import { pathValidator } from '../utils/pathValidator.js';
 import { TERMINAL, TMUX } from '../config.js';
 import { localAccessManager } from '../utils/localAccess.js';
-import { normalizeLocalAccessName, getLocaleSetting, setLocaleSetting } from '../utils/settings.js';
+import {
+  normalizeLocalAccessName,
+  getActivityReorderSetting,
+  getLocaleSetting,
+  setActivityReorderSetting,
+  setLocaleSetting,
+} from '../utils/settings.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
 import {
   getFocusSequence,
@@ -60,6 +66,7 @@ import {
   type AgentPluginManifest,
 } from '../agent/plugins.js';
 import { registerPluginAgents } from '../agent/registry.js';
+import { notifyAgentTransition } from '../notifications/pushService.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -379,7 +386,7 @@ const ACTIVITY_REORDER_PERIODIC_MS = 30_000;
 
 let activityReorderTimer: ReturnType<typeof setTimeout> | null = null;
 let activityReorderPeriodicTimer: ReturnType<typeof setInterval> | null = null;
-let activityReorderEnabled = true;
+let activityReorderEnabled = getActivityReorderSetting();
 
 function getEffectiveLastActivity(session: PersistedClientSession): number {
   // 只用 PTY 输出时间判断「最近活跃」——resize / input / connect
@@ -2565,7 +2572,7 @@ function detectSessionAgent(session: TerminalSession): AgentInfo | null {
   return null;
 }
 
-interface AgentStatusWirePayload {
+export interface AgentStatusWirePayload {
   type: 'agent-status';
   /** State-machine value; null when no agent session is tracked. */
   agentStatus: AgentSessionStatus | null;
@@ -2650,9 +2657,14 @@ let lastAgentStatusSnapshots = new Map<string, string>();
 function broadcastAgentStatus(sessionId: string, session: TerminalSession, force = false): void {
   const payload = buildAgentStatusPayload(sessionId, session);
   const snapshot = JSON.stringify(payload);
-  if (!force && lastAgentStatusSnapshots.get(sessionId) === snapshot) return;
+  const previousSnapshot = lastAgentStatusSnapshots.get(sessionId);
+  if (!force && previousSnapshot === snapshot) return;
   lastAgentStatusSnapshots.set(sessionId, snapshot);
   broadcastEvent(sessionId, payload);
+  const previous = previousSnapshot
+    ? JSON.parse(previousSnapshot) as AgentStatusWirePayload
+    : null;
+  notifyAgentTransition(sessionId, previous, payload);
 }
 
 /** Persist the info needed to resume this pane's agent conversation after the
@@ -4872,6 +4884,7 @@ router.get('/settings/activity-reorder', (_req, res) => {
 router.put('/settings/activity-reorder', (req, res) => {
   const body = req.body ?? {};
   if (typeof body.enabled === 'boolean') {
+    setActivityReorderSetting(body.enabled);
     activityReorderEnabled = body.enabled;
     // 关闭后立刻停掉还在队列里的 reorder timer
     if (!activityReorderEnabled && activityReorderTimer) {
