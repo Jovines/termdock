@@ -26,6 +26,9 @@ import {
   Hash as RiHashLine,
   Clock as RiClockLine,
   LoaderCircle as RiLoaderCircle,
+  AppWindow as RiDesktopLine,
+  FolderOpen as RiFolderOpenLine,
+  Cable as RiLinkLine,
 } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { useTerminalSettings } from './lib/hooks/useTerminalSettings';
@@ -64,6 +67,7 @@ import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSe
 import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 import type { TermdockColorTheme } from './lib/terminal/theme';
+import { getTermdockDesktopBridge, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
 
 // Cache keys for app-level lazy data fetched from the server. 缓存只是"上次看到"的
 // 快照，每次启动还是会发 HTTP 校准；命中时让 UI 不再闪烁默认值 → 自定义值。
@@ -499,6 +503,9 @@ function App() {
   const [localAccessSaving, setLocalAccessSaving] = React.useState(false);
   const [localAccessError, setLocalAccessError] = React.useState<string | null>(null);
   const [localAccessCopied, setLocalAccessCopied] = React.useState<string | null>(null);
+  const desktopBridge = React.useMemo(() => getTermdockDesktopBridge(), []);
+  const [desktopSnapshot, setDesktopSnapshot] = React.useState<DesktopNativeSnapshot | null>(null);
+  const [desktopActionMessage, setDesktopActionMessage] = React.useState<string | null>(null);
   const [showBackGuardHint, setShowBackGuardHint] = React.useState(false);
   const [rightSidebarFilePreviewOpenByRoot, setRightSidebarFilePreviewOpenByRoot] = React.useState<RightSidebarFilePreviewOpenCache>(() => (
     normalizeOpenByRootCache(readCache(RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_ROOT_CACHE_KEY, isRightSidebarFilePreviewOpenCache) ?? {})
@@ -524,6 +531,13 @@ function App() {
   const [terminalSessions, setTerminalSessions] = useState(() =>
     pickTabTerminalSessions(useTerminalStore.getState().sessions),
   );
+
+  useEffect(() => {
+    if (!desktopBridge || !isDrawerOpen) return;
+    desktopBridge.snapshot()
+      .then(setDesktopSnapshot)
+      .catch((error) => setDesktopActionMessage(error instanceof Error ? error.message : String(error)));
+  }, [desktopBridge, isDrawerOpen]);
 
   useEffect(() => {
     return useTerminalStore.subscribe((state) => {
@@ -957,6 +971,13 @@ function App() {
   const handleCloseSettings = useCallback(() => {
     requestCloseHistoryOverlay('settings');
   }, [requestCloseHistoryOverlay]);
+
+  useEffect(() => {
+    if (!desktopBridge) return;
+    const openSettings = () => handleOpenSettings();
+    window.addEventListener('termdock:open-settings', openSettings);
+    return () => window.removeEventListener('termdock:open-settings', openSettings);
+  }, [desktopBridge, handleOpenSettings]);
 
   const showMainBackGuardHint = useCallback(() => {
     setShowBackGuardHint(true);
@@ -1930,6 +1951,35 @@ function App() {
     window.dispatchEvent(new CustomEvent('set-terminal-split-direction', { detail: direction }));
   }, []);
 
+  useEffect(() => {
+    if (!desktopBridge) return;
+    const handleNativeCommand = (event: Event) => {
+      const command = (event as CustomEvent<string>).detail;
+      if (command === 'new-session') {
+        dispatchNewSession();
+      } else if (command === 'close-session') {
+        if (activeSessionId) dispatchCloseSession({ sessionId: activeSessionId, source: 'other' });
+      } else if (command === 'previous-session' || command === 'next-session') {
+        window.dispatchEvent(new CustomEvent('cycle-terminal-session', {
+          detail: { direction: command === 'next-session' ? 'next' : 'prev' },
+        }));
+      } else if (command === 'toggle-left-sidebar') {
+        handleToggleLeftSidebar();
+      } else if (command === 'toggle-right-sidebar') {
+        handleToggleRightSidebar();
+      }
+    };
+    window.addEventListener('termdock:native-command', handleNativeCommand);
+    return () => window.removeEventListener('termdock:native-command', handleNativeCommand);
+  }, [
+    activeSessionId,
+    desktopBridge,
+    dispatchCloseSession,
+    dispatchNewSession,
+    handleToggleLeftSidebar,
+    handleToggleRightSidebar,
+  ]);
+
   const handleSidebarCloseSession = useCallback((sessionId: string, event: React.MouseEvent) => {
     const session = sessions.find((s) => s.id === sessionId);
     if (!session) return;
@@ -2688,6 +2738,72 @@ function App() {
                   {localAccessError && <div className="text-destructive">{localAccessError}</div>}
                 </div>
               </details>
+
+              {desktopBridge && (
+                <div className="mt-3 overflow-hidden rounded-xl bg-surface-2">
+                  <div className="flex items-start justify-between gap-3 border-b border-border/10 px-3 py-3">
+                    <div className="flex min-w-0 items-start gap-2.5">
+                      <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
+                        <RiDesktopLine size={15} />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-[12px] font-medium text-foreground">{t('settings.desktopTitle')}</div>
+                        <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+                          {desktopSnapshot
+                            ? `App ${desktopSnapshot.appVersion} · CLI ${desktopSnapshot.bundledCliVersion}`
+                            : t('settings.desktopStatusLoading')}
+                        </div>
+                      </div>
+                    </div>
+                    <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                      macOS
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 gap-px bg-border/10 sm:grid-cols-3">
+                    <button
+                      type="button"
+                      onClick={() => void desktopBridge.showConnectionCenter()}
+                      className="flex items-center gap-2 bg-surface-2 px-3 py-2.5 text-left text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                    >
+                      <RiLinkLine size={13} className="shrink-0 text-primary" />
+                      {t('settings.desktopSwitchService')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDesktopActionMessage(null);
+                        void desktopBridge.installCli()
+                          .then((next) => {
+                            setDesktopSnapshot(next);
+                            setDesktopActionMessage(t('settings.desktopCliUpdated'));
+                          })
+                          .catch((error) => setDesktopActionMessage(error instanceof Error ? error.message : String(error)));
+                      }}
+                      className="flex items-center gap-2 bg-surface-2 px-3 py-2.5 text-left text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                    >
+                      <RiTerminalLine size={13} className="shrink-0 text-primary" />
+                      {t('settings.desktopInstallCli')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDesktopActionMessage(null);
+                        void desktopBridge.revealDataDirectory()
+                          .catch((error) => setDesktopActionMessage(error instanceof Error ? error.message : String(error)));
+                      }}
+                      className="flex items-center gap-2 bg-surface-2 px-3 py-2.5 text-left text-[11px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                    >
+                      <RiFolderOpenLine size={13} className="shrink-0 text-primary" />
+                      {t('settings.desktopOpenDataDirectory')}
+                    </button>
+                  </div>
+                  {desktopActionMessage && (
+                    <div className="border-t border-border/10 px-3 py-2 text-[10px] text-muted-foreground">
+                      {desktopActionMessage}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* New session shortcut */}
               <div className="mt-3 flex gap-2">

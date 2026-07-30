@@ -1,4 +1,6 @@
 import React from 'react';
+import { subscribeNativeFileDrops } from '../../desktop/nativeBridge';
+import { escapeShellPath } from '../../desktop/shellPath';
 import { flushSync } from 'react-dom';
 import { Copy as CopyIcon } from 'lucide-react';
 import { Terminal, type FontWeight } from '@xterm/xterm';
@@ -1309,6 +1311,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       dismissMobileCopyPopover();
       return true;
     }, [dismissMobileCopyPopover, sendTerminalSeq]);
+
+    React.useEffect(() => subscribeNativeFileDrops((payload) => {
+      if (payload.sessionKey !== sessionKey || payload.paths.length === 0) return;
+      const escapedPaths = payload.paths
+        .map(escapeShellPath)
+        .join(' ');
+      sendTerminalSeq(escapedPaths);
+      try {
+        hiddenInputRef.current?.focus({ preventScroll: true });
+      } catch {
+        // The terminal still receives the paths if focus restoration is denied.
+      }
+    }), [sendTerminalSeq, sessionKey]);
 
     const readClipboardIntoTerminal = React.useCallback(async (textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
       try {
@@ -3749,6 +3764,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     return (
       <div
         ref={containerRef}
+        data-termdock-terminal-dropzone={sessionKey}
         className={`relative h-full w-full terminal-viewport-container ${className || ''}`}
         style={{
           backgroundColor: theme.background,

@@ -448,6 +448,12 @@ export type TranslationDictionary = {
     httpsActive: string;
     httpsInactive: string;
     caMissing: string;
+    desktopTitle: string;
+    desktopStatusLoading: string;
+    desktopSwitchService: string;
+    desktopInstallCli: string;
+    desktopCliUpdated: string;
+    desktopOpenDataDirectory: string;
   };
   toolbarPresets: {
     preview: string;

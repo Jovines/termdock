@@ -152,6 +152,10 @@ html {
   color-scheme: dark;
 }
 
+html[data-termdock-desktop='true'] {
+  --safe-top-inset: max(env(safe-area-inset-top, 0px), 38px);
+}
+
 html[data-theme='light'] {
   color-scheme: light;
   --background: #FFFCF0;
@@ -278,6 +282,26 @@ body {
  */
 .chrome-glow-panel {
   background: var(--chrome-glow), var(--surface);
+}
+
+.terminal-viewport-container[data-native-file-drag='true']::after {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  z-index: 30;
+  padding: 5px 9px;
+  transform: translateX(-50%);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--ui);
+  color: var(--muted-foreground);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  content: '释放以输入文件路径';
+  pointer-events: none;
 }
 
 .terminal-viewport-container {

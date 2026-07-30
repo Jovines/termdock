@@ -431,6 +431,12 @@ export const en: TranslationDictionary = {
     httpsActive: 'HTTPS active',
     httpsInactive: 'HTTPS inactive',
     caMissing: 'CA download unavailable',
+    desktopTitle: 'Termdock Desktop',
+    desktopStatusLoading: 'Reading native macOS status…',
+    desktopSwitchService: 'Switch service',
+    desktopInstallCli: 'Install / Repair CLI',
+    desktopCliUpdated: 'CLI status updated',
+    desktopOpenDataDirectory: 'Open data directory',
   },
   toolbarPresets: {
     preview: 'Preview',

@@ -431,6 +431,12 @@ export const zh: TranslationDictionary = {
     httpsActive: 'HTTPS 已启用',
     httpsInactive: 'HTTPS 未启用',
     caMissing: '未配置 CA 下载',
+    desktopTitle: 'Termdock 桌面端',
+    desktopStatusLoading: '正在读取 macOS 原生状态…',
+    desktopSwitchService: '切换服务',
+    desktopInstallCli: '安装 / 修复 CLI',
+    desktopCliUpdated: 'CLI 状态已更新',
+    desktopOpenDataDirectory: '打开数据目录',
   },
   toolbarPresets: {
     preview: '预览',
