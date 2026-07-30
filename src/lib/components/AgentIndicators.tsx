@@ -273,7 +273,7 @@ export function AgentSessionDot({
   if (status === 'working') {
     return (
       <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--success)] ring-2 ring-surface animate-pulse"
+        className="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full bg-[var(--success)] ring-2 ring-surface shadow-[0_0_6px_rgb(var(--success-rgb)_/_0.50)] animate-pulse"
         title={t('agent.aiRunning')}
       />
     );

@@ -1349,12 +1349,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   React.useEffect(() => {
     const handleInsertReference = (event: Event) => {
       if (!isActiveRef.current) return;
-      const customEvent = event as CustomEvent<{ text?: string; focus?: boolean }>;
+      const customEvent = event as CustomEvent<{ text?: string; focus?: boolean; paste?: boolean }>;
       const text = customEvent.detail?.text;
       if (!text) return;
       // 引用插入也是带外输入：重置输入模型后发送，避免 textarea diff 拿
       // 过期基线算错
-      terminalControllerRef.current?.sendSequence(text);
+      terminalControllerRef.current?.sendSequence(text, { paste: customEvent.detail?.paste });
       if (customEvent.detail?.focus !== false) {
         focusTerminalIfActive();
       }

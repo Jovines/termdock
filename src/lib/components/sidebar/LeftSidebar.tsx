@@ -752,10 +752,10 @@ export function LeftSidebar(
                       {group.label}
                     </span>
                     {groupRunning > 0 && (
-                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)] animate-pulse" />
                     )}
                     {groupReview > 0 && (
-                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--warning)]" />
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--warning)] animate-pulse" />
                     )}
                     <span className="shrink-0 text-[10.5px] text-muted-foreground/70">{group.sessions.length}</span>
                     {(groupAdded > 0 || groupRemoved > 0) && (
@@ -776,6 +776,14 @@ export function LeftSidebar(
                         >
                           {group.sessions.map((session, sessionIndex) => {
                             const isActive = session.id === activeSessionId;
+                            const ts = sessionStates.get(session.id);
+                            const agentRowBg = ts?.agentStatus === 'working'
+                              ? 'bg-[rgb(var(--success-rgb)_/_0.08)] text-foreground'
+                              : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
+                                ? 'bg-[rgb(var(--warning-rgb)_/_0.10)] text-foreground'
+                                : ts?.inCopyMode
+                                  ? 'bg-[rgb(var(--warning-rgb)_/_0.05)] text-foreground'
+                                  : null;
                             return (
                               <Draggable
                                 key={session.id}
@@ -789,11 +797,13 @@ export function LeftSidebar(
                                     ref={sessionDragProvided.innerRef}
                                     {...sessionDragProvided.draggableProps}
                                     className={`group relative flex items-center gap-1 rounded-lg pr-1 transition-colors ${
-                                      sessionSnapshot.isDragging
-                                        ? 'bg-surface-elevated text-foreground shadow-lg opacity-90'
-                                        : isActive
-                                          ? 'bg-surface-elevated text-foreground'
-                                          : 'text-muted-foreground hover:bg-surface-2'
+                                      agentRowBg ?? (
+                                        sessionSnapshot.isDragging
+                                          ? 'bg-surface-elevated text-foreground shadow-lg opacity-90'
+                                          : isActive
+                                            ? 'bg-surface-elevated text-foreground'
+                                            : 'text-muted-foreground hover:bg-surface-2'
+                                      )
                                     } ${isFiltering ? '' : 'cursor-grab active:cursor-grabbing'}`}
                                   >
                                     {renderSessionRowBody(session, sessionDragProvided.dragHandleProps, true)}
@@ -829,6 +839,14 @@ export function LeftSidebar(
           >
             {visibleSessions.map((session, index) => {
               const isActive = session.id === activeSessionId;
+              const ts = sessionStates.get(session.id);
+              const agentRowBg = ts?.agentStatus === 'working'
+                ? 'bg-[rgb(var(--success-rgb)_/_0.08)] text-foreground'
+                : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
+                  ? 'bg-[rgb(var(--warning-rgb)_/_0.10)] text-foreground'
+                  : ts?.inCopyMode
+                    ? 'bg-[rgb(var(--warning-rgb)_/_0.05)] text-foreground'
+                    : null;
               return (
                 <Draggable key={session.id} draggableId={`sidebar:${session.id}`} index={index} isDragDisabled={dragDisabled} disableInteractiveElementBlocking>
                   {(dragProvided, snapshot) => (
@@ -836,11 +854,13 @@ export function LeftSidebar(
                   ref={dragProvided.innerRef}
                   {...dragProvided.draggableProps}
                   className={`group relative flex items-center gap-1 rounded-lg pr-1 transition-colors ${
-                    snapshot.isDragging
-                      ? 'bg-surface-elevated text-foreground shadow-lg opacity-90'
-                      : isActive
-                        ? 'bg-surface-elevated text-foreground'
-                        : 'text-muted-foreground hover:bg-surface-2'
+                    agentRowBg ?? (
+                      snapshot.isDragging
+                        ? 'bg-surface-elevated text-foreground shadow-lg opacity-90'
+                        : isActive
+                          ? 'bg-surface-elevated text-foreground'
+                          : 'text-muted-foreground hover:bg-surface-2'
+                    )
                   } ${dragDisabled ? '' : 'cursor-grab active:cursor-grabbing'}`}
                 >
                   {renderSessionRowBody(session, dragProvided.dragHandleProps)}

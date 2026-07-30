@@ -6437,8 +6437,11 @@ export function RightSidebar(
   const sendContextDraftToTerminal = useCallback((submit: boolean) => {
     const payload = buildDraftTerminalPayload(contextDraftText, submit);
     if (!payload) return;
+    // 多行草稿：告诉终端走 bracketed-paste 包裹，避免 \n 被 PTY 当
+    // 行分隔符，让整段草稿作为一条消息发送而不是拆成多条。
+    const paste = submit && contextDraftText.trim().includes('\n');
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: { text: payload, focus: false },
+      detail: { text: payload, focus: false, paste },
     }));
   }, [contextDraftText]);
 

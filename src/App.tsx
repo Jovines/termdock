@@ -26,6 +26,8 @@ import {
   Hash as RiHashLine,
   Clock as RiClockLine,
   LoaderCircle as RiLoaderCircle,
+  CircleHelp as RiCircleHelp,
+  BellDot as RiBellDot,
   AppWindow as RiDesktopLine,
   FolderOpen as RiFolderOpenLine,
   Cable as RiLinkLine,
@@ -2243,14 +2245,44 @@ function App() {
 
   const showPinnedLeft = sidebarLeftPinned && isDesktopViewport;
 
+  // Pin mode: compute active session display info and agent state for the
+  // centered top-bar title + background tint.
+  const pinnedActiveSession = showPinnedLeft
+    ? sessions.find((s) => s.id === activeSessionId)
+    : null;
+  const pinnedActiveTs = pinnedActiveSession
+    ? terminalSessions.get(pinnedActiveSession.id)
+    : undefined;
+  const pinnedDisplayName = pinnedActiveSession
+    ? getSessionDisplayLines(
+        pinnedActiveSession,
+        pinnedActiveTs?.activeProgram ?? null,
+        pinnedActiveTs?.cwd ?? null,
+        SHELL_NAMES,
+        pinnedActiveTs?.shellTitle ?? null,
+        pinnedActiveTs?.promptState ?? null,
+      ).primary
+    : '';
+  const topBarAgentBg = showPinnedLeft && pinnedActiveTs
+    ? pinnedActiveTs.agentStatus === 'working'
+      ? 'bg-gradient-to-r from-[rgb(var(--success-rgb)_/_0.08)] to-transparent'
+      : pinnedActiveTs.agentStatus === 'waiting'
+        ? 'bg-gradient-to-r from-[rgb(var(--warning-rgb)_/_0.14)] to-transparent'
+        : pinnedActiveTs.agentNeedsReview
+          ? 'bg-gradient-to-r from-[rgb(var(--warning-rgb)_/_0.08)] to-transparent'
+          : pinnedActiveTs.inCopyMode
+            ? 'bg-gradient-to-r from-[rgb(var(--warning-rgb)_/_0.05)] to-transparent'
+            : ''
+    : '';
+
   const body = (
     <div className="w-full h-full flex flex-col app-chrome-bg text-foreground">
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="flex h-full w-full min-h-0 flex-col overflow-visible app-chrome-bg">
           <div
-            className={`flex shrink-0 items-center justify-between gap-1 app-chrome-bg px-1 sm:px-1.5 ${
+            className={`flex shrink-0 items-center justify-between gap-1 app-chrome-bg px-1 sm:px-1.5 transition-colors duration-500 ${
               groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'
-            }`}
+            } ${topBarAgentBg}`}
           >
             {!showPinnedLeft && <button
               type="button"
@@ -2279,19 +2311,32 @@ function App() {
               </button>
             )}
             {showPinnedLeft ? (
-              <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
-                {sessions.find((session) => session.id === activeSessionId)
-                  ? renderTabShell(sessions.find((session) => session.id === activeSessionId)!, true)
-                  : <span className="min-w-0 flex-1 truncate px-2 text-[11px] text-muted-foreground">{t('sidebar.sessions')}</span>}
-                <button
-                  type="button"
-                  onClick={() => dispatchNewSession()}
-                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-primary/15 hover:text-primary"
-                  aria-label={t('tab.new')}
-                  title={t('tab.new')}
-                >
-                  <RiAddLine size={14} />
-                </button>
+              <div className="flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-hidden">
+                {pinnedActiveSession ? (
+                  <>
+                    {renderTabIcon(pinnedActiveSession.mode, pinnedActiveTs)}
+                    <span className={`truncate text-[12px] font-medium ${pinnedActiveTs?.inCopyMode ? 'text-[color:var(--warning)]' : 'text-foreground'}`}>
+                      {pinnedDisplayName}
+                    </span>
+                    {pinnedActiveTs?.agentStatus === 'working' && (
+                      <span title={pinnedActiveTs?.agentMessage ?? undefined}>
+                        <RiLoaderCircle size={12} className="shrink-0 animate-spin text-[color:var(--success)]" />
+                      </span>
+                    )}
+                    {pinnedActiveTs?.agentStatus === 'waiting' && (
+                      <span title={pinnedActiveTs?.agentMessage ?? undefined}>
+                        <RiCircleHelp size={12} className="shrink-0 animate-bounce-y text-[color:var(--warning)]" />
+                      </span>
+                    )}
+                    {!pinnedActiveTs?.agentStatus && pinnedActiveTs?.agentNeedsReview && (
+                      <span title={pinnedActiveTs?.agentMessage ?? undefined}>
+                        <RiBellDot size={13} className="shrink-0 animate-pulse text-[color:var(--warning)]" />
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className="truncate px-2 text-[12px] text-muted-foreground">{t('sidebar.sessions')}</span>
+                )}
               </div>
             ) : groupByFolder ? (
             <DragDropContext onDragEnd={handleGroupedDragEnd}>
