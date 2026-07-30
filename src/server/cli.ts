@@ -2868,7 +2868,7 @@ async function waitForServerMetadata(result: StartServerResult, fallbackPort: nu
     const onboardingUrl = result.getOnboardingUrl() ?? state.onboardingUrl;
     if (state.status !== 'disabled' || state.reason !== 'Local access has not started yet.') {
       return {
-        lanUrl: state.url,
+        lanUrl: state.status === 'active' ? state.url : state.fallbackUrl,
         onboardingUrl,
         status: state.status,
         reason: state.reason,
@@ -2878,7 +2878,7 @@ async function waitForServerMetadata(result: StartServerResult, fallbackPort: nu
   }
   const state = result.getLocalAccessState();
   return {
-    lanUrl: state.url || undefined,
+    lanUrl: (state.status === 'active' ? state.url : state.fallbackUrl) || undefined,
     onboardingUrl: result.getOnboardingUrl() ?? state.onboardingUrl,
     status: state.status,
     reason: state.reason ?? `Metadata still initializing on port ${fallbackPort}.`,
@@ -3058,7 +3058,7 @@ async function main(): Promise<void> {
               port: options.port ?? PORT.backend,
               scheme: result.scheme,
               localUrl: `${result.scheme}://${(options.host ?? DEFAULT_HOST) === '0.0.0.0' ? 'localhost' : (options.host ?? DEFAULT_HOST)}:${options.port ?? PORT.backend}`,
-              lanUrl: state.url,
+              lanUrl: state.status === 'active' ? state.url : state.fallbackUrl,
               onboardingUrl: result.getOnboardingUrl(),
               localAccessStatus: state.status,
               localAccessReason: state.reason,
