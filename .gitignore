@@ -24,6 +24,10 @@ npm-debug.log*
 
 # vite-plugin-pwa dev mode service worker artifacts
 dev-dist/
+.desktop-dist/
+.desktop-runtime/
+desktop/renderer/tokens.css
+out/
 
 # Local Claude Code settings (personal permissions; .claude/skills/ is shared)
 .claude/settings.local.json
