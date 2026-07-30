@@ -83,18 +83,22 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(() => detectInitialLocale());
 
   // Sync locale from server on mount (server-authoritative, shared across clients).
+  // 仅在服务端返回非默认值（'zh'）或与当前一致时才接受；服务端默认值 'en'
+  // 不覆盖用户已显式选择的语言，防止因上次 PUT 失败导致强制刷新后回退成英文。
   useEffect(() => {
     if (typeof window === 'undefined') return;
     fetch('/api/terminal/settings')
       .then((r) => r.json())
       .then((s) => {
         if (s?.locale === 'zh' || s?.locale === 'en') {
+          if (s.locale === locale) return;
+          if (s.locale === 'en' && locale !== 'en') return;
           setLocaleState(s.locale);
           try { window.localStorage.setItem(STORAGE_KEY, s.locale); } catch { /* ignore */ }
         }
       })
       .catch(() => { /* keep local default */ });
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persist to localStorage + server when locale changes.
   useEffect(() => {

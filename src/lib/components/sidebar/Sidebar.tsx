@@ -511,6 +511,9 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
     ({ active, cancel, first, last, movement: [mx], event }) => {
       dbg('bindPanel', { active, first, last, mx });
       if (!isTouchLikePointer(event)) {
+        // 非触控指针（鼠标/触控板）不占手势——cancel 释放指针，
+        // 否则 use-gesture 一直捕获导致子元素 onClick 收不到事件。
+        cancel();
         return;
       }
       if (first) {
