@@ -512,7 +512,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
 
     if (!getStoredPwaAiNotificationsEnabled()) return;
 
-    const agentName = nextAgent?.displayName ?? existing.activeProgram ?? 'Agent';
+    const agentName = nextAgent?.displayName ?? existing.agent?.displayName ?? 'Agent';
     const locale = getStoredLocale();
     const nt = getAgentNotificationText(locale, agentName);
     // waiting：agent 回合中停下来等人（权限/提问）——这是整个功能的核心时刻。

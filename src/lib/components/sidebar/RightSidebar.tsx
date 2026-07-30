@@ -6443,6 +6443,7 @@ export function RightSidebar(
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
       detail: { text: payload, focus: false, paste },
     }));
+    setContextDraftText('');
   }, [contextDraftText]);
 
   const rootName = useMemo(() => {
