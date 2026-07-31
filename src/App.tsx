@@ -67,6 +67,7 @@ import { subscribeClientState } from './lib/utils/clientStateSync';
 import { useI18n } from './lib/i18n';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
+import { QuotaView } from './lib/components/sidebar/QuotaView';
 import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay } from './lib/components/AgentIndicators';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
@@ -1325,6 +1326,7 @@ function App() {
   // Agent detection rules — owned by server (~/.termdock/agent-rules.json)
   // 同样缓存到 localStorage，让 agent 检测在冷启动后立即生效。
   const [isAgentRulesOpen, setIsAgentRulesOpen] = React.useState(false);
+  const [isQuotaOpen, setIsQuotaOpen] = React.useState(false);
 
   const cachedProgramRules = React.useRef<ProgramLabelRule[] | null>(
     readCache(PROGRAM_RULES_CACHE_KEY, isProgramRulesArray)
@@ -1336,6 +1338,7 @@ function App() {
     && !isNotificationsOpen
     && !isToolbarPresetsOpen
     && !isAgentRulesOpen
+    && !isQuotaOpen
     && !tabMenuSessionId
     && !sidebarCloseChoiceSessionId
     && !newSessionShortcutConfirmMode;
@@ -1374,6 +1377,11 @@ function App() {
       if (isAgentRulesOpen) {
         event.preventDefault();
         setIsAgentRulesOpen(false);
+        return;
+      }
+      if (isQuotaOpen) {
+        event.preventDefault();
+        setIsQuotaOpen(false);
         return;
       }
       if (tabMenuSessionId) {
@@ -1727,8 +1735,8 @@ function App() {
   // iOS PWA 不会触发），而 dnd 又占用了 120ms 长按进入拖拽排序。「超长按」
   // （按住不动 ~550ms）是唯一不与「点按切换 / 按住拖动排序」冲突的手势，
   // 用它打开 tab 操作菜单；左侧边栏会话行复用同一手势（见 LeftSidebar）。
-  const openTabMenu = useCallback((sessionId: string) => {
-    setTabMenuAnchor(null);
+  const openTabMenu = useCallback((sessionId: string, anchor?: { x: number; y: number }) => {
+    setTabMenuAnchor(anchor ?? null);
     setTabMenuSessionId(sessionId);
   }, []);
   const bindTabLongPress = useSuperLongPress();
@@ -4131,6 +4139,13 @@ function App() {
         </>
       )}
 
+      {isQuotaOpen && (
+        <QuotaView
+          isOpen={isQuotaOpen}
+          onClose={() => setIsQuotaOpen(false)}
+        />
+      )}
+
       {/* Overlay sidebars (both desktop and mobile) — overlays prevent the
           terminal area from resizing when the user toggles them, which would
           otherwise force xterm.js to refit on every open/close.
@@ -4154,6 +4169,7 @@ function App() {
         onReorderSessions={applySessionOrder}
         onSessionMenu={openTabMenu}
         onOpenSettings={handleOpenSettings}
+        onOpenQuota={() => setIsQuotaOpen(true)}
         tmuxAvailable={tmuxStatus.available}
         defaultSessionMode={newSessionMode}
         onTogglePinned={isDesktopViewport ? handleToggleLeftPinned : undefined}
@@ -4247,6 +4263,7 @@ function App() {
             onReorderSessions={applySessionOrder}
             onSessionMenu={openTabMenu}
             onOpenSettings={handleOpenSettings}
+            onOpenQuota={() => setIsQuotaOpen(true)}
             tmuxAvailable={tmuxStatus.available}
             defaultSessionMode={newSessionMode}
             pinned={true}

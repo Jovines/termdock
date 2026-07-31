@@ -47,6 +47,53 @@ export interface AgentStatusPayload {
   reviewed?: boolean | null;
 }
 
+// ── Subscription quota types ──
+
+export interface QuotaWindow {
+  label: string;
+  percent: number;
+  resetAt?: string;
+  windowLabel?: string;
+}
+
+export interface QuotaResult {
+  slug: string;
+  displayName: string;
+  usagePercent: number;
+  remaining?: number;
+  entitlement?: number;
+  resetAt?: string;
+  windows: QuotaWindow[];
+  error?: string;
+  fetchedAt: number;
+}
+
+export interface QuotaStatus {
+  providers: QuotaResult[];
+  updatedAt: number;
+}
+
+/** Fetch the latest quota status from the backend. */
+export async function fetchQuota(): Promise<QuotaStatus> {
+  const res = await fetch('/api/terminal/quota');
+  if (!res.ok) throw new TerminalApiError('Failed to fetch quota', res.status);
+  return res.json() as Promise<QuotaStatus>;
+}
+
+/** Force-refresh quota data from all providers. */
+export async function refreshQuota(): Promise<QuotaStatus> {
+  const csrfTokenHeader = await getCsrfToken();
+  const res = await fetch('/api/terminal/quota/refresh', {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!res.ok) throw new TerminalApiError('Failed to refresh quota', res.status);
+  return res.json() as Promise<QuotaStatus>;
+}
+
+// ── end quota ──
+
+
 const FS_REQUEST_TIMEOUT_MS = 8_000;
 const GIT_REQUEST_TIMEOUT_MS = 10_000;
 const GIT_FILE_DIFF_REQUEST_TIMEOUT_MS = 45_000;
@@ -529,6 +576,14 @@ export function connectTerminalStream(
         // Handle git-status broadcast
         if (msg.type === 'git-status') {
           onEvent({ type: 'git-status', gitStatus: msg.gitStatus ?? null });
+          return;
+        }
+
+        // Handle quota-status broadcast
+        if (msg.type === 'quota-status' && Array.isArray(msg.providers)) {
+          window.dispatchEvent(new CustomEvent('termdock:quota-update', {
+            detail: msg.providers as QuotaResult[],
+          }));
           return;
         }
 

@@ -606,6 +606,16 @@ export const en: TranslationDictionary = {
     switchLongPressToArrows: 'Switch long press to arrow keys',
     switchLongPressToCopy: 'Switch long press to copy selection',
   },
+  quota: {
+    title: 'Subscription Quota',
+    noProviders: 'No subscription providers detected.',
+    noProvidersHint: 'Quota tracking becomes available when you use AI coding agents with API keys or OAuth login.',
+    exhausted: 'Exhausted',
+    left: ({ n }) => `${n} left`,
+    updated: ({ time }) => `Updated ${time}`,
+    refresh: 'Refresh',
+    close: 'Close',
+  },
   errorBoundary: {
     title: 'Something went wrong',
     unexpected: 'An unexpected error occurred',

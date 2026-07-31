@@ -606,6 +606,16 @@ export const zh: TranslationDictionary = {
     switchLongPressToArrows: '将长按切换为方向键',
     switchLongPressToCopy: '将长按切换为复制所选文本',
   },
+  quota: {
+    title: '订阅配额',
+    noProviders: '未检测到订阅服务。',
+    noProvidersHint: '使用 AI 编程工具并登录后，自动显示配额信息。',
+    exhausted: '已用完',
+    left: ({ n }) => `剩余 ${n}`,
+    updated: ({ time }) => `${time} 更新`,
+    refresh: '刷新',
+    close: '关闭',
+  },
   errorBoundary: {
     title: '出现了一些问题',
     unexpected: '发生意外错误',

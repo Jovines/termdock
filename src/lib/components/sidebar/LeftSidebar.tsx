@@ -14,6 +14,7 @@ import {
   PinOff as RiPinOffLine,
   Columns2 as RiSplitLine,
   Rows2 as RiSplitRowsLine,
+  ChartBar as RiChartBarLine,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
@@ -63,8 +64,9 @@ interface LeftSidebarProps {
   onReorderSessions: (sessionIds: string[]) => void;
   // 打开某个会话的操作菜单（重命名/复制目录/关闭等）。触屏用「超长按」触发，
   // 桌面端同时挂到右键 contextmenu；不传则两种手势都不生效。
-  onSessionMenu?: (sessionId: string) => void;
+  onSessionMenu?: (sessionId: string, anchor?: { x: number; y: number }) => void;
   onOpenSettings: () => void;
+  onOpenQuota?: () => void;
   tmuxAvailable?: boolean;
   defaultSessionMode?: 'shell' | 'tmux';
   push?: boolean;
@@ -102,7 +104,7 @@ export function LeftSidebar(
     sessions, activeSessionId, sessionStates,
     onNewSession, onCloseSession, onSplitSession, onCloseSplit, splitSessionIds,
     splitDirection, onSetSplitDirection,
-    onReorderSessions, onSessionMenu, onOpenSettings,
+    onReorderSessions, onSessionMenu, onOpenSettings, onOpenQuota,
     tmuxAvailable = true,
     defaultSessionMode = 'shell',
     push,
@@ -353,7 +355,7 @@ export function LeftSidebar(
             // 与 dnd 的 120ms 拖拽抬起共存（松手无移动不会排序）。
             if (!onSessionMenu) return;
             event.preventDefault();
-            onSessionMenu(session.id);
+            onSessionMenu(session.id, { x: event.clientX, y: event.clientY });
           }}
           onClick={() => {
             window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
@@ -566,6 +568,17 @@ export function LeftSidebar(
           >
             <RiSearchLine size={14} />
           </button>
+          {onOpenQuota && (
+            <button
+              type="button"
+              onClick={onOpenQuota}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+              aria-label="Subscription Quota"
+              title="Subscription Quota"
+            >
+              <RiChartBarLine size={14} />
+            </button>
+          )}
           <button
             type="button"
             onClick={onOpenSettings}

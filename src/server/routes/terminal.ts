@@ -67,6 +67,12 @@ import {
 } from '../agent/plugins.js';
 import { registerPluginAgents } from '../agent/registry.js';
 import { notifyAgentTransition } from '../notifications/pushService.js';
+import {
+  getQuotaStatus,
+  refreshQuota,
+  startQuotaManager,
+} from '../quota/QuotaManager.js';
+import type { QuotaStatusWirePayload } from '../quota/types.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -5063,6 +5069,50 @@ router.get('/agent-plugin-icon/:slug', (req, res) => {
 });
 
 // ── end Agent plugins API ──
+
+// ── Subscription quota API ──
+
+function broadcastQuotaToAll(): void {
+  const status = getQuotaStatus();
+  const payload: QuotaStatusWirePayload = {
+    type: 'quota-status',
+    providers: status.providers,
+    updatedAt: status.updatedAt,
+  };
+  const data = JSON.stringify(payload);
+
+  // Send to control WS clients
+  for (const [clientId, ws] of controlClients) {
+    if (ws.readyState !== ws.OPEN) { controlClients.delete(clientId); continue; }
+    try { ws.send(data); } catch { controlClients.delete(clientId); }
+  }
+
+  // Send to per-session WS clients
+  for (const [sessionId] of terminalSessions) {
+    try {
+      broadcastJsonWs(sessionId, payload);
+    } catch { /* best-effort */ }
+  }
+}
+
+// Start quota polling — broadcast fn hooks into both WS channels
+startQuotaManager({ broadcast: broadcastQuotaToAll });
+
+router.get('/quota', (_req, res) => {
+  res.json(getQuotaStatus());
+});
+
+router.post('/quota/refresh', async (_req, res) => {
+  try {
+    const status = await refreshQuota();
+    broadcastQuotaToAll();
+    res.json(status);
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Refresh failed' });
+  }
+});
+
+// ── Subscription quota API end ──
 
 // ── Program detection config API ──
 

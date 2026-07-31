@@ -623,6 +623,16 @@ export type TranslationDictionary = {
     switchLongPressToArrows: string;
     switchLongPressToCopy: string;
   };
+  quota: {
+    title: string;
+    noProviders: string;
+    noProvidersHint: string;
+    exhausted: string;
+    left: (p: { n: number }) => string;
+    updated: (p: { time: string }) => string;
+    refresh: string;
+    close: string;
+  };
   errorBoundary: {
     title: string;
     unexpected: string;
