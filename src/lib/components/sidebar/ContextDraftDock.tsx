@@ -84,50 +84,49 @@ export function ContextDraftDock({
 
   return (
     <section
-      className="shrink-0 border-t border-border/20 bg-[var(--chrome-bg)] text-foreground"
+      className="shrink-0 border-t border-border/15 bg-surface/60 text-foreground"
       data-context-draft-dock
     >
-      <div className="flex h-9 items-center gap-2 px-2">
+      {/* Header */}
+      <button
+        type="button"
+        onClick={() => onCollapsedChange(!collapsed)}
+        className="flex h-9 w-full items-center gap-2 px-3 text-left text-[11px] font-semibold text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-[0.995]"
+        aria-expanded={!collapsed}
+        title={collapsed ? labels.expand : labels.collapse}
+      >
+        {collapsed ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+        <span className="min-w-0 flex-1 truncate">{labels.title}</span>
+        {hasDraft && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />}
+        <span className="shrink-0 font-mono text-[9px] font-normal tabular-nums text-muted-foreground/60">
+          {labels.characterCount(value.length)}
+        </span>
         <button
           type="button"
-          onClick={() => onCollapsedChange(!collapsed)}
-          className="flex min-w-0 flex-1 items-center gap-2 rounded px-1.5 py-1 text-left text-[11px] font-semibold text-foreground transition hover:bg-surface-2 active:scale-[0.995]"
-          aria-expanded={!collapsed}
-          title={collapsed ? labels.expand : labels.collapse}
-        >
-          {collapsed ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-          <span className="truncate">{labels.title}</span>
-          {hasDraft && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />}
-          <span className="ml-auto shrink-0 font-mono text-[9px] font-normal text-muted-foreground">
-            {labels.characterCount(value.length)}
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={onDisable}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95"
+          onClick={(e) => { e.stopPropagation(); onDisable(); }}
+          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/60 transition hover:bg-surface-elevated hover:text-foreground"
           aria-label={labels.disable}
           title={labels.disable}
         >
-          <X size={13} />
+          <X size={11} />
         </button>
-      </div>
+      </button>
 
       {!collapsed && (
-        <div className="animate-fade-in px-2 pb-[calc(0.5rem+var(--safe-bottom-inset,0px))]">
-          <div className="mb-1 px-1 text-[10px] leading-4 text-muted-foreground">{labels.hint}</div>
+        <div className="animate-fade-in px-3 pb-[calc(0.75rem+var(--safe-bottom-inset,0px))]">
           <textarea
             ref={textareaRef}
             value={value}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={labels.placeholder}
-            className="block h-28 max-h-[38vh] min-h-20 w-full resize-y rounded-lg border border-border/20 bg-surface px-3 py-2 font-mono text-[12px] leading-5 text-foreground shadow-inner placeholder:text-muted-foreground/70 focus:border-primary/45"
+            className="block h-28 max-h-[38vh] min-h-20 w-full resize-y rounded-xl border border-border/15 bg-surface px-3 py-2.5 font-mono text-[16px] leading-relaxed text-foreground placeholder:text-muted-foreground/50 focus:border-primary/50 focus:outline-none focus:ring-1 focus:ring-primary/20"
             autoCapitalize="sentences"
             spellCheck
             data-context-draft-input
           />
-          <div className="mt-2 flex items-center gap-1.5">
+          <div className="mt-2.5 flex items-center gap-1.5">
+            <span className="mr-1 hidden text-[10px] leading-4 text-muted-foreground/60 sm:inline">{labels.hint}</span>
             <button
               type="button"
               onClick={onClear}
