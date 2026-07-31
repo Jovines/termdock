@@ -59,6 +59,8 @@ export function ContextDraftDock({
 
   useEffect(() => {
     if (focusRequest !== undefined && focusRequest > 0) {
+      // 触屏设备（手机/平板）不自动聚焦，避免软键盘弹起遮挡
+      if (window.matchMedia('(pointer: coarse)').matches) return;
       textareaRef.current?.focus();
     }
   }, [focusRequest]);
