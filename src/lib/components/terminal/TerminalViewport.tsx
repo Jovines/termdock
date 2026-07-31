@@ -1304,19 +1304,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       sentCursorRef.current = 0;
       try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
 
-      // 多行 paste 模式：用 terminal.paste() 走 bracketed-paste 包裹，
-      // 避免 \n 被 PTY 当成行分隔符，确保多行内容作为一条消息发送。
+      // 多行 paste 模式：手动构造 bracketed-paste 序列（与 xterm paste()
+      // 内部行为一致：\r?\n 归一化为 \r，ESC 转义为 ␛），并将 \r 拼接
+      // 到同一段 payload 中，作为一条 WS 消息发送。避免原先 terminal.paste()
+      // + 单独 \r 两条消息的时序竞争，防止 paste 内容已插入但回车丢失
+      // 导致的「有时能发送，有时不能」。
       if (options?.paste && seq.includes('\n')) {
-        const terminal = terminalRef.current;
-        if (terminal) {
-          const hasCR = seq.endsWith('\r');
-          const content = hasCR ? seq.slice(0, -1) : seq;
-          terminal.paste(content);
-          if (hasCR) {
-            inputHandlerRef.current('\r', { skipModifierTransform: true, consumeModifier: options?.consumeModifier });
-          }
-          return;
-        }
+        const hasCR = seq.endsWith('\r');
+        const content = hasCR ? seq.slice(0, -1) : seq;
+        // 与 xterm paste() 内部逻辑对齐：换行归一化 + ESC 转义 + 括号包裹
+        const normalized = content.replace(/\r?\n/g, '\r');
+        const escaped = normalized.replace(/\x1b/g, '␛');
+        const wrapped = `\x1b[200~${escaped}\x1b[201~`;
+        const payload = hasCR ? `${wrapped}\r` : wrapped;
+        inputHandlerRef.current(payload, { skipModifierTransform: true, consumeModifier: options?.consumeModifier });
+        return;
       }
 
       inputHandlerRef.current(seq, { skipModifierTransform: true, consumeModifier: options?.consumeModifier });

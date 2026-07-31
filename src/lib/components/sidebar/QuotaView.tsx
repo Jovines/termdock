@@ -165,8 +165,10 @@ export function QuotaView({ isOpen, onClose }: QuotaViewProps): React.ReactEleme
 
   if (!isOpen) return null;
 
-  const updatedAt = providers.length > 0
-    ? new Date(Math.max(...providers.map((p) => p.fetchedAt || 0)))
+  // Only show providers that successfully fetched data (no errors)
+  const activeProviders = providers.filter((p) => !p.error);
+  const updatedAt = activeProviders.length > 0
+    ? new Date(Math.max(...activeProviders.map((p) => p.fetchedAt || 0)))
     : null;
 
   return (
@@ -200,18 +202,18 @@ export function QuotaView({ isOpen, onClose }: QuotaViewProps): React.ReactEleme
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
-          {loading && providers.length === 0 ? (
+          {loading && activeProviders.length === 0 ? (
             <div className="flex items-center justify-center py-12">
               <RiRefreshLine size={24} className="animate-spin text-muted-foreground" />
             </div>
-          ) : providers.length === 0 ? (
+          ) : activeProviders.length === 0 ? (
             <div className="py-8 text-center text-[13px] text-muted-foreground">
               <p>{t('quota.noProviders')}</p>
               <p className="mt-1.5 text-[11px]">{t('quota.noProvidersHint')}</p>
             </div>
           ) : (
             <div className="space-y-2.5">
-              {providers.map((p) => (
+              {activeProviders.map((p) => (
                 <ProviderCard key={p.slug} result={p} />
               ))}
             </div>
