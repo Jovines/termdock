@@ -20,10 +20,10 @@ describe('sidebar reference paths', () => {
       .toBe('/workspace/project/src/App.tsx:12-18');
   });
 
-  it('quotes absolute references containing spaces', () => {
+  it('escapes spaces with backslash in references', () => {
     expect(buildPromptReference('docs/user guide.md', '/workspace/project'))
-      .toBe('"/workspace/project/docs/user guide.md"');
+      .toBe('/workspace/project/docs/user\\ guide.md');
     expect(buildReferenceInputText('docs/user guide.md', '/workspace/project'))
-      .toBe('"/workspace/project/docs/user guide.md" ');
+      .toBe('/workspace/project/docs/user\\ guide.md ');
   });
 });

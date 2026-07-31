@@ -164,7 +164,13 @@ export function notifyAgentTransition(
     kind,
     title,
     body: current.agentMessage ?? (kind === 'waiting' ? '点按返回对应会话' : '点按查看结果'),
-    tag: `agent:${sessionId}:${kind}:${current.agentActivity}`,
+    // Same tag for all transitions of one session → new notification
+    // replaces the old one (key behaviour on iOS where getNotifications()
+    // is unavailable for programmatic cleanup).
+    tag: `agent:${sessionId}`,
+    // Per-transition key so the 5 s dedup window only suppresses
+    // duplicate deliveries of the same transition, not later ones.
+    dedupKey: `agent:${sessionId}:${kind}:${current.agentActivity}`,
     sessionId,
     url: `/?session=${encodeURIComponent(sessionId)}`,
   });

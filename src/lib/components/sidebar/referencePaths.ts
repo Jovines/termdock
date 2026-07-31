@@ -6,17 +6,16 @@ export function resolveAbsoluteReferencePath(path: string, rootPath: string | nu
 }
 
 export function buildFileReference(path: string, rootPath: string | null): string {
-  return resolveAbsoluteReferencePath(path, rootPath);
+  return resolveAbsoluteReferencePath(path, rootPath).replace(/ /g, '\\ ');
 }
 
 export function buildReferenceInputText(path: string, rootPath: string | null): string {
   const reference = buildFileReference(path, rootPath);
-  return reference.includes(' ') ? `"${reference}" ` : `${reference} `;
+  return `${reference} `;
 }
 
 export function buildPromptReference(path: string, rootPath: string | null): string {
-  const reference = buildFileReference(path, rootPath);
-  return reference.includes(' ') ? `"${reference}"` : reference;
+  return buildFileReference(path, rootPath);
 }
 
 export function buildLineReference(

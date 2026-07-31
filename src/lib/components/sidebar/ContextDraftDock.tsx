@@ -27,6 +27,7 @@ interface ContextDraftDockProps {
   value: string;
   collapsed: boolean;
   labels: ContextDraftDockLabels;
+  focusRequest?: number;
   onChange: (value: string) => void;
   onCollapsedChange: (collapsed: boolean) => void;
   onDisable: () => void;
@@ -39,6 +40,7 @@ export function ContextDraftDock({
   value,
   collapsed,
   labels,
+  focusRequest,
   onChange,
   onCollapsedChange,
   onDisable,
@@ -48,11 +50,18 @@ export function ContextDraftDock({
 }: ContextDraftDockProps) {
   const [lastAction, setLastAction] = useState<'inserted' | 'sent' | null>(null);
   const resetTimerRef = useRef<number | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const hasDraft = Boolean(value.trim());
 
   useEffect(() => () => {
     if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    if (focusRequest !== undefined && focusRequest > 0) {
+      textareaRef.current?.focus();
+    }
+  }, [focusRequest]);
 
   const markAction = (action: 'inserted' | 'sent') => {
     setLastAction(action);
@@ -106,6 +115,7 @@ export function ContextDraftDock({
         <div className="animate-fade-in px-2 pb-[calc(0.5rem+var(--safe-bottom-inset,0px))]">
           <div className="mb-1 px-1 text-[10px] leading-4 text-muted-foreground">{labels.hint}</div>
           <textarea
+            ref={textareaRef}
             value={value}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={handleKeyDown}

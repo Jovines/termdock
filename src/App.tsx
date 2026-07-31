@@ -1720,6 +1720,8 @@ function App() {
 
   useEffect(() => {
     if (editingSessionId && renameInputRef.current) {
+      renameInputRef.current.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      renameInputRef.current.focus();
       renameInputRef.current.select();
     }
     if (!editingSessionId) {
@@ -1843,6 +1845,7 @@ function App() {
           title: data.payload.title ?? 'Termdock',
           body: data.payload.body ?? '',
           tag: data.payload.tag,
+          dedupKey: data.payload.dedupKey,
           data: { url: data.payload.url, sessionId: data.payload.sessionId },
           requireHidden: false,
         });
@@ -3742,7 +3745,7 @@ function App() {
                     onClick={() => void showPwaNotification({
                       title: 'Termdock',
                       body: t('settings.notificationsTestBody'),
-                      tag: `termdock-notification-test-${Date.now()}`,
+                      tag: 'termdock-notification-test',
                       requireHidden: false,
                       data: { url: '/' },
                     })}

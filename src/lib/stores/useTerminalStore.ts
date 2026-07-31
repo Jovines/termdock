@@ -529,7 +529,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       void showPwaNotification({
         title: nt.waitingTitle,
         body: nextMessage ?? nt.waitingBody,
-        tag: `agent:${sessionId}:waiting:${nextActivity}`,
+        tag: `agent:${sessionId}`,
+        dedupKey: `agent:${sessionId}:waiting:${nextActivity}`,
         data: { url: '/', sessionId },
         requireHidden: false,
       });
@@ -540,7 +541,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       void showPwaNotification({
         title: nt.doneTitle,
         body: nt.doneBody,
-        tag: `agent:${sessionId}:done:${nextActivity}`,
+        tag: `agent:${sessionId}`,
+        dedupKey: `agent:${sessionId}:done:${nextActivity}`,
         data: { url: '/', sessionId },
         requireHidden: false,
       });
@@ -551,7 +553,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       void showPwaNotification({
         title: nt.exitedTitle,
         body: nt.exitedBody,
-        tag: `agent:${sessionId}:exited:${nextActivity}`,
+        tag: `agent:${sessionId}`,
+        dedupKey: `agent:${sessionId}:exited:${nextActivity}`,
         data: { url: '/', sessionId },
         requireHidden: false,
       });

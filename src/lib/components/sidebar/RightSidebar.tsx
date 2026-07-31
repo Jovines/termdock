@@ -5247,6 +5247,7 @@ export function RightSidebar(
   const [contextDraftText, setContextDraftText] = useState(
     () => readCache(CONTEXT_DRAFT_TEXT_STORAGE_KEY, isStringValue) ?? '',
   );
+  const [draftFocusRequest, setDraftFocusRequest] = useState(0);
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
   const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
@@ -6400,14 +6401,15 @@ export function RightSidebar(
     writeCacheThrottled(CONTEXT_DRAFT_TEXT_STORAGE_KEY, contextDraftText, CONTEXT_DRAFT_WRITE_MS);
   }, [contextDraftText]);
 
-  const routeReferenceText = useCallback((text: string, key: string) => {
+  const routeReferenceText = useCallback((text: string, key: string, suffix?: string) => {
     if (!text) return;
     if (contextDraftEnabled) {
-      setContextDraftText((current) => appendContextDraft(current, text));
+      setContextDraftText((current) => appendContextDraft(current, text) + (suffix ?? ''));
       setContextDraftCollapsed(false);
+      setDraftFocusRequest((n) => n + 1);
     } else {
       window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-        detail: { text, focus: false },
+        detail: { text: suffix ? text + suffix : text, focus: false },
       }));
     }
     markReferenceInserted(key);
@@ -6426,12 +6428,15 @@ export function RightSidebar(
 
   const insertReferenceText = useCallback((text: string, key: string) => {
     if (!text) return;
-    routeReferenceText(text.endsWith('\n') || text.endsWith(' ') ? text : `${text} `, key);
+    // 多行代码块（有 \n）插入末尾加换行，单行路径不加
+    const suffix = text.includes('\n') ? '\n' : undefined;
+    routeReferenceText(text.endsWith('\n') || text.endsWith(' ') ? text : `${text} `, key, suffix);
   }, [routeReferenceText]);
 
   const insertContextText = useCallback((label: string, text: string, key?: string) => {
     if (!text) return;
-    routeReferenceText(text.endsWith(' ') ? text : `${text} `, key ?? `context:${label}`);
+    // 大段内容（agent 回复、diff 等）插入末尾加换行
+    routeReferenceText(text.endsWith(' ') ? text : `${text} `, key ?? `context:${label}`, '\n');
   }, [routeReferenceText]);
 
   const sendContextDraftToTerminal = useCallback((submit: boolean) => {
@@ -10278,6 +10283,7 @@ export function RightSidebar(
         <ContextDraftDock
           value={contextDraftText}
           collapsed={contextDraftCollapsed}
+          focusRequest={draftFocusRequest}
           onChange={setContextDraftText}
           onCollapsedChange={setContextDraftCollapsed}
           onDisable={() => setContextDraftEnabled(false)}

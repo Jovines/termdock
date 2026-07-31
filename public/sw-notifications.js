@@ -13,7 +13,7 @@ self.addEventListener('push', (event) => {
       return;
     }
     const alertStyle = payload.alertStyle || 'normal';
-    await self.registration.showNotification(payload.title || 'Termdock', {
+    const notificationOptions = {
       body: payload.body,
       tag: payload.tag,
       icon: '/pwa-192x192.png',
@@ -25,7 +25,22 @@ self.addEventListener('push', (event) => {
         url: payload.url || '/',
         sessionId: payload.sessionId,
       },
-    });
+    };
+    try {
+      await self.registration.showNotification(payload.title || 'Termdock', notificationOptions);
+    } catch (error) {
+      // Safari throws NotSupportedError when renotify:true but no prior
+      // notification with the same tag exists.  Retry without renotify —
+      // tag-based replacement still works regardless.
+      if (error.name === 'NotSupportedError' && notificationOptions.renotify) {
+        await self.registration.showNotification(payload.title || 'Termdock', {
+          ...notificationOptions,
+          renotify: false,
+        });
+      } else {
+        throw error;
+      }
+    }
     if ('setAppBadge' in self.navigator) {
       const notifications = await self.registration.getNotifications();
       await self.navigator.setAppBadge(notifications.length);

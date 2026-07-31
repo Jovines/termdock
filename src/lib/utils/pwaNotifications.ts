@@ -14,6 +14,10 @@ export interface PwaNotificationPayload {
   title: string;
   body?: string;
   tag?: string;
+  /** Per-transition dedup key. When set, claimNotificationPayload uses this
+   *  instead of `tag`, so tag-based notification replacement (iOS) doesn't
+   *  collide with the 5 s dedup window. */
+  dedupKey?: string;
   data?: {
     url?: string;
     sessionId?: string;
@@ -161,6 +165,9 @@ function pruneNotificationClaims(now: number): void {
 }
 
 function getNotificationClaimKey(payload: PwaNotificationPayload): string {
+  // Prefer dedupKey (per-transition) over tag (per-session) so tag-based
+  // notification replacement doesn't collide with the 5 s dedup window.
+  if (payload.dedupKey?.trim()) return payload.dedupKey.trim();
   if (payload.tag?.trim()) return payload.tag.trim();
   return [payload.data?.sessionId, payload.title, payload.body]
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
@@ -388,6 +395,27 @@ export async function showPwaNotification(payload: PwaNotificationPayload): Prom
     };
     return true;
   } catch (error) {
+    // Safari throws NotSupportedError when renotify:true but no prior
+    // notification with the same tag exists (the first notification for
+    // each tag).  Retry without renotify — tag replacement still works.
+    if (
+      error instanceof DOMException
+      && error.name === 'NotSupportedError'
+      && notificationOptions.renotify
+    ) {
+      try {
+        const fallbackOptions = { ...notificationOptions, renotify: false };
+        if (registration && typeof registration.showNotification === 'function') {
+          await registration.showNotification(payload.title, fallbackOptions);
+        } else {
+          new Notification(payload.title, fallbackOptions);
+        }
+        return true;
+      } catch (retryError) {
+        console.warn('[PWA notifications] Failed to show notification (renotify fallback):', retryError);
+        return false;
+      }
+    }
     console.warn('[PWA notifications] Failed to show notification:', error);
     return false;
   }
