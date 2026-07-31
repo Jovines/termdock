@@ -117,7 +117,7 @@ export function ContextDraftDock({
       </div>
 
       {!collapsed && (
-        <div className="animate-fade-in px-2.5 sm:px-3 pb-[calc(0.5rem+var(--safe-bottom-inset,0px))]">
+        <div className="animate-fade-in px-2.5 sm:px-3 pb-2">
           <textarea
             ref={textareaRef}
             value={value}
