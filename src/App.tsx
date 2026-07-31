@@ -604,6 +604,7 @@ function App() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [tabMenuSessionId, setTabMenuSessionId] = useState<string | null>(null);
   const [tabMenuAnchor, setTabMenuAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [renamePopupAnchor, setRenamePopupAnchor] = useState<{ x: number; y: number } | null>(null);
   const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
   const [sidebarCloseChoiceSessionId, setSidebarCloseChoiceSessionId] = useState<string | null>(null);
   const [sidebarCloseAnchor, setSidebarCloseAnchor] = useState<{ x: number; y: number } | null>(null);
@@ -1389,6 +1390,12 @@ function App() {
         closeTabMenu();
         return;
       }
+      if (renamePopupAnchor) {
+        event.preventDefault();
+        setEditingSessionId(null);
+        setRenamePopupAnchor(null);
+        return;
+      }
       if (isDrawerOpen) {
         event.preventDefault();
         handleCloseSettings();
@@ -2172,7 +2179,8 @@ function App() {
 
     // 内联重命名输入只在桌面端使用；移动端改用独立重命名卡片
     //（32px/12px 的内联输入在触屏上太小，且 <16px 字号会触发 iOS 聚焦缩放）。
-    if (isEditing && isDesktopViewport) {
+    // 有 renamePopupAnchor 时走弹出卡片（从侧边栏右键触发），不用 tab 栏内联输入
+    if (isEditing && isDesktopViewport && !renamePopupAnchor) {
       // 预填「当前显示名」：reset 只翻 customName 标志，旧自定义名会残留在
       // session.name 里，直接预填 name 会显示界面上看不到的旧名字。
       const nameSeed = session.customName ? session.name : displayName;
@@ -3419,7 +3427,11 @@ function App() {
                 <button
                   type="button"
                   onClick={() => {
+                    // 从右键菜单触发的重命名：记录菜单位置，稍后在附近弹出重命名卡片
+                    //（而不是跳到顶部 tab 栏内联输入，从侧边栏触发时用户视线不在那）
+                    const savedAnchor = tabMenuAnchor;
                     closeTabMenu();
+                    setRenamePopupAnchor(savedAnchor);
                     setEditingSessionId(menuSession.id);
                   }}
                   className={`${menuItemClassName} text-foreground hover:bg-surface-2`}
@@ -3566,6 +3578,118 @@ function App() {
                   </button>
                 </div>
               )}
+            </div>
+          </>
+        );
+      })()}
+
+      {/* 桌面端重命名弹出卡片 —— 从侧边栏右键菜单触发重命名时，在光标附近弹出
+          重命名卡片，而不是跳到顶部 tab 栏的内联输入（用户视线在侧边栏不在 tab 栏）。
+          移动端用下面的独立卡片，tab 栏内联输入仅在没有锚点时作为兜底。 */}
+      {editingSessionId && renamePopupAnchor && isDesktopViewport && (() => {
+        const editingSession = sessions.find((s) => s.id === editingSessionId);
+        if (!editingSession) return null;
+        const editingTs = terminalSessions.get(editingSession.id);
+        const { primary: editingDisplayName } = getSessionDisplayLines(
+          editingSession,
+          editingTs?.activeProgram ?? null,
+          editingTs?.cwd ?? null,
+          SHELL_NAMES,
+          editingTs?.shellTitle ?? null,
+          editingTs?.promptState ?? null,
+        );
+        const nameSeed = editingSession.customName ? editingSession.name : editingDisplayName;
+        const commitDesktopRename = (value: string) => {
+          const trimmed = value.trim();
+          if (!trimmed) {
+            resetSessionName(editingSession.id);
+          } else if (trimmed !== nameSeed) {
+            renameSession(editingSession.id, trimmed);
+          }
+          setEditingSessionId(null);
+          setRenamePopupAnchor(null);
+        };
+        // Position near cursor, clamp to viewport
+        const popupWidth = 300;
+        const popupHeight = 160;
+        const anchorX = renamePopupAnchor.x;
+        const anchorY = renamePopupAnchor.y;
+        const left = Math.min(Math.max(anchorX - popupWidth / 2, 12), window.innerWidth - popupWidth - 12);
+        const top = anchorY + popupHeight + 20 > window.innerHeight
+          ? Math.max(anchorY - popupHeight - 12, 12)
+          : anchorY + 12;
+        return (
+          <>
+            <button
+              type="button"
+              className="fixed inset-0 z-menu-backdrop cursor-default animate-fade-in bg-transparent"
+              onClick={() => { setEditingSessionId(null); setRenamePopupAnchor(null); }}
+              aria-label={t('common.cancel')}
+            />
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label={t('tab.rename')}
+              className="fixed z-menu-panel w-[300px] rounded-xl bg-surface-elevated border border-border/15 shadow-[0_12px_36px_var(--app-shadow-soft)] animate-fade-in"
+              style={{ left: `${left}px`, top: `${top}px` }}
+            >
+              <div className="border-b border-border/15 px-3 py-2.5">
+                <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{t('tab.rename')}</div>
+                <div className="mt-0.5 truncate text-[13px] font-medium text-foreground">{editingDisplayName}</div>
+                {editingTs?.cwd && (
+                  <div className="mt-0.5 truncate text-[11px] text-muted-foreground/70">{editingTs.cwd}</div>
+                )}
+              </div>
+              <form
+                className="px-3 py-2.5"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const value = new FormData(event.currentTarget).get('session-name');
+                  commitDesktopRename(typeof value === 'string' ? value : '');
+                }}
+              >
+                <input
+                  ref={(el) => {
+                    renameInputRef.current = el;
+                    if (el && !renameSheetFocusedRef.current) {
+                      renameSheetFocusedRef.current = true;
+                      el.focus({ preventScroll: true });
+                      el.select();
+                    }
+                  }}
+                  type="text"
+                  name="session-name"
+                  defaultValue={nameSeed}
+                  placeholder={t('tab.renamePlaceholder')}
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  className="w-full rounded-lg bg-surface-2 px-3 py-2 text-[13px] leading-snug text-foreground outline-none ring-1 ring-primary/40 placeholder:text-muted-foreground/60 focus:ring-primary/70"
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.stopPropagation();
+                      setEditingSessionId(null);
+                      setRenamePopupAnchor(null);
+                    }
+                  }}
+                />
+                <div className="mt-2.5 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setEditingSessionId(null); setRenamePopupAnchor(null); }}
+                    className="flex-1 rounded-full bg-surface-2 px-3 py-1.5 text-[12px] font-medium text-muted-foreground transition hover:bg-surface hover:text-foreground"
+                  >
+                    {t('common.cancel')}
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 rounded-full bg-primary px-3 py-1.5 text-[12px] font-semibold text-primary-foreground transition hover:bg-primary/90 active:scale-[0.97]"
+                  >
+                    {t('common.done')}
+                  </button>
+                </div>
+              </form>
             </div>
           </>
         );
