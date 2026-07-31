@@ -345,7 +345,12 @@ export async function showPwaNotification(payload: PwaNotificationPayload): Prom
   }
   if (Notification.permission !== 'granted') return false;
   const registration = await getNotificationRegistration();
-  if (await registration?.pushManager?.getSubscription()) {
+  // When the caller explicitly asked to bypass the focus check (requireHidden: false),
+  // also bypass the push-subscription early return — the SW forwards push messages as
+  // postMessage when a visible window exists, but the caller wants a direct notification.
+  if (payload.requireHidden === false) {
+    // fall through to direct notification below
+  } else if (await registration?.pushManager?.getSubscription()) {
     // The server-side Web Push path covers background and closed-PWA delivery.
     return true;
   }

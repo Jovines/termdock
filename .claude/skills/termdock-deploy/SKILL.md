@@ -39,8 +39,13 @@ cd "$(git rev-parse --show-toplevel)"
 npm run lint          # 类型检查，有错先修
 npm run build         # client + server
 npm install -g .
+```
+
+重启（CLI 内部已处理：`--stop` 等进程退出再返回，`termdock` 等 /health 就绪再返回）：
+
+```bash
 termdock --stop 2>&1 || true
-termdock              # 后台启动；成功输出 URL
+termdock              # 自身 daemonize，不要用 run_in_background
 ```
 
 ## 完整路径（依赖/原生/首次）
@@ -49,24 +54,26 @@ termdock              # 后台启动；成功输出 URL
 cd "$(git rev-parse --show-toplevel)"
 node -v               # 必须 >= 20，不够先切 nvm/fnm 等
 bash install-local.sh # npm install → rebuild node-pty → build → install -g .；timeout >= 1200000ms
+```
+
+重启（CLI 内部已处理——同上）：
+
+```bash
 termdock --stop 2>&1 || true
-termdock
+termdock              # 自身 daemonize，不要用 run_in_background
 ```
 
 ## 部署后验证（两条路径都要做）
 
-### 1. 健康检查
+部署时 `termdock` 已内部等待 /health 就绪。以下验证资产新鲜度和 CA：
+
+### 1. 提取服务 URL
 
 ```bash
 STATUS_OUTPUT="$(termdock --status)"; printf '%s\n' "$STATUS_OUTPUT"
 BASE_URL="$(printf '%s\n' "$STATUS_OUTPUT" | sed -n 's/.*URL:[[:space:]]*\(.*\)$/\1/p' | head -n 1)"
 CURL_TLS=(); printf '%s' "$BASE_URL" | rg -q '^https:' && CURL_TLS=(--cacert "$HOME/.termdock/certs/rootCA.pem")
-timeout=20
-until curl -sS "${CURL_TLS[@]}" "$BASE_URL/health" >/tmp/termdock-health.json; do
-  timeout=$((timeout-1)); [ "$timeout" -le 0 ] && { tail -80 ~/.termdock/server.log >&2; exit 1; }
-  sleep 1
-done
-rg '"status":"ok"' /tmp/termdock-health.json
+# 健康检查已在部署脚本末尾完成，此处直接进入新鲜度验证
 ```
 
 ### 2. 资产新鲜度（最关键——证明线上是新包）
@@ -118,6 +125,7 @@ openssl x509 -in ~/.termdock/certs/rootCA.pem -noout -dates -fingerprint
 - **STALE（资产新鲜度不过）**：确认 `npm install -g .` 真的执行了、重启的是 9834 对应的全局包；检查 `$(npm root -g)/termdock/dist` 的 mtime。
 - **onboarding 不通**：以 `termdock --status` 的 `Setup:` 为准，不要猜 `:9834/onboarding`。
 - **手机 mDNS 不通**：路由器组播限制，用 onboarding 页里的 IP fallback 二维码。
+- **`Port 9834 is already in use`**：极端情况（SIGKILL 后端口未释放）。`lsof -tiTCP:9834 -sTCP:LISTEN | xargs kill -9` 清端口后重来。`--stop` 已内置 5s 优雅退出，正常情况下不应出现。
 - **资源 404 / HTML 很小**：`tail -80 ~/.termdock/server.log`，检查 `dist/client/` 是否最新。
 
 ## 不可省略的原则

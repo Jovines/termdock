@@ -11,15 +11,21 @@ function getStoredLocale(): string {
 function getAgentNotificationText(locale: string, agentName: string) {
   if (locale === 'zh') {
     return {
-      waitingTitle: `${agentName} 需要你的输入`,
-      waitingBody: `${agentName} 需要你的输入。`,
-      finishedBody: `${agentName} 已完成，需要你的关注。`,
+      waitingTitle: `${agentName} 需要你的处理`,
+      waitingBody: `${agentName} 需要你的处理。`,
+      doneTitle: `${agentName} 已完成`,
+      doneBody: `${agentName} 已完成，点按查看结果。`,
+      exitedTitle: `${agentName} 已退出`,
+      exitedBody: `${agentName} 已退出，点按查看结果。`,
     };
   }
   return {
     waitingTitle: `${agentName} needs your input`,
     waitingBody: `${agentName} is waiting for your input.`,
-    finishedBody: `${agentName} finished and needs your attention.`,
+    doneTitle: `${agentName} finished`,
+    doneBody: 'Tap to see the result.',
+    exitedTitle: `${agentName} exited`,
+    exitedBody: 'Tap to see the result.',
   };
 }
 
@@ -515,33 +521,39 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     const agentName = nextAgent?.displayName ?? existing.agent?.displayName ?? 'Agent';
     const locale = getStoredLocale();
     const nt = getAgentNotificationText(locale, agentName);
+    // Tags match the server push path format (pushService.ts notifyAgentTransition)
+    // so the in-memory dedup (claimNotificationPayload) prevents double-fire when
+    // both the WS path here and the SW postMessage handler fire for the same event.
     // waiting：agent 回合中停下来等人（权限/提问）——这是整个功能的核心时刻。
     if (agentStatus === 'waiting' && existing.agentStatus !== 'waiting' && userNotViewing) {
       void showPwaNotification({
         title: nt.waitingTitle,
         body: nextMessage ?? nt.waitingBody,
-        tag: `agent-waiting-${sessionId}`,
+        tag: `agent:${sessionId}:waiting:${nextActivity}`,
         data: { url: '/', sessionId },
+        requireHidden: false,
       });
       return;
     }
     // done：回合完成。
     if (agentStatus === 'done' && existing.agentStatus !== 'done' && userNotViewing) {
       void showPwaNotification({
-        title: 'Termdock',
-        body: nt.finishedBody,
-        tag: `agent-finished-${sessionId}`,
+        title: nt.doneTitle,
+        body: nt.doneBody,
+        tag: `agent:${sessionId}:done:${nextActivity}`,
         data: { url: '/', sessionId },
+        requireHidden: false,
       });
       return;
     }
     // 退出：agent 在工作中/等待中直接退出（done 已通知过，不重复）。
     if (agentStatus === null && (existing.agentStatus === 'working' || existing.agentStatus === 'waiting') && userNotViewing) {
       void showPwaNotification({
-        title: 'Termdock',
-        body: nt.finishedBody,
-        tag: `agent-finished-${sessionId}`,
+        title: nt.exitedTitle,
+        body: nt.exitedBody,
+        tag: `agent:${sessionId}:exited:${nextActivity}`,
         data: { url: '/', sessionId },
+        requireHidden: false,
       });
     }
   },

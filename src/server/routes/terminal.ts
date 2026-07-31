@@ -215,6 +215,11 @@ interface TerminalSession {
   // Carries reviewed across agentSession nullification in syncAgentIdentity so
   // the yellow unread dot survives the poll window. Cleared on manual ack.
   lastAgentReviewed: boolean | null;
+  // Timestamp when the agent first disappeared from the foreground poll.
+  // Debounces "agent exited" notifications: a subcommand that briefly takes the
+  // foreground group should not trigger a false exit. Only when the agent stays
+  // absent for AGENT_EXIT_DEBOUNCE_MS do we clear the session and broadcast.
+  agentLeftAt: number | null;
   // Shared git snapshot for the pane's cwd (branch +N −M), refreshed on cwd
   // change / command end / agent tool activity via the repo-root cache.
   gitStatus: GitStatus | null;
@@ -2686,6 +2691,12 @@ function persistAgentResumeBinding(backendSessionId: string, session: TerminalSe
   schedulePersistGlobalState();
 }
 
+/** Debounce window before treating an agent disappearance as a real exit.
+ *  Subcommands that briefly occupy the foreground group cause momentary poll
+ *  blips — waiting 2–3 poll cycles (1200 ms each) before clearing the session
+ *  avoids false "agent exited" notifications while keeping real exits responsive. */
+const AGENT_EXIT_DEBOUNCE_MS = 3000;
+
 /**
  * React to activeProgram changes: detect agent identity, end the rich session
  * when the agent leaves the foreground, and stamp the launch argv (for resume
@@ -2699,14 +2710,31 @@ function syncAgentIdentity(sessionId: string, session: TerminalSession): void {
     // The agent leaving the foreground ends its session: clear the rich state
     // so a stale "waiting" dot can't outlive the process. The poll can blip
     // momentarily (an agent-spawned subcommand takes the foreground group),
-    // but events re-establish state on the next signal.
+    // so we debounce: only clear after AGENT_EXIT_DEBOUNCE_MS of continuous
+    // absence. A real agent swap (agent A → agent B) clears immediately.
     if (session.agent && session.agentSession) {
+      if (detected === null) {
+        // Agent disappeared — could be a poll blip (subcommand) or real exit.
+        const now = Date.now();
+        if (session.agentLeftAt === null) {
+          session.agentLeftAt = now;
+          return;
+        }
+        if (now - session.agentLeftAt < AGENT_EXIT_DEBOUNCE_MS) {
+          return;
+        }
+      }
+      // Debounce expired (or agent swapped): clear the session for real.
       persistAgentResumeBinding(sessionId, session);
       session.lastAgentReviewed = session.agentSession.reviewed;
       session.agentSession = null;
+      session.agentLeftAt = null;
     }
     session.agent = detected;
     broadcastAgentStatus(sessionId, session);
+  } else if (detected && session.agentLeftAt !== null) {
+    // Agent re-detected before debounce expired — false alarm, restore.
+    session.agentLeftAt = null;
   }
 
   // Stamp the launch argv the identity poll captured — resume gets the flags.
@@ -2743,6 +2771,10 @@ function applyAgentSignals(
   notification: string | null,
 ): void {
   if (events.length === 0 && !notification) return;
+
+  // Hook events prove the agent process is alive — cancel any pending-exit timer
+  // that a poll blip may have started in syncAgentIdentity.
+  session.agentLeftAt = null;
 
   let identityChanged = false;
   for (const event of events) {
@@ -4215,6 +4247,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     agent: null,
     agentSession: null,
     lastAgentReviewed: null,
+    agentLeftAt: null,
     gitStatus: null,
     gitStatusKey: null,
     gitAgentActivitySeen: 0,
@@ -4297,6 +4330,7 @@ async function adoptPtyHostSessions(): Promise<void> {
       agent: null,
       agentSession: null,
       lastAgentReviewed: null,
+      agentLeftAt: null,
       gitStatus: null,
       gitStatusKey: null,
       gitAgentActivitySeen: 0,

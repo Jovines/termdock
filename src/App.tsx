@@ -1827,6 +1827,17 @@ function App() {
         requestFocusSession(data.sessionId);
       } else if (data?.type === 'termdock:push-subscription-changed') {
         void syncPwaPushSubscription(true);
+      } else if (data?.type === 'termdock:push-received' && data.payload) {
+        // SW received a push while a visible window exists — show an in-app
+        // notification even when the app is focused, because the user may be
+        // viewing a different session and miss the sidebar status-dot change.
+        void showPwaNotification({
+          title: data.payload.title ?? 'Termdock',
+          body: data.payload.body ?? '',
+          tag: data.payload.tag,
+          data: { url: data.payload.url, sessionId: data.payload.sessionId },
+          requireHidden: false,
+        });
       }
     };
     navigator.serviceWorker.addEventListener('message', handler);

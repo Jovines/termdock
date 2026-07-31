@@ -1303,6 +1303,38 @@ interface ChangeAuditHunksResult {
 }
 
 const CHANGE_AUDIT_SNAPSHOT_MAX_AGE_MS = 10 * 60 * 1000;
+/** Grace period for --stop: wait up to this long for the daemon to exit
+ *  after SIGTERM before falling back to SIGKILL. */
+const STOP_GRACE_MS = 5000;
+/** Max time to wait for the daemon child to respond to /health after spawn. */
+const DAEMON_START_TIMEOUT_MS = 10000;
+
+/** Poll the health endpoint until it responds or timeout expires. */
+async function waitForHealth(healthUrl: string, caPath: string | undefined | null, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const ok = await new Promise<boolean>((resolve) => {
+        const req = https.get(healthUrl, {
+          ca: caPath ? fs.readFileSync(caPath) : undefined,
+          rejectUnauthorized: Boolean(caPath),
+          timeout: 2000,
+        }, (res) => {
+          let data = '';
+          res.on('data', (chunk: string) => { data += chunk; });
+          res.on('end', () => resolve(data.includes('"status":"ok"')));
+        });
+        req.on('error', () => resolve(false));
+        req.on('timeout', () => { req.destroy(); resolve(false); });
+      });
+      if (ok) return true;
+    } catch {
+      // Retry on any error.
+    }
+    await new Promise<void>((r) => setTimeout(r, 500));
+  }
+  return false;
+}
 
 function fnv1a32(text: string): string {
   let hash = 0x811c9dc5;
@@ -3019,6 +3051,20 @@ async function main(): Promise<void> {
     const bridgeCaffeinateStarted = startRestartBridgeCaffeinate();
     process.kill(runningState.pid, 'SIGTERM');
     removeStateFile();
+
+    // Wait for the process to actually exit — graceful shutdown (session
+    // cleanup, server close, port release) takes time.  Without this wait a
+    // subsequent `termdock` start can race the old process and fail to bind.
+    const graceDeadline = Date.now() + STOP_GRACE_MS;
+    while (isProcessRunning(runningState.pid) && Date.now() < graceDeadline) {
+      await new Promise<void>((r) => setTimeout(r, 100));
+    }
+    if (isProcessRunning(runningState.pid)) {
+      process.kill(runningState.pid, 'SIGKILL');
+      // Brief sleep so the kernel releases the listening socket.
+      await new Promise<void>((r) => setTimeout(r, 200));
+    }
+
     console.log(`${ICON.ok} ${c.green(`Stopped Termdock (PID ${runningState.pid}).`)}`);
     if (bridgeCaffeinateStarted) {
       console.log(`${ICON.info} ${c.dim(`Keeping macOS awake for up to ${restartBridgeCaffeinateSeconds}s while Termdock restarts.`)}`);
@@ -3176,6 +3222,18 @@ async function main(): Promise<void> {
   console.log(`  ${c.dim('PID:')} ${child.pid}`);
   console.log(`  ${c.dim('Log:')} ${logFilePath}`);
   warnIfAuthDisabled(childHost);
+
+  // Wait for the daemon child to become healthy before returning — a
+  // subsequent deploy step that curls the server won't race startup.
+  {
+    const displayHost = childHost === '0.0.0.0' ? 'localhost' : childHost;
+    const healthUrl = `${scheme}://${displayHost}:${childPort}/health`;
+    const healthOk = await waitForHealth(healthUrl, activeHttps.ca, DAEMON_START_TIMEOUT_MS);
+    if (!healthOk) {
+      console.log(`${ICON.warn} ${c.yellow('Server started but health check did not respond in time — it may still be initializing.')}`);
+    }
+  }
+
   process.exit(0);
 }
 
