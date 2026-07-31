@@ -752,6 +752,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       moved: boolean;
     } | null>(null);
     const suppressMobileTapFocusUntilRef = React.useRef(0);
+    // 双击发 Tab 手势命中后，第二下点按仍可能产生两类副作用：
+    // 1. pointerup 走 useTouchScroll → handleClick 往 PTY 上报 SGR 鼠标点击，
+    //    两次点击落在 tmux 双击窗口内触发 DoubleClick1Pane（copy-mode -H +
+    //    select-word）；
+    // 2. 第二下点按的轻微上滑被 tmux 滚动手势累积成 wheel-up，触发
+    //    WheelUpPane 绑定（copy-mode -He）。
+    // 两条路都会把终端带进 copy mode。命中双击后开一个短时窗口，同时吃掉
+    // 这次多余的鼠标点击上报和滚动累积。
+    const suppressDoubleTapUntilRef = React.useRef(0);
     const longPressGestureBlocksScrollRef = React.useRef(false);
     const lastFocusHiddenInputAtRef = React.useRef(0);
     const [, forceRender] = React.useReducer((x) => x + 1, 0);
@@ -1045,6 +1054,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
      * 使用SGR 1006协议发送：\x1b[<button;x;yM (press) 和 \x1b[<button;x;ym (release)
      */
     const handleClick = React.useCallback((clientX: number, clientY: number): void => {
+      // 双击 Tab 手势的第二下点按：不上报鼠标点击，避免 tmux 把两次点击
+      // 误判为双击而进入 copy-mode。
+      if (performance.now() <= suppressDoubleTapUntilRef.current) {
+        suppressDoubleTapUntilRef.current = 0;
+        return;
+      }
       const terminal = terminalRef.current;
       if (!terminal) return;
 
@@ -1889,6 +1904,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (longPressGestureBlocksScrollRef.current) {
         return isClaimed ? 'release' : 'neutral';
       }
+      // 双击 Tab 手势的第二下点按：不做滚动累积，避免轻微上滑被当成
+      // wheel-up 触发 tmux copy-mode。
+      if (performance.now() <= suppressDoubleTapUntilRef.current) {
+        return 'neutral';
+      }
       const st = tmuxScrollStateRef.current;
       if (e.pointerType !== 'touch' || e.pointerId !== st.pointerId) return 'neutral';
       if (st.lastY == null) return 'neutral';
@@ -2115,10 +2135,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
         if (
           s.lastTapTime !== 0 &&
-          now - s.lastTapTime <= 150 &&
+          now - s.lastTapTime <= 300 &&
           Math.hypot(x - s.lastTapX, y - s.lastTapY) <= 25
         ) {
           hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
+          // 吃掉第二下点按即将产生的鼠标点击上报和滚动累积
+          // （见 handleClick / tmux_onPointerMove）。
+          suppressDoubleTapUntilRef.current = performance.now() + 500;
           onDoubleTapRef.current?.();
           setTabIndicator(true);
           if (tabIndicatorTimerRef.current) clearTimeout(tabIndicatorTimerRef.current);
@@ -4379,11 +4402,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               Tab
             </div>
 
-            {/* Long-press arrow drag indicator — fixed top-center */}
+            {/* Long-press arrow drag indicator — 容器内 absolute 顶部居中。
+                不能用 fixed:移动端外层 wrapper 带 translateY(--kb-translate-y)
+                的 transform,会成为 fixed 后代的包含块,软键盘弹出时指示器
+                随 wrapper 上移键盘高度而飞出可视区。 */}
             <div
               ref={arrowIndicatorRef}
               aria-hidden
-              className="fixed left-1/2 top-6 z-chrome-hint pointer-events-none transition-opacity duration-150 ease-out"
+              className="absolute left-1/2 top-6 z-30 pointer-events-none transition-opacity duration-150 ease-out"
               style={{
                 opacity: arrowIndicator.visible ? 1 : 0,
                 transform: arrowIndicator.visible

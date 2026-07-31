@@ -20,6 +20,7 @@ import {
 } from '../terminal/mobileKeyboardPresets';
 import { PRESET_MODE_BUTTON_SIZE_PX, PresetModeButton } from '../terminal/PresetModeButton';
 import { useI18n } from '../../i18n';
+import { Switch } from '../ui/Switch';
 
 interface ToolbarPresetSettingsProps {
   presets: ToolbarPresetDefinition[];
@@ -426,17 +427,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
               {t('toolbarPresets.altSlotHint')}
             </span>
           </span>
-          <span
-            className={`inline-flex h-6 w-10 shrink-0 items-center rounded-full transition ${
-              selectedPreset.includeAlt ? 'bg-primary/70' : 'bg-surface-elevated'
-            }`}
-          >
-            <span
-              className={`mx-0.5 inline-block h-5 w-5 rounded-full bg-foreground/90 transition ${
-                selectedPreset.includeAlt ? 'translate-x-4' : ''
-              }`}
-            />
-          </span>
+          <Switch checked={selectedPreset.includeAlt} />
         </button>
 
         {/* Desktop visibility */}
@@ -453,17 +444,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
               {t('toolbarPresets.desktopVisibilityHint')}
             </span>
           </span>
-          <span
-            className={`inline-flex h-6 w-10 shrink-0 items-center rounded-full transition ${
-              selectedPreset.showOnDesktop ? 'bg-primary/70' : 'bg-surface-elevated'
-            }`}
-          >
-            <span
-              className={`mx-0.5 inline-block h-5 w-5 rounded-full bg-foreground/90 transition ${
-                selectedPreset.showOnDesktop ? 'translate-x-4' : ''
-              }`}
-            />
-          </span>
+          <Switch checked={selectedPreset.showOnDesktop} />
         </button>
 
         {/* Rows */}

@@ -38,6 +38,15 @@ const PROTOCOL_VERSION = 1;
 const HEALTH_TIMEOUT_MS = 3_500;
 const START_TIMEOUT_MS = 90_000;
 
+/** Delivered-but-unseen desktop notifications, mirrored into the Dock badge. */
+const activeNotifications = new Map<string, Notification>();
+let unreadNotificationCount = 0;
+
+function clearUnreadNotifications(): void {
+  unreadNotificationCount = 0;
+  app.setBadgeCount(0);
+}
+
 let mainWindow: BrowserWindow | null = null;
 let activeServiceOrigin: string | null = null;
 let isQuitting = false;
@@ -609,6 +618,10 @@ function createMainWindow(): BrowserWindow {
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null;
   });
+  window.on('focus', () => {
+    // User is looking at the app — the Dock badge has served its purpose.
+    clearUnreadNotifications();
+  });
   window.on('close', (event) => {
     if (process.platform === 'darwin' && !isQuitting) {
       event.preventDefault();
@@ -658,13 +671,30 @@ function installIpcHandlers(): void {
     tag?: unknown;
     sessionId?: unknown;
     silent?: unknown;
+    persistent?: unknown;
   }) => {
     if (!Notification.isSupported() || typeof payload?.title !== 'string') return false;
+    // Web Notification tag semantics: a new notification with the same tag
+    // replaces the previous one instead of stacking.
+    const tag = typeof payload.tag === 'string' && payload.tag ? payload.tag : null;
+    if (tag) {
+      const previous = activeNotifications.get(tag);
+      if (previous) {
+        previous.close();
+        activeNotifications.delete(tag);
+      }
+    }
     const notification = new Notification({
       title: payload.title.slice(0, 160),
       body: typeof payload.body === 'string' ? payload.body.slice(0, 1000) : undefined,
       silent: payload.silent === true,
     });
+    if (tag) {
+      activeNotifications.set(tag, notification);
+      notification.on('close', () => {
+        if (activeNotifications.get(tag) === notification) activeNotifications.delete(tag);
+      });
+    }
     notification.on('click', () => {
       mainWindow?.show();
       mainWindow?.focus();
@@ -673,6 +703,13 @@ function installIpcHandlers(): void {
       }
     });
     notification.show();
+    unreadNotificationCount += 1;
+    app.setBadgeCount(unreadNotificationCount);
+    // macOS banners auto-dismiss even for "persistent" alerts; bounce the Dock
+    // icon so the signal survives until the user looks at the app.
+    if (payload.persistent === true && !mainWindow?.isFocused()) {
+      app.dock?.bounce('informational');
+    }
     return true;
   });
 }

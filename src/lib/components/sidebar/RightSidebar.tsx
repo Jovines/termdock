@@ -112,6 +112,11 @@ const FILE_PREVIEW_READING_STATE_WRITE_MS = 250;
 const FILE_TREE_WIDTH_WRITE_MS = 120;
 const GIT_BUNDLE_SLOW_MS = 700;
 const SIDEBAR_BACKGROUND_IO_DELAY_MS = 600;
+// File-watch reconnect backoff: the /fs/watch stream dies on server restart,
+// deploy, or network hiccups. Retry with capped backoff; before each retry the
+// watched roots' caches are invalidated and the watch epoch is bumped, because
+// events fired while disconnected can never be replayed.
+const FILE_WATCH_RECONNECT_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
 const MOBILE_SIDEBAR_OPEN_SETTLE_DELAY_MS = 320;
 // Closing: the settled reset is deferred past the close spring so the
 // gesture only pays ONE heavy RightSidebar render pass (the isOpen flip)
@@ -898,6 +903,20 @@ function getLocalPathFromBlobSrc(src: string): string | null {
   }
 }
 
+// Ties a /api/terminal/fs/blob URL to the file watcher's version state: when
+// the underlying file changes on disk (per-path bump) or the watcher reports a
+// rescan / reconnects / the user hits refresh (global epoch bump), the version
+// changes and `&v=N` is appended so consumers refetch — otherwise they kept
+// showing the stale bytes (the blob endpoint is Cache-Control: no-store, but
+// fetched object URLs and <img> caches are keyed by URL).
+function useVersionedFsBlobSrc(src: string): string {
+  const localPath = getLocalPathFromBlobSrc(src);
+  const version = useSidebarStore((s) => (
+    localPath ? (s.fileChangeVersions.get(localPath) ?? 0) + s.fileWatchEpoch : 0
+  ));
+  return localPath && version > 0 ? `${src}&v=${version}` : src;
+}
+
 type MarkdownImageState =
   | { status: 'loading' }
   | { status: 'ready'; objectUrl: string }
@@ -911,14 +930,11 @@ type MarkdownImageState =
 //     (computeMarkdownImageDisplayBox) is known as soon as headers land.
 //  3. A pulsing placeholder occupies exactly that box; the ready img is
 //     rendered at the same explicit size and fades in — zero layout shift.
-// The URL is also tied to the file watcher's per-path version: when the image
-// file changes on disk, the version bump appends `&v=N` so the browser
-// refetches — otherwise the preview kept showing the stale image.
+// The URL goes through useVersionedFsBlobSrc, so on-disk changes to the image
+// file (or a watch rescan / manual refresh) append `&v=N` and refetch.
 function MarkdownImage({ src, alt, title }: { src: string; alt: string; title?: string }) {
-  const localPath = getLocalPathFromBlobSrc(src);
   const isVector = isSvgImageSrc(src);
-  const fileVersion = useSidebarStore((s) => (localPath ? s.fileChangeVersions.get(localPath) ?? 0 : 0));
-  const versionedSrc = localPath && fileVersion > 0 ? `${src}&v=${fileVersion}` : src;
+  const versionedSrc = useVersionedFsBlobSrc(src);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [nearViewport, setNearViewport] = useState(false);
@@ -2436,6 +2452,28 @@ interface MarkdownPreviewProps {
   onLightboxClose?: () => void;
 }
 
+// Lightbox variant of the versioned image: same `&v=N` cache-busting as
+// MarkdownImage, so an image that changes on disk while the lightbox is open
+// reloads instead of showing the bytes captured when it was opened.
+function LightboxZoomableImage({ src, alt, onZoomChange, onDoubleTap }: {
+  src: string;
+  alt: string;
+  onZoomChange?: (zoomed: boolean) => void;
+  onDoubleTap?: () => void;
+}) {
+  const versionedSrc = useVersionedFsBlobSrc(src);
+  return (
+    <ZoomableImage
+      src={versionedSrc}
+      alt={alt}
+      onLoad={() => undefined}
+      onError={() => undefined}
+      onZoomChange={onZoomChange}
+      onDoubleTap={onDoubleTap}
+    />
+  );
+}
+
 interface MarkdownImageLightboxProps {
   images: MarkdownPreviewImage[];
   index: number;
@@ -2642,11 +2680,9 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
                 <SwiperSlide key={`${image.kind}-${imageIndex}-${image.alt}`} className="h-full">
                   <div className="h-full w-full px-3 py-4 sm:px-6 sm:py-6">
                     {image.kind === 'image' ? (
-                      <ZoomableImage
+                      <LightboxZoomableImage
                         src={image.src}
                         alt={image.alt || image.title || t('rightSidebar.markdownImage')}
-                        onLoad={() => undefined}
-                        onError={() => undefined}
                         onZoomChange={setImageZoomed}
                         onDoubleTap={clearTapCloseTimer}
                       />
@@ -4609,11 +4645,12 @@ function FilePreview({
     ? (rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath)
     : null;
 
-  // watcher 在 store 里维护「每个绝对路径的变更版本号」。当前预览路径对应的
-  // 版本号变化时（外部 created/updated/deleted/rescan）自动触发重新加载。
+  // watcher 在 store 里维护「每个绝对路径的变更版本号 + 全局 epoch」。当前
+  // 预览路径对应的版本变化时（外部 created/updated/deleted），或 epoch
+  // 变化时（rescan 降级 / watch 重连 / 手动刷新），自动触发重新加载。
   // 文件管理器是纯查看场景，没有"覆盖用户编辑"的冲突顾虑，所以直接静默刷新。
   const externalVersion = useSidebarStore((s) => (
-    versionedPath ? s.fileChangeVersions.get(versionedPath) ?? 0 : 0
+    versionedPath ? (s.fileChangeVersions.get(versionedPath) ?? 0) + s.fileWatchEpoch : s.fileWatchEpoch
   ));
 
   // 用于区分"切到新文件"和"同一个文件外部变更"。前者要重置 UI（loading 占位、
@@ -5346,6 +5383,7 @@ export function RightSidebar(
   const setChangedFiles = useSidebarStore((s) => s.setChangedFiles);
   const invalidateDirectoryCache = useSidebarStore((s) => s.invalidateDirectoryCache);
   const applyFileWatchEvents = useSidebarStore((s) => s.applyFileWatchEvents);
+  const bumpFileWatchEpoch = useSidebarStore((s) => s.bumpFileWatchEpoch);
   const gitBundleLoading = useSidebarStore((s) => s.gitBundleLoading);
   const gitBundleSlow = useSidebarStore((s) => s.gitBundleSlow);
   const gitBundleError = useSidebarStore((s) => s.gitBundleError);
@@ -6405,8 +6443,11 @@ export function RightSidebar(
     if (!text) return;
     if (contextDraftEnabled) {
       setContextDraftText((current) => appendContextDraft(current, text) + (suffix ?? ''));
-      setContextDraftCollapsed(false);
-      setDraftFocusRequest((n) => n + 1);
+      // 触屏设备保持静息行：不展开编辑器、不弹软键盘，由草稿坞行内闪烁反馈追加
+      if (!window.matchMedia('(pointer: coarse)').matches) {
+        setContextDraftCollapsed(false);
+        setDraftFocusRequest((n) => n + 1);
+      }
     } else {
       window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
         detail: { text: suffix ? text + suffix : text, focus: false },
@@ -6481,7 +6522,11 @@ export function RightSidebar(
     // nothing. Expanded dirs whose cache entry disappears refetch themselves
     // (FileTreeItem's isExpanded && !children effect).
     invalidateDirectoryCache(fileTreeRoot, true);
-  }, [fileTreeRoot, invalidateDirectoryCache]);
+    // Also bump the global watch epoch so the file preview and markdown
+    // images reload too — previously refresh only repainted the tree while
+    // already-loaded content kept showing stale bytes.
+    bumpFileWatchEpoch();
+  }, [bumpFileWatchEpoch, fileTreeRoot, invalidateDirectoryCache]);
 
   const togglePinnedExplorerRoot = useCallback(() => {
     if (!fileTreeRoot || !canPinFileTreeRoot) return;
@@ -6529,22 +6574,56 @@ export function RightSidebar(
     if (!isOpen || watchedFileRoots.length === 0) return;
     const controller = new AbortController();
     let cancelled = false;
+    let startTimer = 0;
+    let retryTimer = 0;
     setFileWatchError(null);
-    const handle = window.setTimeout(() => {
+
+    const runWatchLoop = async () => {
+      let attempt = 0;
+      while (!cancelled && !controller.signal.aborted) {
+        if (attempt > 0) {
+          // Reconnecting: events fired while the stream was down are lost
+          // forever, so self-heal before retrying — drop cached listings under
+          // the watched roots (expanded dirs refetch themselves) and bump the
+          // epoch so previews / markdown images reload.
+          for (const root of watchedFileRoots) invalidateDirectoryCache(root, true);
+          bumpFileWatchEpoch();
+        }
+        let failure: unknown = null;
+        try {
+          // Established (or about to): clear any error from a previous
+          // disconnect; a failed attempt re-sets it below.
+          setFileWatchError(null);
+          await watchFileSystem(watchedFileRoots, (events) => {
+            applyFileWatchEvents(events);
+          }, controller.signal);
+          // A clean resolve means the server closed the stream (deploy,
+          // restart) — treat it as a disconnect and reconnect as well.
+          failure = new Error('File watch stream ended');
+        } catch (error) {
+          failure = error;
+        }
+        if (cancelled || controller.signal.aborted || isAbortError(failure)) return;
+        setFileWatchError(failure instanceof Error ? failure.message : 'File watching unavailable');
+        const delay = FILE_WATCH_RECONNECT_DELAYS_MS[Math.min(attempt, FILE_WATCH_RECONNECT_DELAYS_MS.length - 1)];
+        attempt += 1;
+        await new Promise<void>((resolve) => {
+          retryTimer = window.setTimeout(resolve, delay);
+        });
+      }
+    };
+
+    startTimer = window.setTimeout(() => {
       if (cancelled) return;
-      watchFileSystem(watchedFileRoots, (events) => {
-        applyFileWatchEvents(events);
-      }, controller.signal).catch((error) => {
-        if (isAbortError(error) || controller.signal.aborted) return;
-        setFileWatchError(error instanceof Error ? error.message : 'File watching unavailable');
-      });
+      void runWatchLoop();
     }, SIDEBAR_BACKGROUND_IO_DELAY_MS);
     return () => {
       cancelled = true;
-      window.clearTimeout(handle);
+      window.clearTimeout(startTimer);
+      window.clearTimeout(retryTimer);
       controller.abort();
     };
-  }, [applyFileWatchEvents, isOpen, watchedFileRoots]);
+  }, [applyFileWatchEvents, bumpFileWatchEpoch, invalidateDirectoryCache, isOpen, watchedFileRoots]);
 
   useEffect(() => {
     if (!rootPath) return;
@@ -10302,6 +10381,9 @@ export function RightSidebar(
             insertAndSend: t('rightSidebar.contextDraftInsertAndSend'),
             inserted: t('rightSidebar.contextDraftInserted'),
             sent: t('rightSidebar.contextDraftSent'),
+            send: t('rightSidebar.contextDraftSend'),
+            appended: t('rightSidebar.contextDraftAppended'),
+            resize: t('rightSidebar.contextDraftResize'),
             characterCount: (count) => t('rightSidebar.contextDraftCharacterCount', { count }),
           }}
         />
@@ -10310,7 +10392,7 @@ export function RightSidebar(
         {confirmGitAction && (
           <div className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>
             <div
-              className="fixed inset-x-3 bottom-6 mx-auto max-w-md rounded-2xl border border-border/20 bg-surface-elevated p-4 shadow-2xl"
+              className="fixed inset-x-3 bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] mx-auto max-w-md rounded-2xl border border-border/20 bg-surface-elevated p-4 shadow-2xl"
               onClick={(event) => event.stopPropagation()}
             >
               <div className="text-sm font-semibold text-foreground">

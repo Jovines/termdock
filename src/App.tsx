@@ -1,6 +1,7 @@
 import React, { useEffect, useCallback, useState, useRef } from 'react';
 // test comment
 import { MultiTerminalView, type TerminalSessionInfo } from './lib/components/MultiTerminalView';
+import { Switch } from './lib/components/ui/Switch';
 import {
   Plus as RiAddLine,
   X as RiCloseLine,
@@ -45,7 +46,10 @@ import type { ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from 
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
 import {
+  clearPwaAppBadge,
+  dismissPwaNotificationsForSession,
   getStoredPwaAiNotificationsEnabled,
+  getStoredPwaExitNotificationsEnabled,
   getStoredPwaNotificationAlertStyle,
   getPwaNotificationPermission,
   getStoredPwaNotificationsEnabled,
@@ -53,6 +57,7 @@ import {
   isPwaNotificationEffective,
   requestPwaNotificationPermission,
   setStoredPwaAiNotificationsEnabled,
+  setStoredPwaExitNotificationsEnabled,
   setStoredPwaNotificationAlertStyle,
   setStoredPwaNotificationsEnabled,
   showPwaNotification,
@@ -502,6 +507,7 @@ function App() {
   const [networkAvailable, setNetworkAvailable] = React.useState(cachedSettings?.networkAvailable ?? true);
   const [pwaNotificationsEnabled, setPwaNotificationsEnabled] = React.useState(getStoredPwaNotificationsEnabled);
   const [pwaAiNotificationsEnabled, setPwaAiNotificationsEnabled] = React.useState(getStoredPwaAiNotificationsEnabled);
+  const [pwaExitNotificationsEnabled, setPwaExitNotificationsEnabled] = React.useState(getStoredPwaExitNotificationsEnabled);
   const [pwaNotificationAlertStyle, setPwaNotificationAlertStyle] = React.useState<PwaNotificationAlertStyle>(getStoredPwaNotificationAlertStyle);
   const [pwaNotificationPermission, setPwaNotificationPermission] = React.useState(getPwaNotificationPermission);
   const [localAccess, setLocalAccess] = React.useState<LocalAccessState>(cachedSettings?.localAccess ?? DEFAULT_LOCAL_ACCESS);
@@ -1567,13 +1573,19 @@ function App() {
     if (!pwaNotificationsEnabled) return;
     void syncPwaPushSubscription();
     const refresh = () => {
-      if (document.visibilityState === 'visible') void syncPwaPushSubscription();
+      if (document.visibilityState === 'visible') {
+        void syncPwaPushSubscription();
+        // 回到前台 = 用户已看到会话状态,badge 使命完成。
+        void clearPwaAppBadge();
+      }
     };
     const interval = window.setInterval(() => void syncPwaPushSubscription(), 6 * 60 * 60 * 1000);
     document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('focus', refresh);
     return () => {
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', refresh);
+      window.removeEventListener('focus', refresh);
     };
   }, [pwaNotificationsEnabled]);
 
@@ -1609,6 +1621,12 @@ function App() {
   const handleTogglePwaAiNotifications = useCallback((enabled: boolean) => {
     setPwaAiNotificationsEnabled(enabled);
     setStoredPwaAiNotificationsEnabled(enabled);
+    void syncPwaPushPreferences();
+  }, []);
+
+  const handleTogglePwaExitNotifications = useCallback((enabled: boolean) => {
+    setPwaExitNotificationsEnabled(enabled);
+    setStoredPwaExitNotificationsEnabled(enabled);
     void syncPwaPushPreferences();
   }, []);
 
@@ -1717,9 +1735,12 @@ function App() {
     }
     return { running, review };
   }, [sessions, terminalSessions]);
+  // inline 用 'nearest' 而非 'center'：激活 tab 已在可视区内时完全不滚动，
+  // 只有它溢出屏幕才滚最小距离。'center' 会在 tab 多（条溢出）时每切一次
+  // 整条横移去居中，切换频繁时视觉上就是横向抖动。
   useEffect(() => {
     activeSessionTabRef.current?.scrollIntoView({
-      inline: 'center',
+      inline: 'nearest',
       block: 'nearest',
       behavior: 'smooth',
     });
@@ -1754,6 +1775,8 @@ function App() {
   // 等会话恢复 / inventory 同步后由下面的 effect 补发。
   const requestFocusSession = useCallback((sessionId: string | null) => {
     if (!sessionId) return;
+    // 用户点进了这个会话 —— 把它的已送达通知一并清掉(含 badge 重计)。
+    void dismissPwaNotificationsForSession(sessionId);
     const target = sessions.find((session) => (
       session.id === sessionId
       || terminalSessions.get(session.id)?.backendSessionId === sessionId
@@ -1844,18 +1867,11 @@ function App() {
         requestFocusSession(data.sessionId);
       } else if (data?.type === 'termdock:push-subscription-changed') {
         void syncPwaPushSubscription(true);
-      } else if (data?.type === 'termdock:push-received' && data.payload) {
-        // SW received a push while a visible window exists — show an in-app
-        // notification even when the app is focused, because the user may be
-        // viewing a different session and miss the sidebar status-dot change.
-        void showPwaNotification({
-          title: data.payload.title ?? 'Termdock',
-          body: data.payload.body ?? '',
-          tag: data.payload.tag,
-          dedupKey: data.payload.dedupKey,
-          data: { url: data.payload.url, sessionId: data.payload.sessionId },
-          requireHidden: false,
-        });
+      } else if (data?.type === 'termdock:push-received') {
+        // The SW now always shows the notification itself (iOS requires a
+        // visible notification for every push or it revokes permission), so
+        // there is nothing to re-show here. The message is kept so the app
+        // could react in place later (state sync already flows over WS).
       }
     };
     navigator.serviceWorker.addEventListener('message', handler);
@@ -2745,13 +2761,7 @@ function App() {
                     }`}
                   >
                     <span className="font-medium">{t('settings.debug')}</span>
-                    <span className={`inline-flex h-4 w-7 items-center rounded-full transition ${
-                      showDebug ? 'bg-primary/70' : 'bg-surface-elevated'
-                    }`}>
-                      <span className={`mx-0.5 inline-block h-3 w-3 rounded-full bg-foreground/90 transition ${
-                        showDebug ? 'translate-x-3' : ''
-                      }`} />
-                    </span>
+                    <Switch checked={showDebug} size="sm" />
                   </button>
                   <button
                     type="button"
@@ -2778,13 +2788,7 @@ function App() {
                     title={!networkAvailable && preventSleep ? t('settings.noSleepUnavailable') : undefined}
                   >
                     <span className="font-medium truncate">{t('settings.noSleep')}</span>
-                    <span className={`inline-flex h-4 w-7 items-center rounded-full transition ${
-                      preventSleep ? 'bg-[var(--success)]' : 'bg-surface-elevated'
-                    }`}>
-                      <span className={`mx-0.5 inline-block h-3 w-3 rounded-full transition ${
-                        preventSleep ? 'translate-x-3 bg-[var(--background)]' : 'bg-foreground/90'
-                      }`} />
-                    </span>
+                    <Switch checked={preventSleep} size="sm" />
                   </button>
                 </div>
               </div>
@@ -2801,7 +2805,13 @@ function App() {
                     <span className="block font-medium text-foreground">{t('settings.notifications')}</span>
                     <span className="block truncate text-[10px] text-muted-foreground">
                       {pwaNotificationsEnabled
-                        ? (pwaAiNotificationsEnabled ? t('settings.notificationsAiOnSummary') : t('settings.notificationsNoEventsSummary'))
+                        ? (pwaAiNotificationsEnabled && pwaExitNotificationsEnabled
+                          ? t('settings.notificationsBothOnSummary')
+                          : pwaAiNotificationsEnabled
+                            ? t('settings.notificationsAiOnSummary')
+                            : pwaExitNotificationsEnabled
+                              ? t('settings.notificationsExitOnSummary')
+                              : t('settings.notificationsNoEventsSummary'))
                         : t('settings.notificationsOffSummary')}
                     </span>
                   </span>
@@ -3806,7 +3816,7 @@ function App() {
             className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm cursor-default"
             onClick={() => setIsNotificationsOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:top-[10%] sm:bottom-auto sm:max-h-[80vh]">
+          <div className="fixed left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] top-[max(1.5rem,env(safe-area-inset-top,0px))] bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] z-modal-panel mx-auto flex max-w-xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)] sm:top-[10%] sm:bottom-auto sm:max-h-[80vh]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
                 <div className="ui-kicker">{t('settings.notifications')}</div>
@@ -3847,16 +3857,13 @@ function App() {
                     type="button"
                     onClick={() => void handleTogglePwaNotifications()}
                     disabled={!isPwaNotificationSupported() || pwaNotificationPermission === 'denied'}
-                    className={`inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
-                      pwaNotificationsEnabled
-                        ? 'bg-primary/80'
-                        : pwaNotificationPermission === 'denied' || !isPwaNotificationSupported()
-                          ? 'cursor-not-allowed bg-surface-elevated/50 opacity-60'
-                          : 'bg-surface-elevated'
-                    }`}
+                    className="shrink-0 transition disabled:cursor-not-allowed"
                     aria-pressed={pwaNotificationsEnabled}
                   >
-                    <span className={`mx-1 inline-block h-5 w-5 rounded-full bg-[var(--background)] transition ${pwaNotificationsEnabled ? 'translate-x-5' : ''}`} />
+                    <Switch
+                      checked={pwaNotificationsEnabled}
+                      disabled={!isPwaNotificationSupported() || pwaNotificationPermission === 'denied'}
+                    />
                   </button>
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
@@ -3929,16 +3936,33 @@ function App() {
                       type="button"
                       disabled={!pwaNotificationsEnabled}
                       onClick={() => handleTogglePwaAiNotifications(!pwaAiNotificationsEnabled)}
-                      className={`inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
-                        pwaAiNotificationsEnabled && pwaNotificationsEnabled
-                          ? 'bg-primary/80'
-                          : pwaNotificationsEnabled
-                            ? 'bg-surface-elevated'
-                            : 'cursor-not-allowed bg-surface-elevated/50 opacity-60'
-                      }`}
+                      className="shrink-0 transition disabled:cursor-not-allowed"
                       aria-pressed={pwaAiNotificationsEnabled && pwaNotificationsEnabled}
                     >
-                      <span className={`mx-1 inline-block h-5 w-5 rounded-full bg-[var(--background)] transition ${pwaAiNotificationsEnabled && pwaNotificationsEnabled ? 'translate-x-5' : ''}`} />
+                      <Switch
+                        checked={pwaAiNotificationsEnabled && pwaNotificationsEnabled}
+                        disabled={!pwaNotificationsEnabled}
+                      />
+                    </button>
+                  </div>
+                  <div className="mt-3 flex items-start justify-between gap-3 border-t border-border/10 pt-3">
+                    <div className="min-w-0">
+                      <div className="text-[13px] font-semibold text-foreground">{t('settings.notificationsSessionExited')}</div>
+                      <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                        {t('settings.notificationsSessionExitedHint')}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!pwaNotificationsEnabled}
+                      onClick={() => handleTogglePwaExitNotifications(!pwaExitNotificationsEnabled)}
+                      className="shrink-0 transition disabled:cursor-not-allowed"
+                      aria-pressed={pwaExitNotificationsEnabled && pwaNotificationsEnabled}
+                    >
+                      <Switch
+                        checked={pwaExitNotificationsEnabled && pwaNotificationsEnabled}
+                        disabled={!pwaNotificationsEnabled}
+                      />
                     </button>
                   </div>
                 </div>
@@ -3958,7 +3982,7 @@ function App() {
             className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm cursor-default"
             onClick={() => setIsToolbarPresetsOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)]">
+          <div className="fixed left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] top-[max(1.5rem,env(safe-area-inset-top,0px))] bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] z-modal-panel mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
                 <div className="ui-kicker">{t('settings.mobileKeyboard')}</div>
@@ -4019,7 +4043,7 @@ function App() {
             className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm cursor-default"
             onClick={() => setIsAgentRulesOpen(false)}
           />
-          <div className="fixed inset-x-3 top-6 bottom-6 z-modal-panel mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)]">
+          <div className="fixed left-[max(0.75rem,env(safe-area-inset-left,0px))] right-[max(0.75rem,env(safe-area-inset-right,0px))] top-[max(1.5rem,env(safe-area-inset-top,0px))] bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] z-modal-panel mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl bg-surface border border-border/15 shadow-[0_28px_70px_var(--app-shadow-strong),0_14px_32px_var(--app-shadow-soft)]">
             <div className="flex shrink-0 items-center justify-between border-b border-border/15 px-4 py-4 sm:px-6">
               <div className="min-w-0">
                 <div className="ui-kicker">{t('settings.aiAgentDetection')}</div>

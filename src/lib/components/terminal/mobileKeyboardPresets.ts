@@ -31,7 +31,7 @@ export function getToolbarActionLabel(action: MobileToolbarAction, index: number
 // actions/programs changed). The App reads this on startup and, when the
 // stored version differs, overwrites all built-in preset ids with the latest
 // definitions while keeping any user-authored custom presets intact.
-export const BUILTIN_TOOLBAR_PRESETS_VERSION = 12;
+export const BUILTIN_TOOLBAR_PRESETS_VERSION = 13;
 
 export function getBuiltinToolbarPresetIds(): string[] {
   return DEFAULT_PRESETS.map((preset) => preset.id);
@@ -71,6 +71,20 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
       { id: 'claude-undo', label: '/undo', sequence: '/undo', doubleTapSequence: '/undo\r' },
       { id: 'claude-clear', label: '/clear', sequence: '/clear', doubleTapSequence: '/clear\r' },
       { id: 'claude-compact', label: '/compact', sequence: '/compact', doubleTapSequence: '/compact\r' },
+    ],
+    showOnDesktop: true,
+  },
+  {
+    id: 'kimi',
+    label: 'Kimi',
+    programs: ['kimi', 'kimi-code'],
+    includeAlt: false,
+    rowLayout: [4],
+    actions: [
+      { id: 'kimi-undo', label: '/undo', sequence: '/undo', doubleTapSequence: '/undo\r' },
+      { id: 'kimi-new', label: '/new', sequence: '/new', doubleTapSequence: '/new\r' },
+      { id: 'kimi-compact', label: '/compact', sequence: '/compact', doubleTapSequence: '/compact\r' },
+      { id: 'kimi-usage', label: '/usage', sequence: '/usage', doubleTapSequence: '/usage\r' },
     ],
     showOnDesktop: true,
   },

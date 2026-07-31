@@ -188,6 +188,10 @@ function handleControl(msg: ControlOp): void {
     case 'attach':
       attachChannel(msg.id, msg.since);
       return;
+    case 'ping':
+      // 服务端心跳：host 事件循环活着就立即回 pong；连续不回 = wedge。
+      send({ op: 'pong', t: msg.t });
+      return;
     case 'resize': {
       const ch = channels.get(msg.id);
       if (ch && !ch.exited) {
@@ -257,7 +261,12 @@ function onServerConnection(conn: net.Socket): void {
 
 function shutdown(): void {
   try { fs.unlinkSync(SOCKET_PATH); } catch { /* already gone */ }
+  try { fs.unlinkSync(pidFilePath()); } catch { /* already gone */ }
   process.exit(0);
+}
+
+function pidFilePath(): string {
+  return `${SOCKET_PATH}.pid`;
 }
 
 function main(): void {
@@ -269,6 +278,9 @@ function main(): void {
   const server = net.createServer(onServerConnection);
   server.listen(SOCKET_PATH, () => {
     try { fs.chmodSync(SOCKET_PATH, 0o600); } catch { /* best effort */ }
+    // 写 pid 文件：服务端检测到这个 host wedge（心跳超时）时需要知道
+    // 杀谁——host 是 detached 的，pid 没法靠父子关系找回。
+    try { fs.writeFileSync(pidFilePath(), String(process.pid), { mode: 0o600 }); } catch { /* best effort */ }
     console.log(`[pty-host] listening on ${SOCKET_PATH} (pid ${process.pid})`);
   });
 

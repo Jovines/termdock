@@ -18,6 +18,7 @@ function resetSidebarStore(): void {
     showHiddenFiles: false,
     changedFiles: new Map(),
     fileChangeVersions: new Map(),
+    fileWatchEpoch: 0,
     gitBundleLoading: false,
     gitBundleSlow: false,
     gitBundleError: null,
@@ -89,5 +90,44 @@ describe('useSidebarStore left sidebar pin preference', () => {
 
     expect(window.localStorage.getItem('termdock-left-sidebar-pinned')).toBe('1');
     expect(readLeftPinnedPreference()).toBe(true);
+  });
+});
+
+describe('useSidebarStore file watch epoch', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  it('bumps the global epoch on rescan-required', () => {
+    useSidebarStore.getState().setRootPath('/workspace/a');
+    useSidebarStore.getState().selectFile('/workspace/a/notes.md');
+
+    useSidebarStore.getState().applyFileWatchEvents([{ type: 'rescan-required', path: '/workspace/a' }]);
+
+    const state = useSidebarStore.getState();
+    expect(state.fileWatchEpoch).toBe(1);
+    // Selected file keeps its per-path bump for path-only subscribers.
+    expect(state.fileChangeVersions.get('/workspace/a/notes.md')).toBe(1);
+  });
+
+  it('bumpFileWatchEpoch increments monotonically', () => {
+    useSidebarStore.getState().bumpFileWatchEpoch();
+    useSidebarStore.getState().bumpFileWatchEpoch();
+
+    expect(useSidebarStore.getState().fileWatchEpoch).toBe(2);
+  });
+
+  it('does not touch the epoch for regular updated events', () => {
+    useSidebarStore.getState().applyFileWatchEvents([{ type: 'updated', path: '/workspace/a/img.png' }]);
+
+    const state = useSidebarStore.getState();
+    expect(state.fileWatchEpoch).toBe(0);
+    expect(state.fileChangeVersions.get('/workspace/a/img.png')).toBe(1);
   });
 });

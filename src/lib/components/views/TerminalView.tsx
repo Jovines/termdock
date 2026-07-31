@@ -397,7 +397,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     streamReady: isStreamReady,
   });
 
+  // Latest logical focus, kept in a ref so the WS 'connected' handler can
+  // re-assert it after reconnects without a stale closure.
+  const logicalFocusRef = React.useRef(logicalFocus);
+
   React.useEffect(() => {
+    logicalFocusRef.current = logicalFocus;
     reportLogicalFocus(logicalFocus, 'logical-focus-change');
   }, [logicalFocus, reportLogicalFocus, terminalSessionId]);
 
@@ -694,6 +699,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
                 // 标记 WS 已就绪：编排器从这一刻起才允许 push resize 给服务端。
                 setIsStreamReady(true);
+                // 重连后重新声明当前焦点：服务端靠它决定是否跳过该客户端的
+                // 推送（reportLogicalFocus 的 ref 去重会吞掉未变化的焦点值）。
+                if (terminalIdRef.current) {
+                  sendTerminalFocusState(terminalIdRef.current, logicalFocusRef.current, 'stream-connected');
+                }
                 // 之前没有这个 gate，reload 时 ResizeObserver 在 ensureSession
                 // 跑完前就拿 OLD terminalId POST 出去，server 直接 404 + WS 4001
                 // 触发 auto-recreate，必须完全重连才能用。

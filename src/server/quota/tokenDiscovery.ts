@@ -162,8 +162,33 @@ export function discoverCodexTokens(): DiscoveredToken[] {
 
 // ── Kimi ─────────────────────────────────────────────────────────────
 
+/** Kimi Code CLI stores OAuth device-code credentials here (`kimi login`). */
+function discoverKimiFromCredentials(): DiscoveredToken[] {
+  const credPath = path.join(HOME, '.kimi-code', 'credentials', 'kimi-code.json');
+  try {
+    const raw = fs.readFileSync(credPath, 'utf-8');
+    const cred = JSON.parse(raw);
+    if (typeof cred.access_token !== 'string' || !cred.access_token.trim()) {
+      return [];
+    }
+    // expires_at: epoch seconds (or ms on some versions); expired → skip so
+    // the env/opencode fallbacks still get a chance.
+    const exp = Number(cred.expires_at);
+    if (Number.isFinite(exp) && exp > 0) {
+      const expMs = exp > 1e12 ? exp : exp * 1000;
+      if (Date.now() >= expMs) return [];
+    }
+    return [{ token: cred.access_token.trim(), source: 'kimi-code credentials' }];
+  } catch {
+    return [];
+  }
+}
+
 export function discoverKimiTokens(): DiscoveredToken[] {
   const results: DiscoveredToken[] = [];
+
+  // Priority: kimi-code OAuth credentials > env > legacy config > OpenCode auth
+  results.push(...discoverKimiFromCredentials());
 
   // Check KIMI_API_KEY env
   const envKey = process.env.KIMI_API_KEY;

@@ -21,7 +21,7 @@ import { execFile } from 'node:child_process';
 import { agentBySlug, isPluginAgent } from './registry.js';
 import { loadPlugins, resolveHookTarget, type PluginHookEvent } from './plugins.js';
 
-export type HookAgentSlug = 'claude' | 'codex' | 'copilot' | 'opencode' | 'pi' | 'grok';
+export type HookAgentSlug = 'claude' | 'codex' | 'copilot' | 'opencode' | 'pi' | 'grok' | 'kimi';
 
 export type HooksState = 'not-installed' | 'installed' | 'outdated';
 
@@ -39,7 +39,7 @@ export interface HookAgentInfo {
   iconVersion: number | null;
 }
 
-export const HOOK_AGENTS: HookAgentSlug[] = ['claude', 'codex', 'copilot', 'opencode', 'pi', 'grok'];
+export const HOOK_AGENTS: HookAgentSlug[] = ['claude', 'codex', 'copilot', 'opencode', 'pi', 'grok', 'kimi'];
 
 const DISPLAY_NAMES: Record<HookAgentSlug, string> = {
   claude: 'Claude Code',
@@ -48,6 +48,7 @@ const DISPLAY_NAMES: Record<HookAgentSlug, string> = {
   opencode: 'OpenCode',
   pi: 'Pi',
   grok: 'Grok Build',
+  kimi: 'Kimi Code',
 };
 
 // ---------------------------------------------------------------------------
@@ -83,6 +84,7 @@ function targetPath(agent: HookAgentSlug): string {
     case 'opencode': return path.join(xdgConfigDir(), 'opencode', 'plugins', OWNED_FILE_STEM_JS);
     case 'pi': return path.join(homeDir(), '.pi', 'agent', 'extensions', 'termdock', 'index.ts');
     case 'grok': return path.join(homeDir(), '.grok', 'hooks', OWNED_FILE_STEM_JSON);
+    case 'kimi': return path.join(homeDir(), '.kimi-code', 'config.toml');
   }
 }
 
@@ -159,6 +161,31 @@ const CODEX_HOOK_EVENTS: Array<[string, string]> = [
   ['UserPromptSubmit', 'prompt-submit'],
   ['Stop', 'stop'],
 ];
+
+/**
+ * Kimi Code's hook events (~/.kimi-code/config.toml `[[hooks]]` entries, TOML).
+ * `PermissionRequest` is the genuine block (fires right before the approval
+ * wait); `PostToolUse` is the way *back* — Kimi has a `PermissionResult`
+ * event, but the approved tool completing is the same recovery edge Claude
+ * uses, and it keeps the state machine on the shared vocabulary. `Stop` does
+ * NOT fire when the user interrupts (Esc) or the turn errors — Kimi sends
+ * `Interrupt` / `StopFailure` instead, so both fold onto `stop` to keep the
+ * pane from sticking in working.
+ */
+export const KIMI_HOOK_EVENTS: Array<[string, string]> = [
+  ['SessionStart', 'session-start'],
+  ['UserPromptSubmit', 'prompt-submit'],
+  ['PermissionRequest', 'permission-request'],
+  ['PostToolUse', 'tool-complete'],
+  ['Stop', 'stop'],
+  ['StopFailure', 'stop'],
+  ['Interrupt', 'stop'],
+  ['SessionEnd', 'session-end'],
+];
+
+/** Seconds Kimi gives one termdock hook before killing it (its default is
+ *  30s; ours writes a few bytes). */
+const KIMI_HOOK_TIMEOUT_SECS = 5;
 
 /**
  * Grok Build's hook events — Claude Code's vocabulary (grok mirrors it
@@ -503,6 +530,116 @@ function ownedFileUninstall(file: string, mark: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// TOML hooks installer (Kimi Code): kimi keeps hooks in `[[hooks]]` array-of-
+// tables inside ~/.kimi-code/config.toml — free-form TOML we must NOT rewrite
+// wholesale (comments, ordering, other tables are the user's). So instead of
+// parsing, the file is treated as a sequence of *sections* (a `[table]` /
+// `[[array]]` header line plus the lines up to the next header); termdock
+// owns exactly the sections whose command carries the marker, appends fresh
+// `[[hooks]]` blocks at the end of the file, and never touches the rest.
+// ---------------------------------------------------------------------------
+
+/** Split TOML text into sections: everything before the first header is one
+ *  (preamble) section; each later section starts at its header line.
+ *  `sections.join('\n')` reproduces the input byte-for-byte. */
+function splitTomlSections(text: string): string[] {
+  const lines = text.split('\n');
+  const sections: string[] = [];
+  let current: string[] = [];
+  for (const line of lines) {
+    if (/^\s*\[/.test(line) && current.length > 0) {
+      sections.push(current.join('\n'));
+      current = [];
+    }
+    current.push(line);
+  }
+  sections.push(current.join('\n'));
+  return sections;
+}
+
+/** The `event = "…"` value of a `[[hooks]]` section, if it declares one. */
+function tomlSectionEvent(section: string): string | null {
+  const m = section.match(/^\s*event\s*=\s*"([^"]+)"\s*(?:#.*)?$/m);
+  return m ? m[1] : null;
+}
+
+/** The `command = '…'` value of a `[[hooks]]` section (literal-string form —
+ *  the only form termdock writes; the command embeds double quotes). */
+function tomlSectionCommand(section: string): string | null {
+  const m = section.match(/^\s*command\s*=\s*'(.*)'\s*(?:#.*)?$/m);
+  return m ? m[1] : null;
+}
+
+/** One `[[hooks]]` block as termdock writes it. Kimi allows exactly the
+ *  fields event/matcher/command/timeout. */
+function tomlHookBlock(hookEvent: string, command: string): string {
+  return `[[hooks]]\nevent = "${hookEvent}"\ncommand = '${command}'\ntimeout = ${KIMI_HOOK_TIMEOUT_SECS}`;
+}
+
+function readTextFile(file: string): string | null {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+// Exported for tests — the public entry points are hooksState/installHooks/
+// uninstallHooks; these take an explicit file path so tests can use tmp files.
+export function tomlHooksState(file: string, agent: HookAgentSlug, events: Array<[string, string]>): HooksState {
+  const text = readTextFile(file);
+  if (text === null) return 'not-installed';
+  const mark = marker(agent);
+  const ours = splitTomlSections(text).filter((s) => s.includes(mark));
+  if (ours.length === 0) return 'not-installed';
+  for (const [hookEvent, sentinel] of events) {
+    const expected = hookCommand(agent, sentinel);
+    const ok = ours.some(
+      (s) => tomlSectionEvent(s) === hookEvent && tomlSectionCommand(s) === expected,
+    );
+    if (!ok) return 'outdated';
+  }
+  return 'installed';
+}
+
+/** Merge termdock's `[[hooks]]` blocks into config.toml, preserving
+ *  everything else (including the user's own hooks) byte-for-byte. */
+export function tomlHooksInstall(file: string, agent: HookAgentSlug, events: Array<[string, string]>): void {
+  const text = readTextFile(file) ?? '';
+  const mark = marker(agent);
+  // Drop any previous termdock blocks (stale exe path / older event set)…
+  const kept = splitTomlSections(text).filter((s) => !s.includes(mark));
+  let out = kept.join('\n');
+  // …then append the fresh set at the end of the file, where new
+  // `[[hooks]]` tables can never swallow the user's trailing keys.
+  if (out.length > 0 && !out.endsWith('\n')) out += '\n';
+  if (out.trim().length > 0) out += '\n';
+  out += events
+    .map(([hookEvent, sentinel]) => tomlHookBlock(hookEvent, hookCommand(agent, sentinel)))
+    .join('\n\n');
+  out += '\n';
+  writeAtomic(file, out);
+}
+
+/** Remove every termdock `[[hooks]]` block, leaving the rest of the file
+ *  (user hooks included) untouched. */
+export function tomlHooksUninstall(file: string, agent: HookAgentSlug): string {
+  const text = readTextFile(file);
+  if (text === null) return 'Nothing installed; nothing to remove';
+  const mark = marker(agent);
+  const sections = splitTomlSections(text);
+  const removed = sections.filter((s) => s.includes(mark)).length;
+  if (removed === 0) return 'No termdock hooks found; nothing to remove';
+  const out = sections
+    .filter((s) => !s.includes(mark))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\n+$/, '\n');
+  writeAtomic(file, out);
+  return 'Removed';
+}
+
+// ---------------------------------------------------------------------------
 // Public API — built-in agents
 // ---------------------------------------------------------------------------
 
@@ -510,6 +647,7 @@ export function hooksState(agent: HookAgentSlug): HooksState {
   const file = targetPath(agent);
   if (agent === 'claude') return hookMapState(file, agent, CLAUDE_HOOK_EVENTS);
   if (agent === 'codex') return hookMapState(file, agent, CODEX_HOOK_EVENTS);
+  if (agent === 'kimi') return tomlHooksState(file, agent, KIMI_HOOK_EVENTS);
   const expected = ownedFileContent(agent);
   if (expected === null) return 'not-installed';
   return ownedFileState(file, expected, marker(agent));
@@ -553,6 +691,13 @@ export async function installHooks(agent: HookAgentSlug): Promise<InstallResult>
       };
     }
   }
+  if (agent === 'kimi') {
+    tomlHooksInstall(file, agent, KIMI_HOOK_EVENTS);
+    return {
+      summary: 'Installed — run /reload in any open Kimi session (or restart it) for hooks to take effect',
+      devMode,
+    };
+  }
   const content = ownedFileContent(agent);
   if (content === null) throw new Error(`no owned-file integration for ${agent}`);
   ownedFileInstall(file, content, marker(agent));
@@ -563,6 +708,9 @@ export async function uninstallHooks(agent: HookAgentSlug): Promise<string> {
   const file = targetPath(agent);
   if (agent === 'claude' || agent === 'codex') {
     return hookMapUninstall(file, agent);
+  }
+  if (agent === 'kimi') {
+    return tomlHooksUninstall(file, agent);
   }
   return ownedFileUninstall(file, marker(agent));
 }

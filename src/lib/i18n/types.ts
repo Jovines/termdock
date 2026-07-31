@@ -59,8 +59,6 @@ export type TranslationDictionary = {
     settings: string;
     filterSessions: string;
     clearSearch: string;
-    sortRecent: string;
-    sortRecentTitle: string;
     groupByFolder: string;
     groupByFolderTitle: string;
     ungrouped: string;
@@ -167,6 +165,9 @@ export type TranslationDictionary = {
     contextDraftInsertAndSend: string;
     contextDraftInserted: string;
     contextDraftSent: string;
+    contextDraftSend: string;
+    contextDraftAppended: string;
+    contextDraftResize: string;
     contextDraftCharacterCount: (params: TranslatorParams) => string;
     selectFilePrompt: string;
     backToFileList: string;
@@ -417,9 +418,13 @@ export type TranslationDictionary = {
     notificationsEvents: string;
     notificationsAiFinished: string;
     notificationsAiFinishedHint: string;
+    notificationsSessionExited: string;
+    notificationsSessionExitedHint: string;
     notificationsFutureHint: string;
     notificationsOffSummary: string;
     notificationsAiOnSummary: string;
+    notificationsExitOnSummary: string;
+    notificationsBothOnSummary: string;
     notificationsNoEventsSummary: string;
     notificationsDenied: string;
     notificationsUnsupported: string;

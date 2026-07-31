@@ -60,6 +60,7 @@ const AGENTS: AgentInfo[] = [
   { slug: 'antigravity', displayName: 'Antigravity', aliases: ['agy', 'antigravity'],     accentColor: '#2563EB', icon: null },
   { slug: 'grok',        displayName: 'Grok',        aliases: ['grok'],                   accentColor: '#000000', icon: 'grok' },
   { slug: 'qwen',        displayName: 'Qwen Code',   aliases: ['qwen', 'qwen-code'],      accentColor: '#7C3AED', icon: null },
+  { slug: 'kimi',        displayName: 'Kimi Code',   aliases: ['kimi', 'kimi-code'],      accentColor: '#000000', icon: 'kimi' },
 ];
 
 const BY_ALIAS = new Map<string, AgentInfo>();
@@ -188,6 +189,7 @@ function resumeCommandFor(agent: AgentInfo, sessionId: string, flags: string[]):
     case 'cursor':  return `cursor-agent${f} --resume ${sessionId}`;
     case 'copilot': return `copilot${f} --resume ${sessionId}`;
     case 'grok':    return `grok${f} --resume ${sessionId}`;
+    case 'kimi':    return `kimi${f} --session ${sessionId}`;
     default:        return null;
   }
 }
@@ -202,6 +204,7 @@ const STALE_SESSION_FLAGS: Partial<Record<AgentSlug, string[]>> = {
   codex:   ['--last'],
   grok:    ['--resume', '-r', '--load', '--continue', '-c', '--session-id', '-s',
             '--fork-session', '--worktree', '-w', '--worktree-ref', '--ref'],
+  kimi:    ['--session', '-S', '--continue', '-c'],
 };
 
 /**

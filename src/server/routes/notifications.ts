@@ -28,6 +28,7 @@ router.get('/status', (req, res) => {
         endpoint: subscription.endpoint,
         expirationTime: subscription.expirationTime,
         aiEnabled: subscription.aiEnabled,
+        exitEnabled: subscription.exitEnabled,
         alertStyle: subscription.alertStyle,
         locale: subscription.locale,
         updatedAt: subscription.updatedAt,
@@ -38,7 +39,7 @@ router.get('/status', (req, res) => {
 
 router.post('/subscribe', (req, res) => {
   const clientId = clientIdFromRequest(req);
-  const { subscription, aiEnabled, alertStyle, locale } = req.body ?? {};
+  const { subscription, aiEnabled, exitEnabled, alertStyle, locale } = req.body ?? {};
   if (
     !clientId
     || typeof subscription?.endpoint !== 'string'
@@ -63,6 +64,7 @@ router.post('/subscribe', (req, res) => {
       auth: subscription.keys.auth,
     },
     aiEnabled: aiEnabled !== false,
+    exitEnabled: exitEnabled === true,
     alertStyle,
     locale: typeof locale === 'string' ? locale.slice(0, 32) : 'zh-CN',
   });
@@ -70,13 +72,19 @@ router.post('/subscribe', (req, res) => {
 });
 
 router.post('/preferences', (req, res) => {
-  const { aiEnabled, alertStyle, locale } = req.body ?? {};
-  if (typeof aiEnabled !== 'boolean' || !validAlertStyle(alertStyle)) {
+  const { aiEnabled, exitEnabled, alertStyle, locale } = req.body ?? {};
+  if (
+    typeof aiEnabled !== 'boolean'
+    || (exitEnabled !== undefined && typeof exitEnabled !== 'boolean')
+    || !validAlertStyle(alertStyle)
+  ) {
     res.status(400).json({ error: 'Invalid notification preferences' });
     return;
   }
   const updated = updatePushPreferences(clientIdFromRequest(req), {
     aiEnabled,
+    // Optional so stale cached clients don't wipe the newer toggle.
+    ...(typeof exitEnabled === 'boolean' ? { exitEnabled } : {}),
     alertStyle,
     locale: typeof locale === 'string' ? locale.slice(0, 32) : 'zh-CN',
   });

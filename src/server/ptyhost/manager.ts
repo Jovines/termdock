@@ -31,6 +31,16 @@ import {
 const HOST_STARTUP_TIMEOUT_MS = 5_000;
 const HOST_STARTUP_POLL_MS = 50;
 const RECONNECT_DELAY_MS = 500;
+/** connect + helloAck 的总等待上限。host 活着但 wedge（内核 backlog 收下
+ * 连接、事件循环不回包）时，没有这个上限 promise 会永不 settle——且
+ * ensureConnected 的 connecting 锁存器会让之后所有调用挂在同一个
+ * promise 上，表现为"一次卡住、之后全部卡住"。 */
+const CONNECT_HANDSHAKE_TIMEOUT_MS = 4_000;
+/** spawn 发出后等 host 回 spawned 的上限。 */
+const SPAWN_RESPONSE_TIMEOUT_MS = 10_000;
+/** 心跳：连续 HEARTBEAT_MISS_LIMIT 个间隔没有 pong 判定 host wedge。 */
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const HEARTBEAT_MISS_LIMIT = 2;
 
 function hostSocketDir(): string {
   return path.join(os.homedir(), '.termdock', 'pty-hosts');
@@ -174,6 +184,9 @@ export class PtyHostManager {
     reject: (error: Error) => void;
   }>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private lastPongAt = 0;
+  private killingWedgedHost: Promise<void> | null = null;
   private stopped = false;
 
   /** Resolve when the host is connected + handshaken; returns live channels. */
@@ -188,12 +201,18 @@ export class PtyHostManager {
     try {
       return await this.connectOnce();
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT'
-        && (error as NodeJS.ErrnoException).code !== 'ECONNREFUSED') {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ECONNREFUSED') {
+        this.spawnHostDaemon();
+      } else if (code === 'PTY_HOST_HANDSHAKE_TIMEOUT') {
+        // host 活着但 wedge（accept 连接不回 helloAck）：杀掉再重生。
+        console.warn('[pty-host] handshake timed out — replacing wedged host:', ptyHostSocketPath());
+        await this.killWedgedHost();
+        this.spawnHostDaemon();
+      } else {
         throw error;
       }
     }
-    this.spawnHostDaemon();
     const deadline = Date.now() + HOST_STARTUP_TIMEOUT_MS;
     let lastError: unknown = null;
     while (Date.now() < deadline) {
@@ -205,6 +224,54 @@ export class PtyHostManager {
       }
     }
     throw new Error(`pty-host did not start listening in time: ${(lastError as Error)?.message ?? lastError}`);
+  }
+
+  /** 杀掉 wedge 的 host（SIGTERM → 1s 后 SIGKILL）并清理 socket/pid 文件。
+   * 等旧 host 确实死了才返回——否则旧 host 的 SIGTERM shutdown 可能删掉
+   * 新 host 刚 bind 的 socket 文件。并发调用共享同一次 kill。 */
+  private killWedgedHost(): Promise<void> {
+    if (!this.killingWedgedHost) {
+      this.killingWedgedHost = this.doKillWedgedHost().finally(() => {
+        this.killingWedgedHost = null;
+      });
+    }
+    return this.killingWedgedHost;
+  }
+
+  private async doKillWedgedHost(): Promise<void> {
+    const sockPath = ptyHostSocketPath();
+    const pidPath = `${sockPath}.pid`;
+    let pid: number | null = null;
+    try {
+      const parsed = Number(fs.readFileSync(pidPath, 'utf8').trim());
+      if (Number.isInteger(parsed) && parsed > 1) pid = parsed;
+    } catch { /* 无 pid 文件（host 早于该特性）——只能放弃精准击杀 */ }
+
+    if (pid) {
+      const alive = () => {
+        try {
+          process.kill(pid!, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      console.warn(`[pty-host] killing wedged host (pid ${pid})`);
+      try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+      let deadline = Date.now() + 1_000;
+      while (alive() && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (alive()) {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+        deadline = Date.now() + 1_000;
+        while (alive() && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+    }
+    try { fs.unlinkSync(sockPath); } catch { /* gone */ }
+    try { fs.unlinkSync(pidPath); } catch { /* gone */ }
   }
 
   private spawnHostDaemon(): void {
@@ -224,7 +291,14 @@ export class PtyHostManager {
   private connectOnce(): Promise<HostChannelMeta[]> {
     return new Promise((resolvePromise, rejectPromise) => {
       const conn = net.createConnection(ptyHostSocketPath());
+      const timer = setTimeout(() => {
+        const error = new Error('pty-host handshake timed out') as NodeJS.ErrnoException;
+        error.code = 'PTY_HOST_HANDSHAKE_TIMEOUT';
+        conn.destroy();
+        rejectPromise(error);
+      }, CONNECT_HANDSHAKE_TIMEOUT_MS);
       const onError = (error: Error) => {
+        clearTimeout(timer);
         conn.destroy();
         rejectPromise(error);
       };
@@ -232,10 +306,42 @@ export class PtyHostManager {
       conn.once('connect', () => {
         conn.removeListener('error', onError);
         this.attachConnection(conn);
-        this.helloResolve = resolvePromise;
+        this.helloResolve = (channels) => {
+          clearTimeout(timer);
+          // handleDisconnect 会用 [] 兜底调用这里——连接已死时不开心跳。
+          if (this.conn === conn && !conn.destroyed) this.startHeartbeat();
+          resolvePromise(channels);
+        };
         conn.write(encodeControl({ op: 'hello', v: PTY_HOST_PROTOCOL_VERSION }));
       });
     });
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.lastPongAt = Date.now();
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.conn || this.conn.destroyed) {
+        this.stopHeartbeat();
+        return;
+      }
+      if (Date.now() - this.lastPongAt > HEARTBEAT_INTERVAL_MS * HEARTBEAT_MISS_LIMIT) {
+        // host 事件循环 wedge：杀旧 host（新 host 由重连路径 respawn）。
+        console.warn('[pty-host] heartbeat missed — host appears wedged, replacing it:', ptyHostSocketPath());
+        this.stopHeartbeat();
+        this.conn.destroy();
+        void this.killWedgedHost();
+        return;
+      }
+      this.send({ op: 'ping', t: Date.now() });
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 
   private attachConnection(conn: net.Socket): void {
@@ -294,6 +400,9 @@ export class PtyHostManager {
       case 'replayEnd':
         this.clients.get(control.id)?.handleReplayEnd(control.offset);
         return;
+      case 'pong':
+        this.lastPongAt = Date.now();
+        return;
       case 'exit': {
         const client = this.clients.get(control.id);
         if (client) {
@@ -307,6 +416,7 @@ export class PtyHostManager {
   }
 
   private handleDisconnect(): void {
+    this.stopHeartbeat();
     this.helloResolve?.([]);
     this.helloResolve = null;
     for (const pending of this.pendingSpawns.values()) {
@@ -365,8 +475,24 @@ export class PtyHostManager {
     await this.ensureConnected();
     const client = new PtyHostClient(this, id);
     this.clients.set(id, client);
+    let spawnTimer: ReturnType<typeof setTimeout> | null = null;
     const spawned = new Promise<{ pid: number | undefined; offset: number }>((resolvePromise, rejectPromise) => {
-      this.pendingSpawns.set(id, { resolve: resolvePromise, reject: rejectPromise });
+      // host wedge 时 spawned 永远不会来——必须有超时，否则这里永挂。
+      spawnTimer = setTimeout(() => {
+        const error = new Error('pty-host spawn timed out') as NodeJS.ErrnoException;
+        error.code = 'PTY_HOST_SPAWN_TIMEOUT';
+        rejectPromise(error);
+      }, SPAWN_RESPONSE_TIMEOUT_MS);
+      this.pendingSpawns.set(id, {
+        resolve: (result) => {
+          if (spawnTimer) clearTimeout(spawnTimer);
+          resolvePromise(result);
+        },
+        reject: (error) => {
+          if (spawnTimer) clearTimeout(spawnTimer);
+          rejectPromise(error);
+        },
+      });
     });
     this.send({ op: 'spawn', id, spec });
     try {
@@ -379,6 +505,12 @@ export class PtyHostManager {
       return client;
     } catch (error) {
       this.clients.delete(id);
+      this.pendingSpawns.delete(id);
+      // spawn 超时 ≈ host wedge：断连触发 handleDisconnect 的自愈重连。
+      if ((error as NodeJS.ErrnoException).code === 'PTY_HOST_SPAWN_TIMEOUT') {
+        console.warn('[pty-host] spawn timed out — host may be wedged, dropping connection:', ptyHostSocketPath());
+        this.conn?.destroy();
+      }
       throw error;
     }
   }

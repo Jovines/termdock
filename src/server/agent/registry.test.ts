@@ -48,10 +48,20 @@ describe('detectAgentFromArgv', () => {
       ['/usr/local/bin/qwen', 'qwen'],
       ['pi', 'pi'],
       ['hermes', 'hermes'],
+      ['kimi', 'kimi'],
     ];
     for (const [cmd, slug] of cases) {
       expect(detectAgentFromArgv([cmd])?.slug).toBe(slug);
     }
+  });
+
+  it('detects kimi through interpreter wrappers', () => {
+    expect(
+      detectAgentFromArgv(['node', '/home/x/.npm-global/lib/node_modules/@moonshotai/kimi-code/cli.js'])?.slug,
+    ).toBe('kimi');
+    expect(detectAgentFromCommand('kimi --plan')?.slug).toBe('kimi');
+    // Plain text mentioning the name is not a launch
+    expect(detectAgentFromArgv(['cat', 'kimi-notes.md'])).toBeNull();
   });
 
   it('applies custom wrapper rules to the launcher only', () => {
@@ -143,5 +153,19 @@ describe('buildResumeCommand', () => {
       .toBe('grok --resume g-2');
     expect(buildResumeCommand(grok, 'g-3', ['grok', '-w', '--worktree-ref', 'main', '--yolo']))
       .toBe('grok --yolo --resume g-3');
+  });
+
+  it('resumes kimi sessions via --session', () => {
+    const kimi = agentBySlug('kimi')!;
+    expect(buildResumeCommand(kimi, 'session_abc-123', null))
+      .toBe('kimi --session session_abc-123');
+    // Launch flags carry over
+    expect(buildResumeCommand(kimi, 's-2', ['kimi', '--yolo']))
+      .toBe('kimi --yolo --session s-2');
+    // Stale session-targeting flags are stripped — the new id must win
+    expect(buildResumeCommand(kimi, 's-3', ['kimi', '-S', 's-2', '--yolo']))
+      .toBe('kimi --yolo --session s-3');
+    expect(buildResumeCommand(kimi, 's-4', ['kimi', '--continue']))
+      .toBe('kimi --session s-4');
   });
 });

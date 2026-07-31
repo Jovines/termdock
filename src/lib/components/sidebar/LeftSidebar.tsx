@@ -9,7 +9,6 @@ import {
   FolderTree as RiFolderTreeLine,
   ChevronRight as RiChevronRightLine,
   Bell as RiBellLine,
-  ArrowDownWideNarrow as RiSortDescLine,
   Pin as RiPushpinLine,
   PinOff as RiPinOffLine,
   Columns2 as RiSplitLine,
@@ -20,7 +19,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport } from '../../terminal/types';
-import { getActivityReorderEnabled, setActivityReorderEnabled } from '../../terminal/api';
 import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, reorderSessionsWithinGroup, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
 import { getCachedShellTitle, getCachedAgentIdentity } from '../../stores/useTerminalStore';
 import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndicators';
@@ -116,9 +114,6 @@ export function LeftSidebar(
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [confirmNewMode, setConfirmNewMode] = useState<'shell' | 'tmux' | null>(null);
-  const [autoSortByActivity, setAutoSortByActivity] = useState(false);
-  const [activitySortLoading, setActivitySortLoading] = useState(true);
-  const [activitySortError, setActivitySortError] = useState(false);
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
@@ -129,33 +124,10 @@ export function LeftSidebar(
   // 用 ref 而非 state：变更不需要触发重渲染，store 自身的 collapsedGroups 才是真相。
   const autoExpandedGroupKeysRef = useRef<Set<string>>(new Set());
   const prevAutoManagedGroupKeyRef = useRef<string | null>(null);
-  const initialGroupByFolderRef = useRef(groupByFolder);
   const trimmedQuery = query.trim();
   const isFiltering = trimmedQuery.length > 0;
-  // 分组模式下禁用拖拽（与搜索 / 自动排序一致）。
-  // 启动时从服务端拉取活动排序开关状态。旧版本可能同时保存了分组和自动排序，
-  // 迁移时优先保留用户本地可见的分组模式，并同步关闭服务端自动排序。
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        let enabled = await getActivityReorderEnabled();
-        if (enabled && initialGroupByFolderRef.current) {
-          enabled = await setActivityReorderEnabled(false);
-        }
-        if (!cancelled) setAutoSortByActivity(enabled);
-      } catch {
-        if (!cancelled) setActivitySortError(true);
-      } finally {
-        if (!cancelled) setActivitySortLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const dragDisabled = isFiltering || groupByFolder || autoSortByActivity || activitySortLoading;
+  // 分组模式下禁用拖拽（与搜索一致）。
+  const dragDisabled = isFiltering || groupByFolder;
 
 
   const visibleSessions = useMemo(() => {
@@ -264,52 +236,9 @@ export function LeftSidebar(
   }, [dragDisabled, onReorderSessions, sessions]);
 
 
-  // 自动排序与文件夹分组是两种互斥的组织方式。切换时先立即更新界面，
-  // 保存失败则完整回滚，避免 UI 和服务端状态悄悄分叉。
-  const handleToggleAutoSortByActivity = useCallback(async () => {
-    if (activitySortLoading) return;
-    const next = !autoSortByActivity;
-    const wasGrouped = groupByFolder;
-    setActivitySortLoading(true);
-    setActivitySortError(false);
-    setAutoSortByActivity(next);
-    if (next && wasGrouped) {
-      useSidebarStore.getState().toggleGroupByFolder();
-    }
-    try {
-      const saved = await setActivityReorderEnabled(next);
-      setAutoSortByActivity(saved);
-    } catch {
-      setAutoSortByActivity(autoSortByActivity);
-      if (next && wasGrouped) {
-        useSidebarStore.getState().toggleGroupByFolder();
-      }
-      setActivitySortError(true);
-    } finally {
-      setActivitySortLoading(false);
-    }
-  }, [activitySortLoading, autoSortByActivity, groupByFolder]);
-
-  const handleToggleGroupByFolder = useCallback(async () => {
-    if (activitySortLoading) return;
-    const enabling = !groupByFolder;
+  const handleToggleGroupByFolder = useCallback(() => {
     useSidebarStore.getState().toggleGroupByFolder();
-    if (!enabling || !autoSortByActivity) return;
-
-    setActivitySortLoading(true);
-    setActivitySortError(false);
-    setAutoSortByActivity(false);
-    try {
-      const saved = await setActivityReorderEnabled(false);
-      setAutoSortByActivity(saved);
-    } catch {
-      setAutoSortByActivity(true);
-      useSidebarStore.getState().toggleGroupByFolder();
-      setActivitySortError(true);
-    } finally {
-      setActivitySortLoading(false);
-    }
-  }, [activitySortLoading, autoSortByActivity, groupByFolder]);
+  }, []);
 
   // 会话行主体（切换按钮 + 关闭按钮），flat / 分组两种布局共用。
   // dragHandleProps 仅在可拖拽的 flat 模式传入。
@@ -646,34 +575,12 @@ export function LeftSidebar(
         <div className="mt-2 flex items-center gap-1.5">
           <button
             type="button"
-            onClick={() => void handleToggleAutoSortByActivity()}
-            disabled={activitySortLoading}
-            className={`flex min-w-0 flex-1 items-center gap-2 rounded-full px-2.5 py-1.5 text-left text-[11px] transition active:scale-[0.99] ${
-              autoSortByActivity
-                ? 'bg-primary/15 text-primary'
-                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-            } disabled:cursor-wait disabled:opacity-70`}
-            aria-pressed={autoSortByActivity}
-            aria-label={t('sidebar.sortRecent')}
-            title={t('sidebar.sortRecentTitle')}
-          >
-            {activitySortLoading
-              ? <RiLoaderCircle size={12} className="shrink-0 animate-spin" />
-              : <RiSortDescLine size={12} className="shrink-0" />}
-            <span className="min-w-0 flex-1 truncate">{t('sidebar.sortRecent')}</span>
-            <span className={`relative h-4 w-7 shrink-0 rounded-full transition ${autoSortByActivity ? 'bg-primary' : 'bg-muted-foreground/25'}`}>
-              <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-[var(--background)] shadow transition ${autoSortByActivity ? 'left-3.5' : 'left-0.5'}`} />
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleToggleGroupByFolder()}
-            disabled={activitySortLoading}
+            onClick={handleToggleGroupByFolder}
             className={`inline-flex h-8 w-9 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
               groupByFolder
                 ? 'bg-primary/15 text-primary'
                 : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-            } disabled:cursor-wait disabled:opacity-70`}
+            }`}
             aria-pressed={groupByFolder}
             aria-label={t('sidebar.groupByFolder')}
             title={t('sidebar.groupByFolderTitle')}
@@ -681,16 +588,6 @@ export function LeftSidebar(
             <RiFolderTreeLine size={14} />
           </button>
         </div>
-        {activitySortError && (
-          <button
-            type="button"
-            onClick={() => setActivitySortError(false)}
-            title={t('common.retry')}
-            className="mt-1.5 w-full px-1 text-left text-[10.5px] text-[color:var(--destructive)]"
-          >
-            {t('common.error')} · {t('common.retry')}
-          </button>
-        )}
       </div>
 
       {/* Session list */}

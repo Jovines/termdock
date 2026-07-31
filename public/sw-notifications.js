@@ -1,31 +1,30 @@
 self.addEventListener('push', (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = { title: 'Termdock', body: event.data ? event.data.text() : '' };
+  }
+  const alertStyle = payload.alertStyle || 'normal';
+  const notificationOptions = {
+    body: payload.body,
+    tag: payload.tag,
+    icon: '/pwa-192x192.png',
+    badge: '/maskable-icon-512x512.png',
+    silent: alertStyle === 'quiet',
+    requireInteraction: alertStyle === 'persistent',
+    renotify: alertStyle === 'persistent' && Boolean(payload.tag),
+    data: {
+      url: payload.url || '/',
+      sessionId: payload.sessionId,
+    },
+  };
   event.waitUntil((async () => {
-    let payload = {};
-    try {
-      payload = event.data ? event.data.json() : {};
-    } catch {
-      payload = { title: 'Termdock', body: event.data ? event.data.text() : '' };
-    }
-    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    const visibleWindow = windows.find((client) => client.visibilityState === 'visible');
-    if (visibleWindow) {
-      visibleWindow.postMessage({ type: 'termdock:push-received', payload });
-      return;
-    }
-    const alertStyle = payload.alertStyle || 'normal';
-    const notificationOptions = {
-      body: payload.body,
-      tag: payload.tag,
-      icon: '/pwa-192x192.png',
-      badge: '/maskable-icon-512x512.png',
-      silent: alertStyle === 'quiet',
-      requireInteraction: alertStyle === 'persistent',
-      renotify: alertStyle === 'persistent' && Boolean(payload.tag),
-      data: {
-        url: payload.url || '/',
-        sessionId: payload.sessionId,
-      },
-    };
+    // iOS Safari treats a push that never produces a visible notification as
+    // an "invisible push" and revokes the site's permission, and it requires
+    // the notification to be posted immediately (not after async work). So
+    // the SW always shows it; open windows only get the postMessage so the
+    // app could react in place (click focus goes through notificationclick).
     try {
       await self.registration.showNotification(payload.title || 'Termdock', notificationOptions);
     } catch (error) {
@@ -41,9 +40,19 @@ self.addEventListener('push', (event) => {
         throw error;
       }
     }
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of windows) {
+      if (client.visibilityState === 'visible') {
+        client.postMessage({ type: 'termdock:push-received', payload });
+      }
+    }
     if ('setAppBadge' in self.navigator) {
-      const notifications = await self.registration.getNotifications();
-      await self.navigator.setAppBadge(notifications.length);
+      try {
+        const notifications = await self.registration.getNotifications();
+        await self.navigator.setAppBadge(notifications.length);
+      } catch {
+        // Badge accounting is best-effort (iOS lacks getNotifications).
+      }
     }
   })());
 });
@@ -69,6 +78,7 @@ self.addEventListener('pushsubscriptionchange', (event) => {
               body: JSON.stringify({
                 subscription: subscription.toJSON(),
                 aiEnabled: status.subscription?.aiEnabled !== false,
+                exitEnabled: status.subscription?.exitEnabled === true,
                 alertStyle: status.subscription?.alertStyle || 'normal',
                 locale: status.subscription?.locale || 'zh-CN',
               }),

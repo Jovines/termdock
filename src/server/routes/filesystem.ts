@@ -2751,8 +2751,10 @@ router.get('/read', async (req: Request, res: Response) => {
       const stat = await fs.promises.stat(resolvedPath);
       throwIfAborted(controller.signal, 'fs.read');
 
-      if (stat.isDirectory()) {
-        throw new Error('Path is a directory, not a file');
+      // 只允许常规文件：FIFO / unix socket / 设备文件的 open() 会永久占住
+      // 一个 libuv 线程且不可取消（线程池耗尽 = 整个服务 IO 假死）。
+      if (!stat.isFile()) {
+        throw new Error('Path is not a regular file');
       }
 
       const bytesToRead = Math.min(stat.size, MAX_FILE_SIZE);

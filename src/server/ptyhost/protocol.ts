@@ -35,6 +35,7 @@ export type ControlOp =
   | { op: 'exit'; id: string; exitCode: number; signal: number | null; offset: number }
   | { op: 'pause'; id: string }
   | { op: 'resume'; id: string }
+  | { op: 'ping'; t: number }
   | { op: 'pong'; t: number };
 
 export interface HostSpawnSpec {

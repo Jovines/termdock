@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 
+// libuv 线程池默认只有 4 个线程，慢/挂起的异步 IO（fs.promises、crypto 等）
+// 会把池耗尽，表现为整个服务的 IO 全部卡死。必须在任何异步 fs 调用之前
+// 设置（同步 fs 不占线程池，所以放在文件体顶部仍然足够早）。
+process.env.UV_THREADPOOL_SIZE ||= '16';
+
 import { config as loadDotenv } from 'dotenv';
 import os from 'os';
 import { resolve } from 'path';
@@ -2108,6 +2113,25 @@ async function ensureTmuxFocusEvents(): Promise<void> {
   });
 }
 
+// Let tmux forward modified Enter keys (Ctrl/Shift/Alt+Enter) to pane apps.
+// The option only exists in tmux >= 3.2; on older versions the probe fails
+// and we silently skip.
+async function ensureTmuxExtendedKeys(): Promise<void> {
+  try {
+    const { stdout } = await execFileAsync('tmux', ['show-options', '-gqv', 'extended-keys'], {
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+    if (stdout.trim() === 'on') return;
+    await execFileAsync('tmux', ['set-option', '-g', 'extended-keys', 'on'], {
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+  } catch {
+    // extended-keys unsupported on this tmux; nothing to do
+  }
+}
+
 async function ensureTmuxScrollbackProfile(sessionName: string): Promise<void> {
   await execFileAsync('tmux', ['set-option', '-g', 'history-limit', String(TERMDOCK_TMUX_HISTORY_LIMIT)], {
     timeout: 5000,
@@ -2259,6 +2283,7 @@ async function ensureStampedTmuxSession(
   }
 
   await ensureTmuxFocusEvents();
+  await ensureTmuxExtendedKeys();
   await ensureTmuxColorEnvironment(sessionName);
   await ensureTmuxCliSessionOptions(sessionName);
   await setTmuxOption(sessionName, '@termdock-version', TERMDOCK_VERSION);

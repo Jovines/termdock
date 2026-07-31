@@ -35,6 +35,9 @@ export interface DesktopNotificationPayload {
   tag?: string;
   sessionId?: string;
   silent?: boolean;
+  /** Persistent alert style: banners auto-dismiss on macOS, so the main
+   *  process additionally bounces the Dock icon to keep the signal alive. */
+  persistent?: boolean;
 }
 
 export interface NativeFileDropPayload {

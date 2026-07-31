@@ -1,5 +1,6 @@
 const PWA_NOTIFICATIONS_ENABLED_KEY = 'termdock-pwa-notifications-enabled';
 const PWA_AI_NOTIFICATIONS_ENABLED_KEY = 'termdock-pwa-ai-notifications-enabled';
+const PWA_EXIT_NOTIFICATIONS_ENABLED_KEY = 'termdock-pwa-exit-notifications-enabled';
 const PWA_NOTIFICATION_ALERT_STYLE_KEY = 'termdock-pwa-notification-alert-style';
 const NOTIFICATION_DEDUPE_STORAGE_PREFIX = 'termdock-notification-claim:';
 const NOTIFICATION_DEDUPE_TTL_MS = 5000;
@@ -23,6 +24,13 @@ export interface PwaNotificationPayload {
     sessionId?: string;
   };
   requireHidden?: boolean;
+  /** When set, skip the direct show if an active push subscription exists:
+   *  the server pushes the same event and the SW always shows it (iOS
+   *  requires a visible notification for every push). Showing twice for one
+   *  event duplicates the notification because the page tags it with the
+   *  frontend session id while the push uses the backend id, so tag-based
+   *  replacement never collapses the pair. */
+  deferToPush?: boolean;
   alertStyle?: PwaNotificationAlertStyle;
 }
 
@@ -115,6 +123,25 @@ export function setStoredPwaAiNotificationsEnabled(enabled: boolean): void {
   if (typeof window === 'undefined') return;
   try {
     window.localStorage.setItem(PWA_AI_NOTIFICATIONS_ENABLED_KEY, String(enabled));
+  } catch {
+    // localStorage is best-effort; the current in-memory toggle still works.
+  }
+}
+
+/** Opt-in (default off): notify when a terminal process exits on its own. */
+export function getStoredPwaExitNotificationsEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(PWA_EXIT_NOTIFICATIONS_ENABLED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function setStoredPwaExitNotificationsEnabled(enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(PWA_EXIT_NOTIFICATIONS_ENABLED_KEY, String(enabled));
   } catch {
     // localStorage is best-effort; the current in-memory toggle still works.
   }
@@ -277,14 +304,26 @@ export async function syncPwaPushSubscription(force = false, allowCreate = false
       && subscription.expirationTime - Date.now() < PUSH_RENEWAL_WINDOW_MS,
     );
     if (!subscription) {
-      // The initial subscribe must remain inside the settings-button user
-      // gesture on iOS and some Chromium builds. Rotation normally leaves a
-      // replacement subscription for us to upload without another prompt.
-      if (!allowCreate) return false;
-      subscription = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(status.publicKey),
-      });
+      // The browser-side subscription can be revoked silently (push-service
+      // expiry, site-data clearing, PWA reinstall). iOS Safari never fires
+      // pushsubscriptionchange, so without this the server keeps a dead
+      // endpoint and notifications stop forever until the user toggles the
+      // setting off and on. Permission is already granted here, so subscribe()
+      // re-creates the subscription without a prompt on most browsers.
+      // allowCreate marks the settings-toggle gesture (which iOS may still
+      // require); outside it we retry on the next sync.
+      try {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(status.publicKey),
+        });
+      } catch (error) {
+        console.warn(
+          `[PWA notifications] Push subscription missing; re-subscribe failed${allowCreate ? ' (user gesture)' : ''}:`,
+          error,
+        );
+        return false;
+      }
     }
 
     const lastSync = Number(window.localStorage.getItem(PUSH_SYNC_STORAGE_KEY) ?? '0');
@@ -295,6 +334,7 @@ export async function syncPwaPushSubscription(force = false, allowCreate = false
       const response = await notificationMutation('subscribe', {
         subscription: subscription.toJSON(),
         aiEnabled: getStoredPwaAiNotificationsEnabled(),
+        exitEnabled: getStoredPwaExitNotificationsEnabled(),
         alertStyle: getStoredPwaNotificationAlertStyle(),
         locale: navigator.language,
       });
@@ -329,10 +369,47 @@ export async function syncPwaPushPreferences(): Promise<void> {
   if (!getStoredPwaNotificationsEnabled()) return;
   const response = await notificationMutation('preferences', {
     aiEnabled: getStoredPwaAiNotificationsEnabled(),
+    exitEnabled: getStoredPwaExitNotificationsEnabled(),
     alertStyle: getStoredPwaNotificationAlertStyle(),
     locale: navigator.language,
   });
   if (response.status === 404) await syncPwaPushSubscription(true);
+}
+
+/**
+ * Zero the PWA home-screen badge. Called when the app comes back to the
+ * foreground — the user can see the sessions now, so the count is stale.
+ */
+export async function clearPwaAppBadge(): Promise<void> {
+  if (getTermdockDesktopBridge()) return;
+  try {
+    const nav = navigator as Navigator & { clearAppBadge?: () => Promise<void> };
+    if (typeof nav.clearAppBadge === 'function') await nav.clearAppBadge();
+  } catch {
+    // Badge clearing is best-effort; iOS support is patchy anyway.
+  }
+}
+
+/**
+ * Close the delivered notifications of one session (user just opened it) and
+ * re-sync the badge to whatever remains.
+ */
+export async function dismissPwaNotificationsForSession(sessionId: string): Promise<void> {
+  if (getTermdockDesktopBridge()) return;
+  try {
+    const registration = await getNotificationRegistration();
+    if (!registration || typeof registration.getNotifications !== 'function') return;
+    const tag = `agent:${sessionId}`;
+    const sessionNotifications = await registration.getNotifications({ tag });
+    for (const notification of sessionNotifications) notification.close();
+    const nav = navigator as Navigator & { setAppBadge?: (count: number) => Promise<void> };
+    if (typeof nav.setAppBadge === 'function') {
+      const remaining = await registration.getNotifications();
+      await nav.setAppBadge(remaining.length);
+    }
+  } catch {
+    // Notification cleanup is best-effort (iOS lacks getNotifications).
+  }
 }
 
 export async function showPwaNotification(payload: PwaNotificationPayload): Promise<boolean> {
@@ -348,13 +425,20 @@ export async function showPwaNotification(payload: PwaNotificationPayload): Prom
       tag: payload.tag,
       sessionId: payload.data?.sessionId,
       silent: alertStyle === 'quiet',
+      persistent: alertStyle === 'persistent',
     });
   }
   if (Notification.permission !== 'granted') return false;
   const registration = await getNotificationRegistration();
+  if (payload.deferToPush && await registration?.pushManager?.getSubscription()) {
+    // The server push path is live: the SW will show this notification.
+    // Showing it directly here as well would produce a duplicate (different
+    // tag namespaces, so replacement doesn't collapse them).
+    return true;
+  }
   // When the caller explicitly asked to bypass the focus check (requireHidden: false),
-  // also bypass the push-subscription early return — the SW forwards push messages as
-  // postMessage when a visible window exists, but the caller wants a direct notification.
+  // also bypass the push-subscription early return — the caller wants a direct
+  // notification (e.g. the settings test button, which is not server-pushed).
   if (payload.requireHidden === false) {
     // fall through to direct notification below
   } else if (await registration?.pushManager?.getSubscription()) {

@@ -1304,33 +1304,6 @@ export async function updateSettings(settings: { preventSleep?: boolean; localAc
   return response.json();
 }
 
-// ---- Activity reorder preference ----
-
-export async function getActivityReorderEnabled(): Promise<boolean> {
-  const response = await fetch('/api/terminal/settings/activity-reorder', { method: 'GET' });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to load activity sorting preference' }));
-    throw new Error(error.error || 'Failed to load activity sorting preference');
-  }
-  const data = await response.json();
-  return data.enabled !== false;
-}
-
-export async function setActivityReorderEnabled(enabled: boolean): Promise<boolean> {
-  const csrfTokenHeader = await getCsrfToken();
-  const response = await fetch('/api/terminal/settings/activity-reorder', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
-    body: JSON.stringify({ enabled }),
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to save activity sorting preference' }));
-    throw new Error(error.error || 'Failed to save activity sorting preference');
-  }
-  const data = await response.json();
-  return data.enabled === true;
-}
-
 // ---- Auth ----
 
 export interface AuthStatus {

@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
     tag?: string;
     sessionId?: string;
     silent?: boolean;
+    persistent?: boolean;
   }): Promise<boolean> => ipcRenderer.invoke('desktop:show-notification', payload),
   onNativeFileDrop: (
     callback: (payload: { sessionKey: string; paths: string[] }) => void,

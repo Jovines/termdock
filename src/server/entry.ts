@@ -28,6 +28,7 @@ import {
   validateHostMiddleware,
 } from './utils/requestSecurity.js';
 import { getCookieSecurityOptions, setSecureCookieMode } from './utils/cookieSecurity.js';
+import { requestDeadlineMiddleware } from './utils/requestDeadline.js';
 import { startOnboardingServer, stopOnboardingServer, getOnboardingServerUrl } from './onboardingServer.js';
 import { CertificateWatcher } from './certificateWatcher.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog, writeTextLog } from './utils/serverLogger.js';
@@ -41,6 +42,21 @@ import { PORT, DEFAULT_HOST } from './config.js';
 
 const CLIENT_STATE_COOKIE = 'termdock-client';
 export const DEFAULT_PORT = PORT.backend;
+
+/** Read one cookie from a raw Cookie header (upgrade requests bypass the
+ *  cookie-parser middleware). Values are percent-encoded. */
+function getCookieValue(cookieHeader: string | undefined, name: string): string | undefined {
+  if (!cookieHeader) return undefined;
+  const pattern = new RegExp(`(?:^|;\\s*)${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=([^;]*)`);
+  const match = cookieHeader.match(pattern);
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
 const CLIENT_LOG_DEDUP_WINDOW_MS = 5_000;
 const CLIENT_LOG_RATE_WINDOW_MS = 10_000;
 const CLIENT_LOG_RATE_LIMIT = 120;
@@ -347,6 +363,10 @@ export function createApp(options: AppOptions = {}): express.Express {
     next();
   });
 
+  // 全局请求兜底超时：任何 handler 挂起最多活 30s（长连接流按表豁免），
+  // 到期销毁 socket 释放浏览器连接槽。必须在所有路由与静态资源之前挂载。
+  app.use(requestDeadlineMiddleware());
+
   app.use('/api', (req, res, next) => {
     // JSON/API responses must never hit browser conditional caching. A 304 with
     // an empty body breaks fetch().json() callers and looks like random IO
@@ -596,12 +616,13 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
 
     const sessionId = match[1];
     const clientId = crypto.randomUUID();
+    const pushClientId = getCookieValue(cookieHeader, CLIENT_STATE_COOKIE);
     // 短线重连时客户端会带上 ?since=<lastSeq>，让服务端只补发增量。
     const sinceParam = url.searchParams.get('since');
     const sinceSeq = sinceParam ? Math.max(0, Number.parseInt(sinceParam, 10) || 0) : 0;
 
     wss.handleUpgrade(request, socket, head, (ws) => {
-      handleTerminalWebSocket(ws, sessionId, clientId, { sinceSeq });
+      handleTerminalWebSocket(ws, sessionId, clientId, { sinceSeq, pushClientId });
     });
   });
 

@@ -298,9 +298,14 @@ interface SidebarState {
   changedFiles: Map<string, GitChangedFile>;
 
   // 每个绝对路径的"外部变更版本号"。watcher 收到 created / updated / deleted
-  // 事件时自增对应路径的版本号，FilePreview 据此判断已加载内容是否过期，
-  // 显示提示式重新加载横条（避免外部写入风暴时直接覆盖用户视图）。
+  // 事件时自增对应路径的版本号，FilePreview / MarkdownImage 等订阅者据此
+  // 静默重新加载（文件管理器是纯查看场景，没有覆盖用户编辑的冲突顾虑）。
   fileChangeVersions: Map<string, number>;
+
+  // 全局 watch 纪元。任何「可能丢了事件」的场景都 bump 它：rescan-required
+  // 降级、watch 流断线重连、手动刷新。订阅者把 epoch 加进版本号后，这些
+  // 场景下所有已加载内容（含 md 引用图）都会刷新，而不是只有选中文件。
+  fileWatchEpoch: number;
 
   // Git bundle loading state (for right sidebar UX)
   gitBundleLoading: boolean;
@@ -339,6 +344,7 @@ interface SidebarState {
   setDirectoryCache: (path: string, entries: FileTreeNode[]) => void;
   invalidateDirectoryCache: (path: string, recursive?: boolean) => void;
   applyFileWatchEvents: (events: FileWatchEvent[]) => void;
+  bumpFileWatchEpoch: () => void;
   setChangedFiles: (files: Map<string, GitChangedFile>) => void;
   setGitBundleLoading: (loading: boolean) => void;
   setGitBundleSlow: (slow: boolean) => void;
@@ -365,6 +371,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   collapsedGroups: readCollapsedGroups(),
   changedFiles: new Map(),
   fileChangeVersions: new Map(),
+  fileWatchEpoch: 0,
   gitBundleLoading: false,
   gitBundleSlow: false,
   gitBundleError: null,
@@ -562,6 +569,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       let selectedFilePath = s.selectedFilePath;
       let changed = false;
       let versionsChanged = false;
+      let epochChanged = false;
 
       const bumpVersion = (path: string) => {
         fileChangeVersions.set(path, (fileChangeVersions.get(path) ?? 0) + 1);
@@ -576,8 +584,11 @@ export const useSidebarStore = create<SidebarState>((set) => ({
               changed = true;
             }
           }
-          // rescan 范围内的所有已知文件都视为可能变更，但我们只追踪当前
-          // 选中的文件即可，无需遍历整张表。
+          // rescan 表示该范围内可能有任意变更（事件风暴 / watcher 出错降级），
+          // 具体哪些文件变了无从得知。bump 全局 epoch，让所有把 epoch 计入
+          // 版本号的订阅者（md 引用图、lightbox、文件预览）统一刷新；选中
+          // 文件仍单独 bump 一份，兼容只按路径订阅的旧用法。
+          epochChanged = true;
           if (selectedFilePath && isSameOrChildPath(event.path, selectedFilePath)) {
             bumpVersion(selectedFilePath);
           }
@@ -622,13 +633,16 @@ export const useSidebarStore = create<SidebarState>((set) => ({
         changed = true;
       }
 
-      if (!changed && !versionsChanged) return s;
+      if (!changed && !versionsChanged && !epochChanged) return s;
       return {
         directoryCache: changed ? directoryCache : s.directoryCache,
         selectedFilePath,
         fileChangeVersions: versionsChanged ? fileChangeVersions : s.fileChangeVersions,
+        fileWatchEpoch: epochChanged ? s.fileWatchEpoch + 1 : s.fileWatchEpoch,
       };
     }),
+
+  bumpFileWatchEpoch: () => set((s) => ({ fileWatchEpoch: s.fileWatchEpoch + 1 })),
 
   setChangedFiles: (files) => set({ changedFiles: files }),
   setGitBundleLoading: (loading) => set({ gitBundleLoading: loading }),
