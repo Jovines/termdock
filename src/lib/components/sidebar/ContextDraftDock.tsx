@@ -88,54 +88,57 @@ export function ContextDraftDock({
       data-context-draft-dock
     >
       {/* Header */}
-      <button
-        type="button"
-        onClick={() => onCollapsedChange(!collapsed)}
-        className="flex h-9 w-full items-center gap-2 px-3 text-left text-[11px] font-semibold text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-[0.995]"
-        aria-expanded={!collapsed}
-        title={collapsed ? labels.expand : labels.collapse}
-      >
-        {collapsed ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-        <span className="min-w-0 flex-1 truncate">{labels.title}</span>
-        {hasDraft && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />}
-        <span className="shrink-0 font-mono text-[9px] font-normal tabular-nums text-muted-foreground/60">
-          {labels.characterCount(value.length)}
-        </span>
+      <div className="flex h-7 sm:h-9 items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3">
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); onDisable(); }}
-          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/60 transition hover:bg-surface-elevated hover:text-foreground"
+          onClick={() => onCollapsedChange(!collapsed)}
+          className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2 rounded px-1 py-0.5 text-left text-[10px] sm:text-[11px] font-semibold text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-[0.995]"
+          aria-expanded={!collapsed}
+          title={collapsed ? labels.expand : labels.collapse}
+        >
+          {collapsed ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+          <span className="truncate">{labels.title}</span>
+          {hasDraft && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />}
+          {value.length > 0 && (
+            <span className="ml-auto shrink-0 hidden font-mono text-[9px] font-normal tabular-nums text-muted-foreground/50 sm:inline">
+              {labels.characterCount(value.length)}
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={onDisable}
+          className="inline-flex h-5 w-5 sm:h-6 sm:w-6 shrink-0 items-center justify-center rounded text-muted-foreground/50 transition hover:bg-surface-2 hover:text-foreground active:scale-95"
           aria-label={labels.disable}
           title={labels.disable}
         >
           <X size={11} />
         </button>
-      </button>
+      </div>
 
       {!collapsed && (
-        <div className="animate-fade-in px-3 pb-[calc(0.75rem+var(--safe-bottom-inset,0px))]">
+        <div className="animate-fade-in px-2.5 sm:px-3 pb-[calc(0.5rem+var(--safe-bottom-inset,0px))]">
           <textarea
             ref={textareaRef}
             value={value}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={labels.placeholder}
-            className="block h-28 max-h-[38vh] min-h-20 w-full resize-y rounded-xl border border-border/15 bg-surface px-3 py-2.5 font-mono text-[16px] leading-relaxed text-foreground placeholder:text-muted-foreground/50 focus:border-primary/50 focus:outline-none focus:ring-1 focus:ring-primary/20"
+            className="block h-20 sm:h-28 max-h-[38vh] min-h-12 sm:min-h-20 w-full resize-y rounded-lg border border-border/15 bg-surface px-2.5 sm:px-3 py-1.5 sm:py-2.5 font-mono text-[16px] sm:text-[13px] leading-snug sm:leading-relaxed text-foreground placeholder:text-muted-foreground/50 focus:border-primary/45 focus:outline-none"
             autoCapitalize="sentences"
             spellCheck
             data-context-draft-input
           />
-          <div className="mt-2.5 flex items-center gap-1.5">
-            <span className="mr-1 hidden text-[10px] leading-4 text-muted-foreground/60 sm:inline">{labels.hint}</span>
+          <div className="mt-1.5 sm:mt-2 flex items-center gap-1 sm:gap-1.5">
             <button
               type="button"
               onClick={onClear}
               disabled={!hasDraft}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 disabled:opacity-35"
+              className="inline-flex h-7 sm:h-8 w-7 sm:w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 disabled:opacity-35"
               aria-label={labels.clear}
               title={labels.clear}
             >
-              <Trash2 size={13} />
+              <Trash2 size={12} />
             </button>
             <button
               type="button"
@@ -144,9 +147,9 @@ export function ContextDraftDock({
                 markAction('inserted');
               }}
               disabled={!hasDraft}
-              className="inline-flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full bg-surface-2 px-3 text-[11px] font-semibold text-foreground transition hover:bg-surface-elevated active:scale-[0.98] disabled:opacity-35"
+              className="inline-flex h-7 sm:h-8 min-w-0 flex-1 items-center justify-center gap-1 sm:gap-1.5 rounded-full bg-surface-2 px-2.5 sm:px-3 text-[10px] sm:text-[11px] font-semibold text-foreground transition hover:bg-surface-elevated active:scale-[0.98] disabled:opacity-35"
             >
-              <CornerDownLeft size={13} />
+              <CornerDownLeft size={12} />
               <span className="truncate">{lastAction === 'inserted' ? labels.inserted : labels.insert}</span>
             </button>
             <button
@@ -156,9 +159,9 @@ export function ContextDraftDock({
                 markAction('sent');
               }}
               disabled={!hasDraft}
-              className="inline-flex h-8 min-w-0 flex-[1.15] items-center justify-center gap-1.5 rounded-full bg-primary px-3 text-[11px] font-semibold text-primary-foreground transition hover:bg-primary/90 active:scale-[0.98] disabled:opacity-35"
+              className="inline-flex h-7 sm:h-8 min-w-0 flex-[1.15] items-center justify-center gap-1 sm:gap-1.5 rounded-full bg-primary px-2.5 sm:px-3 text-[10px] sm:text-[11px] font-semibold text-primary-foreground transition hover:bg-primary/90 active:scale-[0.98] disabled:opacity-35"
             >
-              <Send size={13} />
+              <Send size={12} />
               <span className="truncate">{lastAction === 'sent' ? labels.sent : labels.insertAndSend}</span>
             </button>
           </div>
