@@ -69,6 +69,7 @@ import {
 import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
 import { subscribeClientState } from './lib/utils/clientStateSync';
+import { clientLog } from './lib/utils/clientLog';
 import { useI18n } from './lib/i18n';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
@@ -231,6 +232,9 @@ const HISTORY_BASE_ANCHOR_STATE_KEY = '__termdockBaseAnchor';
 const HISTORY_BASE_GUARD_STATE_KEY = '__termdockBaseGuard';
 const BASE_HISTORY_GUARD_BUFFER_SIZE = 3;
 const BASE_HISTORY_GUARD_REARM_DELAY_MS = 250;
+const NOTIFICATION_TARGET_CACHE = 'termdock-notification-target-v1';
+const NOTIFICATION_TARGET_KEY = '/__termdock-notification-target';
+const NOTIFICATION_TARGET_MAX_AGE_MS = 30_000;
 const HISTORY_GUARD_DEBUG_ENABLED = false;
 type HistoryOverlay =
   | 'left-sidebar'
@@ -446,6 +450,7 @@ function areTabTerminalSessionsEqual(
       currentState.agent !== nextState.agent ||
       currentState.agentMessage !== nextState.agentMessage ||
       currentState.agentNativeSessionId !== nextState.agentNativeSessionId ||
+      currentState.terminalSessionId !== nextState.terminalSessionId ||
       currentState.agentNeedsReview !== nextState.agentNeedsReview ||
       currentState.gitStatus !== nextState.gitStatus ||
       currentState.shellTitle !== nextState.shellTitle ||
@@ -625,7 +630,12 @@ function App() {
   }, []);
   // 通知点击 / SW postMessage 请求聚焦的目标 session。会话列表可能还没恢复完，
   // 先记在 ref 里，等对应 session 出现在列表里再 dispatch 切换。
-  const pendingFocusSessionRef = React.useRef<string | null>(null);
+  const pendingFocusSessionRef = React.useRef<string | null>(
+    typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('session'),
+  );
+  const notificationTraceRef = React.useRef<string | null>(
+    typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('_notifTrace'),
+  );
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1775,19 +1785,97 @@ function App() {
   // 等会话恢复 / inventory 同步后由下面的 effect 补发。
   const requestFocusSession = useCallback((sessionId: string | null) => {
     if (!sessionId) return;
+    if (notificationTraceRef.current) {
+      clientLog('info', 'PWA_NOTIFICATION_CLICK app-focus-request', {
+        traceId: notificationTraceRef.current,
+        requestedSessionId: sessionId,
+        activeSessionId,
+        sessions: sessions.map((session) => ({
+          id: session.id,
+          terminalSessionId: terminalSessions.get(session.id)?.terminalSessionId ?? null,
+        })),
+      });
+    }
     // 用户点进了这个会话 —— 把它的已送达通知一并清掉(含 badge 重计)。
     void dismissPwaNotificationsForSession(sessionId);
     const target = sessions.find((session) => (
       session.id === sessionId
-      || terminalSessions.get(session.id)?.backendSessionId === sessionId
+      || terminalSessions.get(session.id)?.terminalSessionId === sessionId
     ));
     if (target) {
       pendingFocusSessionRef.current = null;
+      if (notificationTraceRef.current) {
+        clientLog('info', 'PWA_NOTIFICATION_CLICK app-focus-dispatch', {
+          traceId: notificationTraceRef.current,
+          requestedSessionId: sessionId,
+          targetSessionId: target.id,
+        });
+      }
       window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: target.id }));
     } else {
       pendingFocusSessionRef.current = sessionId;
+      if (notificationTraceRef.current) {
+        clientLog('info', 'PWA_NOTIFICATION_CLICK app-focus-pending', {
+          traceId: notificationTraceRef.current,
+          requestedSessionId: sessionId,
+        });
+      }
     }
-  }, [sessions, terminalSessions]);
+  }, [activeSessionId, sessions, terminalSessions]);
+
+  // iOS 冷启动时，通知点击可能已经创建 WindowClient，但此处的 SW
+  // message 监听器还没挂载。SW 会先把目标写入 Cache Storage；页面
+  // 启动 / 恢复可见时消费它，无需二次 navigate 或 openWindow。
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof caches === 'undefined') return;
+    let disposed = false;
+
+    const consumeStoredTarget = async () => {
+      try {
+        const cache = await caches.open(NOTIFICATION_TARGET_CACHE);
+        const response = await cache.match(NOTIFICATION_TARGET_KEY);
+        if (!response) return;
+        await cache.delete(NOTIFICATION_TARGET_KEY);
+        const stored = await response.json() as {
+          sessionId?: unknown;
+          traceId?: unknown;
+          clickedAt?: unknown;
+        };
+        if (disposed) return;
+        const sessionId = typeof stored.sessionId === 'string' ? stored.sessionId : null;
+        const traceId = typeof stored.traceId === 'string' ? stored.traceId : null;
+        const clickedAt = typeof stored.clickedAt === 'number' ? stored.clickedAt : 0;
+        const ageMs = Date.now() - clickedAt;
+        clientLog('info', 'PWA_NOTIFICATION_CLICK app-cache-consumed', {
+          traceId,
+          sessionId,
+          ageMs,
+          valid: Boolean(sessionId && ageMs >= 0 && ageMs <= NOTIFICATION_TARGET_MAX_AGE_MS),
+          visibilityState: document.visibilityState,
+        });
+        if (sessionId && ageMs >= 0 && ageMs <= NOTIFICATION_TARGET_MAX_AGE_MS) {
+          notificationTraceRef.current = traceId;
+          requestFocusSession(sessionId);
+        }
+      } catch (error) {
+        clientLog('warn', 'PWA_NOTIFICATION_CLICK app-cache-failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+
+    const handleVisible = () => {
+      if (document.visibilityState === 'visible') void consumeStoredTarget();
+    };
+    void consumeStoredTarget();
+    document.addEventListener('visibilitychange', handleVisible);
+    window.addEventListener('pageshow', consumeStoredTarget);
+    return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', handleVisible);
+      window.removeEventListener('pageshow', consumeStoredTarget);
+    };
+  }, [requestFocusSession]);
 
   // 启动时解析 ?session=<id>（来自通知点击的 SW 导航），切换后清理 query。
   useEffect(() => {
@@ -1795,8 +1883,15 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     const target = params.get('session');
     if (!target) return;
+    clientLog('info', 'PWA_NOTIFICATION_CLICK app-url-received', {
+      traceId: notificationTraceRef.current,
+      targetSessionId: target,
+      href: window.location.href,
+      visibilityState: document.visibilityState,
+    });
     pendingFocusSessionRef.current = target;
     params.delete('session');
+    params.delete('_notifTrace');
     const nextSearch = params.toString();
     const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
     window.history.replaceState(window.history.state, '', nextUrl);
@@ -1864,6 +1959,7 @@ function App() {
     const handler = (event: MessageEvent) => {
       const data = event.data;
       if (data && data.type === 'termdock:focus-session' && typeof data.sessionId === 'string') {
+        event.ports[0]?.postMessage({ type: 'termdock:focus-session-ack' });
         requestFocusSession(data.sessionId);
       } else if (data?.type === 'termdock:push-subscription-changed') {
         void syncPwaPushSubscription(true);
@@ -1893,13 +1989,31 @@ function App() {
     if (!pending) return;
     const target = sessions.find((session) => (
       session.id === pending
-      || terminalSessions.get(session.id)?.backendSessionId === pending
+      || terminalSessions.get(session.id)?.terminalSessionId === pending
     ));
     if (target) {
       pendingFocusSessionRef.current = null;
+      if (notificationTraceRef.current) {
+        clientLog('info', 'PWA_NOTIFICATION_CLICK app-pending-dispatch', {
+          traceId: notificationTraceRef.current,
+          requestedSessionId: pending,
+          targetSessionId: target.id,
+          activeSessionId,
+        });
+      }
       window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: target.id }));
+    } else if (notificationTraceRef.current) {
+      clientLog('info', 'PWA_NOTIFICATION_CLICK app-pending-unmatched', {
+        traceId: notificationTraceRef.current,
+        requestedSessionId: pending,
+        activeSessionId,
+        sessions: sessions.map((session) => ({
+          id: session.id,
+          terminalSessionId: terminalSessions.get(session.id)?.terminalSessionId ?? null,
+        })),
+      });
     }
-  }, [sessions, terminalSessions]);
+  }, [activeSessionId, sessions, terminalSessions]);
 
   // 按 tab 顺序列出「需要我处理」的 session（waiting / 跑完待查看）。
   const attentionSessionIds = React.useMemo(() => {
