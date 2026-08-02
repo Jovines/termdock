@@ -14,6 +14,9 @@ const toolchainDir = path.join(stage, 'toolchain');
 const toolchainBinDir = path.join(toolchainDir, 'bin');
 const toolchainLibDir = path.join(toolchainDir, 'lib');
 const nodeDownloadDir = path.join(stage, 'node-download');
+const nodeArchiveCacheDir = process.env.TERMDOCK_NODE_ARCHIVE_CACHE
+  ? path.resolve(process.env.TERMDOCK_NODE_ARCHIVE_CACHE)
+  : path.join(os.homedir(), '.cache', 'termdock', 'node-archives');
 const desktopBuildNodeMajor = 22;
 
 const buildNodeMajor = Number.parseInt(process.versions.node.split('.')[0], 10);
@@ -126,7 +129,19 @@ const nodeArchiveName = `node-${process.version}-${nodePlatform}-${nodeArch}.${n
 const nodeArchiveUrl = `https://nodejs.org/dist/${process.version}/${nodeArchiveName}`;
 fs.mkdirSync(nodeDownloadDir, { recursive: true });
 const nodeArchivePath = path.join(nodeDownloadDir, nodeArchiveName);
-run('/usr/bin/curl', ['-fL', '--retry', '4', '--output', nodeArchivePath, nodeArchiveUrl]);
+fs.mkdirSync(nodeArchiveCacheDir, { recursive: true });
+const cachedNodeArchivePath = path.join(nodeArchiveCacheDir, nodeArchiveName);
+if (!fs.existsSync(cachedNodeArchivePath)) {
+  const temporaryArchivePath = `${cachedNodeArchivePath}.${process.pid}.tmp`;
+  try {
+    run('/usr/bin/curl', ['-fL', '--retry', '4', '--output', temporaryArchivePath, nodeArchiveUrl]);
+    run('/usr/bin/tar', ['-tzf', temporaryArchivePath], { stdio: 'ignore' });
+    fs.renameSync(temporaryArchivePath, cachedNodeArchivePath);
+  } finally {
+    fs.rmSync(temporaryArchivePath, { force: true });
+  }
+}
+fs.copyFileSync(cachedNodeArchivePath, nodeArchivePath);
 if (nodeArchiveExt !== 'tar.gz') {
   throw new Error(`Desktop runtime preparation is not implemented for ${process.platform}`);
 }
