@@ -31,12 +31,17 @@ export function getToolbarActionLabel(action: MobileToolbarAction, index: number
 // actions/programs changed). The App reads this on startup and, when the
 // stored version differs, overwrites all built-in preset ids with the latest
 // definitions while keeping any user-authored custom presets intact.
-export const BUILTIN_TOOLBAR_PRESETS_VERSION = 13;
+export const BUILTIN_TOOLBAR_PRESETS_VERSION = 15;
 
 export function getBuiltinToolbarPresetIds(): string[] {
   return DEFAULT_PRESETS.map((preset) => preset.id);
 }
 
+// Note on `rowLayout: [6]`: the layout counts every grid slot in the row, and
+// the first slot of the first row is always the preset-mode switch button
+// (see `expandedItems` in MobileKeyboard.tsx). So a preset with 5 actions
+// fills the row exactly — 1 switch + 5 actions = 6 — and never renders a
+// partially filled first row.
 const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
   {
     id: 'default',
@@ -52,7 +57,7 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     label: 'Code',
     programs: ['opencode'],
     includeAlt: false,
-    rowLayout: [4],
+    rowLayout: [6],
     actions: [
       { id: 'opencode-undo', label: '/undo', sequence: '/undo', doubleTapSequence: '/undo||\r' },
       { id: 'opencode-new', label: '/new', sequence: '/new', doubleTapSequence: '/new||\r' },
@@ -66,7 +71,7 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     label: 'Claude',
     programs: ['claude', 'claude-code'],
     includeAlt: false,
-    rowLayout: [4],
+    rowLayout: [6],
     actions: [
       { id: 'claude-undo', label: '/undo', sequence: '/undo', doubleTapSequence: '/undo\r' },
       { id: 'claude-clear', label: '/clear', sequence: '/clear', doubleTapSequence: '/clear\r' },
@@ -79,12 +84,13 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     label: 'Kimi',
     programs: ['kimi', 'kimi-code'],
     includeAlt: false,
-    rowLayout: [4],
+    rowLayout: [6],
     actions: [
       { id: 'kimi-undo', label: '/undo', sequence: '/undo', doubleTapSequence: '/undo\r' },
       { id: 'kimi-new', label: '/new', sequence: '/new', doubleTapSequence: '/new\r' },
+      { id: 'kimi-sessions', label: '/sessions', sequence: '/sessions', doubleTapSequence: '/sessions\r' },
       { id: 'kimi-compact', label: '/compact', sequence: '/compact', doubleTapSequence: '/compact\r' },
-      { id: 'kimi-usage', label: '/usage', sequence: '/usage', doubleTapSequence: '/usage\r' },
+      { id: 'kimi-goal', label: '/goal', sequence: '/goal', doubleTapSequence: '/goal\r' },
     ],
     showOnDesktop: true,
   },
@@ -108,7 +114,7 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     label: 'Coco',
     programs: ['coco'],
     includeAlt: false,
-    rowLayout: [3, 3],
+    rowLayout: [6],
     actions: [
       { id: 'coco-undo', label: '/undo', sequence: '/||undo ', doubleTapSequence: '/||undo ||\r' },
       { id: 'coco-clear', label: '/clear', sequence: '/||clear ', doubleTapSequence: '/||clear ||\r' },
@@ -122,7 +128,7 @@ const DEFAULT_PRESETS: ToolbarPresetDefinition[] = [
     label: 'TraeX',
     programs: ['traex', 'traecli'],
     includeAlt: false,
-    rowLayout: [3, 2],
+    rowLayout: [6],
     actions: [
       { id: 'traex-undo', label: '/undo', sequence: '/||undo ', doubleTapSequence: '/||undo ||\r' },
       { id: 'traex-clear', label: '/clear', sequence: '/||clear ', doubleTapSequence: '/||clear ||\r' },

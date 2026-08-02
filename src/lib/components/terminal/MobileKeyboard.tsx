@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, Move, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, Move, Plus, X } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { vibrate as hapticVibrate } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
@@ -255,6 +255,20 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     [toolbarDisabled]
   );
 
+  // 新建 session 走 window 事件,由 MultiTerminalView 的 'new-terminal-session'
+  // 监听器接住(detail 为空时回退到 defaultSessionMode 并继承当前 session 的 cwd),
+  // 不需要从 App 层层传 prop 下来。
+  const handleNewSessionPointerDown = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (toolbarDisabled) {
+        return;
+      }
+      event.preventDefault();
+      window.dispatchEvent(new CustomEvent('new-terminal-session'));
+    },
+    [toolbarDisabled]
+  );
+
   const triggerPastePress = React.useCallback(() => {
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
     if (now - lastPasteTriggerAtRef.current < 350) {
@@ -477,6 +491,15 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
       >
       <div className="rounded-2xl bg-surface-elevated p-0.5 space-y-0.5">
       {!isDesktopActions && (
+        /*
+          移动端工具栏第一行(约定:加按钮先看这里)。
+
+          10 列网格贴底全宽,是手机上最好够的位置(拇指热区在下半屏偏右):
+          - 高频键靠右放;展开键固定最右一列,不要动;
+          - 非按键类操作(如新建 session)也放这一行,dispatch window 事件
+            (见 handleNewSessionPointerDown),不要从 App 层层传 prop;
+          - 放不下的键进下方扩展行(expandedRows),第一行保持 10 列。
+        */
         <div className="grid grid-cols-10 gap-1">
         <button
           type="button"
@@ -513,15 +536,6 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         </button>
         <button
           type="button"
-          onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-w')}
-          tabIndex={-1}
-          disabled={buttonDisabled}
-          className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
-        >
-          C-W
-        </button>
-        <button
-          type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'ctrl-u')}
           tabIndex={-1}
           disabled={buttonDisabled}
@@ -537,6 +551,18 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
         >
           /
+        </button>
+        {/* 新建 session 紧跟 / 键之后 */}
+        <button
+          type="button"
+          onPointerDown={handleNewSessionPointerDown}
+          tabIndex={-1}
+          disabled={buttonDisabled}
+          title={t('tab.new')}
+          aria-label={t('tab.new')}
+          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
+        >
+          <Plus size={15} />
         </button>
         <button
           type="button"
