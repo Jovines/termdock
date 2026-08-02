@@ -13,6 +13,7 @@
   },
   "files": [
     "dist",
+    "runtime-manifest.json",
     "README.md",
     "LICENSE",
     "scripts"
@@ -22,13 +23,14 @@
     "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
     "dev:client": "vite",
     "dev:server": "cross-env PORT=9835 tsx watch src/server/entry.ts",
-    "build": "npm run clean && npm run build:client && npm run build:server",
+    "build": "npm run clean && npm run build:client && npm run build:server && npm run build:runtime-manifest",
     "build:desktop": "node scripts/prepare-desktop-tokens.mjs && tsc -p tsconfig.desktop.json",
     "desktop:dev": "npm run build && npm run build:desktop && electron-forge start",
     "desktop:prepare": "npm run build && npm run build:desktop && node scripts/prepare-desktop-runtime.mjs",
     "desktop:make": "npm run desktop:prepare && electron-forge make",
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json && node -e \"require('fs').chmodSync('dist/server/cli.js', 0o755)\"",
+    "build:runtime-manifest": "node scripts/generate-runtime-manifest.mjs",
     "generate:pwa-assets": "pwa-assets-generator --config pwa-assets.config.ts",
     "preview": "vite preview",
     "start": "node dist/server/cli.js",

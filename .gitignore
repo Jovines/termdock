@@ -28,6 +28,7 @@ dev-dist/
 .desktop-runtime/
 desktop/renderer/tokens.css
 out/
+runtime-manifest.json
 
 # Local Claude Code settings (personal permissions; .claude/skills/ is shared)
 .claude/settings.local.json

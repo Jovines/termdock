@@ -128,6 +128,7 @@ module.exports = {
       path.resolve(__dirname, '.desktop-runtime/runtime'),
       path.resolve(__dirname, '.desktop-runtime/server'),
       path.resolve(__dirname, '.desktop-runtime/toolchain'),
+      path.resolve(__dirname, '.desktop-runtime/manifest.json'),
       path.resolve(__dirname, 'desktop/cli'),
       path.resolve(__dirname, 'desktop/renderer'),
     ],

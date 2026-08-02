@@ -140,18 +140,26 @@ const extractedNode = path.join(
 copyMacBinary(extractedNode, runtimeNode);
 
 const rootPackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const runtimeManifest = JSON.parse(
+  fs.readFileSync(path.join(root, 'runtime-manifest.json'), 'utf8'),
+);
 const runtimePackage = {
-  name: 'termdock-desktop-runtime',
+  name: rootPackage.name,
   version: rootPackage.version,
   private: true,
   type: 'module',
   dependencies: rootPackage.dependencies,
 };
 fs.writeFileSync(path.join(serverDir, 'package.json'), `${JSON.stringify(runtimePackage, null, 2)}\n`);
+fs.copyFileSync(path.join(root, 'package-lock.json'), path.join(serverDir, 'package-lock.json'));
+fs.copyFileSync(
+  path.join(root, 'runtime-manifest.json'),
+  path.join(serverDir, 'runtime-manifest.json'),
+);
 fs.cpSync(path.join(root, 'dist'), path.join(serverDir, 'dist'), { recursive: true });
 
 run(process.platform === 'win32' ? 'npm.cmd' : 'npm', [
-  'install',
+  'ci',
   '--omit=dev',
   '--no-audit',
   '--no-fund',
@@ -195,6 +203,7 @@ const manifest = {
   nodeVersion: process.version,
   createdAt: new Date().toISOString(),
   tools: fs.readdirSync(toolchainBinDir).sort(),
+  runtimeCompatibility: runtimeManifest,
 };
 fs.writeFileSync(path.join(stage, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 console.log(`[desktop-runtime] ready at ${stage}`);
