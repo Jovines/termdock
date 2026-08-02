@@ -178,6 +178,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     : null;
 
   const [connectionError, setConnectionError] = React.useState<string | null>(null);
+  // isConnectionTransition 的 ref 镜像：事件监听回调（插入引用 ack 等）需要
+  // 读到最新连接态，不能依赖闭包里的过期值
+  const isConnectionTransitionRef = React.useRef(false);
   const [isFatalError, setIsFatalError] = React.useState(false);
   const [isRestarting, setIsRestarting] = React.useState(false);
   // 触发器：当后端 session 丢失（服务端重启 / idle 清理）后，bump 这个值
@@ -1359,12 +1362,28 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   React.useEffect(() => {
     const handleInsertReference = (event: Event) => {
       if (!isActiveRef.current) return;
-      const customEvent = event as CustomEvent<{ text?: string; focus?: boolean; paste?: boolean }>;
+      const customEvent = event as CustomEvent<{ text?: string; focus?: boolean; paste?: boolean; nonce?: string }>;
       const text = customEvent.detail?.text;
       if (!text) return;
+      const nonce = customEvent.detail?.nonce;
+      // 断联/重连中的 session 插入会丢：带 nonce 的请求回 ack 失败，
+      // 让发送方（上下文草稿坞）保留内容
+      if (isConnectionTransitionRef.current) {
+        if (nonce) {
+          window.dispatchEvent(new CustomEvent('termdock-insert-reference-ack', {
+            detail: { nonce, ok: false },
+          }));
+        }
+        return;
+      }
       // 引用插入也是带外输入：重置输入模型后发送，避免 textarea diff 拿
       // 过期基线算错
       terminalControllerRef.current?.sendSequence(text, { paste: customEvent.detail?.paste });
+      if (nonce) {
+        window.dispatchEvent(new CustomEvent('termdock-insert-reference-ack', {
+          detail: { nonce, ok: true },
+        }));
+      }
       if (customEvent.detail?.focus !== false) {
         focusTerminalIfActive();
       }
@@ -1635,6 +1654,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // 作为 terminal flex 同级元素挤压高度，触发 ResizeObserver→fit，造成布局抖动。
   // 过渡期沿用上一次稳定的 activeProgram，让 preset/工具条高度保持不变。
   const isConnectionTransition = isConnecting || connectionError !== null;
+  isConnectionTransitionRef.current = isConnectionTransition;
   const stableActiveProgramRef = React.useRef(detectedActiveProgram);
   if (!isConnectionTransition) {
     stableActiveProgramRef.current = detectedActiveProgram;

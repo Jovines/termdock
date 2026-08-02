@@ -55,8 +55,8 @@ describe('ContextDraftDock', () => {
     expect(handlers.onChange).toHaveBeenCalledWith('Updated prompt');
     expect(handlers.onInsert).toHaveBeenCalledTimes(1);
     expect(handlers.onInsertAndSend).toHaveBeenCalledTimes(1);
-    // 插入/发送后收回静息行
-    expect(handlers.onCollapsedChange).toHaveBeenCalledWith(true);
+    // 插入/发送不自行收起：父组件等终端 ack 成功才清空收起
+    expect(handlers.onCollapsedChange).not.toHaveBeenCalled();
   });
 
   it('resting line expands on click and sends directly', () => {

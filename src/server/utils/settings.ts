@@ -21,6 +21,8 @@ export interface SettingsDoc {
   firstRunCompleted: boolean;
   /** 'zh' | 'en' — persisted server-side so all connected clients share one choice. */
   locale: string;
+  /** 上下文草稿坞手动拖出的输入框高度（px），手机/桌面分别存。 */
+  contextDraftHeight: { mobile: number | null; desktop: number | null };
   updatedAt: number;
 }
 
@@ -65,9 +67,20 @@ function normalizeLocalAccessSettings(value: unknown): LocalAccessSettings {
   };
 }
 
+function normalizeContextDraftHeight(value: unknown): { mobile: number | null; desktop: number | null } {
+  const raw = value && typeof value === 'object'
+    ? value as { mobile?: unknown; desktop?: unknown }
+    : {};
+  const normalizeOne = (input: unknown): number | null =>
+    typeof input === 'number' && Number.isFinite(input) && input >= 56 && input <= 4000
+      ? Math.round(input)
+      : null;
+  return { mobile: normalizeOne(raw.mobile), desktop: normalizeOne(raw.desktop) };
+}
+
 function normalizeSettings(value: unknown): SettingsDoc {
   const raw = value && typeof value === 'object'
-    ? value as { preventSleep?: unknown; localAccess?: unknown; updatedAt?: unknown }
+    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; updatedAt?: unknown }
     : {};
   return {
     version: 1,
@@ -75,6 +88,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
     localAccess: normalizeLocalAccessSettings(raw.localAccess),
     firstRunCompleted: (raw as { firstRunCompleted?: unknown }).firstRunCompleted === true,
     locale: typeof (raw as { locale?: unknown }).locale === 'string' && (raw as { locale: string }).locale === 'zh' ? 'zh' : 'en',
+    contextDraftHeight: normalizeContextDraftHeight(raw.contextDraftHeight),
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -194,5 +208,15 @@ export function getLocaleSetting(): string {
 export function setLocaleSetting(locale: string): SettingsDoc {
   return updateSettings((settings) => {
     settings.locale = locale;
+  });
+}
+
+export function getContextDraftHeightSetting(): { mobile: number | null; desktop: number | null } {
+  return loadSettings().contextDraftHeight;
+}
+
+export function setContextDraftHeightSetting(device: 'mobile' | 'desktop', height: number | null): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.contextDraftHeight[device] = height;
   });
 }

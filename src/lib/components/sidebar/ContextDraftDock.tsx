@@ -8,6 +8,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { getSettings, updateSettings } from '../../terminal/api';
 
 interface ContextDraftDockLabels {
   title: string;
@@ -32,6 +33,8 @@ interface ContextDraftDockProps {
   collapsed: boolean;
   labels: ContextDraftDockLabels;
   focusRequest?: number;
+  /** 插入/发送失败提示（如终端断联），非空时展示并保持编辑态 */
+  insertError?: string | null;
   onChange: (value: string) => void;
   onCollapsedChange: (collapsed: boolean) => void;
   onDisable: () => void;
@@ -42,19 +45,38 @@ interface ContextDraftDockProps {
 
 const SEND_FEEDBACK_MS = 1400;
 const APPEND_FLASH_MS = 1200;
-const HEIGHT_STORAGE_KEY = 'termdock:right-sidebar:context-draft-height:v1';
 const MIN_TEXTAREA_HEIGHT = 56;
 // 手动拖动的高度上限
 const DRAG_MAX_HEIGHT_RATIO = 0.7;
 
-function readStoredHeight(): number | null {
+type DraftDevice = 'mobile' | 'desktop';
+
+function draftDevice(): DraftDevice {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+    ? 'mobile'
+    : 'desktop';
+}
+
+function heightStorageKey(device: DraftDevice): string {
+  return `termdock:right-sidebar:context-draft-height:${device}:v1`;
+}
+
+// localStorage 作为即时缓存（首帧不闪），服务端 settings 才是同步真源
+function readStoredHeight(device: DraftDevice): number | null {
   try {
-    const raw = window.localStorage.getItem(HEIGHT_STORAGE_KEY);
+    const raw = window.localStorage.getItem(heightStorageKey(device));
     const parsed = raw === null ? NaN : Number(raw);
     return Number.isFinite(parsed) && parsed >= MIN_TEXTAREA_HEIGHT ? parsed : null;
   } catch {
     return null;
   }
+}
+
+function writeStoredHeight(device: DraftDevice, height: number | null): void {
+  try {
+    if (height === null) window.localStorage.removeItem(heightStorageKey(device));
+    else window.localStorage.setItem(heightStorageKey(device), String(height));
+  } catch { /* 忽略持久化失败 */ }
 }
 
 function isCoarsePointer() {
@@ -66,6 +88,7 @@ export function ContextDraftDock({
   collapsed,
   labels,
   focusRequest,
+  insertError,
   onChange,
   onCollapsedChange,
   onDisable,
@@ -75,7 +98,8 @@ export function ContextDraftDock({
 }: ContextDraftDockProps) {
   const [lastAction, setLastAction] = useState<'inserted' | 'sent' | null>(null);
   const [appendFlash, setAppendFlash] = useState(false);
-  const [manualHeight, setManualHeight] = useState<number | null>(readStoredHeight);
+  const [manualHeight, setManualHeight] = useState<number | null>(() => readStoredHeight(draftDevice()));
+  const manualHeightRef = useRef<number | null>(manualHeight);
   const resetTimerRef = useRef<number | null>(null);
   const flashTimerRef = useRef<number | null>(null);
   const prevValueRef = useRef(value);
@@ -88,6 +112,24 @@ export function ContextDraftDock({
   useEffect(() => () => {
     if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
     if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+  }, []);
+
+  // 服务端存有手机/桌面各自的拖动手动高度：挂载后拉一次覆盖本地缓存
+  useEffect(() => {
+    let cancelled = false;
+    const device = draftDevice();
+    getSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        const serverHeight = settings.contextDraftHeight?.[device] ?? null;
+        writeStoredHeight(device, serverHeight);
+        manualHeightRef.current = serverHeight;
+        setManualHeight(serverHeight);
+      })
+      .catch(() => { /* 拉取失败沿用本地缓存 */ });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -197,17 +239,17 @@ export function ContextDraftDock({
     }
   };
 
+  // 插入/发送不再立即收起：父组件等终端 ack，成功才清空收起，
+  // 失败（断联）保持编辑态并通过 insertError 提示
   const handleInsert = () => {
     onInsert();
     markAction('inserted');
-    onCollapsedChange(true);
   };
 
   const handleSend = () => {
     if (!hasDraft) return;
     onInsertAndSend();
     markAction('sent');
-    onCollapsedChange(true);
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -244,25 +286,27 @@ export function ContextDraftDock({
       Math.max(drag.startHeight + (drag.startY - event.clientY), MIN_TEXTAREA_HEIGHT),
       viewportHeight * DRAG_MAX_HEIGHT_RATIO,
     ));
+    manualHeightRef.current = next;
     setManualHeight(next);
+  };
+
+  const persistHeight = (height: number | null) => {
+    const device = draftDevice();
+    writeStoredHeight(device, height);
+    updateSettings({ contextDraftHeight: { [device]: height } })
+      .catch(() => { /* 同步失败下次启动再对齐 */ });
   };
 
   const endResize = () => {
     if (!dragStateRef.current) return;
     dragStateRef.current = null;
-    setManualHeight((current) => {
-      try {
-        if (current !== null) window.localStorage.setItem(HEIGHT_STORAGE_KEY, String(current));
-      } catch { /* 忽略持久化失败 */ }
-      return current;
-    });
+    if (manualHeightRef.current !== null) persistHeight(manualHeightRef.current);
   };
 
   const resetResize = () => {
+    manualHeightRef.current = null;
     setManualHeight(null);
-    try {
-      window.localStorage.removeItem(HEIGHT_STORAGE_KEY);
-    } catch { /* 忽略持久化失败 */ }
+    persistHeight(null);
   };
 
   const charCount = value.length > 0 && (
@@ -290,14 +334,16 @@ export function ContextDraftDock({
             <PenLine size={11} className="shrink-0 text-muted-foreground/60" aria-hidden="true" />
             <span
               className={`truncate text-[11px] ${
-                appendFlash
-                  ? 'text-primary'
-                  : hasDraft
-                    ? 'text-foreground/80'
-                    : 'text-muted-foreground/50'
+                insertError
+                  ? 'text-destructive'
+                  : appendFlash
+                    ? 'text-primary'
+                    : hasDraft
+                      ? 'text-foreground/80'
+                      : 'text-muted-foreground/50'
               }`}
             >
-              {appendFlash ? labels.appended : hasDraft ? firstLine : labels.title}
+              {insertError ?? (appendFlash ? labels.appended : hasDraft ? firstLine : labels.title)}
             </span>
           </button>
           {charCount}
@@ -397,7 +443,13 @@ export function ContextDraftDock({
           >
             <Trash2 size={13} />
           </button>
-          <span className="flex-1" />
+          {insertError ? (
+            <span className="min-w-0 flex-1 truncate px-1 text-[10px] text-destructive" role="alert">
+              {insertError}
+            </span>
+          ) : (
+            <span className="flex-1" />
+          )}
           <kbd className="hidden shrink-0 select-none rounded border border-border/20 px-1 py-0.5 font-mono text-[9px] text-muted-foreground/40 sm:inline">
             {sendShortcut}
           </kbd>

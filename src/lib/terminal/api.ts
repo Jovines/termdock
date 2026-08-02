@@ -1279,6 +1279,7 @@ export interface SettingsState {
   caffeinateActive: boolean;
   networkAvailable: boolean;
   localAccess: LocalAccessState;
+  contextDraftHeight: { mobile: number | null; desktop: number | null };
 }
 
 export async function getSettings(): Promise<SettingsState> {
@@ -1290,7 +1291,7 @@ export async function getSettings(): Promise<SettingsState> {
   return response.json();
 }
 
-export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean } }): Promise<SettingsState> {
+export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null } }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -1300,6 +1301,36 @@ export async function updateSettings(settings: { preventSleep?: boolean; localAc
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to update settings' }));
     throw new Error(error.error || 'Failed to update settings');
+  }
+  return response.json();
+}
+
+// ---- Context draft (cross-device realtime sync) ----
+
+export interface ContextDraftState {
+  text: string;
+  updatedAt: number;
+}
+
+export async function getContextDraft(): Promise<ContextDraftState> {
+  const response = await fetch('/api/terminal/context-draft', { method: 'GET' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to load context draft' }));
+    throw new Error(error.error || 'Failed to load context draft');
+  }
+  return response.json();
+}
+
+export async function updateContextDraft(text: string, origin: string): Promise<ContextDraftState> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/context-draft', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify({ text, origin }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update context draft' }));
+    throw new Error(error.error || 'Failed to update context draft');
   }
   return response.json();
 }

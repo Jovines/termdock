@@ -33,9 +33,17 @@ export interface ControlConfigUpdatedEvent {
   updatedAt?: number;
 }
 
+export interface ControlContextDraftEvent {
+  type: 'context-draft';
+  text: string;
+  updatedAt: number;
+  origin: string | null;
+}
+
 export type ControlEvent =
   | ControlSnapshot
-  | ControlConfigUpdatedEvent;
+  | ControlConfigUpdatedEvent
+  | ControlContextDraftEvent;
 
 type Listener = (state: ControlEvent) => void;
 
@@ -158,13 +166,28 @@ function connect(): void {
 
   ws.onmessage = (event) => {
     lastServerPingAt = Date.now();
-    let msg: { type?: string; state?: ClientStateSnapshot; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number } | null = null;
+    let msg: { type?: string; state?: ClientStateSnapshot; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number; text?: string; origin?: string | null } | null = null;
     try {
       msg = JSON.parse(event.data as string);
     } catch {
       return;
     }
     if (!msg) return;
+    if (msg.type === 'context-draft') {
+      if (typeof msg.text !== 'string') return;
+      const draftEvent: ControlContextDraftEvent = {
+        type: 'context-draft',
+        text: msg.text,
+        updatedAt: typeof msg.updatedAt === 'number' ? msg.updatedAt : Date.now(),
+        origin: typeof msg.origin === 'string' ? msg.origin : null,
+      };
+      for (const listener of sync.listeners) {
+        try { listener(draftEvent); } catch (error) {
+          console.error('[clientStateSync] listener threw:', error);
+        }
+      }
+      return;
+    }
     if (msg.type === 'config-updated') {
       if (msg.key !== 'toolbar-presets' && msg.key !== 'agent-rules' && msg.key !== 'program-detection') {
         return;

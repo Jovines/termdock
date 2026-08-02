@@ -44,10 +44,11 @@ import { ChangeWalkthroughPanel } from './ChangeWalkthroughPanel';
 import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, isPreviewableImagePath, openInFileBrowser, readFileContent, readImagePreviewBlob, runGitAction, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, isPreviewableImagePath, openInFileBrowser, readFileContent, readImagePreviewBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
-import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, refractorNodesToReact, type RefractorLike } from '../../utils/syntaxHighlight';
+import { subscribeClientState } from '../../utils/clientStateSync';
+import { loadRefractor, resolveLanguage, shouldHighlight, highlightToLines, type RefractorLike } from '../../utils/syntaxHighlight';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 import {
   buildFileReference,
@@ -1458,6 +1459,49 @@ function renderMarkdownInlineLines(lines: string[], keyPrefix: string, context: 
   return nodes;
 }
 
+// Same line splitting as renderMarkdownInlineLines, but in two phases so the
+// inline rendering (which has side effects: image gallery registration) runs
+// EAGERLY while the block is built, and only the per-line wrapper spans —
+// data-md-ref-* stamps + data-selected highlight — are re-created whenever
+// the referenced line range changes. This mirrors how table blocks precompute
+// their cells: content functions must never re-run renderMarkdownInline, or
+// images would be registered again on every render.
+function renderMarkdownRefLineNodes(lines: string[], keyPrefix: string, context: MarkdownRenderContext): { perLine: ReactNode[]; hardBreaks: boolean[] } {
+  const perLine: ReactNode[] = [];
+  const hardBreaks: boolean[] = [];
+  lines.forEach((line, index) => {
+    hardBreaks.push(hasMarkdownHardBreak(line));
+    perLine.push(renderMarkdownInline(stripMarkdownHardBreak(line), `${keyPrefix}-${index}`, true, context));
+  });
+  return { perLine, hardBreaks };
+}
+
+function wrapMarkdownRefLines(
+  perLine: ReactNode[],
+  hardBreaks: boolean[],
+  lineNums: number[],
+  keyPrefix: string,
+  lineRange: { start: number; end: number } | null,
+): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  perLine.forEach((lineNodes, index) => {
+    const lineNo = lineNums[index] ?? 0;
+    const selected = Boolean(lineRange && lineNo >= lineRange.start && lineNo <= lineRange.end);
+    nodes.push(
+      <span
+        key={`${keyPrefix}-ref-${index}`}
+        data-md-ref-start={lineNo}
+        data-md-ref-end={lineNo}
+        data-selected={selected ? 'true' : undefined}
+      >
+        {lineNodes}
+      </span>,
+    );
+    if (index < perLine.length - 1) nodes.push(hardBreaks[index] ? <br key={`${keyPrefix}-${index}-br`} /> : ' ');
+  });
+  return nodes;
+}
+
 function splitMarkdownTableRow(line: string): string[] {
   const normalized = line.trim().replace(/^\|/, '').replace(/\|$/, '');
   const cells: string[] = [];
@@ -1534,6 +1578,13 @@ interface MarkdownListItem {
   start?: number;
   children: MarkdownListItem[];
   paragraphs: string[];
+  // 1-based source line range of the item (including nested children and
+  // continuation paragraphs), relative to the array passed to
+  // parseMarkdownListBlock — absolute for top-level lists, quote-relative for
+  // lists nested inside blockquotes (callers add a line offset when stamping
+  // data-md-ref-* attributes).
+  lineStart: number;
+  lineEnd: number;
 }
 
 function getMarkdownListIndent(line: string): number {
@@ -1573,6 +1624,7 @@ function parseMarkdownListBlock(
       if (indent > baseIndent && stack.length > 0) {
         const target = [...stack].reverse().find((entry) => entry.indent < indent)?.item ?? stack[stack.length - 1].item;
         target.paragraphs.push(currentLine.trim());
+        for (const entry of stack) entry.item.lineEnd = index + 1;
         index += 1;
         continue;
       }
@@ -1582,12 +1634,13 @@ function parseMarkdownListBlock(
     if (indent < baseIndent) break;
     if (indent === baseIndent && itemMatch.ordered !== ordered) break;
 
-    const item: MarkdownListItem = { content: itemMatch.content, ordered: itemMatch.ordered, start: itemMatch.start, children: [], paragraphs: [] };
+    const item: MarkdownListItem = { content: itemMatch.content, ordered: itemMatch.ordered, start: itemMatch.start, children: [], paragraphs: [], lineStart: index + 1, lineEnd: index + 1 };
     while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop();
     const parent = stack[stack.length - 1]?.item ?? null;
     if (parent) parent.children.push(item);
     else items.push(item);
     stack.push({ indent, item });
+    for (const entry of stack) entry.item.lineEnd = index + 1;
     index += 1;
   }
 
@@ -1602,33 +1655,65 @@ export function __testParseMarkdownListBlock(lines: string[]): MarkdownListItem[
   return parseMarkdownListBlock(lines, 0, getMarkdownListIndent(first), parsed.ordered, true, collectMarkdownFootnoteDefinitionLineIndexes(lines)).items;
 }
 
-function renderMarkdownListItems(
+// List rendering is split like paragraphs (see renderMarkdownRefLineNodes):
+// buildMarkdownListItemRenders runs all inline rendering eagerly (image
+// registration happens once, at block-build time), wrapMarkdownListItems only
+// re-creates the <li> wrappers — data-md-ref-* stamps and the data-selected
+// highlight — when the referenced line range changes.
+interface MarkdownListGroupRender {
+  ordered: boolean;
+  start?: number;
+  items: MarkdownListItemRender[];
+}
+
+interface MarkdownListItemRender {
+  key: string;
+  taskItem: boolean;
+  refStart: number;
+  refEnd: number;
+  content: ReactNode;
+  groups: MarkdownListGroupRender[];
+}
+
+function buildMarkdownListItemRenders(
   items: MarkdownListItem[],
-  blockStart: number,
+  keyPrefix: string,
   context: MarkdownRenderContext,
-): ReactNode[] {
+  lineOffset = 0,
+): MarkdownListItemRender[] {
   return items.map((item, itemIndex) => {
     const taskMatch = item.content.match(/^\[([ xX])\]\s+(.+)$/);
-    return (
-      <li key={`item-${itemIndex}`} className={taskMatch ? 'list-none' : undefined}>
-        {taskMatch ? <input type="checkbox" checked={taskMatch[1].toLowerCase() === 'x'} readOnly className="mr-2 align-[-2px] accent-primary" /> : null}
-        {renderMarkdownInline(taskMatch?.[2] ?? item.content, `li-${blockStart}-${itemIndex}`, true, context)}
-        {item.paragraphs.length > 0 && (
-          <div className="mt-1 space-y-1 text-muted-foreground">
-            {item.paragraphs.map((paragraph, paragraphIndex) => (
-              <p key={`paragraph-${paragraphIndex}`}>
-                {renderMarkdownInline(paragraph, `li-${blockStart}-${itemIndex}-p-${paragraphIndex}`, true, context)}
-              </p>
-            ))}
-          </div>
-        )}
-        {item.children.length > 0 && renderMarkdownNestedLists(item.children, blockStart + itemIndex + 1, context)}
-      </li>
-    );
+    return {
+      key: `item-${itemIndex}`,
+      taskItem: Boolean(taskMatch),
+      refStart: item.lineStart + lineOffset,
+      refEnd: item.lineEnd + lineOffset,
+      content: (
+        <>
+          {taskMatch ? <input type="checkbox" checked={taskMatch[1].toLowerCase() === 'x'} readOnly className="mr-2 align-[-2px] accent-primary" /> : null}
+          {renderMarkdownInline(taskMatch?.[2] ?? item.content, `li-${keyPrefix}-${itemIndex}`, true, context)}
+          {item.paragraphs.length > 0 && (
+            <div className="mt-1 space-y-1 text-muted-foreground">
+              {item.paragraphs.map((paragraph, paragraphIndex) => (
+                <p key={`paragraph-${paragraphIndex}`}>
+                  {renderMarkdownInline(paragraph, `li-${keyPrefix}-${itemIndex}-p-${paragraphIndex}`, true, context)}
+                </p>
+              ))}
+            </div>
+          )}
+        </>
+      ),
+      groups: buildMarkdownListGroupRenders(item.children, `${keyPrefix}-${itemIndex}`, context, lineOffset),
+    };
   });
 }
 
-function renderMarkdownNestedLists(items: MarkdownListItem[], blockStart: number, context: MarkdownRenderContext): ReactNode[] {
+function buildMarkdownListGroupRenders(
+  items: MarkdownListItem[],
+  keyPrefix: string,
+  context: MarkdownRenderContext,
+  lineOffset = 0,
+): MarkdownListGroupRender[] {
   const groups: Array<{ ordered: boolean; items: MarkdownListItem[] }> = [];
   for (const item of items) {
     const current = groups[groups.length - 1];
@@ -1636,11 +1721,37 @@ function renderMarkdownNestedLists(items: MarkdownListItem[], blockStart: number
     else groups.push({ ordered: item.ordered, items: [item] });
   }
 
+  return groups.map((group, groupIndex) => ({
+    ordered: group.ordered,
+    start: group.ordered ? group.items[0]?.start : undefined,
+    items: buildMarkdownListItemRenders(group.items, `${keyPrefix}-g${groupIndex}`, context, lineOffset),
+  }));
+}
+
+function wrapMarkdownListItems(renders: MarkdownListItemRender[], lineRange: { start: number; end: number } | null): ReactNode[] {
+  return renders.map((item) => {
+    const selected = Boolean(lineRange && item.refStart <= lineRange.end && item.refEnd >= lineRange.start);
+    return (
+      <li
+        key={item.key}
+        className={item.taskItem ? 'list-none' : undefined}
+        data-md-ref-start={item.refStart}
+        data-md-ref-end={item.refEnd}
+        data-selected={selected ? 'true' : undefined}
+      >
+        {item.content}
+        {item.groups.length > 0 && wrapMarkdownListGroups(item.groups, lineRange)}
+      </li>
+    );
+  });
+}
+
+function wrapMarkdownListGroups(groups: MarkdownListGroupRender[], lineRange: { start: number; end: number } | null): ReactNode[] {
   return groups.map((group, groupIndex) => {
     const ListTag = group.ordered ? 'ol' : 'ul';
     return (
-      <ListTag key={`nested-${groupIndex}`} start={group.ordered ? group.items[0]?.start : undefined} className={`${group.ordered ? 'list-decimal' : 'list-disc'} mt-1 space-y-0.5 pl-4 marker:text-muted-foreground/60`}>
-        {renderMarkdownListItems(group.items, blockStart + groupIndex + 1, context)}
+      <ListTag key={`nested-${groupIndex}`} start={group.start} className={`${group.ordered ? 'list-decimal' : 'list-disc'} mt-1 space-y-0.5 pl-4 marker:text-muted-foreground/60`}>
+        {wrapMarkdownListItems(group.items, lineRange)}
       </ListTag>
     );
   });
@@ -1666,9 +1777,25 @@ function renderMarkdownFootnotes(context: MarkdownRenderContext): ReactNode | nu
   );
 }
 
-function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: MarkdownRenderContext): ReactNode[] {
-  const nodes: ReactNode[] = [];
+// Quote content is built in the same two phases as paragraphs/lists (see
+// renderMarkdownRefLineNodes): buildMarkdownQuoteNodeRenders runs ALL inline
+// rendering eagerly at block-build time (image gallery registration must not
+// re-run per render), producing descriptors; wrapMarkdownQuoteNodes then only
+// re-assembles the tree with per-line data-selected highlights whenever the
+// referenced line range changes.
+type MarkdownQuoteNodeRender =
+  | { kind: 'static'; node: ReactNode }
+  | { kind: 'paragraph'; keyPrefix: string; perLine: ReactNode[]; hardBreaks: boolean[]; lineNums: number[] }
+  | { kind: 'list'; keyPrefix: string; ordered: boolean; start?: number; renders: MarkdownListItemRender[] }
+  | { kind: 'code'; key: string; code: string; lang: string; blockKey: string; codeStartLine: number };
+
+function buildMarkdownQuoteNodeRenders(lines: string[], keyPrefix: string, context: MarkdownRenderContext, lineNums?: number[]): MarkdownQuoteNodeRender[] {
+  const nodes: MarkdownQuoteNodeRender[] = [];
   let index = 0;
+  // Quote lines are consumed consecutively, so lineNums[i] is the 1-based
+  // source line of quote line i; nested constructs (lists, code) only know
+  // their quote-relative index and get shifted back through this.
+  const lineAt = (quoteIndex: number) => lineNums?.[quoteIndex] ?? quoteIndex + 1;
 
   while (index < lines.length) {
     const line = lines[index];
@@ -1690,14 +1817,17 @@ function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: 
         index += 1;
       }
       if (index < lines.length) index += 1;
-      nodes.push(
-        <details key={`${keyPrefix}-details-${blockStart}`} className="overflow-hidden rounded-lg border border-border/20 bg-surface px-3 py-2 text-muted-foreground">
-          <summary className="cursor-pointer text-sm font-semibold text-foreground">{renderMarkdownInline(summary, `${keyPrefix}-details-${blockStart}-summary`, true, context)}</summary>
-          {bodyLines.length > 0 && (
-            <div className="mt-2 text-sm leading-6">{renderMarkdownInlineLines(bodyLines, `${keyPrefix}-details-${blockStart}`, context)}</div>
-          )}
-        </details>,
-      );
+      nodes.push({
+        kind: 'static',
+        node: (
+          <details key={`${keyPrefix}-details-${blockStart}`} className="overflow-hidden rounded-lg border border-border/20 bg-surface px-3 py-2 text-muted-foreground">
+            <summary className="cursor-pointer text-sm font-semibold text-foreground">{renderMarkdownInline(summary, `${keyPrefix}-details-${blockStart}-summary`, true, context)}</summary>
+            {bodyLines.length > 0 && (
+              <div className="mt-2 text-sm leading-6">{renderMarkdownInlineLines(bodyLines, `${keyPrefix}-details-${blockStart}`, context)}</div>
+            )}
+          </details>
+        ),
+      });
       continue;
     }
 
@@ -1718,7 +1848,7 @@ function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: 
         htmlLines.push(lines[index]);
         index += 1;
       }
-      nodes.push(<MarkdownSanitizedHtml key={`${keyPrefix}-html-${blockStart}`} html={htmlLines.join('\n')} />);
+      nodes.push({ kind: 'static', node: <MarkdownSanitizedHtml key={`${keyPrefix}-html-${blockStart}`} html={htmlLines.join('\n')} /> });
       continue;
     }
 
@@ -1734,13 +1864,13 @@ function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: 
         index += 1;
       }
       if (index < lines.length) index += 1;
-      nodes.push(
-        lang.toLowerCase() === 'mermaid'
-          ? <MarkdownMermaidBlock key={`${keyPrefix}-code-${blockStart}`} code={codeLines.join('\n')} blockKey={`${keyPrefix}-code-${blockStart}`} />
-          : ['math', 'latex', 'tex'].includes(lang.toLowerCase())
-          ? <MarkdownMath key={`${keyPrefix}-code-${blockStart}`} tex={codeLines.join('\n')} display />
-          : <MarkdownCodeBlock key={`${keyPrefix}-code-${blockStart}`} code={codeLines.join('\n')} lang={lang} blockKey={`${keyPrefix}-code-${blockStart}`} />,
-      );
+      if (lang.toLowerCase() === 'mermaid') {
+        nodes.push({ kind: 'static', node: <MarkdownMermaidBlock key={`${keyPrefix}-code-${blockStart}`} code={codeLines.join('\n')} blockKey={`${keyPrefix}-code-${blockStart}`} /> });
+      } else if (['math', 'latex', 'tex'].includes(lang.toLowerCase())) {
+        nodes.push({ kind: 'static', node: <MarkdownMath key={`${keyPrefix}-code-${blockStart}`} tex={codeLines.join('\n')} display /> });
+      } else {
+        nodes.push({ kind: 'code', key: `${keyPrefix}-code-${blockStart}`, code: codeLines.join('\n'), lang, blockKey: `${keyPrefix}-code-${blockStart}`, codeStartLine: lineAt(blockStart) + 1 });
+      }
       continue;
     }
 
@@ -1751,7 +1881,7 @@ function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: 
         codeLines.push(lines[index].trim() ? stripIndentedCodeLine(lines[index]) : '');
         index += 1;
       }
-      nodes.push(<MarkdownCodeBlock key={`${keyPrefix}-indented-code-${blockStart}`} code={codeLines.join('\n').replace(/\n+$/, '')} lang="" blockKey={`${keyPrefix}-indented-code-${blockStart}`} />);
+      nodes.push({ kind: 'code', key: `${keyPrefix}-indented-code-${blockStart}`, code: codeLines.join('\n').replace(/\n+$/, ''), lang: '', blockKey: `${keyPrefix}-indented-code-${blockStart}`, codeStartLine: lineAt(blockStart) });
       continue;
     }
 
@@ -1761,11 +1891,14 @@ function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: 
       const Tag = `h${level}` as keyof JSX.IntrinsicElements;
       const headingText = normalizeMarkdownAtxHeadingText(headingMatch[2]);
       const headingId = getMarkdownHeadingId(headingText, context);
-      nodes.push(
-        <Tag key={`${keyPrefix}-heading-${index}`} id={headingId} className="scroll-mt-16 font-semibold text-foreground">
-          {renderMarkdownInline(headingText, `${keyPrefix}-heading-${index}`, true, context)}
-        </Tag>,
-      );
+      nodes.push({
+        kind: 'static',
+        node: (
+          <Tag key={`${keyPrefix}-heading-${index}`} id={headingId} className="scroll-mt-16 font-semibold text-foreground">
+            {renderMarkdownInline(headingText, `${keyPrefix}-heading-${index}`, true, context)}
+          </Tag>
+        ),
+      });
       index += 1;
       continue;
     }
@@ -1780,22 +1913,25 @@ function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: 
         rows.push(splitMarkdownTableRow(lines[index]));
         index += 1;
       }
-      nodes.push(
-        <div key={`${keyPrefix}-table-${blockStart}`} className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
-            <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
-              <thead className="bg-surface-2 text-foreground">
-              <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(cell, `${keyPrefix}-th-${blockStart}-${cellIndex}`, true, context)}</div></th>)}</tr>
-              </thead>
-              <tbody>
-                {rows.map((row, rowIndex) => (
-                  <tr key={`r-${rowIndex}`} className="border-t border-border/10">
-                  {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className={`${MARKDOWN_TABLE_BODY_CELL_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(row[cellIndex] ?? '', `${keyPrefix}-td-${blockStart}-${rowIndex}-${cellIndex}`, true, context)}</div></td>)}
-                  </tr>
-                ))}
-              </tbody>
-          </table>
-        </div>,
-      );
+      nodes.push({
+        kind: 'static',
+        node: (
+          <div key={`${keyPrefix}-table-${blockStart}`} className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
+              <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
+                <thead className="bg-surface-2 text-foreground">
+                <tr>{header.map((cell, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(cell, `${keyPrefix}-th-${blockStart}-${cellIndex}`, true, context)}</div></th>)}</tr>
+                </thead>
+                <tbody>
+                  {rows.map((row, rowIndex) => (
+                    <tr key={`r-${rowIndex}`} className="border-t border-border/10">
+                    {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className={`${MARKDOWN_TABLE_BODY_CELL_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{renderMarkdownInline(row[cellIndex] ?? '', `${keyPrefix}-td-${blockStart}-${rowIndex}-${cellIndex}`, true, context)}</div></td>)}
+                    </tr>
+                  ))}
+                </tbody>
+            </table>
+          </div>
+        ),
+      });
       continue;
     }
 
@@ -1807,27 +1943,52 @@ function renderMarkdownQuoteBlocks(lines: string[], keyPrefix: string, context: 
       const blockStart = index;
       const parsed = parseMarkdownListBlock(lines, index, baseIndent, ordered, false);
       index = parsed.nextIndex;
-      const ListTag = ordered ? 'ol' : 'ul';
-      nodes.push(
-        <ListTag key={`${keyPrefix}-list-${blockStart}`} start={ordered ? start : undefined} className={`${ordered ? 'list-decimal' : 'list-disc'} space-y-0.5 pl-4 marker:text-muted-foreground/70`}>
-          {renderMarkdownListItems(parsed.items, blockStart, context)}
-        </ListTag>,
-      );
+      nodes.push({
+        kind: 'list',
+        keyPrefix: `${keyPrefix}-list-${blockStart}`,
+        ordered,
+        start: ordered ? start : undefined,
+        renders: buildMarkdownListItemRenders(parsed.items, `${keyPrefix}-list-${blockStart}`, context, lineAt(0) - 1),
+      });
       continue;
     }
 
     const paragraphLines = [line.trimStart()];
+    const paragraphNums = [lineAt(index)];
     const blockStart = index;
     index += 1;
     while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
       if (index + 1 < lines.length && lines[index].includes('|') && isMarkdownTableSeparator(lines[index + 1])) break;
       paragraphLines.push(lines[index].trimStart());
+      paragraphNums.push(lineAt(index));
       index += 1;
     }
-    nodes.push(<p key={`${keyPrefix}-p-${blockStart}`}>{renderMarkdownInlineLines(paragraphLines, `${keyPrefix}-p-${blockStart}`, context)}</p>);
+    const renderedParagraph = renderMarkdownRefLineNodes(paragraphLines, `${keyPrefix}-p-${blockStart}`, context);
+    nodes.push({ kind: 'paragraph', keyPrefix: `${keyPrefix}-p-${blockStart}`, perLine: renderedParagraph.perLine, hardBreaks: renderedParagraph.hardBreaks, lineNums: paragraphNums });
   }
 
   return nodes;
+}
+
+function wrapMarkdownQuoteNodes(renders: MarkdownQuoteNodeRender[], lineRange: { start: number; end: number } | null): ReactNode[] {
+  return renders.map((item) => {
+    switch (item.kind) {
+      case 'static':
+        return item.node;
+      case 'paragraph':
+        return <p key={item.keyPrefix}>{wrapMarkdownRefLines(item.perLine, item.hardBreaks, item.lineNums, item.keyPrefix, lineRange)}</p>;
+      case 'list': {
+        const ListTag = item.ordered ? 'ol' : 'ul';
+        return (
+          <ListTag key={item.keyPrefix} start={item.start} className={`${item.ordered ? 'list-decimal' : 'list-disc'} space-y-0.5 pl-4 marker:text-muted-foreground/70`}>
+            {wrapMarkdownListItems(item.renders, lineRange)}
+          </ListTag>
+        );
+      }
+      case 'code':
+        return <MarkdownCodeBlock key={item.key} code={item.code} lang={item.lang} blockKey={item.blockKey} codeStartLine={item.codeStartLine} lineRange={lineRange} />;
+    }
+  });
 }
 
 interface MarkdownPreviewBlock {
@@ -1838,12 +1999,20 @@ interface MarkdownPreviewBlock {
   heading?: MarkdownHeadingInfo;
   interactive?: boolean;
   kind?: 'table';
+  // True when the block stamps data-md-ref-* targets inside (paragraph lines,
+  // list items, quote lines, code lines): a partial selection then highlights
+  // only the exact lines + a rail segment instead of washing the whole block.
+  fineGrained?: boolean;
 }
 
 interface MarkdownCodeBlockProps {
   code: string;
   lang: string;
   blockKey: string;
+  // 1-based source line of the first code line; when set, every rendered line
+  // is stamped with data-md-ref-* so it can be referenced on its own.
+  codeStartLine?: number;
+  lineRange?: { start: number; end: number } | null;
 }
 
 interface MermaidLike {
@@ -2008,9 +2177,9 @@ function MarkdownMermaidBlock({
   );
 }
 
-function MarkdownCodeBlock({ code, lang, blockKey }: MarkdownCodeBlockProps) {
+function MarkdownCodeBlock({ code, lang, blockKey, codeStartLine, lineRange }: MarkdownCodeBlockProps) {
   const language = normalizeMarkdownFenceLanguage(lang);
-  const [highlighted, setHighlighted] = useState<ReactNode[] | null>(null);
+  const [highlighted, setHighlighted] = useState<ReactNode[][] | null>(null);
 
   useEffect(() => {
     if (!language || !shouldHighlight(code)) {
@@ -2025,7 +2194,7 @@ function MarkdownCodeBlock({ code, lang, blockKey }: MarkdownCodeBlockProps) {
           return;
         }
         try {
-          setHighlighted(refractorNodesToReact(refractor.highlight(code, language), `md-code-${blockKey}`));
+          setHighlighted(highlightToLines(refractor, code, language));
         } catch {
           if (!cancelled) setHighlighted(null);
         }
@@ -2036,10 +2205,25 @@ function MarkdownCodeBlock({ code, lang, blockKey }: MarkdownCodeBlockProps) {
     return () => { cancelled = true; };
   }, [blockKey, code, language]);
 
+  const perLine: ReactNode[][] = highlighted ?? (code || ' ').split('\n').map((line) => [line || ' ']);
+
   return (
     <div className="overflow-hidden rounded-lg border border-border/20 bg-surface shadow-sm">
       {lang && <div className="border-b border-border/15 bg-surface-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">{lang}</div>}
-      <pre className={`${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-code overflow-auto p-3 text-[11px] leading-relaxed text-foreground`}><code>{highlighted ?? (code || ' ')}</code></pre>
+      <pre className={`${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-code overflow-auto p-3 text-[11px] leading-relaxed text-foreground`}><code>{perLine.map((lineNodes, lineIndex) => {
+        const lineNo = codeStartLine != null ? codeStartLine + lineIndex : null;
+        const selected = Boolean(lineRange && lineNo != null && lineNo >= lineRange.start && lineNo <= lineRange.end);
+        return (
+          <span
+            key={`${blockKey}-line-${lineIndex}`}
+            data-md-ref-start={lineNo ?? undefined}
+            data-md-ref-end={lineNo ?? undefined}
+            data-selected={selected ? 'true' : undefined}
+          >
+            {lineNodes}{lineIndex < perLine.length - 1 ? '\n' : null}
+          </span>
+        );
+      })}</code></pre>
     </div>
   );
 }
@@ -2153,11 +2337,12 @@ export function buildMarkdownPreviewRenderResult(
         key: `code-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
+        fineGrained: lang.toLowerCase() !== 'mermaid' && !['math', 'latex', 'tex'].includes(lang.toLowerCase()),
         content: lang.toLowerCase() === 'mermaid'
           ? <MarkdownMermaidBlock code={codeLines.join('\n')} blockKey={`code-${blockStart}`} />
           : ['math', 'latex', 'tex'].includes(lang.toLowerCase())
           ? <MarkdownMath tex={codeLines.join('\n')} display />
-          : <MarkdownCodeBlock code={codeLines.join('\n')} lang={lang} blockKey={`code-${blockStart}`} />,
+          : (lineRange) => <MarkdownCodeBlock code={codeLines.join('\n')} lang={lang} blockKey={`code-${blockStart}`} codeStartLine={blockStart + 2} lineRange={lineRange} />,
       });
       continue;
     }
@@ -2174,7 +2359,8 @@ export function buildMarkdownPreviewRenderResult(
         key: `indented-code-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
-        content: <MarkdownCodeBlock code={codeLines.join('\n').replace(/\n+$/, '')} lang="" blockKey={`indented-code-${blockStart}`} />,
+        fineGrained: true,
+        content: (lineRange) => <MarkdownCodeBlock code={codeLines.join('\n').replace(/\n+$/, '')} lang="" blockKey={`indented-code-${blockStart}`} codeStartLine={blockStart + 1} lineRange={lineRange} />,
       });
       continue;
     }
@@ -2272,9 +2458,11 @@ export function buildMarkdownPreviewRenderResult(
 
     if (trimmed.startsWith('>')) {
       const quoteLines: string[] = [];
+      const quoteLineNums: number[] = [];
       const blockStart = index;
       while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
         quoteLines.push(lines[index].trim().replace(/^>\s?/, ''));
+        quoteLineNums.push(index + 1);
         index += 1;
       }
       const calloutMatch = quoteLines[0]?.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
@@ -2285,26 +2473,34 @@ export function buildMarkdownPreviewRenderResult(
           ...(firstLine ? [firstLine] : []),
           ...quoteLines.slice(1),
         ];
+        const bodyNums = [
+          ...(firstLine ? [quoteLineNums[0]] : []),
+          ...quoteLineNums.slice(1),
+        ];
+        const renderedBody = renderMarkdownRefLineNodes(bodyLines, `callout-${blockStart}`, context);
         blocks.push({
           key: `callout-${blockStart}`,
           startLine: blockStart + 1,
           endLine: index,
-          content: (
+          fineGrained: true,
+          content: (lineRange) => (
             <aside className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-muted-foreground">
               <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-primary">{label}</div>
-              {bodyLines.length > 0 && <div>{renderMarkdownInlineLines(bodyLines, `callout-${blockStart}`, context)}</div>}
+              {bodyLines.length > 0 && <div>{wrapMarkdownRefLines(renderedBody.perLine, renderedBody.hardBreaks, bodyNums, `callout-${blockStart}`, lineRange)}</div>}
             </aside>
           ),
         });
         continue;
       }
+      const quoteRenders = buildMarkdownQuoteNodeRenders(quoteLines, `quote-${blockStart}`, context, quoteLineNums);
       blocks.push({
         key: `quote-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
-        content: (
+        fineGrained: true,
+        content: (lineRange) => (
           <blockquote className="space-y-2 border-l-2 border-border-strong bg-surface-2/70 py-1.5 pl-2.5 pr-2 text-muted-foreground sm:py-2 sm:pl-3">
-            {renderMarkdownQuoteBlocks(quoteLines, `quote-${blockStart}`, context)}
+            {wrapMarkdownQuoteNodes(quoteRenders, lineRange)}
           </blockquote>
         ),
       });
@@ -2335,13 +2531,13 @@ export function buildMarkdownPreviewRenderResult(
             <div className={MARKDOWN_TABLE_SCROLL_CLASS} data-markdown-table-scroll>
               <table className="w-max min-w-full max-w-none table-auto border-collapse text-left text-[11px] sm:text-xs">
                 <thead className="bg-surface-2 text-foreground">
-                  <tr data-markdown-table-row-line={blockStart + 1} data-selected={isSelectedLine(blockStart + 1) ? 'true' : undefined}>{renderedHeader.map((cellContent, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{cellContent}</div></th>)}</tr>
+                  <tr data-markdown-table-row-line={blockStart + 1} data-md-ref-start={blockStart + 1} data-md-ref-end={blockStart + 1} data-selected={isSelectedLine(blockStart + 1) ? 'true' : undefined}>{renderedHeader.map((cellContent, cellIndex) => <th key={`h-${cellIndex}`} className={`${MARKDOWN_TABLE_HEADER_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{cellContent}</div></th>)}</tr>
                 </thead>
                 <tbody>
                   {renderedRows.map((row, rowIndex) => {
                     const rowLine = blockStart + rowIndex + 3;
                     return (
-                      <tr key={`r-${rowIndex}`} className="border-t border-border/10" data-markdown-table-row-line={rowLine} data-selected={isSelectedLine(rowLine) ? 'true' : undefined}>
+                      <tr key={`r-${rowIndex}`} className="border-t border-border/10" data-markdown-table-row-line={rowLine} data-md-ref-start={rowLine} data-md-ref-end={rowLine} data-selected={isSelectedLine(rowLine) ? 'true' : undefined}>
                         {header.map((_, cellIndex) => <td key={`c-${cellIndex}`} className={`${MARKDOWN_TABLE_BODY_CELL_CLASS} ${getMarkdownTableAlignClass(alignments[cellIndex] ?? null)}`}><div className={MARKDOWN_TABLE_CELL_CONTENT_CLASS}>{row[cellIndex]}</div></td>)}
                       </tr>
                     );
@@ -2364,13 +2560,15 @@ export function buildMarkdownPreviewRenderResult(
       const parsed = parseMarkdownListBlock(lines, index, baseIndent, ordered, true, footnoteDefinitionLines);
       index = parsed.nextIndex;
       const ListTag = ordered ? 'ol' : 'ul';
+      const listRenders = buildMarkdownListItemRenders(parsed.items, `list-${blockStart}`, context);
       blocks.push({
         key: `list-${blockStart}`,
         startLine: blockStart + 1,
         endLine: index,
-        content: (
+        fineGrained: true,
+        content: (lineRange) => (
           <ListTag start={ordered ? start : undefined} className={`${ordered ? 'list-decimal' : 'list-disc'} space-y-0.5 pl-4 text-muted-foreground marker:text-muted-foreground/70 sm:space-y-1 sm:pl-5`}>
-            {renderMarkdownListItems(parsed.items, blockStart, context)}
+            {wrapMarkdownListItems(listRenders, lineRange)}
           </ListTag>
         ),
       });
@@ -2378,6 +2576,7 @@ export function buildMarkdownPreviewRenderResult(
     }
 
     const paragraphLines: string[] = [line.trimStart()];
+    const paragraphNums: number[] = [index + 1];
     const blockStart = index;
     index += 1;
     while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
@@ -2387,13 +2586,16 @@ export function buildMarkdownPreviewRenderResult(
         continue;
       }
       paragraphLines.push(lines[index].trimStart());
+      paragraphNums.push(index + 1);
       index += 1;
     }
+    const renderedParagraph = renderMarkdownRefLineNodes(paragraphLines, `p-${blockStart}`, context);
     blocks.push({
       key: `p-${blockStart}`,
       startLine: blockStart + 1,
       endLine: index,
-      content: <p className="text-muted-foreground">{renderMarkdownInlineLines(paragraphLines, `p-${blockStart}`, context)}</p>,
+      fineGrained: true,
+      content: (lineRange) => <p className="text-muted-foreground">{wrapMarkdownRefLines(renderedParagraph.perLine, renderedParagraph.hardBreaks, paragraphNums, `p-${blockStart}`, lineRange)}</p>,
     });
   }
 
@@ -2441,6 +2643,9 @@ interface MarkdownPreviewProps {
   rootPath: string | null;
   lineRange: { start: number; end: number } | null;
   onLineRangeClick: (event: MouseEvent<HTMLElement>, startLine: number, endLine: number) => void;
+  // Drag-to-select on the selection rails: reports the live range while
+  // dragging (phase 'move') and the committed range on release (phase 'end').
+  onLineRangeDrag?: (event: MouseEvent<HTMLElement>, startLine: number, endLine: number, phase: 'move' | 'end') => void;
   scrollTop: number;
   outlineOpen: boolean;
   outlineCloseSignal?: number;
@@ -2711,6 +2916,7 @@ export function MarkdownPreview({
   rootPath,
   lineRange,
   onLineRangeClick,
+  onLineRangeDrag,
   scrollTop,
   outlineOpen,
   outlineCloseSignal,
@@ -2803,6 +3009,8 @@ export function MarkdownPreview({
   const outlineResetKey = `${filePath ?? ''}\n${content}`;
   const lastOutlineResetKeyRef = useRef(outlineResetKey);
   const tableTapRef = useRef<{ pointerId: number; startX: number; startY: number } | null>(null);
+  const railDragRef = useRef<{ pointerId: number; anchorLine: number; moved: boolean } | null>(null);
+  const railDragSuppressClickRef = useRef(false);
 
   useEffect(() => {
     if (lastOutlineResetKeyRef.current === outlineResetKey) return;
@@ -2877,16 +3085,105 @@ export function MarkdownPreview({
     if (dx > 8 || dy > 8) return;
     const target = event.target;
     if (isInteractiveTextTarget(target) || hasNativeTextSelection()) return;
-    const tableRow = target instanceof HTMLElement ? target.closest<HTMLElement>('tr[data-markdown-table-row-line]') : null;
-    const rowLine = Number(tableRow?.dataset.markdownTableRowLine);
-    const referenceStartLine = Number.isFinite(rowLine) && rowLine > 0 ? rowLine : startLine;
-    const referenceEndLine = Number.isFinite(rowLine) && rowLine > 0 ? rowLine : endLine;
-    onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, referenceStartLine, referenceEndLine);
+    const range = resolveMarkdownRefRange(target, startLine, endLine);
+    onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, range.start, range.end);
   }, [onLineRangeClick]);
 
   const handleTablePointerCancel = useCallback((event: React.PointerEvent<HTMLElement>) => {
     if (tableTapRef.current?.pointerId === event.pointerId) tableTapRef.current = null;
   }, []);
+
+  // Drag-to-select on the per-block selection rails. The anchor line comes
+  // from whatever fine-grained target (data-md-ref-*) sits under the pointer;
+  // blocks without one interpolate between their first/last source line by
+  // vertical position, so dragging stays continuous across block boundaries.
+  const resolveLineAtPoint = useCallback((x: number, y: number): number | null => {
+    const root = previewRootRef.current;
+    if (!root || typeof document.elementFromPoint !== 'function') return null;
+    const hit = document.elementFromPoint(x, y);
+    if (!(hit instanceof HTMLElement) || !root.contains(hit)) return null;
+    const refTarget = hit.closest<HTMLElement>('[data-md-ref-start]');
+    if (refTarget) {
+      const line = Number(refTarget.dataset.mdRefStart);
+      if (Number.isFinite(line) && line > 0) return line;
+    }
+    const blockNode = hit.closest<HTMLElement>('[data-markdown-preview-block-start]');
+    if (!blockNode) return null;
+    const startLine = Number(blockNode.dataset.markdownPreviewBlockStart);
+    const block = blocks.find((item) => item.startLine === startLine);
+    if (!block) return Number.isFinite(startLine) && startLine > 0 ? startLine : null;
+    if (block.endLine <= block.startLine) return block.startLine;
+    const rect = blockNode.getBoundingClientRect();
+    const ratio = rect.height > 0 ? Math.min(1, Math.max(0, (y - rect.top) / rect.height)) : 0;
+    return Math.round(block.startLine + ratio * (block.endLine - block.startLine));
+  }, [blocks]);
+
+  const handleRailPointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (!onLineRangeDrag) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    // Nudge the probe point past the rail column and grid gap so the anchor
+    // resolves to the fine-grained line next to the rail rather than the rail
+    // itself (widest rail config: 0.875rem column + 0.5rem gap = 22px).
+    const anchorLine = resolveLineAtPoint(event.clientX + 24, event.clientY);
+    if (anchorLine == null) return;
+    railDragRef.current = { pointerId: event.pointerId, anchorLine, moved: false };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // jsdom and older browsers may not support pointer capture; dragging
+      // still works as long as the pointer stays over the rail.
+    }
+  }, [onLineRangeDrag, resolveLineAtPoint]);
+
+  const handleRailPointerMove = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    const drag = railDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || !onLineRangeDrag) return;
+    const currentLine = resolveLineAtPoint(event.clientX + 16, event.clientY);
+    if (currentLine == null) return;
+    if (!drag.moved && currentLine === drag.anchorLine) return;
+    drag.moved = true;
+    railDragSuppressClickRef.current = true;
+    onLineRangeDrag(
+      event as unknown as MouseEvent<HTMLElement>,
+      Math.min(drag.anchorLine, currentLine),
+      Math.max(drag.anchorLine, currentLine),
+      'move',
+    );
+  }, [onLineRangeDrag, resolveLineAtPoint]);
+
+  const handleRailPointerUp = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    const drag = railDragRef.current;
+    railDragRef.current = null;
+    if (!drag || drag.pointerId !== event.pointerId || !onLineRangeDrag) return;
+    if (!drag.moved) return; // plain click — the block click handler toggles the reference
+    const currentLine = resolveLineAtPoint(event.clientX + 16, event.clientY) ?? drag.anchorLine;
+    onLineRangeDrag(
+      event as unknown as MouseEvent<HTMLElement>,
+      Math.min(drag.anchorLine, currentLine),
+      Math.max(drag.anchorLine, currentLine),
+      'end',
+    );
+  }, [onLineRangeDrag, resolveLineAtPoint]);
+
+  const handleRailPointerCancel = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (railDragRef.current?.pointerId === event.pointerId) railDragRef.current = null;
+  }, []);
+
+  const railDragHandlers = {
+    onPointerDown: handleRailPointerDown,
+    onPointerMove: handleRailPointerMove,
+    onPointerUp: handleRailPointerUp,
+    onPointerCancel: handleRailPointerCancel,
+  };
+
+  // A drag that selected a range ends with a click event bubbling to the
+  // block/rail click handlers; swallow that one click so the freshly dragged
+  // range isn't toggled away.
+  const consumeRailDragClick = (): boolean => {
+    if (!railDragSuppressClickRef.current) return false;
+    railDragSuppressClickRef.current = false;
+    return true;
+  };
 
   if (blocks.length === 0) {
     return <div className="min-w-0 max-w-full px-4 py-4 text-sm leading-6 text-foreground"><p className="text-muted-foreground">{t('rightSidebar.emptyFile')}</p></div>;
@@ -2991,9 +3288,35 @@ export function MarkdownPreview({
         <div className="min-w-0 max-w-full space-y-1.5 overflow-x-hidden break-words px-1.5 py-3 text-[13px] leading-5 text-foreground sm:space-y-2 sm:px-2 sm:py-4 sm:text-sm sm:leading-6">
         <MarkdownMermaidOpenContext.Provider value={handleOpenMermaidLightbox}>
         {blocks.map((block) => {
-          const selected = Boolean(lineRange && block.startLine <= lineRange.end && block.endLine >= lineRange.start);
-          const blockSelected = block.kind === 'table' ? false : selected;
+          const intersects = Boolean(lineRange && block.startLine <= lineRange.end && block.endLine >= lineRange.start);
+          const wholeSelected = Boolean(lineRange && lineRange.start <= block.startLine && lineRange.end >= block.endLine);
+          // Fine-grained blocks highlight the exact referenced lines inside,
+          // so the block-wide wash and full-height rail only appear when the
+          // whole block is referenced. Blocks without inner targets light up
+          // as a whole on any overlap.
+          const blockSelected = block.kind === 'table' ? false : (block.fineGrained ? wholeSelected : intersects);
           const tableWholeSelected = Boolean(block.kind === 'table' && lineRange?.start === block.startLine && lineRange.end === block.endLine);
+          // Segment of the selection rail matching the referenced lines, so a
+          // partial selection lights only its own slice of the rail.
+          let railSegment: ReactNode = null;
+          if (block.kind !== 'table' && block.fineGrained && intersects && !wholeSelected && lineRange) {
+            const lineCount = block.endLine - block.startLine + 1;
+            const segmentStart = Math.max(lineRange.start, block.startLine);
+            const segmentEnd = Math.min(lineRange.end, block.endLine);
+            const segmentTop = (segmentStart - block.startLine) / lineCount;
+            const segmentHeight = (segmentEnd - segmentStart + 1) / lineCount;
+            railSegment = (
+              <span
+                aria-hidden="true"
+                data-md-rail-segment
+                className="absolute left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-primary transition sm:w-1"
+                style={{
+                  top: `calc(0.25rem + (100% - 0.5rem) * ${segmentTop})`,
+                  height: `calc((100% - 0.5rem) * ${segmentHeight})`,
+                }}
+              />
+            );
+          }
           const renderedContent = typeof block.content === 'function' ? block.content(lineRange) : block.content;
           const lineLabel = block.startLine === block.endLine ? String(block.startLine) : `${block.startLine}-${block.endLine}`;
           const blockContent = (
@@ -3001,8 +3324,10 @@ export function MarkdownPreview({
               <span
                 className={getReferenceSelectionRailShellClass(blockSelected)}
                 aria-hidden="true"
+                {...railDragHandlers}
               >
                 <span className={getReferenceSelectionRailBarClass(blockSelected)} />
+                {railSegment}
               </span>
               <div className="min-w-0" data-sidebar-selectable>{renderedContent}</div>
             </>
@@ -3012,7 +3337,7 @@ export function MarkdownPreview({
               <div
                 key={block.key}
                 data-markdown-preview-block-start={block.startLine}
-                className={`group grid w-full grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2 ${blockSelected ? 'bg-[var(--surface-2)]' : ''}`}
+                className={`group grid w-full grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2 ${blockSelected ? 'bg-primary/10' : ''}`}
                 title={`Line ${lineLabel}`}
                 aria-label={`Line ${lineLabel}`}
               >
@@ -3022,10 +3347,12 @@ export function MarkdownPreview({
                     className={getReferenceSelectionRailShellClass(tableWholeSelected, 'self')}
                     onClick={(event) => {
                       event.preventDefault();
+                      if (consumeRailDragClick()) return;
                       onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, block.startLine, block.endLine);
                     }}
                     title={`Reference table lines ${lineLabel}`}
                     aria-label={`Reference table lines ${lineLabel}`}
+                    {...railDragHandlers}
                   >
                     <span className={getReferenceSelectionRailBarClass(tableWholeSelected, 'self')} />
                   </button>
@@ -3033,8 +3360,10 @@ export function MarkdownPreview({
                   <span
                     className={getReferenceSelectionRailShellClass(blockSelected, 'none')}
                     aria-hidden="true"
+                    {...railDragHandlers}
                   >
                     <span className={getReferenceSelectionRailBarClass(blockSelected, 'none')} />
+                    {railSegment}
                   </span>
                 )}
                 <div
@@ -3067,14 +3396,16 @@ export function MarkdownPreview({
               onClick={(event) => {
                 const target = event.target;
                 if (isInteractiveTextTarget(target) || hasNativeTextSelection()) return;
-                onLineRangeClick(event, block.startLine, block.endLine);
+                if (consumeRailDragClick()) return;
+                const range = resolveMarkdownRefRange(target, block.startLine, block.endLine);
+                onLineRangeClick(event, range.start, range.end);
               }}
               onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
                 if (event.key !== 'Enter' && event.key !== ' ') return;
                 event.preventDefault();
                 onLineRangeClick(event as unknown as MouseEvent<HTMLElement>, block.startLine, block.endLine);
               }}
-              className={`group grid w-full cursor-pointer grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition active:scale-[0.998] sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2 ${selected ? 'bg-[var(--surface-2)]' : 'hover:bg-[var(--surface-2)]'}`}
+              className={`group grid w-full cursor-pointer grid-cols-[0.625rem_minmax(0,1fr)] gap-1.5 rounded-md py-0.5 pr-1.5 text-left outline-none transition active:scale-[0.998] sm:grid-cols-[0.875rem_minmax(0,1fr)] sm:gap-2 sm:pr-2 ${blockSelected ? 'bg-primary/10' : 'hover:bg-[var(--surface-2)]'}`}
               title={`Reference line ${lineLabel}`}
               aria-label={`Reference line ${lineLabel}`}
             >
@@ -3681,14 +4012,18 @@ function getReferenceSelectionRailShellClass(selected: boolean, hover: 'group' |
   const hoverClass = hover === 'group'
     ? 'group-hover:bg-[var(--surface-elevated)]'
     : hover === 'self' ? 'hover:bg-[var(--surface-elevated)]' : '';
-  return `flex min-h-5 w-full select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-[var(--surface-elevated)]' : `bg-[var(--surface-2)] ${hoverClass}`}`;
+  // touch-none: drags starting on a rail are line-range selections, so the
+  // browser must not hijack the gesture for scrolling. relative: anchors the
+  // partial-selection rail segment (data-md-rail-segment). Selected state is
+  // a primary tint so it reads as "referenced", not as yet another gray.
+  return `relative flex min-h-5 w-full touch-none select-none items-stretch justify-center rounded transition sm:min-h-6 ${selected ? 'bg-primary/20' : `bg-[var(--surface-2)] ${hoverClass}`}`;
 }
 
 function getReferenceSelectionRailBarClass(selected: boolean, hover: 'group' | 'self' | 'none' = 'group'): string {
   const hoverClass = hover === 'group'
     ? 'group-hover:bg-[var(--muted-foreground)]'
     : hover === 'self' ? 'hover:bg-[var(--muted-foreground)]' : '';
-  return `my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-[var(--muted-foreground)]' : `bg-[var(--border-strong)] ${hoverClass}`}`;
+  return `my-1 w-0.5 rounded-full transition sm:w-1 ${selected ? 'bg-primary' : `bg-[var(--border-strong)] ${hoverClass}`}`;
 }
 
 function getReferenceFloatingButtonClass(isMobile: boolean, completed: boolean): string {
@@ -3852,6 +4187,24 @@ function hasNativeTextSelection(): boolean {
 
 function isInteractiveTextTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && Boolean(target.closest('a, button, input, textarea, select, label, [contenteditable="true"]'));
+}
+
+// Resolve the source line range referenced by a click inside a Markdown
+// preview block: the nearest element stamped with data-md-ref-start/end (a
+// paragraph line, list item, quote line, code line, table row) wins, so
+// references land on exactly what was tapped instead of the whole block.
+function resolveMarkdownRefRange(
+  target: EventTarget | null,
+  fallbackStart: number,
+  fallbackEnd: number,
+): { start: number; end: number } {
+  const refTarget = target instanceof HTMLElement ? target.closest<HTMLElement>('[data-md-ref-start]') : null;
+  const start = Number(refTarget?.dataset.mdRefStart);
+  const end = Number(refTarget?.dataset.mdRefEnd ?? refTarget?.dataset.mdRefStart);
+  if (Number.isFinite(start) && start > 0 && Number.isFinite(end) && end > 0) {
+    return { start: Math.min(start, end), end: Math.max(start, end) };
+  }
+  return { start: fallbackStart, end: fallbackEnd };
 }
 
 function GitActionMenu({ actions, running, completed }: {
@@ -4962,6 +5315,11 @@ function FilePreview({
     });
   };
 
+  const handlePreviewLineRangeDrag = (event: MouseEvent<HTMLElement>, startLine: number, endLine: number, phase: 'move' | 'end') => {
+    if (phase === 'end') placeFloatingInsertButton(event);
+    onLineRangeChange({ start: startLine, end: endLine });
+  };
+
   const handleMarkdownPreviewScroll = (event: UIEvent<HTMLDivElement>) => {
     const { scrollTop, scrollLeft } = event.currentTarget;
     setMarkdownPreviewScrollTop(scrollTop);
@@ -5092,7 +5450,9 @@ function FilePreview({
             {isImagePreview
               ? t('rightSidebar.imagePreviewHint')
               : showMarkdownPreview
-                ? t('rightSidebar.markdownPreviewHint')
+                ? lineRange
+                  ? t('rightSidebar.selectedLineHint', { lineLabel: selectedLineLabel ?? '' })
+                  : t('rightSidebar.markdownPreviewHint')
               : lineRange
                 ? t('rightSidebar.selectedLineHint', { lineLabel: selectedLineLabel ?? '' })
                 : t('rightSidebar.multiLineHint')}
@@ -5144,6 +5504,7 @@ function FilePreview({
             rootPath={rootPath}
             lineRange={lineRange}
             onLineRangeClick={handlePreviewLineRangeClick}
+            onLineRangeDrag={handlePreviewLineRangeDrag}
             scrollTop={markdownPreviewScrollTop}
             outlineOpen={markdownOutlineOpen}
             outlineCloseSignal={markdownOutlineCloseSignal}
@@ -5285,6 +5646,8 @@ export function RightSidebar(
     () => readCache(CONTEXT_DRAFT_TEXT_STORAGE_KEY, isStringValue) ?? '',
   );
   const [draftFocusRequest, setDraftFocusRequest] = useState(0);
+  // 草稿插入终端失败（session 断联/无活跃终端）：保留草稿并提示
+  const [draftInsertFailed, setDraftInsertFailed] = useState(false);
   // Line-range selection lives in the sidebar so the sticky action bar and
   // the file scroller stay in sync without prop-drilling the click handler.
   const [lineRange, setLineRange] = useState<{ start: number; end: number } | null>(null);
@@ -6439,6 +6802,58 @@ export function RightSidebar(
     writeCacheThrottled(CONTEXT_DRAFT_TEXT_STORAGE_KEY, contextDraftText, CONTEXT_DRAFT_WRITE_MS);
   }, [contextDraftText]);
 
+  // 草稿内容跨设备实时同步：服务端为真源（~/.termdock/context-draft.json），
+  // control WebSocket 推送其它客户端的变更；本端改动防抖 500ms 上传。
+  // lastSyncedDraftRef 记录「与服务端一致的文本」，用于跳过回声和自己的上传。
+  const draftSyncClientIdRef = useRef<string>(crypto.randomUUID?.() ?? `draft-${Math.random().toString(36).slice(2)}`);
+  const lastSyncedDraftRef = useRef<string | null>(null);
+  const draftUploadTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getContextDraft()
+      .then((server) => {
+        if (cancelled) return;
+        lastSyncedDraftRef.current = server.text;
+        setContextDraftText((local) => {
+          // 服务端有内容 → 以服务端为准；服务端为空但本地有 → 保留本地，
+          // 后面的上传 effect 会把它推上去
+          if (server.text && server.text !== local) return server.text;
+          return local;
+        });
+      })
+      .catch(() => { /* 拉取失败用本地缓存 */ });
+    const unsubscribe = subscribeClientState((event) => {
+      if (event.type !== 'context-draft') return;
+      if (event.origin === draftSyncClientIdRef.current) return;
+      lastSyncedDraftRef.current = event.text;
+      setContextDraftText(event.text);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      if (draftUploadTimerRef.current !== null) {
+        window.clearTimeout(draftUploadTimerRef.current);
+        draftUploadTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (lastSyncedDraftRef.current === contextDraftText) return;
+    if (draftUploadTimerRef.current !== null) window.clearTimeout(draftUploadTimerRef.current);
+    const text = contextDraftText;
+    draftUploadTimerRef.current = window.setTimeout(() => {
+      draftUploadTimerRef.current = null;
+      updateContextDraft(text, draftSyncClientIdRef.current)
+        .then(() => {
+          lastSyncedDraftRef.current = text;
+        })
+        .catch(() => { /* 同步失败，下次改动再试 */ });
+    }, 500);
+  }, [contextDraftText]);
+
   const routeReferenceText = useCallback((text: string, key: string, suffix?: string) => {
     if (!text) return;
     if (contextDraftEnabled) {
@@ -6486,10 +6901,35 @@ export function RightSidebar(
     // 多行草稿：告诉终端走 bracketed-paste 包裹，避免 \n 被 PTY 当
     // 行分隔符，让整段草稿作为一条消息发送而不是拆成多条。
     const paste = submit && contextDraftText.trim().includes('\n');
+    // 断联的 session 无法接收输入：终端侧会拒绝并回 ack。只有 ack 成功
+    // 才清空草稿并收起；失败（含超时无活跃终端）保留草稿并提示。
+    const nonce = `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let settled = false;
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('termdock-insert-reference-ack', handleAck);
+      window.clearTimeout(timeoutId);
+      if (ok) {
+        setDraftInsertFailed(false);
+        setContextDraftText('');
+        setContextDraftCollapsed(true);
+      } else {
+        setDraftInsertFailed(true);
+        setContextDraftCollapsed(false);
+      }
+    };
+    const handleAck = (event: Event) => {
+      const detail = (event as CustomEvent<{ nonce?: string; ok?: boolean }>).detail;
+      if (detail?.nonce !== nonce) return;
+      settle(detail.ok === true);
+    };
+    const timeoutId = window.setTimeout(() => settle(false), 1500);
+    window.addEventListener('termdock-insert-reference-ack', handleAck);
+    setDraftInsertFailed(false);
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: { text: payload, focus: false, paste },
+      detail: { text: payload, focus: false, paste, nonce },
     }));
-    setContextDraftText('');
   }, [contextDraftText]);
 
   const rootName = useMemo(() => {
@@ -10363,7 +10803,11 @@ export function RightSidebar(
           value={contextDraftText}
           collapsed={contextDraftCollapsed}
           focusRequest={draftFocusRequest}
-          onChange={setContextDraftText}
+          insertError={draftInsertFailed ? t('rightSidebar.contextDraftInsertFailed') : null}
+          onChange={(next) => {
+            setDraftInsertFailed(false);
+            setContextDraftText(next);
+          }}
           onCollapsedChange={setContextDraftCollapsed}
           onDisable={() => setContextDraftEnabled(false)}
           onClear={() => setContextDraftText('')}

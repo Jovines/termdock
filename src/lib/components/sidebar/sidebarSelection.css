@@ -35,3 +35,14 @@
   -webkit-user-select: none;
   user-select: none;
 }
+
+/* Fine-grained Markdown reference targets (paragraph/quote/code lines, list
+   items, table rows) highlight the exact referenced source lines, not the
+   whole rendered block. Selection uses the primary accent (same family as
+   the Insert pill) so it can never be confused with the neutral hover/rail
+   grays. */
+.termdock-native-select [data-md-ref-start][data-selected='true'] {
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+  color: var(--foreground);
+  border-radius: 0.25rem;
+}

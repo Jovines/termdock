@@ -19,7 +19,10 @@ import {
   normalizeLocalAccessName,
   getLocaleSetting,
   setLocaleSetting,
+  getContextDraftHeightSetting,
+  setContextDraftHeightSetting,
 } from '../utils/settings.js';
+import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
 import {
   getFocusSequence,
@@ -4850,6 +4853,7 @@ async function getSettingsPayload() {
     caffeinateActive: caffeinateManager.isActive(),
     networkAvailable: caffeinateManager.isNetworkAvailable(),
     locale: getLocaleSetting(),
+    contextDraftHeight: getContextDraftHeightSetting(),
     localAccess: {
       ...localAccess,
       interfaces,
@@ -4873,6 +4877,18 @@ router.put('/settings', async (req, res) => {
     setLocaleSetting(body.locale);
   }
 
+  if (body.contextDraftHeight && typeof body.contextDraftHeight === 'object') {
+    const heightBody = body.contextDraftHeight as { mobile?: unknown; desktop?: unknown };
+    for (const device of ['mobile', 'desktop'] as const) {
+      const value = heightBody[device];
+      if (value === null) {
+        setContextDraftHeightSetting(device, null);
+      } else if (typeof value === 'number' && Number.isFinite(value) && value >= 56 && value <= 4000) {
+        setContextDraftHeightSetting(device, Math.round(value));
+      }
+    }
+  }
+
   if (body.localAccess && typeof body.localAccess === 'object') {
     const localAccessBody = body.localAccess as { name?: unknown; reset?: unknown };
     if (localAccessBody.reset === true) {
@@ -4892,6 +4908,30 @@ router.put('/settings', async (req, res) => {
   }
 
   res.json(await getSettingsPayload());
+});
+
+// ── Context draft (cross-device realtime sync) ────────────────────────
+// 草稿内容存服务端（~/.termdock/context-draft.json），PUT 后通过 control
+// WebSocket 广播给其它客户端；携带 origin 让发送方忽略自己的回声。
+
+router.get('/context-draft', (_req, res) => {
+  res.json(loadContextDraft());
+});
+
+router.put('/context-draft', (req, res) => {
+  const body = req.body ?? {};
+  if (typeof body.text !== 'string') {
+    res.status(400).json({ error: 'Invalid draft text', code: 'INVALID_CONTEXT_DRAFT' });
+    return;
+  }
+  const doc = saveContextDraft(body.text);
+  broadcastControlEvent({
+    type: 'context-draft',
+    text: doc.text,
+    updatedAt: doc.updatedAt,
+    origin: typeof body.origin === 'string' ? body.origin : null,
+  });
+  res.json(doc);
 });
 
 // ── Agent hooks API (rich status channel installers, built-in + plugin) ──

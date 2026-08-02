@@ -1097,7 +1097,7 @@ html[data-theme='light'] .termdock-diff {
 
 .termdock-md-table-scroll tr[data-selected='true'] > th,
 .termdock-md-table-scroll tr[data-selected='true'] > td {
-  background: var(--surface-elevated);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
   color: var(--foreground);
 }
 
@@ -1112,7 +1112,7 @@ html[data-theme='light'] .termdock-diff {
   inset-inline-start: 0.25rem;
   width: 0.1875rem;
   border-radius: 999px;
-  background: var(--muted-foreground);
+  background: var(--primary);
 }
 
 /*

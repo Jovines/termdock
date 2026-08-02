@@ -496,6 +496,251 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(wholeTableGutterSelected).toBe(true);
   });
 
+  it('stamps paragraph lines with their source line for line-level references', () => {
+    const { container } = renderPreview([
+      'first line',
+      'second **bold** line',
+      '',
+      'third para',
+    ].join('\n'));
+
+    const refs = Array.from(container.querySelectorAll<HTMLElement>('p [data-md-ref-start]'));
+    expect(refs.map((el) => el.dataset.mdRefStart)).toEqual(['1', '2', '4']);
+    expect(refs.map((el) => el.dataset.mdRefEnd)).toEqual(['1', '2', '4']);
+  });
+
+  it('keeps paragraph line mapping when hidden definition lines are skipped', () => {
+    const { container } = renderPreview([
+      'start line',
+      '[a]: https://example.com',
+      'continued line',
+    ].join('\n'));
+
+    const refs = Array.from(container.querySelectorAll<HTMLElement>('p [data-md-ref-start]'));
+    expect(refs.map((el) => el.dataset.mdRefStart)).toEqual(['1', '3']);
+  });
+
+  it('marks only the referenced lines inside a paragraph', () => {
+    const block = buildMarkdownPreviewBlocks([
+      'first line',
+      'second line',
+      'third line',
+    ], '/repo/docs/para.md', '/repo').find((item) => item.key.startsWith('p-'));
+
+    expect(block).toBeTruthy();
+    const { container } = render(<>{block ? renderBlockContent(block.content, { start: 2, end: 2 }) : null}</>);
+    const refs = Array.from(container.querySelectorAll<HTMLElement>('[data-md-ref-start]'));
+    expect(refs.map((el) => el.dataset.selected ?? '')).toEqual(['', 'true', '']);
+  });
+
+  it('stamps list items with per-item source line ranges', () => {
+    const { container } = renderPreview([
+      '- one',
+      '- two',
+      '  continuation',
+      '- three',
+    ].join('\n'));
+
+    const items = Array.from(container.querySelectorAll<HTMLElement>('li[data-md-ref-start]'));
+    expect(items.map((el) => [el.dataset.mdRefStart, el.dataset.mdRefEnd])).toEqual([
+      ['1', '1'],
+      ['2', '3'],
+      ['4', '4'],
+    ]);
+  });
+
+  it('stamps nested list items with their own source line ranges', () => {
+    const { container } = renderPreview([
+      '- parent',
+      '  - child',
+      '- sibling',
+    ].join('\n'));
+
+    const items = Array.from(container.querySelectorAll<HTMLElement>('li[data-md-ref-start]'));
+    expect(items.map((el) => [el.dataset.mdRefStart, el.dataset.mdRefEnd])).toEqual([
+      ['1', '2'],
+      ['2', '2'],
+      ['3', '3'],
+    ]);
+  });
+
+  it('stamps lists nested in blockquotes with absolute source lines', () => {
+    const { container } = renderPreview([
+      'intro',
+      '',
+      '> - one',
+      '> - two',
+    ].join('\n'));
+
+    const items = Array.from(container.querySelectorAll<HTMLElement>('blockquote li[data-md-ref-start]'));
+    expect(items.map((el) => [el.dataset.mdRefStart, el.dataset.mdRefEnd])).toEqual([
+      ['3', '3'],
+      ['4', '4'],
+    ]);
+  });
+
+  it('marks only the referenced list item instead of the whole list', () => {
+    const block = buildMarkdownPreviewBlocks([
+      '- one',
+      '- two',
+    ], '/repo/docs/list.md', '/repo').find((item) => item.key.startsWith('list-'));
+
+    expect(block).toBeTruthy();
+    const { container } = render(<>{block ? renderBlockContent(block.content, { start: 2, end: 2 }) : null}</>);
+    const items = Array.from(container.querySelectorAll<HTMLElement>('li[data-md-ref-start]'));
+    expect(items.map((el) => el.dataset.selected ?? '')).toEqual(['', 'true']);
+  });
+
+  it('stamps blockquote lines with their source line for line-level references', () => {
+    const { container } = renderPreview([
+      '> first quoted',
+      '> second quoted',
+    ].join('\n'));
+
+    const refs = Array.from(container.querySelectorAll<HTMLElement>('blockquote p [data-md-ref-start]'));
+    expect(refs.map((el) => el.dataset.mdRefStart)).toEqual(['1', '2']);
+  });
+
+  it('stamps callout body lines with their source line for line-level references', () => {
+    const { container } = renderPreview([
+      '> [!NOTE] first body',
+      '> second body',
+    ].join('\n'));
+
+    const refs = Array.from(container.querySelectorAll<HTMLElement>('aside [data-md-ref-start]'));
+    expect(refs.map((el) => el.dataset.mdRefStart)).toEqual(['1', '2']);
+  });
+
+  it('stamps fenced code lines with their source line for line-level references', () => {
+    const { container } = renderPreview([
+      'intro',
+      '',
+      '```unknowlang',
+      'alpha',
+      'beta',
+      '```',
+    ].join('\n'));
+
+    const refs = Array.from(container.querySelectorAll<HTMLElement>('pre [data-md-ref-start]'));
+    expect(refs.map((el) => el.dataset.mdRefStart)).toEqual(['4', '5']);
+    expect(refs.map((el) => el.textContent?.trim())).toEqual(['alpha', 'beta']);
+  });
+
+  it('stamps indented code lines with their source line for line-level references', () => {
+    const { container } = renderPreview([
+      'intro',
+      '',
+      '    alpha',
+      '    beta',
+    ].join('\n'));
+
+    const refs = Array.from(container.querySelectorAll<HTMLElement>('pre [data-md-ref-start]'));
+    expect(refs.map((el) => el.dataset.mdRefStart)).toEqual(['3', '4']);
+  });
+
+  it('highlights only the referenced lines and a rail segment for partial selections', () => {
+    render(
+      <MarkdownPreview
+        content={['first line', 'second line', 'third line'].join('\n')}
+        filePath="/repo/docs/guide.md"
+        rootPath="/repo"
+        lineRange={{ start: 2, end: 2 }}
+        onLineRangeClick={() => undefined}
+        scrollTop={0}
+        outlineOpen={false}
+        lightboxOpen={false}
+      />,
+    );
+
+    const blockRow = document.querySelector<HTMLElement>('[data-markdown-preview-block-start="1"]');
+    expect(blockRow?.className ?? '').not.toMatch(/(?:^|\s)bg-primary\/10/);
+    expect(blockRow?.className ?? '').not.toMatch(/(?:^|\s)bg-\[var\(--surface-2\)\]/);
+    const segment = document.querySelector<HTMLElement>('[data-md-rail-segment]');
+    expect(segment).toBeTruthy();
+    expect(segment?.style.top).toContain(`${1 / 3}`);
+    expect(segment?.style.height).toContain(`${1 / 3}`);
+    const refs = Array.from(document.querySelectorAll<HTMLElement>('[data-md-ref-start]'));
+    expect(refs.map((el) => el.dataset.selected ?? '')).toEqual(['', 'true', '']);
+  });
+
+  it('keeps the block-wide highlight when the whole block is referenced', () => {
+    render(
+      <MarkdownPreview
+        content={['first line', 'second line', 'third line'].join('\n')}
+        filePath="/repo/docs/guide.md"
+        rootPath="/repo"
+        lineRange={{ start: 1, end: 3 }}
+        onLineRangeClick={() => undefined}
+        scrollTop={0}
+        outlineOpen={false}
+        lightboxOpen={false}
+      />,
+    );
+
+    const blockRow = document.querySelector<HTMLElement>('[data-markdown-preview-block-start="1"]');
+    expect(blockRow?.className ?? '').toMatch(/(?:^|\s)bg-primary\/10/);
+    expect(document.querySelector('[data-md-rail-segment]')).toBeNull();
+  });
+
+  it('highlights the referenced line inside a blockquote instead of the whole quote', () => {
+    render(
+      <MarkdownPreview
+        content={['> first quoted', '> second quoted', '> third quoted'].join('\n')}
+        filePath="/repo/docs/guide.md"
+        rootPath="/repo"
+        lineRange={{ start: 2, end: 2 }}
+        onLineRangeClick={() => undefined}
+        scrollTop={0}
+        outlineOpen={false}
+        lightboxOpen={false}
+      />,
+    );
+
+    const blockRow = document.querySelector<HTMLElement>('[data-markdown-preview-block-start="1"]');
+    expect(blockRow?.className ?? '').not.toMatch(/(?:^|\s)bg-\[var\(--surface-2\)\]/);
+    const refs = Array.from(document.querySelectorAll<HTMLElement>('blockquote [data-md-ref-start]'));
+    expect(refs.map((el) => el.dataset.selected ?? '')).toEqual(['', 'true', '']);
+    expect(document.querySelector('[data-md-rail-segment]')).toBeTruthy();
+  });
+
+  it('references the exact tapped line instead of the whole Markdown block', () => {
+    const onLineRangeClick = vi.fn();
+    render(
+      <MarkdownPreview
+        content={['first line', 'second line', 'third line'].join('\n')}
+        filePath="/repo/docs/guide.md"
+        rootPath="/repo"
+        lineRange={null}
+        onLineRangeClick={onLineRangeClick}
+        scrollTop={0}
+        outlineOpen={false}
+        lightboxOpen={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('second line'));
+    expect(onLineRangeClick).toHaveBeenCalledWith(expect.anything(), 2, 2);
+  });
+
+  it('references the exact tapped list item range instead of the whole list', () => {
+    const onLineRangeClick = vi.fn();
+    render(
+      <MarkdownPreview
+        content={['- one', '- two', '  continuation', '- three'].join('\n')}
+        filePath="/repo/docs/guide.md"
+        rootPath="/repo"
+        lineRange={null}
+        onLineRangeClick={onLineRangeClick}
+        scrollTop={0}
+        outlineOpen={false}
+        lightboxOpen={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('two'));
+    expect(onLineRangeClick).toHaveBeenCalledWith(expect.anything(), 2, 3);
+  });
+
   it('renders one-column Markdown tables with the same overflow-safe cell sizing', () => {
     const { container } = renderPreview([
       '| Only column |',
