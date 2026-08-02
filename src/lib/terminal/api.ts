@@ -825,6 +825,24 @@ export function sendTerminalFocusState(
   }
 }
 
+// Push-viewing 与 focus 是两套语义：focus 要求 textarea 聚焦（移动端要弹起
+// 软键盘），用于 tmux focus tracking；viewing 只要求“正在看这个 session”
+// （active + 页面可见 + 窗口聚焦），用于服务端推送抑制。键盘收起但还在看
+// 输出是移动端常态，不能用 focus 充当 viewing。
+export function sendTerminalViewingState(
+  sessionId: string,
+  viewing: boolean,
+  reason?: string,
+): void {
+  const conn = wsConnections.get(sessionId);
+  if (!conn || conn.ws.readyState !== WebSocket.OPEN) return;
+  try {
+    conn.ws.send(JSON.stringify({ type: 'viewing', viewing, reason }));
+  } catch {
+    // Viewing state is advisory; the heartbeat/reconnect path will repair stale sockets.
+  }
+}
+
 export function sendAgentReviewAck(sessionId: string): void {
   const conn = wsConnections.get(sessionId);
   if (!conn || conn.ws.readyState !== WebSocket.OPEN) return;

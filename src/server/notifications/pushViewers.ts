@@ -3,11 +3,13 @@
  * session, so agent-transition pushes can skip the very client that is
  * already looking at the session (its notification would be redundant).
  *
- * The per-terminal WebSocket reports logical focus (session active + viewport
- * focused + document visible + window focused) on every change, including a
- * focus=false when the user switches sessions, blurs the window, or the
- * document goes hidden — and the WS close handler clears the entry when the
- * connection dies (e.g. the iOS PWA was killed without a clean focus=false).
+ * The per-terminal WebSocket reports viewing state (session active + document
+ * visible + window focused + stream ready — deliberately NOT textarea focus,
+ * since mobile users routinely watch output with the keyboard dismissed) on
+ * every change, including a viewing=false when the user switches sessions,
+ * backgrounds the app, or the window blurs — and the WS close handler clears
+ * the entry when the connection dies (e.g. the iOS PWA was killed without a
+ * clean viewing=false).
  */
 const viewingSessionsByClient = new Map<string, Set<string>>();
 

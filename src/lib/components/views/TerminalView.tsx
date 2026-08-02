@@ -6,7 +6,7 @@ import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout }
 import { TerminalViewport, type RefreshReason, type TerminalController } from '../terminal/TerminalViewport';
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
-import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, updateSessionInventoryEntry } from '../../terminal/api';
+import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, sendTerminalViewingState, updateSessionInventoryEntry } from '../../terminal/api';
 import { computeTerminalLogicalFocus } from '../../terminal/focus';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
@@ -205,6 +205,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const modifierTapRef = React.useRef<{ modifier: Modifier; timestamp: number } | null>(null);
   const lastFocusRequestTokenRef = React.useRef(0);
   const lastSentLogicalFocusRef = React.useRef<boolean | null>(null);
+  const lastSentViewingRef = React.useRef<boolean | null>(null);
   const streamVersionRef = React.useRef(0);
   const isActiveRef = React.useRef(isActive);
   const isMobileRef = React.useRef(isMobile);
@@ -392,6 +393,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     debugSession('[Terminal] focus state sent', { backendSessionId, focused, reason });
   }, [debugSession]);
 
+  const reportViewing = React.useCallback((viewing: boolean, reason: string) => {
+    const backendSessionId = terminalIdRef.current;
+    if (!backendSessionId) return;
+    if (lastSentViewingRef.current === viewing) return;
+    lastSentViewingRef.current = viewing;
+    sendTerminalViewingState(backendSessionId, viewing, reason);
+    debugSession('[Terminal] viewing state sent', { backendSessionId, viewing, reason });
+  }, [debugSession]);
+
   const logicalFocus = computeTerminalLogicalFocus({
     isActive,
     viewportFocused: isViewportFocused,
@@ -400,14 +410,26 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     streamReady: isStreamReady,
   });
 
+  // 推送抑制的“正在看这个 session”：不要求 textarea 聚焦（移动端键盘收起
+  // 但还在看输出是常态），也不要求 document.hasFocus() —— iOS installed PWA
+  // 在用户交互前 hasFocus 经常是 false（前台看着输出也一样），visibilityState
+  // 才是可靠的“应用在前台”信号。只要 active + 页面可见 + 流就绪。
+  const logicalViewing = isActive && isDocumentVisible && isStreamReady;
+
   // Latest logical focus, kept in a ref so the WS 'connected' handler can
   // re-assert it after reconnects without a stale closure.
   const logicalFocusRef = React.useRef(logicalFocus);
+  const logicalViewingRef = React.useRef(logicalViewing);
 
   React.useEffect(() => {
     logicalFocusRef.current = logicalFocus;
     reportLogicalFocus(logicalFocus, 'logical-focus-change');
   }, [logicalFocus, reportLogicalFocus, terminalSessionId]);
+
+  React.useEffect(() => {
+    logicalViewingRef.current = logicalViewing;
+    reportViewing(logicalViewing, 'logical-viewing-change');
+  }, [logicalViewing, reportViewing, terminalSessionId]);
 
   // Listen for font size changes from TerminalViewport (pinch-to-zoom)
   React.useEffect(() => {
@@ -531,6 +553,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   React.useEffect(() => {
     terminalIdRef.current = terminalSessionId;
     lastSentLogicalFocusRef.current = null;
+    lastSentViewingRef.current = null;
     lastSentFlowPausedRef.current = null;
   }, [terminalSessionId]);
 
@@ -702,10 +725,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
                 // 标记 WS 已就绪：编排器从这一刻起才允许 push resize 给服务端。
                 setIsStreamReady(true);
-                // 重连后重新声明当前焦点：服务端靠它决定是否跳过该客户端的
-                // 推送（reportLogicalFocus 的 ref 去重会吞掉未变化的焦点值）。
+                // 重连后重新声明当前 focus / viewing：服务端分别用它做 tmux
+                // focus tracking 和推送抑制（ref 去重会吞掉未变化的值）。
                 if (terminalIdRef.current) {
                   sendTerminalFocusState(terminalIdRef.current, logicalFocusRef.current, 'stream-connected');
+                  sendTerminalViewingState(terminalIdRef.current, logicalViewingRef.current, 'stream-connected');
                 }
                 // 之前没有这个 gate，reload 时 ResizeObserver 在 ensureSession
                 // 跑完前就拿 OLD terminalId POST 出去，server 直接 404 + WS 4001

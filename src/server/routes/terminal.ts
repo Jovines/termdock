@@ -6171,10 +6171,17 @@ export function handleTerminalWebSocket(
           const focused = msg.focused === true;
           const reason = typeof msg.reason === 'string' ? msg.reason : 'client-focus';
           updateClientFocusState(sessionId, session, clientId, focused, reason);
+          break;
+        }
+        case 'viewing': {
           // Push suppression: while this client is actively viewing the
           // session, its agent-transition push is redundant — skip it.
+          // Kept separate from 'focus' (which requires textarea focus for
+          // tmux focus tracking): on mobile the keyboard is routinely
+          // dismissed while the user is still watching the session.
           if (options.pushClientId) {
-            setClientViewingSession(options.pushClientId, sessionId, focused);
+            const viewing = msg.viewing === true;
+            setClientViewingSession(options.pushClientId, sessionId, viewing);
           }
           break;
         }
