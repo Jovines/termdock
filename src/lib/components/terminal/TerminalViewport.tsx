@@ -19,6 +19,13 @@ import '@xterm/xterm/css/xterm.css';
 import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
 import {
+  cellToClientPoint,
+  clampCellToBuffer,
+  getTerminalGridMetrics,
+  orderSelectionEndpoints,
+  type SelectionCell,
+} from '../../terminal/selectionHandles';
+import {
   TERMINAL_FALLBACK_LIGATURES,
   TERMINAL_LIGATURE_FEATURE_SETTINGS,
   type TerminalFontWeight,
@@ -602,16 +609,10 @@ function getVisibleTerminalText(terminal: Terminal): string {
 }
 
 function getTerminalCellFromPoint(terminal: Terminal, clientX: number, clientY: number): { col: number; row: number } | null {
-  const element = terminal.element;
-  if (!element || !terminal.cols || !terminal.rows) return null;
-  const rect = element.getBoundingClientRect();
-  if (!rect.width || !rect.height) return null;
-  const rx = clientX - rect.left;
-  const ry = clientY - rect.top;
-  const charW = element.offsetWidth / terminal.cols || rect.width / terminal.cols;
-  const charH = element.offsetHeight / terminal.rows || rect.height / terminal.rows;
-  const col = Math.max(0, Math.min(terminal.cols - 1, Math.floor(rx / charW)));
-  const viewportRow = Math.max(0, Math.min(terminal.rows - 1, Math.floor(ry / charH)));
+  const m = getTerminalGridMetrics(terminal);
+  if (!m) return null;
+  const col = Math.max(0, Math.min(terminal.cols - 1, Math.floor((clientX - m.originLeft) / m.cellW)));
+  const viewportRow = Math.max(0, Math.min(terminal.rows - 1, Math.floor((clientY - m.originTop) / m.cellH)));
   return {
     col,
     row: terminal.buffer.active.viewportY + viewportRow,
@@ -781,6 +782,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const [mobileCopyPopover, setMobileCopyPopover] = React.useState<{ left: number; top: number } | null>(null);
     const mobileCopyPopoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const mobileCopyPopoverPressingRef = React.useRef(false);
+    // 移动端选区会话：长按框选抬手后保留选区，渲染首/尾两个拖动 handle
+    // 供二次调整。anchor = 拖动时被固定的另一端，focus = 跟随手指的一端
+    // （都是 buffer 绝对行列，无序）；渲染时按线性 offset 排首/尾。
+    // dragging = 当前被按住的 handle（'start'/'end'），未拖动为 null。
+    const selectionSessionRef = React.useRef<{
+      active: boolean;
+      anchor: SelectionCell | null;
+      focus: SelectionCell | null;
+      dragging: 'start' | 'end' | null;
+    }>({ active: false, anchor: null, focus: null, dragging: null });
+    // 非 null ⇔ 会话激活；两端点滚出视口时对应位置为 null（隐藏该 handle）
+    const [selectionHandles, setSelectionHandles] = React.useState<{
+      start: { left: number; top: number } | null;
+      end: { left: number; top: number } | null;
+    } | null>(null);
     // 桌面 IME 候选窗锚点：跟随 xterm 光标的 1 cell 大小区域
     // mobile（enableTouchScroll=true）下不使用，textarea 仍然 inset:0 全覆盖
     const [imeAnchor, setImeAnchor] = React.useState<{ x: number; y: number; cellW: number; cellH: number }>(
@@ -837,12 +853,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       setMobileCopyPopover(null);
     }, []);
 
-    const showMobileCopyPopover = React.useCallback((position: { left: number; top: number }) => {
+    const showMobileCopyPopover = React.useCallback((position: { left: number; top: number }, options?: { persistent?: boolean }) => {
       if (mobileCopyPopoverTimerRef.current !== null) {
         clearTimeout(mobileCopyPopoverTimerRef.current);
+        mobileCopyPopoverTimerRef.current = null;
       }
       mobileCopyPopoverPressingRef.current = false;
       setMobileCopyPopover(position);
+      // 选区会话期间气泡常驻：用户可能还要拖 handle 调整，由
+      // endSelectionSession 统一关闭。
+      if (options?.persistent) return;
       mobileCopyPopoverTimerRef.current = setTimeout(() => {
         mobileCopyPopoverTimerRef.current = null;
         setMobileCopyPopover(null);
@@ -852,12 +872,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     React.useEffect(() => {
       if (!mobileCopyPopover) return;
 
+      // 选区会话期间滚动终端是合法操作（把选区外内容滚进视口再接着调），
+      // 只消气泡、不动会话；xterm viewport 的 scroll 会走到这个 capture 监听。
+      const handleScrollDismiss = () => {
+        if (selectionSessionRef.current.active) return;
+        dismissMobileCopyPopover();
+      };
       const handleDismiss = () => dismissMobileCopyPopover();
-      window.addEventListener('scroll', handleDismiss, true);
+      window.addEventListener('scroll', handleScrollDismiss, true);
       window.addEventListener('resize', handleDismiss);
       document.addEventListener('visibilitychange', handleDismiss);
       return () => {
-        window.removeEventListener('scroll', handleDismiss, true);
+        window.removeEventListener('scroll', handleScrollDismiss, true);
         window.removeEventListener('resize', handleDismiss);
         document.removeEventListener('visibilitychange', handleDismiss);
       };
@@ -869,6 +895,64 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         mobileCopyPopoverTimerRef.current = null;
       }
     }, []);
+
+    // 重算首/尾 handle 的位置（相对 containerRef 的 absolute 坐标）。
+    // start handle 贴在首格上边缘、end handle 贴在末格下边缘，避免挡住
+    // 被选中文字；拖动中的 handle 始终画在 focus（手指）一端。
+    // 不能用 fixed + client 坐标：移动端外层 wrapper 恒带
+    // translateY(--kb-translate-y) transform，会成为 fixed 后代的包含块
+    // （同 arrow indicator 处注释的结论）。client 坐标与容器 rect 同处
+    // 一个坐标系，相减后 transform 自然抵消。
+    const updateSelectionHandles = React.useCallback(() => {
+      const term = terminalRef.current;
+      const container = containerRef.current;
+      const session = selectionSessionRef.current;
+      if (!term || !container || !session.active || !session.anchor || !session.focus) {
+        setSelectionHandles(null);
+        return;
+      }
+      const containerRect = container.getBoundingClientRect();
+      const charH = getTerminalGridMetrics(term)?.cellH ?? 16;
+      const { start, end } = orderSelectionEndpoints(session.anchor, session.focus, term.cols);
+      // 拖动中被按住的 handle 跟 focus（手指）走，另一端锚在 anchor；
+      // 未拖动时按线性 offset 排首/尾。
+      const startCell = session.dragging === 'start' ? session.focus : session.dragging === 'end' ? session.anchor : start;
+      const endCell = session.dragging === 'end' ? session.focus : session.dragging === 'start' ? session.anchor : end;
+      const toPos = (cell: SelectionCell, isStart: boolean) => {
+        const p = cellToClientPoint(term, cell);
+        return p ? { left: p.x - containerRect.left, top: isStart ? p.y - containerRect.top : p.y + charH - containerRect.top } : null;
+      };
+      setSelectionHandles({
+        start: toPos(startCell, true),
+        end: toPos(endCell, false),
+      });
+    }, []);
+
+    // 结束选区会话：隐藏 handle + 复制气泡（选区本身由调用方决定是否
+    // clearSelection —— 复制场景里 xterm 已经清过了）。
+    const endSelectionSession = React.useCallback(() => {
+      const session = selectionSessionRef.current;
+      session.active = false;
+      session.anchor = null;
+      session.focus = null;
+      session.dragging = null;
+      setSelectionHandles(null);
+      dismissMobileCopyPopover();
+    }, [dismissMobileCopyPopover]);
+
+    // 会话期间：终端滚动 → 重定位 handle（端点出视口即隐藏）；resize →
+    // 结束会话（xterm resize 本身会清选区，行列换算也已失效）。
+    React.useEffect(() => {
+      if (!selectionHandles) return;
+      const term = terminalRef.current;
+      if (!term) return;
+      const scrollSub = term.onScroll(() => updateSelectionHandles());
+      const resizeSub = term.onResize(() => endSelectionSession());
+      return () => {
+        scrollSub.dispose();
+        resizeSub.dispose();
+      };
+    }, [selectionHandles, updateSelectionHandles, endSelectionSession]);
 
     React.useEffect(() => {
       if (enableTouchScroll) {
@@ -1318,6 +1402,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       sentValueRef.current = '';
       sentCursorRef.current = 0;
       try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
+      endSelectionSession();
 
       // 多行 paste 模式：手动构造 bracketed-paste 序列（与 xterm paste()
       // 内部行为一致：\r?\n 归一化为 \r，ESC 转义为 ␛），并将 \r 拼接
@@ -1660,13 +1745,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const selection = terminal?.hasSelection() ? terminal.getSelection() : '';
       try { terminal?.clearSelection(); } catch { /* ignored */ }
       flushSync(() => {
-        dismissMobileCopyPopover();
+        endSelectionSession();
       });
       void (async () => {
         const ok = await writeClipboardText(selection);
         onMobileLongPressCopyResultRef.current?.(ok);
       })();
-    }, [dismissMobileCopyPopover, suppressMobileTapFocus]);
+    }, [endSelectionSession, suppressMobileTapFocus]);
 
     const notifyGestureLock = React.useCallback((locked: boolean) => {
       document.dispatchEvent(
@@ -2052,10 +2137,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       originX: number;
       originY: number;
       holdTimer: ReturnType<typeof setTimeout> | null;
-      mode: 'idle' | 'holding' | 'arrow' | 'copy';
+      mode: 'idle' | 'holding' | 'arrow' | 'copy' | 'adjust';
       longPressMode: 'arrows' | 'copy';
       copyStart: { col: number; row: number } | null;
       copyDidSelect: boolean;
+      // 拖选触边自动滚动：timer 非 null 表示正在滚；dir 方向，
+      // lines 每 tick 行数（越深越快），clientX/Y 最近指位
+      edgeScrollTimer: ReturnType<typeof setInterval> | null;
+      edgeScrollDir: -1 | 0 | 1;
+      edgeScrollLines: number;
+      edgeClientX: number;
+      edgeClientY: number;
       gestureLocked: boolean;
       joystickDir: '' | 'up' | 'down' | 'left' | 'right';
       joystickRepeatTimer: ReturnType<typeof setTimeout> | null;
@@ -2076,6 +2168,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       longPressMode: 'arrows',
       copyStart: null,
       copyDidSelect: false,
+      edgeScrollTimer: null,
+      edgeScrollDir: 0,
+      edgeScrollLines: 0,
+      edgeClientX: 0,
+      edgeClientY: 0,
       gestureLocked: false,
       joystickDir: '',
       joystickRepeatTimer: null,
@@ -2107,6 +2204,81 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       notifyGestureLock(locked);
     }, [notifyGestureLock]);
 
+    const lpStopEdgeScroll = React.useCallback(() => {
+      const s = lpStateRef.current;
+      if (s.edgeScrollTimer !== null) {
+        clearInterval(s.edgeScrollTimer);
+        s.edgeScrollTimer = null;
+      }
+      s.edgeScrollDir = 0;
+    }, []);
+
+    // 拖动落点统一入口：copy（初次框选）与 adjust（拖 handle）共用，
+    // 触边自动滚动的 tick 也走这里，保证两种来源行为一致。
+    const lpApplyDragCell = React.useCallback((cell: SelectionCell) => {
+      const term = terminalRef.current;
+      const s = lpStateRef.current;
+      if (!term) return;
+      if (s.mode === 'copy' && s.copyStart) {
+        s.copyDidSelect = selectTerminalRange(term, s.copyStart, cell) || s.copyDidSelect;
+        return;
+      }
+      if (s.mode === 'adjust') {
+        const session = selectionSessionRef.current;
+        if (!session.active || !session.anchor) return;
+        session.focus = clampCellToBuffer(term, cell);
+        selectTerminalRange(term, session.anchor, session.focus);
+        updateSelectionHandles();
+      }
+    }, [updateSelectionHandles]);
+
+    // 拖选到视口上/下边缘时自动滚动终端，让选区能延伸到屏外：
+    // 60ms 一个 tick，按指位深入边缘的程度每次滚 1~6 行，滚完用最近的
+    // 指位重算端点（viewportY 变了，同一 clientY 映射到更远的 buffer 行）。
+    const lpUpdateEdgeScroll = React.useCallback((clientX: number, clientY: number) => {
+      const term = terminalRef.current;
+      const s = lpStateRef.current;
+      if (!term) return;
+      const m = getTerminalGridMetrics(term);
+      if (!m) return;
+      const top = m.originTop;
+      const bottom = m.originTop + term.rows * m.cellH;
+      const edge = Math.max(28, m.cellH * 1.5);
+      const dTop = clientY - top;
+      const dBottom = bottom - clientY;
+      let dir: -1 | 0 | 1 = 0;
+      let depth = 0;
+      if (dTop < edge) {
+        dir = -1;
+        depth = Math.min(1, (edge - dTop) / edge);
+      } else if (dBottom < edge) {
+        dir = 1;
+        depth = Math.min(1, (edge - dBottom) / edge);
+      }
+      s.edgeClientX = clientX;
+      s.edgeClientY = clientY;
+      if (dir === 0) {
+        lpStopEdgeScroll();
+        return;
+      }
+      s.edgeScrollDir = dir;
+      s.edgeScrollLines = 1 + Math.round(depth * 5);
+      if (s.edgeScrollTimer === null) {
+        s.edgeScrollTimer = setInterval(() => {
+          const t = terminalRef.current;
+          const st = lpStateRef.current;
+          if (!t || st.edgeScrollDir === 0) return;
+          if (st.mode !== 'copy' && st.mode !== 'adjust') {
+            lpStopEdgeScroll();
+            return;
+          }
+          t.scrollLines(st.edgeScrollDir * st.edgeScrollLines);
+          const cell = getTerminalCellFromPoint(t, st.edgeClientX, st.edgeClientY);
+          if (cell) lpApplyDragCell(cell);
+        }, 60);
+      }
+    }, [lpApplyDragCell, lpStopEdgeScroll]);
+
     const lp_onPointerDown = React.useCallback((e: PointerEvent): boolean => {
       if (e.pointerType !== 'touch') return false;
 
@@ -2120,6 +2292,42 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       const s = lpStateRef.current;
       s.longPressMode = mobileLongPressModeRef.current;
+
+      // 选区会话激活中：按住 handle → 进入 adjust 二次调整；点终端其他
+      // 位置（非 handle、非复制气泡）→ 结束会话并清选区，本次点按继续
+      // 走正常流程（不拦截）。
+      const selectionSession = selectionSessionRef.current;
+      if (selectionSession.active && s.pointerId === null) {
+        const handleEl = target.closest('[data-selection-handle]');
+        if (handleEl instanceof HTMLElement) {
+          const term = terminalRef.current;
+          const side = handleEl.dataset.selectionHandle === 'start' ? 'start' : 'end';
+          if (term && selectionSession.anchor && selectionSession.focus) {
+            // 抓住一端后：另一端固定为 anchor，被拖端为 focus（无序，
+            // 跨过另一端时选区自然反向，不会塌缩）。
+            const ordered = orderSelectionEndpoints(selectionSession.anchor, selectionSession.focus, term.cols);
+            selectionSession.anchor = side === 'start' ? ordered.end : ordered.start;
+            selectionSession.focus = side === 'start' ? ordered.start : ordered.end;
+            selectionSession.dragging = side;
+            s.pointerId = e.pointerId;
+            s.tapStartX = e.clientX;
+            s.tapStartY = e.clientY;
+            s.tapDidMove = false;
+            s.mode = 'adjust';
+            longPressGestureBlocksScrollRef.current = true;
+            suppressMobileTapFocus(1800);
+            stopAllScroll();
+            tmuxStopRaf();
+            hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
+            lpSetGestureLock(true);
+            return true;
+          }
+        }
+        if (!target.closest('[data-terminal-copy-popover]')) {
+          endSelectionSession();
+          try { terminalRef.current?.clearSelection(); } catch { /* ignored */ }
+        }
+      }
 
       // A gesture is already owned by the primary pointer. Extra fingers
       // (palm brush, edge grip) must be claimed but otherwise ignored —
@@ -2268,6 +2476,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         return 'claim';
       }
 
+      if (s.mode === 'adjust') {
+        if (!isClaimed) return 'claim';
+        stopAllScroll();
+        const term = terminalRef.current;
+        const session = selectionSessionRef.current;
+        if (!term || !session.active || !session.anchor || !session.focus) return 'claim';
+        const cell = getTerminalCellFromPoint(term, e.clientX, e.clientY);
+        if (!cell) return 'claim';
+        lpApplyDragCell(cell);
+        lpUpdateEdgeScroll(e.clientX, e.clientY);
+        return 'claim';
+      }
+
       if (s.mode === 'copy') {
         if (!isClaimed) return 'claim';
         stopAllScroll();
@@ -2275,7 +2496,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (!term || !s.copyStart) return 'claim';
         const end = getTerminalCellFromPoint(term, e.clientX, e.clientY);
         if (!end) return 'claim';
-        s.copyDidSelect = selectTerminalRange(term, s.copyStart, end) || s.copyDidSelect;
+        lpApplyDragCell(end);
+        lpUpdateEdgeScroll(e.clientX, e.clientY);
         return 'claim';
       }
 
@@ -2370,7 +2592,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         return 'claim';
       }
       return 'neutral';
-    }, [lpSetGestureLock]);
+    }, [lpSetGestureLock, lpApplyDragCell, lpUpdateEdgeScroll]);
 
     const lp_onPointerUp = React.useCallback((e: PointerEvent) => {
       if (e.pointerType !== 'touch' || e.pointerId !== lpStateRef.current.pointerId) return;
@@ -2380,16 +2602,26 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (s.mode === 'copy') {
         stopAllScroll();
         tmuxStopRaf();
+        lpStopEdgeScroll();
         lpSetGestureLock(false);
         const term = terminalRef.current;
+        let finalEnd: SelectionCell | null = null;
         if (term && s.copyStart) {
-          const end = getTerminalCellFromPoint(term, e.clientX, e.clientY);
-          if (end) {
-            s.copyDidSelect = selectTerminalRange(term, s.copyStart, end) || s.copyDidSelect;
+          finalEnd = getTerminalCellFromPoint(term, e.clientX, e.clientY);
+          if (finalEnd) {
+            s.copyDidSelect = selectTerminalRange(term, s.copyStart, finalEnd) || s.copyDidSelect;
           }
         }
-        if (term && s.copyDidSelect && term.hasSelection()) {
-          showMobileCopyPopover(getMobileCopyPopoverPosition(e.clientX, e.clientY));
+        if (term && s.copyDidSelect && term.hasSelection() && s.copyStart) {
+          // 抬手不结束：进入选区会话，留首/尾 handle 供二次调整，
+          // 复制气泡常驻，直到复制或点选区外。
+          const session = selectionSessionRef.current;
+          session.active = true;
+          session.anchor = s.copyStart;
+          session.focus = finalEnd ?? s.copyStart;
+          session.dragging = null;
+          updateSelectionHandles();
+          showMobileCopyPopover(getMobileCopyPopoverPosition(e.clientX, e.clientY), { persistent: true });
           suppressMobileTapFocus(1800);
           hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
         } else {
@@ -2398,6 +2630,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
         s.copyStart = null;
         s.copyDidSelect = false;
+        s.pointerId = null;
+        s.mode = 'idle';
+        longPressGestureBlocksScrollRef.current = false;
+        return;
+      }
+
+      if (s.mode === 'adjust') {
+        stopAllScroll();
+        tmuxStopRaf();
+        lpStopEdgeScroll();
+        lpSetGestureLock(false);
+        // 拖完一端不结束会话：handle 与选区保留，可再拖另一端、
+        // 点「复制」或点选区外结束。
+        selectionSessionRef.current.dragging = null;
+        updateSelectionHandles();
+        suppressMobileTapFocus(1800);
         s.pointerId = null;
         s.mode = 'idle';
         longPressGestureBlocksScrollRef.current = false;
@@ -2439,13 +2687,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       s.copyDidSelect = false;
       s.pointerId = null;
       s.mode = 'idle';
-    }, [lpSetGestureLock, stopAllScroll, suppressMobileTapFocus]);
+    }, [lpSetGestureLock, stopAllScroll, suppressMobileTapFocus, lpStopEdgeScroll]);
 
     const lp_onPointerCancel = React.useCallback(() => {
       const s = lpStateRef.current;
       lpSetGestureLock(false);
+      lpStopEdgeScroll();
       if (s.mode === 'arrow') {
         setArrowIndicator({ visible: false, activeDir: '' });
+      }
+      if (s.mode === 'adjust') {
+        // 会话保留，仅结束本次拖动
+        selectionSessionRef.current.dragging = null;
+        updateSelectionHandles();
       }
       if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
       if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
@@ -2456,7 +2710,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       s.pointerId = null;
       s.tapDidMove = false;
       s.mode = 'idle';
-    }, [lpSetGestureLock]);
+    }, [lpSetGestureLock, lpStopEdgeScroll, updateSelectionHandles]);
 
     useGesture({
       name: `long-press:${sessionKey}`,
@@ -3901,6 +4155,48 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             <CopyIcon size={14} strokeWidth={2.4} />
             <span>{t('common.copy')}</span>
           </button>
+        )}
+        {/* 移动端选区首/尾调整 handle：44px 触控热区，视觉是「圆点+短柄」
+            棒棒糖。start 锚在首格上边缘（圆点在上），end 锚在末格下边缘
+            （圆点在下），不遮选中文字。手势命中走 lp_onPointerDown 的
+            data-selection-handle 检测。
+            absolute + 局部刻度 z-30（同 arrow indicator）：外层 wrapper 的
+            translateY transform 会把 fixed 后代抓去当包含块，不能用 fixed。 */}
+        {selectionHandles?.start && (
+          <div
+            data-selection-handle="start"
+            className="absolute z-30 h-11 w-11 select-none"
+            style={{
+              left: selectionHandles.start.left,
+              top: selectionHandles.start.top,
+              transform: 'translate(-50%, -100%)',
+              touchAction: 'none',
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <div className="pointer-events-none absolute bottom-0 left-1/2 flex -translate-x-1/2 flex-col items-center">
+              <div className="h-3.5 w-3.5 rounded-full bg-[var(--accent)] shadow-[0_1px_4px_rgb(0_0_0_/_0.4)]" />
+              <div className="h-3 w-0.5 bg-[var(--accent)]" />
+            </div>
+          </div>
+        )}
+        {selectionHandles?.end && (
+          <div
+            data-selection-handle="end"
+            className="absolute z-30 h-11 w-11 select-none"
+            style={{
+              left: selectionHandles.end.left,
+              top: selectionHandles.end.top,
+              transform: 'translate(-50%, 0)',
+              touchAction: 'none',
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <div className="pointer-events-none absolute left-1/2 top-0 flex -translate-x-1/2 flex-col items-center">
+              <div className="h-3 w-0.5 bg-[var(--accent)]" />
+              <div className="h-3.5 w-3.5 rounded-full bg-[var(--accent)] shadow-[0_1px_4px_rgb(0_0_0_/_0.4)]" />
+            </div>
+          </div>
         )}
         {/* Early initialization loading - shows before xterm.js loads */}
         {isInitializing && <TerminalInitializing />}
