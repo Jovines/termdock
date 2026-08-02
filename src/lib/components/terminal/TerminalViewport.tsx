@@ -46,6 +46,10 @@ import {
 } from '../../terminal/lineEditSync';
 
 const TERMINAL_HAPTIC_PATTERN_MS = 8;
+// 拖选（初次框选 / 拖选区 handle）时把指位向上提这么多 px 再换算格子：
+// 选区边缘和被拖 handle 停在手指上方保持可见，不被手指挡住——
+// 相当于自研的「放大镜」替代（iOS 原生 loupe 已被 readonly 屏蔽）。
+const SELECTION_DRAG_LIFT_PX = 36;
 const TMUX_TOUCH_AXIS_THRESHOLD_PX = 10;
 const TMUX_TOUCH_HORIZONTAL_RELEASE_RATIO = 1.08;
 const TMUX_TOUCH_VERTICAL_CLAIM_RATIO = 1.16;
@@ -1648,7 +1652,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const isClipboardUiTarget = React.useCallback((target: EventTarget | null): boolean => {
       return target instanceof HTMLElement && (
         target.closest('[data-terminal-copy-popover="true"]') !== null ||
-        target.closest('[data-mobile-copy-button="true"]') !== null
+        target.closest('[data-mobile-copy-button="true"]') !== null ||
+        // 选区调整 handle 也算剪贴板 UI：触摸它不能 dismiss 复制气泡，
+        // 否则一拖 handle 气泡就消失、选完没法复制。
+        target.closest('[data-selection-handle]') !== null
       );
     }, []);
 
@@ -2273,7 +2280,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             return;
           }
           t.scrollLines(st.edgeScrollDir * st.edgeScrollLines);
-          const cell = getTerminalCellFromPoint(t, st.edgeClientX, st.edgeClientY);
+          const cell = getTerminalCellFromPoint(t, st.edgeClientX, st.edgeClientY - SELECTION_DRAG_LIFT_PX);
           if (cell) lpApplyDragCell(cell);
         }, 60);
       }
@@ -2316,6 +2323,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             s.mode = 'adjust';
             longPressGestureBlocksScrollRef.current = true;
             suppressMobileTapFocus(1800);
+            hiddenInputRef.current?.setAttribute('readonly', '');
             stopAllScroll();
             tmuxStopRaf();
             hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
@@ -2400,6 +2408,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             s.mode = 'copy';
             longPressGestureBlocksScrollRef.current = true;
             suppressMobileTapFocus(1800);
+            // pointerdown capture 里 prepareMobileInputForTouch 已摘掉
+            // readonly，长按期间 textarea 处于可编辑态，iOS 会弹放大镜。
+            // 进入框选即恢复 readonly 屏蔽 loupe（下一次正常点按会重新摘掉）。
+            hiddenInputRef.current?.setAttribute('readonly', '');
             s.copyStart = start;
             s.copyDidSelect = false;
             stopAllScroll();
@@ -2482,7 +2494,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         const term = terminalRef.current;
         const session = selectionSessionRef.current;
         if (!term || !session.active || !session.anchor || !session.focus) return 'claim';
-        const cell = getTerminalCellFromPoint(term, e.clientX, e.clientY);
+        const cell = getTerminalCellFromPoint(term, e.clientX, e.clientY - SELECTION_DRAG_LIFT_PX);
         if (!cell) return 'claim';
         lpApplyDragCell(cell);
         lpUpdateEdgeScroll(e.clientX, e.clientY);
@@ -2494,7 +2506,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         stopAllScroll();
         const term = terminalRef.current;
         if (!term || !s.copyStart) return 'claim';
-        const end = getTerminalCellFromPoint(term, e.clientX, e.clientY);
+        const end = getTerminalCellFromPoint(term, e.clientX, e.clientY - SELECTION_DRAG_LIFT_PX);
         if (!end) return 'claim';
         lpApplyDragCell(end);
         lpUpdateEdgeScroll(e.clientX, e.clientY);
@@ -2607,7 +2619,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         const term = terminalRef.current;
         let finalEnd: SelectionCell | null = null;
         if (term && s.copyStart) {
-          finalEnd = getTerminalCellFromPoint(term, e.clientX, e.clientY);
+          finalEnd = getTerminalCellFromPoint(term, e.clientX, e.clientY - SELECTION_DRAG_LIFT_PX);
           if (finalEnd) {
             s.copyDidSelect = selectTerminalRange(term, s.copyStart, finalEnd) || s.copyDidSelect;
           }
