@@ -4,6 +4,10 @@ import {
   type MessageBoxOptions,
   type MessageBoxReturnValue,
 } from 'electron';
+import {
+  updateRuntimeFromRegistry,
+  type RuntimeUpdateResult,
+} from './runtime.js';
 
 const UPDATE_REPOSITORY = 'Jovines/termdock';
 const AUTOMATIC_CHECK_DELAY_MS = 15_000;
@@ -105,6 +109,14 @@ export function configureDesktopUpdater(displayMessageBox: ShowMessageBox): void
   interval.unref();
 }
 
+export async function ensureLatestRuntime(): Promise<RuntimeUpdateResult | null> {
+  if (!supportsAutomaticUpdates()) return null;
+  return updateRuntimeFromRegistry({
+    appVersion: app.getVersion(),
+    resourcesPath: process.resourcesPath,
+  });
+}
+
 export async function checkForDesktopUpdates(manual = true): Promise<void> {
   if (!supportsAutomaticUpdates()) {
     if (manual && showMessageBox) {
@@ -118,6 +130,32 @@ export async function checkForDesktopUpdates(manual = true): Promise<void> {
   }
   manualCheckPending ||= manual;
   try {
+    const runtime = await ensureLatestRuntime();
+    if (runtime?.status === 'updated') {
+      console.log(`[desktop-updater] runtime updated to ${runtime.currentVersion}`);
+      if (manual && showMessageBox) {
+        manualCheckPending = false;
+        await showMessageBox({
+          type: 'info',
+          title: 'Termdock Runtime 已更新',
+          message: `已安装 ${runtime.currentVersion}`,
+          detail: '下次由桌面版启动本机服务时自动使用；当前正在运行的服务和会话不受影响。',
+        });
+      }
+      return;
+    }
+    if (runtime?.status !== 'requires-desktop') {
+      if (manual && showMessageBox) {
+        manualCheckPending = false;
+        await showMessageBox({
+          type: 'info',
+          title: 'Termdock Runtime 已是最新版本',
+          message: `当前 Runtime ${runtime?.currentVersion ?? app.getVersion()} 已是最新版本。`,
+        });
+      }
+      return;
+    }
+    console.log(`[desktop-updater] desktop update required: ${runtime.reason ?? 'incompatible runtime'}`);
     await autoUpdater.checkForUpdates();
   } catch (error) {
     await reportUpdateError(error);

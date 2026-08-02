@@ -37,6 +37,7 @@ export interface CliInstallation {
 
 export interface DesktopSnapshot {
   appVersion: string;
+  runtimeVersion: string;
   packaged: boolean;
   bundledCliVersion: string;
   cliInstallations: CliInstallation[];

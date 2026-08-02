@@ -17,6 +17,15 @@ if [ ! -x "$node_bin" ] || [ ! -f "$cli_entry" ]; then
   exit 1
 fi
 
+runtime_selection="$("$node_bin" "$resources_dir/cli/resolve-runtime.cjs" "$resources_dir")"
+runtime_version="$(printf '%s\n' "$runtime_selection" | sed -n '1p')"
+selected_cli="$(printf '%s\n' "$runtime_selection" | sed -n '2p')"
+if [ -n "$selected_cli" ] && [ -f "$selected_cli" ]; then
+  cli_entry="$selected_cli"
+  TERMDOCK_VERSION="$runtime_version"
+  export TERMDOCK_VERSION
+fi
+
 PATH="$toolchain_bin:/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
 export PATH
 export TERMDOCK_BUNDLED_RUNTIME=1

@@ -101,7 +101,9 @@ function renderConnections(connections) {
 
 function render(snapshot) {
   currentSnapshot = snapshot;
-  elements.version.textContent = `Termdock Desktop ${snapshot.appVersion}`;
+  elements.version.textContent = snapshot.runtimeVersion === snapshot.appVersion
+    ? `Termdock Desktop ${snapshot.appVersion}`
+    : `Termdock Desktop ${snapshot.appVersion} · Runtime ${snapshot.runtimeVersion}`;
   elements.connectionCount.textContent = String(snapshot.connections.length);
 
   const local = snapshot.localService;

@@ -25,7 +25,16 @@ import type {
   SavedConnection,
   ServiceProbe,
 } from './types.js';
-import { checkForDesktopUpdates, configureDesktopUpdater } from './updater.js';
+import {
+  checkForDesktopUpdates,
+  configureDesktopUpdater,
+  ensureLatestRuntime,
+} from './updater.js';
+import {
+  resolvePackagedRuntime,
+  rollbackDownloadedRuntime,
+  type DesktopRuntimePaths,
+} from './runtime.js';
 
 const execFileAsync = promisify(execFile);
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -262,25 +271,33 @@ async function getLocalServiceStatus(): Promise<LocalServiceStatus> {
   return { running: probe.ok, state, probe };
 }
 
-function runtimePaths(): {
+type ResolvedDesktopRuntime = DesktopRuntimePaths & {
   node: string;
-  cli: string;
   launcher: string;
   toolchainBin: string;
-} {
+};
+
+function runtimePaths(): ResolvedDesktopRuntime {
   if (app.isPackaged) {
+    const selected = resolvePackagedRuntime({
+      appVersion: app.getVersion(),
+      resourcesPath: process.resourcesPath,
+    });
     return {
+      ...selected,
       node: path.join(process.resourcesPath, 'runtime', 'bin', 'node'),
-      cli: path.join(process.resourcesPath, 'server', 'dist', 'server', 'cli.js'),
       launcher: path.join(process.resourcesPath, 'cli', 'td'),
       toolchainBin: path.join(process.resourcesPath, 'toolchain', 'bin'),
     };
   }
   return {
     node: process.env.TERMDOCK_NODE_BIN || 'node',
+    serverRoot: projectRoot,
     cli: path.join(projectRoot, 'dist', 'server', 'cli.js'),
     launcher: path.join(projectRoot, 'desktop', 'cli', 'td'),
     toolchainBin: path.join(projectRoot, '.desktop-runtime', 'toolchain', 'bin'),
+    version: app.getVersion(),
+    source: 'development',
   };
 }
 
@@ -336,7 +353,7 @@ async function bundledCliVersion(): Promise<string> {
     const { stdout } = await execFileAsync(runtime.node, [runtime.cli, '--version'], {
       timeout: 5_000,
       maxBuffer: 128 * 1024,
-      env: desktopRuntimeEnv(),
+      env: desktopRuntimeEnv(runtime),
     });
     return stdout.trim() || app.getVersion();
   } catch {
@@ -353,6 +370,7 @@ async function snapshot(): Promise<DesktopSnapshot> {
   ]);
   return {
     appVersion: app.getVersion(),
+    runtimeVersion: cliVersion,
     packaged: app.isPackaged,
     bundledCliVersion: cliVersion,
     cliInstallations,
@@ -362,8 +380,7 @@ async function snapshot(): Promise<DesktopSnapshot> {
   };
 }
 
-function desktopRuntimeEnv(): NodeJS.ProcessEnv {
-  const runtime = runtimePaths();
+function desktopRuntimeEnv(runtime = runtimePaths()): NodeJS.ProcessEnv {
   const currentPath = process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin';
   return {
     ...process.env,
@@ -372,14 +389,15 @@ function desktopRuntimeEnv(): NodeJS.ProcessEnv {
       .join(path.delimiter),
     TERMDOCK_DESKTOP: '1',
     TERMDOCK_BUNDLED_RUNTIME: app.isPackaged ? '1' : '0',
-    TERMDOCK_VERSION: app.getVersion(),
+    TERMDOCK_VERSION: runtime.version,
+    TERMDOCK_DESKTOP_SHELL_VERSION: app.getVersion(),
     TMUX_BIN: fs.existsSync(path.join(runtime.toolchainBin, 'tmux'))
       ? path.join(runtime.toolchainBin, 'tmux')
       : process.env.TMUX_BIN,
   };
 }
 
-async function waitForLocalService(): Promise<ServiceProbe> {
+async function waitForLocalService(childPid?: number): Promise<ServiceProbe> {
   const deadline = Date.now() + START_TIMEOUT_MS;
   let lastProbe: ServiceProbe = { ok: false, url: DEFAULT_LOCAL_URL, error: '服务尚未启动' };
   while (Date.now() < deadline) {
@@ -387,6 +405,9 @@ async function waitForLocalService(): Promise<ServiceProbe> {
     const url = state ? stateUrl(state) : DEFAULT_LOCAL_URL;
     lastProbe = await probeService(url);
     if (lastProbe.ok) return lastProbe;
+    if (childPid && !isProcessRunning(childPid)) {
+      return { ...lastProbe, error: '服务进程在健康检查通过前退出' };
+    }
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
   return lastProbe;
@@ -436,34 +457,55 @@ async function startLocalService(): Promise<ServiceProbe> {
     }
   }
 
-  const runtime = runtimePaths();
+  if (app.isPackaged) {
+    try {
+      await ensureLatestRuntime();
+    } catch (error) {
+      console.error('[desktop-runtime] update check failed; using the current runtime', error);
+    }
+  }
+
+  let runtime = runtimePaths();
   if (!fs.existsSync(runtime.cli)) {
     throw new Error('未找到 Termdock 服务端构建，请先运行 npm run build');
   }
   if (app.isPackaged && !fs.existsSync(runtime.node)) {
     throw new Error('安装包缺少内嵌 Node Runtime');
   }
-  fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
-  const logPath = path.join(termdockDir, 'server.log');
-  const logFd = fs.openSync(logPath, 'a');
-  const child = spawn(runtime.node, [
-    runtime.cli,
-    '--foreground',
-    '--host',
-    '0.0.0.0',
-    '--port',
-    '9834',
-  ], {
-    detached: true,
-    stdio: ['ignore', logFd, logFd],
-    env: desktopRuntimeEnv(),
-  });
-  fs.closeSync(logFd);
-  child.unref();
+  const startRuntime = async (selected: ResolvedDesktopRuntime): Promise<ServiceProbe> => {
+    fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
+    const logPath = path.join(termdockDir, 'server.log');
+    const logFd = fs.openSync(logPath, 'a');
+    const child = spawn(selected.node, [
+      selected.cli,
+      '--foreground',
+      '--host',
+      '0.0.0.0',
+      '--port',
+      '9834',
+    ], {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: desktopRuntimeEnv(selected),
+    });
+    fs.closeSync(logFd);
+    child.unref();
+    return waitForLocalService(child.pid);
+  };
 
-  const probe = await waitForLocalService();
+  let probe = await startRuntime(runtime);
+  if (!probe.ok && app.isPackaged && runtime.source === 'downloaded') {
+    if (rollbackDownloadedRuntime({
+      appVersion: app.getVersion(),
+      resourcesPath: process.resourcesPath,
+    }, runtime.version)) {
+      console.error(`[desktop-runtime] ${runtime.version} failed to start; rolled back`);
+      runtime = runtimePaths();
+      probe = await startRuntime(runtime);
+    }
+  }
   if (!probe.ok) {
-    throw new Error(`桌面版服务启动失败：${probe.error ?? '未知错误'}。日志：${logPath}`);
+    throw new Error(`桌面版服务启动失败：${probe.error ?? '未知错误'}。日志：${path.join(termdockDir, 'server.log')}`);
   }
   await connectWindow(probe.url);
   return probe;
