@@ -4,7 +4,6 @@ import {
   Settings as RiSettings4Line,
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
-  Search as RiSearchLine,
   LoaderCircle as RiLoaderCircle,
   FolderTree as RiFolderTreeLine,
   ChevronRight as RiChevronRightLine,
@@ -72,22 +71,6 @@ interface LeftSidebarProps {
   onTogglePinned?: () => void;
 }
 
-function matchesSession(
-  query: string,
-  session: LeftSidebarProps['sessions'][number],
-  state?: LeftSidebarProps['sessionStates'] extends Map<string, infer T> ? T : never,
-): boolean {
-  if (!query) return true;
-  const haystack = [
-    session.name,
-    session.mode,
-    state?.cwd,
-    state?.activeProgram,
-    getCwdLeafName(state?.cwd ?? null),
-  ].filter(Boolean).join(' ').toLowerCase();
-  return haystack.includes(query.toLowerCase());
-}
-
 function StatusDot({
   status,
   needsReview,
@@ -111,8 +94,6 @@ export function LeftSidebar(
   }: LeftSidebarProps,
 ) {
   const { t } = useI18n();
-  const [query, setQuery] = useState('');
-  const [searchOpen, setSearchOpen] = useState(false);
   const [confirmNewMode, setConfirmNewMode] = useState<'shell' | 'tmux' | null>(null);
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
@@ -124,15 +105,11 @@ export function LeftSidebar(
   // 用 ref 而非 state：变更不需要触发重渲染，store 自身的 collapsedGroups 才是真相。
   const autoExpandedGroupKeysRef = useRef<Set<string>>(new Set());
   const prevAutoManagedGroupKeyRef = useRef<string | null>(null);
-  const trimmedQuery = query.trim();
-  const isFiltering = trimmedQuery.length > 0;
-  // 分组模式下禁用拖拽（与搜索一致）。
-  const dragDisabled = isFiltering || groupByFolder;
+  // 分组模式下禁用拖拽（组依据 cwd,拖动回写会破坏分组结构）。
+  const dragDisabled = groupByFolder;
 
-
-  const visibleSessions = useMemo(() => {
-    return sessions.filter((session) => matchesSession(trimmedQuery, session, sessionStates.get(session.id)));
-  }, [trimmedQuery, sessions, sessionStates]);
+  // 搜索功能已移除,可见会话 = 全部会话;保留 visibleSessions 别名避免下游大改。
+  const visibleSessions = sessions;
 
 
   const { runningCount, reviewCount } = useMemo(() => {
@@ -200,8 +177,6 @@ export function LeftSidebar(
 
   useEffect(() => {
     if (!isOpen) {
-      setQuery('');
-      setSearchOpen(false);
       setConfirmNewMode(null);
     }
   }, [isOpen]);
@@ -392,9 +367,7 @@ export function LeftSidebar(
   // 分组模式下的拖拽：单个 DragDropContext，按 result.type 区分两种拖动。
   //  - type 'group'：整组顺序拖动（组与组之间排序），组内顺序不变。
   //  - type 'session'：组内排序；禁止跨组拖动（分组依据是 cwd，跨组无意义）。
-  // 搜索过滤时禁用（folderGroups 基于 visibleSessions，回写会丢失被过滤掉的会话）。
   const handleGroupedDragEnd = useCallback((result: DropResult) => {
-    if (isFiltering) return;
     if (!result.destination) return;
     if (result.type === 'group') {
       if (result.source.index === result.destination.index) return;
@@ -405,7 +378,7 @@ export function LeftSidebar(
     if (result.source.index === result.destination.index) return;
     const groupKey = result.source.droppableId.replace(/^group-sessions:/, '');
     onReorderSessions(reorderSessionsWithinGroup(folderGroups, groupKey, result.source.index, result.destination.index));
-  }, [isFiltering, folderGroups, onReorderSessions]);
+  }, [folderGroups, onReorderSessions]);
 
   // 「待处理」是桌面多任务的工作队列，独立于用户选择的会话组织方式。
   // 按 sessions 原始顺序排列。这样无论会话属于哪个组、组是否折叠，都能在
@@ -479,24 +452,10 @@ export function LeftSidebar(
               )}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setSearchOpen((prev) => !prev);
-              if (!searchOpen) setTimeout(() => {
-                document.querySelector<HTMLInputElement>('input[data-left-search]')?.focus();
-              }, 50);
-            }}
-            className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
-              searchOpen
-                ? 'bg-primary/15 text-primary'
-                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-            }`}
-            aria-label={t('sidebar.toggleSearch')}
-            title={t('common.search')}
-          >
-            <RiSearchLine size={14} />
-          </button>
+          {/* 头部按钮组仅桌面显示(hidden sm:flex)。
+              移动端不要在头部加按钮——抽屉全高,顶部超出拇指热区;
+              移动端入口统一加在下方 footer 的 sm:hidden 快捷行里。 */}
+          <div className="hidden sm:flex shrink-0 items-center gap-1.5">
           {onOpenQuota && (
             <button
               type="button"
@@ -542,35 +501,8 @@ export function LeftSidebar(
               <RiCloseLine size={14} />
             </button>
           )}
-        </div>
-
-        {searchOpen && (
-          <div className="mt-2 flex items-center gap-2 rounded-full bg-surface-2 px-3 py-1.5 text-muted-foreground focus-within:bg-surface-elevated">
-            <RiSearchLine size={12} className="shrink-0" />
-            <input
-              data-left-search
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={t('sidebar.filterSessions')}
-              className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground"
-              autoCapitalize="off"
-              autoCorrect="off"
-              autoComplete="off"
-              enterKeyHint="search"
-            />
-            {query && (
-              <button
-                type="button"
-                onClick={() => setQuery('')}
-                className="rounded-full p-0.5 text-muted-foreground hover:bg-surface hover:text-foreground"
-                aria-label={t('sidebar.clearSearch')}
-              >
-                <RiCloseLine size={12} />
-              </button>
-            )}
           </div>
-        )}
+        </div>
 
         <div className="mt-2 flex items-center gap-1.5">
           <button
@@ -624,8 +556,8 @@ export function LeftSidebar(
                   groupRemoved += ts.gitStatus.removed;
                 }
               }
-              // 「其他」组（无 cwd）永远排最后，禁止整组拖动；搜索过滤时也禁用整组拖动。
-              const groupDragDisabled = group.key === '' || isFiltering;
+              // 「其他」组（无 cwd）永远排最后，禁止整组拖动。
+              const groupDragDisabled = group.key === '';
               return (
                 <Draggable
                   key={group.key || '__ungrouped__'}
@@ -699,7 +631,6 @@ export function LeftSidebar(
                                 key={session.id}
                                 draggableId={`sidebar-grouped:${session.id}`}
                                 index={sessionIndex}
-                                isDragDisabled={isFiltering}
                                 disableInteractiveElementBlocking
                               >
                                 {(sessionDragProvided, sessionSnapshot) => (
@@ -714,7 +645,7 @@ export function LeftSidebar(
                                             ? 'bg-surface-elevated text-foreground'
                                             : 'text-muted-foreground hover:bg-surface-2'
                                       )
-                                    } ${isFiltering ? '' : 'cursor-grab active:cursor-grabbing'}`}
+                                    } cursor-grab active:cursor-grabbing`}
                                   >
                                     {renderSessionRowBody(session, sessionDragProvided.dragHandleProps, true)}
                                   </div>
@@ -825,6 +756,41 @@ export function LeftSidebar(
 
       {/* Footer — split new-session button */}
       <div className="shrink-0 border-t border-border/15 p-2">
+        {/*
+          移动端快捷入口行(约定:移动端按钮都加在这里)。
+
+          背景:手机单手握持时拇指热区在下半屏偏右,抽屉又是全高的,
+          头部按钮根本够不到。因此:
+          - 移动端专用入口一律加在这一行(sm:hidden),不要加进头部,
+            也不要头/尾各放一份重复;
+          - 按钮样式沿用现有模式:h-9 flex-1 rounded-lg bg-surface-2
+            text-muted-foreground active:scale-95,图标 size={15};
+          - 「关闭」故意不放:点遮罩或边缘滑动即可关抽屉(见 Sidebar.tsx),
+            放按钮只会占位置。
+          桌面端入口在头部按钮组(hidden sm:flex),两处互不重复。
+        */}
+        <div className="flex items-center gap-1.5 pb-1.5 sm:hidden">
+          {onOpenQuota && (
+            <button
+              type="button"
+              onClick={onOpenQuota}
+              className="inline-flex h-9 flex-1 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+              aria-label="Subscription Quota"
+              title="Subscription Quota"
+            >
+              <RiChartBarLine size={15} />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="inline-flex h-9 flex-1 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+            aria-label={t('sidebar.settings')}
+            title={t('sidebar.settings')}
+          >
+            <RiSettings4Line size={15} />
+          </button>
+        </div>
         <div className="flex items-stretch gap-1.5">
           <button
             type="button"
