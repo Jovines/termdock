@@ -9,6 +9,7 @@ import {
   resolvePackagedRuntime,
   rollbackDownloadedRuntime,
   runtimeCompatibilityError,
+  updateRuntimeFromRegistry,
   validateTarEntries,
   verifyPackageIntegrity,
   verifyRegistrySignature,
@@ -146,4 +147,36 @@ describe('downloaded runtime selection', () => {
     expect(resolvePackagedRuntime({ appVersion: '1.4.46', resourcesPath, homeDir }).source)
       .toBe('bundled');
   });
+
+  it.runIf(process.env.TERMDOCK_RUNTIME_INTEGRATION === '1')(
+    'downloads, verifies, extracts, and activates the published npm runtime',
+    async () => {
+      const homeDir = tempDirectory();
+      const resourcesPath = path.join(tempDirectory(), 'Resources');
+      const published = parseRuntimeManifest(JSON.parse(
+        fs.readFileSync(path.resolve('runtime-manifest.json'), 'utf8'),
+      ));
+      writeJson(
+        path.join(resourcesPath, 'server', 'runtime-manifest.json'),
+        { ...published, version: '1.4.45' },
+      );
+      fs.mkdirSync(path.join(resourcesPath, 'server', 'node_modules'), { recursive: true });
+
+      const result = await updateRuntimeFromRegistry({
+        appVersion: published.minimumDesktopVersion,
+        resourcesPath,
+        homeDir,
+      });
+      expect(result).toMatchObject({ status: 'updated', currentVersion: published.version });
+      const selected = resolvePackagedRuntime({
+        appVersion: published.minimumDesktopVersion,
+        resourcesPath,
+        homeDir,
+      });
+      expect(selected).toMatchObject({ source: 'downloaded', version: published.version });
+      expect(fs.realpathSync(path.join(homeDir, '.termdock', 'desktop-runtime', 'client-current')))
+        .toContain(path.join('versions', published.version));
+    },
+    120_000,
+  );
 });
