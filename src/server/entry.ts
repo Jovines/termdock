@@ -32,6 +32,7 @@ import { requestDeadlineMiddleware } from './utils/requestDeadline.js';
 import { startOnboardingServer, stopOnboardingServer, getOnboardingServerUrl } from './onboardingServer.js';
 import { CertificateWatcher } from './certificateWatcher.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog, writeTextLog } from './utils/serverLogger.js';
+import { resolveRuntimeClientDist } from './utils/runtimeClient.js';
 import {
   getTermdockVersion,
   TERMDOCK_CAPABILITIES,
@@ -63,8 +64,8 @@ const CLIENT_LOG_RATE_LIMIT = 120;
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDirPath = path.dirname(currentFilePath);
-const clientDistPath = path.resolve(currentDirPath, '../client');
-const clientIndexPath = path.join(clientDistPath, 'index.html');
+const bundledClientDistPath = path.resolve(currentDirPath, '../client');
+const bundledClientIndexPath = path.join(bundledClientDistPath, 'index.html');
 const clientLogRecent = new Map<string, number>();
 let clientLogWindowStartedAt = 0;
 let clientLogWindowCount = 0;
@@ -477,18 +478,35 @@ export function createApp(options: AppOptions = {}): express.Express {
   // 文件系统路由（继承 /api/terminal 上的 auth + CSRF 保护）
   app.use('/api/terminal/fs', filesystemRoutes);
 
-  if (fs.existsSync(clientIndexPath)) {
-    app.use(createStaticCompressionMiddleware(clientDistPath));
-    app.use(express.static(clientDistPath, {
-      setHeaders: (res, filePath, stat) => {
-        void stat;
-        const relativePath = `/${path.relative(clientDistPath, filePath).split(path.sep).join('/')}`;
-        setStaticCacheHeaders({ url: relativePath, path: relativePath } as express.Request, res);
-      },
-    }));
+  if (fs.existsSync(bundledClientIndexPath)) {
+    let cachedClientPath = '';
+    let cachedCompression: express.RequestHandler | null = null;
+    let cachedStatic: express.RequestHandler | null = null;
+    const activeClientHandlers = () => {
+      const clientPath = resolveRuntimeClientDist(bundledClientDistPath);
+      if (clientPath !== cachedClientPath || !cachedCompression || !cachedStatic) {
+        cachedClientPath = clientPath;
+        cachedCompression = createStaticCompressionMiddleware(clientPath);
+        cachedStatic = express.static(clientPath, {
+          setHeaders: (res, filePath, stat) => {
+            void stat;
+            const relativePath = `/${path.relative(clientPath, filePath).split(path.sep).join('/')}`;
+            setStaticCacheHeaders({ url: relativePath, path: relativePath } as express.Request, res);
+          },
+        });
+      }
+      return { clientPath, compression: cachedCompression, staticFiles: cachedStatic };
+    };
+    app.use((req, res, next) => {
+      const handlers = activeClientHandlers();
+      handlers.compression(req, res, (compressionError) => {
+        if (compressionError) return next(compressionError);
+        handlers.staticFiles(req, res, next);
+      });
+    });
     app.get(/^(?!\/api(?:\/|$)|\/health$|\/onboarding(?:\/|$)|\/ca(?:\/|$)).*/, (req, res) => {
       setStaticCacheHeaders(req, res);
-      res.sendFile(clientIndexPath);
+      res.sendFile(path.join(activeClientHandlers().clientPath, 'index.html'));
     });
   }
 
