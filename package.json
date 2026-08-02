@@ -37,6 +37,7 @@
     "lint": "tsc --noEmit",
     "trace:diff": "node scripts/inspect-diff-trace.mjs",
     "trace:fsio": "node scripts/inspect-fs-io.mjs",
+    "release:classify": "node scripts/classify-release.mjs",
     "test": "vitest --passWithNoTests",
     "test:ui": "vitest --ui",
     "prepublishOnly": "npm run build",
