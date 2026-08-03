@@ -53,6 +53,7 @@ describe('DiffReview click anchoring', () => {
   const animationFrames = new Map<number, FrameRequestCallback>();
   let animationFrameId = 0;
   const originalIntersectionObserver = globalThis.IntersectionObserver;
+  const originalScrollTo = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTo');
 
   beforeEach(() => {
     streamItems.clear();
@@ -88,6 +89,8 @@ describe('DiffReview click anchoring', () => {
   afterEach(() => {
     cleanup();
     globalThis.IntersectionObserver = originalIntersectionObserver;
+    if (originalScrollTo) Object.defineProperty(HTMLElement.prototype, 'scrollTo', originalScrollTo);
+    else delete (HTMLElement.prototype as { scrollTo?: typeof HTMLElement.prototype.scrollTo }).scrollTo;
     vi.restoreAllMocks();
   });
 
@@ -97,9 +100,17 @@ describe('DiffReview click anchoring', () => {
     pending.forEach(([, callback]) => callback(performance.now()));
   }
 
-  it('positions once, then preserves the viewport anchor through the shared size model', () => {
+  it('keeps a focused file pinned to the loading frontier while measured sizes settle', () => {
     const targetKey = files[2].key;
-    const { container } = render(
+    const scrollTo = vi.fn(function (this: HTMLElement, { top }: ScrollToOptions) {
+      this.scrollTop = Number(top);
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      writable: true,
+      value: scrollTo,
+    });
+    render(
       <DiffReview
         files={files}
         groups={groups}
@@ -120,34 +131,14 @@ describe('DiffReview click anchoring', () => {
         activePane
       />,
     );
-    const scroller = container.querySelector('.termdock-diff-stream-scroller') as HTMLDivElement;
-    const target = container.querySelector(`[data-diff-stream-item="${targetKey}"]`) as HTMLElement;
-    Object.defineProperty(scroller, 'scrollTop', { configurable: true, writable: true, value: 100 });
-    scroller.getBoundingClientRect = vi.fn(() => ({ top: 50 } as DOMRect));
-    target.getBoundingClientRect = vi.fn(() => ({ top: 500 } as DOMRect));
-    const scrollTo = vi.fn(({ top }: ScrollToOptions) => {
-      scroller.scrollTop = Number(top);
-    });
-    scroller.scrollTo = scrollTo as unknown as typeof scroller.scrollTo;
-
     act(flushAnimationFrames);
-    expect(scrollTo).toHaveBeenLastCalledWith({ top: 550, behavior: 'instant' });
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 36, behavior: 'instant' });
 
     act(() => streamItems.get(files[0].key)?.onHeightChange?.(files[0].key, 64, 274));
-    expect(scrollTo).toHaveBeenLastCalledWith({ top: 760, behavior: 'instant' });
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 36, behavior: 'instant' });
 
     act(() => streamItems.get(targetKey)?.onHeightChange?.(targetKey, 64, 480));
-    expect(scrollTo).toHaveBeenCalledTimes(2);
-
-    const first = container.querySelector(`[data-diff-stream-item="${files[0].key}"]`) as HTMLElement;
-    const second = container.querySelector(`[data-diff-stream-item="${files[1].key}"]`) as HTMLElement;
-    first.getBoundingClientRect = vi.fn(() => ({ bottom: 40 } as DOMRect));
-    second.getBoundingClientRect = vi.fn(() => ({ bottom: 200 } as DOMRect));
-    scroller.scrollTop = 300;
-    scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
-
-    act(() => streamItems.get(files[0].key)?.onHeightChange?.(files[0].key, 274, 374));
-    expect(scrollTo).toHaveBeenLastCalledWith({ top: 400, behavior: 'instant' });
+    expect(scrollTo).toHaveBeenCalledTimes(1);
   });
 
   it('loads intersecting files one at a time instead of igniting the whole neighbourhood', () => {

@@ -897,7 +897,11 @@ export function DiffReview({
     ));
     if (Math.abs(container.scrollTop - nativeTop) < 1) return;
     expectedProgrammaticScrollTopRef.current = nativeTop;
-    container.scrollTo({ top: nativeTop, behavior: 'instant' });
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({ top: nativeTop, behavior: 'instant' });
+    } else {
+      container.scrollTop = nativeTop;
+    }
   }, [canvasOrigin, loadingFrontier.maxScrollTop, loadingFrontier.minScrollTop]);
 
   useLayoutEffect(() => {
@@ -920,7 +924,11 @@ export function DiffReview({
       lastDetailScrollTimeRef.current = performance.now();
       expectedProgrammaticScrollTopRef.current = nativeTop;
       setCanvasViewport({ top: logicalTop, height: container.clientHeight });
-      container.scrollTo({ top: nativeTop, behavior: 'instant' });
+      if (typeof container.scrollTo === 'function') {
+        container.scrollTo({ top: nativeTop, behavior: 'instant' });
+      } else {
+        container.scrollTop = nativeTop;
+      }
     });
     return () => window.cancelAnimationFrame(frame);
   }, [initialDetailScrollTop, loadingFrontier.maxScrollTop, loadingFrontier.minScrollTop, orderedFileKeysSignature, scrollTargetKey]);

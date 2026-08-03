@@ -58,7 +58,7 @@ describe('DiffStreamItem virtualization', () => {
     const onHeightChange = vi.fn();
     const { container, rerender } = render(<DiffStreamItem {...baseProps} visible onHeightChange={onHeightChange} />);
     expect(container.querySelector('[data-mocked-diff-viewer]')).toBeTruthy();
-    expect(onHeightChange).toHaveBeenCalledWith(baseProps.selectionPath, 64, 240);
+    expect(onHeightChange).toHaveBeenCalledWith(baseProps.selectionPath, 104, 240);
 
     rerender(<DiffStreamItem {...baseProps} visible={false} onHeightChange={onHeightChange} />);
 
