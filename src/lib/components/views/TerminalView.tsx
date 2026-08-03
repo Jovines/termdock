@@ -8,7 +8,7 @@ import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
 import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, sendTerminalViewingState, updateSessionInventoryEntry } from '../../terminal/api';
 import { computeTerminalLogicalFocus } from '../../terminal/focus';
-import { shouldConsumeAfterTmuxCopyModeExit } from '../../terminal/copyModeInput';
+import { isTmuxMouseOrFocusInput, shouldConsumeAfterTmuxCopyModeExit } from '../../terminal/copyModeInput';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
 import { buildDesktopToolbarPresetOptions, buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, splitToolbarSequenceSegments, TOOLBAR_SEGMENT_DELAY_MS, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
@@ -1307,7 +1307,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       // 键盘输入触发 tmux 退出 copy-mode（与移动端 onTmuxScroll 路径一致）。
       // 注意：wheel 事件本身不退出 copy-mode（连续滚动要继续生效），
       // 只是打个标记，等真正的键盘输入再退出。
-      const isSgrMouseSeq = /^(\x1b\[<[0-9]+;[0-9]+;[0-9]+[mM])+$/.test(data);
+      const isMouseOrFocusSeq = isTmuxMouseOrFocusInput(data);
       const isMouseWheelSeq = /^(\x1b\[<6[45];[0-9]+;[0-9]+M)+$/.test(data);
       if (isTmuxMode && isMouseWheelSeq) {
         shouldExitTmuxCopyModeOnInputRef.current = true;
@@ -1352,7 +1352,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           // wheel/drag/select 事件自身不退出。
           if (
             isTmuxMode &&
-            !isSgrMouseSeq &&
+            !isMouseOrFocusSeq &&
             shouldExitTmuxCopyModeOnInputRef.current &&
             terminal.tmuxAction
           ) {
