@@ -444,7 +444,7 @@ export const ToolbarPresetSettings: React.FC<ToolbarPresetSettingsProps> = ({
               {t('toolbarPresets.desktopVisibilityHint')}
             </span>
           </span>
-          <Switch checked={selectedPreset.showOnDesktop} />
+          <Switch checked={selectedPreset.showOnDesktop === true} />
         </button>
 
         {/* Rows */}
