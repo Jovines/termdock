@@ -24,6 +24,7 @@ import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndi
 import { useI18n } from '../../i18n';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
+import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 
 
 interface LeftSidebarProps {
@@ -54,10 +55,9 @@ interface LeftSidebarProps {
   onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => void;
   onCloseSession: (sessionId: string, event: React.MouseEvent) => void;
   onSplitSession: (sessionId: string) => void;
-  onCloseSplit: () => void;
-  splitSessionIds: string[];
-  splitDirection: 'horizontal' | 'vertical';
-  onSetSplitDirection: (direction: 'horizontal' | 'vertical') => void;
+  onCloseSplit: (sessionId: string) => void;
+  splitWorkspaces: SplitWorkspaceSummary[];
+  onSetSplitLayout: (sessionId: string, layout: SplitLayout) => void;
   onReorderSessions: (sessionIds: string[]) => void;
   // 打开某个会话的操作菜单（重命名/复制目录/关闭等）。触屏用「超长按」触发，
   // 桌面端同时挂到右键 contextmenu；不传则两种手势都不生效。
@@ -83,8 +83,8 @@ export function LeftSidebar(
   {
     isOpen, drawerWidthPx, onClose, onOpen,
     sessions, activeSessionId, sessionStates,
-    onNewSession, onCloseSession, onSplitSession, onCloseSplit, splitSessionIds,
-    splitDirection, onSetSplitDirection,
+    onNewSession, onCloseSession, onSplitSession, onCloseSplit, splitWorkspaces,
+    onSetSplitLayout,
     onReorderSessions, onSessionMenu, onOpenSettings, onOpenQuota,
     tmuxAvailable = true,
     defaultSessionMode = 'shell',
@@ -108,8 +108,15 @@ export function LeftSidebar(
   // 分组模式下禁用拖拽（组依据 cwd,拖动回写会破坏分组结构）。
   const dragDisabled = groupByFolder;
 
-  // 搜索功能已移除,可见会话 = 全部会话;保留 visibleSessions 别名避免下游大改。
-  const visibleSessions = sessions;
+  const splitSessionIds = useMemo(
+    () => new Set(splitWorkspaces.flatMap((workspace) => workspace.sessionIds)),
+    [splitWorkspaces],
+  );
+  // 分屏 workspace 自己占一个顶层 item，其成员不再重复出现在普通 session 列表里。
+  const visibleSessions = useMemo(
+    () => sessions.filter((session) => !splitSessionIds.has(session.id)),
+    [sessions, splitSessionIds],
+  );
 
 
   const { runningCount, reviewCount } = useMemo(() => {
@@ -204,11 +211,14 @@ export function LeftSidebar(
   const handleSessionDragEnd = useCallback((result: DropResult) => {
     if (dragDisabled) return;
     if (!result.destination || result.source.index === result.destination.index) return;
-    const reordered = [...sessions];
+    const reordered = [...visibleSessions];
     const [moved] = reordered.splice(result.source.index, 1);
     reordered.splice(result.destination.index, 0, moved);
-    onReorderSessions(reordered.map((session) => session.id));
-  }, [dragDisabled, onReorderSessions, sessions]);
+    let standaloneIndex = 0;
+    onReorderSessions(sessions.map((session) => (
+      splitSessionIds.has(session.id) ? session.id : reordered[standaloneIndex++]!.id
+    )));
+  }, [dragDisabled, onReorderSessions, sessions, splitSessionIds, visibleSessions]);
 
 
   const handleToggleGroupByFolder = useCallback(() => {
@@ -222,9 +232,10 @@ export function LeftSidebar(
     session: LeftSidebarProps['sessions'][number],
     dragHandleProps?: DraggableProvidedDragHandleProps | null,
     grouped?: boolean,
+    inSplitWorkspace?: boolean,
   ) => {
     const isActive = session.id === activeSessionId;
-    const isSplit = splitSessionIds.includes(session.id);
+    const isSplit = splitSessionIds.has(session.id);
     const ts = sessionStates.get(session.id);
     const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
     const displayName = getSessionDisplayName(
@@ -320,12 +331,12 @@ export function LeftSidebar(
             )}
           </span>
         </button>
-        <button
+        {!inSplitWorkspace && <button
           type="button"
           onClick={(event) => {
             event.stopPropagation();
             if (isSplit) {
-              onCloseSplit();
+              onCloseSplit(session.id);
             } else {
               onSplitSession(session.id);
             }
@@ -337,7 +348,7 @@ export function LeftSidebar(
           title={isSplit ? t('tab.splitClose') : t('tab.split')}
         >
           <RiSplitLine size={13} />
-        </button>
+        </button>}
         <button
           type="button"
           onClick={(event) => {
@@ -435,6 +446,101 @@ export function LeftSidebar(
     </div>
   ) : null;
 
+  const splitWorkspacePanel = splitWorkspaces.length > 0 ? (
+    <div className="mb-1.5 space-y-1">
+      {splitWorkspaces.map((workspace) => {
+        const members = workspace.sessionIds.flatMap((id) => {
+          const session = sessions.find((candidate) => candidate.id === id);
+          return session ? [session] : [];
+        });
+        if (members.length < 2) return null;
+        const hasActive = members.some((session) => session.id === activeSessionId);
+        const layoutActions: Array<{ layout: SplitLayout; icon: React.ReactNode; label: string }> = [
+          { layout: 'horizontal', icon: <RiSplitLine size={12} />, label: t('tab.splitHorizontal') },
+          { layout: 'vertical', icon: <RiSplitRowsLine size={12} />, label: t('tab.splitVertical') },
+          { layout: 'grid', icon: <RiLayoutGridLine size={12} />, label: t('tab.splitGrid') },
+        ];
+        return (
+          <section
+            key={workspace.id}
+            className={`overflow-hidden rounded-lg ring-1 transition-colors ${
+              hasActive ? 'bg-primary/[0.06] ring-primary/25' : 'bg-surface-2/45 ring-border/15'
+            }`}
+          >
+            <header className="flex items-center gap-1 border-b border-border/10 px-1.5 py-1">
+              <span className={`inline-flex h-6 w-6 items-center justify-center rounded-md ${
+                hasActive ? 'bg-primary/15 text-primary' : 'bg-surface text-muted-foreground'
+              }`}>
+                {workspace.layout === 'vertical'
+                  ? <RiSplitRowsLine size={13} />
+                  : workspace.layout === 'grid'
+                    ? <RiLayoutGridLine size={13} />
+                    : <RiSplitLine size={13} />}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = members.find((session) => session.id === activeSessionId) ?? members[0];
+                  if (target) window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: target.id }));
+                  closeIfOverlay();
+                }}
+                className="min-w-0 flex-1 truncate px-1 text-left text-[11.5px] font-semibold text-foreground"
+              >
+                {t('tab.splitWorkspace')} · {t('tab.sessionCount', { count: members.length })}
+              </button>
+              {layoutActions.map((action) => (
+                <button
+                  key={action.layout}
+                  type="button"
+                  onClick={() => onSetSplitLayout(members[0]!.id, action.layout)}
+                  className={`inline-flex h-6 w-6 items-center justify-center rounded-md transition ${
+                    workspace.layout === action.layout
+                      ? 'bg-primary/15 text-primary'
+                      : 'text-muted-foreground/70 hover:bg-surface-elevated hover:text-foreground'
+                  }`}
+                  aria-label={action.label}
+                  title={action.label}
+                >
+                  {action.icon}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => onSplitSession((members.find((session) => session.id === activeSessionId) ?? members[0])!.id)}
+                className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground/70 transition hover:bg-primary/15 hover:text-primary"
+                aria-label={t('tab.split')}
+                title={t('tab.split')}
+              >
+                <RiAddLine size={12} />
+              </button>
+              <button
+                type="button"
+                onClick={() => onCloseSplit(members[0]!.id)}
+                className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground/70 transition hover:bg-destructive/15 hover:text-destructive"
+                aria-label={t('tab.splitClose')}
+                title={t('tab.splitClose')}
+              >
+                <RiCloseLine size={12} />
+              </button>
+            </header>
+            <div className="py-0.5">
+              {members.map((session) => (
+                <div
+                  key={session.id}
+                  className={`group relative flex items-center gap-1 pr-1 transition-colors ${
+                    session.id === activeSessionId ? 'bg-surface-elevated/80 text-foreground' : 'text-muted-foreground hover:bg-surface-2'
+                  }`}
+                >
+                  {renderSessionRowBody(session, undefined, true, true)}
+                </div>
+              ))}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  ) : null;
+
   const inner = (
     <>
       {/* Header — single compact row */}
@@ -524,13 +630,14 @@ export function LeftSidebar(
 
       {/* Session list */}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 py-1.5">
+        {splitWorkspacePanel}
         {!groupByFolder && attentionPanel}
         {sessions.length === 0 ? (
           <div className="rounded-xl bg-surface-2/60 px-4 py-8 text-center">
             <RiTerminalLine size={26} className="mx-auto mb-2 text-muted-foreground" />
             <p className="text-[12px] text-muted-foreground">{t('sidebar.noSessions')}</p>
           </div>
-        ) : visibleSessions.length === 0 ? (
+        ) : visibleSessions.length === 0 && splitWorkspaces.length === 0 ? (
           <div className="rounded-xl bg-surface-2/60 px-4 py-6 text-center">
             <p className="text-[12px] text-muted-foreground">{t('sidebar.noMatchingSessions')}</p>
           </div>
@@ -717,42 +824,6 @@ export function LeftSidebar(
           </DragDropContext>
         )}
       </div>
-
-      {splitSessionIds.length === 2 && (
-        <div className="hidden shrink-0 items-center gap-1.5 border-t border-border/15 px-2 py-1.5 md:flex">
-          <span className="min-w-0 flex-1 truncate px-1 text-[11px] font-medium text-muted-foreground">
-            {t('tab.splitLayout')}
-          </span>
-          <button
-            type="button"
-            onClick={() => onSetSplitDirection('horizontal')}
-            className={`inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11px] transition-colors ${
-              splitDirection === 'horizontal'
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
-            }`}
-            title={`${t('tab.splitHorizontal')} · Ctrl/⌘+Shift+←/→`}
-            aria-label={t('tab.splitHorizontal')}
-          >
-            <RiSplitLine size={13} />
-            {t('tab.splitHorizontal')}
-          </button>
-          <button
-            type="button"
-            onClick={() => onSetSplitDirection('vertical')}
-            className={`inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11px] transition-colors ${
-              splitDirection === 'vertical'
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
-            }`}
-            title={`${t('tab.splitVertical')} · Ctrl/⌘+Shift+↑/↓`}
-            aria-label={t('tab.splitVertical')}
-          >
-            <RiSplitRowsLine size={13} />
-            {t('tab.splitVertical')}
-          </button>
-        </div>
-      )}
 
       {/* Footer — split new-session button */}
       <div className="shrink-0 border-t border-border/15 p-2">

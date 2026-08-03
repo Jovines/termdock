@@ -590,6 +590,8 @@ export type TranslationDictionary = {
     splitLayout: string;
     splitHorizontal: string;
     splitVertical: string;
+    splitGrid: string;
+    splitWorkspace: string;
     splitUnavailableGrouped: string;
     splitEndedGrouped: string;
     splitNoOtherSessions: string;
