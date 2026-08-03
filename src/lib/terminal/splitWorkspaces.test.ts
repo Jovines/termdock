@@ -4,6 +4,8 @@ import {
   findSplitWorkspace,
   normalizeSplitWorkspaces,
   pruneSplitWorkspaces,
+  reorderSplitWorkspaceSessions,
+  renameSplitWorkspace,
 } from './splitWorkspaces';
 
 describe('split workspaces', () => {
@@ -35,5 +37,24 @@ describe('split workspaces', () => {
     ])).toEqual([
       { id: 'one', sessionIds: ['A', 'B'], layout: 'horizontal', ratios: [0.5, 0.5] },
     ]);
+  });
+
+  it('reorders panes without changing workspace membership', () => {
+    const workspaces = normalizeSplitWorkspaces([
+      { id: 'one', sessionIds: ['A', 'B', 'C'], layout: 'grid', ratios: [1, 1, 1] },
+    ]);
+    expect(reorderSplitWorkspaceSessions(workspaces, 'one', ['C', 'A', 'B'])[0]?.sessionIds)
+      .toEqual(['C', 'A', 'B']);
+    expect(reorderSplitWorkspaceSessions(workspaces, 'one', ['A', 'C'])[0]?.sessionIds)
+      .toEqual(['A', 'B', 'C']);
+  });
+
+  it('sets and clears a custom workspace name', () => {
+    const workspaces = normalizeSplitWorkspaces([
+      { id: 'one', sessionIds: ['A', 'B'], layout: 'horizontal', ratios: [1, 1] },
+    ]);
+    const named = renameSplitWorkspace(workspaces, 'one', '  API work  ');
+    expect(named[0]?.name).toBe('API work');
+    expect(renameSplitWorkspace(named, 'one', '')[0]?.name).toBeUndefined();
   });
 });

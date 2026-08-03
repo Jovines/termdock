@@ -2,6 +2,7 @@ export type SplitLayout = 'horizontal' | 'vertical' | 'grid';
 
 export interface SplitWorkspace {
   id: string;
+  name?: string;
   sessionIds: string[];
   layout: SplitLayout;
   ratios: number[];
@@ -9,6 +10,7 @@ export interface SplitWorkspace {
 
 export interface SplitWorkspaceSummary {
   id: string;
+  name?: string;
   sessionIds: string[];
   layout: SplitLayout;
 }
@@ -54,6 +56,9 @@ export function normalizeSplitWorkspaces(value: unknown): SplitWorkspace[] {
     claimedWorkspaceIds.add(candidate.id);
     result.push({
       id: candidate.id,
+      ...(typeof candidate.name === 'string' && candidate.name.trim()
+        ? { name: candidate.name.trim().slice(0, 80) }
+        : {}),
       sessionIds: uniqueSessionIds,
       layout: isSplitLayout(candidate.layout) ? candidate.layout : DEFAULT_LAYOUT,
       ratios: normalizeRatios(candidate.ratios, uniqueSessionIds.length),
@@ -105,6 +110,7 @@ export function combineSplitWorkspaces(
   const sessionIds = [...new Set(mergedIds)];
   const nextWorkspace: SplitWorkspace = {
     id: primaryWorkspace?.id ?? `split:${primaryId}`,
+    ...(primaryWorkspace?.name ? { name: primaryWorkspace.name } : {}),
     sessionIds,
     layout: primaryWorkspace?.layout ?? DEFAULT_LAYOUT,
     ratios: equalRatios(sessionIds.length),
@@ -124,4 +130,32 @@ export function removeSplitWorkspaceForSession(
 ): SplitWorkspace[] {
   const workspace = findSplitWorkspace(workspaces, sessionId);
   return workspace ? workspaces.filter((candidate) => candidate.id !== workspace.id) : workspaces;
+}
+
+export function reorderSplitWorkspaceSessions(
+  workspaces: SplitWorkspace[],
+  workspaceId: string,
+  sessionIds: string[],
+): SplitWorkspace[] {
+  return workspaces.map((workspace) => {
+    if (workspace.id !== workspaceId) return workspace;
+    const requested = [...new Set(sessionIds)];
+    const currentIds = new Set(workspace.sessionIds);
+    const hasSameMembers = requested.length === workspace.sessionIds.length
+      && requested.every((id) => currentIds.has(id));
+    return hasSameMembers ? { ...workspace, sessionIds: requested } : workspace;
+  });
+}
+
+export function renameSplitWorkspace(
+  workspaces: SplitWorkspace[],
+  workspaceId: string,
+  name: string,
+): SplitWorkspace[] {
+  const trimmed = name.trim().slice(0, 80);
+  return workspaces.map((workspace) => (
+    workspace.id === workspaceId
+      ? { ...workspace, ...(trimmed ? { name: trimmed } : { name: undefined }) }
+      : workspace
+  ));
 }
