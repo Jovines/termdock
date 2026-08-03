@@ -3810,7 +3810,7 @@ function App() {
                     type="submit"
                     className="flex-1 rounded-full bg-primary px-3 py-1.5 text-[12px] font-semibold text-primary-foreground transition hover:bg-primary/90 active:scale-[0.97]"
                   >
-                    {t('common.done')}
+                    {t('common.save')}
                   </button>
                 </div>
               </form>
