@@ -8,6 +8,7 @@ import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
 import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, sendTerminalViewingState, updateSessionInventoryEntry } from '../../terminal/api';
 import { computeTerminalLogicalFocus } from '../../terminal/focus';
+import { shouldConsumeAfterTmuxCopyModeExit } from '../../terminal/copyModeInput';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
 import { buildDesktopToolbarPresetOptions, buildToolbarPresetOptions, decodeToolbarSequence, detectToolbarPreset, getToolbarActionLabel, getToolbarPreset, normalizeActiveProgram, sanitizeToolbarPresets, splitToolbarSequenceSegments, TOOLBAR_SEGMENT_DELAY_MS, type ToolbarPresetDefinition, type ToolbarPresetMode } from '../terminal/mobileKeyboardPresets';
@@ -1360,6 +1361,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               await terminal.tmuxAction(terminalId, { action: 'copy-mode', enabled: false });
             } catch {
               // exit-copy-mode failure shouldn't block sending input
+            }
+
+            // tmuxAction already consumed Escape's intended effect by leaving
+            // copy mode. Sending the byte again would leak Escape into the
+            // foreground program in the pane.
+            if (shouldConsumeAfterTmuxCopyModeExit(payload)) {
+              return;
             }
           }
 
