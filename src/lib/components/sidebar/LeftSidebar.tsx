@@ -282,6 +282,20 @@ export function LeftSidebar(
     useSidebarStore.getState().toggleGroupByFolder();
   }, []);
 
+  const getSessionStatusBackground = useCallback((sessionId: string): string | null => {
+    const state = sessionStates.get(sessionId);
+    if (state?.agentStatus === 'waiting' || state?.agentNeedsReview) {
+      return 'bg-[rgb(var(--warning-rgb)_/_0.10)] text-foreground';
+    }
+    if (state?.agentStatus === 'working') {
+      return 'bg-[rgb(var(--success-rgb)_/_0.08)] text-foreground';
+    }
+    if (state?.inCopyMode) {
+      return 'bg-[rgb(var(--warning-rgb)_/_0.05)] text-foreground';
+    }
+    return null;
+  }, [sessionStates]);
+
   // 会话行主体（切换按钮 + 关闭按钮），flat / 分组两种布局共用。
   // dragHandleProps 仅在可拖拽的 flat 模式传入。
   const bindSessionLongPress = useSuperLongPress();
@@ -543,12 +557,7 @@ export function LeftSidebar(
       const state = sessionStates.get(member.id);
       if (state?.agentStatus === 'waiting' || state?.agentNeedsReview) {
         reviewMembers.push(member);
-      } else if (
-        state?.isConnecting
-        || state?.agentStatus === 'working'
-        || state?.promptState === 'running'
-        || (state?.tuiProgress && state.tuiProgress.state !== 'remove')
-      ) {
+      } else if (state?.agentStatus === 'working') {
         workingMembers.push(member);
       } else if (state?.inCopyMode) {
         copyModeMembers.push(member);
@@ -569,6 +578,14 @@ export function LeftSidebar(
       onRenameSplitWorkspace(workspace.id, value);
       setEditingSplitWorkspaceId(null);
     };
+    const toggleExpanded = () => {
+      setExpandedSplitWorkspaceIds((current) => {
+        const next = new Set(current);
+        if (next.has(workspace.id)) next.delete(workspace.id);
+        else next.add(workspace.id);
+        return next;
+      });
+    };
     const reorderMemberAt = (targetSessionId: string, afterTarget: boolean) => {
       if (!draggedSplitMember || draggedSplitMember.workspaceId !== workspace.id) return;
       if (draggedSplitMember.sessionId === targetSessionId) return;
@@ -588,20 +605,25 @@ export function LeftSidebar(
               ? 'bg-surface-elevated opacity-90 shadow-lg'
               : reviewMembers.length > 0
                 ? 'bg-[rgb(var(--warning-rgb)_/_0.08)] hover:bg-[rgb(var(--warning-rgb)_/_0.12)]'
-                : hasActive
-                  ? 'bg-primary/[0.07]'
-                  : 'hover:bg-surface-2'
+                : workingMembers.length > 0
+                  ? 'bg-[rgb(var(--success-rgb)_/_0.06)] hover:bg-[rgb(var(--success-rgb)_/_0.10)]'
+                  : copyModeMembers.length > 0
+                    ? 'bg-[rgb(var(--warning-rgb)_/_0.05)] hover:bg-[rgb(var(--warning-rgb)_/_0.08)]'
+                    : hasActive
+                      ? 'bg-primary/[0.07]'
+                      : 'hover:bg-surface-2'
         }`}
       >
-        <header className="flex h-10 items-center gap-0.5 px-0.5">
+        <header
+          className="flex h-10 items-center gap-0.5 px-0.5"
+          onClick={toggleExpanded}
+        >
           <button
             type="button"
-            onClick={() => setExpandedSplitWorkspaceIds((current) => {
-              const next = new Set(current);
-              if (next.has(workspace.id)) next.delete(workspace.id);
-              else next.add(workspace.id);
-              return next;
-            })}
+            onClick={(event) => {
+              event.stopPropagation();
+              toggleExpanded();
+            }}
             className="inline-flex h-8 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
             aria-expanded={expanded}
             aria-label={displayName}
@@ -625,6 +647,7 @@ export function LeftSidebar(
               defaultValue={workspace.name ?? ''}
               placeholder={defaultName}
               className="h-7 min-w-0 flex-1 rounded-md bg-surface-elevated px-1.5 text-[11.5px] font-semibold text-foreground outline-none ring-1 ring-primary/40"
+              onClick={(event) => event.stopPropagation()}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') commitName(event.currentTarget.value);
                 if (event.key === 'Escape') setEditingSplitWorkspaceId(null);
@@ -635,10 +658,6 @@ export function LeftSidebar(
             <button
               type="button"
               {...(dragHandleProps ?? {})}
-              onClick={() => {
-                const target = members.find((session) => session.id === activeSessionId) ?? reviewMembers[0] ?? members[0];
-                if (target) focusMember(target.id);
-              }}
               className={`min-w-0 flex-1 px-1 text-left ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
               title={`${displayName} · ${t('tab.sessionCount', { count: members.length })}`}
             >
@@ -693,7 +712,10 @@ export function LeftSidebar(
           <span className="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/60">{members.length}</span>
           <button
             type="button"
-            onClick={() => setEditingSplitWorkspaceId(workspace.id)}
+            onClick={(event) => {
+              event.stopPropagation();
+              setEditingSplitWorkspaceId(workspace.id);
+            }}
             className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 opacity-0 transition hover:bg-surface-elevated hover:text-foreground group-hover/split:opacity-100 focus:opacity-100"
             aria-label={t('tab.splitRename')}
             title={t('tab.splitRename')}
@@ -753,8 +775,11 @@ export function LeftSidebar(
                   const bounds = event.currentTarget.getBoundingClientRect();
                   reorderMemberAt(session.id, event.clientY > bounds.top + bounds.height / 2);
                 }}
-                className={`flex items-center rounded-md pr-1 ${
-                  session.id === activeSessionId ? 'bg-surface-elevated/80 text-foreground' : 'text-muted-foreground hover:bg-surface-2'
+                className={`flex items-center rounded-md pr-1 transition-colors ${
+                  getSessionStatusBackground(session.id)
+                    ?? (session.id === activeSessionId
+                      ? 'bg-surface-elevated/80 text-foreground'
+                      : 'text-muted-foreground hover:bg-surface-2')
                 }`}
               >
                 <span
@@ -805,9 +830,10 @@ export function LeftSidebar(
                             ? 'bg-primary/15 text-foreground ring-1 ring-primary/40'
                             : snapshot.isDragging
                               ? 'bg-surface-elevated text-foreground opacity-90 shadow-lg'
-                              : entity.session.id === activeSessionId
-                                ? 'bg-surface-elevated text-foreground'
-                                : 'text-muted-foreground hover:bg-surface-2'
+                              : getSessionStatusBackground(entity.session.id)
+                                ?? (entity.session.id === activeSessionId
+                                  ? 'bg-surface-elevated text-foreground'
+                                  : 'text-muted-foreground hover:bg-surface-2')
                         } cursor-grab active:cursor-grabbing`}
                       >
                         {renderSessionRowBody(entity.session, dragProvided.dragHandleProps, folderKey !== undefined)}
