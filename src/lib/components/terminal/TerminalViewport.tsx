@@ -44,6 +44,11 @@ import {
   textareaCursorInCodePoints,
   type LineEditOps,
 } from '../../terminal/lineEditSync';
+import {
+  computeJoystickRepeatIntervalMs,
+  resolveJoystickDirection,
+  type JoystickDirection,
+} from './joystickRepeat';
 
 const TERMINAL_HAPTIC_PATTERN_MS = 8;
 // 拖选（初次框选 / 拖选区 handle）时把指位向上提这么多 px 再换算格子：
@@ -2515,7 +2520,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       if (s.mode === 'arrow') {
         if (!isClaimed) return 'claim';
-        const ARROW_SEQUENCES: Record<string, string> = {
+        const ARROW_SEQUENCES: Record<JoystickDirection, string> = {
           up: '\x1b[A',
           down: '\x1b[B',
           left: '\x1b[D',
@@ -2525,26 +2530,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // Direction is always relative to the long-press origin so the
         // indicator stays perfectly in sync with the finger's actual
         // movement direction — no drift from origin resets.
+        // 死区/换向滞回与速度曲线的手感参数集中在 joystickRepeat.ts。
         const dx = e.clientX - s.tapStartX;
         const dy = e.clientY - s.tapStartY;
-        const dist = Math.hypot(dx, dy);
-
-        const absDx = Math.abs(dx);
-        const absDy = Math.abs(dy);
-
-        let newDir: '' | 'up' | 'down' | 'left' | 'right' = '';
-        if (dist > 12) {
-          // Require a clear directional intent: the dominant axis must be at
-          // least 1.5× the other.  This prevents accidental direction switches
-          // when the finger drifts diagonally (e.g. 13px right, 12px down).
-          const AXIS_RATIO = 1.5;
-          if (absDx >= absDy * AXIS_RATIO) {
-            newDir = dx > 0 ? 'right' : 'left';
-          } else if (absDy >= absDx * AXIS_RATIO) {
-            newDir = dy > 0 ? 'down' : 'up';
-          }
-          // else: ambiguous diagonal — keep previous direction (or none)
-        }
+        const newDir = resolveJoystickDirection(dx, dy, s.joystickDir);
 
         // Track incremental movement for repeat-rate control
         if (newDir && newDir !== s.joystickDir) {
@@ -2557,11 +2546,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           const newDy = e.clientY - s.originY;
           const newDist = Math.hypot(newDx, newDy);
 
-          const excess = Math.min(newDist - 12, 80 - 12);
-          const ratio = excess / (80 - 12);
-          const intervalMs = 260 - ratio * (260 - 80);
           // Store for the running timer to pick up on its next iteration
-          s.repeatIntervalMs = intervalMs;
+          s.repeatIntervalMs = computeJoystickRepeatIntervalMs(newDist);
 
           if (newDir !== s.joystickDir) {
             // Direction changed — fire immediately, start repeat with initial delay
