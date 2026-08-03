@@ -35,6 +35,7 @@ import {
   rollbackDownloadedRuntime,
   type DesktopRuntimePaths,
 } from './runtime.js';
+import { isExternalLinkStagingUrl, isSafeExternalUrl } from './externalLinks.js';
 
 const execFileAsync = promisify(execFile);
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -64,6 +65,11 @@ function showDesktopMessageBox(options: MessageBoxOptions) {
   return mainWindow
     ? dialog.showMessageBox(mainWindow, options)
     : dialog.showMessageBox(options);
+}
+
+function openExternalLink(url: string): void {
+  if (!isSafeExternalUrl(url)) return;
+  void shell.openExternal(url);
 }
 
 function defaultConfig(): DesktopConfig {
@@ -636,8 +642,30 @@ function createMainWindow(): BrowserWindow {
     },
   });
   window.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    if (isExternalLinkStagingUrl(url)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          show: false,
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+          },
+        },
+      };
+    }
+    openExternalLink(url);
     return { action: 'deny' };
+  });
+  window.webContents.on('did-create-window', (childWindow, details) => {
+    if (!isExternalLinkStagingUrl(details.url)) return;
+    childWindow.hide();
+    childWindow.webContents.on('will-navigate', (event, url) => {
+      event.preventDefault();
+      openExternalLink(url);
+      childWindow.close();
+    });
   });
   window.webContents.on('will-navigate', (event, url) => {
     if (!activeServiceOrigin) return;
@@ -647,7 +675,7 @@ function createMainWindow(): BrowserWindow {
       // Block malformed navigations.
     }
     event.preventDefault();
-    void shell.openExternal(url);
+    openExternalLink(url);
   });
   window.webContents.on('did-finish-load', () => {
     if (!activeServiceOrigin) return;
