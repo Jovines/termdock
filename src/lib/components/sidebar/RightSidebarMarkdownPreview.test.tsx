@@ -943,6 +943,42 @@ describe('right sidebar Markdown preview rendering', () => {
     vi.useRealTimers();
   });
 
+  it('pans a zoomed image freely with two-axis trackpad wheel input', () => {
+    vi.useFakeTimers();
+    render(
+      <MarkdownImageLightbox
+        images={[{ kind: 'image', src: '/one.png', alt: 'Trackpad image' }]}
+        index={0}
+        onChange={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+
+    const image = screen.getByRole('img', { name: 'Trackpad image' }) as HTMLImageElement;
+    const viewport = image.parentElement as HTMLDivElement;
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 400 },
+      clientHeight: { configurable: true, value: 300 },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 400, bottom: 300, width: 400, height: 300, toJSON: () => ({}) }),
+      },
+    });
+    Object.defineProperties(image, {
+      clientWidth: { configurable: true, value: 400 },
+      clientHeight: { configurable: true, value: 300 },
+    });
+
+    fireEvent.doubleClick(image, { clientX: 200, clientY: 150 });
+    vi.advanceTimersByTime(250);
+    expect(image.style.transform).toContain('scale(2.5)');
+
+    fireEvent.wheel(viewport, { deltaX: 48, deltaY: -32 });
+    expect(image.style.transform).toContain('translate3d(-48px, 32px, 0)');
+
+    vi.useRealTimers();
+  });
+
   it('repaints SVG images at the zoomed layout size instead of scaling a rasterized layer', () => {
     vi.useFakeTimers();
     Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 400 });

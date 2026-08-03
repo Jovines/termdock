@@ -4431,11 +4431,12 @@ interface ZoomableViewportProps {
   }) => ReactNode;
 }
 
-// Pinch-to-zoom viewer. Supports touch pinch (mobile), trackpad pinch and
-// ctrl/⌘ + wheel (desktop), and double-tap / double-click to toggle zoom. The
-// container carries `data-sidebar-gesture-ignore` only while zoomed, so pans
-// of enlarged content are never hijacked — while an unzoomed horizontal swipe
-// still flows to the sidebar's gesture arbiter (e.g. swiper back-navigation).
+// Pinch-to-zoom viewer. Supports touch pinch (mobile), trackpad pinch,
+// ctrl/⌘ + wheel (desktop), two-axis trackpad panning while zoomed, and
+// double-tap / double-click to toggle zoom. The container carries
+// `data-sidebar-gesture-ignore` only while zoomed, so pans of enlarged content
+// are never hijacked — while an unzoomed horizontal swipe still flows to the
+// sidebar's gesture arbiter (e.g. swiper back-navigation).
 function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: ZoomableViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
@@ -4619,14 +4620,26 @@ function ZoomableViewport({ resetKey, onZoomChange, onDoubleTap, children }: Zoo
         setAnimateTransform(false);
         applyZoom(scale, ox, oy);
       },
-      onWheel: ({ event, delta: [, dy], ctrlKey }) => {
+      onWheel: ({ event, delta: [dx, dy], ctrlKey }) => {
         // Trackpad pinch surfaces as a wheel event with ctrlKey on most
-        // browsers; plain scroll is left to the container so users can still
-        // scroll the page when the image isn't zoomed.
-        if (!ctrlKey) return;
+        // browsers. Once zoomed, an unmodified two-finger gesture should move
+        // the image like a native canvas in both axes. Keeping each incoming
+        // wheel delta intact also preserves the trackpad's OS-level momentum.
+        if (ctrlKey) {
+          event.preventDefault();
+          event.stopPropagation();
+          setAnimateTransform(false);
+          applyZoom(transformRef.current.scale * (1 - dy * 0.01), event.clientX, event.clientY);
+          return;
+        }
+        if (transformRef.current.scale <= 1) return;
         event.preventDefault();
+        event.stopPropagation();
         setAnimateTransform(false);
-        applyZoom(transformRef.current.scale * (1 - dy * 0.01), event.clientX, event.clientY);
+        setTransform((prev) => ({
+          ...prev,
+          ...clampOffset(prev.scale, prev.x - dx, prev.y - dy),
+        }));
       },
     },
     {
