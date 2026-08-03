@@ -536,6 +536,28 @@ export function LeftSidebar(
     if (members.length < 2) return null;
     const hasActive = members.some((session) => session.id === activeSessionId);
     const expanded = expandedSplitWorkspaceIds.has(workspace.id);
+    const reviewMembers: SidebarSession[] = [];
+    const workingMembers: SidebarSession[] = [];
+    const copyModeMembers: SidebarSession[] = [];
+    for (const member of members) {
+      const state = sessionStates.get(member.id);
+      if (state?.agentStatus === 'waiting' || state?.agentNeedsReview) {
+        reviewMembers.push(member);
+      } else if (
+        state?.isConnecting
+        || state?.agentStatus === 'working'
+        || state?.promptState === 'running'
+        || (state?.tuiProgress && state.tuiProgress.state !== 'remove')
+      ) {
+        workingMembers.push(member);
+      } else if (state?.inCopyMode) {
+        copyModeMembers.push(member);
+      }
+    }
+    const focusMember = (sessionId: string) => {
+      window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
+      closeIfOverlay();
+    };
     const defaultName = `${t('tab.splitWorkspace')} ${splitWorkspaces.findIndex((candidate) => candidate.id === workspace.id) + 1}`;
     const displayName = workspace.name || defaultName;
     const layoutActions: Array<{ layout: SplitLayout; icon: React.ReactNode; label: string }> = [
@@ -564,9 +586,11 @@ export function LeftSidebar(
             ? 'bg-primary/15 ring-1 ring-primary/40'
             : isDragging
               ? 'bg-surface-elevated opacity-90 shadow-lg'
-              : hasActive
-                ? 'bg-primary/[0.07]'
-                : 'hover:bg-surface-2'
+              : reviewMembers.length > 0
+                ? 'bg-[rgb(var(--warning-rgb)_/_0.08)] hover:bg-[rgb(var(--warning-rgb)_/_0.12)]'
+                : hasActive
+                  ? 'bg-primary/[0.07]'
+                  : 'hover:bg-surface-2'
         }`}
       >
         <header className="flex h-10 items-center gap-0.5 px-0.5">
@@ -585,7 +609,11 @@ export function LeftSidebar(
             <RiChevronRightLine size={13} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
           </button>
           <span className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
-            hasActive ? 'text-primary' : 'text-muted-foreground'
+            reviewMembers.length > 0
+              ? 'text-[color:var(--warning)]'
+              : workingMembers.length > 0
+                ? 'text-[color:var(--success)]'
+                : hasActive ? 'text-primary' : 'text-muted-foreground'
           }`}>
             {workspace.layout === 'vertical' ? <RiSplitRowsLine size={13} />
               : workspace.layout === 'grid' ? <RiLayoutGridLine size={13} />
@@ -608,9 +636,8 @@ export function LeftSidebar(
               type="button"
               {...(dragHandleProps ?? {})}
               onClick={() => {
-                const target = members.find((session) => session.id === activeSessionId) ?? members[0];
-                if (target) window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: target.id }));
-                closeIfOverlay();
+                const target = members.find((session) => session.id === activeSessionId) ?? reviewMembers[0] ?? members[0];
+                if (target) focusMember(target.id);
               }}
               className={`min-w-0 flex-1 px-1 text-left ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
               title={`${displayName} · ${t('tab.sessionCount', { count: members.length })}`}
@@ -626,6 +653,42 @@ export function LeftSidebar(
                 )).join(' · ')}
               </span>
             </button>
+          )}
+          {reviewMembers.length > 0 && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                focusMember(reviewMembers[0]!.id);
+              }}
+              className="inline-flex h-5 shrink-0 items-center gap-0.5 rounded-full bg-[rgb(var(--warning-rgb)_/_0.14)] px-1.5 text-[9px] font-semibold tabular-nums text-[color:var(--warning)] ring-1 ring-[rgb(var(--warning-rgb)_/_0.22)] transition hover:bg-[rgb(var(--warning-rgb)_/_0.22)]"
+              title={t('agent.needsReview')}
+              aria-label={`${t('agent.needsReview')}: ${reviewMembers.length}`}
+            >
+              <RiBellLine size={9} />
+              {reviewMembers.length}
+            </button>
+          )}
+          {workingMembers.length > 0 && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                focusMember(workingMembers[0]!.id);
+              }}
+              className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-[rgb(var(--success-rgb)_/_0.10)] px-1.5 text-[9px] font-medium tabular-nums text-[color:var(--success)] transition hover:bg-[rgb(var(--success-rgb)_/_0.16)]"
+              title={t('agent.aiRunning')}
+              aria-label={`${t('agent.aiRunning')}: ${workingMembers.length}`}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-[var(--success)] animate-pulse" />
+              {workingMembers.length}
+            </button>
+          )}
+          {copyModeMembers.length > 0 && reviewMembers.length === 0 && workingMembers.length === 0 && (
+            <span
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-[rgb(var(--warning-rgb)_/_0.70)]"
+              title={t('agent.copyMode')}
+            />
           )}
           <span className="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/60">{members.length}</span>
           <button
