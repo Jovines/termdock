@@ -80,6 +80,7 @@ import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 import type { TermdockColorTheme } from './lib/terminal/theme';
 import { getTermdockDesktopBridge, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
+import type { SplitLayout, SplitWorkspaceSummary } from './lib/terminal/splitWorkspaces';
 
 // Cache keys for app-level lazy data fetched from the server. 缓存只是"上次看到"的
 // 快照，每次启动还是会发 HTTP 校准；命中时让 UI 不再闪烁默认值 → 自定义值。
@@ -542,8 +543,7 @@ function App() {
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
-  const [splitSessionIds, setSplitSessionIds] = React.useState<string[]>([]);
-  const [splitDirection, setSplitDirection] = React.useState<'horizontal' | 'vertical'>('horizontal');
+  const [splitWorkspaces, setSplitWorkspaces] = React.useState<SplitWorkspaceSummary[]>([]);
   // Only re-render the chrome when tab metadata changes, not on every terminal output chunk.
   const [terminalSessions, setTerminalSessions] = useState(() =>
     pickTabTerminalSessions(useTerminalStore.getState().sessions),
@@ -2083,13 +2083,11 @@ function App() {
   const handleSessionDataUpdate = useCallback((data: {
     sessions: TerminalSessionInfo[];
     activeSessionId: string | null;
-    splitSessionIds: string[];
-    splitDirection: 'horizontal' | 'vertical';
+    splitWorkspaces: SplitWorkspaceSummary[];
   }) => {
     setSessions(data.sessions);
     setActiveSessionId(data.activeSessionId);
-    setSplitSessionIds(data.splitSessionIds);
-    setSplitDirection(data.splitDirection);
+    setSplitWorkspaces(data.splitWorkspaces);
     useTerminalStore.getState().setActiveSessionId(data.activeSessionId);
   }, []);
 
@@ -2170,8 +2168,8 @@ function App() {
     window.dispatchEvent(new CustomEvent('open-terminal-split-chooser', { detail: targetSessionId }));
   }, [activeSessionId]);
 
-  const dispatchSetSplitDirection = useCallback((direction: 'horizontal' | 'vertical') => {
-    window.dispatchEvent(new CustomEvent('set-terminal-split-direction', { detail: direction }));
+  const dispatchSetSplitLayout = useCallback((sessionId: string, layout: SplitLayout) => {
+    window.dispatchEvent(new CustomEvent('set-terminal-split-direction', { detail: { sessionId, layout } }));
   }, []);
 
   useEffect(() => {
@@ -4427,10 +4425,9 @@ function App() {
         onNewSession={(opts) => dispatchNewSession(opts)}
         onCloseSession={handleSidebarCloseSession}
         onSplitSession={dispatchOpenSplitChooser}
-        onCloseSplit={() => window.dispatchEvent(new CustomEvent('close-terminal-split'))}
-        splitSessionIds={splitSessionIds}
-        splitDirection={splitDirection}
-        onSetSplitDirection={dispatchSetSplitDirection}
+        onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}
+        splitWorkspaces={splitWorkspaces}
+        onSetSplitLayout={dispatchSetSplitLayout}
         onReorderSessions={applySessionOrder}
         onSessionMenu={openTabMenu}
         onOpenSettings={handleOpenSettings}
@@ -4521,10 +4518,9 @@ function App() {
             onNewSession={(opts) => dispatchNewSession(opts)}
             onCloseSession={handleSidebarCloseSession}
             onSplitSession={dispatchOpenSplitChooser}
-            onCloseSplit={() => window.dispatchEvent(new CustomEvent('close-terminal-split'))}
-            splitSessionIds={splitSessionIds}
-            splitDirection={splitDirection}
-            onSetSplitDirection={dispatchSetSplitDirection}
+            onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}
+            splitWorkspaces={splitWorkspaces}
+            onSetSplitLayout={dispatchSetSplitLayout}
             onReorderSessions={applySessionOrder}
             onSessionMenu={openTabMenu}
             onOpenSettings={handleOpenSettings}

@@ -15,6 +15,17 @@ import { createDebugLogger } from '../utils/debug';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
 import { Check, Columns2, Folder, Plus, X } from 'lucide-react';
 import { useI18n } from '../i18n';
+import {
+  combineSplitWorkspaces,
+  equalRatios,
+  findSplitWorkspace,
+  normalizeSplitWorkspaces,
+  pruneSplitWorkspaces,
+  removeSplitWorkspaceForSession,
+  type SplitLayout,
+  type SplitWorkspace,
+  type SplitWorkspaceSummary,
+} from '../terminal/splitWorkspaces';
 
 interface TerminalSession {
   id: string;
@@ -60,19 +71,14 @@ type ResumeRequest = {
   reason: 'visibility' | 'bfcache' | 'online';
 };
 
-type SplitWorkspace = {
-  primaryId: string;
-  secondaryId: string;
-  ratio: number;
-  direction: 'horizontal' | 'vertical';
-};
-
 type WorkspaceSlide = {
   key: string;
   sessions: TerminalSession[];
+  workspace?: SplitWorkspace;
 };
 
-const SPLIT_WORKSPACE_STORAGE_KEY = 'termdock:split-workspace:v1';
+const SPLIT_WORKSPACES_STORAGE_KEY = 'termdock:split-workspaces:v2';
+const LEGACY_SPLIT_WORKSPACE_STORAGE_KEY = 'termdock:split-workspace:v1';
 const MIN_SPLIT_RATIO = 0.1;
 const MAX_SPLIT_RATIO = 0.9;
 const MOBILE_MIN_SPLIT_RATIO = 0.28;
@@ -81,10 +87,6 @@ const MOBILE_SPLIT_MOVE_CANCEL_PX = 8;
 const MOBILE_SPLIT_HIT_SLOP_PX = 12;
 const DESKTOP_SPLIT_MIN_WIDTH_PX = 280;
 const DESKTOP_SPLIT_MIN_HEIGHT_PX = 160;
-
-function clampSplitRatio(value: number): number {
-  return Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, value));
-}
 
 function detectMobileSplitLayout(): { mobile: boolean; landscape: boolean } {
   if (typeof window === 'undefined') return { mobile: false, landscape: false };
@@ -96,49 +98,51 @@ function detectMobileSplitLayout(): { mobile: boolean; landscape: boolean } {
   };
 }
 
-function readSplitWorkspace(): SplitWorkspace | null {
-  if (typeof window === 'undefined') return null;
+function readSplitWorkspaces(): SplitWorkspace[] {
+  if (typeof window === 'undefined') return [];
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(SPLIT_WORKSPACE_STORAGE_KEY) || 'null') as Partial<SplitWorkspace> | null;
-    if (
-      !parsed ||
-      typeof parsed.primaryId !== 'string' ||
-      typeof parsed.secondaryId !== 'string' ||
-      parsed.primaryId === parsed.secondaryId
-    ) {
-      return null;
+    const stored = window.localStorage.getItem(SPLIT_WORKSPACES_STORAGE_KEY);
+    if (stored) return normalizeSplitWorkspaces(JSON.parse(stored));
+    const legacy = JSON.parse(window.localStorage.getItem(LEGACY_SPLIT_WORKSPACE_STORAGE_KEY) || 'null') as {
+      primaryId?: unknown;
+      secondaryId?: unknown;
+      ratio?: unknown;
+      direction?: unknown;
+    } | null;
+    if (legacy && typeof legacy.primaryId === 'string' && typeof legacy.secondaryId === 'string' && legacy.primaryId !== legacy.secondaryId) {
+      const firstRatio = Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, typeof legacy.ratio === 'number' ? legacy.ratio : 0.5));
+      return [{
+        id: `split:${legacy.primaryId}`,
+        sessionIds: [legacy.primaryId, legacy.secondaryId],
+        layout: legacy.direction === 'vertical' ? 'vertical' : 'horizontal',
+        ratios: [firstRatio, 1 - firstRatio],
+      }];
     }
-    return {
-      primaryId: parsed.primaryId,
-      secondaryId: parsed.secondaryId,
-      ratio: clampSplitRatio(typeof parsed.ratio === 'number' ? parsed.ratio : 0.5),
-      direction: parsed.direction === 'vertical' ? 'vertical' : 'horizontal',
-    };
   } catch {
-    return null;
+    // Ignore invalid or stale local state.
   }
+  return [];
 }
 
-function buildWorkspaceSlides(sessions: TerminalSession[], split: SplitWorkspace | null): WorkspaceSlide[] {
-  if (!split) {
-    return sessions.map((session) => ({ key: session.id, sessions: [session] }));
-  }
-  const primary = sessions.find((session) => session.id === split.primaryId);
-  const secondary = sessions.find((session) => session.id === split.secondaryId);
-  if (!primary || !secondary) {
-    return sessions.map((session) => ({ key: session.id, sessions: [session] }));
-  }
-  const pairIds = new Set([primary.id, secondary.id]);
-  const pair = [primary, secondary];
+function buildWorkspaceSlides(sessions: TerminalSession[], workspaces: SplitWorkspace[]): WorkspaceSlide[] {
+  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+  const workspaceBySessionId = new Map<string, SplitWorkspace>();
+  workspaces.forEach((workspace) => workspace.sessionIds.forEach((id) => workspaceBySessionId.set(id, workspace)));
+  const emittedWorkspaceIds = new Set<string>();
   const slides: WorkspaceSlide[] = [];
   for (const session of sessions) {
-    if (!pairIds.has(session.id)) {
+    const workspace = workspaceBySessionId.get(session.id);
+    if (!workspace) {
       slides.push({ key: session.id, sessions: [session] });
       continue;
     }
-    if (!slides.some((slide) => slide.key === `split:${primary.id}:${secondary.id}`)) {
-      slides.push({ key: `split:${primary.id}:${secondary.id}`, sessions: pair });
-    }
+    if (emittedWorkspaceIds.has(workspace.id)) continue;
+    emittedWorkspaceIds.add(workspace.id);
+    const workspaceSessions = workspace.sessionIds.flatMap((id) => {
+      const member = sessionsById.get(id);
+      return member ? [member] : [];
+    });
+    if (workspaceSessions.length >= 2) slides.push({ key: workspace.id, sessions: workspaceSessions, workspace });
   }
   return slides;
 }
@@ -326,8 +330,7 @@ interface MultiTerminalViewProps {
   onSessionDataUpdate?: (data: {
     sessions: TerminalSessionInfo[];
     activeSessionId: string | null;
-    splitSessionIds: string[];
-    splitDirection: 'horizontal' | 'vertical';
+    splitWorkspaces: SplitWorkspaceSummary[];
   }) => void;
 }
 
@@ -379,7 +382,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const swiperRef = useRef<SwiperInstance | null>(null);
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
   const [focusTransferRequest, setFocusTransferRequest] = useState<{ sessionId: string; token: number } | null>(null);
-  const [splitWorkspace, setSplitWorkspace] = useState<SplitWorkspace | null>(() => readSplitWorkspace());
+  const [splitWorkspaces, setSplitWorkspaces] = useState<SplitWorkspace[]>(() => readSplitWorkspaces());
   const [splitChooserOpen, setSplitChooserOpen] = useState(false);
   const [splitNotice, setSplitNotice] = useState<string | null>(null);
   const [isCreatingSplitSession, setIsCreatingSplitSession] = useState(false);
@@ -457,37 +460,30 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const arrangedRef = useRef<TerminalSession[]>(arranged);
   arrangedRef.current = arranged;
   const workspaceSlides = useMemo(
-    () => buildWorkspaceSlides(arranged, splitWorkspace),
-    [arranged, splitWorkspace],
+    () => buildWorkspaceSlides(arranged, splitWorkspaces),
+    [arranged, splitWorkspaces],
   );
   const workspaceSlidesRef = useRef<WorkspaceSlide[]>(workspaceSlides);
   workspaceSlidesRef.current = workspaceSlides;
+  const activeSplitWorkspace = useMemo(
+    () => findSplitWorkspace(splitWorkspaces, activeSessionId),
+    [activeSessionId, splitWorkspaces],
+  );
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (splitWorkspace) {
-      window.localStorage.setItem(SPLIT_WORKSPACE_STORAGE_KEY, JSON.stringify(splitWorkspace));
+    if (splitWorkspaces.length > 0) {
+      window.localStorage.setItem(SPLIT_WORKSPACES_STORAGE_KEY, JSON.stringify(splitWorkspaces));
+      window.localStorage.removeItem(LEGACY_SPLIT_WORKSPACE_STORAGE_KEY);
     } else {
-      window.localStorage.removeItem(SPLIT_WORKSPACE_STORAGE_KEY);
+      window.localStorage.removeItem(SPLIT_WORKSPACES_STORAGE_KEY);
     }
-  }, [splitWorkspace]);
+  }, [splitWorkspaces]);
 
   useEffect(() => {
-    if (isLoading || isRestoring || !splitWorkspace) return;
-    const primary = sessions.find((session) => session.id === splitWorkspace.primaryId);
-    const secondary = sessions.find((session) => session.id === splitWorkspace.secondaryId);
-    if (!primary || !secondary) {
-      setSplitWorkspace(null);
-      return;
-    }
-    if (!groupByFolder) return;
-    const primaryCwd = cwdById.get(primary.id) ?? null;
-    const secondaryCwd = cwdById.get(secondary.id) ?? null;
-    if ((primaryCwd ?? '') !== (secondaryCwd ?? '')) {
-      setSplitWorkspace(null);
-      setSplitNotice(t('tab.splitEndedGrouped'));
-    }
-  }, [cwdById, groupByFolder, isLoading, isRestoring, sessions, splitWorkspace, t]);
+    if (isLoading || isRestoring || splitWorkspaces.length === 0) return;
+    setSplitWorkspaces((current) => pruneSplitWorkspaces(current, sessions.map((session) => session.id)));
+  }, [isLoading, isRestoring, sessions, splitWorkspaces.length]);
 
   useEffect(() => {
     if (!splitNotice) return;
@@ -890,12 +886,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         tmuxSessionName: s.tmuxSessionName,
       })),
       activeSessionId,
-      splitSessionIds: splitWorkspace
-        ? [splitWorkspace.primaryId, splitWorkspace.secondaryId]
-        : [],
-      splitDirection: splitWorkspace?.direction ?? 'horizontal',
+      splitWorkspaces: splitWorkspaces.map(({ id, sessionIds, layout }) => ({ id, sessionIds, layout })),
     });
-  }, [sessions, activeSessionId, splitWorkspace, onSessionDataUpdate]);
+  }, [sessions, activeSessionId, splitWorkspaces, onSessionDataUpdate]);
 
   // 恢复会话（尝试复用现有 session）- 只执行一次
   useEffect(() => {
@@ -1147,16 +1140,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const pairWithExistingSession = useCallback((secondaryId: string) => {
     const primaryId = activeSessionIdRef.current;
     if (!primaryId || primaryId === secondaryId) return;
-    const primaryCwd = cwdById.get(primaryId) ?? null;
-    const secondaryCwd = cwdById.get(secondaryId) ?? null;
-    if (groupByFolder && (primaryCwd ?? '') !== (secondaryCwd ?? '')) {
-      setSplitNotice(t('tab.splitUnavailableGrouped'));
-      return;
-    }
-    setSplitWorkspace({ primaryId, secondaryId, ratio: 0.5, direction: 'horizontal' });
+    setSplitWorkspaces((current) => combineSplitWorkspaces(current, primaryId, secondaryId));
     setSplitChooserOpen(false);
     activateSplitPane(primaryId, { preserveMobileKeyboard: false });
-  }, [activateSplitPane, cwdById, groupByFolder, t]);
+  }, [activateSplitPane]);
 
   const createSessionInSplit = useCallback(async () => {
     const primaryId = activeSessionIdRef.current;
@@ -1172,13 +1159,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       setSplitNotice(t('common.error'));
       return;
     }
-    setSplitWorkspace({ primaryId, secondaryId, ratio: 0.5, direction: 'horizontal' });
+    setSplitWorkspaces((current) => combineSplitWorkspaces(current, primaryId, secondaryId));
     setSplitChooserOpen(false);
     activateSplitPane(primaryId, { preserveMobileKeyboard: false });
   }, [activateSplitPane, defaultSessionMode, handleNewSession, isCreatingSplitSession, t]);
 
   const closeSplitWorkspace = useCallback((focusSessionId?: string) => {
-    setSplitWorkspace(null);
+    setSplitWorkspaces((current) => removeSplitWorkspaceForSession(current, focusSessionId));
     if (focusSessionId) {
       activateSplitPane(focusSessionId, { preserveMobileKeyboard: false });
     }
@@ -1188,6 +1175,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     event: React.PointerEvent<HTMLButtonElement>,
     container: HTMLDivElement,
     vertical: boolean,
+    workspaceId: string,
+    dividerIndex: number,
   ) => {
     event.preventDefault();
     event.stopPropagation();
@@ -1213,7 +1202,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         return;
       }
       pointerEvent.preventDefault();
-      const rawRatio = vertical
+      const pointerRatio = vertical
         ? (pointerEvent.clientY - rect.top) / rect.height
         : (pointerEvent.clientX - rect.left) / rect.width;
       const dimension = vertical ? rect.height : rect.width;
@@ -1222,11 +1211,21 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         : vertical
           ? DESKTOP_SPLIT_MIN_HEIGHT_PX
           : DESKTOP_SPLIT_MIN_WIDTH_PX;
-      const minimumRatio = minPanePx > 0
-        ? Math.min(0.5, minPanePx / Math.max(1, dimension))
-        : MOBILE_MIN_SPLIT_RATIO;
-      const nextRatio = Math.min(1 - minimumRatio, Math.max(minimumRatio, rawRatio));
-      setSplitWorkspace((current) => current ? { ...current, ratio: nextRatio } : current);
+      setSplitWorkspaces((current) => current.map((workspace) => {
+        if (workspace.id !== workspaceId) return workspace;
+        const ratios = workspace.ratios.length === workspace.sessionIds.length
+          ? [...workspace.ratios]
+          : equalRatios(workspace.sessionIds.length);
+        const before = ratios.slice(0, dividerIndex).reduce((sum, ratio) => sum + ratio, 0);
+        const pairTotal = ratios[dividerIndex]! + ratios[dividerIndex + 1]!;
+        const minimumRatio = minPanePx > 0
+          ? Math.min(pairTotal / 2, minPanePx / Math.max(1, dimension))
+          : Math.min(pairTotal / 2, MOBILE_MIN_SPLIT_RATIO);
+        const first = Math.min(pairTotal - minimumRatio, Math.max(minimumRatio, pointerRatio - before));
+        ratios[dividerIndex] = first;
+        ratios[dividerIndex + 1] = pairTotal - first;
+        return { ...workspace, ratios };
+      }));
     };
     const stop = () => {
       if (longPressTimer !== null) {
@@ -1407,14 +1406,19 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       openSplitChooser(customEvent.detail);
     };
 
-    const handleCloseSplitEvent = () => {
-      closeSplitWorkspace(activeSessionIdRef.current ?? undefined);
+    const handleCloseSplitEvent = (event: Event) => {
+      const requestedSessionId = (event as CustomEvent<string | undefined>).detail;
+      closeSplitWorkspace(requestedSessionId ?? activeSessionIdRef.current ?? undefined);
     };
 
     const handleSetSplitDirectionEvent = (event: Event) => {
-      const direction = (event as CustomEvent<'horizontal' | 'vertical'>).detail;
-      if (direction !== 'horizontal' && direction !== 'vertical') return;
-      setSplitWorkspace((current) => current ? { ...current, direction } : current);
+      const detail = (event as CustomEvent<SplitLayout | { sessionId?: string; layout?: SplitLayout }>).detail;
+      const layout = typeof detail === 'string' ? detail : detail?.layout;
+      const sessionId = typeof detail === 'string' ? activeSessionIdRef.current : detail?.sessionId;
+      if (layout !== 'horizontal' && layout !== 'vertical' && layout !== 'grid') return;
+      setSplitWorkspaces((current) => current.map((workspace) => (
+        workspace.sessionIds.includes(sessionId ?? '') ? { ...workspace, layout } : workspace
+      )));
     };
 
     const handleCycleSessionEvent = (event: Event) => {
@@ -1498,21 +1502,25 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [handleNewSession, handleSwitchSession, openSplitChooser, closeSplitWorkspace, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleResetSessionName, handleReorderSessions]);
 
   useEffect(() => {
-    if (!splitWorkspace || isMobileLayout) return;
+    if (!activeSplitWorkspace || isMobileLayout) return;
     const handleSplitShortcut = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return;
 
       const directionMatches =
-        splitWorkspace.direction === 'horizontal'
+        activeSplitWorkspace.layout === 'horizontal'
           ? event.key === 'ArrowLeft' || event.key === 'ArrowRight'
-          : event.key === 'ArrowUp' || event.key === 'ArrowDown';
+          : activeSplitWorkspace.layout === 'vertical'
+            ? event.key === 'ArrowUp' || event.key === 'ArrowDown'
+            : event.key.startsWith('Arrow');
       if (directionMatches) {
         event.preventDefault();
         event.stopPropagation();
-        const targetId =
-          event.key === 'ArrowLeft' || event.key === 'ArrowUp'
-            ? splitWorkspace.primaryId
-            : splitWorkspace.secondaryId;
+        const activeIndex = activeSplitWorkspace.sessionIds.indexOf(activeSessionIdRef.current ?? '');
+        const delta = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
+        const targetIndex = (Math.max(0, activeIndex) + delta + activeSplitWorkspace.sessionIds.length)
+          % activeSplitWorkspace.sessionIds.length;
+        const targetId = activeSplitWorkspace.sessionIds[targetIndex];
+        if (!targetId) return;
         activateSplitPane(targetId);
         return;
       }
@@ -1525,7 +1533,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     };
     window.addEventListener('keydown', handleSplitShortcut, true);
     return () => window.removeEventListener('keydown', handleSplitShortcut, true);
-  }, [activateSplitPane, closeSplitWorkspace, isMobileLayout, splitWorkspace]);
+  }, [activateSplitPane, activeSplitWorkspace, closeSplitWorkspace, isMobileLayout]);
 
   // 注意：以前这里有 `if (isRestoring) { 全屏 spinner }`，但它在两种场景下都很烦：
   // 1. PWA 从后台返回（iOS 会把页面踢出内存重新加载）：每次都看一遍全屏 loading
@@ -1554,6 +1562,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       sharedMobileKeyboardLayout?: boolean;
       suppressPageFlipRefresh?: boolean;
       hidden?: boolean;
+      containerStyle?: React.CSSProperties;
     } = {},
   ) => {
     const isActive = session.id === activeSessionId;
@@ -1563,6 +1572,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         className={`relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden ${
           options.hidden ? 'invisible pointer-events-none' : ''
         }`}
+        style={options.containerStyle}
         aria-hidden={options.hidden || undefined}
         onPointerDown={() => {
           if (!isActive) activateSplitPane(session.id);
@@ -1667,14 +1677,17 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           className="h-full"
         >
           {workspaceSlides.map((slide) => {
-            const isSplit = slide.sessions.length === 2;
-            const verticalSplit = isMobileLayout
+            const workspace = slide.workspace;
+            const isSplit = !!workspace && slide.sessions.length >= 2;
+            const effectiveLayout: SplitLayout = isMobileLayout
               ? !isMobileLandscape
-              : splitWorkspace?.direction === 'vertical';
-            const storedRatio = splitWorkspace?.ratio ?? 0.5;
-            const ratio = isMobileLayout
-              ? Math.min(1 - MOBILE_MIN_SPLIT_RATIO, Math.max(MOBILE_MIN_SPLIT_RATIO, storedRatio))
-              : storedRatio;
+                ? 'vertical'
+                : 'horizontal'
+              : workspace?.layout ?? 'horizontal';
+            const verticalSplit = effectiveLayout === 'vertical';
+            const ratios = workspace?.ratios.length === slide.sessions.length
+              ? workspace.ratios
+              : equalRatios(slide.sessions.length);
             const keyboardFocusSessionIndex = mobileKeyboardOpenSessionId
               ? slide.sessions.findIndex((session) => session.id === mobileKeyboardOpenSessionId)
               : -1;
@@ -1684,18 +1697,22 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             const splitToolbarOwnerId = slide.sessions.some((session) => session.id === activeSessionId)
               ? activeSessionId
               : slide.sessions[0]?.id;
+            const linearTracks = ratios.flatMap((ratio, index) => [
+              mobileKeyboardFocusMode && index !== keyboardFocusSessionIndex ? '0px' : `minmax(0, ${ratio}fr)`,
+              ...(index < ratios.length - 1 ? [mobileKeyboardFocusMode ? '0px' : '1px'] : []),
+            ]).join(' ');
+            const gridColumns = Math.ceil(Math.sqrt(slide.sessions.length));
+            const gridLastRowCount = slide.sessions.length % gridColumns;
             const splitGridStyle: React.CSSProperties = {
-              ...(verticalSplit
+              ...(effectiveLayout === 'grid'
                 ? {
-                    gridTemplateRows: mobileKeyboardFocusMode
-                      ? (keyboardFocusSessionIndex === 0 ? 'minmax(0, 1fr) 0px 0px' : '0px 0px minmax(0, 1fr)')
-                      : `minmax(0, ${ratio}fr) 1px minmax(0, ${1 - ratio}fr)`,
+                    gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+                    gridTemplateRows: `repeat(${Math.ceil(slide.sessions.length / gridColumns)}, minmax(0, 1fr))`,
+                    gap: '1px',
                   }
-                : {
-                    gridTemplateColumns: mobileKeyboardFocusMode
-                      ? (keyboardFocusSessionIndex === 0 ? 'minmax(0, 1fr) 0px 0px' : '0px 0px minmax(0, 1fr)')
-                      : `minmax(0, ${ratio}fr) 1px minmax(0, ${1 - ratio}fr)`,
-                  }),
+                : verticalSplit
+                  ? { gridTemplateRows: linearTracks }
+                  : { gridTemplateColumns: linearTracks }),
               ...(isMobileLayout
                 ? {
                     marginTop: 'var(--kb-margin-top, 0px)',
@@ -1724,52 +1741,60 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                       className="grid min-h-0 min-w-0 flex-1 overflow-hidden"
                       style={splitGridStyle}
                     >
-                      {renderTerminal(slide.sessions[0]!, {
-                        suppressKeyboard: isMobileLayout && slide.sessions[0]!.id !== splitToolbarOwnerId,
-                        keyboardPortalTarget: isMobileLayout ? splitKeyboardPortalTarget : null,
-                        sharedMobileKeyboardLayout: isMobileLayout,
-                        suppressPageFlipRefresh: true,
-                        hidden: mobileKeyboardFocusMode && keyboardFocusSessionIndex !== 0,
-                      })}
-                      <button
-                        type="button"
-                        className={`swiper-no-swiping relative z-20 touch-none select-none bg-[var(--border-strong)] transition-colors hover:bg-primary active:bg-primary ${
-                          verticalSplit ? 'cursor-row-resize' : 'cursor-col-resize'
-                        } ${mobileKeyboardFocusMode ? 'invisible pointer-events-none' : ''}`}
-                        onPointerDownCapture={(event) => {
-                          const container = event.currentTarget.closest('[data-split-container="true"]');
-                          if (container instanceof HTMLDivElement) {
-                            startSplitResize(event, container, verticalSplit);
-                          }
-                        }}
-                        onDoubleClick={(event) => {
-                          if (isMobileLayout) return;
-                          event.preventDefault();
-                          event.stopPropagation();
-                          setSplitWorkspace((current) => current ? { ...current, ratio: 0.5 } : current);
-                        }}
-                        onContextMenu={(event) => {
-                          if (isMobileLayout) event.preventDefault();
-                        }}
-                        aria-label={t('tab.split')}
-                      >
-                        <span
-                          aria-hidden="true"
-                          data-split-divider-hitarea="true"
-                          className={`absolute ${verticalSplit ? 'inset-x-0' : 'inset-y-0'}`}
-                          style={verticalSplit
-                            ? { top: -MOBILE_SPLIT_HIT_SLOP_PX, bottom: -MOBILE_SPLIT_HIT_SLOP_PX }
-                            : { left: -MOBILE_SPLIT_HIT_SLOP_PX, right: -MOBILE_SPLIT_HIT_SLOP_PX }
-                          }
-                        />
-                      </button>
-                      {renderTerminal(slide.sessions[1]!, {
-                        suppressKeyboard: isMobileLayout && slide.sessions[1]!.id !== splitToolbarOwnerId,
-                        keyboardPortalTarget: isMobileLayout ? splitKeyboardPortalTarget : null,
-                        sharedMobileKeyboardLayout: isMobileLayout,
-                        suppressPageFlipRefresh: true,
-                        hidden: mobileKeyboardFocusMode && keyboardFocusSessionIndex !== 1,
-                      })}
+                      {slide.sessions.map((session, index) => (
+                        <React.Fragment key={session.id}>
+                          {renderTerminal(session, {
+                            suppressKeyboard: isMobileLayout && session.id !== splitToolbarOwnerId,
+                            keyboardPortalTarget: isMobileLayout ? splitKeyboardPortalTarget : null,
+                            sharedMobileKeyboardLayout: isMobileLayout,
+                            suppressPageFlipRefresh: true,
+                            hidden: mobileKeyboardFocusMode && keyboardFocusSessionIndex !== index,
+                            containerStyle: effectiveLayout === 'grid'
+                              && gridLastRowCount > 0
+                              && index === slide.sessions.length - 1
+                              ? { gridColumn: `span ${gridColumns - gridLastRowCount + 1}` }
+                              : undefined,
+                          })}
+                          {effectiveLayout !== 'grid' && index < slide.sessions.length - 1 && workspace && (
+                            <button
+                              type="button"
+                              className={`swiper-no-swiping relative z-20 touch-none select-none bg-[var(--border-strong)] transition-colors hover:bg-primary active:bg-primary ${
+                                verticalSplit ? 'cursor-row-resize' : 'cursor-col-resize'
+                              } ${mobileKeyboardFocusMode ? 'invisible pointer-events-none' : ''}`}
+                              onPointerDownCapture={(event) => {
+                                const container = event.currentTarget.closest('[data-split-container="true"]');
+                                if (container instanceof HTMLDivElement) {
+                                  startSplitResize(event, container, verticalSplit, workspace.id, index);
+                                }
+                              }}
+                              onDoubleClick={(event) => {
+                                if (isMobileLayout) return;
+                                event.preventDefault();
+                                event.stopPropagation();
+                                setSplitWorkspaces((current) => current.map((candidate) => (
+                                  candidate.id === workspace.id
+                                    ? { ...candidate, ratios: equalRatios(candidate.sessionIds.length) }
+                                    : candidate
+                                )));
+                              }}
+                              onContextMenu={(event) => {
+                                if (isMobileLayout) event.preventDefault();
+                              }}
+                              aria-label={t('tab.split')}
+                            >
+                              <span
+                                aria-hidden="true"
+                                data-split-divider-hitarea="true"
+                                className={`absolute ${verticalSplit ? 'inset-x-0' : 'inset-y-0'}`}
+                                style={verticalSplit
+                                  ? { top: -MOBILE_SPLIT_HIT_SLOP_PX, bottom: -MOBILE_SPLIT_HIT_SLOP_PX }
+                                  : { left: -MOBILE_SPLIT_HIT_SLOP_PX, right: -MOBILE_SPLIT_HIT_SLOP_PX }
+                                }
+                              />
+                            </button>
+                          )}
+                        </React.Fragment>
+                      ))}
                     </div>
                     {isMobileLayout && (
                       <div
@@ -1808,7 +1833,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               <div className="min-w-0 flex-1">
                 <h2 className="text-[14px] font-semibold text-foreground">{t('tab.splitTitle')}</h2>
                 <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                  {groupByFolder ? t('tab.splitUnavailableGrouped') : t('tab.splitExistingHint')}
+                  {t('tab.splitExistingHint')}
                 </p>
               </div>
               <button
@@ -1840,21 +1865,17 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               <div className="px-3 pb-1 pt-3 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
                 {t('tab.splitExisting')}
               </div>
-              {sessions.filter((session) => session.id !== activeSessionId).length === 0 ? (
+              {sessions.filter((session) => !activeSplitWorkspace?.sessionIds.includes(session.id) && session.id !== activeSessionId).length === 0 ? (
                 <p className="px-3 py-4 text-[12px] text-muted-foreground">{t('tab.splitNoOtherSessions')}</p>
-              ) : sessions.filter((session) => session.id !== activeSessionId).map((session) => {
-                const activeCwd = cwdById.get(activeSessionId) ?? null;
+              ) : sessions.filter((session) => !activeSplitWorkspace?.sessionIds.includes(session.id) && session.id !== activeSessionId).map((session) => {
                 const sessionCwd = cwdById.get(session.id) ?? null;
-                const unavailable = groupByFolder && (activeCwd ?? '') !== (sessionCwd ?? '');
                 const label = getSessionLabel(session);
                 return (
                   <button
                     key={session.id}
                     type="button"
-                    disabled={unavailable}
                     onClick={() => pairWithExistingSession(session.id)}
-                    className="group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-surface-2 active:bg-surface-elevated disabled:cursor-not-allowed disabled:opacity-40"
-                    title={unavailable ? t('tab.splitUnavailableGrouped') : undefined}
+                    className="group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-surface-2 active:bg-surface-elevated"
                   >
                     <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground">
                       {sessionCwd ? <Folder size={15} /> : <Columns2 size={15} />}
@@ -1865,11 +1886,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                         {sessionCwd ? (getCwdLeafName(sessionCwd) ?? sessionCwd) : session.name}
                       </span>
                     </span>
-                    {unavailable ? (
-                      <X size={14} className="text-muted-foreground" />
-                    ) : (
-                      <Check size={14} className="text-primary opacity-0 transition group-hover:opacity-100" />
-                    )}
+                    <Check size={14} className="text-primary opacity-0 transition group-hover:opacity-100" />
                   </button>
                 );
               })}
