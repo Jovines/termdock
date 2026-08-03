@@ -614,16 +614,10 @@ export function LeftSidebar(
                       : 'hover:bg-surface-2'
         }`}
       >
-        <header
-          className="flex h-10 items-center gap-0.5 px-0.5"
-          onClick={toggleExpanded}
-        >
+        <header className="flex h-10 items-center gap-0.5 px-0.5">
           <button
             type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              toggleExpanded();
-            }}
+            onClick={toggleExpanded}
             className="inline-flex h-8 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
             aria-expanded={expanded}
             aria-label={displayName}
@@ -647,7 +641,6 @@ export function LeftSidebar(
               defaultValue={workspace.name ?? ''}
               placeholder={defaultName}
               className="h-7 min-w-0 flex-1 rounded-md bg-surface-elevated px-1.5 text-[11.5px] font-semibold text-foreground outline-none ring-1 ring-primary/40"
-              onClick={(event) => event.stopPropagation()}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') commitName(event.currentTarget.value);
                 if (event.key === 'Escape') setEditingSplitWorkspaceId(null);
@@ -658,6 +651,10 @@ export function LeftSidebar(
             <button
               type="button"
               {...(dragHandleProps ?? {})}
+              onClick={() => {
+                const target = members.find((session) => session.id === activeSessionId) ?? reviewMembers[0] ?? members[0];
+                if (target) focusMember(target.id);
+              }}
               className={`min-w-0 flex-1 px-1 text-left ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
               title={`${displayName} · ${t('tab.sessionCount', { count: members.length })}`}
             >
@@ -712,10 +709,7 @@ export function LeftSidebar(
           <span className="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/60">{members.length}</span>
           <button
             type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              setEditingSplitWorkspaceId(workspace.id);
-            }}
+            onClick={() => setEditingSplitWorkspaceId(workspace.id)}
             className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 opacity-0 transition hover:bg-surface-elevated hover:text-foreground group-hover/split:opacity-100 focus:opacity-100"
             aria-label={t('tab.splitRename')}
             title={t('tab.splitRename')}
