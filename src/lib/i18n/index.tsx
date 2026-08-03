@@ -162,7 +162,10 @@ export function useI18n(): I18nContextValue {
     return {
       locale: DEFAULT_LOCALE,
       setLocale: () => {},
-      t: (key) => key,
+      t: (key, params) => {
+        const value = resolveKey(dictionaries[DEFAULT_LOCALE], key);
+        return value === undefined ? key : format(value, params);
+      },
     };
   }
   return ctx;

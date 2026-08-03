@@ -321,7 +321,7 @@ describe('right sidebar Markdown preview rendering', () => {
       '```',
     ].join('\n'));
 
-    expect(screen.getByText('Rendering diagram...')).toBeTruthy();
+    expect(screen.getByText('Rendering diagram…')).toBeTruthy();
     await waitFor(() => expect(screen.getByRole('img', { name: 'Mermaid diagram' })).toBeTruthy());
     const svg = screen.getByText('Graph').closest('svg');
     expect(svg).toBeTruthy();
@@ -1209,7 +1209,7 @@ describe('right sidebar Markdown preview rendering', () => {
       '</div>',
     ].join('\n'));
 
-    expect(screen.getByText('Rendering HTML...')).toBeTruthy();
+    expect(screen.getByText('Rendering HTML…')).toBeTruthy();
     await waitFor(() => expect(screen.getByText('HTML')).toBeTruthy());
     expect(domPurifySanitize).toHaveBeenCalledWith(expect.stringContaining('<script>alert(1)</script>'), expect.objectContaining({ ALLOW_DATA_ATTR: false }));
     expect(container.querySelector('script')).toBeNull();
