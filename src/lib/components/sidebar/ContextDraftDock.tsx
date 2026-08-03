@@ -134,9 +134,13 @@ export function ContextDraftDock({
 
   useEffect(() => {
     if (focusRequest !== undefined && focusRequest > 0) {
-      // 触屏设备（手机/平板）不自动聚焦，避免软键盘弹起遮挡
-      if (isCoarsePointer()) return;
-      textareaRef.current?.focus();
+      const el = textareaRef.current;
+      if (!el) return;
+      // 外部引用总是追加到草稿末尾，caret 也必须跟到新末尾。触屏设备
+      // 只更新 selection，不主动 focus，避免软键盘弹起遮挡。
+      if (!isCoarsePointer()) el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+      el.scrollTop = el.scrollHeight;
     }
   }, [focusRequest]);
 

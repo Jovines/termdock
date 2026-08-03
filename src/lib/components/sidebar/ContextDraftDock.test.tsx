@@ -105,6 +105,41 @@ describe('ContextDraftDock', () => {
     expect(handlers.onCollapsedChange).not.toHaveBeenCalled();
   });
 
+  it('moves the caret to the end after an external draft append', () => {
+    const handlers = {
+      onChange: vi.fn(),
+      onCollapsedChange: vi.fn(),
+      onDisable: vi.fn(),
+      onClear: vi.fn(),
+      onInsert: vi.fn(),
+      onInsertAndSend: vi.fn(),
+    };
+    const { rerender } = render(
+      <ContextDraftDock
+        value="Review this"
+        collapsed={false}
+        focusRequest={0}
+        labels={labels}
+        {...handlers}
+      />,
+    );
+    const input = screen.getByPlaceholderText('Write a prompt') as HTMLTextAreaElement;
+    input.setSelectionRange(0, 0);
+
+    rerender(
+      <ContextDraftDock
+        value={'Review this\n\n/repo/src/App.tsx'}
+        collapsed={false}
+        focusRequest={1}
+        labels={labels}
+        {...handlers}
+      />,
+    );
+
+    expect(input.selectionStart).toBe(input.value.length);
+    expect(input.selectionEnd).toBe(input.value.length);
+  });
+
   it('clears the draft without collapsing on touch', () => {
     const handlers = renderDock();
     const dock = document.querySelector('[data-context-draft-dock]')!;
