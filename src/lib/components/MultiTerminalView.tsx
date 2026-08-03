@@ -1495,6 +1495,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       setSplitWorkspaces((current) => renameSplitWorkspace(current, detail.workspaceId!, detail.name!));
     };
 
+    const handleCombineSplitSessionsEvent = (event: Event) => {
+      const detail = (event as CustomEvent<{ primaryId?: string; secondaryId?: string }>).detail;
+      if (!detail?.primaryId || !detail.secondaryId || detail.primaryId === detail.secondaryId) return;
+      setSplitWorkspaces((current) => combineSplitWorkspaces(current, detail.primaryId!, detail.secondaryId!));
+      activateSplitPane(detail.primaryId, { preserveMobileKeyboard: false });
+    };
+
     window.addEventListener('new-terminal-session', handleNewSessionEvent);
     window.addEventListener('switch-terminal-session', handleSwitchSessionEvent);
     window.addEventListener('focus-active-terminal-session', handleFocusActiveSessionEvent);
@@ -1509,6 +1516,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     window.addEventListener('reorder-terminal-session', handleReorderSessionEvent);
     window.addEventListener('reorder-terminal-split-workspace', handleReorderSplitWorkspaceEvent);
     window.addEventListener('rename-terminal-split-workspace', handleRenameSplitWorkspaceEvent);
+    window.addEventListener('combine-terminal-split-sessions', handleCombineSplitSessionsEvent);
 
     return () => {
       window.removeEventListener('new-terminal-session', handleNewSessionEvent);
@@ -1525,8 +1533,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('reorder-terminal-session', handleReorderSessionEvent);
       window.removeEventListener('reorder-terminal-split-workspace', handleReorderSplitWorkspaceEvent);
       window.removeEventListener('rename-terminal-split-workspace', handleRenameSplitWorkspaceEvent);
+      window.removeEventListener('combine-terminal-split-sessions', handleCombineSplitSessionsEvent);
     };
-  }, [handleNewSession, handleSwitchSession, openSplitChooser, closeSplitWorkspace, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleResetSessionName, handleReorderSessions]);
+  }, [activateSplitPane, handleNewSession, handleSwitchSession, openSplitChooser, closeSplitWorkspace, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleResetSessionName, handleReorderSessions]);
 
   useEffect(() => {
     if (!activeSplitWorkspace || isMobileLayout) return;

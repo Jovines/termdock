@@ -2184,6 +2184,12 @@ function App() {
     }));
   }, []);
 
+  const dispatchCombineSplitSessions = useCallback((primaryId: string, secondaryId: string) => {
+    window.dispatchEvent(new CustomEvent('combine-terminal-split-sessions', {
+      detail: { primaryId, secondaryId },
+    }));
+  }, []);
+
   useEffect(() => {
     if (!desktopBridge) return;
     const handleNativeCommand = (event: Event) => {
@@ -4442,6 +4448,7 @@ function App() {
         onSetSplitLayout={dispatchSetSplitLayout}
         onReorderSplitWorkspace={dispatchReorderSplitWorkspace}
         onRenameSplitWorkspace={dispatchRenameSplitWorkspace}
+        onCombineSplitSessions={dispatchCombineSplitSessions}
         onReorderSessions={applySessionOrder}
         onSessionMenu={openTabMenu}
         onOpenSettings={handleOpenSettings}
@@ -4537,6 +4544,7 @@ function App() {
             onSetSplitLayout={dispatchSetSplitLayout}
             onReorderSplitWorkspace={dispatchReorderSplitWorkspace}
             onRenameSplitWorkspace={dispatchRenameSplitWorkspace}
+            onCombineSplitSessions={dispatchCombineSplitSessions}
             onReorderSessions={applySessionOrder}
             onSessionMenu={openTabMenu}
             onOpenSettings={handleOpenSettings}
