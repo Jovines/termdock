@@ -2172,6 +2172,18 @@ function App() {
     window.dispatchEvent(new CustomEvent('set-terminal-split-direction', { detail: { sessionId, layout } }));
   }, []);
 
+  const dispatchReorderSplitWorkspace = useCallback((workspaceId: string, sessionIds: string[]) => {
+    window.dispatchEvent(new CustomEvent('reorder-terminal-split-workspace', {
+      detail: { workspaceId, sessionIds },
+    }));
+  }, []);
+
+  const dispatchRenameSplitWorkspace = useCallback((workspaceId: string, name: string) => {
+    window.dispatchEvent(new CustomEvent('rename-terminal-split-workspace', {
+      detail: { workspaceId, name },
+    }));
+  }, []);
+
   useEffect(() => {
     if (!desktopBridge) return;
     const handleNativeCommand = (event: Event) => {
@@ -4428,6 +4440,8 @@ function App() {
         onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}
         splitWorkspaces={splitWorkspaces}
         onSetSplitLayout={dispatchSetSplitLayout}
+        onReorderSplitWorkspace={dispatchReorderSplitWorkspace}
+        onRenameSplitWorkspace={dispatchRenameSplitWorkspace}
         onReorderSessions={applySessionOrder}
         onSessionMenu={openTabMenu}
         onOpenSettings={handleOpenSettings}
@@ -4521,6 +4535,8 @@ function App() {
             onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}
             splitWorkspaces={splitWorkspaces}
             onSetSplitLayout={dispatchSetSplitLayout}
+            onReorderSplitWorkspace={dispatchReorderSplitWorkspace}
+            onRenameSplitWorkspace={dispatchRenameSplitWorkspace}
             onReorderSessions={applySessionOrder}
             onSessionMenu={openTabMenu}
             onOpenSettings={handleOpenSettings}

@@ -22,6 +22,8 @@ import {
   normalizeSplitWorkspaces,
   pruneSplitWorkspaces,
   removeSplitWorkspaceForSession,
+  reorderSplitWorkspaceSessions,
+  renameSplitWorkspace,
   type SplitLayout,
   type SplitWorkspace,
   type SplitWorkspaceSummary,
@@ -886,7 +888,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         tmuxSessionName: s.tmuxSessionName,
       })),
       activeSessionId,
-      splitWorkspaces: splitWorkspaces.map(({ id, sessionIds, layout }) => ({ id, sessionIds, layout })),
+      splitWorkspaces: splitWorkspaces.map(({ id, name, sessionIds, layout }) => ({
+        id,
+        ...(name ? { name } : {}),
+        sessionIds,
+        layout,
+      })),
     });
   }, [sessions, activeSessionId, splitWorkspaces, onSessionDataUpdate]);
 
@@ -1472,6 +1479,22 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       handleReorderSessions(customEvent.detail.sessionIds);
     };
 
+    const handleReorderSplitWorkspaceEvent = (event: Event) => {
+      const detail = (event as CustomEvent<{ workspaceId?: string; sessionIds?: string[] }>).detail;
+      if (!detail?.workspaceId || !Array.isArray(detail.sessionIds)) return;
+      setSplitWorkspaces((current) => reorderSplitWorkspaceSessions(
+        current,
+        detail.workspaceId!,
+        detail.sessionIds!,
+      ));
+    };
+
+    const handleRenameSplitWorkspaceEvent = (event: Event) => {
+      const detail = (event as CustomEvent<{ workspaceId?: string; name?: string }>).detail;
+      if (!detail?.workspaceId || typeof detail.name !== 'string') return;
+      setSplitWorkspaces((current) => renameSplitWorkspace(current, detail.workspaceId!, detail.name!));
+    };
+
     window.addEventListener('new-terminal-session', handleNewSessionEvent);
     window.addEventListener('switch-terminal-session', handleSwitchSessionEvent);
     window.addEventListener('focus-active-terminal-session', handleFocusActiveSessionEvent);
@@ -1484,6 +1507,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     window.addEventListener('rename-terminal-session', handleRenameSessionEvent);
     window.addEventListener('reset-terminal-session-name', handleResetSessionNameEvent);
     window.addEventListener('reorder-terminal-session', handleReorderSessionEvent);
+    window.addEventListener('reorder-terminal-split-workspace', handleReorderSplitWorkspaceEvent);
+    window.addEventListener('rename-terminal-split-workspace', handleRenameSplitWorkspaceEvent);
 
     return () => {
       window.removeEventListener('new-terminal-session', handleNewSessionEvent);
@@ -1498,6 +1523,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('rename-terminal-session', handleRenameSessionEvent);
       window.removeEventListener('reset-terminal-session-name', handleResetSessionNameEvent);
       window.removeEventListener('reorder-terminal-session', handleReorderSessionEvent);
+      window.removeEventListener('reorder-terminal-split-workspace', handleReorderSplitWorkspaceEvent);
+      window.removeEventListener('rename-terminal-split-workspace', handleRenameSplitWorkspaceEvent);
     };
   }, [handleNewSession, handleSwitchSession, openSplitChooser, closeSplitWorkspace, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleResetSessionName, handleReorderSessions]);
 
@@ -1862,12 +1889,54 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                 </span>
               </button>
 
+              {splitWorkspaces.filter((workspace) => workspace.id !== activeSplitWorkspace?.id).length > 0 && (
+                <>
+                  <div className="px-3 pb-1 pt-3 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+                    {t('tab.splitExistingGroups')}
+                  </div>
+                  {splitWorkspaces.filter((workspace) => workspace.id !== activeSplitWorkspace?.id).map((workspace, workspaceIndex) => {
+                    const members = workspace.sessionIds.flatMap((id) => {
+                      const member = sessions.find((session) => session.id === id);
+                      return member ? [member] : [];
+                    });
+                    if (members.length < 2) return null;
+                    const workspaceName = workspace.name || `${t('tab.splitWorkspace')} ${workspaceIndex + 1}`;
+                    const memberSummary = members.map((member) => getSessionLabel(member).primary).join(' · ');
+                    return (
+                      <button
+                        key={workspace.id}
+                        type="button"
+                        onClick={() => pairWithExistingSession(members[0]!.id)}
+                        className="group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-surface-2 active:bg-surface-elevated"
+                      >
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                          <Columns2 size={15} />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-1.5">
+                            <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">{workspaceName}</span>
+                            <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium text-primary">
+                              {t('tab.splitOccupied')}
+                            </span>
+                          </span>
+                          <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
+                            {t('tab.sessionCount', { count: members.length })} · {memberSummary}
+                          </span>
+                        </span>
+                        <Check size={14} className="text-primary opacity-0 transition group-hover:opacity-100" />
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+
               <div className="px-3 pb-1 pt-3 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
-                {t('tab.splitExisting')}
+                {t('tab.splitAvailableSessions')}
               </div>
-              {sessions.filter((session) => !activeSplitWorkspace?.sessionIds.includes(session.id) && session.id !== activeSessionId).length === 0 ? (
+              {sessions.filter((session) => !splitWorkspaces.some((workspace) => workspace.sessionIds.includes(session.id)) && session.id !== activeSessionId).length === 0
+                && splitWorkspaces.filter((workspace) => workspace.id !== activeSplitWorkspace?.id).length === 0 ? (
                 <p className="px-3 py-4 text-[12px] text-muted-foreground">{t('tab.splitNoOtherSessions')}</p>
-              ) : sessions.filter((session) => !activeSplitWorkspace?.sessionIds.includes(session.id) && session.id !== activeSessionId).map((session) => {
+              ) : sessions.filter((session) => !splitWorkspaces.some((workspace) => workspace.sessionIds.includes(session.id)) && session.id !== activeSessionId).map((session) => {
                 const sessionCwd = cwdById.get(session.id) ?? null;
                 const label = getSessionLabel(session);
                 return (
