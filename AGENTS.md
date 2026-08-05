@@ -10,10 +10,17 @@
   `commit -a`。
 - 别人 WIP 的文件保持 unstaged,不 stage / 不 reset / 不 checkout / 不修改。
 - commit message 只描述自己的改动。
+- git 操作前先 `git status` 快照,操作后对照确认没动别人 WIP。
+
+## Git 历史与资产
+
+- **不重写已推送历史**;必须重写时先 `git clone --mirror` 备份,临时克隆里重写、
+  `--force-with-lease` 推送,并告知其他 Agent 同步。
+- 非运行时资产(3D 模型、预览图、诊断脚本等)不入库;大文件先问用户,放仓库外。
 
 ## 工具
 
-- 搜索用 `rg`(ripgrep),不要 `grep -r`;查文件用 `Glob`,不要 `find`。
+- 搜索用 `rg`,列文件用 `rg --files`,不要 `grep -r` / `find`。
 - 改完 `src/` 用 `termdock-deploy` skill 验证;若编译错属他人 WIP,先停。
 - **改动完成并验证后自动部署到正式端口 9834**(`termdock-deploy` skill:
   build → `termdock --stop` → setsid 启动 → health 检查),不用再问用户。
