@@ -148,6 +148,8 @@ const FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS = 'termdock-file-preview-horizontal-s
 // three.js is heavy (~600 kB), so the 3D viewer loads on demand the first
 // time a .stl/.glb/.gltf file is previewed.
 const ModelPreview = lazy(() => import('./ModelPreview'));
+// 类型导入: 查看器的语义特征(来自 .features.json sidecar)
+import type { ModelFeature } from './ModelPreview';
 const MARKDOWN_TABLE_SCROLL_CLASS = `${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-md-table-scroll max-w-full overflow-x-auto overflow-y-hidden rounded-lg border border-border/20 bg-surface`;
 
 type GitActionKey = GitActionRequest['action'];
@@ -4860,6 +4862,8 @@ interface FilePreviewProps {
   filePath: string | null;
   onInsertReference: (path: string, key?: string) => void;
   onInsertText: (text: string, key: string) => void;
+  /** Insert a model-feature reference (draft-aware, same as file refs). */
+  onInsertFeature?: (text: string, key: string) => void;
   onReferenceCopied: (key: string) => void;
   onClose?: () => void;
   isMobile: boolean;
@@ -4973,6 +4977,7 @@ export function FilePreview({
   filePath,
   onInsertReference,
   onInsertText,
+  onInsertFeature,
   onReferenceCopied,
   onClose,
   isMobile,
@@ -4994,6 +4999,7 @@ export function FilePreview({
   const { t } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
+  const [modelFeatures, setModelFeatures] = useState<ModelFeature[] | null>(null);
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   // Floating "引用" button position relative to the scroller. Mouse clicks set
@@ -5156,6 +5162,47 @@ export function FilePreview({
       endLoading('cleanup');
     };
   }, [filePath, rootPath, externalVersion, manualRefreshNonce, onLineRangeChange, t]);
+
+  // 语义特征 sidecar: 约定放 <模型目录>/features/<名>.json
+  useEffect(() => {
+    if (previewState.kind !== 'model3d' || !filePath) {
+      setModelFeatures(null);
+      return;
+    }
+    let cancelled = false;
+    // 例: 3d-parts/x/glb/assembly.glb → 3d-parts/x/features/assembly.json
+    const slash = filePath.lastIndexOf('/');
+    const fileName = slash >= 0 ? filePath.slice(slash + 1) : filePath;
+    const dir = slash >= 0 ? filePath.slice(0, slash) : '';
+    const parentSlash = dir.lastIndexOf('/');
+    const modelRoot = parentSlash >= 0 ? dir.slice(0, parentSlash) : '';
+    const stem = fileName.replace(/\.(stl|glb|gltf)$/i, '');
+    const sidecarPath = `${modelRoot ? `${modelRoot}/` : ''}features/${stem}.json`;
+    readFileContent(sidecarPath)
+      .then((result) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse(result.content) as {
+            version?: number;
+            features?: ModelFeature[];
+          };
+          // 契约版本校验(见 docs/model-features.schema.json): 只认 version 1
+          setModelFeatures(
+            data.version === 1 && Array.isArray(data.features) && data.features.length > 0
+              ? data.features
+              : null,
+          );
+        } catch {
+          setModelFeatures(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setModelFeatures(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [previewState, filePath]);
 
   // Syntax highlighting for the text preview. Runs after the content is loaded,
   // skips Markdown preview mode (handled separately), unknown languages, and
@@ -5540,6 +5587,9 @@ export function FilePreview({
               blobUrl={previewState.objectUrl}
               ext={previewState.ext}
               fileName={display.name}
+              filePath={readablePath}
+              features={modelFeatures}
+              onInsertFeature={onInsertFeature}
               onRefresh={refreshPreview}
             />
           </Suspense>
@@ -10238,6 +10288,7 @@ export function RightSidebar(
                   filePath={filesPaneActive ? selectedFilePath : null}
                   onInsertReference={insertPathReference}
                   onInsertText={insertReferenceText}
+                  onInsertFeature={insertReferenceText}
                   onReferenceCopied={markReferenceCopied}
                   isMobile={false}
                   lineRange={lineRange}
@@ -10330,6 +10381,7 @@ export function RightSidebar(
                     filePath={filesPaneActive && (mobileFilePreviewOpen || mobileFileSlideIndex === 1) ? selectedFilePath : null}
                     onInsertReference={insertPathReference}
                     onInsertText={insertReferenceText}
+                    onInsertFeature={insertReferenceText}
                     onReferenceCopied={markReferenceCopied}
                     onClose={closeFilePreview}
                     isMobile
@@ -10398,6 +10450,7 @@ export function RightSidebar(
             filePath={previewPaneActive ? selectedFilePath : null}
             onInsertReference={insertPathReference}
             onInsertText={insertReferenceText}
+            onInsertFeature={insertReferenceText}
             onReferenceCopied={markReferenceCopied}
             isMobile={false}
             lineRange={lineRange}

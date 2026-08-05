@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { FilePreview } from './RightSidebar';
@@ -27,6 +27,7 @@ const { stlParseMock, gltfParseMock, readModel3dBlobMock, readFileContentMock } 
 
 function makeStlGeometryMock() {
   return {
+    getAttribute() { return undefined; },
     boundingBox: null as null | { getSize: (v: { x: number; y: number; z: number }) => unknown; getCenter: (v: { x: number; y: number; z: number }) => unknown },
     computeBoundingBox() {
       this.boundingBox = {
@@ -48,6 +49,9 @@ vi.mock('three', () => {
     set(x: number, y: number, z: number) { this.x = x; this.y = y; this.z = z; return this; }
     sub(v: Vector3) { this.x -= v.x; this.y -= v.y; this.z -= v.z; return this; }
     copy(v: Vector3) { this.x = v.x; this.y = v.y; this.z = v.z; return this; }
+    clone() { return new Vector3().set(this.x, this.y, this.z); }
+    project() { return this; }
+    normalize() { return this; }
     negate() { this.x = -this.x; this.y = -this.y; this.z = -this.z; return this; }
   }
   class Plane {
@@ -61,6 +65,7 @@ vi.mock('three', () => {
   class Color {
     value: unknown;
     constructor(value?: unknown) { this.value = value; }
+    setHex() {}
   }
   class Scene {
     background: unknown = null;
@@ -73,7 +78,7 @@ vi.mock('three', () => {
     aspect = 1;
     near = 0.1;
     far = 10000;
-    position = { set: () => {} };
+    position = { set: () => {}, distanceTo: () => 100 };
     constructor(fov: number) { this.fov = fov; }
     updateProjectionMatrix() {}
   }
@@ -91,15 +96,19 @@ vi.mock('three', () => {
     geometry: { dispose: () => void };
     material: { dispose: () => void };
     rotation = { x: 0, y: 0, z: 0 };
-    position = { set: () => {}, sub: () => {} };
+    position = { set: () => {}, sub: () => {}, copy() { return this; }, add() { return this; } };
+    quaternion = { setFromUnitVectors: () => {} };
+    scale = { set: () => {} };
     constructor(geometry: { dispose: () => void }, material: { dispose: () => void }) {
       this.geometry = geometry;
       this.material = material;
     }
     traverse(cb: (node: unknown) => void) { cb(this); }
+    updateMatrixWorld() {}
   }
   class MeshStandardMaterial {
     constructor(_options?: unknown) {}
+    emissive = { setHex: () => {} };
     dispose() {}
   }
   class GridHelper {
@@ -115,13 +124,26 @@ vi.mock('three', () => {
   class Group {
     position = { set: () => {}, sub: () => {} };
     traverse(cb: (node: unknown) => void) { cb(this); }
+    updateMatrixWorld() {}
   }
   class BufferGeometry {}
+  class CircleGeometry {
+    dispose() {}
+  }
+  class RingGeometry {
+    dispose() {}
+  }
+  class Raycaster {
+    set() {}
+    setFromCamera() {}
+    intersectObject() { return []; }
+  }
   return {
     AmbientLight: Light,
     DirectionalLight: Light,
     Box3,
     BufferGeometry,
+    CircleGeometry,
     Color,
     DoubleSide: 2,
     FrontSide: 0,
@@ -131,6 +153,8 @@ vi.mock('three', () => {
     MeshStandardMaterial,
     PerspectiveCamera,
     Plane,
+    Raycaster,
+    RingGeometry,
     Scene,
     Vector3,
     WebGLRenderer,
@@ -176,6 +200,10 @@ function renderFilePreview(filePath: string) {
       filePath={filePath}
       onInsertReference={() => {}}
       onInsertText={() => {}}
+      onInsertFeature={(text) => {
+        // 模拟 RightSidebar 的接线: 普通引用走 termdock-insert-reference 事件
+        window.dispatchEvent(new CustomEvent('termdock-insert-reference', { detail: { text } }));
+      }}
       onReferenceCopied={() => {}}
       isMobile={false}
       markdownOutlineOpen={false}
@@ -262,5 +290,49 @@ describe('right sidebar 3D model preview', () => {
     expect(await screen.findByText('Binary files cannot be previewed. Use the download button above to save it.')).toBeTruthy();
     expect(readModel3dBlobMock).not.toHaveBeenCalled();
     expect(stlParseMock).not.toHaveBeenCalled();
+  });
+
+  it('loads semantic features and sends a feature annotation', async () => {
+    readFileContentMock.mockImplementation(async (path: string) => {
+      if (path.includes('features/')) {
+        return {
+          path,
+          content: JSON.stringify({
+            version: 1,
+            features: [
+              { id: 'feat-a', part: 'Part A', name: 'Feature 1', center: [0, 0, 0] },
+              { id: 'feat-b', part: 'Part B', name: 'Feature 2', center: [1, 1, 1] },
+            ],
+          }),
+          size: 0,
+          modified: '',
+          binary: false,
+        };
+      }
+      return { path, content: '', size: 0, modified: '', binary: true };
+    });
+    renderFilePreview('parts/gear.stl');
+    await screen.findByText('Dimensions: 10.0 × 20.0 × 30.0 mm');
+    expect(readFileContentMock).toHaveBeenCalledWith('features/gear.json');
+    expect(await screen.findByRole('button', { name: 'Features' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Features' }));
+    expect(screen.queryByText('Part A·Feature 1')).toBeTruthy();
+    const marker = document.querySelector('[data-feature-id="feat-a"]') as HTMLElement;
+    expect(marker.style.transform).toContain('translate(0px,');
+    expect(marker.style.transform).toContain('translate(-50%, -50%)');
+    fireEvent.click(screen.getByText('Part A·Feature 1'));
+    expect(screen.getByRole('button', { name: 'Insert reference' })).toBeTruthy();
+    // 多选: 再选一个面, 引用文本应包含 面A/面B
+    fireEvent.click(screen.getByText('Part B·Feature 2'));
+    let inserted = '';
+    const handler = (e: Event) => {
+      inserted = (e as CustomEvent<{ text?: string }>).detail?.text ?? '';
+    };
+    window.addEventListener('termdock-insert-reference', handler);
+    fireEvent.click(screen.getByRole('button', { name: 'Insert reference' }));
+    expect(inserted).toContain('面A: Part A·Feature 1');
+    expect(inserted).toContain('面B: Part B·Feature 2');
+    window.removeEventListener('termdock-insert-reference', handler);
+    fireEvent.click(screen.getByRole('button', { name: 'Features' }));
   });
 });
