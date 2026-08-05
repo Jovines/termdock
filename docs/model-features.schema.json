@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "termdock:model-features-schema",
+  "title": "Termdock 3D 模型语义特征清单 (model-features)",
+  "description": "web-terminal 3D 查看器「特征标注」的可选增强数据契约。任何模型在 features/<模型名>.json 放一份即可启用命名特征; 不依赖 cadquery-print skill, 任何生成方都能产出。查看器只认本契约, 不认具体生产方。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "model", "features"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "契约版本。破坏性改动时递增, 查看器按版本决定是否兼容。"
+    },
+    "model": {
+      "type": "string",
+      "description": "对应的模型文件名, 如 assembly.glb"
+    },
+    "features": {
+      "type": "array",
+      "description": "语义特征列表。多零件模型内 id 必须全局唯一(查看器按 id 定位标记)。",
+      "items": { "$ref": "#/definitions/feature" }
+    }
+  },
+  "definitions": {
+    "feature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "part", "name", "center"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "稳定且全局唯一的特征 id(改名/改序不影响引用)"
+        },
+        "part": {
+          "type": "string",
+          "description": "零件显示名, 如 底座"
+        },
+        "node": {
+          "type": "string",
+          "description": "GLB 零件节点名(选中高亮用), 如 base; 单零件模型可省略"
+        },
+        "name": {
+          "type": "string",
+          "description": "特征名, 如 燕尾根部上棱; 面/棱/边/角越细越好"
+        },
+        "center": {
+          "$ref": "#/definitions/vec3",
+          "description": "特征中心, CAD 坐标(Z-up), 与模型文件同一坐标系; 建议吸附到实际表面(倒角/圆角后)"
+        },
+        "normal": {
+          "$ref": "#/definitions/vec3",
+          "description": "特征法线(CAD 坐标, Z-up), 可选"
+        },
+        "hint": {
+          "type": "string",
+          "description": "给用户/AI 的补充说明"
+        }
+      }
+    },
+    "vec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "type": "number" }
+    }
+  }
+}
