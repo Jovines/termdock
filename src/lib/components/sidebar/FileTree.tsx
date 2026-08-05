@@ -6,6 +6,7 @@ import {
   FolderOpen as RiFolderOpen,
   File as RiFile,
   FileCode as RiFileCode,
+  Box as RiBox,
   Loader2 as RiLoader,
   Pin as RiPin,
   PinOff as RiPinOff,
@@ -14,7 +15,7 @@ import {
   Download as RiDownload,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
-import { cancelIoSlot, listDirectory, searchFilesStream, downloadFile, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, listDirectory, searchFilesStream, downloadFile, isPreviewableModel3dPath, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 
@@ -57,6 +58,7 @@ const CHANGE_STYLES: Record<string, { label: string; className: string; title: s
 
 function getFileIcon(name: string, type: 'file' | 'directory' | 'symlink') {
   if (type === 'directory') return null; // handled separately
+  if (isPreviewableModel3dPath(name)) return <RiBox size={14} />;
   const ext = name.lastIndexOf('.') >= 0 ? name.slice(name.lastIndexOf('.')) : '';
   return CODE_EXTS.has(ext) ? <RiFileCode size={14} /> : <RiFile size={14} />;
 }

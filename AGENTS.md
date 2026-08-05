@@ -15,6 +15,8 @@
 
 - 搜索用 `rg`(ripgrep),不要 `grep -r`;查文件用 `Glob`,不要 `find`。
 - 改完 `src/` 用 `termdock-deploy` skill 验证;若编译错属他人 WIP,先停。
+- **改动完成并验证后自动部署到正式端口 9834**(`termdock-deploy` skill:
+  build → `termdock --stop` → setsid 启动 → health 检查),不用再问用户。
 
 ## 色彩体系 (Flexoki)
 
