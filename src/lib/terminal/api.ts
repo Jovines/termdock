@@ -1611,6 +1611,27 @@ export function isPreviewableImagePath(filePath: string): boolean {
   return getImageMimeTypeForPath(filePath) !== null;
 }
 
+// 3D model files (.stl/.glb/.gltf) render in an interactive three.js viewer.
+// .step/.stp are deliberately excluded: they fall back to the binary hint.
+export const MODEL_3D_EXTS: readonly string[] = ['.stl', '.glb', '.gltf'];
+
+export function getModel3dExtForPath(filePath: string): string | null {
+  const dotIndex = filePath.lastIndexOf('.');
+  if (dotIndex < 0) return null;
+  const ext = filePath.slice(dotIndex).toLowerCase();
+  return (MODEL_3D_EXTS as readonly string[]).includes(ext) ? ext : null;
+}
+
+export function isPreviewableModel3dPath(filePath: string): boolean {
+  return getModel3dExtForPath(filePath) !== null;
+}
+
+const MODEL_3D_MIME_BY_EXT: Record<string, string> = {
+  '.stl': 'model/stl',
+  '.glb': 'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+};
+
 export interface ImagePreviewBlob {
   blob: Blob;
   path: string;
@@ -1856,6 +1877,44 @@ export async function readImagePreviewBlob(filePath: string, signal?: AbortSigna
     size: sizeHeader ? Number(sizeHeader) : null,
     modified: response.headers.get('Last-Modified'),
     mimeType: response.headers.get('Content-Type') || blob.type || getImageMimeTypeForPath(filePath) || 'application/octet-stream',
+  };
+}
+
+export interface Model3dPreviewBlob {
+  blob: Blob;
+  path: string;
+  size: number | null;
+  modified: string | null;
+  ext: string;
+  mimeType: string;
+}
+
+// Fetches a 3D model file through the generic download endpoint (the blob
+// endpoint is image-oriented; download serves arbitrary binary files).
+export async function readModel3dBlob(filePath: string, signal?: AbortSignal, action = 'view_file', requestSlotId?: string): Promise<Model3dPreviewBlob> {
+  const params = new URLSearchParams({ path: filePath, action });
+  if (requestSlotId) params.set('requestSlotId', requestSlotId);
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/download?${params}`,
+    { signal },
+    FS_REQUEST_TIMEOUT_MS,
+    '3D model preview took too long. The file may be on slow storage or blocked by another process.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to load 3D model preview' }));
+    throw new Error(error.error || 'Failed to load 3D model preview');
+  }
+
+  const blob = await response.blob();
+  const sizeHeader = response.headers.get('Content-Length');
+  const ext = getModel3dExtForPath(filePath) ?? '';
+  return {
+    blob,
+    path: filePath,
+    size: sizeHeader ? Number(sizeHeader) : null,
+    modified: response.headers.get('Last-Modified'),
+    ext,
+    mimeType: response.headers.get('Content-Type') || blob.type || MODEL_3D_MIME_BY_EXT[ext] || 'application/octet-stream',
   };
 }
 

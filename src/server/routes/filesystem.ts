@@ -47,6 +47,139 @@ const RESTORE_CONFIRM_PHRASES = new Set(['丢弃改动', 'discard changes']);
 const FS_IO_LOG_NAME = 'fs-io.log';
 const activeDiffSlots = new Map<string, { controller: AbortController; requestId: number }>();
 const activeIoSlots = new Map<string, { controller: AbortController; requestId: number; op: string }>();
+// ── Shared file-watch subscriptions ──────────────────────────────────────
+// @parcel/watcher's subscribe() recursively scans the whole subtree on a
+// libuv threadpool worker before it starts delivering events. Creating one
+// subscription per fs/watch connection turns client reconnects (which happen
+// on every file selection) into N full-tree scans, saturating the 16-worker
+// pool — every async fs operation then queues behind the scans and the whole
+// server appears frozen. The registry below makes the subscription per-root
+// and reference-counted: while any client watches a root, the tree is scanned
+// exactly once, and reconnect/re-subscribe attaches to the existing
+// subscription instead of rescanning.
+interface SharedWatchClient {
+  closed: boolean;
+  enqueue: (event: FileWatchEvent) => void;
+}
+interface SharedWatchEntry {
+  refs: number;
+  subscription: watcher.AsyncSubscription | null;
+  failure: string | null;
+  clients: Set<SharedWatchClient>;
+  inFlight: Promise<watcher.AsyncSubscription | null> | null;
+  evictTimer: ReturnType<typeof setTimeout> | null;
+}
+const sharedWatchRegistry = new Map<string, SharedWatchEntry>();
+const SHARED_WATCH_EVICT_DELAY_MS = 60_000;
+
+function sharedWatchCallback(rootPath: string, entry: SharedWatchEntry): (error: Error | null, events: watcher.Event[]) => void {
+  return (error, events) => {
+    if (entry.failure) return;
+    if (error) {
+      entry.failure = error.message || 'watch-error';
+      const reason = entry.failure;
+      for (const client of entry.clients) {
+        if (!client.closed) client.enqueue({ type: 'rescan-required', path: rootPath, reason });
+      }
+      return;
+    }
+    for (const event of events) {
+      const changedPath = path.resolve(event.path);
+      if (!isPathInside(rootPath, changedPath) || isIgnoredWatchPath(rootPath, changedPath)) continue;
+      if (event.type === 'delete') {
+        for (const client of entry.clients) {
+          if (!client.closed) client.enqueue({ type: 'deleted', path: changedPath });
+        }
+        continue;
+      }
+      fs.promises.lstat(changedPath)
+        .then((stat) => {
+          const payload: FileWatchEvent = {
+            type: event.type === 'create' ? 'created' : 'updated',
+            path: changedPath,
+            entry: toFileEntry(changedPath, stat),
+          };
+          for (const client of entry.clients) {
+            if (!client.closed) client.enqueue(payload);
+          }
+        })
+        .catch(() => {
+          for (const client of entry.clients) {
+            if (!client.closed) client.enqueue({ type: 'deleted', path: changedPath });
+          }
+        });
+    }
+  };
+}
+
+async function acquireSharedWatch(rootPath: string, client: SharedWatchClient): Promise<string | null> {
+  let entry = sharedWatchRegistry.get(rootPath);
+  if (!entry) {
+    entry = {
+      refs: 0,
+      subscription: null,
+      failure: null,
+      clients: new Set(),
+      inFlight: null,
+      evictTimer: null,
+    };
+    sharedWatchRegistry.set(rootPath, entry);
+  }
+  if (entry.evictTimer) {
+    clearTimeout(entry.evictTimer);
+    entry.evictTimer = null;
+  }
+  entry.refs += 1;
+  entry.clients.add(client);
+  if (entry.failure) return null;
+  if (entry.subscription) return rootPath;
+  if (!entry.inFlight) {
+    entry.inFlight = watcher.subscribe(rootPath, sharedWatchCallback(rootPath, entry), {
+      ignore: Array.from(WATCH_IGNORED_NAMES).map((name) => `**/${name}/**`),
+    })
+      .then((subscription) => {
+        const current = sharedWatchRegistry.get(rootPath);
+        if (!current || current.refs === 0) {
+          // Nobody is watching anymore (client disconnected mid-scan): free
+          // the freshly built subscription instead of leaking its DirTree.
+          void subscription.unsubscribe().catch(() => undefined);
+          return null;
+        }
+        current.subscription = subscription;
+        return subscription;
+      })
+      .catch((error) => {
+        const current = sharedWatchRegistry.get(rootPath);
+        if (current) current.failure = error instanceof Error ? error.message : String(error);
+        return null;
+      })
+      .finally(() => {
+        const current = sharedWatchRegistry.get(rootPath);
+        if (current) current.inFlight = null;
+      });
+  }
+  await entry.inFlight;
+  const current = sharedWatchRegistry.get(rootPath);
+  return current && !current.failure ? rootPath : null;
+}
+
+function releaseSharedWatch(rootPath: string, client: SharedWatchClient): void {
+  client.closed = true;
+  const entry = sharedWatchRegistry.get(rootPath);
+  if (!entry) return;
+  entry.clients.delete(client);
+  entry.refs -= 1;
+  if (entry.refs > 0) return;
+  if (entry.evictTimer) clearTimeout(entry.evictTimer);
+  entry.evictTimer = setTimeout(() => {
+    const current = sharedWatchRegistry.get(rootPath);
+    if (!current || current.refs > 0) return;
+    sharedWatchRegistry.delete(rootPath);
+    void current.subscription?.unsubscribe().catch(() => undefined);
+    current.subscription = null;
+  }, SHARED_WATCH_EVICT_DELAY_MS);
+  entry.evictTimer.unref?.();
+}
 const untrackedJobs = new Map<string, {
   status: 'running' | 'done' | 'error';
   startedAt: number;
@@ -2482,7 +2615,7 @@ router.get('/watch', async (req: Request, res: Response) => {
   let closed = false;
   let pending: FileWatchEvent[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
-  const subscriptions: watcher.AsyncSubscription[] = [];
+  const attachedRoots = new Map<string, SharedWatchClient>();
 
   const writeEvent = (type: string, payload: Record<string, unknown>) => {
     if (closed || res.destroyed) return;
@@ -2510,43 +2643,26 @@ router.get('/watch', async (req: Request, res: Response) => {
 
   writeEvent('ready', { roots });
 
-  for (const rootPath of roots) {
-    try {
-      const subscription = await watcher.subscribe(rootPath, (error, events) => {
-        if (closed) return;
-        if (error) {
-          enqueue({ type: 'rescan-required', path: rootPath, reason: error.message || 'watch-error' });
-          return;
-        }
-        for (const event of events) {
-          const changedPath = path.resolve(event.path);
-          if (!isPathInside(rootPath, changedPath) || isIgnoredWatchPath(rootPath, changedPath)) continue;
-          if (event.type === 'delete') {
-            enqueue({ type: 'deleted', path: changedPath });
-            continue;
-          }
-          fs.promises.lstat(changedPath)
-            .then((stat) => {
-              enqueue({ type: event.type === 'create' ? 'created' : 'updated', path: changedPath, entry: toFileEntry(changedPath, stat) });
-            })
-            .catch(() => {
-              enqueue({ type: 'deleted', path: changedPath });
-            });
-        }
-      }, {
-        ignore: Array.from(WATCH_IGNORED_NAMES).map((name) => `**/${name}/**`),
-      });
-      subscriptions.push(subscription);
-    } catch (error) {
-      enqueue({ type: 'rescan-required', path: rootPath, reason: error instanceof Error ? error.message : 'watch-unavailable' });
+  const attachRoot = async (rootPath: string) => {
+    const client: SharedWatchClient = { closed: false, enqueue };
+    attachedRoots.set(rootPath, client);
+    const ok = await acquireSharedWatch(rootPath, client);
+    if (closed) return;
+    if (!ok) {
+      const reason = sharedWatchRegistry.get(rootPath)?.failure ?? 'watch-unavailable';
+      enqueue({ type: 'rescan-required', path: rootPath, reason });
     }
+  };
+
+  for (const rootPath of roots) {
+    await attachRoot(rootPath);
   }
 
   req.on('close', () => {
     closed = true;
     if (flushTimer) clearTimeout(flushTimer);
-    for (const subscription of subscriptions) {
-      void subscription.unsubscribe().catch(() => undefined);
+    for (const [rootPath, client] of attachedRoots) {
+      releaseSharedWatch(rootPath, client);
     }
   });
 });

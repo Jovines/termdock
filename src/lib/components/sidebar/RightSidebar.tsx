@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, type CSSProperties, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useCallback, useLayoutEffect, useMemo, useState, useDeferredValue, useRef, lazy, Suspense, type CSSProperties, type Dispatch, type KeyboardEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useGesture } from '@use-gesture/react';
 import { Swiper, SwiperSlide } from 'swiper/react';
@@ -44,7 +44,7 @@ import { ChangeWalkthroughPanel } from './ChangeWalkthroughPanel';
 import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, isPreviewableImagePath, openInFileBrowser, readFileContent, readImagePreviewBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, isPreviewableImagePath, isPreviewableModel3dPath, openInFileBrowser, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { subscribeClientState } from '../../utils/clientStateSync';
@@ -144,6 +144,10 @@ const MARKDOWN_TABLE_BODY_CELL_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-bord
 // the drawer per touch sequence, so no swiper-no-swiping / gesture-ignore
 // markers are needed — the class only carries the touch-action CSS rule.
 const FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS = 'termdock-file-preview-horizontal-scroll';
+
+// three.js is heavy (~600 kB), so the 3D viewer loads on demand the first
+// time a .stl/.glb/.gltf file is previewed.
+const ModelPreview = lazy(() => import('./ModelPreview'));
 const MARKDOWN_TABLE_SCROLL_CLASS = `${FILE_PREVIEW_HORIZONTAL_SCROLL_CLASS} termdock-md-table-scroll max-w-full overflow-x-auto overflow-y-hidden rounded-lg border border-border/20 bg-surface`;
 
 type GitActionKey = GitActionRequest['action'];
@@ -4877,9 +4881,10 @@ interface FilePreviewProps {
 
 type FilePreviewState =
   | { kind: 'idle' }
-  | { kind: 'loading'; mode: 'text' | 'image' }
+  | { kind: 'loading'; mode: 'text' | 'image' | 'model3d' }
   | { kind: 'text'; content: string; meta: { size: number; truncated?: boolean } }
   | { kind: 'image'; objectUrl: string; meta: { size: number | null; mimeType: string; modified: string | null }; dimensions?: { width: number; height: number } }
+  | { kind: 'model3d'; objectUrl: string; ext: string; meta: { size: number | null; mimeType: string; modified: string | null } }
   | { kind: 'binary' }
   | { kind: 'error'; message: string };
 
@@ -4964,7 +4969,7 @@ function getNativePointerLogData(event: globalThis.PointerEvent | globalThis.Mou
   };
 }
 
-function FilePreview({
+export function FilePreview({
   filePath,
   onInsertReference,
   onInsertText,
@@ -5024,6 +5029,11 @@ function FilePreview({
   const lastFullPathRef = useRef<string | null>(null);
   const restoredReadingStateKeyRef = useRef<string | null>(null);
 
+  // 手动刷新 nonce:移动端 SSE 挂起后 watch 可能不会重连,预览界面提供
+  // 刷新按钮兜底,nonce 变化与外部变更走同一条重新加载路径(不重置 UI)。
+  const [manualRefreshNonce, setManualRefreshNonce] = useState(0);
+  const refreshPreview = useCallback(() => setManualRefreshNonce((n) => n + 1), []);
+
   useEffect(() => {
     if (!filePath) {
       lastFullPathRef.current = null;
@@ -5052,14 +5062,16 @@ function FilePreview({
     };
     let objectUrl: string | null = null;
     const isImage = isPreviewableImagePath(fullPath);
+    const isModel3d = !isImage && isPreviewableModel3dPath(fullPath);
     const isMarkdown = isMarkdownPath(fullPath);
+    const previewMode = isImage ? 'image' : isModel3d ? 'model3d' : 'text';
     const isPathChange = lastFullPathRef.current !== fullPath;
     lastFullPathRef.current = fullPath;
 
     if (isPathChange) {
-      logFilePreviewLoadingEvent('start', { loadingId, filePath, fullPath, rootPath, mode: isImage ? 'image' : 'text', externalVersion });
+      logFilePreviewLoadingEvent('start', { loadingId, filePath, fullPath, rootPath, mode: previewMode, externalVersion });
       setDownloadState({ status: 'idle' });
-      setPreviewState({ kind: 'loading', mode: isImage ? 'image' : 'text' });
+      setPreviewState({ kind: 'loading', mode: previewMode });
       restoredReadingStateKeyRef.current = null;
       const savedReadingState = readFilePreviewReadingState(rootPath, filePath);
       onLineRangeChange(savedReadingState?.lineRange ?? null);
@@ -5072,7 +5084,7 @@ function FilePreview({
         filePath,
         fullPath,
         rootPath,
-        mode: isImage ? 'image' : 'text',
+        mode: previewMode,
         durationMs: Math.round(performance.now() - startedAt),
         isPathChange,
       });
@@ -5101,6 +5113,23 @@ function FilePreview({
           setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : t('rightSidebar.imageLoadFailed') });
           endLoading('error', { error: err instanceof Error ? err.message : String(err) });
         });
+    } else if (isModel3d) {
+      readModel3dBlob(fullPath, controller.signal, 'view_file', requestSlotId)
+        .then((result) => {
+          objectUrl = URL.createObjectURL(result.blob);
+          setPreviewState({
+            kind: 'model3d',
+            objectUrl,
+            ext: result.ext,
+            meta: { size: result.size, mimeType: result.mimeType, modified: result.modified },
+          });
+          endLoading('model3d_loaded', { bytes: result.size, ext: result.ext });
+        })
+        .catch((err) => {
+          if (controller.signal.aborted) return;
+          setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : t('rightSidebar.model3dLoadFailed') });
+          endLoading('error', { error: err instanceof Error ? err.message : String(err) });
+        });
     } else {
       readFileContent(fullPath, controller.signal, 'view_file', requestSlotId)
         .then((result) => {
@@ -5126,7 +5155,7 @@ function FilePreview({
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       endLoading('cleanup');
     };
-  }, [filePath, rootPath, externalVersion, onLineRangeChange, t]);
+  }, [filePath, rootPath, externalVersion, manualRefreshNonce, onLineRangeChange, t]);
 
   // Syntax highlighting for the text preview. Runs after the content is loaded,
   // skips Markdown preview mode (handled separately), unknown languages, and
@@ -5262,10 +5291,11 @@ function FilePreview({
   // so short files render numbers close to the left edge instead of leaving a
   // fixed gap sized for thousand-line files.
   const gutterWidthCh = Math.max(2, String(lines.length).length) + 1;
-  const meta = previewState.kind === 'text' || previewState.kind === 'image' ? previewState.meta : null;
+  const meta = previewState.kind === 'text' || previewState.kind === 'image' || previewState.kind === 'model3d' ? previewState.meta : null;
   const isMarkdown = isMarkdownPath(readablePath);
   const showMarkdownPreview = previewState.kind === 'text' && isMarkdown && markdownViewMode === 'preview';
   const isImagePreview = previewState.kind === 'image' || (previewState.kind === 'loading' && previewState.mode === 'image');
+  const isModel3dPreview = previewState.kind === 'model3d' || (previewState.kind === 'loading' && previewState.mode === 'model3d');
   const lineReference = buildLineReference(readablePath, rootPath, lineRange);
   const lineReferenceText = (() => {
     if (!lineRange || previewState.kind !== 'text' || lines.length === 0) return lineReference;
@@ -5458,7 +5488,7 @@ function FilePreview({
         )}
         {/* Hint row — fixed height so toggling line range doesn't shift the
             file content below. */}
-        {!(isMobile && showMarkdownPreview) && previewState.kind !== 'binary' && <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
+        {!(isMobile && showMarkdownPreview) && !isModel3dPreview && previewState.kind !== 'binary' && <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
           <span className="truncate">
             {isImagePreview
               ? t('rightSidebar.imagePreviewHint')
@@ -5474,7 +5504,7 @@ function FilePreview({
       </div>
       {previewState.kind === 'loading' ? (
         <div className="min-h-0 flex-1 overflow-auto px-3 py-8 text-center text-sm text-muted-foreground">
-          {previewState.mode === 'image' ? t('rightSidebar.loadingImage') : 'Loading file…'}
+          {previewState.mode === 'image' ? t('rightSidebar.loadingImage') : previewState.mode === 'model3d' ? t('rightSidebar.model3dLoading') : 'Loading file…'}
         </div>
       ) : previewState.kind === 'error' ? (
         <div className="min-h-0 flex-1 overflow-auto">
@@ -5502,6 +5532,17 @@ function FilePreview({
             }}
             onError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.imageLoadFailed') })}
           />
+        </div>
+      ) : previewState.kind === 'model3d' ? (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface">
+          <Suspense fallback={<div className="min-h-0 flex-1 px-3 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.model3dLoading')}</div>}>
+            <ModelPreview
+              blobUrl={previewState.objectUrl}
+              ext={previewState.ext}
+              fileName={display.name}
+              onRefresh={refreshPreview}
+            />
+          </Suspense>
         </div>
       ) : showMarkdownPreview ? (
         <div
@@ -7004,26 +7045,39 @@ export function RightSidebar(
     else pinExplorerRoot(path, 'file');
   }, [pinExplorerRoot, pinnedExplorerRootSet, rootPath, unpinExplorerRoot]);
 
-  const watchedFileRoots = useMemo(() => {
+  const expandedPaths = useSidebarStore((s) => s.expandedPaths);
+  // Watch ONLY the directories the tree has actually expanded (plus the
+  // selected file's parent when it lives outside the explorer root). The
+  // server-side watcher recursively scans the full subtree of every root it
+  // subscribes to on a libuv threadpool worker — watching the whole explorer
+  // root (e.g. /home/qiao with 300k+ directories) blocks a worker for minutes
+  // per subscription, exhausts inotify, and eventually freezes every fs
+  // request. The key is a stable sorted string so selecting a file (which
+  // changes selectedFilePath) does not tear down and re-establish the stream.
+  const watchedFileRootsKey = useMemo(() => {
     const roots = new Set<string>();
-    // Watch the visible tree root. The server-side watcher (@parcel/watcher)
-    // is recursive per root, so this keeps the whole expanded tree fresh via
-    // applyFileWatchEvents' incremental directoryCache updates — previously
-    // only the selected file's parent was watched, so the tree never updated
-    // on its own (and with no file selected there was no watcher at all).
-    if (filesPaneActive && fileTreeRoot) roots.add(fileTreeRoot);
+    if (filesPaneActive && fileTreeRoot) {
+      const treeRoot = `${fileTreeRoot.replace(/\/+$/, '')}/`;
+      for (const expandedPath of expandedPaths) {
+        if (expandedPath === fileTreeRoot) continue;
+        if (expandedPath.startsWith(treeRoot)) roots.add(expandedPath);
+      }
+    }
     // The previewed file can live outside the explorer root (e.g. browsing a
     // subdirectory while a project file is open); keep its parent watched so
     // external edits still reload the preview.
     if ((filesPaneActive || previewPaneActive) && rootPath && selectedFilePath) {
       const selectedAbsolutePath = selectedFilePath.startsWith('/') ? selectedFilePath : `${rootPath}/${selectedFilePath}`;
       const selectedParent = getParentPath(selectedAbsolutePath);
-      if (selectedParent) roots.add(selectedParent);
+      // A file directly inside the explorer root needs no extra watcher — the
+      // root itself is deliberately not watched (it can be the whole home dir).
+      if (selectedParent && selectedParent !== fileTreeRoot) roots.add(selectedParent);
     }
-    return [...roots];
-  }, [filesPaneActive, previewPaneActive, fileTreeRoot, rootPath, selectedFilePath]);
+    return [...roots].sort().join('\n');
+  }, [expandedPaths, filesPaneActive, previewPaneActive, fileTreeRoot, rootPath, selectedFilePath]);
 
   useEffect(() => {
+    const watchedFileRoots = watchedFileRootsKey ? watchedFileRootsKey.split('\n') : [];
     if (!isOpen || watchedFileRoots.length === 0) return;
     const controller = new AbortController();
     let cancelled = false;
@@ -7076,7 +7130,7 @@ export function RightSidebar(
       window.clearTimeout(retryTimer);
       controller.abort();
     };
-  }, [applyFileWatchEvents, bumpFileWatchEpoch, invalidateDirectoryCache, isOpen, watchedFileRoots]);
+  }, [applyFileWatchEvents, bumpFileWatchEpoch, invalidateDirectoryCache, isOpen, watchedFileRootsKey]);
 
   useEffect(() => {
     if (!rootPath) return;
