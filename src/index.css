@@ -1636,3 +1636,9 @@ html[data-theme='light'] .termdock-code .token.important {
     animation: none;
   }
 }
+
+/* 3D 查看器语义特征标签: 基础居中位移由 CSS 提供, JS 只覆盖 translate 定位,
+   避免 React 重渲染把内联 transform 重置回原点导致标签消失。 */
+.model3d-feature-label {
+  transform: translate(-50%, -50%);
+}

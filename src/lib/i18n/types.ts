@@ -202,6 +202,12 @@ export type TranslationDictionary = {
     model3dClipToggle: string;
     model3dClipPosition: string;
     model3dClipFlip: string;
+    model3dFeatureToggle: string;
+    model3dFeatureStatus: (params: TranslatorParams) => string;
+    model3dFeatureInsert: string;
+    model3dGlossaryToggle: string;
+    model3dPickToggle: string;
+    model3dPickHint: string;
     markdownPreview: string;
     markdownSource: string;
     markdownPreviewHint: string;
