@@ -22,6 +22,9 @@ npm-debug.log*
 .tmp
 .tmp-*/
 
+# 3D 打印配件项目已移至 ~/3d-parts，不再入库
+3d-parts/
+
 # vite-plugin-pwa dev mode service worker artifacts
 dev-dist/
 .desktop-dist/
