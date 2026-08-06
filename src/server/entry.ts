@@ -469,7 +469,11 @@ export function createApp(options: AppOptions = {}): express.Express {
   });
 
   // 应用鉴权 + CSRF保护（在终端路由之前）
-  app.use('/api/terminal', requireAuth());
+  // The HTML preview route authenticates itself: document requests use the
+  // session cookie, then get redirected to a short-lived URL token so the
+  // sandboxed iframe's subresource requests (which browsers refuse to send
+  // cookies for) can still load images/css/js.
+  app.use('/api/terminal', requireAuth({ bypass: (req) => req.path.startsWith('/fs/preview') }));
   app.use('/api/terminal', csrfProtection.verifyMiddleware());
 
   // 终端路由

@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { findDirectoryIndexFile, injectHtmlPreviewBase } from './filesystem.js';
+import {
+  findDirectoryIndexFile,
+  injectHtmlPreviewBase,
+  isPathWithinPreviewRoot,
+  isPreviewToken,
+  mintPreviewToken,
+  validatePreviewToken,
+} from './filesystem.js';
 
 const tempDirs: string[] = [];
 
@@ -66,5 +73,40 @@ describe('HTML preview directory index resolution', () => {
     const dir = makeTempDir();
     fs.writeFileSync(path.join(dir, 'page.html'), '<html></html>');
     expect(await findDirectoryIndexFile(dir)).toBeNull();
+  });
+});
+
+describe('HTML preview auth tokens', () => {
+  it('recognizes minted token format and rejects others', () => {
+    const token = mintPreviewToken('/tmp');
+    expect(isPreviewToken(token)).toBe(true);
+    expect(isPreviewToken('short')).toBe(false);
+    expect(isPreviewToken('x'.repeat(33))).toBe(false);
+    expect(isPreviewToken(`${token}ff`)).toBe(false);
+  });
+
+  it('validates paths inside the token root and rejects escapes', () => {
+    const root = path.join(os.tmpdir(), 'termdock-preview-root');
+    expect(isPathWithinPreviewRoot(root, path.join(root, 'img/a.png'))).toBe(true);
+    expect(isPathWithinPreviewRoot(root, root)).toBe(true);
+    expect(isPathWithinPreviewRoot(root, path.join(root, '..', 'escape.png'))).toBe(false);
+    expect(isPathWithinPreviewRoot(root, path.join(os.tmpdir(), 'sibling.png'))).toBe(false);
+    // Prefix lookalike must not pass: /root-other is not under /root
+    expect(isPathWithinPreviewRoot(root, `${root}-other/x.png`)).toBe(false);
+  });
+
+  it('accepts a fresh token for paths inside its root', () => {
+    const root = path.join(os.tmpdir(), 'termdock-preview-valid');
+    const token = mintPreviewToken(root);
+    expect(validatePreviewToken(token, path.join(root, 'index.html'))).toBe(true);
+    expect(validatePreviewToken(token, path.join(root, 'img/a.png'))).toBe(true);
+  });
+
+  it('rejects unknown, expired, and out-of-root tokens', () => {
+    const root = path.join(os.tmpdir(), 'termdock-preview-invalid');
+    expect(validatePreviewToken('f'.repeat(32), path.join(root, 'index.html'))).toBe(false);
+
+    const token = mintPreviewToken(root);
+    expect(validatePreviewToken(token, path.join(root, '..', 'outside.png'))).toBe(false);
   });
 });

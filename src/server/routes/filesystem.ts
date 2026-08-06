@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import crypto from 'crypto';
 import fs from 'fs';
 import type { Dirent } from 'fs';
 import path from 'path';
@@ -6,6 +7,7 @@ import { execFile, spawn } from 'child_process';
 import watcher from '@parcel/watcher';
 import busboy from 'busboy';
 import { pathValidator } from '../utils/pathValidator.js';
+import { isAuthEnabled, isRequestAuthenticated } from '../utils/authProtection.js';
 import { getImageDimensions } from '../utils/imageDimensions.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog } from '../utils/serverLogger.js';
 import { clearBranchAuditRecords, clearChangeAuditRecords, listBranchAuditRecords, listChangeAuditRecords, buildChangeAuditFingerprint } from '../utils/changeAuditStore.js';
@@ -3283,8 +3285,59 @@ router.get('/video', async (req: Request, res: Response) => {
 // equal to the document's own request URL — that keeps relative references
 // working while also making in-page anchor links (#section) stay same-document
 // instead of forcing a full reload. Other asset types keep streaming as-is.
+//
+// Authentication: browsers refuse to send cookies for subresource requests
+// from a sandboxed iframe without allow-same-origin (Chrome blocks the 401
+// responses as ORB), so with a password set the document loads but images
+// don't. The preview route therefore authenticates document requests with the
+// session cookie, then redirects them to a URL carrying a short-lived token
+// bound to the previewed file's directory. Every relative subresource URL
+// inherits that token from the document URL, so css/js/images load without
+// cookies while the sandbox keeps previewed scripts on a separate origin.
 // The frontend renders this in a sandboxed iframe (no allow-same-origin), so
 // previewed scripts never gain the termdock origin.
+const PREVIEW_TOKEN_TTL_MS = 30 * 60 * 1000;
+const previewTokens = new Map<string, { root: string; expiresAt: number }>();
+
+export function isPreviewToken(value: string): boolean {
+  return /^[0-9a-f]{32}$/.test(value);
+}
+
+export function isPathWithinPreviewRoot(root: string, targetPath: string): boolean {
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(targetPath);
+  const prefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
+  return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(prefix);
+}
+
+// Sliding-expiry validation: a valid token refreshes its lifetime so a page
+// that keeps loading subresources stays usable without re-authenticating.
+export function validatePreviewToken(token: string, targetPath: string): boolean {
+  const entry = previewTokens.get(token);
+  if (!entry) return false;
+  if (entry.expiresAt < Date.now()) {
+    previewTokens.delete(token);
+    return false;
+  }
+  if (!isPathWithinPreviewRoot(entry.root, targetPath)) return false;
+  entry.expiresAt = Date.now() + PREVIEW_TOKEN_TTL_MS;
+  return true;
+}
+
+export function mintPreviewToken(root: string): string {
+  const now = Date.now();
+  for (const [token, entry] of previewTokens) {
+    if (entry.expiresAt < now) previewTokens.delete(token);
+  }
+  const token = crypto.randomBytes(16).toString('hex');
+  previewTokens.set(token, { root: path.resolve(root), expiresAt: now + PREVIEW_TOKEN_TTL_MS });
+  return token;
+}
+
+function tokenizePreviewUrl(previewBaseUrl: string, token: string): string {
+  return previewBaseUrl.replace(/^(\/api\/terminal\/fs\/preview\/)/, `$1${token}/`);
+}
+
 // Insert <base href> right after <head> (or after the doctype / at the very
 // start when the document has no head). Documents that already declare their
 // own <base> are left untouched so author intent wins.
@@ -3326,8 +3379,11 @@ export async function findDirectoryIndexFile(dirPath: string): Promise<string | 
 router.get('/preview/*path', async (req: Request, res: Response) => {
   try {
     const rawSegments = req.params.path;
-    const segments = Array.isArray(rawSegments) ? rawSegments : rawSegments ? [rawSegments] : [];
-    const requestedPath = `/${segments.join('/')}`;
+    const segments: string[] = Array.isArray(rawSegments) ? rawSegments : rawSegments ? [rawSegments] : [];
+    const firstSegment = segments[0];
+    const maybeToken = firstSegment && isPreviewToken(firstSegment) ? firstSegment : null;
+    const pathSegments = maybeToken ? segments.slice(1) : segments;
+    const requestedPath = `/${pathSegments.join('/')}`;
     if (!requestedPath || requestedPath === '/') {
       res.status(400).json({ error: 'Missing path parameter' });
       return;
@@ -3337,30 +3393,59 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
     // path, since this router is mounted under /api/terminal/fs); used as the
     // injected <base> so it always equals the document URL.
     const previewBaseUrl = req.originalUrl.split('?', 1)[0];
+    const authEnabled = isAuthEnabled();
+
+    // Token requests carry their own credential in the URL. Document requests
+    // must present the session cookie before we mint a token for them.
+    if (!maybeToken && authEnabled && !isRequestAuthenticated(req)) {
+      res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+      return;
+    }
 
     const validatedPath = await pathValidator.validatePathAsync(requestedPath);
     let stat = await fs.promises.stat(validatedPath);
 
     let targetPath = validatedPath;
+    let redirectUrl: string | null = null;
     if (stat.isDirectory()) {
       // Directory links must carry a trailing slash so relative references
       // inside the served index resolve within the directory, matching how a
       // normal web server behaves.
       if (!previewBaseUrl.endsWith('/')) {
-        res.redirect(308, `${previewBaseUrl}/`);
-        return;
+        redirectUrl = `${previewBaseUrl}/`;
+      } else {
+        const indexPath = await findDirectoryIndexFile(validatedPath);
+        if (!indexPath) {
+          res.status(404).json({ error: 'Directory has no index file to preview', code: 'NO_INDEX' });
+          return;
+        }
+        targetPath = indexPath;
+        stat = await fs.promises.stat(targetPath);
       }
-      const indexPath = await findDirectoryIndexFile(validatedPath);
-      if (!indexPath) {
-        res.status(404).json({ error: 'Directory has no index file to preview', code: 'NO_INDEX' });
-        return;
-      }
-      targetPath = indexPath;
-      stat = await fs.promises.stat(targetPath);
+    }
+
+    // Authenticated document requests get a short-lived token bound to the
+    // previewed file's directory, so the sandboxed iframe's subresources can
+    // load without cookies. The token segment in the URL is inherited by every
+    // relative reference the document makes.
+    if (authEnabled && !maybeToken) {
+      const root = stat.isDirectory() ? validatedPath : path.dirname(validatedPath);
+      const tokenized = tokenizePreviewUrl(previewBaseUrl, mintPreviewToken(root));
+      redirectUrl = stat.isDirectory() && !previewBaseUrl.endsWith('/') ? `${tokenized}/` : tokenized;
+    }
+
+    if (redirectUrl) {
+      res.redirect(302, redirectUrl);
+      return;
     }
 
     if (!stat.isFile()) {
       res.status(400).json({ error: 'Path is not a file' });
+      return;
+    }
+
+    if (maybeToken && !validatePreviewToken(maybeToken, targetPath)) {
+      res.status(403).json({ error: 'Preview token invalid or expired', code: 'PREVIEW_TOKEN_INVALID' });
       return;
     }
 

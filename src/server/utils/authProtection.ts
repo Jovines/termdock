@@ -307,9 +307,10 @@ export function isRequestAuthenticated(req: Request): boolean {
 // Middleware factory: blocks the request with 401 unless either auth is
 // disabled (no auth.json) or the request carries a valid session cookie.
 // Bypass paths are public (login/status/health/static).
-export function requireAuth() {
+export function requireAuth(options?: { bypass?: (req: Request) => boolean }) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (!isAuthEnabled()) return next();
+    if (options?.bypass?.(req)) return next();
     if (isRequestAuthenticated(req)) return next();
     res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
   };
