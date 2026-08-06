@@ -68,8 +68,11 @@ describe('RightSidebar video preview', () => {
     renderFilePreview('clips/demo.mp4');
     const video = screen.getByTestId('file-preview-video');
     expect(video.tagName).toBe('VIDEO');
-    expect(video.getAttribute('controls')).not.toBeNull();
+    // 自绘播放器：隐藏原生控件，进度条拖动由自定义逻辑处理。
+    expect(video.getAttribute('controls')).toBeNull();
     expect(video.getAttribute('src')).toBe(buildVideoPreviewUrl('/repo/clips/demo.mp4'));
+    expect(screen.getByTestId('file-preview-video-player')).toBeTruthy();
+    expect(screen.getByTestId('file-preview-video-track')).toBeTruthy();
     expect(readFileContentMock).not.toHaveBeenCalled();
   });
 

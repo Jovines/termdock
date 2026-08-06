@@ -176,6 +176,8 @@ export const en: TranslationDictionary = {
     videoPreviewHint: 'Click to play · drag to seek',
     videoLoadFailed: 'Failed to load video preview',
     videoUnsupported: 'Your browser does not support this video format',
+    videoPlay: 'Play',
+    videoPause: 'Pause',
     model3dLoading: 'Loading 3D model…',
     model3dLoadFailed: 'Failed to load 3D model preview',
     model3dDimensions: ({ dims }) => `Dimensions: ${dims}`,

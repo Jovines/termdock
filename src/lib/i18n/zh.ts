@@ -176,6 +176,8 @@ export const zh: TranslationDictionary = {
     videoPreviewHint: '点击播放 · 可拖动进度条',
     videoLoadFailed: '视频预览加载失败',
     videoUnsupported: '当前浏览器不支持该视频格式',
+    videoPlay: '播放',
+    videoPause: '暂停',
     model3dLoading: '正在加载 3D 模型…',
     model3dLoadFailed: '3D 模型预览加载失败',
     model3dDimensions: ({ dims }) => `尺寸: ${dims}`,

@@ -193,6 +193,8 @@ export type TranslationDictionary = {
     videoPreviewHint: string;
     videoLoadFailed: string;
     videoUnsupported: string;
+    videoPlay: string;
+    videoPause: string;
     model3dLoading: string;
     model3dLoadFailed: string;
     model3dDimensions: (params: TranslatorParams) => string;

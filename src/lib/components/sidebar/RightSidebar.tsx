@@ -60,6 +60,7 @@ import {
 import { ContextDraftDock } from './ContextDraftDock';
 import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
 import { readHtmlViewMode, writeHtmlViewMode, type HtmlViewMode } from './htmlViewMode';
+import { VideoPreviewPlayer } from './VideoPreviewPlayer';
 import './sidebarSelection.css';
 
 interface RightSidebarProps {
@@ -5627,17 +5628,10 @@ export function FilePreview({
         </div>
       ) : previewState.kind === 'video' ? (
         <div className="min-h-0 flex-1 overflow-hidden bg-surface p-3">
-          <video
-            key={previewState.url}
-            data-testid="file-preview-video"
-            controls
-            preload="metadata"
-            className="h-full max-h-full w-full rounded-lg bg-black object-contain"
-            src={previewState.url}
-            onError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.videoLoadFailed') })}
-          >
-            {t('rightSidebar.videoUnsupported')}
-          </video>
+          <VideoPreviewPlayer
+            url={previewState.url}
+            onLoadError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.videoLoadFailed') })}
+          />
         </div>
       ) : previewState.kind === 'model3d' ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface">
