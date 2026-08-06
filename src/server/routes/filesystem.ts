@@ -3478,6 +3478,10 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
       res.setHeader('Last-Modified', stat.mtime.toUTCString());
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Content-Type-Options', 'nosniff');
+      // Preview URLs carry a short-lived token; never leak it to third-party
+      // resources the previewed document loads (fonts, analytics, hotlinked
+      // images) via the Referer header.
+      res.setHeader('Referrer-Policy', 'no-referrer');
       res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(targetPath)));
       res.end(payload);
       return;
@@ -3488,6 +3492,7 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
     res.setHeader('Last-Modified', stat.mtime.toUTCString());
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(targetPath)));
 
     const stream = fs.createReadStream(targetPath);
