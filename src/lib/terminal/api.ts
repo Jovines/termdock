@@ -1611,6 +1611,37 @@ export function isPreviewableImagePath(filePath: string): boolean {
   return getImageMimeTypeForPath(filePath) !== null;
 }
 
+// Video files play in the right sidebar with a native <video> element. The
+// server /video route streams with HTTP Range support, so playback can seek
+// without buffering the whole file in the browser. Keep the map to formats
+// the browser can actually decode (mkv/avi intentionally excluded).
+const VIDEO_MIME_BY_EXT: Record<string, string> = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/x-m4v',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.ogv': 'video/ogg',
+  '.mpeg': 'video/mpeg',
+  '.mpg': 'video/mpeg',
+};
+
+export function getVideoMimeTypeForPath(filePath: string): string | null {
+  const dotIndex = filePath.lastIndexOf('.');
+  if (dotIndex < 0) return null;
+  return VIDEO_MIME_BY_EXT[filePath.slice(dotIndex).toLowerCase()] ?? null;
+}
+
+export function isPreviewableVideoPath(filePath: string): boolean {
+  return getVideoMimeTypeForPath(filePath) !== null;
+}
+
+// The server /video endpoint streams the file directly; the <video> element
+// requests this URL with Range headers, so seeking works without a full blob
+// download in the browser.
+export function buildVideoPreviewUrl(filePath: string): string {
+  return `/api/terminal/fs/video?path=${encodeURIComponent(filePath)}&action=view_file`;
+}
+
 // 3D model files (.stl/.glb/.gltf) render in an interactive three.js viewer.
 // .step/.stp are deliberately excluded: they fall back to the binary hint.
 export const MODEL_3D_EXTS: readonly string[] = ['.stl', '.glb', '.gltf'];
@@ -1624,6 +1655,28 @@ export function getModel3dExtForPath(filePath: string): string | null {
 
 export function isPreviewableModel3dPath(filePath: string): boolean {
   return getModel3dExtForPath(filePath) !== null;
+}
+
+// HTML files render in a sandboxed iframe through the /api/terminal/fs/preview
+// route. The route mirrors the absolute filesystem path in the URL so relative
+// css/js/image references inside the document resolve to the file's own
+// directory (the document URL acts as its own <base>).
+export const HTML_EXTENSIONS: readonly string[] = ['.html', '.htm'];
+
+export function isPreviewableHtmlPath(filePath: string): boolean {
+  const dotIndex = filePath.lastIndexOf('.');
+  if (dotIndex < 0) return false;
+  const ext = filePath.slice(dotIndex).toLowerCase();
+  return (HTML_EXTENSIONS as readonly string[]).includes(ext);
+}
+
+export function buildHtmlPreviewUrl(filePath: string): string {
+  const encodedSegments = filePath
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  return `/api/terminal/fs/preview/${encodedSegments}`;
 }
 
 const MODEL_3D_MIME_BY_EXT: Record<string, string> = {

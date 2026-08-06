@@ -16,6 +16,8 @@ const router = Router();
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
 const MAX_IMAGE_PREVIEW_SIZE = 20 * 1024 * 1024; // 20MB
+const MAX_HTML_PREVIEW_SIZE = 20 * 1024 * 1024; // 20MB
+const MAX_VIDEO_PREVIEW_SIZE = 4 * 1024 * 1024 * 1024; // 4GB
 const MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024; // 200MB
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100MB per file
 const MAX_UPLOAD_FILES = 50; // max 50 files per upload
@@ -688,6 +690,92 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
 
 function getImageMimeType(filePath: string): string | null {
   return IMAGE_MIME_BY_EXT[path.extname(filePath).toLowerCase()] ?? null;
+}
+
+// Video files play in the right sidebar through the /video route, which
+// streams with HTTP Range support so the browser <video> element can seek
+// without loading the whole file into memory. Keep the map to formats the
+// browser can actually decode (mkv/avi intentionally excluded).
+const VIDEO_MIME_BY_EXT: Record<string, string> = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/x-m4v',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.ogv': 'video/ogg',
+  '.mpeg': 'video/mpeg',
+  '.mpg': 'video/mpeg',
+};
+
+function getVideoMimeType(filePath: string): string | null {
+  return VIDEO_MIME_BY_EXT[path.extname(filePath).toLowerCase()] ?? null;
+}
+
+type VideoRangeResult =
+  | { kind: 'full' }
+  | { kind: 'range'; start: number; end: number }
+  | { kind: 'unsatisfiable' };
+
+// Single-range `Range: bytes=start-end` / `bytes=-N` parsing. Malformed or
+// multi-range headers fall back to a full 200 response, which browsers accept
+// (they just cannot seek until the file is buffered).
+function parseVideoRange(rangeHeader: string | undefined, total: number): VideoRangeResult {
+  if (!rangeHeader || total <= 0) return { kind: 'full' };
+  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+  if (!match) return { kind: 'full' };
+  const rawStart = match[1];
+  const rawEnd = match[2];
+  if (rawStart === '' && rawEnd === '') return { kind: 'full' };
+  if (rawStart === '') {
+    const suffixLength = Number(rawEnd);
+    if (!Number.isInteger(suffixLength) || suffixLength <= 0) return { kind: 'unsatisfiable' };
+    return { kind: 'range', start: Math.max(0, total - suffixLength), end: total - 1 };
+  }
+  const start = Number(rawStart);
+  if (!Number.isInteger(start) || start < 0 || start >= total) return { kind: 'unsatisfiable' };
+  const end = rawEnd === '' ? total - 1 : Math.min(Number(rawEnd), total - 1);
+  if (!Number.isInteger(end) || end < start) return { kind: 'unsatisfiable' };
+  return { kind: 'range', start, end };
+}
+
+// MIME types for the right-sidebar HTML preview route. The route mirrors the
+// absolute filesystem path in the URL, so every relative resource referenced
+// by a previewed document (css/js/fonts/images/...) is served by the same
+// route with a type the browser can render.
+const HTML_PREVIEW_MIME_BY_EXT: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.ico': 'image/x-icon',
+  '.bmp': 'image/bmp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.eot': 'application/vnd.ms-fontobject',
+  '.wasm': 'application/wasm',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.ogg': 'audio/ogg',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+};
+
+function getHtmlPreviewMimeType(filePath: string): string | null {
+  return HTML_PREVIEW_MIME_BY_EXT[path.extname(filePath).toLowerCase()] ?? null;
 }
 
 function toContentDispositionFilename(name: string): string {
@@ -3055,6 +3143,198 @@ router.get('/blob', async (req: Request, res: Response) => {
     const code = payload.code ?? (typeof (error as { code?: unknown })?.code === 'string' ? (error as { code: string }).code : undefined);
     logOnce('error', { code, error: payload.error });
     res.status(status).json({ ...payload, code });
+  }
+});
+
+// Serve video files for the right-sidebar preview. The route streams with
+// HTTP Range support, so <video> playback starts quickly and seeking works
+// without buffering the whole file in the browser or server memory.
+router.get('/video', async (req: Request, res: Response) => {
+  const requestId = ++fsIoRequestSeq;
+  const startedAt = Date.now();
+  const requestedPath = req.query.path as string;
+  const action = getRequestAction(req, 'view_file');
+  const requestSlotId = typeof req.query.requestSlotId === 'string' ? req.query.requestSlotId : undefined;
+  const controller = new AbortController();
+  const abortRequest = () => {
+    if (!res.writableEnded) controller.abort(new SupersededRequestError('fs.video'));
+  };
+  req.on('aborted', abortRequest);
+  res.on('close', abortRequest);
+  registerIoSlot({ requestId, op: 'fs.video', action, slotId: requestSlotId, controller, path: requestedPath });
+  let logged = false;
+  const logOnce = (status: 'ok' | 'error', entry: Partial<Parameters<typeof logFsIo>[0]> = {}) => {
+    if (logged) return;
+    logged = true;
+    releaseIoSlot(requestSlotId, requestId);
+    logFsIo({
+      action,
+      op: 'fs.video',
+      id: requestId,
+      startedAt,
+      status,
+      path: requestedPath,
+      ...entry,
+      extra: { ...(entry.extra ?? {}), requestSlotId },
+    });
+  };
+  try {
+    if (!requestedPath) {
+      res.status(400).json({ error: 'Missing path parameter' });
+      return;
+    }
+
+    const { resolvedPath, stat, mimeType } = await withTimeout((async () => {
+      const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
+      throwIfAborted(controller.signal, 'fs.video');
+      const stat = await fs.promises.stat(resolvedPath);
+      throwIfAborted(controller.signal, 'fs.video');
+
+      if (!stat.isFile()) {
+        throw new Error('Path is not a file');
+      }
+
+      const mimeType = getVideoMimeType(resolvedPath);
+      if (!mimeType) {
+        const error = new Error('Unsupported video type');
+        (error as Error & { status?: number }).status = 415;
+        throw error;
+      }
+
+      if (stat.size > MAX_VIDEO_PREVIEW_SIZE) {
+        const error = new Error('Video is too large to preview');
+        (error as Error & { code?: string; status?: number }).code = 'VIDEO_TOO_LARGE';
+        (error as Error & { status?: number }).status = 413;
+        throw error;
+      }
+      return { resolvedPath, stat, mimeType };
+    })(), FS_ROUTE_TIMEOUT_MS, 'Video preview took too long. The file may be on slow storage or currently blocked by another process.', 'FS_VIDEO_TIMEOUT');
+
+    const total = stat.size;
+    const range = parseVideoRange(typeof req.headers.range === 'string' ? req.headers.range : undefined, total);
+
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Last-Modified', stat.mtime.toUTCString());
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(resolvedPath)));
+
+    if (req.method === 'HEAD') {
+      res.setHeader('Content-Length', total.toString());
+      if (range.kind === 'range') res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${total}`);
+      res.end();
+      logOnce('ok', { path: resolvedPath, bytes: total, extra: { mimeType } });
+      return;
+    }
+
+    if (range.kind === 'unsatisfiable') {
+      res.status(416);
+      res.setHeader('Content-Range', `bytes */${total}`);
+      res.end();
+      logOnce('ok', { path: resolvedPath, bytes: 0, extra: { mimeType, status: 416 } });
+      return;
+    }
+
+    if (range.kind === 'range') {
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${total}`);
+      res.setHeader('Content-Length', String(range.end - range.start + 1));
+    } else {
+      res.setHeader('Content-Length', total.toString());
+    }
+
+    const stream = fs.createReadStream(resolvedPath, range.kind === 'range' ? { start: range.start, end: range.end } : undefined);
+    controller.signal.addEventListener('abort', () => stream.destroy(controller.signal.reason instanceof Error ? controller.signal.reason : undefined), { once: true });
+    const bytesServed = range.kind === 'range' ? range.end - range.start + 1 : total;
+    res.on('finish', () => logOnce('ok', { path: resolvedPath, bytes: bytesServed, extra: { mimeType } }));
+    res.on('close', () => {
+      if (!res.writableEnded) logOnce('error', { path: resolvedPath, bytes: bytesServed, code: 'CLIENT_CLOSED', error: 'Client closed video preview request' });
+    });
+    stream.on('error', (error) => {
+      logOnce('error', { path: resolvedPath, code: 'FS_VIDEO_STREAM_ERROR', error: error instanceof Error ? error.message : 'Failed to read video' });
+      if (!res.headersSent) {
+        const message = error instanceof Error ? error.message : 'Failed to read video';
+        res.status(500).json({ error: message });
+        return;
+      }
+      res.destroy(error instanceof Error ? error : undefined);
+    });
+    stream.pipe(res);
+  } catch (error) {
+    const payload = getErrorPayload(error);
+    const status = error instanceof OperationTimeoutError
+      ? 504
+      : typeof (error as { status?: unknown })?.status === 'number'
+        ? (error as { status: number }).status
+        : 403;
+    const code = payload.code ?? (typeof (error as { code?: unknown })?.code === 'string' ? (error as { code: string }).code : undefined);
+    logOnce('error', { code, error: payload.error });
+    res.status(status).json({ ...payload, code });
+  }
+});
+
+// Serve workspace files for the right-sidebar HTML preview. The URL path
+// mirrors the absolute filesystem path (e.g. .../preview/home/user/proj/
+// index.html), so relative css/js/image references inside a document resolve
+// to the file's own directory without any content rewriting — the document
+// URL itself acts as the <base>. The frontend renders this in a sandboxed
+// iframe (no allow-same-origin), so previewed scripts never gain the termdock
+// origin.
+router.get('/preview/*path', async (req: Request, res: Response) => {
+  try {
+    const rawSegments = req.params.path;
+    const segments = Array.isArray(rawSegments) ? rawSegments : rawSegments ? [rawSegments] : [];
+    const requestedPath = `/${segments.join('/')}`;
+    if (!requestedPath || requestedPath === '/') {
+      res.status(400).json({ error: 'Missing path parameter' });
+      return;
+    }
+
+    const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
+    const stat = await fs.promises.stat(resolvedPath);
+
+    if (!stat.isFile()) {
+      res.status(400).json({ error: 'Path is not a file' });
+      return;
+    }
+
+    const mimeType = getHtmlPreviewMimeType(resolvedPath);
+    if (!mimeType) {
+      res.status(415).json({ error: 'Unsupported file type for preview' });
+      return;
+    }
+
+    if (stat.size > MAX_HTML_PREVIEW_SIZE) {
+      res.status(413).json({
+        error: 'File is too large to preview',
+        code: 'FILE_TOO_LARGE',
+        size: stat.size,
+        maxSize: MAX_HTML_PREVIEW_SIZE,
+      });
+      return;
+    }
+
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Length', stat.size.toString());
+    res.setHeader('Last-Modified', stat.mtime.toUTCString());
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(resolvedPath)));
+
+    const stream = fs.createReadStream(resolvedPath);
+    stream.on('error', (error) => {
+      if (!res.headersSent) {
+        const message = error instanceof Error ? error.message : 'Failed to serve file';
+        res.status(500).json({ error: message });
+        return;
+      }
+      res.destroy(error instanceof Error ? error : undefined);
+    });
+    stream.pipe(res);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(403).json({ error: message });
   }
 });
 
