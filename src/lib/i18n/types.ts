@@ -189,6 +189,10 @@ export type TranslationDictionary = {
     loadingImage: string;
     imagePreviewHint: string;
     imageLoadFailed: string;
+    loadingVideo: string;
+    videoPreviewHint: string;
+    videoLoadFailed: string;
+    videoUnsupported: string;
     model3dLoading: string;
     model3dLoadFailed: string;
     model3dDimensions: (params: TranslatorParams) => string;
@@ -211,6 +215,9 @@ export type TranslationDictionary = {
     markdownPreview: string;
     markdownSource: string;
     markdownPreviewHint: string;
+    htmlPreview: string;
+    htmlSource: string;
+    htmlPreviewHint: string;
     markdownOutline: string;
     markdownOutlineShort: string;
     closeMarkdownOutline: string;

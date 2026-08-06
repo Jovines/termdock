@@ -44,7 +44,7 @@ import { ChangeWalkthroughPanel } from './ChangeWalkthroughPanel';
 import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, isPreviewableImagePath, isPreviewableModel3dPath, openInFileBrowser, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { subscribeClientState } from '../../utils/clientStateSync';
@@ -59,6 +59,7 @@ import {
 } from './referencePaths';
 import { ContextDraftDock } from './ContextDraftDock';
 import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
+import { readHtmlViewMode, writeHtmlViewMode, type HtmlViewMode } from './htmlViewMode';
 import './sidebarSelection.css';
 
 interface RightSidebarProps {
@@ -4885,10 +4886,11 @@ interface FilePreviewProps {
 
 type FilePreviewState =
   | { kind: 'idle' }
-  | { kind: 'loading'; mode: 'text' | 'image' | 'model3d' }
+  | { kind: 'loading'; mode: 'text' | 'image' | 'model3d' | 'video' }
   | { kind: 'text'; content: string; meta: { size: number; truncated?: boolean } }
   | { kind: 'image'; objectUrl: string; meta: { size: number | null; mimeType: string; modified: string | null }; dimensions?: { width: number; height: number } }
   | { kind: 'model3d'; objectUrl: string; ext: string; meta: { size: number | null; mimeType: string; modified: string | null } }
+  | { kind: 'video'; url: string; meta: { size: number | null; mimeType: string; modified: string | null } }
   | { kind: 'binary' }
   | { kind: 'error'; message: string };
 
@@ -5006,6 +5008,7 @@ export function FilePreview({
   // this near the cursor; non-pointer jumps fall back to the selected line.
   const [floatingInsertPos, setFloatingInsertPos] = useState<{ top: number; left: number } | null>(null);
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>(() => readMarkdownViewMode());
+  const [htmlViewMode, setHtmlViewMode] = useState<HtmlViewMode>(() => readHtmlViewMode(rootPath, filePath));
   const [refractor, setRefractor] = useState<RefractorLike | null>(null);
   const [markdownPreviewScrollTop, setMarkdownPreviewScrollTop] = useState(0);
   // Per-line highlighted React nodes, keyed implicitly by the current text
@@ -5069,8 +5072,10 @@ export function FilePreview({
     let objectUrl: string | null = null;
     const isImage = isPreviewableImagePath(fullPath);
     const isModel3d = !isImage && isPreviewableModel3dPath(fullPath);
+    const isVideo = !isImage && !isModel3d && isPreviewableVideoPath(fullPath);
     const isMarkdown = isMarkdownPath(fullPath);
-    const previewMode = isImage ? 'image' : isModel3d ? 'model3d' : 'text';
+    const isHtml = isPreviewableHtmlPath(fullPath);
+    const previewMode = isImage ? 'image' : isModel3d ? 'model3d' : isVideo ? 'video' : 'text';
     const isPathChange = lastFullPathRef.current !== fullPath;
     lastFullPathRef.current = fullPath;
 
@@ -5082,6 +5087,7 @@ export function FilePreview({
       const savedReadingState = readFilePreviewReadingState(rootPath, filePath);
       onLineRangeChange(savedReadingState?.lineRange ?? null);
       setMarkdownViewMode(isMarkdown ? readMarkdownViewMode() : 'source');
+      setHtmlViewMode(isHtml ? readHtmlViewMode(rootPath, filePath) : 'source');
     }
     const watchdog = window.setTimeout(() => {
       if (loadingEnded || controller.signal.aborted) return;
@@ -5136,6 +5142,19 @@ export function FilePreview({
           setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : t('rightSidebar.model3dLoadFailed') });
           endLoading('error', { error: err instanceof Error ? err.message : String(err) });
         });
+    } else if (isVideo) {
+      // 视频不走 fetch blob：直接给 <video> 一个流式 URL（服务端 Range
+      // 支持），播放/拖进度都不需要把整文件载入浏览器内存。
+      const videoMimeType = getVideoMimeTypeForPath(fullPath) ?? '';
+      const videoUrl = buildVideoPreviewUrl(fullPath);
+      // 幂等更新：同 URL 直接复用原 state，避免父组件传入的新回调引用
+      // 触发 effect 重跑后陷入「setState → 重渲染 → 再 setState」死循环。
+      setPreviewState((current) => (
+        current.kind === 'video' && current.url === videoUrl
+          ? current
+          : { kind: 'video', url: videoUrl, meta: { size: null, mimeType: videoMimeType, modified: null } }
+      ));
+      endLoading('video_ready', { mimeType: videoMimeType });
     } else {
       readFileContent(fullPath, controller.signal, 'view_file', requestSlotId)
         .then((result) => {
@@ -5219,7 +5238,8 @@ export function FilePreview({
     // renderer, so highlighting would be wasted there. In "source" mode we do
     // highlight the raw markdown like any other language.
     const isMarkdownPreview = isMarkdownPath(readable ?? '') && markdownViewMode === 'preview';
-    if (!language || isMarkdownPreview || !shouldHighlight(content)) {
+    const isHtmlPreview = isPreviewableHtmlPath(readable ?? '') && htmlViewMode === 'preview';
+    if (!language || isMarkdownPreview || isHtmlPreview || !shouldHighlight(content)) {
       setHighlightedLines(null);
       return;
     }
@@ -5247,11 +5267,11 @@ export function FilePreview({
     }
 
     return () => { cancelled = true; };
-  }, [previewState, refractor, filePath, rootPath, markdownViewMode]);
+  }, [previewState, refractor, filePath, rootPath, markdownViewMode, htmlViewMode]);
 
   useLayoutEffect(() => {
     if (!readingStateKey || previewState.kind !== 'text') return;
-    const restoreKey = `${readingStateKey}:${markdownViewMode}`;
+    const restoreKey = `${readingStateKey}:${markdownViewMode}:${htmlViewMode}`;
     if (restoredReadingStateKeyRef.current === restoreKey) return;
     const savedReadingState = readFilePreviewReadingState(rootPath, filePath);
     restoredReadingStateKeyRef.current = restoreKey;
@@ -5269,7 +5289,7 @@ export function FilePreview({
       setMarkdownPreviewScrollTop(markdownViewMode === 'preview' ? Math.max(0, top ?? 0) : 0);
     });
     return () => cancelAnimationFrame(frame);
-  }, [filePath, markdownViewMode, previewState.kind, readingStateKey, rootPath]);
+  }, [filePath, markdownViewMode, htmlViewMode, previewState.kind, readingStateKey, rootPath]);
 
   useEffect(() => {
     if (!readingStateKey) return;
@@ -5304,7 +5324,8 @@ export function FilePreview({
     const isImagePreviewLocal = previewState.kind === 'image' || (previewState.kind === 'loading' && previewState.mode === 'image');
     const readableLocal = rootPath && filePath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
     const showMarkdownPreviewLocal = previewState.kind === 'text' && isMarkdownPath(readableLocal ?? '') && markdownViewMode === 'preview';
-    if (previewState.kind !== 'text' || isImagePreviewLocal || showMarkdownPreviewLocal) {
+    const showHtmlPreviewLocal = previewState.kind === 'text' && isPreviewableHtmlPath(readableLocal ?? '') && htmlViewMode === 'preview';
+    if (previewState.kind !== 'text' || isImagePreviewLocal || showMarkdownPreviewLocal || showHtmlPreviewLocal) {
       setFloatingInsertPos(null);
       return;
     }
@@ -5324,7 +5345,7 @@ export function FilePreview({
     const ro = new ResizeObserver(() => computePos());
     ro.observe(scroller);
     return () => ro.disconnect();
-  }, [lineRange, floatingInsertPos, previewState, markdownViewMode, filePath, rootPath, highlightedLines]);
+  }, [lineRange, floatingInsertPos, previewState, markdownViewMode, htmlViewMode, filePath, rootPath, highlightedLines]);
 
   if (!filePath) {
     return <div className="mx-3 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
@@ -5338,11 +5359,14 @@ export function FilePreview({
   // so short files render numbers close to the left edge instead of leaving a
   // fixed gap sized for thousand-line files.
   const gutterWidthCh = Math.max(2, String(lines.length).length) + 1;
-  const meta = previewState.kind === 'text' || previewState.kind === 'image' || previewState.kind === 'model3d' ? previewState.meta : null;
+  const meta = previewState.kind === 'text' || previewState.kind === 'image' || previewState.kind === 'model3d' || previewState.kind === 'video' ? previewState.meta : null;
   const isMarkdown = isMarkdownPath(readablePath);
   const showMarkdownPreview = previewState.kind === 'text' && isMarkdown && markdownViewMode === 'preview';
+  const isHtml = isPreviewableHtmlPath(readablePath);
+  const showHtmlPreview = previewState.kind === 'text' && isHtml && htmlViewMode === 'preview';
   const isImagePreview = previewState.kind === 'image' || (previewState.kind === 'loading' && previewState.mode === 'image');
   const isModel3dPreview = previewState.kind === 'model3d' || (previewState.kind === 'loading' && previewState.mode === 'model3d');
+  const isVideoPreview = previewState.kind === 'video' || (previewState.kind === 'loading' && previewState.mode === 'video');
   const lineReference = buildLineReference(readablePath, rootPath, lineRange);
   const lineReferenceText = (() => {
     if (!lineRange || previewState.kind !== 'text' || lines.length === 0) return lineReference;
@@ -5451,7 +5475,7 @@ export function FilePreview({
     // bottom regardless of file length.
     <div className="flex h-full min-h-0 flex-col bg-surface text-foreground">
       {getReferenceLongPressHandlers.popoverNode}
-      <div className={`shrink-0 border-b border-border/15 px-3 ${isMobile && showMarkdownPreview ? 'py-1.5' : 'py-2'}`}>
+      <div className={`shrink-0 border-b border-border/15 px-3 ${isMobile && (showMarkdownPreview || showHtmlPreview) ? 'py-1.5' : 'py-2'}`}>
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
             {isMobile && onClose && (
@@ -5487,6 +5511,23 @@ export function FilePreview({
                 title={markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
               >
                 {markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
+              </button>
+            )}
+            {isHtml && previewState.kind === 'text' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setHtmlViewMode((mode) => {
+                    const next = mode === 'preview' ? 'source' : 'preview';
+                    writeHtmlViewMode(rootPath, filePath, next);
+                    return next;
+                  });
+                  onLineRangeChange(null);
+                }}
+                className="inline-flex h-9 items-center gap-1 rounded-full bg-surface-2 px-2.5 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 sm:px-3"
+                title={htmlViewMode === 'preview' ? t('rightSidebar.htmlSource') : t('rightSidebar.htmlPreview')}
+              >
+                {htmlViewMode === 'preview' ? t('rightSidebar.htmlSource') : t('rightSidebar.htmlPreview')}
               </button>
             )}
             {!isMobile && (
@@ -5525,7 +5566,7 @@ export function FilePreview({
             </button>
           </div>
         </div>
-        {meta && !(isMobile && showMarkdownPreview) && (
+        {meta && !(isMobile && (showMarkdownPreview || showHtmlPreview)) && (
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
             {meta.size !== null && <span>{t('rightSidebar.byteCount', { count: meta.size.toLocaleString() })}</span>}
             {'truncated' in meta && meta.truncated && <span className="text-[color:var(--warning)]">{t('rightSidebar.previewTruncated')}</span>}
@@ -5535,23 +5576,27 @@ export function FilePreview({
         )}
         {/* Hint row — fixed height so toggling line range doesn't shift the
             file content below. */}
-        {!(isMobile && showMarkdownPreview) && !isModel3dPreview && previewState.kind !== 'binary' && <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
+        {!(isMobile && (showMarkdownPreview || showHtmlPreview)) && !isModel3dPreview && previewState.kind !== 'binary' && <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
           <span className="truncate">
-            {isImagePreview
+            {isVideoPreview
+              ? t('rightSidebar.videoPreviewHint')
+              : isImagePreview
               ? t('rightSidebar.imagePreviewHint')
               : showMarkdownPreview
                 ? lineRange
                   ? t('rightSidebar.selectedLineHint', { lineLabel: selectedLineLabel ?? '' })
                   : t('rightSidebar.markdownPreviewHint')
-              : lineRange
-                ? t('rightSidebar.selectedLineHint', { lineLabel: selectedLineLabel ?? '' })
-                : t('rightSidebar.multiLineHint')}
+                : showHtmlPreview
+                  ? t('rightSidebar.htmlPreviewHint')
+                  : lineRange
+                    ? t('rightSidebar.selectedLineHint', { lineLabel: selectedLineLabel ?? '' })
+                    : t('rightSidebar.multiLineHint')}
           </span>
         </div>}
       </div>
       {previewState.kind === 'loading' ? (
         <div className="min-h-0 flex-1 overflow-auto px-3 py-8 text-center text-sm text-muted-foreground">
-          {previewState.mode === 'image' ? t('rightSidebar.loadingImage') : previewState.mode === 'model3d' ? t('rightSidebar.model3dLoading') : 'Loading file…'}
+          {previewState.mode === 'image' ? t('rightSidebar.loadingImage') : previewState.mode === 'model3d' ? t('rightSidebar.model3dLoading') : previewState.mode === 'video' ? t('rightSidebar.loadingVideo') : 'Loading file…'}
         </div>
       ) : previewState.kind === 'error' ? (
         <div className="min-h-0 flex-1 overflow-auto">
@@ -5579,6 +5624,20 @@ export function FilePreview({
             }}
             onError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.imageLoadFailed') })}
           />
+        </div>
+      ) : previewState.kind === 'video' ? (
+        <div className="min-h-0 flex-1 overflow-hidden bg-surface p-3">
+          <video
+            key={previewState.url}
+            data-testid="file-preview-video"
+            controls
+            preload="metadata"
+            className="h-full max-h-full w-full rounded-lg bg-black object-contain"
+            src={previewState.url}
+            onError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.videoLoadFailed') })}
+          >
+            {t('rightSidebar.videoUnsupported')}
+          </video>
         </div>
       ) : previewState.kind === 'model3d' ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface">
@@ -5632,6 +5691,16 @@ export function FilePreview({
               {lineReferenceCopied ? t('rightSidebar.copied') : lineReferenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertLineRef', { lineLabel: selectedLineLabel ?? '' })}
             </button>
           )}
+        </div>
+      ) : showHtmlPreview ? (
+        <div className="min-h-0 flex-1 overflow-hidden bg-surface">
+          <iframe
+            key={`${readablePath}:${externalVersion}:${manualRefreshNonce}`}
+            src={buildHtmlPreviewUrl(readablePath)}
+            title={`${display.name} preview`}
+            sandbox="allow-scripts"
+            className="block h-full w-full border-0 bg-white"
+          />
         </div>
       ) : previewState.kind === 'text' ? (
         <div
