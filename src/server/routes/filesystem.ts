@@ -3277,10 +3277,43 @@ router.get('/video', async (req: Request, res: Response) => {
 // Serve workspace files for the right-sidebar HTML preview. The URL path
 // mirrors the absolute filesystem path (e.g. .../preview/home/user/proj/
 // index.html), so relative css/js/image references inside a document resolve
-// to the file's own directory without any content rewriting — the document
-// URL itself acts as the <base>. The frontend renders this in a sandboxed
-// iframe (no allow-same-origin), so previewed scripts never gain the termdock
-// origin.
+// to the file's own directory. To make that resolution explicit and engine-
+// independent (some engines don't reliably resolve subresources against a
+// sandboxed iframe's document URL), HTML documents get an injected
+// <base href> pointing at the file's preview directory; other asset types
+// keep streaming as-is. The frontend renders this in a sandboxed iframe
+// (no allow-same-origin), so previewed scripts never gain the termdock origin.
+export function buildHtmlPreviewDirectoryUrl(filePath: string): string {
+  // Drop the filename segment, then encode each directory segment exactly like
+  // the client-side buildHtmlPreviewUrl does (works for POSIX and Windows
+  // paths regardless of the host platform).
+  const encodedSegments = filePath
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .slice(0, -1)
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  return `/api/terminal/fs/preview/${encodedSegments}${encodedSegments ? '/' : ''}`;
+}
+
+// Insert <base href> right after <head> (or after the doctype / at the very
+// start when the document has no head). Documents that already declare their
+// own <base> are left untouched so author intent wins.
+export function injectHtmlPreviewBase(html: string, baseUrl: string): string {
+  if (/<base\b/i.test(html)) return html;
+  const baseTag = `<base href="${baseUrl}">`;
+  const headMatch = html.match(/<head\b[^>]*>/i);
+  if (headMatch && typeof headMatch.index === 'number') {
+    const insertAt = headMatch.index + headMatch[0].length;
+    return html.slice(0, insertAt) + baseTag + html.slice(insertAt);
+  }
+  const doctypeMatch = html.match(/^\s*<!doctype[^>]*>/i);
+  if (doctypeMatch) {
+    return html.slice(0, doctypeMatch[0].length) + baseTag + html.slice(doctypeMatch[0].length);
+  }
+  return baseTag + html;
+}
+
 router.get('/preview/*path', async (req: Request, res: Response) => {
   try {
     const rawSegments = req.params.path;
@@ -3312,6 +3345,24 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
         size: stat.size,
         maxSize: MAX_HTML_PREVIEW_SIZE,
       });
+      return;
+    }
+
+    const isHtml = path.extname(resolvedPath).toLowerCase() === '.html' || path.extname(resolvedPath).toLowerCase() === '.htm';
+
+    if (isHtml) {
+      // HTML is size-capped above; buffer it so we can inject <base> and send
+      // an accurate Content-Length for the modified payload.
+      const html = await fs.promises.readFile(resolvedPath, 'utf8');
+      const served = injectHtmlPreviewBase(html, buildHtmlPreviewDirectoryUrl(resolvedPath));
+      const payload = Buffer.from(served, 'utf8');
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Content-Length', payload.length.toString());
+      res.setHeader('Last-Modified', stat.mtime.toUTCString());
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(resolvedPath)));
+      res.end(payload);
       return;
     }
 
