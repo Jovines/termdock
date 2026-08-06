@@ -9735,7 +9735,7 @@ export function RightSidebar(
         )}
       </div>
       {rootPath && (pinnedExplorerRoots.length > 0 || browsingOutsideProject) && (
-        <div className="mt-1 flex items-center gap-1 overflow-x-auto pb-0.5 text-[11px]">
+        <div className="mt-1 flex flex-wrap items-center gap-1 pb-0.5 text-[11px]">
           <span className="shrink-0 px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
             {t('rightSidebar.pinnedFolders')}
           </span>
