@@ -54,7 +54,17 @@ export type GestureOwner =
   | { kind: 'swiper'; instance: SwiperLike };
 
 const SWIPER_CONTAINER_CLASS = 'swiper';
-const SWIPER_NO_SWIPING_CLASS = 'swiper-no-swiping';
+
+/**
+ * 手势密集的内层控件（视频进度条、3D 画布等）需要同时排除两类外层横向手势：
+ *  - swiper-no-swiping：不进入侧边栏文件预览 Swiper 的消费者链（也匹配
+ *    Swiper 自带的 noSwiping 规则）
+ *  - data-sidebar-gesture-ignore：抽屉 useDrag 在起点即忽略，避免 close
+ *    方向的手势把侧边栏抽屉拖走
+ * 新控件接入时把两个标记都加上，保证拖动不会"串"到外层页面切换。
+ */
+export const SWIPER_NO_SWIPING_CLASS = 'swiper-no-swiping';
+export const SIDEBAR_GESTURE_IGNORE_ATTR = 'data-sidebar-gesture-ignore';
 // Sub-pixel / rounding tolerance for scroll-edge detection.
 const EDGE_EPSILON_PX = 1;
 

@@ -12,6 +12,7 @@ import {
   buildConsumerChain,
   hasActiveTextSelection,
   resolveGestureOwner,
+  SIDEBAR_GESTURE_IGNORE_ATTR,
   yieldToSwiper,
 } from './gestureArbiter';
 import { useI18n } from '../../i18n';
@@ -46,7 +47,7 @@ const FLING_VELOCITY_THRESHOLD = 500;
 const REDUCED_MOTION_FADE_MS = 200;
 // Grace period between the spring finishing and the deferred state commit.
 const COMMIT_BUFFER_MS = 50;
-const PANEL_GESTURE_IGNORE_SELECTOR = '[data-sidebar-gesture-ignore]';
+const PANEL_GESTURE_IGNORE_SELECTOR = `[${SIDEBAR_GESTURE_IGNORE_ATTR}]`;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
