@@ -3314,6 +3314,26 @@ export function injectHtmlPreviewBase(html: string, baseUrl: string): string {
   return baseTag + html;
 }
 
+const HTML_PREVIEW_INDEX_FILES = ['index.html', 'index.htm'];
+
+// Directory navigation in a previewed document (e.g. <a href="docs/">) should
+// behave like a normal web server: serve the directory's index document when
+// one exists. Returns the validated index file path, or null when the
+// directory has no index to preview.
+export async function findDirectoryIndexFile(dirPath: string): Promise<string | null> {
+  for (const name of HTML_PREVIEW_INDEX_FILES) {
+    const candidate = path.join(dirPath, name);
+    try {
+      const candidatePath = await pathValidator.validatePathAsync(candidate);
+      const candidateStat = await fs.promises.stat(candidatePath);
+      if (candidateStat.isFile()) return candidatePath;
+    } catch {
+      // Missing or not allowed — try the next index name.
+    }
+  }
+  return null;
+}
+
 router.get('/preview/*path', async (req: Request, res: Response) => {
   try {
     const rawSegments = req.params.path;
@@ -3324,15 +3344,26 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
       return;
     }
 
-    const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
-    const stat = await fs.promises.stat(resolvedPath);
+    const validatedPath = await pathValidator.validatePathAsync(requestedPath);
+    let stat = await fs.promises.stat(validatedPath);
+
+    let targetPath = validatedPath;
+    if (stat.isDirectory()) {
+      const indexPath = await findDirectoryIndexFile(validatedPath);
+      if (!indexPath) {
+        res.status(404).json({ error: 'Directory has no index file to preview', code: 'NO_INDEX' });
+        return;
+      }
+      targetPath = indexPath;
+      stat = await fs.promises.stat(targetPath);
+    }
 
     if (!stat.isFile()) {
       res.status(400).json({ error: 'Path is not a file' });
       return;
     }
 
-    const mimeType = getHtmlPreviewMimeType(resolvedPath);
+    const mimeType = getHtmlPreviewMimeType(targetPath);
     if (!mimeType) {
       res.status(415).json({ error: 'Unsupported file type for preview' });
       return;
@@ -3348,20 +3379,20 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
       return;
     }
 
-    const isHtml = path.extname(resolvedPath).toLowerCase() === '.html' || path.extname(resolvedPath).toLowerCase() === '.htm';
+    const isHtml = path.extname(targetPath).toLowerCase() === '.html' || path.extname(targetPath).toLowerCase() === '.htm';
 
     if (isHtml) {
       // HTML is size-capped above; buffer it so we can inject <base> and send
       // an accurate Content-Length for the modified payload.
-      const html = await fs.promises.readFile(resolvedPath, 'utf8');
-      const served = injectHtmlPreviewBase(html, buildHtmlPreviewDirectoryUrl(resolvedPath));
+      const html = await fs.promises.readFile(targetPath, 'utf8');
+      const served = injectHtmlPreviewBase(html, buildHtmlPreviewDirectoryUrl(targetPath));
       const payload = Buffer.from(served, 'utf8');
       res.setHeader('Content-Type', mimeType);
       res.setHeader('Content-Length', payload.length.toString());
       res.setHeader('Last-Modified', stat.mtime.toUTCString());
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(resolvedPath)));
+      res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(targetPath)));
       res.end(payload);
       return;
     }
@@ -3371,9 +3402,9 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
     res.setHeader('Last-Modified', stat.mtime.toUTCString());
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(resolvedPath)));
+    res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(targetPath)));
 
-    const stream = fs.createReadStream(resolvedPath);
+    const stream = fs.createReadStream(targetPath);
     stream.on('error', (error) => {
       if (!res.headersSent) {
         const message = error instanceof Error ? error.message : 'Failed to serve file';

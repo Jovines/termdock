@@ -1,5 +1,22 @@
-import { describe, expect, it } from 'vitest';
-import { buildHtmlPreviewDirectoryUrl, injectHtmlPreviewBase } from './filesystem.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { buildHtmlPreviewDirectoryUrl, findDirectoryIndexFile, injectHtmlPreviewBase } from './filesystem.js';
+
+const tempDirs: string[] = [];
+
+function makeTempDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'termdock-html-preview-'));
+  tempDirs.push(dir);
+  return dir;
+}
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe('HTML preview base injection', () => {
   it('builds a preview directory URL mirroring the absolute path', () => {
@@ -45,5 +62,26 @@ describe('HTML preview base injection', () => {
     const html = '<HTML><HEAD><TITLE>x</TITLE></HEAD></HTML>';
     expect(injectHtmlPreviewBase(html, '/api/terminal/fs/preview/site/'))
       .toBe('<HTML><HEAD><base href="/api/terminal/fs/preview/site/"><TITLE>x</TITLE></HEAD></HTML>');
+  });
+});
+
+describe('HTML preview directory index resolution', () => {
+  it('serves index.html when present', async () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'index.html'), '<html></html>');
+    fs.writeFileSync(path.join(dir, 'other.html'), '<html></html>');
+    expect(await findDirectoryIndexFile(dir)).toBe(path.join(dir, 'index.html'));
+  });
+
+  it('falls back to index.htm', async () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'index.htm'), '<html></html>');
+    expect(await findDirectoryIndexFile(dir)).toBe(path.join(dir, 'index.htm'));
+  });
+
+  it('returns null when the directory has no index document', async () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'page.html'), '<html></html>');
+    expect(await findDirectoryIndexFile(dir)).toBeNull();
   });
 });
