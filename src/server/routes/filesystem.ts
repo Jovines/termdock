@@ -3279,23 +3279,12 @@ router.get('/video', async (req: Request, res: Response) => {
 // index.html), so relative css/js/image references inside a document resolve
 // to the file's own directory. To make that resolution explicit and engine-
 // independent (some engines don't reliably resolve subresources against a
-// sandboxed iframe's document URL), HTML documents get an injected
-// <base href> pointing at the file's preview directory; other asset types
-// keep streaming as-is. The frontend renders this in a sandboxed iframe
-// (no allow-same-origin), so previewed scripts never gain the termdock origin.
-export function buildHtmlPreviewDirectoryUrl(filePath: string): string {
-  // Drop the filename segment, then encode each directory segment exactly like
-  // the client-side buildHtmlPreviewUrl does (works for POSIX and Windows
-  // paths regardless of the host platform).
-  const encodedSegments = filePath
-    .split(/[\\/]+/)
-    .filter(Boolean)
-    .slice(0, -1)
-    .map((segment) => encodeURIComponent(segment))
-    .join('/');
-  return `/api/terminal/fs/preview/${encodedSegments}${encodedSegments ? '/' : ''}`;
-}
-
+// sandboxed iframe's document URL), HTML documents get an injected <base href>
+// equal to the document's own request URL — that keeps relative references
+// working while also making in-page anchor links (#section) stay same-document
+// instead of forcing a full reload. Other asset types keep streaming as-is.
+// The frontend renders this in a sandboxed iframe (no allow-same-origin), so
+// previewed scripts never gain the termdock origin.
 // Insert <base href> right after <head> (or after the doctype / at the very
 // start when the document has no head). Documents that already declare their
 // own <base> are left untouched so author intent wins.
@@ -3344,11 +3333,23 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
       return;
     }
 
+    // Raw (percent-encoded) full pathname as the browser sees it (baseUrl +
+    // path, since this router is mounted under /api/terminal/fs); used as the
+    // injected <base> so it always equals the document URL.
+    const previewBaseUrl = req.originalUrl.split('?', 1)[0];
+
     const validatedPath = await pathValidator.validatePathAsync(requestedPath);
     let stat = await fs.promises.stat(validatedPath);
 
     let targetPath = validatedPath;
     if (stat.isDirectory()) {
+      // Directory links must carry a trailing slash so relative references
+      // inside the served index resolve within the directory, matching how a
+      // normal web server behaves.
+      if (!previewBaseUrl.endsWith('/')) {
+        res.redirect(308, `${previewBaseUrl}/`);
+        return;
+      }
       const indexPath = await findDirectoryIndexFile(validatedPath);
       if (!indexPath) {
         res.status(404).json({ error: 'Directory has no index file to preview', code: 'NO_INDEX' });
@@ -3385,7 +3386,7 @@ router.get('/preview/*path', async (req: Request, res: Response) => {
       // HTML is size-capped above; buffer it so we can inject <base> and send
       // an accurate Content-Length for the modified payload.
       const html = await fs.promises.readFile(targetPath, 'utf8');
-      const served = injectHtmlPreviewBase(html, buildHtmlPreviewDirectoryUrl(targetPath));
+      const served = injectHtmlPreviewBase(html, previewBaseUrl);
       const payload = Buffer.from(served, 'utf8');
       res.setHeader('Content-Type', mimeType);
       res.setHeader('Content-Length', payload.length.toString());

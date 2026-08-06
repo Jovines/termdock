@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { buildHtmlPreviewDirectoryUrl, findDirectoryIndexFile, injectHtmlPreviewBase } from './filesystem.js';
+import { findDirectoryIndexFile, injectHtmlPreviewBase } from './filesystem.js';
 
 const tempDirs: string[] = [];
 
@@ -19,23 +19,6 @@ afterEach(() => {
 });
 
 describe('HTML preview base injection', () => {
-  it('builds a preview directory URL mirroring the absolute path', () => {
-    expect(buildHtmlPreviewDirectoryUrl('/home/user/proj/site/index.html'))
-      .toBe('/api/terminal/fs/preview/home/user/proj/site/');
-    expect(buildHtmlPreviewDirectoryUrl('/index.html'))
-      .toBe('/api/terminal/fs/preview/');
-  });
-
-  it('encodes URL-special characters in directory segments', () => {
-    expect(buildHtmlPreviewDirectoryUrl('/home/user/my site/#demo/index.html'))
-      .toBe('/api/terminal/fs/preview/home/user/my%20site/%23demo/');
-  });
-
-  it('normalizes backslash (Windows) paths', () => {
-    expect(buildHtmlPreviewDirectoryUrl('C:\\repo\\site\\index.html'))
-      .toBe('/api/terminal/fs/preview/C%3A/repo/site/');
-  });
-
   it('injects <base> right after <head>', () => {
     const html = '<!doctype html>\n<html><head><meta charset="utf-8"></head><body><img src="img/a.png"></body></html>';
     const result = injectHtmlPreviewBase(html, '/api/terminal/fs/preview/site/');
