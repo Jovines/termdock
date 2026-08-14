@@ -46,3 +46,25 @@
   color: var(--foreground);
   border-radius: 0.25rem;
 }
+
+/*
+ * Markdown code lives inside a minmax(0, 1fr) reference grid whose reading
+ * surface inherits `overflow-wrap: break-word`. Keep the <pre> pinned to the
+ * grid track and let its unwrapped code establish scrollWidth; otherwise
+ * mobile Safari can size or wrap the pre to its contents and leave the long
+ * line clipped by the surrounding card instead of creating an inner x-scroll.
+ */
+.termdock-native-select pre.termdock-file-preview-horizontal-scroll {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  touch-action: pan-x pan-y;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
