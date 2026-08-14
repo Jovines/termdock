@@ -63,7 +63,9 @@
   white-space: pre;
   overflow-wrap: normal;
   word-break: normal;
-  touch-action: pan-x pan-y;
+  /* The sidebar drag recognizer drives scrollLeft after horizontal axis-lock.
+     Keeping only pan-y avoids iOS WebKit cancelling native x-scroll midway. */
+  touch-action: pan-y;
   overscroll-behavior-x: contain;
   overscroll-behavior-y: auto;
   -webkit-overflow-scrolling: touch;

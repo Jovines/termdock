@@ -9,11 +9,14 @@ import {
   type SpringSolver,
 } from '../../utils/spring';
 import {
+  beginManagedScrollerGesture,
   buildConsumerChain,
   hasActiveTextSelection,
   resolveGestureOwner,
   SIDEBAR_GESTURE_IGNORE_ATTR,
+  updateManagedScrollerGesture,
   yieldToSwiper,
+  type ManagedScrollerGesture,
 } from './gestureArbiter';
 import { useI18n } from '../../i18n';
 
@@ -133,6 +136,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
   // position. Guards the release path against ignored starts and duplicate
   // release events.
   const panelDragActiveRef = useRef(false);
+  const managedScrollerGestureRef = useRef<ManagedScrollerGesture | null>(null);
   const edgeDragActiveRef = useRef(false);
   // Position history of the current gesture. @use-gesture reports velocity
   // as an UNSIGNED magnitude (sign lives in `direction`) and zeroes it on
@@ -520,6 +524,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       if (first) {
         restoreYieldedSwiper();
         panelDragActiveRef.current = false;
+        managedScrollerGestureRef.current = null;
         dragHistoryRef.current = [];
         // The gesture-ignore check belongs at gesture START only. Checking it
         // again on release swallows the snap and freezes the panel wherever
@@ -544,18 +549,29 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
           return;
         }
         if (owner.kind === 'scroller') {
-          // Native scroll already tracks the finger; just stay out.
-          cancel();
-          return;
+          const managedGesture = beginManagedScrollerGesture(owner.element);
+          if (managedGesture) {
+            // iOS WebKit does not reliably resume a nested native x-scroll
+            // after the drawer recognizer axis-locks. Keep this recognizer
+            // alive and drive the code block directly for the whole gesture.
+            managedScrollerGestureRef.current = managedGesture;
+          } else {
+            // Other native scrollers already track the finger; just stay out.
+            cancel();
+            return;
+          }
         }
-        // The drawer owns the gesture. Anchor at the live position; the
-        // movement offset keeps tracking 1:1 from the touch start, so the
-        // pre-lock slop shows up as a single-frame catch-up, not a lag.
-        panelDragActiveRef.current = true;
-        grabLivePosition();
-        dragStartXRef.current = currentXRef.current;
+        if (!managedScrollerGestureRef.current) {
+          // The drawer owns the gesture. Anchor at the live position; the
+          // movement offset keeps tracking 1:1 from the touch start, so the
+          // pre-lock slop shows up as a single-frame catch-up, not a lag.
+          panelDragActiveRef.current = true;
+          grabLivePosition();
+          dragStartXRef.current = currentXRef.current;
+        }
       }
       if (!active) {
+        managedScrollerGestureRef.current = null;
         // use-gesture may deliver the release twice (e.g. after cancel());
         // only the gesture that owned the drag decides, exactly once —
         // a duplicate would retarget the spring with velocity 0 and kill
@@ -564,6 +580,10 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
           panelDragActiveRef.current = false;
           decideSnap(releaseVelocity());
         }
+        return;
+      }
+      if (managedScrollerGestureRef.current) {
+        updateManagedScrollerGesture(managedScrollerGestureRef.current, mx);
         return;
       }
       if (panelDragActiveRef.current) {

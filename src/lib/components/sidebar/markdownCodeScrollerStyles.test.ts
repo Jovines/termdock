@@ -19,7 +19,7 @@ describe('Markdown code scroller styles', () => {
     expect(rule).toMatch(/white-space:\s*pre/);
     expect(rule).toMatch(/overflow-wrap:\s*normal/);
     expect(rule).toMatch(/word-break:\s*normal/);
-    expect(rule).toMatch(/touch-action:\s*pan-x pan-y/);
+    expect(rule).toMatch(/touch-action:\s*pan-y/);
     expect(rule).toMatch(/-webkit-overflow-scrolling:\s*touch/);
   });
 });
