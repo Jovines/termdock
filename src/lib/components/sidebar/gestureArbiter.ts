@@ -53,7 +53,13 @@ export type GestureOwner =
   | { kind: 'scroller'; element: HTMLElement }
   | { kind: 'swiper'; instance: SwiperLike };
 
+export interface ManagedScrollerGesture {
+  element: HTMLElement;
+  startScrollLeft: number;
+}
+
 const SWIPER_CONTAINER_CLASS = 'swiper';
+const MANAGED_CODE_SCROLLER_SELECTOR = 'pre.termdock-file-preview-horizontal-scroll';
 
 /**
  * 手势密集的内层控件（视频进度条、3D 画布等）需要同时排除两类外层横向手势：
@@ -79,6 +85,25 @@ export function canNativeScrollX(element: HTMLElement, direction: 1 | -1): boole
   return direction > 0
     ? element.scrollLeft > EDGE_EPSILON_PX
     : element.scrollLeft < maxScrollLeft - EDGE_EPSILON_PX;
+}
+
+/**
+ * iOS WebKit can permanently cancel a nested native x-scroll when the
+ * enclosing drawer's drag recognizer axis-locks, even if the drawer then
+ * cancels and yields. Markdown code blocks opt into a deterministic path:
+ * their CSS reserves horizontal drags for JavaScript (`touch-action: pan-y`)
+ * and the drawer recognizer drives scrollLeft for the winning scroller.
+ *
+ * Other horizontal regions keep native scrolling and the existing edge
+ * fall-through behavior.
+ */
+export function beginManagedScrollerGesture(element: HTMLElement): ManagedScrollerGesture | null {
+  if (!element.matches(MANAGED_CODE_SCROLLER_SELECTOR)) return null;
+  return { element, startScrollLeft: element.scrollLeft };
+}
+
+export function updateManagedScrollerGesture(gesture: ManagedScrollerGesture, movementX: number): void {
+  gesture.element.scrollLeft = gesture.startScrollLeft - movementX;
 }
 
 /**

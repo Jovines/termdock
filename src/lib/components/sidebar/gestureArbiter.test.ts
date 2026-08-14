@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 import {
+  beginManagedScrollerGesture,
   buildConsumerChain,
   canNativeScrollX,
   canSwiperSlide,
   hasActiveTextSelection,
   resolveGestureOwner,
+  updateManagedScrollerGesture,
   yieldToSwiper,
   type ConsumerChain,
   type SwiperLike,
@@ -57,6 +59,31 @@ describe('canNativeScrollX', () => {
     const el = makeScroller({ scrollWidth: 300, clientWidth: 100, scrollLeft: 100 });
     expect(canNativeScrollX(el, 1)).toBe(true);
     expect(canNativeScrollX(el, -1)).toBe(true);
+  });
+});
+
+describe('managed code scroller gestures', () => {
+  it('drives Markdown code scrollLeft directly from finger movement', () => {
+    const code = makeScroller({ scrollWidth: 300, clientWidth: 100, scrollLeft: 40 });
+    code.className = 'termdock-file-preview-horizontal-scroll';
+    const pre = document.createElement('pre');
+    Object.defineProperties(pre, {
+      scrollLeft: { value: code.scrollLeft, configurable: true, writable: true },
+    });
+    pre.className = code.className;
+
+    const gesture = beginManagedScrollerGesture(pre);
+    expect(gesture).not.toBeNull();
+    updateManagedScrollerGesture(gesture!, -25);
+    expect(pre.scrollLeft).toBe(65);
+    updateManagedScrollerGesture(gesture!, 15);
+    expect(pre.scrollLeft).toBe(25);
+  });
+
+  it('leaves other native horizontal scrollers on the browser path', () => {
+    const tableScroller = makeScroller({ scrollWidth: 300, clientWidth: 100 });
+    tableScroller.className = 'termdock-file-preview-horizontal-scroll termdock-md-table-scroll';
+    expect(beginManagedScrollerGesture(tableScroller)).toBeNull();
   });
 });
 
