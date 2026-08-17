@@ -382,6 +382,14 @@ export type TranslationDictionary = {
     insertHunkShort: string;
     insertFileShort: string;
     insertAllShort: string;
+    stageHunk: string;
+    stageHunkTitle: string;
+    revertHunk: string;
+    revertHunkTitle: string;
+    revertHunkConfirm: string;
+    hunkActionApplying: string;
+    hunkActionUnavailable: string;
+    hunkActionFailed: (params: TranslatorParams) => string;
     auditExplanation: string;
     auditStale: string;
     auditClear: string;
@@ -415,6 +423,14 @@ export type TranslationDictionary = {
     loadingNextFile: string;
     resizeNavigation: string;
     focusPathHint: string;
+    whitespace: string;
+    whitespaceDefault: string;
+    whitespaceTrim: string;
+    whitespaceIgnore: string;
+    whitespaceIgnoreBlankLines: string;
+    context: string;
+    contextLines: (params: TranslatorParams) => string;
+    contextAll: string;
   };
   settings: {
     title: string;

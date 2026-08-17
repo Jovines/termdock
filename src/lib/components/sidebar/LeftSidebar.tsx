@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport } from '../../terminal/types';
-import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
+import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
 import { getCachedShellTitle, getCachedAgentIdentity } from '../../stores/useTerminalStore';
 import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
@@ -298,6 +298,8 @@ export function LeftSidebar(
 
   // 会话行主体（切换按钮 + 关闭按钮），flat / 分组两种布局共用。
   // dragHandleProps 仅在可拖拽的 flat 模式传入。
+  // 触屏「超长按」不挂在按钮上（按钮在可拖拽行上是 dnd 拖拽手柄）：
+  // 与顶栏 tab 一致，挂在行外层 wrapper 上，与 dnd 的 120ms 拖拽抬起共存。
   const bindSessionLongPress = useSuperLongPress();
   const renderSessionRowBody = useCallback((
     session: LeftSidebarProps['sessions'][number],
@@ -335,7 +337,6 @@ export function LeftSidebar(
           ref={isActive ? activeItemRef : null}
           type="button"
           {...(dragHandleProps ?? {})}
-          {...(!dragHandleProps && onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
           onContextMenu={(event) => {
             // 桌面右键 = 打开会话操作菜单；触屏超长按由 pointer 手势触发，
             // 与 dnd 的 120ms 拖拽抬起共存（松手无移动不会排序）。
@@ -434,7 +435,7 @@ export function LeftSidebar(
         </button>
       </>
     );
-  }, [activeSessionId, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onSessionMenu, bindSessionLongPress, t]);
+  }, [activeSessionId, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onSessionMenu, t]);
 
   // 分组模式下：按 cwd 把当前可见会话归组。
   const folderGroups = useMemo(() => {
@@ -485,6 +486,33 @@ export function LeftSidebar(
     )));
   }, [folderGroups, onCombineSplitSessions, onReorderSessions]);
 
+  // 目录模式下的拖拽：单个 DragDropContext，按 result.type 区分两种拖动。
+  //  - type 'group'：整组顺序拖动（组与组之间排序），组内顺序不变。
+  //  - type 'session'：组内排序；禁止跨组拖动（分组依据是 cwd，跨组无意义）。
+  // 组是 Draggable、组内会话列表是嵌套 Droppable，pangea 官方支持的嵌套列表
+  // 模式：父组可整组拖动，子列表内的 item 仍可各自排序。
+  const handleGroupedDragEnd = useCallback((result: DropResult) => {
+    if (result.type === 'group') {
+      if (!result.destination || result.source.index === result.destination.index) return;
+      onReorderSessions(reorderGroupedSessionIds(folderGroups, result.source.index, result.destination.index));
+      return;
+    }
+    const groupKey = result.source.droppableId.replace(/^group-sessions:/, '');
+    const group = folderGroups.find((candidate) => candidate.key === groupKey);
+    if (!group) return;
+    const entities = buildSidebarEntities(
+      group.sessions,
+      sameFolderSplitWorkspacesByKey.get(groupKey) ?? [],
+      sessionsById,
+    );
+    if (result.combine) {
+      handleEntityDragEnd(result, entities, groupKey);
+      return;
+    }
+    if (!result.destination || result.destination.droppableId !== result.source.droppableId) return;
+    handleEntityDragEnd(result, entities, groupKey);
+  }, [folderGroups, sameFolderSplitWorkspacesByKey, sessionsById, handleEntityDragEnd, onReorderSessions]);
+
   // 「待处理」是桌面多任务的工作队列，独立于用户选择的会话组织方式。
   // 按 sessions 原始顺序排列。这样无论会话属于哪个组、组是否折叠，都能在
   // 顶部一眼看到并直接点入——动态紧急度独立于稳定的分组组织。
@@ -525,6 +553,7 @@ export function LeftSidebar(
             {laneSessions.map((session) => (
               <div
                 key={`attention:${session.id}`}
+                {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
                 className={`group relative flex items-center gap-1 rounded-lg pr-1 transition ${
                   session.id === activeSessionId
                     ? 'bg-surface-elevated text-foreground'
@@ -769,6 +798,7 @@ export function LeftSidebar(
                   const bounds = event.currentTarget.getBoundingClientRect();
                   reorderMemberAt(session.id, event.clientY > bounds.top + bounds.height / 2);
                 }}
+                {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
                 className={`flex items-center rounded-md pr-1 transition-colors ${
                   getSessionStatusBackground(session.id)
                     ?? (session.id === activeSessionId
@@ -819,6 +849,7 @@ export function LeftSidebar(
                       Boolean(snapshot.combineTargetFor),
                     ) : (
                       <div
+                        {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(entity.session.id)) : {})}
                         className={`group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
                           snapshot.combineTargetFor
                             ? 'bg-primary/15 text-foreground ring-1 ring-primary/40'
@@ -946,71 +977,129 @@ export function LeftSidebar(
         ) : groupByFolder ? (
           <div className="space-y-1.5">
             {attentionPanel}
-            <div className="space-y-1.5">
-            {folderGroups.map((group) => {
-              const collapsed = collapsedGroups.has(group.key);
-              const combinedWorkspaces = sameFolderSplitWorkspacesByKey.get(group.key) ?? [];
-              const folderEntities = buildSidebarEntities(group.sessions, combinedWorkspaces, sessionsById);
-              let groupRunning = 0;
-              let groupReview = 0;
-              let groupAdded = 0;
-              let groupRemoved = 0;
-              for (const session of group.sessions) {
-                const ts = sessionStates.get(session.id);
-                if (ts?.agentStatus === 'working') groupRunning += 1;
-                if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) groupReview += 1;
-                if (ts?.gitStatus) {
-                  groupAdded += ts.gitStatus.added;
-                  groupRemoved += ts.gitStatus.removed;
-                }
-              }
-              return (
-                <div
-                  key={group.key || '__ungrouped__'}
-                  className="rounded-md"
-                >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      // 用户手动 toggle 一律视为「接管」：从 auto-expanded 集合里清除，
-                      // 这样翻页走开时不会再自动收回。手动展开同理 — 用户意图优先。
-                      toggleGroupCollapsed(group.key);
-                      autoExpandedGroupKeysRef.current.delete(group.key);
-                    }}
-                    className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-muted-foreground transition hover:bg-surface-2"
-                    title={group.key || group.label}
-                  >
-                    <RiChevronRightLine
-                      size={13}
-                      className={`shrink-0 transition-transform ${collapsed ? '' : 'rotate-90'}`}
-                    />
-                    <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold uppercase tracking-wide">
-                      {group.label}
-                    </span>
-                    {groupRunning > 0 && (
-                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)] animate-pulse" />
-                    )}
-                    {groupReview > 0 && (
-                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--warning)] animate-pulse" />
-                    )}
-                    <span className="shrink-0 text-[10.5px] text-muted-foreground/70">{group.sessions.length}</span>
-                    {(groupAdded > 0 || groupRemoved > 0) && (
-                      <span className="shrink-0 text-[9px] text-muted-foreground/70">
-                        <span className="text-[color:var(--success)]">+{groupAdded}</span>
-                        {' '}
-                        <span className="text-[rgb(var(--warning-rgb))]">−{groupRemoved}</span>
-                      </span>
-                    )}
-                  </button>
-                  {!collapsed && (
-                    <div className="mt-0.5 pl-2">
-                      {renderSidebarEntityList(folderEntities, `folder-entities:${group.key}`, group.key)}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            </div>
+            <DragDropContext onDragEnd={handleGroupedDragEnd}>
+              <Droppable droppableId="sidebar-groups" type="group" direction="vertical">
+                {(groupsProvided) => (
+                  <div ref={groupsProvided.innerRef} {...groupsProvided.droppableProps} className="space-y-1.5">
+                    {folderGroups.map((group, groupIndex) => {
+                      const collapsed = collapsedGroups.has(group.key);
+                      const combinedWorkspaces = sameFolderSplitWorkspacesByKey.get(group.key) ?? [];
+                      const folderEntities = buildSidebarEntities(group.sessions, combinedWorkspaces, sessionsById);
+                      let groupRunning = 0;
+                      let groupReview = 0;
+                      let groupAdded = 0;
+                      let groupRemoved = 0;
+                      for (const session of group.sessions) {
+                        const ts = sessionStates.get(session.id);
+                        if (ts?.agentStatus === 'working') groupRunning += 1;
+                        if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) groupReview += 1;
+                        if (ts?.gitStatus) {
+                          groupAdded += ts.gitStatus.added;
+                          groupRemoved += ts.gitStatus.removed;
+                        }
+                      }
+                      // 「其他」组（无 cwd）永远排最后，禁止整组拖动。
+                      const groupDragDisabled = group.key === '';
+                      return (
+                        <Draggable
+                          key={group.key || '__ungrouped__'}
+                          draggableId={`sidebar-group:${group.key || '__ungrouped__'}`}
+                          index={groupIndex}
+                          isDragDisabled={groupDragDisabled}
+                          disableInteractiveElementBlocking
+                        >
+                          {(groupDragProvided, groupSnapshot) => (
+                            <div
+                              ref={groupDragProvided.innerRef}
+                              {...groupDragProvided.draggableProps}
+                              className={`rounded-md transition-colors ${groupSnapshot.isDragging ? 'bg-surface-elevated shadow-lg opacity-90' : ''}`}
+                            >
+                              <button
+                                type="button"
+                                {...(groupDragDisabled ? {} : groupDragProvided.dragHandleProps)}
+                                onClick={() => {
+                                  // 用户手动 toggle 一律视为「接管」：从 auto-expanded 集合里清除，
+                                  // 这样翻页走开时不会再自动收回。手动展开同理 — 用户意图优先。
+                                  toggleGroupCollapsed(group.key);
+                                  autoExpandedGroupKeysRef.current.delete(group.key);
+                                }}
+                                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-muted-foreground transition hover:bg-surface-2 ${groupDragDisabled ? '' : 'cursor-grab active:cursor-grabbing'}`}
+                                title={group.key || group.label}
+                              >
+                                <RiChevronRightLine
+                                  size={13}
+                                  className={`shrink-0 transition-transform ${collapsed ? '' : 'rotate-90'}`}
+                                />
+                                <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold uppercase tracking-wide">
+                                  {group.label}
+                                </span>
+                                {groupRunning > 0 && (
+                                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)] animate-pulse" />
+                                )}
+                                {groupReview > 0 && (
+                                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--warning)] animate-pulse" />
+                                )}
+                                <span className="shrink-0 text-[10.5px] text-muted-foreground/70">{group.sessions.length}</span>
+                                {(groupAdded > 0 || groupRemoved > 0) && (
+                                  <span className="shrink-0 text-[9px] text-muted-foreground/70">
+                                    <span className="text-[color:var(--success)]">+{groupAdded}</span>
+                                    {' '}
+                                    <span className="text-[rgb(var(--warning-rgb))]">−{groupRemoved}</span>
+                                  </span>
+                                )}
+                              </button>
+                              {!collapsed && (
+                                <div className="mt-0.5 pl-2">
+                                  <Droppable droppableId={`group-sessions:${group.key}`} type="session" direction="vertical" isCombineEnabled>
+                                    {(sessionsProvided) => (
+                                      <div ref={sessionsProvided.innerRef} {...sessionsProvided.droppableProps} className="space-y-0.5">
+                                        {folderEntities.map((entity, index) => (
+                                          <Draggable key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
+                                            {(dragProvided, snapshot) => (
+                                              <div ref={dragProvided.innerRef} {...dragProvided.draggableProps}>
+                                                {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
+                                                  entity.workspace,
+                                                  entity.members,
+                                                  dragProvided.dragHandleProps,
+                                                  snapshot.isDragging,
+                                                  Boolean(snapshot.combineTargetFor),
+                                                ) : (
+                                                  <div
+                                                    {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(entity.session.id)) : {})}
+                                                    className={`group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
+                                                      snapshot.combineTargetFor
+                                                        ? 'bg-primary/15 text-foreground ring-1 ring-primary/40'
+                                                        : snapshot.isDragging
+                                                          ? 'bg-surface-elevated text-foreground opacity-90 shadow-lg'
+                                                          : getSessionStatusBackground(entity.session.id)
+                                                            ?? (entity.session.id === activeSessionId
+                                                              ? 'bg-surface-elevated text-foreground'
+                                                              : 'text-muted-foreground hover:bg-surface-2')
+                                                    } cursor-grab active:cursor-grabbing`}
+                                                  >
+                                                    {renderSessionRowBody(entity.session, dragProvided.dragHandleProps, true)}
+                                                  </div>
+                                                )}
+                                              </div>
+                                            )}
+                                          </Draggable>
+                                        ))}
+                                        {sessionsProvided.placeholder}
+                                      </div>
+                                    )}
+                                  </Droppable>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </Draggable>
+                      );
+                    })}
+                    {groupsProvided.placeholder}
+                  </div>
+                )}
+              </Droppable>
+            </DragDropContext>
           </div>
         ) : (
           renderSidebarEntityList(flatSidebarEntities, 'sidebar-entities')

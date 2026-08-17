@@ -70,7 +70,7 @@ describe('DiffLab regression fixtures', () => {
     expect(lab?.getAttribute('data-diff-lab-wrap')).toBe('off');
     await waitFor(() => expect(container.querySelector('[data-diff-viewer]')?.getAttribute('data-diff-view-type')).toBe('split'));
     expect(container.querySelector('[data-diff-viewer]')?.getAttribute('data-diff-inline-mode')).toBe('chars');
-    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('moved');
+    expect((screen.getByRole('combobox', { name: 'Fixture' }) as HTMLSelectElement).value).toBe('moved');
   });
 
   it('keeps inserted lines one-sided and aligns the following modified line in split view', async () => {

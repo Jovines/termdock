@@ -1,27 +1,28 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { flushSync } from 'react-dom';
 import type { Swiper as SwiperInstance } from 'swiper';
 import type { ChangeAuditRecord, GitDiffOptions } from '../../terminal/api';
 import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
 import { DiffReviewWorkspace, type DiffReviewMode } from './DiffReviewWorkspace';
 import { DiffStreamItem, type DiffStreamFile } from './DiffStreamItem';
-import { invalidateFileDiffCached, preloadPreparedFileDiff, type DiffInlineMode, type DiffViewType } from './DiffViewer';
+import { invalidateFileDiffCached, preloadPreparedFileDiff, type DiffHunkActionRequest, type DiffInlineMode, type DiffViewType } from './DiffViewer';
 import { useSidebarStore } from '../../stores/useSidebarStore';
-import { useI18n } from '../../i18n';
-import { hasActiveTextSelection } from './gestureArbiter';
 
 // --- ChangeBadge (shared) ---
 
-const MAX_RETAINED_DIFF_ITEMS = 3;
-const DESKTOP_PRELOAD_RADIUS = 3;
+// Bounded count of live DiffViewer instances. Must cover the number of cards
+// visible at once (small files can stack several to a viewport) plus lookahead,
+// otherwise a resting viewport can hold a skeleton that never gets a slot.
+const MAX_RETAINED_DIFF_ITEMS = 8;
+const DIFF_PRELOAD_RADIUS = 3;
 const DIFF_PRELOAD_CONCURRENCY = 2;
-const DIFF_CANVAS_PADDING = 1_000_000;
-const DIFF_CANVAS_IDLE_OVERSCAN = 480;
-const DIFF_CANVAS_MEDIUM_AHEAD = 960;
-const DIFF_CANVAS_FAST_AHEAD = 1_800;
-const DIFF_SCROLL_IDLE_MS = 100;
-const DIFF_SCROLL_MEDIUM_VELOCITY = 0.35;
-const DIFF_SCROLL_FAST_VELOCITY = 1.2;
-const DIFF_LOADING_FRONTIER_PEEK = 36;
+// Skeleton slots are cheap (a header plus an estimated-height body), so the
+// rendered window is generous: the viewport must never scroll past painted
+// slots into bare canvas, even when a fling outruns a React commit.
+const DIFF_CANVAS_OVERSCAN = 1_600;
+// How much of a still-loading card peeks into the viewport when the scroll
+// gate stops the user at it: header plus a slice of the loading cover.
+const DIFF_SCROLL_GATE_PEEK = 120;
 const DEFAULT_DIFF_ITEM_HEIGHT = 104;
 const MAX_CACHED_DIFF_ITEM_HEIGHTS = 1_000;
 const cachedDiffItemHeights = new Map<string, number>();
@@ -39,32 +40,13 @@ function cacheDiffItemHeight(key: string, height: number): void {
 interface DiffCanvasLayout {
   tops: number[];
   heights: number[];
-  minScrollTop: number;
-  maxScrollTop: number;
+  /** Bottom edge of the last item (estimated until measured). */
+  bottom: number;
 }
 
 interface DiffCanvasViewport {
   top: number;
   height: number;
-}
-
-type DiffScrollPace = 'idle' | 'slow' | 'medium' | 'fast';
-
-interface DiffScrollMotion {
-  direction: 'up' | 'down';
-  pace: DiffScrollPace;
-}
-
-interface DiffLoadingFrontier {
-  minScrollTop: number;
-  maxScrollTop: number;
-  previousKey: string | null;
-  nextKey: string | null;
-}
-
-interface DiffBoundaryLoadRequest {
-  direction: 'up' | 'down';
-  key: string;
 }
 
 export const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; title: string }> = {
@@ -101,6 +83,8 @@ export interface DiffReviewFile {
   auditRecords: ChangeAuditRecord[];
   /** Optional per-file override for the reference insertion callback. */
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
+  /** Optional per-file override for the hunk git action callback. */
+  onHunkGitAction?: (request: DiffHunkActionRequest) => Promise<void>;
 }
 
 export interface DiffStreamScrollRequest {
@@ -139,6 +123,8 @@ export interface DiffReviewProps {
 
   // --- Diff references ---
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
+  /** Hunk-level git actions; only pass for live worktree diffs. */
+  onHunkGitAction?: (request: DiffHunkActionRequest) => Promise<void>;
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
@@ -172,6 +158,7 @@ export interface DiffReviewProps {
 
   // --- Scroll sync ---
   onDetailScroll?: (container: HTMLDivElement) => void;
+  /** Saved native scrollTop to restore for this file set. */
   initialDetailScrollTop?: number;
   scrollToKey?: string | null;
   scrollToKeyNonce?: number;
@@ -198,6 +185,7 @@ export function DiffReview({
   renderSubtitle,
   renderStreamBadge,
   onInsertDiffReference,
+  onHunkGitAction,
   onReferenceCopied,
   insertedReferenceKey,
   copiedReferenceKey,
@@ -230,7 +218,6 @@ export function DiffReview({
   onMobileSlideChange,
   slideToDetailOnMobile,
 }: DiffReviewProps) {
-  const { t } = useI18n();
   const sidebarRootPath = useSidebarStore((state) => state.rootPath);
   const matchesSelectedKey = useMemo(() => {
     return (file: DiffReviewFile) => selectedKey === file.key
@@ -261,76 +248,49 @@ export function DiffReview({
     }
     return ordered;
   }, [files, groups, mode]);
+
+  // --- Free-canvas virtualization ---
+  // The canvas is one absolutely-positioned column spanning the whole list
+  // (estimated heights until measured). There is no loading frontier: every
+  // region is always scrollable and always paints at least a skeleton.
+  // Mounting the expensive DiffViewer is the only scheduled work, and it
+  // expands outward from the anchor card by distance. The single UX gate:
+  // scrolling into a card that is still loading stops at a peek into its
+  // loading cover until it is ready (skeletons never gate).
   const detailScrollerRef = useRef<HTMLDivElement | null>(null);
-  const canvasElementRef = useRef<HTMLDivElement | null>(null);
   const handledScrollRequestNonceRef = useRef<number | null>(null);
   const appliedInitialDetailScrollKeyRef = useRef<string | null>(null);
-  const pendingCanvasScrollTopRef = useRef<number | null>(null);
-  const expectedProgrammaticScrollTopRef = useRef<number | null>(null);
-  const nativeCanvasStartRef = useRef(DIFF_CANVAS_PADDING);
   const invalidatedReloadKeyRef = useRef(reloadKey);
-  const lastDetailScrollTopRef = useRef(DIFF_CANVAS_PADDING);
-  const lastDetailScrollTimeRef = useRef(0);
-  const smoothedScrollVelocityRef = useRef(0);
-  const scrollIdleTimerRef = useRef<number | null>(null);
-  const elasticResetTimerRef = useRef<number | null>(null);
-  const elasticOffsetRef = useRef(0);
-  const touchYRef = useRef<number | null>(null);
-  const scrollDirectionRef = useRef<'up' | 'down'>('down');
-  const scrollPaceRef = useRef<DiffScrollPace>('idle');
-  const loadingPriorityKeyRef = useRef<string | null>(null);
-  const pumpLoadQueueRef = useRef<() => void>(() => undefined);
-  const loadingFrontierRef = useRef<DiffLoadingFrontier>({
-    minScrollTop: DIFF_CANVAS_PADDING,
-    maxScrollTop: DIFF_CANVAS_PADDING,
-    previousKey: null,
-    nextKey: null,
-  });
+  const lastDetailScrollTopRef = useRef(0);
+  const scrollFrameRef = useRef<number | null>(null);
   const measuredItemHeightsRef = useRef<Map<string, number>>(new Map(cachedDiffItemHeights));
-  const canvasCandidateKeysRef = useRef<Set<string>>(new Set());
+  // Viewport anchor used to keep the visible card pixel-stable when items
+  // above it are (re)measured and every top below shifts.
+  const scrollAnchorRef = useRef<{ key: string | null; top: number }>({ key: null, top: 0 });
   const mountedKeysRef = useRef<Set<string>>(new Set());
-  const stableMountedKeysRef = useRef<Set<string>>(new Set());
   const readyKeysRef = useRef<Set<string>>(new Set());
   const loadingKeyRef = useRef<string | null>(null);
+  const pumpLoadQueueRef = useRef<() => void>(() => undefined);
   const orderedFileKeysRef = useRef<string[]>([]);
   const orderedFileIndexRef = useRef<Map<string, number>>(new Map());
+  const canvasLayoutRef = useRef<DiffCanvasLayout>({ tops: [], heights: [], bottom: 0 });
   const [mountedKeys, setMountedKeys] = useState<Set<string>>(() => new Set());
   const [canvasRevision, setCanvasRevision] = useState(0);
-  const [readinessRevision, setReadinessRevision] = useState(0);
-  const [canvasOrigin, setCanvasOrigin] = useState({ index: 0, top: DIFF_CANVAS_PADDING });
-  const [canvasViewport, setCanvasViewport] = useState<DiffCanvasViewport>({ top: DIFF_CANVAS_PADDING, height: 0 });
-  const [scrollMotion, setScrollMotion] = useState<DiffScrollMotion>({ direction: 'down', pace: 'idle' });
-  const [boundaryLoadRequest, setBoundaryLoadRequest] = useState<DiffBoundaryLoadRequest | null>(null);
+  const [canvasViewport, setCanvasViewport] = useState<DiffCanvasViewport>({ top: 0, height: 0 });
   const orderedFileKeys = useMemo(() => allOrderedFiles.map((file) => file.key), [allOrderedFiles]);
-  const orderedFileKeysSignature = orderedFileKeys.join('\u0001');
+  const orderedFileKeysSignature = orderedFileKeys.join('');
   orderedFileKeysRef.current = orderedFileKeys;
   orderedFileIndexRef.current = new Map(orderedFileKeys.map((key, index) => [key, index]));
   const canvasLayout = useMemo<DiffCanvasLayout>(() => {
     const heights = orderedFileKeys.map((key) => measuredItemHeightsRef.current.get(key) ?? DEFAULT_DIFF_ITEM_HEIGHT);
     const tops = new Array<number>(heights.length);
-    const originIndex = Math.min(Math.max(0, canvasOrigin.index), Math.max(0, heights.length - 1));
-    if (heights.length > 0) {
-      tops[originIndex] = canvasOrigin.top;
-      for (let index = originIndex - 1; index >= 0; index -= 1) {
-        tops[index] = tops[index + 1] - heights[index];
-      }
-      for (let index = originIndex + 1; index < heights.length; index += 1) {
-        tops[index] = tops[index - 1] + heights[index - 1];
-      }
+    for (let index = 0; index < heights.length; index += 1) {
+      tops[index] = index === 0 ? 0 : tops[index - 1] + heights[index - 1];
     }
-    const firstTop = heights.length > 0 ? tops[0] : 0;
-    const lastTop = heights.length > 0 ? tops[heights.length - 1] : 0;
-    const finalBottom = heights.length > 0 ? lastTop + heights[heights.length - 1] : 0;
-    const maxScrollTop = heights.length > 0
-      ? Math.max(firstTop, lastTop, finalBottom - canvasViewport.height)
-      : 0;
-    return {
-      tops,
-      heights,
-      minScrollTop: firstTop,
-      maxScrollTop,
-    };
-  }, [canvasOrigin, canvasRevision, canvasViewport.height, orderedFileKeysSignature]);
+    const bottom = heights.length > 0 ? tops[heights.length - 1] + heights[heights.length - 1] : 0;
+    return { tops, heights, bottom };
+  }, [canvasRevision, orderedFileKeysSignature]);
+  canvasLayoutRef.current = canvasLayout;
 
   const scrollTargetKey = useMemo(() => {
     if (!scrollToKey) return null;
@@ -348,63 +308,6 @@ export function DiffReview({
       || selectedKey === file.absolutePath
     ))?.key ?? null;
   }, [allOrderedFiles, selectedKey]);
-  const loadingFrontier = useMemo<DiffLoadingFrontier>(() => {
-    const count = orderedFileKeys.length;
-    if (count === 0) {
-      return { minScrollTop: 0, maxScrollTop: 0, previousKey: null, nextKey: null };
-    }
-
-    let low = 0;
-    let high = count;
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      if (canvasLayout.tops[middle] <= canvasViewport.top + 1) low = middle + 1;
-      else high = middle;
-    }
-    let seedIndex = Math.min(count - 1, Math.max(0, low - 1));
-    if (!stableMountedKeysRef.current.has(orderedFileKeys[seedIndex])) {
-      const readyIndices = Array.from(stableMountedKeysRef.current)
-        .map((key) => orderedFileIndexRef.current.get(key))
-        .filter((index): index is number => index !== undefined);
-      if (readyIndices.length > 0) {
-        readyIndices.sort((left, right) => Math.abs(left - seedIndex) - Math.abs(right - seedIndex));
-        seedIndex = readyIndices[0];
-      } else {
-        seedIndex = Math.min(count - 1, Math.max(0, canvasOrigin.index));
-      }
-    }
-
-    let startIndex = seedIndex;
-    let endIndex = seedIndex;
-    if (stableMountedKeysRef.current.has(orderedFileKeys[seedIndex])) {
-      while (startIndex > 0 && stableMountedKeysRef.current.has(orderedFileKeys[startIndex - 1])) startIndex -= 1;
-      while (endIndex < count - 1 && stableMountedKeysRef.current.has(orderedFileKeys[endIndex + 1])) endIndex += 1;
-    }
-
-    const previousKey = startIndex > 0 ? orderedFileKeys[startIndex - 1] : null;
-    const nextKey = endIndex < count - 1 ? orderedFileKeys[endIndex + 1] : null;
-    const minScrollTop = previousKey
-      ? Math.max(canvasLayout.minScrollTop, canvasLayout.tops[startIndex] - DIFF_LOADING_FRONTIER_PEEK)
-      : canvasLayout.minScrollTop;
-    const nextFrontierTop = nextKey ? canvasLayout.tops[endIndex + 1] : null;
-    const maxScrollTop = nextFrontierTop === null
-      ? canvasLayout.maxScrollTop
-      : Math.min(
-          canvasLayout.maxScrollTop,
-          Math.max(canvasLayout.tops[startIndex], nextFrontierTop - canvasViewport.height + DIFF_LOADING_FRONTIER_PEEK),
-        );
-    return { minScrollTop, maxScrollTop, previousKey, nextKey };
-  }, [
-    canvasLayout.maxScrollTop,
-    canvasLayout.minScrollTop,
-    canvasLayout.tops,
-    canvasOrigin.index,
-    canvasViewport.height,
-    canvasViewport.top,
-    orderedFileKeys,
-    readinessRevision,
-  ]);
-  loadingFrontierRef.current = loadingFrontier;
 
   const visibleAnchorIndex = useMemo(() => {
     const count = canvasLayout.tops.length;
@@ -419,13 +322,14 @@ export function DiffReview({
     return Math.min(count - 1, Math.max(0, low - 1));
   }, [canvasLayout.tops, canvasViewport.top]);
 
+  // Warm the prepared-diff cache around the anchor so mounts complete fast.
+  // Symmetric by design: loading expands outward from the current position.
   useEffect(() => {
-    if (!activePane || mobile || visibleAnchorIndex < 0) return;
-    const directionStep = scrollMotion.direction === 'down' ? 1 : -1;
+    if (!activePane || visibleAnchorIndex < 0) return;
     const indices = [visibleAnchorIndex];
-    for (let distance = 1; distance <= DESKTOP_PRELOAD_RADIUS; distance += 1) {
-      indices.push(visibleAnchorIndex + directionStep * distance);
-      indices.push(visibleAnchorIndex - directionStep * distance);
+    for (let distance = 1; distance <= DIFF_PRELOAD_RADIUS; distance += 1) {
+      indices.push(visibleAnchorIndex + distance);
+      indices.push(visibleAnchorIndex - distance);
     }
     const queue = indices
       .filter((index, position) => (
@@ -454,103 +358,104 @@ export function DiffReview({
     return () => {
       cancelled = true;
     };
-  }, [activePane, allOrderedFiles, diffOptions, inlineMode, mobile, scrollMotion.direction, sidebarRootPath, visibleAnchorIndex]);
+  }, [activePane, allOrderedFiles, diffOptions, inlineMode, sidebarRootPath, visibleAnchorIndex]);
 
   const replaceMountedKeys = useCallback((next: Set<string>) => {
     mountedKeysRef.current = next;
     setMountedKeys(next);
   }, []);
 
-  const pumpLoadQueue = useCallback(() => {
-    const priorityKey = loadingPriorityKeyRef.current;
-    if (scrollPaceRef.current === 'fast' && !priorityKey) return;
-    if (loadingKeyRef.current) return;
-    if (priorityKey && !mountedKeysRef.current.has(priorityKey) && mountedKeysRef.current.size >= MAX_RETAINED_DIFF_ITEMS) {
-      const priorityIndex = orderedFileIndexRef.current.get(priorityKey);
-      const removable = Array.from(mountedKeysRef.current)
-        .filter((key) => key !== loadingKeyRef.current)
-        .sort((left, right) => {
-          const leftDistance = Math.abs((orderedFileIndexRef.current.get(left) ?? 0) - (priorityIndex ?? 0));
-          const rightDistance = Math.abs((orderedFileIndexRef.current.get(right) ?? 0) - (priorityIndex ?? 0));
-          return rightDistance - leftDistance;
-        })[0];
-      if (removable) {
-        const next = new Set(mountedKeysRef.current);
-        next.delete(removable);
-        replaceMountedKeys(next);
-      }
+  // Region identification: skeleton slots cover the viewport plus a fixed
+  // pixel overscan on both sides.
+  const renderedIndices = useMemo(() => {
+    const start = canvasViewport.top - DIFF_CANVAS_OVERSCAN;
+    const end = canvasViewport.top + canvasViewport.height + DIFF_CANVAS_OVERSCAN;
+    const indexSet = new Set<number>();
+    let low = 0;
+    let high = canvasLayout.tops.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (canvasLayout.tops[middle] <= start) low = middle + 1;
+      else high = middle;
     }
-    if (mountedKeysRef.current.size >= MAX_RETAINED_DIFF_ITEMS) return;
-    const candidateSet = new Set(canvasCandidateKeysRef.current);
-    if (priorityKey && orderedFileIndexRef.current.has(priorityKey)) candidateSet.add(priorityKey);
-    const candidates = Array.from(candidateSet).filter((key) => !mountedKeysRef.current.has(key));
-    if (candidates.length === 0) return;
-    const viewportCenter = canvasViewport.top + canvasViewport.height / 2;
-    const viewportStart = canvasViewport.top;
-    const viewportEnd = canvasViewport.top + canvasViewport.height;
-    const direction = scrollDirectionRef.current;
-    candidates.sort((left, right) => {
-      if (left === priorityKey) return -1;
-      if (right === priorityKey) return 1;
-      const leftIndex = orderedFileIndexRef.current.get(left) ?? 0;
-      const rightIndex = orderedFileIndexRef.current.get(right) ?? 0;
-      const leftTop = canvasLayout.tops[leftIndex] ?? 0;
-      const rightTop = canvasLayout.tops[rightIndex] ?? 0;
-      const leftBottom = leftTop + (canvasLayout.heights[leftIndex] ?? DEFAULT_DIFF_ITEM_HEIGHT);
-      const rightBottom = rightTop + (canvasLayout.heights[rightIndex] ?? DEFAULT_DIFF_ITEM_HEIGHT);
-      const leftInViewport = leftBottom >= viewportStart && leftTop <= viewportEnd;
-      const rightInViewport = rightBottom >= viewportStart && rightTop <= viewportEnd;
-      if (leftInViewport !== rightInViewport) return leftInViewport ? -1 : 1;
-      const leftAhead = direction === 'down' ? leftTop > viewportEnd : leftBottom < viewportStart;
-      const rightAhead = direction === 'down' ? rightTop > viewportEnd : rightBottom < viewportStart;
-      if (leftAhead !== rightAhead) return leftAhead ? -1 : 1;
-      const distance = Math.abs(leftTop - viewportCenter) - Math.abs(rightTop - viewportCenter);
-      if (distance !== 0) return distance;
-      return direction === 'up' ? rightTop - leftTop : leftTop - rightTop;
-    });
+    const firstCandidate = Math.max(0, low - 1);
+    for (let index = firstCandidate; index < canvasLayout.tops.length; index += 1) {
+      const top = canvasLayout.tops[index];
+      if (top > end) break;
+      const bottom = top + canvasLayout.heights[index];
+      if (bottom >= start && top <= end) indexSet.add(index);
+    }
+    // Keep the immediate neighbours rendered even when the current diff is
+    // taller than the pixel overscan; they provide measured heights and a
+    // seamless boundary.
+    for (let index = visibleAnchorIndex - 1; index <= visibleAnchorIndex + 1; index += 1) {
+      if (index >= 0 && index < canvasLayout.tops.length) indexSet.add(index);
+    }
+    return Array.from(indexSet).sort((left, right) => left - right);
+  }, [canvasLayout, canvasViewport, visibleAnchorIndex]);
+
+  // Mount cards strictly outward from the anchor card, one at a time:
+  // anchor±1, anchor±2, ... (the card below wins ties). The candidate ring is
+  // derived from the anchor index alone — deliberately NOT from the rendered
+  // skeleton window, whose commits can lag a fast entry scroll. Serial (one
+  // card in flight) and capped: when MAX_RETAINED_DIFF_ITEMS cards are
+  // mounted, the farthest one is recycled — but only for a strictly closer
+  // candidate, so the mounted set converges to the anchor's neighbourhood.
+  const pumpLoadQueue = useCallback(() => {
+    if (loadingKeyRef.current) return;
+    const keys = orderedFileKeysRef.current;
+    if (keys.length === 0) return;
+    const anchorKey = scrollAnchorRef.current.key;
+    const anchorIndex = Math.min(
+      keys.length - 1,
+      (anchorKey !== null ? orderedFileIndexRef.current.get(anchorKey) : undefined)
+        ?? Math.max(0, visibleAnchorIndex),
+    );
+    const distanceOf = (key: string) => Math.abs((orderedFileIndexRef.current.get(key) ?? 0) - anchorIndex);
+    const candidates: string[] = [];
+    if (!mountedKeysRef.current.has(keys[anchorIndex])) candidates.push(keys[anchorIndex]);
+    for (let distance = 1; distance <= MAX_RETAINED_DIFF_ITEMS; distance += 1) {
+      const below = anchorIndex + distance;
+      const above = anchorIndex - distance;
+      if (below < keys.length && !mountedKeysRef.current.has(keys[below])) candidates.push(keys[below]);
+      if (above >= 0 && !mountedKeysRef.current.has(keys[above])) candidates.push(keys[above]);
+    }
     const nextKey = candidates[0];
     if (!nextKey) return;
-    stableMountedKeysRef.current.delete(nextKey);
+    if (mountedKeysRef.current.size >= MAX_RETAINED_DIFF_ITEMS) {
+      const nextDistance = distanceOf(nextKey);
+      const removable = Array.from(mountedKeysRef.current)
+        .filter((key) => key !== loadingKeyRef.current)
+        .sort((left, right) => distanceOf(right) - distanceOf(left))[0];
+      if (!removable || distanceOf(removable) <= nextDistance) return;
+      const next = new Set(mountedKeysRef.current);
+      next.delete(removable);
+      readyKeysRef.current.delete(removable);
+      replaceMountedKeys(next);
+    }
     loadingKeyRef.current = nextKey;
     replaceMountedKeys(new Set(mountedKeysRef.current).add(nextKey));
-  }, [canvasLayout.heights, canvasLayout.tops, canvasViewport.height, canvasViewport.top, replaceMountedKeys]);
+  }, [replaceMountedKeys, visibleAnchorIndex]);
   pumpLoadQueueRef.current = pumpLoadQueue;
 
   const prioritizeLoad = useCallback((key: string) => {
-    // Scroll-driven selection sync frequently points at the file that is
-    // already mounted under the viewport. It must not cancel an adjacent
-    // background mount; otherwise every slow scroll aborts the next file and
-    // only restarts it after the user hits the loading frontier.
     if (mountedKeysRef.current.has(key)) return;
     const currentLoading = loadingKeyRef.current;
-    if (currentLoading && currentLoading !== key && !stableMountedKeysRef.current.has(currentLoading)) {
+    if (currentLoading && currentLoading !== key) {
       const next = new Set(mountedKeysRef.current);
       next.delete(currentLoading);
-      stableMountedKeysRef.current.delete(currentLoading);
-      setReadinessRevision((revision) => revision + 1);
+      readyKeysRef.current.delete(currentLoading);
       replaceMountedKeys(next);
       loadingKeyRef.current = null;
     }
-    stableMountedKeysRef.current.delete(key);
     loadingKeyRef.current = key;
     replaceMountedKeys(new Set(mountedKeysRef.current).add(key));
-  }, [replaceMountedKeys]);
-
-  const focusLoad = useCallback((key: string) => {
-    const wasReady = mountedKeysRef.current.has(key) && stableMountedKeysRef.current.has(key);
-    stableMountedKeysRef.current = wasReady ? new Set([key]) : new Set();
-    setReadinessRevision((revision) => revision + 1);
-    loadingKeyRef.current = wasReady ? null : key;
-    replaceMountedKeys(new Set([key]));
   }, [replaceMountedKeys]);
 
   const handleItemContentReady = useCallback((key: string) => {
     if (!mountedKeysRef.current.has(key)) return;
     readyKeysRef.current.add(key);
-    stableMountedKeysRef.current.add(key);
-    setReadinessRevision((revision) => revision + 1);
     if (loadingKeyRef.current === key) loadingKeyRef.current = null;
-    if (loadingPriorityKeyRef.current === key) loadingPriorityKeyRef.current = null;
     window.requestAnimationFrame(() => pumpLoadQueueRef.current());
   }, []);
 
@@ -579,11 +484,11 @@ export function DiffReview({
     const measure = () => {
       const nextHeight = Math.max(0, Math.ceil(container.clientHeight));
       if (nextHeight === 0) return;
-      const logicalTop = container.scrollTop + nativeCanvasStartRef.current;
+      const top = container.scrollTop;
       setCanvasViewport((current) => (
-        current.height === nextHeight && current.top === logicalTop
+        current.height === nextHeight && current.top === top
           ? current
-          : { top: logicalTop, height: nextHeight }
+          : { top, height: nextHeight }
       ));
     };
     measure();
@@ -597,313 +502,183 @@ export function DiffReview({
     if (selectedTargetKey) prioritizeLoad(selectedTargetKey);
   }, [prioritizeLoad, selectedTargetKey]);
 
-  const renderedIndices = useMemo(() => {
-    const ahead = scrollMotion.pace === 'fast'
-      ? DIFF_CANVAS_FAST_AHEAD
-      : scrollMotion.pace === 'medium'
-        ? DIFF_CANVAS_MEDIUM_AHEAD
-        : DIFF_CANVAS_IDLE_OVERSCAN;
-    const behind = scrollMotion.pace === 'fast'
-      ? 120
-      : scrollMotion.pace === 'medium'
-        ? 240
-        : DIFF_CANVAS_IDLE_OVERSCAN;
-    const start = canvasViewport.top - (scrollMotion.direction === 'up' ? ahead : behind);
-    const end = canvasViewport.top + canvasViewport.height + (scrollMotion.direction === 'down' ? ahead : behind);
-    const indexSet = new Set<number>();
-    let low = 0;
-    let high = canvasLayout.tops.length;
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      if (canvasLayout.tops[middle] <= start) low = middle + 1;
-      else high = middle;
-    }
-    const firstCandidate = Math.max(0, low - 1);
-    for (let index = firstCandidate; index < canvasLayout.tops.length; index += 1) {
-      const top = canvasLayout.tops[index];
-      if (top > end) break;
-      const bottom = top + canvasLayout.heights[index];
-      if (bottom >= start && top <= end) indexSet.add(index);
-    }
-    // Keep the immediate neighbours mounted even when the current diff is
-    // taller than the pixel overscan. Data for ±3 is warmed separately; these
-    // two DOM neighbours provide measured heights and a seamless boundary.
-    for (let index = visibleAnchorIndex - 1; index <= visibleAnchorIndex + 1; index += 1) {
-      if (index >= 0 && index < canvasLayout.tops.length) indexSet.add(index);
-    }
-    return Array.from(indexSet).sort((left, right) => left - right);
-  }, [canvasLayout.heights, canvasLayout.tops, canvasViewport.height, canvasViewport.top, scrollMotion, visibleAnchorIndex]);
-
+  // Keep the mount pipeline fed whenever the rendered window moves.
   useEffect(() => {
     const validKeys = new Set(orderedFileKeysRef.current);
     for (const key of Array.from(measuredItemHeightsRef.current.keys())) {
       if (!validKeys.has(key)) measuredItemHeightsRef.current.delete(key);
     }
-    const candidateKeys = new Set(renderedIndices.map((index) => orderedFileKeysRef.current[index]).filter(Boolean));
-    canvasCandidateKeysRef.current = candidateKeys;
-    const retainedMounted = new Set(
-      Array.from(mountedKeysRef.current).filter((key) => validKeys.has(key) && candidateKeys.has(key)),
-    );
-    if (retainedMounted.size !== mountedKeysRef.current.size) {
-      let readinessChanged = false;
-      for (const key of mountedKeysRef.current) {
-        if (!retainedMounted.has(key) && stableMountedKeysRef.current.delete(key)) readinessChanged = true;
+    for (const key of Array.from(mountedKeysRef.current)) {
+      if (!validKeys.has(key)) {
+        const next = new Set(mountedKeysRef.current);
+        next.delete(key);
+        readyKeysRef.current.delete(key);
+        replaceMountedKeys(next);
       }
-      if (readinessChanged) setReadinessRevision((revision) => revision + 1);
-      replaceMountedKeys(retainedMounted);
     }
-    readyKeysRef.current = new Set(Array.from(readyKeysRef.current).filter((key) => validKeys.has(key)));
-    stableMountedKeysRef.current = new Set(
-      Array.from(stableMountedKeysRef.current).filter((key) => validKeys.has(key) && retainedMounted.has(key)),
-    );
-    if (loadingKeyRef.current && (!validKeys.has(loadingKeyRef.current) || !candidateKeys.has(loadingKeyRef.current))) {
+    // Only a disappearing file releases the in-flight slot here; a card that
+    // merely left the skeleton window still finishes loading, so a stale
+    // window commit can never open the serial gate for a second mount.
+    if (loadingKeyRef.current && !validKeys.has(loadingKeyRef.current)) {
       loadingKeyRef.current = null;
     }
     if (allOrderedFiles.length === 0) {
-      canvasCandidateKeysRef.current.clear();
-      readyKeysRef.current.clear();
-      stableMountedKeysRef.current.clear();
       loadingKeyRef.current = null;
+      readyKeysRef.current.clear();
       replaceMountedKeys(new Set());
       return;
     }
     pumpLoadQueue();
   }, [allOrderedFiles.length, orderedFileKeysSignature, pumpLoadQueue, renderedIndices, replaceMountedKeys]);
 
-  const requestBoundaryLoad = useCallback((direction: 'up' | 'down') => {
-    const frontier = loadingFrontierRef.current;
-    const key = direction === 'up' ? frontier.previousKey : frontier.nextKey;
-    if (!key) return;
-    loadingPriorityKeyRef.current = key;
-    canvasCandidateKeysRef.current.add(key);
-    scrollDirectionRef.current = direction;
-    scrollPaceRef.current = 'idle';
-    smoothedScrollVelocityRef.current = 0;
-    setScrollMotion({ direction, pace: 'idle' });
-    setBoundaryLoadRequest((current) => (
-      current?.direction === direction && current.key === key ? current : { direction, key }
-    ));
-    window.requestAnimationFrame(() => pumpLoadQueueRef.current());
-  }, []);
-
-  useEffect(() => {
-    if (!boundaryLoadRequest) return;
-    const frontierKey = boundaryLoadRequest.direction === 'up'
-      ? loadingFrontier.previousKey
-      : loadingFrontier.nextKey;
-    if (stableMountedKeysRef.current.has(boundaryLoadRequest.key) || frontierKey !== boundaryLoadRequest.key) {
-      setBoundaryLoadRequest(null);
-    }
-  }, [boundaryLoadRequest, loadingFrontier, readinessRevision]);
-
   const handleDetailScroll = useCallback((container: HTMLDivElement) => {
     detailScrollerRef.current = container;
-    const nativeTop = container.scrollTop;
-    const logicalTop = nativeTop + nativeCanvasStartRef.current;
-    const expectedTop = expectedProgrammaticScrollTopRef.current;
-    if (expectedTop !== null && Math.abs(expectedTop - nativeTop) < 1) {
-      expectedProgrammaticScrollTopRef.current = null;
-      lastDetailScrollTopRef.current = logicalTop;
-      lastDetailScrollTimeRef.current = performance.now();
-      smoothedScrollVelocityRef.current = 0;
-      scrollPaceRef.current = 'idle';
-      setScrollMotion((current) => current.pace === 'idle' ? current : { ...current, pace: 'idle' });
-      setCanvasViewport({ top: logicalTop, height: container.clientHeight });
-      onDetailScroll?.(container);
-      return;
-    }
-
-    const now = performance.now();
-    const delta = logicalTop - lastDetailScrollTopRef.current;
-    const elapsed = lastDetailScrollTimeRef.current > 0 ? Math.max(1, now - lastDetailScrollTimeRef.current) : 16;
-    const direction = delta < 0 ? 'up' : delta > 0 ? 'down' : scrollDirectionRef.current;
-    const nativeMax = Math.max(0, container.scrollHeight - container.clientHeight);
-    if (delta < 0 && nativeTop <= 0.75) requestBoundaryLoad('up');
-    if (delta > 0 && nativeTop >= nativeMax - 0.75) requestBoundaryLoad('down');
-    const instantVelocity = Math.abs(delta) / elapsed;
-    const velocity = smoothedScrollVelocityRef.current * 0.65 + instantVelocity * 0.35;
-    const pace: DiffScrollPace = velocity >= DIFF_SCROLL_FAST_VELOCITY
-      ? 'fast'
-      : velocity >= DIFF_SCROLL_MEDIUM_VELOCITY
-        ? 'medium'
-        : 'slow';
-
-    scrollDirectionRef.current = direction;
-    scrollPaceRef.current = pace;
-    smoothedScrollVelocityRef.current = velocity;
-    lastDetailScrollTopRef.current = logicalTop;
-    lastDetailScrollTimeRef.current = now;
-    setScrollMotion((current) => (
-      current.direction === direction && current.pace === pace ? current : { direction, pace }
-    ));
-    setCanvasViewport({ top: logicalTop, height: container.clientHeight });
-
-    if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
-    scrollIdleTimerRef.current = window.setTimeout(() => {
-      scrollIdleTimerRef.current = null;
-      smoothedScrollVelocityRef.current = 0;
-      scrollPaceRef.current = 'idle';
-      setScrollMotion((current) => current.pace === 'idle' ? current : { ...current, pace: 'idle' });
-      const activeContainer = detailScrollerRef.current;
-      if (activeContainer) {
-        const nativeMax = Math.max(0, activeContainer.scrollHeight - activeContainer.clientHeight);
-        if (scrollDirectionRef.current === 'up' && activeContainer.scrollTop <= 0.75) requestBoundaryLoad('up');
-        if (scrollDirectionRef.current === 'down' && activeContainer.scrollTop >= nativeMax - 0.75) {
-          requestBoundaryLoad('down');
+    const previousTop = lastDetailScrollTopRef.current;
+    let top = container.scrollTop;
+    const delta = top - previousTop;
+    // Loading gate: a card that is mounted but not content-ready yet blocks
+    // the leading edge — scrolling down stops at a peek into its loading
+    // cover, scrolling up at a peek from its bottom. Only gates AHEAD of the
+    // previous position apply, so the clamp can never drag the user backwards
+    // (e.g. the entry card must not gate the entry scroll itself). Assigning
+    // scrollTop here also cancels native fling momentum, which is the point.
+    if (delta !== 0) {
+      const layout = canvasLayoutRef.current;
+      const viewportHeight = container.clientHeight;
+      let gatedTop = top;
+      for (const key of Array.from(mountedKeysRef.current)) {
+        if (readyKeysRef.current.has(key)) continue;
+        const index = orderedFileIndexRef.current.get(key);
+        if (index === undefined) continue;
+        const cardTop = layout.tops[index] ?? 0;
+        if (delta > 0) {
+          const gate = cardTop + DIFF_SCROLL_GATE_PEEK - viewportHeight;
+          if (gate >= previousTop - 1 && gatedTop > gate) gatedTop = Math.max(0, gate);
+        } else {
+          const cardBottom = cardTop + (layout.heights[index] ?? DEFAULT_DIFF_ITEM_HEIGHT);
+          const gate = cardBottom - DIFF_SCROLL_GATE_PEEK;
+          if (gate <= previousTop + 1 && gatedTop < gate) gatedTop = gate;
         }
-        setCanvasViewport({
-          top: activeContainer.scrollTop + nativeCanvasStartRef.current,
-          height: activeContainer.clientHeight,
-        });
       }
-    }, DIFF_SCROLL_IDLE_MS);
+      if (gatedTop !== top) {
+        container.scrollTop = gatedTop;
+        top = gatedTop;
+      }
+    }
+    lastDetailScrollTopRef.current = top;
+    if (Math.abs(top - previousTop) >= DIFF_CANVAS_OVERSCAN) {
+      // A jump bigger than the rendered window's runway (scrollbar thumb
+      // drags, trackpad flicks on a cold cache) would paint bare canvas for a
+      // frame if the window update waited for the next scheduled render.
+      flushSync(() => {
+        setCanvasViewport({ top, height: container.clientHeight });
+      });
+    } else if (scrollFrameRef.current === null) {
+      scrollFrameRef.current = window.requestAnimationFrame(() => {
+        scrollFrameRef.current = null;
+        const active = detailScrollerRef.current;
+        if (active) setCanvasViewport({ top: active.scrollTop, height: active.clientHeight });
+      });
+    }
     onDetailScroll?.(container);
-  }, [onDetailScroll, requestBoundaryLoad]);
+  }, [onDetailScroll]);
 
   useEffect(() => () => {
-    if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
+    if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current);
   }, []);
 
-  useEffect(() => {
-    const container = detailScrollerRef.current;
-    if (!container) return;
-    const setElasticOffset = (offset: number, animate: boolean) => {
-      const canvas = canvasElementRef.current;
-      elasticOffsetRef.current = offset;
-      if (!canvas) return;
-      canvas.style.transition = animate ? 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)' : 'none';
-      canvas.style.transform = `translate3d(0, ${offset}px, 0)`;
-      if (elasticResetTimerRef.current !== null) window.clearTimeout(elasticResetTimerRef.current);
-      if (animate) {
-        elasticResetTimerRef.current = window.setTimeout(() => {
-          elasticResetTimerRef.current = null;
-          const activeCanvas = canvasElementRef.current;
-          if (activeCanvas) activeCanvas.style.transition = 'none';
-        }, 200);
-      }
-    };
-    const releaseElasticOffset = () => {
-      if (Math.abs(elasticOffsetRef.current) < 0.5) return;
-      setElasticOffset(0, true);
-    };
-    const handleWheel = (event: WheelEvent) => {
-      const nativeMax = Math.max(0, container.scrollHeight - container.clientHeight);
-      const pushingPastTop = event.deltaY < 0 && container.scrollTop <= 0.75;
-      const pushingPastBottom = event.deltaY > 0 && container.scrollTop >= nativeMax - 0.75;
-      if (!pushingPastTop && !pushingPastBottom) return;
-      if (event.cancelable) event.preventDefault();
-      event.stopPropagation();
-      requestBoundaryLoad(pushingPastTop ? 'up' : 'down');
-    };
-    const handleTouchStart = (event: TouchEvent) => {
-      if (elasticResetTimerRef.current !== null) {
-        window.clearTimeout(elasticResetTimerRef.current);
-        elasticResetTimerRef.current = null;
-      }
-      if (Math.abs(elasticOffsetRef.current) >= 0.5) setElasticOffset(0, false);
-      touchYRef.current = event.touches[0]?.clientY ?? null;
-    };
-    const handleTouchMove = (event: TouchEvent) => {
-      const currentY = event.touches[0]?.clientY;
-      const previousY = touchYRef.current;
-      if (currentY === undefined || previousY === null) return;
-      touchYRef.current = currentY;
-      if (hasActiveTextSelection()) {
-        releaseElasticOffset();
-        return;
-      }
-      const deltaY = previousY - currentY;
-      const nativeMax = Math.max(0, container.scrollHeight - container.clientHeight);
-      const pushingPastTop = deltaY < 0 && container.scrollTop <= 0.75;
-      const pushingPastBottom = deltaY > 0 && container.scrollTop >= nativeMax - 0.75;
-      const fingerDelta = currentY - previousY;
-      if (pushingPastTop || pushingPastBottom) {
-        const direction = pushingPastTop ? 1 : -1;
-        const currentMagnitude = Math.abs(elasticOffsetRef.current);
-        const outwardDistance = pushingPastTop ? Math.max(0, fingerDelta) : Math.max(0, -fingerDelta);
-        const resistance = Math.max(0.08, 0.34 * (1 - currentMagnitude / 24));
-        const nextMagnitude = Math.min(24, currentMagnitude + outwardDistance * resistance);
-        setElasticOffset(direction * nextMagnitude, false);
-      } else if (Math.abs(elasticOffsetRef.current) >= 0.5) {
-        const nextOffset = elasticOffsetRef.current + fingerDelta * 0.7;
-        const crossedZero = Math.sign(nextOffset) !== Math.sign(elasticOffsetRef.current);
-        setElasticOffset(crossedZero ? 0 : nextOffset, false);
-        if (event.cancelable) event.preventDefault();
-        event.stopPropagation();
-        return;
-      } else {
-        return;
-      }
-      if (event.cancelable) event.preventDefault();
-      event.stopPropagation();
-      requestBoundaryLoad(pushingPastTop ? 'up' : 'down');
-    };
-    const handleTouchEnd = () => {
-      touchYRef.current = null;
-      releaseElasticOffset();
-    };
-    container.addEventListener('wheel', handleWheel, { passive: false });
-    container.addEventListener('touchstart', handleTouchStart, { passive: true });
-    container.addEventListener('touchmove', handleTouchMove, { passive: false });
-    container.addEventListener('touchend', handleTouchEnd, { passive: true });
-    container.addEventListener('touchcancel', handleTouchEnd, { passive: true });
-    return () => {
-      container.removeEventListener('wheel', handleWheel);
-      container.removeEventListener('touchstart', handleTouchStart);
-      container.removeEventListener('touchmove', handleTouchMove);
-      container.removeEventListener('touchend', handleTouchEnd);
-      container.removeEventListener('touchcancel', handleTouchEnd);
-      if (elasticResetTimerRef.current !== null) {
-        window.clearTimeout(elasticResetTimerRef.current);
-        elasticResetTimerRef.current = null;
-      }
-    };
-  }, [requestBoundaryLoad]);
-
-  useEffect(() => {
-    if (!scrollTargetKey) return;
-    if (handledScrollRequestNonceRef.current === scrollToKeyNonce) return;
-    handledScrollRequestNonceRef.current = scrollToKeyNonce;
-    const targetIndex = orderedFileIndexRef.current.get(scrollTargetKey);
-    if (targetIndex === undefined) return;
-    let top = DIFF_CANVAS_PADDING;
-    for (let index = 0; index < targetIndex; index += 1) {
-      top += measuredItemHeightsRef.current.get(orderedFileKeysRef.current[index]) ?? DEFAULT_DIFF_ITEM_HEIGHT;
-    }
-    const nextOrigin = { index: targetIndex, top };
-    setCanvasOrigin(nextOrigin);
-    pendingCanvasScrollTopRef.current = top;
-    setCanvasViewport((current) => ({ top, height: current.height }));
-    focusLoad(scrollTargetKey);
-  }, [focusLoad, scrollTargetKey, scrollToKeyNonce]);
-
+  // Anchor compensation: when (re)measurement shifts the anchor card's top,
+  // carry the scroll position along by exactly that delta. Changes below the
+  // anchor never touch the scroll position. This only ever applies a delta
+  // to the live scrollTop — it never restores an absolute position, so an
+  // in-flight user scroll is never eaten.
   useLayoutEffect(() => {
     const container = detailScrollerRef.current;
     if (!container) return;
-    const requestedLogicalTop = pendingCanvasScrollTopRef.current ?? lastDetailScrollTopRef.current;
-    pendingCanvasScrollTopRef.current = null;
-    const logicalTop = Math.min(
-      loadingFrontier.maxScrollTop,
-      Math.max(loadingFrontier.minScrollTop, requestedLogicalTop),
-    );
-    const nativeTop = logicalTop - loadingFrontier.minScrollTop;
-    nativeCanvasStartRef.current = loadingFrontier.minScrollTop;
-    lastDetailScrollTopRef.current = logicalTop;
-    lastDetailScrollTimeRef.current = performance.now();
-    setCanvasViewport((current) => (
-      current.top === logicalTop && current.height === container.clientHeight
-        ? current
-        : { top: logicalTop, height: container.clientHeight }
-    ));
-    if (Math.abs(container.scrollTop - nativeTop) < 1) return;
-    expectedProgrammaticScrollTopRef.current = nativeTop;
+    const anchor = scrollAnchorRef.current;
+    if (anchor.key === null) return;
+    const anchorIndex = orderedFileIndexRef.current.get(anchor.key);
+    if (anchorIndex === undefined) return;
+    const delta = (canvasLayout.tops[anchorIndex] ?? anchor.top) - anchor.top;
+    if (Math.abs(delta) < 1) return;
+    const nextTop = container.scrollTop + delta;
+    lastDetailScrollTopRef.current = nextTop;
+    setCanvasViewport((current) => ({ top: nextTop, height: current.height }));
     if (typeof container.scrollTo === 'function') {
-      container.scrollTo({ top: nativeTop, behavior: 'instant' });
+      container.scrollTo({ top: nextTop, behavior: 'instant' });
     } else {
-      container.scrollTop = nativeTop;
+      container.scrollTop = nextTop;
     }
-  }, [canvasOrigin, loadingFrontier.maxScrollTop, loadingFrontier.minScrollTop]);
+  }, [canvasLayout]);
 
+  // Recapture the anchor on every commit (after the compensation above).
+  // Keep the current anchor card while it is still visible — notably the
+  // focused card sits at the bottom edge after an end-clamped entry scroll,
+  // and it must stay the anchor while the cards around it settle, or the
+  // viewport drifts away from it. Once it scrolls out of view, the anchor
+  // moves to the topmost visible card.
+  useLayoutEffect(() => {
+    const keys = orderedFileKeysRef.current;
+    const tops = canvasLayout.tops;
+    if (keys.length === 0) {
+      scrollAnchorRef.current = { key: null, top: 0 };
+      return;
+    }
+    const viewTop = lastDetailScrollTopRef.current;
+    const viewBottom = viewTop + (detailScrollerRef.current?.clientHeight ?? canvasViewport.height);
+    const current = scrollAnchorRef.current;
+    if (current.key !== null) {
+      const currentIndex = orderedFileIndexRef.current.get(current.key);
+      if (currentIndex !== undefined) {
+        const top = tops[currentIndex] ?? 0;
+        const bottom = top + (canvasLayout.heights[currentIndex] ?? DEFAULT_DIFF_ITEM_HEIGHT);
+        if (bottom > viewTop && top < viewBottom) {
+          scrollAnchorRef.current = { key: current.key, top };
+          return;
+        }
+      }
+    }
+    let low = 0;
+    let high = tops.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (tops[middle] <= viewTop + 1) low = middle + 1;
+      else high = middle;
+    }
+    const index = Math.min(tops.length - 1, Math.max(0, low - 1));
+    scrollAnchorRef.current = { key: keys[index] ?? null, top: tops[index] ?? 0 };
+  });
+
+  // Explicit scroll-to-file requests land the target top-aligned.
+  useLayoutEffect(() => {
+    if (!scrollTargetKey) return;
+    if (handledScrollRequestNonceRef.current === scrollToKeyNonce) return;
+    const targetIndex = orderedFileIndexRef.current.get(scrollTargetKey);
+    if (targetIndex === undefined) return;
+    // Mount the clicked card first, even if the scroller is not in the DOM
+    // yet (Swiper mounts the detail lazily); only the scroll itself waits.
+    prioritizeLoad(scrollTargetKey);
+    scrollAnchorRef.current = { key: scrollTargetKey, top: canvasLayout.tops[targetIndex] ?? 0 };
+    const container = detailScrollerRef.current;
+    if (!container) return;
+    // Consume the nonce only once the scroll is actually applied; an early
+    // commit without the scroller must not swallow the request.
+    handledScrollRequestNonceRef.current = scrollToKeyNonce;
+    const top = canvasLayout.tops[targetIndex] ?? 0;
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({ top, behavior: 'instant' });
+    } else {
+      container.scrollTop = top;
+    }
+    // Read back the applied position: near the list end the browser clamps
+    // the requested top, and the scroll bookkeeping must track where the
+    // viewport ACTUALLY landed.
+    const appliedTop = container.scrollTop;
+    lastDetailScrollTopRef.current = appliedTop;
+    setCanvasViewport({ top: appliedTop, height: container.clientHeight });
+  }, [canvasLayout, canvasViewport.height, prioritizeLoad, scrollTargetKey, scrollToKeyNonce]);
+
+  // Restore a previously saved native scroll position for this file set.
   useLayoutEffect(() => {
     if (initialDetailScrollTop === undefined) return;
     if (scrollTargetKey) return;
@@ -911,27 +686,18 @@ export function DiffReview({
     if (appliedInitialDetailScrollKeyRef.current === restoreKey) return;
     const container = detailScrollerRef.current;
     if (!container) return;
-    const nativeSpan = Math.max(0, loadingFrontier.maxScrollTop - loadingFrontier.minScrollTop);
-    const requestedNativeTop = initialDetailScrollTop >= loadingFrontier.minScrollTop
-      ? initialDetailScrollTop - loadingFrontier.minScrollTop
-      : initialDetailScrollTop;
-    const nativeTop = Math.min(nativeSpan, Math.max(0, requestedNativeTop));
-    const logicalTop = nativeTop + loadingFrontier.minScrollTop;
-    const frame = window.requestAnimationFrame(() => {
-      appliedInitialDetailScrollKeyRef.current = restoreKey;
-      nativeCanvasStartRef.current = loadingFrontier.minScrollTop;
-      lastDetailScrollTopRef.current = logicalTop;
-      lastDetailScrollTimeRef.current = performance.now();
-      expectedProgrammaticScrollTopRef.current = nativeTop;
-      setCanvasViewport({ top: logicalTop, height: container.clientHeight });
-      if (typeof container.scrollTo === 'function') {
-        container.scrollTo({ top: nativeTop, behavior: 'instant' });
-      } else {
-        container.scrollTop = nativeTop;
-      }
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [initialDetailScrollTop, loadingFrontier.maxScrollTop, loadingFrontier.minScrollTop, orderedFileKeysSignature, scrollTargetKey]);
+    appliedInitialDetailScrollKeyRef.current = restoreKey;
+    const maxTop = Math.max(0, canvasLayout.bottom - container.clientHeight);
+    const top = Math.min(Math.max(0, initialDetailScrollTop), maxTop);
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({ top, behavior: 'instant' });
+    } else {
+      container.scrollTop = top;
+    }
+    const appliedTop = container.scrollTop;
+    lastDetailScrollTopRef.current = appliedTop;
+    setCanvasViewport({ top: appliedTop, height: container.clientHeight });
+  }, [canvasLayout.bottom, initialDetailScrollTop, orderedFileKeysSignature, scrollTargetKey]);
 
   const renderStreamItem = useCallback((item: DiffReviewFile, estimatedHeight: number) => {
     const isSelected = matchesSelectedKey(item);
@@ -957,6 +723,7 @@ export function DiffReview({
         diffOverride={item.diffOverride}
         renderBadge={(status) => renderStreamBadge(status, item)}
         onInsertDiffReference={item.onInsertDiffReference ?? onInsertDiffReference}
+        onHunkGitAction={item.onHunkGitAction ?? onHunkGitAction}
         onReferenceCopied={onReferenceCopied}
         insertedReferenceKey={insertedReferenceKey}
         copiedReferenceKey={copiedReferenceKey}
@@ -965,74 +732,33 @@ export function DiffReview({
         onHeightChange={handleItemHeightChange}
       />
     );
-  }, [activePane, copiedReferenceKey, diffOptions, diffViewType, handleItemContentReady, handleItemHeightChange, inlineMode, insertedReferenceKey, matchesSelectedKey, mountedKeys, onClearAuditRecord, onInsertDiffReference, onReferenceCopied, reloadKey, renderStreamBadge, showScrollHint, wrap]);
+  }, [activePane, copiedReferenceKey, diffOptions, diffViewType, handleItemContentReady, handleItemHeightChange, inlineMode, insertedReferenceKey, matchesSelectedKey, mountedKeys, onClearAuditRecord, onHunkGitAction, onInsertDiffReference, onReferenceCopied, reloadKey, renderStreamBadge, showScrollHint, wrap]);
 
   const detailBody = (
     <div
-      ref={canvasElementRef}
       data-diff-stream-content
       data-diff-stream-canvas
       className="termdock-diff-stream relative overflow-clip bg-surface will-change-transform"
-      style={{
-        height: Math.max(
-          canvasViewport.height,
-          loadingFrontier.maxScrollTop - loadingFrontier.minScrollTop + canvasViewport.height,
-        ),
-      }}
+      style={{ height: Math.max(canvasViewport.height, canvasLayout.bottom) }}
     >
       {renderedIndices.map((index) => {
         const item = allOrderedFiles[index];
         if (!item) return null;
-        const concealUntilStable = item.key !== selectedTargetKey
-          && !stableMountedKeysRef.current.has(item.key);
         return (
           <div
             key={item.key}
             data-diff-canvas-slot={item.key}
-            className={`absolute inset-x-0 ${concealUntilStable ? 'invisible' : ''}`}
-            style={{ top: canvasLayout.tops[index] - loadingFrontier.minScrollTop }}
+            className="absolute inset-x-0"
+            style={{ top: canvasLayout.tops[index] }}
           >
             {renderStreamItem(item, canvasLayout.heights[index])}
           </div>
         );
       })}
-      {boundaryLoadRequest?.direction === 'up' && (
-        <div
-          aria-live="polite"
-          className="pointer-events-none absolute inset-x-0 z-20 flex h-9 items-center justify-center gap-2 border-b border-border/20 bg-surface/95 text-[11px] text-muted-foreground backdrop-blur"
-          style={{ top: 0 }}
-        >
-          <span className="size-1.5 animate-pulse rounded-full bg-current" />
-          {t('diffViewer.loadingPreviousFile')}
-        </div>
-      )}
-      {boundaryLoadRequest?.direction === 'down' && (
-        <div
-          aria-live="polite"
-          className="pointer-events-none absolute inset-x-0 z-20 flex h-9 items-center justify-center gap-2 border-t border-border/20 bg-surface/95 text-[11px] text-muted-foreground backdrop-blur"
-          style={{
-            top: loadingFrontier.maxScrollTop
-              - loadingFrontier.minScrollTop
-              + canvasViewport.height
-              - DIFF_LOADING_FRONTIER_PEEK,
-          }}
-        >
-          <span className="size-1.5 animate-pulse rounded-full bg-current" />
-          {t('diffViewer.loadingNextFile')}
-        </div>
-      )}
     </div>
   );
 
-  const detail = mobile ? (
-    <div
-      ref={detailScrollerRef}
-      className="termdock-diff-stream termdock-diff-stream-scroller h-full max-h-full min-h-0 overflow-y-auto overscroll-contain bg-surface [overflow-anchor:none]"
-      onScroll={(event) => handleDetailScroll(event.currentTarget)}
-    >
-      {detailBody}
-    </div>
-  ) : (
+  const detail = (
     <div
       ref={detailScrollerRef}
       className="termdock-diff-stream termdock-diff-stream-scroller h-full max-h-full min-h-0 overflow-y-auto overscroll-contain bg-surface [overflow-anchor:none]"

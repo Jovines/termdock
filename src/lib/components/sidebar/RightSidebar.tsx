@@ -42,9 +42,10 @@ import { DiffReview, type DiffReviewFile, ChangeBadge, nextDiffStreamScrollReque
 import { ChangeStatusWithAuditBadge, getFileAuditStatus } from './AuditStatusBadge';
 import { ChangeWalkthroughPanel } from './ChangeWalkthroughPanel';
 import type { DiffInlineMode, DiffViewType } from './DiffViewer';
+import { useDiffDisplayPrefs, type DiffContextPref, type DiffWhitespacePref } from './diffDisplayPrefs';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { subscribeClientState } from '../../utils/clientStateSync';
@@ -6387,7 +6388,7 @@ export function RightSidebar(
     setBranchAuditRepoBaseBranches(branchAuditModuleState?.repoBaseBranches ?? {});
     setBranchAuditPreviewEntries(restoredPreviewEntries);
     setBranchAuditPreviewScrollTops(branchAuditModuleState?.previewScrollTops ?? {});
-    if (restoredPreviewEntry && branchAuditModuleState?.previewDetailOpen) {
+    if (restoredPreviewEntry && branchAuditModuleState?.previewDetailOpen && (restoredPreviewEntry.diff.hunks?.length ?? 0) > 0) {
       setBranchAuditPreviewDiff(restoredPreviewEntry.diff);
       setSelectedBranchAuditHistoryKey(restoredPreviewEntry.key);
       setSelectedBranchAuditFileKey(branchAuditModuleState.selectedPreviewFileKey ?? (restoredPreviewEntry.diff.hunks?.[0] ? `${restoredPreviewEntry.diff.hunks[0].filePath}\u0000${restoredPreviewEntry.diff.hunks[0].hunkHeader}\u0000${restoredPreviewEntry.diff.hunks[0].hunkIndex}` : null));
@@ -8651,6 +8652,10 @@ export function RightSidebar(
         diff: results.map((result) => result.diff).filter(Boolean).join('\n'),
         truncated: results.some((result) => result.truncated),
       } satisfies BranchDiffResponse;
+      if ((merged.hunks ?? []).length === 0) {
+        setBranchAuditPreviewError(t('rightSidebar.branchAuditDiffEmpty'));
+        return;
+      }
       const createdAt = Date.now();
       const entryKey = [
         'preview',
@@ -8883,12 +8888,19 @@ export function RightSidebar(
   }, []);
 
   // Histogram keeps code blocks stable around repeated lines and the precise
-  // word enhancer handles the inner fragments. These are product defaults,
-  // not user-facing tuning knobs.
+  // word enhancer handles the inner fragments; whitespace/context come from
+  // the user-facing diff display prefs (shared localStorage store).
+  const {
+    whitespace: diffWhitespacePref,
+    context: diffContextPref,
+    setWhitespace: setDiffWhitespacePref,
+    setContext: setDiffContextPref,
+  } = useDiffDisplayPrefs();
   const diffOptions = useMemo<GitDiffOptions>(() => ({
     algorithm: 'histogram',
-    whitespace: 'default',
-  }), []);
+    whitespace: diffWhitespacePref,
+    context: diffContextPref,
+  }), [diffWhitespacePref, diffContextPref]);
 
   const updateSearchMode = useCallback((mode: FileSearchMode) => {
     setSearchMode(mode);
@@ -8940,6 +8952,20 @@ export function RightSidebar(
       if (isCurrentSidebarRoot(expectedRootPath)) setRunningGitAction(null);
     }
   }, [applyGitBundle, isCurrentSidebarRoot, rootPath, t, waitForGitActionJob]);
+
+  // Hunk-level stage/revert from the diff viewer. Errors propagate back to
+  // the hunk header (inline message); on success the refreshed bundle updates
+  // the change list and bumps diffRefreshKey so the diff reloads.
+  const runDiffHunkAction = useCallback(async (request: ApplyDiffHunkRequest) => {
+    const expectedRootPath = rootPath;
+    const result = await applyDiffHunk(request);
+    if (!isCurrentSidebarRoot(expectedRootPath)) return;
+    const refreshedBundle = rootPath
+      ? await getGitBundle(rootPath, undefined, { includeNested: true, cacheOnly: true, action: 'git_action_cache_sync', requestSlotId: buildGitBundleRequestSlotId(rootPath) }).catch(() => result.bundle)
+      : result.bundle;
+    if (!isCurrentSidebarRoot(expectedRootPath)) return;
+    if (refreshedBundle) applyGitBundle(refreshedBundle, { reloadDiff: true, cacheOnly: true });
+  }, [applyGitBundle, isCurrentSidebarRoot, rootPath]);
 
   const runRepoGitAction = useCallback((action: 'stage-all' | 'stash-all', repoRoot: string | null, repoLabel: string) => {
     if (!repoRoot) return;
@@ -10643,6 +10669,7 @@ export function RightSidebar(
               diffOptions={diffOptions}
               reloadKey={diffRefreshKey}
               renderStreamBadge={(status) => <ChangeBadge status={status} />}
+              onHunkGitAction={runDiffHunkAction}
               onInsertDiffReference={insertContextText}
               onReferenceCopied={markReferenceCopied}
               insertedReferenceKey={insertedReferenceKey}
@@ -10686,6 +10713,30 @@ export function RightSidebar(
                       <span className="font-mono text-[12px] leading-none">Aa</span>
                       <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
                     </button>
+                    <select
+                      value={diffWhitespacePref}
+                      onChange={(event) => setDiffWhitespacePref(event.target.value as DiffWhitespacePref)}
+                      aria-label={t('diffViewer.whitespace')}
+                      className="h-7 shrink-0 rounded-full border border-border/20 bg-surface-2 px-2 text-[11px] font-medium text-muted-foreground outline-none transition hover:text-foreground"
+                      title={t('diffViewer.whitespace')}
+                    >
+                      <option value="default">{t('diffViewer.whitespaceDefault')}</option>
+                      <option value="trim">{t('diffViewer.whitespaceTrim')}</option>
+                      <option value="ignore">{t('diffViewer.whitespaceIgnore')}</option>
+                      <option value="ignore-blank-lines">{t('diffViewer.whitespaceIgnoreBlankLines')}</option>
+                    </select>
+                    <select
+                      value={String(diffContextPref)}
+                      onChange={(event) => setDiffContextPref(event.target.value === 'all' ? 'all' : Number(event.target.value) as DiffContextPref)}
+                      aria-label={t('diffViewer.context')}
+                      className="h-7 shrink-0 rounded-full border border-border/20 bg-surface-2 px-2 text-[11px] font-medium text-muted-foreground outline-none transition hover:text-foreground"
+                      title={t('diffViewer.context')}
+                    >
+                      {([3, 10, 25] as const).map((count) => (
+                        <option key={count} value={String(count)}>{t('diffViewer.contextLines', { count })}</option>
+                      ))}
+                      <option value="all">{t('diffViewer.contextAll')}</option>
+                    </select>
                   </div>
                   {activeGitRepoSummary && (
                     <div className="mt-2 flex items-center gap-1.5">
@@ -10838,6 +10889,7 @@ export function RightSidebar(
                   diffOptions={diffOptions}
                   reloadKey={diffRefreshKey}
                   renderStreamBadge={(status) => <ChangeBadge status={status} />}
+                  onHunkGitAction={runDiffHunkAction}
                   onInsertDiffReference={insertContextText}
                   onReferenceCopied={markReferenceCopied}
                   insertedReferenceKey={insertedReferenceKey}
@@ -10969,6 +11021,7 @@ export function RightSidebar(
                   diffOptions={diffOptions}
                   reloadKey={diffRefreshKey}
                   renderStreamBadge={(status) => <ChangeBadge status={status} />}
+                  onHunkGitAction={runDiffHunkAction}
                   onInsertDiffReference={insertContextText}
                   onReferenceCopied={markReferenceCopied}
                   insertedReferenceKey={insertedReferenceKey}

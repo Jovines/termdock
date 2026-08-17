@@ -2145,15 +2145,20 @@ export interface FileDiffResponse {
 
 export type GitDiffAlgorithm = 'default' | 'myers' | 'minimal' | 'patience' | 'histogram';
 export type GitDiffWhitespaceMode = 'default' | 'trim' | 'ignore' | 'ignore-blank-lines';
+/** Unified context line count; 'all' asks the server for the whole file. */
+export type GitDiffContextLines = number | 'all';
 
 export interface GitDiffOptions {
   algorithm?: GitDiffAlgorithm;
   whitespace?: GitDiffWhitespaceMode;
+  context?: GitDiffContextLines;
 }
 
 function appendGitDiffOptions(params: URLSearchParams, options?: GitDiffOptions): void {
   if (options?.algorithm && options.algorithm !== 'default') params.set('algorithm', options.algorithm);
   if (options?.whitespace && options.whitespace !== 'default') params.set('whitespace', options.whitespace);
+  if (options?.context === 'all') params.set('context', 'all');
+  else if (typeof options?.context === 'number') params.set('context', String(options.context));
 }
 
 export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: string, signal?: AbortSignal, action = filePath ? 'view_diff' : 'view_all_changes', traceId?: string, interactionId?: string, requestSlotId?: string, options?: GitDiffOptions): Promise<FileDiffResponse> {
@@ -2178,6 +2183,7 @@ export async function getFileDiff(filePath?: string, cached?: boolean, cwd?: str
     cached: Boolean(cached),
     algorithm: options?.algorithm ?? 'default',
     whitespace: options?.whitespace ?? 'default',
+    context: options?.context === undefined ? 'default' : String(options.context),
     timeoutMs: isConcreteVisibleFileDiff ? GIT_FILE_DIFF_REQUEST_TIMEOUT_MS : GIT_REQUEST_TIMEOUT_MS,
   });
   const response = await fetchWithTimeout(
@@ -2824,6 +2830,37 @@ export async function getGitActionStatus(options: { cwd?: string; action?: GitAc
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get Git action status' }));
     throw new Error(error.error || 'Failed to get Git action status');
+  }
+  return response.json();
+}
+
+// Hunk-level git operations (stage / revert one diff hunk). The patch text is
+// one file header + one hunk extracted from a diff previously served by the
+// backend; the server revalidates that it only touches `path`.
+export type DiffHunkApplyMode = 'stage' | 'revert-worktree' | 'revert-staged';
+
+export interface ApplyDiffHunkRequest {
+  cwd: string;
+  path: string;
+  mode: DiffHunkApplyMode;
+  patch: string;
+}
+
+export interface ApplyDiffHunkResponse {
+  ok: true;
+  bundle?: GitBundleResponse;
+}
+
+export async function applyDiffHunk(request: ApplyDiffHunkRequest): Promise<ApplyDiffHunkResponse> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/fs/apply-hunk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to apply diff hunk' }));
+    throw new Error(error.error || 'Failed to apply diff hunk');
   }
   return response.json();
 }

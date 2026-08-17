@@ -13,6 +13,7 @@ import { writeDiffTraceLog, writeErrorLog, writeJsonLog } from '../utils/serverL
 import { clearBranchAuditRecords, clearChangeAuditRecords, listBranchAuditRecords, listChangeAuditRecords, buildChangeAuditFingerprint } from '../utils/changeAuditStore.js';
 import { getLanIPv4Addresses } from '../utils/localAccess.js';
 import { inspectBinaryFile } from '../utils/binaryFile.js';
+import { GitApplyError, HUNK_APPLY_MODES, runGitApply, validateHunkPatch, type HunkApplyMode } from '../utils/hunkApply.js';
 
 const router = Router();
 
@@ -47,6 +48,7 @@ const FS_ROUTE_TIMEOUT_MS = 6_000;
 const GIT_ROUTE_TIMEOUT_MS = 8_000;
 const GIT_FILE_DIFF_ROUTE_TIMEOUT_MS = 45_000;
 const GIT_ACTION_TIMEOUT_MS = 10 * 60_000;
+const GIT_APPLY_TIMEOUT_MS = 30_000;
 const RESTORE_CONFIRM_PHRASES = new Set(['丢弃改动', 'discard changes']);
 const FS_IO_LOG_NAME = 'fs-io.log';
 const activeDiffSlots = new Map<string, { controller: AbortController; requestId: number }>();
@@ -605,6 +607,8 @@ function getRequestAction(req: Request, fallback: string): string {
 
 type GitDiffAlgorithm = 'default' | 'myers' | 'minimal' | 'patience' | 'histogram';
 type GitDiffWhitespaceMode = 'default' | 'trim' | 'ignore' | 'ignore-blank-lines';
+// 'all' maps to a very large -U value so the whole file becomes visible.
+type GitDiffContextLines = 'default' | 'all' | number;
 
 function getGitDiffAlgorithm(value: unknown): GitDiffAlgorithm {
   return value === 'myers' || value === 'minimal' || value === 'patience' || value === 'histogram'
@@ -618,12 +622,23 @@ function getGitDiffWhitespaceMode(value: unknown): GitDiffWhitespaceMode {
     : 'default';
 }
 
-function buildGitDiffOptionArgs(options: { algorithm: GitDiffAlgorithm; whitespace: GitDiffWhitespaceMode }): string[] {
+function getGitDiffContextLines(value: unknown): GitDiffContextLines {
+  if (value === 'all') return 'all';
+  if (typeof value === 'string' && /^\d{1,3}$/.test(value)) {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed) && parsed >= 0 && parsed <= 999) return parsed;
+  }
+  return 'default';
+}
+
+function buildGitDiffOptionArgs(options: { algorithm: GitDiffAlgorithm; whitespace: GitDiffWhitespaceMode; context: GitDiffContextLines }): string[] {
   const args: string[] = [];
   if (options.algorithm !== 'default') args.push(`--diff-algorithm=${options.algorithm}`);
   if (options.whitespace === 'trim') args.push('--ignore-space-at-eol');
   if (options.whitespace === 'ignore') args.push('--ignore-all-space');
   if (options.whitespace === 'ignore-blank-lines') args.push('--ignore-blank-lines');
+  if (options.context === 'all') args.push('--unified=100000');
+  else if (typeof options.context === 'number') args.push(`--unified=${options.context}`);
   return args;
 }
 
@@ -3578,6 +3593,7 @@ router.get('/diff', async (req: Request, res: Response) => {
   const diffOptions = {
     algorithm: getGitDiffAlgorithm(req.query.algorithm),
     whitespace: getGitDiffWhitespaceMode(req.query.whitespace),
+    context: getGitDiffContextLines(req.query.context),
   };
   const diffOptionArgs = buildGitDiffOptionArgs(diffOptions);
   const controller = new AbortController();
@@ -4512,6 +4528,62 @@ router.get('/git-action/status', async (req: Request, res: Response) => {
   }
   const job = gitActionJobs.get(getGitActionJobKey(gitRoot, action));
   res.json(job ? { ok: true, ...serializeGitActionJob(job) } : { ok: false, status: 'missing' });
+});
+
+// Hunk-level git operations (IntelliJ-style gutter actions): stage one hunk
+// into the index or revert it in the worktree/index. The browser extracts a
+// single hunk from a diff we served and posts it back; validateHunkPatch
+// confines it to the requested file and the patch is fed to `git apply` over
+// stdin — no temp files, no shell.
+router.post('/apply-hunk', async (req: Request, res: Response) => {
+  const requestId = ++fsIoRequestSeq;
+  const startedAt = Date.now();
+  const action = getRequestAction(req, 'apply_diff_hunk');
+  const body = req.body as { cwd?: unknown; path?: unknown; mode?: unknown; patch?: unknown };
+  const cwd = typeof body.cwd === 'string' ? body.cwd : '';
+  const requestedPath = typeof body.path === 'string' ? body.path : '';
+  const mode: HunkApplyMode | undefined = typeof body.mode === 'string' && HUNK_APPLY_MODES.includes(body.mode as HunkApplyMode)
+    ? body.mode as HunkApplyMode
+    : undefined;
+  const patch = typeof body.patch === 'string' ? body.patch : '';
+  let gitRootForLog: string | null = null;
+  logFsIoEvent({ id: requestId, action, op: 'git.apply-hunk', event: 'request-start', path: requestedPath, cwd, extra: { mode, patchBytes: getDiffByteLength(patch) } });
+  try {
+    if (!cwd || !requestedPath) {
+      res.status(400).json({ error: 'Missing cwd or path', code: 'MISSING_PARAMS' });
+      return;
+    }
+    if (!mode) {
+      res.status(400).json({ error: 'Unsupported hunk apply mode', code: 'UNSUPPORTED_MODE' });
+      return;
+    }
+    const resolvedCwd = await pathValidator.validatePathAsync(cwd);
+    const gitRoot = await findGitRoot(resolvedCwd);
+    if (!gitRoot) {
+      res.status(404).json({ error: 'Not a git repository', code: 'NOT_GIT_REPOSITORY' });
+      return;
+    }
+    gitRootForLog = gitRoot;
+    const pathspec = await toGitPathspec(gitRoot, requestedPath);
+    const validation = validateHunkPatch(patch, pathspec);
+    if (!validation.ok) {
+      logFsIoEvent({ id: requestId, action, op: 'git.apply-hunk', event: 'invalid-patch', path: requestedPath, cwd, repoRoot: gitRoot, extra: { mode, reason: validation.error } });
+      res.status(400).json({ error: validation.error, code: 'INVALID_PATCH' });
+      return;
+    }
+    await runGitApply(gitRoot, mode, patch, GIT_APPLY_TIMEOUT_MS);
+    clearGitBundleCacheForRoot(gitRoot);
+    const bundle = await refreshGitBundleCacheDetached(resolvedCwd, gitRoot, true);
+    logFsIo({ id: requestId, action, op: 'git.apply-hunk', startedAt, status: 'ok', path: requestedPath, cwd, repoRoot: gitRoot, extra: { mode } });
+    res.json({ ok: true, bundle });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Git apply failed';
+    const code = (error as Error & { code?: string }).code ?? 'GIT_APPLY_FAILED';
+    logFsIo({ id: requestId, action, op: 'git.apply-hunk', startedAt, status: 'error', path: requestedPath, cwd, repoRoot: gitRootForLog, code, error: message, extra: { mode } });
+    // A stale patch (context drifted since the diff was rendered) is a normal
+    // conflict, not a server fault — 409 tells the client to suggest a refresh.
+    res.status(error instanceof GitApplyError ? 409 : 500).json({ error: message, code });
+  }
 });
 
 // ---- File upload ----

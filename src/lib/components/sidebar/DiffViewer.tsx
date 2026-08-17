@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMoveHorizontal } from 'lucide-react';
+import { ChevronDown as RiChevronDown, ChevronUp as RiChevronUp, GitCompare as RiGitCompare, Loader2 as RiLoader, MoveHorizontal as RiMoveHorizontal } from 'lucide-react';
 import { Diff, Hunk, getChangeKey, type FileData, type HunkData, type HunkTokens } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
 import { useSidebarStore } from '../../stores/useSidebarStore';
-import { cancelIoSlot, getFileDiff, getGitBlobContent, isPreviewableImagePath, readImagePreviewBlob, type ChangeAuditRecord, type FileDiffResponse, type GitChangedFile, type GitDiffOptions } from '../../terminal/api';
+import { cancelIoSlot, getFileDiff, getGitBlobContent, isPreviewableImagePath, readImagePreviewBlob, type ChangeAuditRecord, type DiffHunkApplyMode, type FileDiffResponse, type GitChangedFile, type GitDiffOptions } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 import { readCache, writeCache } from '../../utils/localStorageCache';
 import { findMovedLineCandidates, pairChangedLinesForDisplay } from './inlineDiff';
 import { parseDiffInWorker, type DiffWorkerResult } from './diffWorkerClient';
 import { resolveLanguage } from '../../utils/syntaxHighlight';
+import { useDiffDisplayPrefs, type DiffContextPref, type DiffWhitespacePref } from './diffDisplayPrefs';
 
 const MAX_DIFF_CACHE_ENTRIES = 24;
 const MAX_PARSED_DIFF_CACHE_ENTRIES = 32;
@@ -83,7 +84,8 @@ function logDiffLoadingEvent(event: string, data: Record<string, unknown> = {}):
 }
 
 function getDiffOptionsKey(options?: GitDiffOptions): string {
-  return `${options?.algorithm ?? 'default'}:${options?.whitespace ?? 'default'}`;
+  const context = options?.context === undefined ? 'default' : String(options.context);
+  return `${options?.algorithm ?? 'default'}:${options?.whitespace ?? 'default'}:${context}`;
 }
 
 function buildDiffCacheKey(filePath: string | undefined, cwd: string | undefined, options?: GitDiffOptions): string {
@@ -319,6 +321,11 @@ interface DiffViewerProps {
   requestSlotId?: string | null;
   changedFile?: GitChangedFile | null;
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
+  /**
+   * Hunk-level git actions (stage / revert). Only provided for live worktree
+   * diffs; absent for commit/branch/preview diffs, which hides the buttons.
+   */
+  onHunkGitAction?: (request: DiffHunkActionRequest) => Promise<void>;
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
@@ -416,6 +423,95 @@ function toReferenceDiffPath(path: string | null | undefined, options: {
 function formatDiffEndpoint(prefix: 'a' | 'b', path: string): string {
   if (isDiffNullPath(path)) return '/dev/null';
   return path.startsWith('/') ? path : `${prefix}/${path}`;
+}
+
+// --- Hunk-level git actions (stage / revert one hunk) ---
+//
+// The patch sent to the server is sliced out of the exact diff text we
+// received, so context lines and "\ No newline" markers survive untouched.
+
+export interface DiffHunkActionRequest {
+  mode: DiffHunkApplyMode;
+  patch: string;
+  cwd: string;
+  path: string;
+}
+
+// Minimal decoder for git's C-style quoted paths ("a/weird\tname"); returns
+// null on malformed quoting so callers can bail out instead of guessing.
+function unquoteDiffHeaderPath(raw: string): string | null {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return null;
+  let out = '';
+  for (let i = 1; i < raw.length - 1; i += 1) {
+    const ch = raw[i];
+    if (ch !== '\\') {
+      out += ch;
+      continue;
+    }
+    i += 1;
+    if (i >= raw.length - 1) return null;
+    const esc = raw[i];
+    if (esc === '\\' || esc === '"') out += esc;
+    else if (esc === 'n') out += '\n';
+    else if (esc === 't') out += '\t';
+    else if (esc === 'r') out += '\r';
+    else if (/[0-7]/.test(esc) && /^[0-7]{3}$/.test(raw.slice(i, i + 3))) {
+      out += String.fromCharCode(parseInt(raw.slice(i, i + 3), 8));
+      i += 2;
+    } else {
+      return null;
+    }
+  }
+  return out;
+}
+
+function diffFileHeaderMatches(line: string | undefined, prefix: 'a' | 'b', expectedPath: string | undefined): boolean {
+  if (!line || !expectedPath) return false;
+  let value = line.slice(4).trimEnd();
+  const tabIndex = value.indexOf('\t');
+  if (tabIndex >= 0) value = value.slice(0, tabIndex);
+  if (isDiffNullPath(expectedPath)) return value === '/dev/null';
+  const expected = `${prefix}/${expectedPath}`;
+  if (value === expected) return true;
+  if (value.startsWith('"')) return unquoteDiffHeaderPath(value) === expected;
+  return false;
+}
+
+// Slice one hunk (with its file header) out of the raw unified diff. The
+// file block is located by index — react-diff-view preserves the order of the
+// parsed text — and then verified against the parsed file paths; a mismatch
+// returns null so the caller can refuse to run the action.
+export function extractHunkPatch(diffText: string, file: Pick<FileData, 'oldPath' | 'newPath'>, fileIndex: number, hunkIndex: number): string | null {
+  if (!diffText) return null;
+  const lines = diffText.split('\n');
+  const blockStarts: number[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].startsWith('diff --git ')) blockStarts.push(i);
+  }
+  if (fileIndex >= blockStarts.length) return null;
+  const blockStart = blockStarts[fileIndex];
+  const blockEnd = fileIndex + 1 < blockStarts.length ? blockStarts[fileIndex + 1] : lines.length;
+
+  const hunkStarts: number[] = [];
+  for (let i = blockStart; i < blockEnd; i += 1) {
+    if (lines[i].startsWith('@@ ')) hunkStarts.push(i);
+  }
+  if (hunkStarts.length === 0 || hunkIndex >= hunkStarts.length) return null;
+
+  const headerLines = lines.slice(blockStart, hunkStarts[0]);
+  const oldHeader = headerLines.find((line) => line.startsWith('--- '));
+  const newHeader = headerLines.find((line) => line.startsWith('+++ '));
+  if (!oldHeader || !newHeader) return null;
+  const expectedOld = file.oldPath && !isDiffNullPath(file.oldPath) ? file.oldPath : '/dev/null';
+  const expectedNew = file.newPath && !isDiffNullPath(file.newPath) ? file.newPath : '/dev/null';
+  if (!diffFileHeaderMatches(oldHeader, 'a', expectedOld) || !diffFileHeaderMatches(newHeader, 'b', expectedNew)) {
+    return null;
+  }
+
+  const hunkStart = hunkStarts[hunkIndex];
+  const hunkEnd = hunkIndex + 1 < hunkStarts.length ? hunkStarts[hunkIndex + 1] : blockEnd;
+  const patch = [...headerLines, ...lines.slice(hunkStart, hunkEnd)].join('\n');
+  return patch.endsWith('\n') ? patch : `${patch}\n`;
 }
 
 function rewriteDiffReferencePaths(diffText: string, files: FileData[], options: {
@@ -786,6 +882,19 @@ function canUseSplitDiffView(): boolean {
 }
 
 /**
+ * F7-based hunk navigation must not steal keys from text entry: the terminal
+ * maps F7 to an escape sequence the shell may rely on, and inputs may use it
+ * for their own purposes.
+ */
+function isDiffNavTypingTarget(element: Element | null): boolean {
+  if (typeof HTMLElement === 'undefined' || !(element instanceof HTMLElement)) return false;
+  return element.tagName === 'INPUT'
+    || element.tagName === 'TEXTAREA'
+    || element.isContentEditable
+    || Boolean(element.closest('.xterm'));
+}
+
+/**
  * Inline hint that says "swipe to see more" above a file's diff row.
  * Self-dismisses on first tap so it doesn't get in the way of repeat
  * visits — the user has seen it once, they know now.
@@ -807,7 +916,7 @@ function DiffScrollHint() {
   );
 }
 
-export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
+export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onHunkGitAction, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
   const { t, locale } = useI18n();
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
@@ -847,6 +956,55 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     setPreferredViewType(next);
     writeCache(DIFF_VIEW_TYPE_STORAGE_KEY, next);
   }, []);
+
+  const {
+    whitespace: whitespacePref,
+    context: contextPref,
+    setWhitespace: setWhitespacePref,
+    setContext: setContextPref,
+  } = useDiffDisplayPrefs();
+  // With diffOverride/preparedDiff the content is supplied by the caller, so
+  // whitespace/context tweaks cannot be re-fetched from here.
+  const diffOptionsLocked = diffOverride !== undefined || preparedDiff !== undefined;
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const diffHoveredRef = useRef(false);
+  const [activeHunkIndex, setActiveHunkIndex] = useState<number | null>(null);
+
+  const jumpToHunk = useCallback((direction: 1 | -1) => {
+    const container = containerRef.current;
+    if (!container) return;
+    const anchors = container.querySelectorAll('[data-diff-hunk-anchor]');
+    if (anchors.length === 0) return;
+    setActiveHunkIndex((current) => {
+      const base = current !== null && current >= 0 && current < anchors.length
+        ? current
+        : (direction === 1 ? -1 : 0);
+      const next = (base + direction + anchors.length) % anchors.length;
+      const anchor = anchors[next];
+      if (anchor instanceof HTMLElement) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return next;
+    });
+  }, []);
+
+  // F7 / Shift+F7 jump between hunks (IntelliJ-style), but only while the
+  // pointer is over this diff or focus is inside it — never while the user
+  // is typing in the terminal or an input.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'F7') return;
+      const container = containerRef.current;
+      if (!container) return;
+      const activeElement = document.activeElement;
+      const focusInside = activeElement instanceof Node && container.contains(activeElement);
+      if (!diffHoveredRef.current && !focusInside) return;
+      if (isDiffNavTypingTarget(activeElement)) return;
+      event.preventDefault();
+      jumpToHunk(event.shiftKey ? -1 : 1);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [jumpToHunk]);
   const changedFileRepoRoot = changedFile?.repoRoot ?? null;
   const changedFileStatus = changedFile?.status ?? null;
   const auditRepoRoot = changedFileRepoRoot ?? repoRoot ?? rootPath;
@@ -1267,6 +1425,52 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     onInsertDiffReference(filePath ? `${titleParts.name} diff` : t('diffViewer.allDiffLabel'), wholeDiffText, wholeDiffReferenceKey);
   }, [filePath, onInsertDiffReference, t, titleParts.name, wholeDiffReferenceKey, wholeDiffText]);
 
+  // Hunk-level git actions (stage / revert). The patch is sliced from the raw
+  // diff text at click time so stale renders fail server-side with a readable
+  // git error instead of silently applying the wrong thing.
+  const [runningHunkActionKey, setRunningHunkActionKey] = useState<string | null>(null);
+  const [hunkActionError, setHunkActionError] = useState<{ key: string; message: string } | null>(null);
+  const [revertConfirmKey, setRevertConfirmKey] = useState<string | null>(null);
+
+  // New diff data reshuffles hunks; drop stale action state.
+  useEffect(() => {
+    setHunkActionError(null);
+    setRevertConfirmKey(null);
+  }, [files]);
+
+  useEffect(() => {
+    if (!revertConfirmKey) return;
+    const timer = window.setTimeout(() => setRevertConfirmKey(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [revertConfirmKey]);
+
+  const hunkActionGitRoot = changedFileRepoRoot ?? repoRoot ?? (filePath?.startsWith('/') ? null : rootPath);
+  const canRunHunkActions = Boolean(onHunkGitAction && hunkActionGitRoot && diffOverride == null && preparedDiff == null);
+
+  const runHunkGitAction = useCallback(async (mode: DiffHunkApplyMode, actionKey: string, file: FileData, fileIndex: number, hunkIndex: number, displayPath: string) => {
+    if (!onHunkGitAction || !hunkActionGitRoot) return;
+    const patch = effectiveDiffContent ? extractHunkPatch(effectiveDiffContent, file, fileIndex, hunkIndex) : null;
+    if (!patch) {
+      setHunkActionError({ key: actionKey, message: t('diffViewer.hunkActionUnavailable') });
+      return;
+    }
+    setRunningHunkActionKey(actionKey);
+    setHunkActionError(null);
+    try {
+      await onHunkGitAction({
+        mode,
+        patch,
+        cwd: hunkActionGitRoot,
+        path: joinRepoPath(hunkActionGitRoot, displayPath) ?? displayPath,
+      });
+    } catch (error) {
+      setHunkActionError({ key: actionKey, message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setRunningHunkActionKey((current) => (current === actionKey ? null : current));
+      setRevertConfirmKey((current) => (current === actionKey ? null : current));
+    }
+  }, [onHunkGitAction, hunkActionGitRoot, effectiveDiffContent, t]);
+
   // Per-hunk derived data (sections, inline moved-line candidates, split-view
   // alignment). findMovedLineCandidates is O(deleted × inserted) similarity
   // work — recomputing it inside the JSX map on EVERY render made unrelated
@@ -1304,9 +1508,20 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     return map;
   }, [files, lightweight, viewType]);
 
-  const renderFileDiffs = (hideSingleFileHeader: boolean) => (
+  const totalHunks = useMemo(() => files.reduce((sum, file) => sum + file.hunks.length, 0), [files]);
+
+  // New diff data reshuffles hunk positions; drop the stale jump target.
+  useEffect(() => {
+    setActiveHunkIndex(null);
+  }, [files]);
+
+  const renderFileDiffs = (hideSingleFileHeader: boolean) => {
+    // Flat index across all files' hunks, matching the DOM order of
+    // [data-diff-hunk-anchor] used by jumpToHunk.
+    let hunkFlatCursor = 0;
+    return (
     <>
-      {files.map((file) => {
+      {files.map((file, fileIndex) => {
         const key = `${file.oldRevision}-${file.newRevision}-${file.newPath}`;
         const stats = fileStats.get(key) ?? { additions: 0, deletions: 0 };
         const displayPath = file.newPath && !isDiffNullPath(file.newPath)
@@ -1391,6 +1606,8 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
             <div className={`termdock-native-select overflow-x-auto termdock-diff-scroll ${viewType === 'split' ? 'diff-split' : ''} ${wrap ? 'termdock-diff-wrap' : ''}`}>
               <div className="min-w-full">
                 {file.hunks.map((hunk, index) => {
+                    const hunkFlatIndex = hunkFlatCursor;
+                    hunkFlatCursor += 1;
                     const diffHeader = `diff --git ${formatDiffEndpoint('a', referenceOldPath)} ${formatDiffEndpoint('b', referenceNewPath)}`;
                     const hunkDiffText = formatDiffReference([
                       diffHeader,
@@ -1404,6 +1621,13 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     const hunkAudit = getHunkAudit(effectiveAuditRecords, auditRepoRoot, displayPath, hunk.content, hunkFingerprint);
                     const hunkReferenceKey = `diff:hunk:${displayPath}:${index}`;
                     const hunkReferenceActive = insertedReferenceKey === hunkReferenceKey || copiedReferenceKey === hunkReferenceKey;
+                    const stageHunkKey = `stage:${displayPath}:${index}`;
+                    const revertHunkKey = `revert:${displayPath}:${index}`;
+                    const hunkActionBusy = runningHunkActionKey !== null;
+                    const canStageHunk = canRunHunkActions && (!changedFile || changedFile.unstaged || changedFile.untracked);
+                    const thisHunkActionError = hunkActionError && (hunkActionError.key === stageHunkKey || hunkActionError.key === revertHunkKey)
+                      ? hunkActionError.message
+                      : null;
                     const importCollapseKey = `${displayPath}\0${index}\0${hunk.content}`;
                     const derived = hunkDerivedMap.get(hunk);
                     const hunkSections = derived?.hunkSections ?? [];
@@ -1497,7 +1721,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                     return (
                       <div
                         key={hunk.content}
-                        className={`diff-hunk ${importOnlyHunk ? 'diff-hunk-imports' : ''}`}
+                        className={`diff-hunk scroll-mt-16 ${importOnlyHunk ? 'diff-hunk-imports' : ''} ${hunkFlatIndex === activeHunkIndex ? 'diff-hunk--jump-target' : ''}`}
                         data-diff-hunk-anchor={displayPath}
                         data-diff-hunk-index={index}
                         data-diff-hunk-fingerprint={hunkFingerprint}
@@ -1513,6 +1737,42 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                                   title={t('diffViewer.insertHunkDiff')}
                                 >
                                   {copiedReferenceKey === hunkReferenceKey ? t('rightSidebar.copied') : insertedReferenceKey === hunkReferenceKey ? t('rightSidebar.inserted') : t('diffViewer.insertHunkShort')}
+                                </button>
+                              )}
+                              {canStageHunk && (
+                                <button
+                                  type="button"
+                                  disabled={hunkActionBusy}
+                                  onClick={() => void runHunkGitAction('stage', stageHunkKey, file, fileIndex, index, displayPath)}
+                                  className="inline-flex h-6 shrink-0 items-center rounded-full bg-accent/10 px-2 text-[10px] font-semibold text-accent transition hover:bg-accent/20 active:scale-95 disabled:opacity-50"
+                                  title={t('diffViewer.stageHunkTitle')}
+                                >
+                                  {runningHunkActionKey === stageHunkKey ? t('diffViewer.hunkActionApplying') : t('diffViewer.stageHunk')}
+                                </button>
+                              )}
+                              {canRunHunkActions && (
+                                <button
+                                  type="button"
+                                  disabled={hunkActionBusy}
+                                  onClick={() => {
+                                    if (revertConfirmKey !== revertHunkKey) {
+                                      setRevertConfirmKey(revertHunkKey);
+                                      return;
+                                    }
+                                    void runHunkGitAction('revert-worktree', revertHunkKey, file, fileIndex, index, displayPath);
+                                  }}
+                                  className={`inline-flex h-6 shrink-0 items-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 disabled:opacity-50 ${
+                                    revertConfirmKey === revertHunkKey
+                                      ? 'bg-destructive/15 text-destructive hover:bg-destructive/25'
+                                      : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+                                  }`}
+                                  title={t('diffViewer.revertHunkTitle')}
+                                >
+                                  {runningHunkActionKey === revertHunkKey
+                                    ? t('diffViewer.hunkActionApplying')
+                                    : revertConfirmKey === revertHunkKey
+                                      ? t('diffViewer.revertHunkConfirm')
+                                      : t('diffViewer.revertHunk')}
                                 </button>
                               )}
                               <span className="min-w-0 flex-1 truncate">{hunk.content}</span>
@@ -1546,6 +1806,11 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                                 </>
                               )}
                             </div>
+                            {thisHunkActionError && (
+                              <div className="mt-1 truncate text-[10px] text-destructive" title={thisHunkActionError}>
+                                {t('diffViewer.hunkActionFailed', { message: thisHunkActionError })}
+                              </div>
+                            )}
                             {importCollapsed && (
                               <div className="mt-1 rounded bg-surface-2 px-2 py-1 text-[10px] text-muted-foreground">
                                 Import-only changes collapsed.
@@ -1608,7 +1873,8 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         );
       })}
     </>
-  );
+    );
+  };
 
   if (effectiveDiffLoading) {
     return embedded ? (
@@ -1715,6 +1981,9 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   if (embedded) {
     return (
       <div
+        ref={containerRef}
+        onMouseEnter={() => { diffHoveredRef.current = true; }}
+        onMouseLeave={() => { diffHoveredRef.current = false; }}
         className="termdock-diff termdock-native-select termdock-diff-card-mobile overflow-hidden rounded-b-xl"
         data-diff-viewer
         data-diff-view-type={viewType}
@@ -1731,6 +2000,9 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
 
   return (
     <div
+      ref={containerRef}
+      onMouseEnter={() => { diffHoveredRef.current = true; }}
+      onMouseLeave={() => { diffHoveredRef.current = false; }}
       className="termdock-diff termdock-native-select px-3 py-2"
       data-diff-viewer
       data-diff-view-type={viewType}
@@ -1751,6 +2023,54 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
+            <div className="inline-flex h-7 shrink-0 items-center rounded-full bg-surface-2 p-0.5">
+              <button
+                type="button"
+                onClick={() => jumpToHunk(-1)}
+                disabled={totalHunks < 2}
+                aria-label={t('diffViewer.prevHunk')}
+                className="inline-flex h-6 items-center rounded-full px-1.5 text-muted-foreground transition hover:text-foreground active:scale-95 disabled:cursor-not-allowed disabled:opacity-45"
+                title={`${t('diffViewer.prevHunk')} (Shift+F7)`}
+              >
+                <RiChevronUp size={13} />
+              </button>
+              <button
+                type="button"
+                onClick={() => jumpToHunk(1)}
+                disabled={totalHunks < 2}
+                aria-label={t('diffViewer.nextHunk')}
+                className="inline-flex h-6 items-center rounded-full px-1.5 text-muted-foreground transition hover:text-foreground active:scale-95 disabled:cursor-not-allowed disabled:opacity-45"
+                title={`${t('diffViewer.nextHunk')} (F7)`}
+              >
+                <RiChevronDown size={13} />
+              </button>
+            </div>
+            <select
+              value={whitespacePref}
+              disabled={diffOptionsLocked}
+              onChange={(event) => setWhitespacePref(event.target.value as DiffWhitespacePref)}
+              aria-label={t('diffViewer.whitespace')}
+              className="h-7 shrink-0 rounded-full border border-border/20 bg-surface-2 px-2 text-[10px] font-semibold text-muted-foreground outline-none transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+              title={t('diffViewer.whitespace')}
+            >
+              <option value="default">{t('diffViewer.whitespaceDefault')}</option>
+              <option value="trim">{t('diffViewer.whitespaceTrim')}</option>
+              <option value="ignore">{t('diffViewer.whitespaceIgnore')}</option>
+              <option value="ignore-blank-lines">{t('diffViewer.whitespaceIgnoreBlankLines')}</option>
+            </select>
+            <select
+              value={String(contextPref)}
+              disabled={diffOptionsLocked}
+              onChange={(event) => setContextPref(event.target.value === 'all' ? 'all' : Number(event.target.value) as DiffContextPref)}
+              aria-label={t('diffViewer.context')}
+              className="h-7 shrink-0 rounded-full border border-border/20 bg-surface-2 px-2 text-[10px] font-semibold text-muted-foreground outline-none transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+              title={t('diffViewer.context')}
+            >
+              {([3, 10, 25] as const).map((count) => (
+                <option key={count} value={String(count)}>{t('diffViewer.contextLines', { count })}</option>
+              ))}
+              <option value="all">{t('diffViewer.contextAll')}</option>
+            </select>
             <div className="inline-flex h-7 shrink-0 overflow-hidden rounded-full bg-surface-2 p-0.5" aria-label={t('diffViewer.view')}>
               <button
                 type="button"

@@ -323,6 +323,7 @@ export function DiffLab() {
             <select
               value={fixtureKey}
               onChange={(event) => setFixtureKey(event.target.value as keyof typeof DIFF_FIXTURES)}
+              aria-label="Fixture"
               className="h-8 rounded-md border border-border/30 bg-surface px-2 text-xs text-foreground outline-none"
             >
               {fixtureOptions.map(([key, item]) => (

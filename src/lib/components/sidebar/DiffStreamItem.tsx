@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
 import type { ChangeAuditRecord, GitChangedFile, GitDiffOptions } from '../../terminal/api';
-import { DiffViewer, type DiffInlineMode, type DiffViewerPreparedDiff, type DiffViewType } from './DiffViewer';
+import { DiffViewer, type DiffHunkActionRequest, type DiffInlineMode, type DiffViewerPreparedDiff, type DiffViewType } from './DiffViewer';
 
-const DIFF_HEIGHT_SETTLE_MS = 120;
+const DIFF_HEIGHT_SETTLE_MS = 1500; // TEMP-DEBUG: inflated to make the scroll gate observable in the lab
+// Approximate height of the sticky file header; used to stretch the loading
+// cover so it fills the slot's estimated height instead of leaving bare canvas.
+const DIFF_HEADER_ESTIMATE = 44;
 
 export interface DiffStreamFile {
   path: string;
@@ -32,6 +35,7 @@ interface DiffStreamItemProps {
   preparedDiff?: DiffViewerPreparedDiff | null;
   renderBadge: (status: string) => React.ReactNode;
   onInsertDiffReference?: (label: string, text: string, key?: string) => void;
+  onHunkGitAction?: (request: DiffHunkActionRequest) => Promise<void>;
   onReferenceCopied?: (key: string) => void;
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
@@ -62,6 +66,7 @@ export function DiffStreamItem({
   preparedDiff,
   renderBadge,
   onInsertDiffReference,
+  onHunkGitAction,
   onReferenceCopied,
   insertedReferenceKey,
   copiedReferenceKey,
@@ -171,8 +176,8 @@ export function DiffStreamItem({
         className="relative"
         data-diff-stream-body
         style={visible
-          ? { minHeight: contentReady ? 64 : measuredBodyHeight ?? 64 }
-          : { height: measuredBodyHeight ?? 64 }}
+          ? { minHeight: contentReady ? 64 : Math.max(measuredBodyHeight ?? 64, (estimatedHeight ?? 104) - DIFF_HEADER_ESTIMATE) }
+          : { height: Math.max(measuredBodyHeight ?? 64, (estimatedHeight ?? 104) - DIFF_HEADER_ESTIMATE) }}
       >
         {visible ? (
           <DiffViewer
@@ -202,6 +207,7 @@ export function DiffStreamItem({
               scheduleSettledNotification();
             }}
             onInsertDiffReference={onInsertDiffReference}
+            onHunkGitAction={onHunkGitAction}
             onReferenceCopied={onReferenceCopied}
             insertedReferenceKey={insertedReferenceKey}
             copiedReferenceKey={copiedReferenceKey}

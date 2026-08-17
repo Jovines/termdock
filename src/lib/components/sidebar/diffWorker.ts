@@ -1,6 +1,8 @@
+import './diffWorkerGlobalShim';
 import { parseDiff, tokenize, type FileData, type HunkData, type HunkTokens } from 'react-diff-view';
 import refractor from 'refractor';
 import { markSmartEdits, type SmartInlineDiffMode } from './inlineDiff';
+
 
 interface ParseRequest {
   id: number;

@@ -287,14 +287,6 @@ export function UniversalDiffReview({
     if (!selectedKey && fallbackKeyRef.current) onSelectRef.current(fallbackKeyRef.current);
   }, [selectedKey]);
 
-  if (items.length === 0) {
-    return (
-      <div className="rounded-lg bg-surface-2 px-3 py-6 text-center text-xs text-muted-foreground">
-        {emptyText}
-      </div>
-    );
-  }
-
   const wrapToggle = onToggleWrap ? (
     <button
       type="button"
@@ -344,6 +336,21 @@ export function UniversalDiffReview({
       </div>
     </div>
   );
+
+  if (items.length === 0) {
+    const emptyBox = (
+      <div className="rounded-lg bg-surface-2 px-3 py-6 text-center text-xs text-muted-foreground">
+        {emptyText}
+      </div>
+    );
+    if (!headerTitle && !onClose) return emptyBox;
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-2">
+        {renderHeader(null)}
+        {emptyBox}
+      </div>
+    );
+  }
 
   const mobileDetailHeader = onToggleWrap ? ({ slideToList }: { slideToList: () => void }) => (
     <div className="flex items-center justify-between gap-2">
