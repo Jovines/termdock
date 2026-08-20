@@ -55,4 +55,24 @@ describe('DiffFileNavigator text selection', () => {
 
     expect(onSelectFile).toHaveBeenCalledWith(file);
   });
+
+  it('exposes directory paths to a trailing action renderer in tree mode', () => {
+    const renderDirectoryTrailing = vi.fn(() => <button type="button">Reference directory</button>);
+    const group = { key: '/repo', root: '/repo', label: 'repo', files: [file] };
+    render(
+      <DiffFileNavigator
+        groups={[group]}
+        selectedKey={null}
+        mode="tree"
+        onSelectFile={() => undefined}
+        collapsedDirectoryKeys={new Set()}
+        onToggleDirectory={() => undefined}
+        renderLeading={() => null}
+        renderDirectoryTrailing={renderDirectoryTrailing}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Reference directory' })).toBeTruthy();
+    expect(renderDirectoryTrailing).toHaveBeenCalledWith('docs', group);
+  });
 });

@@ -38,6 +38,7 @@ interface DiffFileNavigatorProps {
   onSelectFile: (file: DiffNavigatorFile) => void;
   renderLeading: (file: DiffNavigatorFile) => ReactNode;
   renderTrailing?: (file: DiffNavigatorFile) => ReactNode;
+  renderDirectoryTrailing?: (directoryPath: string, group: DiffNavigatorGroup) => ReactNode;
   renderSubtitle?: (file: DiffNavigatorFile) => ReactNode;
   getFileTreePath?: (file: DiffNavigatorFile) => string;
 }
@@ -232,6 +233,7 @@ function renderDirectory(
   groupKey: string,
   props: DiffFileNavigatorProps,
   depth: number,
+  group: DiffNavigatorGroup,
 ): ReactNode {
   let displayDirectory = directory;
   const displayNames = [directory.name];
@@ -260,7 +262,14 @@ function renderDirectory(
         depth={depth}
         title={displayDirectory.path}
         leading={collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-        trailing={<span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground/60 transition group-hover:text-muted-foreground">{displayDirectory.childCount}</span>}
+        trailing={(
+          <span className="flex shrink-0 items-center gap-1">
+            <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground/60 transition group-hover:text-muted-foreground">
+              {displayDirectory.childCount}
+            </span>
+            {props.renderDirectoryTrailing?.(displayDirectory.path, group)}
+          </span>
+        )}
       >
         <span className="flex min-w-0 items-center gap-1">
           <Folder size={14} className="shrink-0 text-[color:var(--folder)]" />
@@ -269,7 +278,7 @@ function renderDirectory(
       </DiffTreeRowShell>
       {!collapsed && (
         <div className="space-y-px">
-          {displayDirectory.directories.map((child) => renderDirectory(child, groupKey, props, depth + 1))}
+          {displayDirectory.directories.map((child) => renderDirectory(child, groupKey, props, depth + 1, group))}
           {displayDirectory.files.length > 0 && (
             <div className="space-y-px">
               {displayDirectory.files.map((file) => renderFileRow(file, props, depth + 1))}
@@ -287,7 +296,7 @@ function renderTreeGroup(group: DiffNavigatorGroup, props: DiffFileNavigatorProp
   const directories = buildDiffFileTree(group.files, getTreePath);
   return (
     <div className="space-y-px">
-      {directories.map((directory) => renderDirectory(directory, group.key, props, 0))}
+      {directories.map((directory) => renderDirectory(directory, group.key, props, 0, group))}
       {rootFiles.length > 0 && (
         <div className="space-y-px">
           {rootFiles.map((file) => renderFileRow(file, props))}
