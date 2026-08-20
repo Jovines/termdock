@@ -7864,31 +7864,52 @@ export function RightSidebar(
     ) : null;
   }
 
-  function renderChangeNavigatorTrailing(file: GitChangedFile) {
-    const repoRoot = getChangedFileRepoRoot(file, rootPath);
-    const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
+  function renderChangeNavigatorReference(path: string, title: string) {
+    const absolutePath = resolveAbsoluteReferencePath(path, rootPath);
     const referenceKey = `path:${absolutePath}`;
     const referenceInserted = insertedReferenceKey === referenceKey;
     const referenceCopied = copiedReferenceKey === referenceKey;
+    const keepVisible = referenceInserted || referenceCopied;
+    return (
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          insertPathReference(absolutePath, referenceKey);
+        }}
+        {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
+        className={`inline-flex h-6 shrink-0 items-center justify-center overflow-hidden rounded-full text-[11px] font-semibold opacity-100 transition-[max-width,padding,opacity,transform,background-color,color] active:scale-95 ${
+          keepVisible
+            ? 'max-w-20 px-2'
+            : 'max-w-20 px-2 md:max-w-0 md:px-0 md:opacity-0 md:group-hover:max-w-20 md:group-hover:px-2 md:group-hover:opacity-100'
+        } ${keepVisible ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
+        title={title}
+      >
+        <span className="whitespace-nowrap">
+          {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
+        </span>
+      </button>
+    );
+  }
+
+  function renderChangeNavigatorTrailing(file: GitChangedFile) {
+    const repoRoot = getChangedFileRepoRoot(file, rootPath);
+    const absolutePath = file.absolutePath || (repoRoot ? `${repoRoot}/${file.path}` : file.path);
     const actions = buildGitActionButtons(file);
     const busyPath = getChangedFileBusyPath(file);
     return (
       <span className="flex shrink-0 items-center gap-1">
         <GitActionMenu actions={actions} running={runningGitAction} completed={completedGitAction?.path === busyPath ? completedGitAction : null} />
-        <button
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            insertPathReference(absolutePath, referenceKey);
-          }}
-          {...getReferenceLongPressHandlers(getPathReferenceText(absolutePath), referenceKey)}
-          className={`inline-flex h-6 shrink-0 items-center justify-center rounded-full px-2 text-[11px] font-semibold opacity-100 transition active:scale-95 md:opacity-0 md:group-hover:opacity-100 ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-          title={t('rightSidebar.insertThisFile')}
-        >
-          {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('rightSidebar.insertFileRef')}
-        </button>
+        {renderChangeNavigatorReference(absolutePath, t('rightSidebar.insertThisFile'))}
       </span>
     );
+  }
+
+  function renderChangeNavigatorDirectoryTrailing(directoryPath: string, group: DiffNavigatorGroup) {
+    const directoryRoot = group.root ?? rootPath;
+    if (!directoryRoot) return null;
+    const absolutePath = resolveAbsoluteReferencePath(directoryPath, directoryRoot);
+    return renderChangeNavigatorReference(absolutePath, t('fileTree.insertRefTitle'));
   }
 
   function renderDiffChangeModeToggle() {
@@ -10586,6 +10607,7 @@ export function RightSidebar(
                 const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
                 return file ? renderChangeNavigatorTrailing(file) : null;
               }}
+              renderDirectoryTrailing={renderChangeNavigatorDirectoryTrailing}
               renderSubtitle={(navigatorFile) => {
                 const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
                 return file ? renderChangeNavigatorSubtitle(file) : null;
@@ -10796,6 +10818,7 @@ export function RightSidebar(
                     const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
                     return file ? renderChangeNavigatorTrailing(file) : null;
                   }}
+                  renderDirectoryTrailing={renderChangeNavigatorDirectoryTrailing}
                   renderSubtitle={(navigatorFile) => {
                     const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
                     return file ? renderChangeNavigatorSubtitle(file) : null;
@@ -10921,6 +10944,7 @@ export function RightSidebar(
                     const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
                     return file ? renderChangeNavigatorTrailing(file) : null;
                   }}
+                  renderDirectoryTrailing={renderChangeNavigatorDirectoryTrailing}
                   renderSubtitle={(navigatorFile) => {
                     const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
                     return file ? renderChangeNavigatorSubtitle(file) : null;
