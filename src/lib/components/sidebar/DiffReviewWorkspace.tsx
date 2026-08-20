@@ -21,6 +21,7 @@ interface DiffReviewWorkspaceProps {
   onSelectFile: (file: DiffNavigatorFile) => void;
   renderLeading: (file: DiffNavigatorFile) => ReactNode;
   renderTrailing?: (file: DiffNavigatorFile) => ReactNode;
+  renderDirectoryTrailing?: (directoryPath: string, group: DiffNavigatorGroup) => ReactNode;
   renderSubtitle?: (file: DiffNavigatorFile) => ReactNode;
   detail: ReactNode;
   mobile: boolean;
@@ -106,6 +107,7 @@ export function DiffReviewWorkspace({
   onSelectFile,
   renderLeading,
   renderTrailing,
+  renderDirectoryTrailing,
   renderSubtitle,
   detail,
   mobile,
@@ -168,6 +170,7 @@ export function DiffReviewWorkspace({
               }}
               renderLeading={renderLeading}
               renderTrailing={renderTrailing}
+              renderDirectoryTrailing={renderDirectoryTrailing}
               renderSubtitle={renderSubtitle}
             />
               ) : emptyContent}

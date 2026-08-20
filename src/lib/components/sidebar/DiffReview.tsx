@@ -116,6 +116,7 @@ export interface DiffReviewProps {
   // --- Render slots (navigator side) ---
   renderLeading: (file: DiffNavigatorFile) => ReactNode;
   renderTrailing?: (file: DiffNavigatorFile) => ReactNode;
+  renderDirectoryTrailing?: (directoryPath: string, group: DiffNavigatorGroup) => ReactNode;
   renderSubtitle?: (file: DiffNavigatorFile) => ReactNode;
 
   // --- Render slots (stream side) ---
@@ -182,6 +183,7 @@ export function DiffReview({
   onToggleDirectory,
   renderLeading,
   renderTrailing,
+  renderDirectoryTrailing,
   renderSubtitle,
   renderStreamBadge,
   onInsertDiffReference,
@@ -779,6 +781,7 @@ export function DiffReview({
       onSelectFile={onSelectFile}
       renderLeading={renderLeading}
       renderTrailing={renderTrailing}
+      renderDirectoryTrailing={renderDirectoryTrailing}
       renderSubtitle={renderSubtitle}
       detail={detail}
       mobile={mobile}
