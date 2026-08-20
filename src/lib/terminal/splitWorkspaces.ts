@@ -112,7 +112,9 @@ export function combineSplitWorkspaces(
     id: primaryWorkspace?.id ?? `split:${primaryId}`,
     ...(primaryWorkspace?.name ? { name: primaryWorkspace.name } : {}),
     sessionIds,
-    layout: primaryWorkspace?.layout ?? DEFAULT_LAYOUT,
+    layout: sessionIds.length > 2 && (!primaryWorkspace || primaryWorkspace.layout === DEFAULT_LAYOUT)
+      ? 'grid'
+      : primaryWorkspace?.layout ?? DEFAULT_LAYOUT,
     ratios: equalRatios(sessionIds.length),
   };
   const consumedIds = new Set([primaryWorkspace?.id, secondaryWorkspace?.id].filter(Boolean));
@@ -122,6 +124,23 @@ export function combineSplitWorkspaces(
     : remaining.length;
   remaining.splice(Math.min(insertionIndex, remaining.length), 0, nextWorkspace);
   return remaining;
+}
+
+export function removeSessionFromSplitWorkspace(
+  workspaces: SplitWorkspace[],
+  sessionId: string | null | undefined,
+): SplitWorkspace[] {
+  const workspace = findSplitWorkspace(workspaces, sessionId);
+  if (!workspace || !sessionId) return workspaces;
+  if (workspace.sessionIds.length <= 2) {
+    return workspaces.filter((candidate) => candidate.id !== workspace.id);
+  }
+  const sessionIds = workspace.sessionIds.filter((id) => id !== sessionId);
+  return workspaces.map((candidate) => (
+    candidate.id === workspace.id
+      ? { ...candidate, sessionIds, ratios: equalRatios(sessionIds.length) }
+      : candidate
+  ));
 }
 
 export function removeSplitWorkspaceForSession(

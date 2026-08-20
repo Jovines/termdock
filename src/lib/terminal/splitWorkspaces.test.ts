@@ -4,6 +4,7 @@ import {
   findSplitWorkspace,
   normalizeSplitWorkspaces,
   pruneSplitWorkspaces,
+  removeSessionFromSplitWorkspace,
   reorderSplitWorkspaceSessions,
   renameSplitWorkspace,
 } from './splitWorkspaces';
@@ -56,5 +57,15 @@ describe('split workspaces', () => {
     const named = renameSplitWorkspace(workspaces, 'one', '  API work  ');
     expect(named[0]?.name).toBe('API work');
     expect(renameSplitWorkspace(named, 'one', '')[0]?.name).toBeUndefined();
+  });
+
+  it('uses a grid for larger workspaces and can remove one pane without dissolving the rest', () => {
+    let workspaces = combineSplitWorkspaces([], 'A', 'B');
+    workspaces = combineSplitWorkspaces(workspaces, 'A', 'C');
+    expect(workspaces[0]).toMatchObject({ sessionIds: ['A', 'B', 'C'], layout: 'grid' });
+
+    workspaces = removeSessionFromSplitWorkspace(workspaces, 'B');
+    expect(workspaces[0]?.sessionIds).toEqual(['A', 'C']);
+    expect(removeSessionFromSplitWorkspace(workspaces, 'A')).toEqual([]);
   });
 });
