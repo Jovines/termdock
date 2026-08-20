@@ -57,6 +57,10 @@ export type TranslationDictionary = {
     noMatchingSessions: string;
     toggleSearch: string;
     settings: string;
+    moreActions: string;
+    subscriptionQuota: string;
+    pinSidebar: string;
+    unpinSidebar: string;
     filterSessions: string;
     clearSearch: string;
     groupByFolder: string;
@@ -636,7 +640,9 @@ export type TranslationDictionary = {
     splitVertical: string;
     splitGrid: string;
     splitWorkspace: string;
+    splitWorkspaces: string;
     splitRename: string;
+    splitRemovePane: string;
     splitExistingGroups: string;
     splitAvailableSessions: string;
     splitOccupied: string;

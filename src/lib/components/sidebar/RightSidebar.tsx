@@ -70,6 +70,8 @@ interface RightSidebarProps {
   onClose: () => void;
   onOpen?: () => void;
   push?: boolean;
+  pinned?: boolean;
+  onTogglePinned?: () => void;
   rightSidebarFilePreviewOpen?: boolean;
   rightSidebarFilePreviewCloseSignal?: number;
   onOpenRightSidebarFilePreview?: () => void;
@@ -5773,6 +5775,8 @@ export function RightSidebar(
     onClose,
     onOpen,
     push,
+    pinned = false,
+    onTogglePinned,
     rightSidebarFilePreviewOpen = false,
     rightSidebarFilePreviewCloseSignal,
     onOpenRightSidebarFilePreview,
@@ -9958,6 +9962,7 @@ export function RightSidebar(
       onClose={onClose}
       onOpen={onOpen}
       push={push}
+      pinned={pinned}
     >
       {getReferenceLongPressHandlers.popoverNode}
       {/* Header — single compact row + tab bar. The header is laid out as a
@@ -10048,6 +10053,17 @@ export function RightSidebar(
               e.target.value = '';
             }}
           />
+          {onTogglePinned && (
+            <button
+              type="button"
+              onClick={onTogglePinned}
+              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${pinned ? 'bg-primary/15 text-primary hover:bg-primary/20' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+              aria-label={pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar')}
+              title={pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar')}
+            >
+              {pinned ? <RiPinOff size={14} /> : <RiPin size={14} />}
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}

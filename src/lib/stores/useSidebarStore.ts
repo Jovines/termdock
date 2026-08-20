@@ -16,6 +16,8 @@ const GROUP_BY_FOLDER_KEY = 'termdock-sidebar-group-by-folder';
 const COLLAPSED_GROUPS_KEY = 'termdock-sidebar-collapsed-folder-groups';
 const LEFT_PINNED_KEY = 'termdock-left-sidebar-pinned';
 const LEFT_SIDEBAR_WIDTH_KEY = 'termdock-left-sidebar-width';
+const RIGHT_PINNED_KEY = 'termdock-right-sidebar-pinned';
+const RIGHT_SIDEBAR_WIDTH_KEY = 'termdock-right-sidebar-width';
 
 export function readLeftPinnedPreference(): boolean {
   // Desktop is the multi-task surface: keep the session navigator visible on
@@ -56,15 +58,43 @@ function writeLeftSidebarWidth(width: number): void {
   } catch { /* best-effort */ }
 }
 
-function readGroupByFolder(): boolean {
-  if (typeof window === "undefined") return true;
+function readRightPinnedPreference(): boolean {
+  if (typeof window === 'undefined') return false;
   try {
-    const stored = window.localStorage.getItem(GROUP_BY_FOLDER_KEY);
-    if (stored === null) return true; // default: grouped
-    return stored === "1";
+    return window.localStorage.getItem(RIGHT_PINNED_KEY) === '1';
   } catch {
-    return true;
+    return false;
   }
+}
+
+function writeRightPinned(pinned: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(RIGHT_PINNED_KEY, pinned ? '1' : '0');
+  } catch { /* best-effort */ }
+}
+
+function readRightSidebarWidth(): number {
+  if (typeof window === 'undefined') return 600;
+  try {
+    const stored = window.localStorage.getItem(RIGHT_SIDEBAR_WIDTH_KEY);
+    if (!stored) return 600;
+    const parsed = parseInt(stored, 10);
+    return Number.isFinite(parsed) && parsed >= 320 && parsed <= 760 ? parsed : 600;
+  } catch {
+    return 600;
+  }
+}
+
+function writeRightSidebarWidth(width: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(RIGHT_SIDEBAR_WIDTH_KEY, String(width));
+  } catch { /* best-effort */ }
+}
+
+function readGroupByFolder(): boolean {
+  return true;
 }
 
 function writeGroupByFolder(enabled: boolean): void {
@@ -270,6 +300,8 @@ interface SidebarState {
   // Left sidebar pinned mode (desktop inline layout)
   leftPinned: boolean;
   leftSidebarWidth: number;
+  rightPinned: boolean;
+  rightSidebarWidth: number;
 
   // Right sidebar tab
   rightTab: RightSidebarTab;
@@ -322,6 +354,9 @@ interface SidebarState {
   toggleLeftPinned: () => void;
   setLeftPinned: (pinned: boolean) => void;
   setLeftSidebarWidth: (width: number) => void;
+  toggleRightPinned: () => void;
+  setRightPinned: (pinned: boolean) => void;
+  setRightSidebarWidth: (width: number) => void;
   openRight: () => void;
   closeRight: () => void;
   toggleRight: () => void;
@@ -357,6 +392,8 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   rightOpen: false,
   leftPinned: readLeftPinnedPreference(),
   leftSidebarWidth: readLeftSidebarWidth(),
+  rightPinned: readRightPinnedPreference(),
+  rightSidebarWidth: readRightSidebarWidth(),
   rightTab: 'files',
   rightSearchOpen: false,
   rootPath: null,
@@ -399,6 +436,24 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       if (s.leftSidebarWidth === clamped) return s;
       writeLeftSidebarWidth(clamped);
       return { leftSidebarWidth: clamped };
+    }),
+  toggleRightPinned: () =>
+    set((s) => {
+      const next = !s.rightPinned;
+      writeRightPinned(next);
+      return { rightPinned: next, rightOpen: true };
+    }),
+  setRightPinned: (pinned) =>
+    set(() => {
+      writeRightPinned(pinned);
+      return { rightPinned: pinned };
+    }),
+  setRightSidebarWidth: (width) =>
+    set((s) => {
+      const clamped = Math.min(Math.max(width, 320), 760);
+      if (s.rightSidebarWidth === clamped) return s;
+      writeRightSidebarWidth(clamped);
+      return { rightSidebarWidth: clamped };
     }),
   openRight: () => set({ rightOpen: true }),
   closeRight: () => set({ rightOpen: false, rightSearchOpen: false }),

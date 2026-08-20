@@ -5,7 +5,6 @@ import {
   Terminal as RiTerminalLine,
   LayoutGrid as RiLayoutGridLine,
   LoaderCircle as RiLoaderCircle,
-  FolderTree as RiFolderTreeLine,
   ChevronRight as RiChevronRightLine,
   Bell as RiBellLine,
   Pin as RiPushpinLine,
@@ -15,6 +14,7 @@ import {
   ChartBar as RiChartBarLine,
   Pencil as RiPencilLine,
   GripVertical as RiDragHandleLine,
+  MoreHorizontal as RiMoreHorizontal,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
@@ -58,6 +58,7 @@ interface LeftSidebarProps {
   onCloseSession: (sessionId: string, event: React.MouseEvent) => void;
   onSplitSession: (sessionId: string) => void;
   onCloseSplit: (sessionId: string) => void;
+  onRemoveFromSplit: (sessionId: string) => void;
   splitWorkspaces: SplitWorkspaceSummary[];
   onSetSplitLayout: (sessionId: string, layout: SplitLayout) => void;
   onReorderSplitWorkspace: (workspaceId: string, sessionIds: string[]) => void;
@@ -131,7 +132,7 @@ export function LeftSidebar(
   {
     isOpen, drawerWidthPx, onClose, onOpen,
     sessions, activeSessionId, sessionStates,
-    onNewSession, onCloseSession, onSplitSession, onCloseSplit, splitWorkspaces,
+    onNewSession, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, splitWorkspaces,
     onSetSplitLayout, onReorderSplitWorkspace, onRenameSplitWorkspace, onCombineSplitSessions,
     onReorderSessions, onSessionMenu, onOpenSettings, onOpenQuota,
     tmuxAvailable = true,
@@ -146,6 +147,8 @@ export function LeftSidebar(
   const [editingSplitWorkspaceId, setEditingSplitWorkspaceId] = useState<string | null>(null);
   const [expandedSplitWorkspaceIds, setExpandedSplitWorkspaceIds] = useState<Set<string>>(new Set());
   const [draggedSplitMember, setDraggedSplitMember] = useState<{ workspaceId: string; sessionId: string } | null>(null);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
@@ -164,24 +167,6 @@ export function LeftSidebar(
     () => new Map(sessions.map((session) => [session.id, session])),
     [sessions],
   );
-  const sameFolderSplitWorkspacesByKey = useMemo(() => {
-    const result = new Map<string, SplitWorkspaceSummary[]>();
-    for (const workspace of splitWorkspaces) {
-      const members = workspace.sessionIds.flatMap((id) => {
-        const session = sessionsById.get(id);
-        return session ? [session] : [];
-      });
-      if (members.length < 2) continue;
-      const folderKeys = new Set(members.map((session) => (
-        folderGroupKeyForCwd(sessionStates.get(session.id)?.cwd ?? null)
-      )));
-      if (folderKeys.size !== 1) continue;
-      const [folderKey] = folderKeys;
-      if (folderKey === undefined) continue;
-      result.set(folderKey, [...(result.get(folderKey) ?? []), workspace]);
-    }
-    return result;
-  }, [sessionsById, sessionStates, splitWorkspaces]);
   // Flat 模式中分屏 workspace 占一个顶层 item；目录模式由各目录自己决定是否合并。
   const visibleSessions = useMemo(
     () => sessions.filter((session) => !splitSessionIds.has(session.id)),
@@ -255,8 +240,24 @@ export function LeftSidebar(
   useEffect(() => {
     if (!isOpen) {
       setConfirmNewMode(null);
+      setHeaderMenuOpen(false);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!headerMenuOpen) return;
+    const closeMenu = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent && event.key !== 'Escape') return;
+      if (event instanceof MouseEvent && event.target instanceof Node && headerMenuRef.current?.contains(event.target)) return;
+      setHeaderMenuOpen(false);
+    };
+    window.addEventListener('mousedown', closeMenu);
+    window.addEventListener('keydown', closeMenu);
+    return () => {
+      window.removeEventListener('mousedown', closeMenu);
+      window.removeEventListener('keydown', closeMenu);
+    };
+  }, [headerMenuOpen]);
 
   useEffect(() => {
     setConfirmNewMode(null);
@@ -277,10 +278,6 @@ export function LeftSidebar(
     onNewSession({ mode });
     closeIfOverlay();
   };
-
-  const handleToggleGroupByFolder = useCallback(() => {
-    useSidebarStore.getState().toggleGroupByFolder();
-  }, []);
 
   const getSessionStatusBackground = useCallback((sessionId: string): string | null => {
     const state = sessionStates.get(sessionId);
@@ -403,11 +400,13 @@ export function LeftSidebar(
             )}
           </span>
         </button>
-        {!inSplitWorkspace && <button
+        <button
           type="button"
           onClick={(event) => {
             event.stopPropagation();
-            if (isSplit) {
+            if (inSplitWorkspace) {
+              onRemoveFromSplit(session.id);
+            } else if (isSplit) {
               onCloseSplit(session.id);
             } else {
               onSplitSession(session.id);
@@ -416,11 +415,11 @@ export function LeftSidebar(
           className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition hover:bg-primary/15 hover:text-primary active:scale-95 ${
             isSplit ? 'bg-primary/15 text-primary' : 'text-muted-foreground/70'
           }`}
-          aria-label={`${isSplit ? t('tab.splitClose') : t('tab.split')} ${displayName}`}
-          title={isSplit ? t('tab.splitClose') : t('tab.split')}
+          aria-label={`${inSplitWorkspace ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')} ${displayName}`}
+          title={inSplitWorkspace ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')}
         >
           <RiSplitLine size={13} />
-        </button>}
+        </button>
         <button
           type="button"
           onClick={(event) => {
@@ -435,17 +434,35 @@ export function LeftSidebar(
         </button>
       </>
     );
-  }, [activeSessionId, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onSessionMenu, t]);
+  }, [activeSessionId, splitSessionIds, sessionStates, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, onSessionMenu, t]);
 
-  // 分组模式下：按 cwd 把当前可见会话归组。
+  // 分屏工作区跟随主会话（第一块 pane）的目录展示。跨目录成员仍留在同一个
+  // 工作区条目内，不再被提升成脱离目录结构的独立一级区域。
   const folderGroups = useMemo(() => {
     if (!groupByFolder) return [];
-    return buildFolderGroups(
+    const baseGroups = buildFolderGroups(
       sessions,
       (session) => sessionStates.get(session.id)?.cwd ?? null,
       t('sidebar.ungrouped'),
     );
-  }, [groupByFolder, sessions, sessionStates, t]);
+    const anchoredWorkspaceIdsByFolder = new Map<string, Set<string>>();
+    for (const workspace of splitWorkspaces) {
+      const anchorId = workspace.sessionIds[0];
+      if (!anchorId) continue;
+      const folderKey = folderGroupKeyForCwd(sessionStates.get(anchorId)?.cwd ?? null);
+      const workspaceIds = anchoredWorkspaceIdsByFolder.get(folderKey) ?? new Set<string>();
+      workspace.sessionIds.forEach((id) => workspaceIds.add(id));
+      anchoredWorkspaceIdsByFolder.set(folderKey, workspaceIds);
+    }
+    return baseGroups.flatMap((group) => {
+      const allowedIds = new Set(
+        group.sessions.filter((session) => !splitSessionIds.has(session.id)).map((session) => session.id),
+      );
+      anchoredWorkspaceIdsByFolder.get(group.key)?.forEach((id) => allowedIds.add(id));
+      const groupedSessions = sessions.filter((session) => allowedIds.has(session.id));
+      return groupedSessions.length > 0 ? [{ ...group, sessions: groupedSessions }] : [];
+    });
+  }, [groupByFolder, sessions, sessionStates, splitSessionIds, splitWorkspaces, t]);
 
   const flatSidebarEntities = useMemo(
     () => buildSidebarEntities(sessions, splitWorkspaces, sessionsById),
@@ -500,28 +517,24 @@ export function LeftSidebar(
     const groupKey = result.source.droppableId.replace(/^group-sessions:/, '');
     const group = folderGroups.find((candidate) => candidate.key === groupKey);
     if (!group) return;
-    const entities = buildSidebarEntities(
-      group.sessions,
-      sameFolderSplitWorkspacesByKey.get(groupKey) ?? [],
-      sessionsById,
-    );
+    const entities = buildSidebarEntities(group.sessions, splitWorkspaces, sessionsById);
     if (result.combine) {
       handleEntityDragEnd(result, entities, groupKey);
       return;
     }
     if (!result.destination || result.destination.droppableId !== result.source.droppableId) return;
     handleEntityDragEnd(result, entities, groupKey);
-  }, [folderGroups, sameFolderSplitWorkspacesByKey, sessionsById, handleEntityDragEnd, onReorderSessions]);
+  }, [folderGroups, sessionsById, splitWorkspaces, handleEntityDragEnd, onReorderSessions]);
 
   // 「待处理」是桌面多任务的工作队列，独立于用户选择的会话组织方式。
   // 按 sessions 原始顺序排列。这样无论会话属于哪个组、组是否折叠，都能在
   // 顶部一眼看到并直接点入——动态紧急度独立于稳定的分组组织。
   const attentionSessions = useMemo(() => {
-    return visibleSessions.filter((session) => {
+    return sessions.filter((session) => {
       const ts = sessionStates.get(session.id);
       return ts?.agentStatus === 'waiting' || ts?.agentNeedsReview;
     });
-  }, [visibleSessions, sessionStates]);
+  }, [sessions, sessionStates]);
   const waitingAttentionSessions = useMemo(
     () => attentionSessions.filter((session) => sessionStates.get(session.id)?.agentStatus === 'waiting'),
     [attentionSessions, sessionStates],
@@ -892,45 +905,40 @@ export function LeftSidebar(
               )}
             </div>
           </div>
-          {/* 头部按钮组仅桌面显示(hidden sm:flex)。
-              移动端不要在头部加按钮——抽屉全高,顶部超出拇指热区;
-              移动端入口统一加在下方 footer 的 sm:hidden 快捷行里。 */}
-          <div className="hidden sm:flex shrink-0 items-center gap-1.5">
-          {onOpenQuota && (
-            <button
-              type="button"
-              onClick={onOpenQuota}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-              aria-label="Subscription Quota"
-              title="Subscription Quota"
-            >
-              <RiChartBarLine size={14} />
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-            aria-label={t('sidebar.settings')}
-            title={t('sidebar.settings')}
-          >
-            <RiSettings4Line size={14} />
-          </button>
-          {onTogglePinned && (
-            <button
-              type="button"
-              onClick={onTogglePinned}
-              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
-                pinned
-                  ? 'bg-primary/15 text-primary hover:bg-primary/20'
-                  : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-              }`}
-              aria-label={pinned ? 'Unpin sidebar' : 'Pin sidebar'}
-              title={pinned ? t('common.close') : 'Pin sidebar'}
-            >
-              {pinned ? <RiPinOffLine size={14} /> : <RiPushpinLine size={14} />}
-            </button>
-          )}
+          <div className="flex shrink-0 items-center gap-1">
+            <div ref={headerMenuRef} className="relative">
+              <button
+                type="button"
+                onClick={() => setHeaderMenuOpen((open) => !open)}
+                className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${headerMenuOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+                aria-expanded={headerMenuOpen}
+                aria-haspopup="menu"
+                aria-label={t('sidebar.moreActions')}
+                title={t('sidebar.moreActions')}
+              >
+                <RiMoreHorizontal size={15} />
+              </button>
+              {headerMenuOpen && (
+                <div role="menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+                  {onOpenQuota && (
+                    <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); onOpenQuota(); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
+                      <RiChartBarLine size={14} className="text-muted-foreground" />
+                      <span>{t('sidebar.subscriptionQuota')}</span>
+                    </button>
+                  )}
+                  <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); onOpenSettings(); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
+                    <RiSettings4Line size={14} className="text-muted-foreground" />
+                    <span>{t('sidebar.settings')}</span>
+                  </button>
+                  {onTogglePinned && (
+                    <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); onTogglePinned(); }} className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${pinned ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}>
+                      {pinned ? <RiPinOffLine size={14} /> : <RiPushpinLine size={14} className="text-muted-foreground" />}
+                      <span>{pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar')}</span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           {(!push || pinned) && (
             <button
               type="button"
@@ -942,23 +950,6 @@ export function LeftSidebar(
             </button>
           )}
           </div>
-        </div>
-
-        <div className="mt-2 flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={handleToggleGroupByFolder}
-            className={`inline-flex h-8 w-9 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
-              groupByFolder
-                ? 'bg-primary/15 text-primary'
-                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-            }`}
-            aria-pressed={groupByFolder}
-            aria-label={t('sidebar.groupByFolder')}
-            title={t('sidebar.groupByFolderTitle')}
-          >
-            <RiFolderTreeLine size={14} />
-          </button>
         </div>
       </div>
 
@@ -983,8 +974,7 @@ export function LeftSidebar(
                   <div ref={groupsProvided.innerRef} {...groupsProvided.droppableProps} className="space-y-1.5">
                     {folderGroups.map((group, groupIndex) => {
                       const collapsed = collapsedGroups.has(group.key);
-                      const combinedWorkspaces = sameFolderSplitWorkspacesByKey.get(group.key) ?? [];
-                      const folderEntities = buildSidebarEntities(group.sessions, combinedWorkspaces, sessionsById);
+                      const folderEntities = buildSidebarEntities(group.sessions, splitWorkspaces, sessionsById);
                       let groupRunning = 0;
                       let groupReview = 0;
                       let groupAdded = 0;
@@ -1108,41 +1098,6 @@ export function LeftSidebar(
 
       {/* Footer — split new-session button */}
       <div className="shrink-0 border-t border-border/15 p-2">
-        {/*
-          移动端快捷入口行(约定:移动端按钮都加在这里)。
-
-          背景:手机单手握持时拇指热区在下半屏偏右,抽屉又是全高的,
-          头部按钮根本够不到。因此:
-          - 移动端专用入口一律加在这一行(sm:hidden),不要加进头部,
-            也不要头/尾各放一份重复;
-          - 按钮样式沿用现有模式:h-9 flex-1 rounded-lg bg-surface-2
-            text-muted-foreground active:scale-95,图标 size={15};
-          - 「关闭」故意不放:点遮罩或边缘滑动即可关抽屉(见 Sidebar.tsx),
-            放按钮只会占位置。
-          桌面端入口在头部按钮组(hidden sm:flex),两处互不重复。
-        */}
-        <div className="flex items-center gap-1.5 pb-1.5 sm:hidden">
-          {onOpenQuota && (
-            <button
-              type="button"
-              onClick={onOpenQuota}
-              className="inline-flex h-9 flex-1 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-              aria-label="Subscription Quota"
-              title="Subscription Quota"
-            >
-              <RiChartBarLine size={15} />
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            className="inline-flex h-9 flex-1 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-            aria-label={t('sidebar.settings')}
-            title={t('sidebar.settings')}
-          >
-            <RiSettings4Line size={15} />
-          </button>
-        </div>
         <div className="flex items-stretch gap-1.5">
           <button
             type="button"

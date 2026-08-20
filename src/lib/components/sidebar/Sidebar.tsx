@@ -32,6 +32,7 @@ interface SidebarProps {
    * terminal column from resizing when toggling. The prop is accepted but ignored.
    */
   push?: boolean;
+  pinned?: boolean;
 }
 
 const EDGE_ZONE_WIDTH = 15;
@@ -102,7 +103,7 @@ function dbg(...args: unknown[]): void {
  *  - `prefers-reduced-motion` replaces the slide with a gentle cross-fade.
  */
 export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Sidebar(
-  { side, isOpen, drawerWidthPx, onClose, onOpen, children },
+  { side, isOpen, drawerWidthPx, onClose, onOpen, children, pinned = false },
   forwardedRef,
 ) {
   const { t } = useI18n();
@@ -651,6 +652,19 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       onOpenRef.current?.();
     }
   }, []);
+
+  if (pinned) {
+    return (
+      <aside
+        ref={setPanelRef}
+        data-sidebar={side}
+        data-sidebar-pinned="true"
+        className="relative flex h-full min-h-0 w-full flex-col app-chrome-bg"
+      >
+        {children}
+      </aside>
+    );
+  }
 
   // ── Overlay mode (used on both desktop & mobile) — fixed, draggable ──
   return (

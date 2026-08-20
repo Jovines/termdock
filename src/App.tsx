@@ -588,6 +588,8 @@ function App() {
   const sidebarRightOpen = useSidebarStore((s) => s.rightOpen);
   const sidebarLeftPinned = useSidebarStore((s) => s.leftPinned);
   const sidebarLeftWidth = useSidebarStore((s) => s.leftSidebarWidth);
+  const sidebarRightPinned = useSidebarStore((s) => s.rightPinned);
+  const sidebarRightWidth = useSidebarStore((s) => s.rightSidebarWidth);
   const sidebarRootPath = useSidebarStore((s) => s.rootPath);
   const sidebarSelectedFilePath = useSidebarStore((s) => s.selectedFilePath);
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
@@ -595,6 +597,9 @@ function App() {
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
   const [isDesktopViewport, setIsDesktopViewport] = useState(() => (
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1024px)').matches
+  ));
+  const [isWideDesktopViewport, setIsWideDesktopViewport] = useState(() => (
+    typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1440px)').matches
   ));
   // Landscape orientation. A phone in landscape (typically 667-896px wide)
   // has plenty of room for a wide workbench-style drawer, even though
@@ -648,6 +653,15 @@ function App() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    const media = window.matchMedia('(min-width: 1440px)');
+    const updateViewportMode = () => setIsWideDesktopViewport(media.matches);
+    updateViewportMode();
+    media.addEventListener('change', updateViewportMode);
+    return () => media.removeEventListener('change', updateViewportMode);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
     const media = window.matchMedia('(orientation: landscape)');
     const updateOrientation = () => setIsLandscape(media.matches);
     updateOrientation();
@@ -688,12 +702,13 @@ function App() {
   // device's *short* side is < 1024px so the regular desktop check
   // returns false — the orientation check is what tells us there's
   // enough horizontal real estate for a wide drawer.
-  const useDesktopDrawer = isDesktopViewport || isLandscape;
+  const useDesktopDrawer = isWideDesktopViewport;
+  const useDesktopLeftDrawer = isDesktopViewport || isLandscape;
   const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
   const rightDrawerWidthPx = useDesktopDrawer
     ? Math.min(Math.max(viewportWidth * 0.9, 360), viewportWidth - 56)
     : Math.min(viewportWidth * 0.92, 420);
-  const leftDrawerWidthPx = useDesktopDrawer
+  const leftDrawerWidthPx = useDesktopLeftDrawer
     ? Math.min(Math.max(viewportWidth * 0.22, 280), 340)
     : Math.min(viewportWidth * 0.86, 380);
 
@@ -742,9 +757,9 @@ function App() {
           ? 'right-sidebar-file-preview'
           : isDrawerOpen
             ? 'settings'
-            : sidebarRightOpen
+            : sidebarRightOpen && !(sidebarRightPinned && isWideDesktopViewport)
               ? 'right-sidebar'
-              : sidebarLeftOpen
+              : sidebarLeftOpen && !(sidebarLeftPinned && isDesktopViewport)
                 ? 'left-sidebar'
                 : null;
   const activeHistoryOverlayRef = React.useRef<HistoryOverlay | null>(activeHistoryOverlay);
@@ -872,6 +887,23 @@ function App() {
     store.closeLeft();
   }, []);
 
+  const handleToggleRightPinned = useCallback(() => {
+    const store = useSidebarStore.getState();
+    if (store.rightPinned) {
+      store.setRightPinned(false);
+      store.openRight();
+    } else {
+      store.setRightPinned(true);
+      store.openRight();
+    }
+  }, []);
+
+  const handleClosePinnedRight = useCallback(() => {
+    const store = useSidebarStore.getState();
+    store.setRightPinned(false);
+    store.closeRight();
+  }, []);
+
   // Resize handle for pinned sidebar
   const resizeStartXRef = useRef<number>(0);
   const resizeStartWidthRef = useRef<number>(0);
@@ -908,7 +940,48 @@ function App() {
     window.addEventListener('mouseup', handleMouseUp);
   }, []);
 
+  const rightResizeStartXRef = useRef<number>(0);
+  const rightResizeStartWidthRef = useRef<number>(0);
+  const rightResizeRafRef = useRef<number | null>(null);
+
+  const handleRightResizeMouseDown = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    rightResizeStartXRef.current = event.clientX;
+    rightResizeStartWidthRef.current = useSidebarStore.getState().rightSidebarWidth;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (rightResizeRafRef.current !== null) return;
+      rightResizeRafRef.current = requestAnimationFrame(() => {
+        rightResizeRafRef.current = null;
+        const delta = rightResizeStartXRef.current - moveEvent.clientX;
+        useSidebarStore.getState().setRightSidebarWidth(rightResizeStartWidthRef.current + delta);
+      });
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      if (rightResizeRafRef.current !== null) {
+        cancelAnimationFrame(rightResizeRafRef.current);
+        rightResizeRafRef.current = null;
+      }
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  }, []);
+
   const handleToggleRightSidebar = useCallback(() => {
+    const store = useSidebarStore.getState();
+    if (store.rightPinned) {
+      store.setRightPinned(false);
+      store.closeRight();
+      return;
+    }
     if (sidebarRightOpen) {
       requestCloseHistoryOverlay('right-sidebar');
       return;
@@ -1417,20 +1490,16 @@ function App() {
         handleCloseSettings();
         return;
       }
-      if (sidebarRightOpen) {
+      const rightPinnedInline = sidebarRightPinned && isWideDesktopViewport;
+      if (sidebarRightOpen && !rightPinnedInline) {
         event.preventDefault();
         requestCloseHistoryOverlay('right-sidebar');
         return;
       }
-      if (sidebarLeftOpen) {
+      const leftPinnedInline = sidebarLeftPinned && isDesktopViewport;
+      if (sidebarLeftOpen && !leftPinnedInline) {
         event.preventDefault();
-        // When pinned (inline layout), ESC unpins the sidebar; side panels
-        // in a split layout aren't "overlays" you dismiss with Esc.
-        if (sidebarLeftPinned) {
-          handleClosePinnedLeft();
-        } else {
-          requestCloseHistoryOverlay('left-sidebar');
-        }
+        requestCloseHistoryOverlay('left-sidebar');
       }
     };
     document.addEventListener('keydown', handler);
@@ -1443,10 +1512,12 @@ function App() {
     closeTabMenu,
     isDrawerOpen,
     sidebarRightOpen,
+    sidebarRightPinned,
     sidebarLeftOpen,
     sidebarLeftPinned,
+    isDesktopViewport,
+    isWideDesktopViewport,
     handleCloseSettings,
-    handleClosePinnedLeft,
     requestCloseHistoryOverlay,
   ]);
 
@@ -2420,6 +2491,7 @@ function App() {
   };
 
   const showPinnedLeft = sidebarLeftPinned && isDesktopViewport;
+  const showPinnedRight = sidebarRightPinned && isWideDesktopViewport;
 
   // Pin mode: compute active session display info and agent state for the
   // centered top-bar title + background tint.
@@ -2701,7 +2773,7 @@ function App() {
                 {activeSessionPositionLabel}
               </span>
               )}
-              <button
+              {!showPinnedRight && <button
                 type="button"
                 onClick={handleToggleRightSidebar}
                 className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted-foreground ring-1 ring-border/10 transition hover:bg-surface-elevated hover:text-foreground sm:h-8 sm:w-8"
@@ -2709,7 +2781,7 @@ function App() {
                 title={t('tab.explorerTitle')}
               >
                 <RiPanelRightLine size={14} />
-              </button>
+              </button>}
             </div>
           </div>
 
@@ -4444,6 +4516,7 @@ function App() {
         onCloseSession={handleSidebarCloseSession}
         onSplitSession={dispatchOpenSplitChooser}
         onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}
+        onRemoveFromSplit={(sessionId) => window.dispatchEvent(new CustomEvent('remove-terminal-split-pane', { detail: sessionId }))}
         splitWorkspaces={splitWorkspaces}
         onSetSplitLayout={dispatchSetSplitLayout}
         onReorderSplitWorkspace={dispatchReorderSplitWorkspace}
@@ -4457,7 +4530,7 @@ function App() {
         defaultSessionMode={newSessionMode}
         onTogglePinned={isDesktopViewport ? handleToggleLeftPinned : undefined}
       />)}
-      <RightSidebar
+      {!showPinnedRight && <RightSidebar
         isOpen={sidebarRightOpen}
         drawerWidthPx={rightDrawerWidthPx}
         onClose={() => requestCloseHistoryOverlay('right-sidebar')}
@@ -4478,7 +4551,8 @@ function App() {
         markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
         onOpenMarkdownImageLightbox={handleOpenMarkdownImageLightbox}
         onCloseMarkdownImageLightbox={handleCloseMarkdownImageLightbox}
-      />
+        onTogglePinned={isWideDesktopViewport ? handleToggleRightPinned : undefined}
+      />}
 
       {showBackGuardHint && !isIOS && (
         <button
@@ -4524,9 +4598,10 @@ function App() {
     </div>
   );
 
-  if (showPinnedLeft) {
+  if (showPinnedLeft || showPinnedRight) {
     return (
       <div className="w-screen h-full flex flex-row">
+        {showPinnedLeft && <>
         <div style={{ width: sidebarLeftWidth, flexShrink: 0, height: '100%' }}>
           <LeftSidebar
             isOpen={sidebarLeftOpen}
@@ -4540,6 +4615,7 @@ function App() {
             onCloseSession={handleSidebarCloseSession}
             onSplitSession={dispatchOpenSplitChooser}
             onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}
+            onRemoveFromSplit={(sessionId) => window.dispatchEvent(new CustomEvent('remove-terminal-split-pane', { detail: sessionId }))}
             splitWorkspaces={splitWorkspaces}
             onSetSplitLayout={dispatchSetSplitLayout}
             onReorderSplitWorkspace={dispatchReorderSplitWorkspace}
@@ -4561,9 +4637,44 @@ function App() {
           className="shrink-0 w-[5px] h-full cursor-col-resize bg-border/10 hover:bg-primary/30 active:bg-primary/50 transition-colors"
           onMouseDown={handleResizeMouseDown}
         />
+        </>}
         <div className="flex-1 min-w-0 h-full overflow-hidden">
           {body}
         </div>
+        {showPinnedRight && <>
+          <div
+            role="separator"
+            tabIndex={-1}
+            className="h-full w-[5px] shrink-0 cursor-col-resize bg-border/10 transition-colors hover:bg-primary/30 active:bg-primary/50"
+            onMouseDown={handleRightResizeMouseDown}
+          />
+          <div style={{ width: sidebarRightWidth, flexShrink: 0, height: '100%' }}>
+            <RightSidebar
+              isOpen
+              drawerWidthPx={sidebarRightWidth}
+              onClose={handleClosePinnedRight}
+              onOpen={handleOpenRightSidebar}
+              pinned
+              onTogglePinned={handleToggleRightPinned}
+              rightSidebarFilePreviewOpen={rightSidebarFilePreviewOpen}
+              rightSidebarFilePreviewCloseSignal={rightSidebarFilePreviewCloseSignal}
+              onOpenRightSidebarFilePreview={handleOpenRightSidebarFilePreview}
+              onCloseRightSidebarFilePreview={handleCloseRightSidebarFilePreview}
+              rightSidebarRepoPickerOpen={rightSidebarRepoPickerOpen}
+              rightSidebarRepoPickerCloseSignal={rightSidebarRepoPickerCloseSignal}
+              onOpenRightSidebarRepoPicker={handleOpenRightSidebarRepoPicker}
+              onCloseRightSidebarRepoPicker={handleCloseRightSidebarRepoPicker}
+              markdownOutlineOpen={markdownOutlineOpen}
+              markdownOutlineCloseSignal={markdownOutlineCloseSignal}
+              onOpenMarkdownOutline={handleOpenMarkdownOutline}
+              onCloseMarkdownOutline={handleCloseMarkdownOutline}
+              markdownImageLightboxOpen={markdownImageLightboxOpen}
+              markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
+              onOpenMarkdownImageLightbox={handleOpenMarkdownImageLightbox}
+              onCloseMarkdownImageLightbox={handleCloseMarkdownImageLightbox}
+            />
+          </div>
+        </>}
       </div>
     );
   }
