@@ -21,6 +21,7 @@ import {
   findSplitWorkspace,
   normalizeSplitWorkspaces,
   pruneSplitWorkspaces,
+  removeSessionFromSplitWorkspace,
   removeSplitWorkspaceForSession,
   reorderSplitWorkspaceSessions,
   renameSplitWorkspace,
@@ -1178,6 +1179,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
   }, [activateSplitPane]);
 
+  const removeSplitPane = useCallback((sessionId: string) => {
+    setSplitWorkspaces((current) => removeSessionFromSplitWorkspace(current, sessionId));
+    activateSplitPane(sessionId, { preserveMobileKeyboard: false });
+  }, [activateSplitPane]);
+
   const startSplitResize = useCallback((
     event: React.PointerEvent<HTMLButtonElement>,
     container: HTMLDivElement,
@@ -1418,6 +1424,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       closeSplitWorkspace(requestedSessionId ?? activeSessionIdRef.current ?? undefined);
     };
 
+    const handleRemoveSplitPaneEvent = (event: Event) => {
+      const sessionId = (event as CustomEvent<string>).detail;
+      if (sessionId) removeSplitPane(sessionId);
+    };
+
     const handleSetSplitDirectionEvent = (event: Event) => {
       const detail = (event as CustomEvent<SplitLayout | { sessionId?: string; layout?: SplitLayout }>).detail;
       const layout = typeof detail === 'string' ? detail : detail?.layout;
@@ -1507,6 +1518,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     window.addEventListener('focus-active-terminal-session', handleFocusActiveSessionEvent);
     window.addEventListener('open-terminal-split-chooser', handleOpenSplitChooserEvent);
     window.addEventListener('close-terminal-split', handleCloseSplitEvent);
+    window.addEventListener('remove-terminal-split-pane', handleRemoveSplitPaneEvent);
     window.addEventListener('set-terminal-split-direction', handleSetSplitDirectionEvent);
     window.addEventListener('cycle-terminal-session', handleCycleSessionEvent);
     window.addEventListener('close-terminal-session', handleCloseSessionEvent);
@@ -1524,6 +1536,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('focus-active-terminal-session', handleFocusActiveSessionEvent);
       window.removeEventListener('open-terminal-split-chooser', handleOpenSplitChooserEvent);
       window.removeEventListener('close-terminal-split', handleCloseSplitEvent);
+      window.removeEventListener('remove-terminal-split-pane', handleRemoveSplitPaneEvent);
       window.removeEventListener('set-terminal-split-direction', handleSetSplitDirectionEvent);
       window.removeEventListener('cycle-terminal-session', handleCycleSessionEvent);
       window.removeEventListener('close-terminal-session', handleCloseSessionEvent);
@@ -1535,7 +1548,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       window.removeEventListener('rename-terminal-split-workspace', handleRenameSplitWorkspaceEvent);
       window.removeEventListener('combine-terminal-split-sessions', handleCombineSplitSessionsEvent);
     };
-  }, [activateSplitPane, handleNewSession, handleSwitchSession, openSplitChooser, closeSplitWorkspace, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleResetSessionName, handleReorderSessions]);
+  }, [activateSplitPane, handleNewSession, handleSwitchSession, openSplitChooser, closeSplitWorkspace, removeSplitPane, handleCloseSession, handleCloseSessionByBackendId, handleRenameSession, handleResetSessionName, handleReorderSessions]);
 
   useEffect(() => {
     if (!activeSplitWorkspace || isMobileLayout) return;
