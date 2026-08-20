@@ -2359,15 +2359,26 @@ async function getBranchDiffPayload(
     await execGit(['rev-parse', '--verify', '--quiet', compareHead], repoRoot, signal);
   }
   const includeWorkingTree = includeUncommitted && !hasRequestedHead;
+  // Diff merge-base → working tree in a single pass, so committed and
+  // uncommitted changes to the same file merge into one coherent diff
+  // instead of two overlapping per-file diffs concatenated together.
+  // Falls back to the concatenated form when there is no merge base.
+  const mergeBase = includeWorkingTree
+    ? await execGit(['merge-base', baseRef, compareHead], repoRoot, signal)
+      .then((result) => result.trim() || null)
+      .catch(() => null)
+    : null;
+  const diffBase = mergeBase ?? `${baseRef}...${compareHead}`;
+  const fetchSeparateWorktreeDiff = includeWorkingTree && !mergeBase;
   const [currentBranch, headRef, statResult, nameResult, workingNameResult, logResult, diffResult, workingDiffResult] = await Promise.all([
     execGit(['branch', '--show-current'], repoRoot, signal).catch(emptyOnNonAbortGitError),
     execGit(['rev-parse', '--short=12', compareHead], repoRoot, signal).catch(emptyOnNonAbortGitError),
-    execGitLimited(['diff', `${baseRef}...${compareHead}`, '--stat'], repoRoot, MAX_BRANCH_DIFF_STAT_BYTES, false, signal),
-    execGitLimited(['diff', '--name-only', `${baseRef}...${compareHead}`], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
-    includeWorkingTree ? execGitLimited(['diff', '--name-only', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
+    execGitLimited(['diff', diffBase, '--stat'], repoRoot, MAX_BRANCH_DIFF_STAT_BYTES, false, signal),
+    execGitLimited(['diff', '--name-only', diffBase], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal),
+    fetchSeparateWorktreeDiff ? execGitLimited(['diff', '--name-only', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_NAME_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
     execGitLimited(['log', `${baseRef}..${compareHead}`, '--oneline', '--no-merges'], repoRoot, MAX_BRANCH_DIFF_LOG_BYTES, false, signal),
-    execGitLimited(['diff', `${baseRef}...${compareHead}`], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
-    includeWorkingTree ? execGitLimited(['diff', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
+    execGitLimited(['diff', diffBase], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal),
+    fetchSeparateWorktreeDiff ? execGitLimited(['diff', 'HEAD'], repoRoot, MAX_BRANCH_DIFF_BYTES, false, signal) : Promise.resolve({ stdout: '', truncated: false }),
   ]);
   const trackedDiff = [diffResult.stdout, workingDiffResult.stdout].filter(Boolean).join('\n');
   const untrackedResult = includeWorkingTree
