@@ -70,10 +70,14 @@ Overlay 模式不触发是因为 `containerRect.left` ≈ 0，双重叠加的效
 
 ## 修复
 
-`TerminalViewport.tsx:3910-3922`：桌面端 IME 覆盖层 textarea 的坐标改为
-直接使用 `imeAnchor.x` / `imeAnchor.y`（terminal 内部坐标），不再叠加
-`containerRect.left/top`（viewport 坐标）。imeAnchor 的坐标天然以 terminal
-元素为基准，在 Swiper wrapper 的 containing block 下直接可用。
+桌面端 IME 覆盖层 textarea 的坐标不能直接混用 viewport 坐标和 terminal
+内部坐标。现在先找到实际建立 fixed coordinate system 的 transform/contain 祖先，
+再用 `terminalRect - containingBlockRect + cursorLocalOffset` 换算：
+
+- pinned sidebar 的横向位移同时存在于两个 rect 中，会自然抵消，不再双倍右移；
+- tab/chrome 到 terminal 画布之间的纵向距离会被保留，候选窗锚点不再固定落在
+  光标上方；
+- 没有 fixed containing block 时回退为标准 viewport 坐标。
 
 ## 待排查方向
 

@@ -25,6 +25,8 @@ import {
   orderSelectionEndpoints,
   type SelectionCell,
 } from '../../terminal/selectionHandles';
+import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal/imeAnchor';
+import { buildBracketedPastePayload } from '../../terminal/bracketedPaste';
 import {
   TERMINAL_FALLBACK_LIGATURES,
   TERMINAL_LIGATURE_FEATURE_SETTINGS,
@@ -721,6 +723,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
+    const imeFixedContainingBlockRef = React.useRef<HTMLElement | null | undefined>(undefined);
     const desktopMouseFocusTimerRef = React.useRef<number | null>(null);
     const imageAddonLoadedRef = React.useRef(false);
     const remainderPxRef = React.useRef(0);
@@ -1401,7 +1404,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
      * 2. clearSelection()：与 xterm 默认"输入即清选区"行为一致
      * 3. 带 skipModifierTransform 让 TerminalView 不再叠加移动端修饰符工具栏的状态
      */
-    const sendTerminalSeq = React.useCallback((seq: string, textarea?: HTMLTextAreaElement | null, options?: { consumeModifier?: boolean; paste?: boolean }) => {
+    const sendTerminalSeq = React.useCallback((seq: string, textarea?: HTMLTextAreaElement | null, options?: { consumeModifier?: boolean; paste?: boolean; submitAfterPaste?: boolean }) => {
       if (!seq) return;
       clearPendingTextareaSync();
       const target = textarea ?? hiddenInputRef.current;
@@ -1418,14 +1421,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       // 到同一段 payload 中，作为一条 WS 消息发送。避免原先 terminal.paste()
       // + 单独 \r 两条消息的时序竞争，防止 paste 内容已插入但回车丢失
       // 导致的「有时能发送，有时不能」。
-      if (options?.paste && seq.includes('\n')) {
-        const hasCR = seq.endsWith('\r');
-        const content = hasCR ? seq.slice(0, -1) : seq;
-        // 与 xterm paste() 内部逻辑对齐：换行归一化 + ESC 转义 + 括号包裹
-        const normalized = content.replace(/\r?\n/g, '\r');
-        const escaped = normalized.replace(/\x1b/g, '␛');
-        const wrapped = `\x1b[200~${escaped}\x1b[201~`;
-        const payload = hasCR ? `${wrapped}\r` : wrapped;
+      if (options?.paste && /[\r\n]/.test(seq)) {
+        // 显式“粘贴并发送”动作保留末尾 CR 作为 block 外提交；系统剪贴板
+        // 粘贴则把所有换行都留在 bracketed-paste 内，避免 TUI 连发多条消息。
+        const submitAfterPaste = options.submitAfterPaste ?? seq.endsWith('\r');
+        const payload = buildBracketedPastePayload(seq, submitAfterPaste);
         inputHandlerRef.current(payload, { skipModifierTransform: true, consumeModifier: options?.consumeModifier });
         return;
       }
@@ -1436,7 +1436,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pasteTextIntoTerminal = React.useCallback((rawText: string, textarea?: HTMLTextAreaElement | null): boolean => {
       const cleaned = sanitizeTerminalInput(rawText);
       if (!cleaned) return false;
-      sendTerminalSeq(cleaned, textarea);
+      sendTerminalSeq(cleaned, textarea, { paste: true, submitAfterPaste: false });
       dismissMobileCopyPopover();
       return true;
     }, [dismissMobileCopyPopover, sendTerminalSeq]);
@@ -1479,28 +1479,34 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const term = terminalRef.current;
       if (!term || !term.element) return;
 
-      let cellW = 8;
-      let cellH = 17;
-      try {
-        const rowsEl = term.element.querySelector('.xterm-rows') as HTMLElement | null;
-        const firstRow = rowsEl?.firstElementChild as HTMLElement | null;
-        if (firstRow && firstRow.offsetHeight > 0) {
-          cellH = firstRow.offsetHeight;
-        }
-        if (rowsEl && rowsEl.offsetWidth > 0 && term.cols > 0) {
-          cellW = rowsEl.offsetWidth / term.cols;
-        }
-      } catch { /* fall through to fallback */ }
+      // 与选区 handle 共用 xterm 的真实网格几何。不能用 firstRow.offsetHeight：
+      // 它会把小数行高取整，误差乘以 cursorY 后表现为“顶部准、底部向下漂”。
+      // 原点也必须取 .xterm-screen，而不是可能带底部 fit 留白的外层容器。
+      const grid = getTerminalGridMetrics(term);
+      const screenElement = term.element.querySelector('.xterm-screen') as HTMLElement | null;
+      const anchorElement = screenElement ?? term.element;
+      const anchorRect = anchorElement.getBoundingClientRect();
+      const cellW = grid?.cellW
+        ?? (anchorRect.width > 0 && term.cols > 0 ? anchorRect.width / term.cols : 8);
+      const cellH = grid?.cellH
+        ?? (anchorRect.height > 0 && term.rows > 0 ? anchorRect.height / term.rows : 17);
 
-      if (cellW <= 0 || cellH <= 0) {
-        const rect = term.element.getBoundingClientRect();
-        if (rect.width > 0 && term.cols > 0) cellW = rect.width / term.cols;
-        if (rect.height > 0 && term.rows > 0) cellH = rect.height / term.rows;
+      const input = hiddenInputRef.current;
+      let containingBlock = imeFixedContainingBlockRef.current;
+      if (input && (
+        containingBlock === undefined
+        || (containingBlock !== null && (!containingBlock.isConnected || !containingBlock.contains(input)))
+      )) {
+        containingBlock = findFixedContainingBlock(input);
+        imeFixedContainingBlockRef.current = containingBlock;
       }
 
       const buf = term.buffer.active;
-      const x = Math.round(buf.cursorX * cellW);
-      const y = Math.round(buf.cursorY * cellH);
+      const localX = buf.cursorX * cellW;
+      const localY = buf.cursorY * cellH;
+      const position = resolveImeAnchorOffset(anchorElement, containingBlock ?? null, localX, localY);
+      const x = Math.round(position.x);
+      const y = Math.round(position.y);
 
       setImeAnchor((prev) => {
         if (
@@ -4266,10 +4272,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                       // （见 swiper-bundle.min.css），按 CSS Transforms 规范这会
                       // 创建一个新的 containing block，使 position:fixed 的
                       // left/top 不再相对于 viewport，而是相对于 swiper-wrapper。
-                      // 若叠加 containerRect.left（视口坐标），sidebar pin 后
-                      // 该值 ≈ 305px，会被 containing block 再偏移一次，表现为
-                      // IME 候选框"双倍右移"。imeAnchor 的 x/y 本身就是 terminal
-                      // 内部坐标，在 containing block 坐标系下直接使用即可。
+                      // updateImeAnchor 会用真实 DOM rect 换算 terminal 原点相对
+                      // containing block 的偏移：横向不会重复叠加 pinned sidebar，
+                      // 纵向也会包含 tab/chrome 到终端画布之间的实际距离。
                       // 详见 docs/pinned-sidebar-ime-offset.md
                       const viewportLeft = imeAnchor.x;
                       const viewportTop = imeAnchor.y;
@@ -4288,20 +4293,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                         height: Math.max(1, Math.round(imeAnchor.cellH)),
                       };
                       if (!imeComposition.active) return base;
-                      // composition 态：textarea 显形为「带下划线、不透明
-                      // 背景遮住 xterm」的可见 overlay；候选窗紧贴它出现。
+                      // composition 态仍让 textarea 占据真实几何，供系统 IME
+                      // 定位；但 textarea.value 含此前输入，必须保持完全透明。
+                      // 当前 composition 文本由下方独立视觉层渲染，否则 textarea
+                      // 横向滚动时会把旧 value 的尾巴从左侧逐渐带出来。
                       const metrics = getImeOverlayMetrics(imeComposition.text);
                       return {
                         ...base,
                         opacity: 1,
-                        color: theme.foreground,
-                        background: theme.background,
-                        caretColor: theme.cursor || theme.foreground,
-                        textDecorationLine: 'underline',
-                        textDecorationStyle: 'solid',
-                        textDecorationColor: theme.foreground,
+                        color: 'transparent',
+                        WebkitTextFillColor: 'transparent',
+                        background: 'transparent',
+                        transition: 'none',
+                        caretColor: 'transparent',
+                        textDecorationColor: 'transparent',
                         wordBreak: 'break-all',
-                        zIndex: 21,
+                        zIndex: 20,
                         width: metrics.width,
                         height: metrics.height,
                         whiteSpace: metrics.whiteSpace,
@@ -4679,6 +4686,45 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 releaseImeAnchor();
               }}
             />
+
+            {imeComposition.active && (() => {
+              const metrics = getImeOverlayMetrics(imeComposition.text);
+              return (
+                <div
+                  aria-hidden="true"
+                  data-terminal-ime-composition="true"
+                  style={{
+                    position: 'fixed',
+                    left: imeAnchor.x,
+                    top: imeAnchor.y,
+                    zIndex: 21,
+                    pointerEvents: 'none',
+                    overflow: 'hidden',
+                    boxSizing: 'content-box',
+                    width: metrics.width,
+                    height: metrics.height,
+                    margin: 0,
+                    padding: 0,
+                    color: theme.foreground,
+                    background: theme.background,
+                    // 只由这个纯视觉层显示当前 composition；它没有历史 value，
+                    // 因而候选再长也不会横向滚出之前输入的尾巴。
+                    boxShadow: `-1px 0 0 1px ${theme.background}`,
+                    fontSize: `${fontSize}px`,
+                    fontFamily,
+                    lineHeight: '1',
+                    textDecorationLine: 'underline',
+                    textDecorationStyle: 'solid',
+                    textDecorationColor: theme.foreground,
+                    wordBreak: 'break-all',
+                    whiteSpace: metrics.whiteSpace,
+                    transition: 'none',
+                  }}
+                >
+                  {imeComposition.text}
+                </div>
+              );
+            })()}
 
             {/* Double-tap Tab indicator */}
             <div
