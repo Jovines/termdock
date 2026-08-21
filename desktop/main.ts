@@ -6,7 +6,9 @@ import {
   Menu,
   net,
   Notification,
+  session,
   shell,
+  type MenuItemConstructorOptions,
   type MessageBoxOptions,
 } from 'electron';
 import { execFile, spawn } from 'node:child_process';
@@ -47,6 +49,7 @@ const DEFAULT_LOCAL_URL = 'http://localhost:9834';
 const PROTOCOL_VERSION = 1;
 const HEALTH_TIMEOUT_MS = 3_500;
 const START_TIMEOUT_MS = 90_000;
+const localServiceCertificatePath = path.join(termdockDir, 'certs', 'termdock-local.pem');
 
 /** Delivered-but-unseen desktop notifications, mirrored into the Dock badge. */
 const activeNotifications = new Map<string, Notification>();
@@ -58,18 +61,64 @@ function clearUnreadNotifications(): void {
 }
 
 let mainWindow: BrowserWindow | null = null;
-let activeServiceOrigin: string | null = null;
+const serviceWindows = new Map<string, BrowserWindow>();
+const windowServiceOrigins = new WeakMap<BrowserWindow, string>();
 let isQuitting = false;
 
+function focusedWorkspaceWindow(): BrowserWindow | null {
+  const focused = BrowserWindow.getFocusedWindow();
+  if (focused && windowServiceOrigins.has(focused)) return focused;
+  return [...serviceWindows.values()].find((window) => !window.isDestroyed()) ?? null;
+}
+
+function serviceLabel(url: string): string {
+  const normalized = normalizeServiceUrl(url);
+  const saved = readDesktopConfig().connections.find((entry) => entry.url === normalized);
+  if (saved?.label.trim()) return saved.label.trim();
+  const parsed = new URL(normalized);
+  return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'
+    ? '本机'
+    : parsed.host;
+}
+
 function showDesktopMessageBox(options: MessageBoxOptions) {
-  return mainWindow
-    ? dialog.showMessageBox(mainWindow, options)
+  const parent = BrowserWindow.getFocusedWindow() ?? mainWindow;
+  return parent
+    ? dialog.showMessageBox(parent, options)
     : dialog.showMessageBox(options);
 }
 
 function openExternalLink(url: string): void {
   if (!isSafeExternalUrl(url)) return;
   void shell.openExternal(url);
+}
+
+function configureLocalServiceCertificateTrust(): void {
+  let localFingerprint: string | null = null;
+  try {
+    localFingerprint = new crypto.X509Certificate(
+      fs.readFileSync(localServiceCertificatePath),
+    ).fingerprint256;
+  } catch {
+    // The certificate is created when the local service first enables HTTPS.
+  }
+  if (!localFingerprint) return;
+
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    let isLocalTarget = false;
+    try {
+      isLocalTarget = isLocalNetworkTarget(new URL(`https://${request.hostname}`));
+    } catch {
+      // Keep Chromium's default verification for malformed hostnames.
+    }
+    let presentedFingerprint: string | null = null;
+    try {
+      presentedFingerprint = new crypto.X509Certificate(request.certificate.data).fingerprint256;
+    } catch {
+      // Keep Chromium's default verification if the certificate cannot be parsed.
+    }
+    callback(isLocalTarget && presentedFingerprint === localFingerprint ? 0 : -3);
+  });
 }
 
 function defaultConfig(): DesktopConfig {
@@ -268,6 +317,27 @@ async function probeService(rawUrl: string): Promise<ServiceProbe> {
   }
 }
 
+async function probeServiceWithLocalNetworkPermission(rawUrl: string): Promise<ServiceProbe> {
+  let probe = await probeService(rawUrl);
+  if (probe.ok) return probe;
+
+  let parsedProbeUrl: URL;
+  try {
+    parsedProbeUrl = new URL(probe.url);
+  } catch {
+    return probe;
+  }
+  if (!isLocalNetworkTarget(parsedProbeUrl) || !looksLikeLocalNetworkPermissionError(probe.error)) {
+    return probe;
+  }
+
+  if (!(await requestLocalNetworkPermissionRetry(probe.url))) {
+    return { ...probe, error: 'Termdock 尚未获得 macOS 本地网络权限' };
+  }
+  probe = await probeService(rawUrl);
+  return probe;
+}
+
 async function getLocalServiceStatus(): Promise<LocalServiceStatus> {
   const state = readServerState();
   if (!state || !isProcessRunning(state.pid)) {
@@ -390,6 +460,8 @@ function desktopRuntimeEnv(runtime = runtimePaths()): NodeJS.ProcessEnv {
   const currentPath = process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin';
   return {
     ...process.env,
+    LANG: process.env.LANG || 'en_US.UTF-8',
+    LC_CTYPE: process.env.LC_CTYPE || process.env.LANG || 'en_US.UTF-8',
     PATH: [runtime.toolchainBin, '/opt/homebrew/bin', '/usr/local/bin', currentPath]
       .filter(Boolean)
       .join(path.delimiter),
@@ -417,6 +489,23 @@ async function waitForLocalService(childPid?: number): Promise<ServiceProbe> {
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
   return lastProbe;
+}
+
+async function ensureTmuxUtf8Environment(runtime: ResolvedDesktopRuntime): Promise<void> {
+  const tmux = path.join(runtime.toolchainBin, 'tmux');
+  if (!fs.existsSync(tmux)) return;
+  const locale = desktopRuntimeEnv(runtime).LANG || 'en_US.UTF-8';
+  for (const name of ['LANG', 'LC_CTYPE']) {
+    try {
+      await execFileAsync(tmux, ['set-environment', '-g', name, locale], {
+        timeout: 5_000,
+        maxBuffer: 128 * 1024,
+        env: desktopRuntimeEnv(runtime),
+      });
+    } catch {
+      // tmux is optional and may not have a running server yet.
+    }
+  }
 }
 
 async function confirmAndStopExisting(status: LocalServiceStatus): Promise<boolean> {
@@ -513,6 +602,7 @@ async function startLocalService(): Promise<ServiceProbe> {
   if (!probe.ok) {
     throw new Error(`桌面版服务启动失败：${probe.error ?? '未知错误'}。日志：${path.join(termdockDir, 'server.log')}`);
   }
+  await ensureTmuxUtf8Environment(runtime);
   await connectWindow(probe.url);
   return probe;
 }
@@ -561,47 +651,38 @@ async function installCli(): Promise<DesktopSnapshot> {
 }
 
 async function connectWindow(rawUrl: string): Promise<ServiceProbe> {
-  let probe = await probeService(rawUrl);
-  if (!probe.ok) {
-    let parsedProbeUrl: URL | null = null;
-    try {
-      parsedProbeUrl = new URL(probe.url);
-    } catch {
-      // The probe already contains the normalized URL validation error.
-    }
-    if (
-      parsedProbeUrl
-      && isLocalNetworkTarget(parsedProbeUrl)
-      && looksLikeLocalNetworkPermissionError(probe.error)
-    ) {
-      const shouldRetry = await requestLocalNetworkPermissionRetry(probe.url);
-      if (shouldRetry) {
-        probe = await probeService(rawUrl);
-      } else {
-        return { ...probe, error: 'Termdock 尚未获得 macOS 本地网络权限' };
-      }
-    }
-  }
+  let probe = await probeServiceWithLocalNetworkPermission(rawUrl);
   if (!probe.ok) return probe;
   const parsed = new URL(probe.url);
-  while (mainWindow) {
-    activeServiceOrigin = parsed.origin;
+  const key = parsed.origin;
+  const existingWindow = serviceWindows.get(key);
+  if (existingWindow && !existingWindow.isDestroyed()) {
+    existingWindow.show();
+    existingWindow.focus();
+    return probe;
+  }
+
+  const workspaceWindow = createDesktopWindow({ serviceOrigin: key, label: serviceLabel(probe.url) });
+  serviceWindows.set(key, workspaceWindow);
+  while (!workspaceWindow.isDestroyed()) {
     try {
-      await mainWindow.loadURL(probe.url);
+      await workspaceWindow.loadURL(probe.url);
       const config = readDesktopConfig();
       config.lastConnectionUrl = probe.url;
       const existing = config.connections.find((entry) => entry.url === probe.url);
       if (existing) existing.lastConnectedAt = Date.now();
       writeDesktopConfig(config);
+      workspaceWindow.show();
+      workspaceWindow.focus();
       return probe;
     } catch (error) {
-      activeServiceOrigin = null;
-      await showConnectionCenter();
       const message = networkErrorDetails(error);
       if (isLocalNetworkTarget(parsed) && looksLikeLocalNetworkPermissionError(error)) {
         if (await requestLocalNetworkPermissionRetry(probe.url)) continue;
+        workspaceWindow.destroy();
         return { ...probe, ok: false, error: 'Termdock 尚未获得 macOS 本地网络权限' };
       }
+      workspaceWindow.destroy();
       await showDesktopMessageBox({
         type: 'error',
         title: '连接 Termdock 服务失败',
@@ -615,7 +696,9 @@ async function connectWindow(rawUrl: string): Promise<ServiceProbe> {
 }
 
 async function showConnectionCenter(): Promise<void> {
-  activeServiceOrigin = null;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createDesktopWindow();
+  }
   const rendererPath = app.isPackaged
     ? path.join(process.resourcesPath, 'renderer', 'index.html')
     : path.join(projectRoot, 'desktop', 'renderer', 'index.html');
@@ -624,9 +707,10 @@ async function showConnectionCenter(): Promise<void> {
   mainWindow?.focus();
 }
 
-function createMainWindow(): BrowserWindow {
+function createDesktopWindow(options?: { serviceOrigin: string; label: string }): BrowserWindow {
   const window = new BrowserWindow({
-    title: 'Termdock',
+    title: options ? `Termdock — ${options.label}` : 'Termdock — 连接中心',
+    show: false,
     width: 1280,
     height: 820,
     minWidth: 760,
@@ -641,6 +725,13 @@ function createMainWindow(): BrowserWindow {
       sandbox: true,
     },
   });
+  if (options) windowServiceOrigins.set(window, options.serviceOrigin);
+  if (options) {
+    window.webContents.on('page-title-updated', (event) => {
+      event.preventDefault();
+      window.setTitle(`Termdock — ${options.label}`);
+    });
+  }
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (isExternalLinkStagingUrl(url)) {
       return {
@@ -668,9 +759,10 @@ function createMainWindow(): BrowserWindow {
     });
   });
   window.webContents.on('will-navigate', (event, url) => {
-    if (!activeServiceOrigin) return;
+    const serviceOrigin = windowServiceOrigins.get(window);
+    if (!serviceOrigin) return;
     try {
-      if (new URL(url).origin === activeServiceOrigin) return;
+      if (new URL(url).origin === serviceOrigin) return;
     } catch {
       // Block malformed navigations.
     }
@@ -678,22 +770,54 @@ function createMainWindow(): BrowserWindow {
     openExternalLink(url);
   });
   window.webContents.on('did-finish-load', () => {
-    if (!activeServiceOrigin) return;
+    if (!windowServiceOrigins.has(window)) return;
     void window.webContents.insertCSS(`
       html[data-termdock-desktop='true'] {
         --safe-top-inset: max(env(safe-area-inset-top, 0px), 38px) !important;
+      }
+      html[data-termdock-desktop='true'] #root {
+        padding-top: 0 !important;
+      }
+      html[data-termdock-desktop='true'] body::after {
+        display: none !important;
+      }
+      html[data-termdock-desktop='true'] #root main > div > div:first-child {
+        padding-left: 80px !important;
+        -webkit-app-region: drag;
+      }
+      html[data-termdock-desktop='true'] #root .h-full.flex.flex-col.app-chrome-bg.border-r > .shrink-0.border-b {
+        padding-left: 80px !important;
+        -webkit-app-region: drag;
+      }
+      html[data-termdock-desktop='true'] #root button,
+      html[data-termdock-desktop='true'] #root a,
+      html[data-termdock-desktop='true'] #root input,
+      html[data-termdock-desktop='true'] #root textarea,
+      html[data-termdock-desktop='true'] #root select,
+      html[data-termdock-desktop='true'] #root [data-rbd-draggable-id] {
+        -webkit-app-region: no-drag;
+      }
+      html[data-termdock-desktop='true'] [data-sidebar='right'] {
+        padding-top: 0 !important;
+      }
+      html[data-termdock-desktop='true'] [data-sidebar='right'] > div:first-child {
+        -webkit-app-region: drag;
       }
     `);
   });
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null;
+    const serviceOrigin = windowServiceOrigins.get(window);
+    if (serviceOrigin && serviceWindows.get(serviceOrigin) === window) {
+      serviceWindows.delete(serviceOrigin);
+    }
   });
   window.on('focus', () => {
     // User is looking at the app — the Dock badge has served its purpose.
     clearUnreadNotifications();
   });
   window.on('close', (event) => {
-    if (process.platform === 'darwin' && !isQuitting) {
+    if (window === mainWindow && process.platform === 'darwin' && !isQuitting) {
       event.preventDefault();
       window.hide();
     }
@@ -703,7 +827,7 @@ function createMainWindow(): BrowserWindow {
 
 function installIpcHandlers(): void {
   ipcMain.handle('desktop:snapshot', () => snapshot());
-  ipcMain.handle('desktop:probe', (_event, url: string) => probeService(url));
+  ipcMain.handle('desktop:probe', (_event, url: string) => probeServiceWithLocalNetworkPermission(url));
   ipcMain.handle('desktop:save-connection', async (_event, input: { url: string; label: string }) => {
     const url = normalizeServiceUrl(input.url);
     const config = readDesktopConfig();
@@ -718,12 +842,14 @@ function installIpcHandlers(): void {
       });
     }
     writeDesktopConfig(config);
+    installMenu();
     return snapshot();
   });
   ipcMain.handle('desktop:remove-connection', async (_event, id: string) => {
     const config = readDesktopConfig();
     config.connections = config.connections.filter((entry) => entry.id !== id);
     writeDesktopConfig(config);
+    installMenu();
     return snapshot();
   });
   ipcMain.handle('desktop:connect', (_event, url: string) => connectWindow(url));
@@ -735,7 +861,7 @@ function installIpcHandlers(): void {
     const error = await shell.openPath(termdockDir);
     if (error) throw new Error(error);
   });
-  ipcMain.handle('desktop:show-notification', (_event, payload: {
+  ipcMain.handle('desktop:show-notification', (event, payload: {
     title?: unknown;
     body?: unknown;
     tag?: unknown;
@@ -765,11 +891,15 @@ function installIpcHandlers(): void {
         if (activeNotifications.get(tag) === notification) activeNotifications.delete(tag);
       });
     }
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
     notification.on('click', () => {
-      mainWindow?.show();
-      mainWindow?.focus();
+      const targetWindow = sourceWindow && !sourceWindow.isDestroyed()
+        ? sourceWindow
+        : focusedWorkspaceWindow();
+      targetWindow?.show();
+      targetWindow?.focus();
       if (typeof payload.sessionId === 'string') {
-        mainWindow?.webContents.send('desktop:focus-session', payload.sessionId);
+        targetWindow?.webContents.send('desktop:focus-session', payload.sessionId);
       }
     });
     notification.show();
@@ -777,7 +907,7 @@ function installIpcHandlers(): void {
     app.setBadgeCount(unreadNotificationCount);
     // macOS banners auto-dismiss even for "persistent" alerts; bounce the Dock
     // icon so the signal survives until the user looks at the app.
-    if (payload.persistent === true && !mainWindow?.isFocused()) {
+    if (payload.persistent === true && !sourceWindow?.isFocused()) {
       app.dock?.bounce('informational');
     }
     return true;
@@ -786,8 +916,37 @@ function installIpcHandlers(): void {
 
 function installMenu(): void {
   const sendCommand = (command: string) => {
-    mainWindow?.webContents.send('desktop:command', command);
+    focusedWorkspaceWindow()?.webContents.send('desktop:command', command);
   };
+  const openService = (url: string) => {
+    void connectWindow(url).then((probe) => {
+      if (!probe.ok) {
+        void showDesktopMessageBox({
+          type: 'error',
+          title: '连接 Termdock 服务失败',
+          message: `无法打开 ${probe.url}`,
+          detail: probe.error,
+        });
+      }
+    });
+  };
+  const openLocalService = () => {
+    void getLocalServiceStatus().then((status) => {
+      if (status.running && status.state) {
+        openService(stateUrl(status.state));
+        return;
+      }
+      void showConnectionCenter();
+    });
+  };
+  const config = readDesktopConfig();
+  const serviceItems: MenuItemConstructorOptions[] = [
+    { label: '本机', click: openLocalService },
+    ...config.connections.map((connection) => ({
+      label: connection.label || new URL(connection.url).host,
+      click: () => openService(connection.url),
+    })),
+  ];
   const menu = Menu.buildFromTemplate([
     {
       label: 'Termdock',
@@ -797,13 +956,14 @@ function installMenu(): void {
         {
           label: '设置…',
           accelerator: 'CmdOrCtrl+,',
-          click: () => mainWindow?.webContents.send('desktop:open-settings'),
+          click: () => focusedWorkspaceWindow()?.webContents.send('desktop:open-settings'),
         },
         {
           label: '连接中心',
-          accelerator: 'CmdOrCtrl+Shift+O',
+          accelerator: 'CmdOrCtrl+N',
           click: () => void showConnectionCenter(),
         },
+        { label: '打开服务', submenu: serviceItems },
         {
           label: '安装或修复 CLI…',
           click: () => void installCli().catch((error) => {
@@ -909,6 +1069,13 @@ function installMenu(): void {
     {
       label: '窗口',
       submenu: [
+        {
+          label: '连接中心',
+          accelerator: 'CmdOrCtrl+Shift+O',
+          click: () => void showConnectionCenter(),
+        },
+        { label: '打开服务', submenu: serviceItems },
+        { type: 'separator' },
         { role: 'minimize' },
         { role: 'zoom' },
         { role: 'front' },
@@ -916,12 +1083,18 @@ function installMenu(): void {
     },
   ]);
   Menu.setApplicationMenu(menu);
+  app.dock?.setMenu(Menu.buildFromTemplate([
+    { label: '连接中心', click: () => void showConnectionCenter() },
+    { type: 'separator' },
+    ...serviceItems,
+  ]));
 }
 
 app.whenReady().then(async () => {
+  configureLocalServiceCertificateTrust();
   installIpcHandlers();
   installMenu();
-  mainWindow = createMainWindow();
+  mainWindow = createDesktopWindow();
   configureDesktopUpdater(showDesktopMessageBox);
   await showConnectionCenter();
   const lastConnectionUrl = readDesktopConfig().lastConnectionUrl;
@@ -933,8 +1106,11 @@ app.whenReady().then(async () => {
   }
   app.on('activate', () => {
     if (!mainWindow) {
-      mainWindow = createMainWindow();
+      mainWindow = createDesktopWindow();
       void showConnectionCenter();
+    } else {
+      mainWindow.show();
+      mainWindow.focus();
     }
   });
 }).catch((error) => {

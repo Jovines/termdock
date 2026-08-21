@@ -3,6 +3,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const signingIdentity = process.env.APPLE_SIGNING_IDENTITY || '-';
+const runtimeEntitlements = path.resolve(__dirname, 'desktop/entitlements.runtime.plist');
 const notarizeConfig = (
   process.env.APPLE_ID
   && process.env.APPLE_APP_SPECIFIC_PASSWORD
@@ -55,9 +56,37 @@ function signBundledRuntime(buildPath, _electronVersion, platform, _arch, callba
         const args = ['--force', '--sign', signingIdentity];
         if (signingIdentity === '-') args.push('--timestamp=none');
         else args.push('--options', 'runtime', '--timestamp');
+        if (binary === path.join(resources, 'runtime', 'bin', 'node')) {
+          args.push('--entitlements', runtimeEntitlements);
+        }
         args.push(binary);
         execFileSync('/usr/bin/codesign', args, { stdio: 'inherit' });
       }
+    }
+    callback();
+  } catch (error) {
+    callback(error);
+  }
+}
+
+function installUniqueMacLauncher(buildPath, _electronVersion, platform, _arch, callback) {
+  try {
+    if (platform === 'darwin') {
+      const appPath = buildPath.endsWith('.app')
+        ? buildPath
+        : path.join(buildPath, 'Termdock.app');
+      const launcherPath = path.join(appPath, 'Contents', 'MacOS', 'Termdock');
+      const electronPath = `${launcherPath}.electron`;
+      fs.renameSync(launcherPath, electronPath);
+      execFileSync('/usr/bin/xcrun', [
+        'clang',
+        '-Os',
+        '-Wall',
+        '-Wextra',
+        '-o',
+        launcherPath,
+        path.resolve(__dirname, 'desktop/native/launcher.c'),
+      ], { stdio: 'inherit' });
     }
     callback();
   } catch (error) {
@@ -137,10 +166,15 @@ module.exports = {
       : {
           osxSign: {
             identity: signingIdentity,
+            // Executables copied into Contents/Resources are signed explicitly
+            // by signBundledRuntime above. Let the outer app signature seal the
+            // remaining static assets instead of asking codesign to timestamp
+            // every .pak, font, and server resource individually.
+            ignore: (filePath) => filePath.includes('/Resources/'),
           },
           ...(notarizeConfig ? { osxNotarize: notarizeConfig } : {}),
         }),
-    afterCopyExtraResources: [signBundledRuntime],
+    afterCopyExtraResources: [installUniqueMacLauncher, signBundledRuntime],
     // @electron/osx-sign must own Developer ID signing so every Electron
     // framework and dylib is re-signed with the same Team ID. The fallback
     // hook remains useful for local ad-hoc builds.

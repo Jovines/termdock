@@ -922,6 +922,9 @@ describe('right sidebar Markdown preview rendering', () => {
 
     const stage = container.querySelector('[data-markdown-image-lightbox-stage]');
     expect(stage).toBeTruthy();
+    expect(container.querySelector('[data-markdown-image-lightbox]')?.className).toContain(
+      'pt-[var(--safe-top-inset,env(safe-area-inset-top,0px))]',
+    );
     fireEvent.click(stage as Element);
     // tap-close waits 450ms so a double-tap's second tap can veto it
     vi.advanceTimersByTime(449);

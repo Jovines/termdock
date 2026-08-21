@@ -2815,7 +2815,11 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
   return (
     <>
       <div className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={onClose} />
-      <div className="fixed inset-0 z-modal-panel flex flex-col bg-background-subtle/95 text-foreground" data-sidebar-gesture-ignore>
+      <div
+        className="fixed inset-0 z-modal-panel flex flex-col bg-background-subtle/95 pt-[var(--safe-top-inset,env(safe-area-inset-top,0px))] text-foreground"
+        data-markdown-image-lightbox
+        data-sidebar-gesture-ignore
+      >
         <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border/20 bg-surface/80 px-3">
           <div className="min-w-0">
             <div className="truncate text-sm font-medium">{activeTitle}</div>
