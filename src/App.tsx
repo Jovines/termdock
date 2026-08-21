@@ -40,6 +40,7 @@ import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
 import { useSuperLongPress } from './lib/hooks/useSuperLongPress';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
+import { shouldDestroySessionDirectly } from './lib/terminal/sessionClose';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession } from './lib/terminal/api';
 import type { ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
@@ -2299,14 +2300,24 @@ function App() {
   const handleSidebarCloseSession = useCallback((sessionId: string, event: React.MouseEvent) => {
     const session = sessions.find((s) => s.id === sessionId);
     if (!session) return;
-    if (session.mode !== 'tmux') {
-      dispatchCloseSession({ sessionId, source: 'sidebar', closeMode: 'auto' });
+    const terminalState = terminalSessions.get(sessionId);
+    if (shouldDestroySessionDirectly({
+      mode: session.mode,
+      activeProgram: terminalState?.activeProgram ?? null,
+      promptState: terminalState?.promptState ?? null,
+      shellNames: SHELL_NAMES,
+    })) {
+      dispatchCloseSession({
+        sessionId,
+        source: 'sidebar',
+        closeMode: session.mode === 'tmux' ? 'destroy' : 'auto',
+      });
       return;
     }
     setSidebarCloseAnchor({ x: event.clientX, y: event.clientY });
     setSidebarCloseChoiceSessionId(sessionId);
     setTmuxKillError(null);
-  }, [sessions, dispatchCloseSession]);
+  }, [sessions, terminalSessions, dispatchCloseSession]);
 
   const sidebarCloseChoiceSession = React.useMemo(
     () => sessions.find((s) => s.id === sidebarCloseChoiceSessionId) ?? null,
