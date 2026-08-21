@@ -247,6 +247,13 @@ interface TerminalSession {
   flowPausedClients: Set<string>;
   flowPausedClientTimers: Map<string, ReturnType<typeof setTimeout>>;
   ptyPausedForFlowControl: boolean;
+  // tmux 的 resize 和随后滚轮输入必须按同一条顺序链执行。PTY winsize 已经
+  // 更新并不代表浏览器里 xterm 的差分屏幕一定仍与 tmux grid 同步；首次
+  // resize 后滚动前，用 capture-pane 发一份权威屏幕重建，避免错误差分继续
+  // 叠加。Promise 链只等待实际 tmux 命令，不使用固定时延。
+  tmuxIoChain?: Promise<void>;
+  tmuxScreenSyncClients?: Set<string>;
+  tmuxResizeGeneration?: number;
 }
 
 type TuiProgressReport = {
@@ -2220,6 +2227,88 @@ async function captureTmuxPane(sessionName: string): Promise<string> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+const TMUX_SCREEN_RESET = '\u001b[H\u001b[2J\u001b[3J';
+
+function buildTmuxScreenSnapshot(snapshot: string): string[] {
+  return [
+    TMUX_SCREEN_RESET,
+    // capture-pane is line-oriented, whereas live tmux output contains the
+    // carriage returns required by convertEol=false.
+    snapshot.replace(/\r?\n/g, '\r\n'),
+  ];
+}
+
+function enqueueTmuxIo<T>(session: TerminalSession, operation: () => Promise<T> | T): Promise<T> {
+  const previous = session.tmuxIoChain ?? Promise.resolve();
+  const result = previous.catch(() => undefined).then(operation);
+  // Keep the sequencing tail fulfilled so one failed capture/command cannot
+  // permanently poison all later input for the session.
+  session.tmuxIoChain = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function markTmuxClientsForScreenSync(sessionId: string, session: TerminalSession): void {
+  if (session.mode !== 'tmux') return;
+  const clients = wsClients.get(sessionId);
+  if (!clients || clients.size === 0) return;
+  const pending = session.tmuxScreenSyncClients ?? new Set<string>();
+  for (const clientId of clients.keys()) pending.add(clientId);
+  session.tmuxScreenSyncClients = pending;
+  session.tmuxResizeGeneration = (session.tmuxResizeGeneration ?? 0) + 1;
+}
+
+function isTmuxWheelInput(data: string): boolean {
+  return /^(?:\u001b\[<6[45];\d+;\d+[Mm])+$/.test(data);
+}
+
+async function syncTmuxScreenBeforeScroll(
+  sessionId: string,
+  clientId: string,
+  session: TerminalSession,
+  ws: WebSocket,
+): Promise<void> {
+  if (
+    session.mode !== 'tmux'
+    || !session.tmuxSessionName
+    || !session.tmuxScreenSyncClients?.has(clientId)
+  ) {
+    return;
+  }
+
+  const generation = session.tmuxResizeGeneration ?? 0;
+  try {
+    // This command enters tmux's own event loop after node-pty has applied the
+    // new winsize. It is an ordering barrier based on real work, not a timeout.
+    // The following capture is therefore taken from tmux's resized grid.
+    const preferredClientPid = getPtyProcessPid(session.ptyProcess);
+    const clientTty = await resolveTmuxClientTty(session.tmuxSessionName, preferredClientPid);
+    if (clientTty) {
+      await runTmux(['refresh-client', '-t', clientTty]);
+    }
+
+    const snapshot = await captureTmuxPane(session.tmuxSessionName);
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'tmux-screen-sync',
+        chunks: buildTmuxScreenSnapshot(snapshot),
+        cols: session.cols,
+        rows: session.rows,
+        generation,
+      }));
+      session.tmuxScreenSyncClients.delete(clientId);
+      if (session.tmuxScreenSyncClients.size === 0) {
+        session.tmuxScreenSyncClients = undefined;
+      }
+    }
+  } catch (error) {
+    // Keep the client marked dirty. Its next wheel event retries the exact
+    // synchronization instead of permanently accepting a partial screen.
+    console.warn(
+      `[tmux-screen-sync] failed session=${sessionId} client=${clientId}: ${getErrorMessage(error)}`,
+    );
+  }
+}
+
 async function isTmuxPaneInMode(target: string, control?: TmuxControl): Promise<boolean> {
   const paneInModeRaw = (await sendTmuxCommand(target, control, [
     'display-message',
@@ -3508,15 +3597,7 @@ async function getRestoreHistory(sessionId: string, session: TerminalSession): P
 
     try {
       const snapshot = await captureTmuxPane(session.tmuxSessionName);
-      return snapshot
-        // capture-pane returns a line-oriented snapshot with LF separators.
-        // In tmux mode the frontend intentionally keeps xterm.convertEol=false
-        // so live TUI output preserves exact terminal semantics; feeding bare LF
-        // during restore moves down without carriage return and renders as sparse
-        // diagonal characters after reconnect. Normalize only this synthetic
-        // snapshot to CRLF so each captured tmux line starts at column 0.
-        ? ['\u001b[H\u001b[2J\u001b[3J', snapshot.replace(/\r?\n/g, '\r\n')]
-        : [];
+      return snapshot ? buildTmuxScreenSnapshot(snapshot) : [];
     } catch (error) {
       console.warn(`Failed to capture tmux pane for ${session.tmuxSessionName}: ${getErrorMessage(error)}`);
       return [];
@@ -3758,6 +3839,7 @@ function applyPtyResize(
   session.rows = cleanRows;
   session.lastActivity = Date.now();
   if (changed) {
+    markTmuxClientsForScreenSync(sessionId, session);
     broadcastJsonWs(
       sessionId,
       { type: 'pty-size', cols: cleanCols, rows: cleanRows, source },
@@ -5539,7 +5621,7 @@ router.get('/:sessionId/agent-resume', (req, res) => {
   res.json({ available: command !== null, command, busy });
 });
 
-router.post('/:sessionId/resize', (req, res) => {
+router.post('/:sessionId/resize', async (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
 
@@ -5553,7 +5635,16 @@ router.post('/:sessionId/resize', (req, res) => {
   }
 
   try {
-    const ok = applyPtyResize(sessionId, session, Number(cols), Number(rows), 'http-resize');
+    const applyResize = () => applyPtyResize(
+      sessionId,
+      session,
+      Number(cols),
+      Number(rows),
+      'http-resize',
+    );
+    const ok = session.mode === 'tmux'
+      ? await enqueueTmuxIo(session, applyResize)
+      : applyResize();
     if (!ok) {
       return res.status(400).json({ error: 'invalid cols/rows' });
     }
@@ -6133,8 +6224,19 @@ export function handleTerminalWebSocket(
       switch (msg.type) {
         case 'input': {
           if (typeof msg.data === 'string' && msg.data.length > 0) {
-            session.lastActivity = Date.now();
-            session.ptyProcess.write(msg.data);
+            const data = msg.data;
+            if (session.mode === 'tmux') {
+              await enqueueTmuxIo(session, async () => {
+                if (isTmuxWheelInput(data)) {
+                  await syncTmuxScreenBeforeScroll(sessionId, clientId, session, ws);
+                }
+                session.lastActivity = Date.now();
+                session.ptyProcess.write(data);
+              });
+            } else {
+              session.lastActivity = Date.now();
+              session.ptyProcess.write(data);
+            }
           }
           break;
         }
@@ -6142,7 +6244,23 @@ export function handleTerminalWebSocket(
           const cols = Number(msg.cols);
           const rows = Number(msg.rows);
           if (cols > 0 && rows > 0) {
-            applyPtyResize(sessionId, session, cols, rows, `ws-resize:${clientId}`, clientId);
+            const ok = session.mode === 'tmux'
+              ? await enqueueTmuxIo(session, () => applyPtyResize(
+                  sessionId,
+                  session,
+                  cols,
+                  rows,
+                  `ws-resize:${clientId}`,
+                  clientId,
+                ))
+              : applyPtyResize(sessionId, session, cols, rows, `ws-resize:${clientId}`, clientId);
+            ws.send(JSON.stringify({
+              type: 'resize-ack',
+              seq: typeof msg.seq === 'number' ? msg.seq : undefined,
+              ok,
+              cols: session.cols,
+              rows: session.rows,
+            }));
           }
           break;
         }
@@ -6152,12 +6270,17 @@ export function handleTerminalWebSocket(
             ws.send(JSON.stringify({ type: 'tmux-result', reqId, success: false, error: 'Not in tmux mode' }));
             break;
           }
-          const result = await executeTmuxAction(
-            session.tmuxSessionName,
-            msg.action as string,
-            msg as unknown as Record<string, unknown>,
-            session.tmuxControl,
-          );
+          const result = await enqueueTmuxIo(session, async () => {
+            if (msg.action === 'scroll') {
+              await syncTmuxScreenBeforeScroll(sessionId, clientId, session, ws);
+            }
+            return executeTmuxAction(
+              session.tmuxSessionName!,
+              msg.action as string,
+              msg as unknown as Record<string, unknown>,
+              session.tmuxControl,
+            );
+          });
           ws.send(JSON.stringify({ type: 'tmux-result', reqId, success: !result.error, error: result.error }));
           if (result.shouldBroadcastLayout && session.tmuxSessionName) {
             try {

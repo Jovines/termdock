@@ -156,6 +156,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     setTerminalSession,
     setConnecting,
     appendToBuffer,
+    replaceBuffer,
     clearTerminalSession,
     removeTerminalSession,
     clearBuffer,
@@ -209,6 +210,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const shouldExitTmuxCopyModeOnInputRef = React.useRef(false);
   const tmuxScrollPendingRef = React.useRef<{ direction: 'up' | 'down'; lines: number } | null>(null);
   const tmuxScrollFlushTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTmuxScreenSyncGenerationRef = React.useRef(-1);
   const modifierTapRef = React.useRef<{ modifier: Modifier; timestamp: number } | null>(null);
   const lastFocusRequestTokenRef = React.useRef(0);
   const lastSentLogicalFocusRef = React.useRef<boolean | null>(null);
@@ -592,6 +594,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   React.useEffect(() => {
     terminalIdRef.current = terminalSessionId;
+    lastTmuxScreenSyncGenerationRef.current = -1;
     lastSentLogicalFocusRef.current = null;
     lastSentViewingRef.current = null;
     lastSentFlowPausedRef.current = null;
@@ -928,6 +931,27 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setTmuxLayout(event.layout ?? null);
                 if (event.layout) {
                   setSessionCopyMode(storeSessionId, event.layout.inCopyMode);
+                }
+                break;
+              }
+              case 'tmux-screen-sync': {
+                const generation = event.generation ?? 0;
+                if (generation < lastTmuxScreenSyncGenerationRef.current) {
+                  break;
+                }
+                lastTmuxScreenSyncGenerationRef.current = generation;
+                // This is an authoritative tmux grid, not another diff chunk.
+                // Reset xterm and replace the store atomically so stale lines
+                // from the pre-resize column layout cannot survive at the top.
+                flowPausedBufferRef.current = [];
+                terminalControllerRef.current?.clear();
+                replaceBuffer(storeSessionId, event.chunks ?? []);
+                if (typeof event.cols === 'number' && typeof event.rows === 'number') {
+                  terminalControllerRef.current?.notifyServerSize(
+                    event.cols,
+                    event.rows,
+                    'tmux-screen-sync',
+                  );
                 }
                 break;
               }

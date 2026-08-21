@@ -563,6 +563,20 @@ export function connectTerminalStream(
           return;
         }
 
+        // A resize can leave the browser's incremental terminal state out of
+        // sync with tmux's authoritative grid. This is a replacement snapshot,
+        // deliberately distinct from ordinary live `data` chunks.
+        if (msg.type === 'tmux-screen-sync' && Array.isArray(msg.chunks)) {
+          onEvent({
+            type: 'tmux-screen-sync',
+            chunks: msg.chunks.filter((chunk: unknown): chunk is string => typeof chunk === 'string'),
+            cols: typeof msg.cols === 'number' ? msg.cols : undefined,
+            rows: typeof msg.rows === 'number' ? msg.rows : undefined,
+            generation: typeof msg.generation === 'number' ? msg.generation : undefined,
+          });
+          return;
+        }
+
         // Handle active-program broadcast
         if (msg.type === 'active-program') {
           onEvent({

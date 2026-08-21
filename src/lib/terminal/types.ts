@@ -171,7 +171,7 @@ export interface TerminalSession {
 
 // Stream Event Types
 export interface TerminalStreamEvent {
-  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size' | 'shell-title' | 'prompt-state' | 'tui-progress' | 'git-status';
+  type: 'connected' | 'data' | 'exit' | 'reconnecting' | 'tmux-layout' | 'tmux-screen-sync' | 'active-program' | 'cwd' | 'agent-status' | 'resize-ack' | 'focus-mode' | 'pty-size' | 'shell-title' | 'prompt-state' | 'tui-progress' | 'git-status';
   data?: string;
   layout?: TmuxLayout;
   exitCode?: number;
@@ -214,6 +214,10 @@ export interface TerminalStreamEvent {
   replayChunks?: string[];
   replayLastSeq?: number;
   replayOutOfWindow?: boolean;
+  // resize 后首次滚动前由服务端从 tmux capture-pane 取得的权威屏幕。
+  // 客户端必须原子替换现有 xterm buffer，不能作为普通增量追加。
+  chunks?: string[];
+  generation?: number;
   seq?: number;
   cols?: number;
   rows?: number;
