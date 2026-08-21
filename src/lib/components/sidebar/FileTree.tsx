@@ -14,6 +14,7 @@ import {
   MoreHorizontal as RiMoreHorizontal,
   Link2 as RiLink,
   Download as RiDownload,
+  Check as RiCheck,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
 import { cancelIoSlot, listDirectory, searchFilesStream, downloadFile, isPreviewableModel3dPath, isPreviewableVideoPath, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
@@ -88,8 +89,7 @@ function iconActionVisibilityClass(visible: boolean): string {
 }
 
 function textActionVisibilityClass(visible: boolean): string {
-  if (visible) return 'ml-1 min-w-8 px-2 opacity-100';
-  return 'ml-1 min-w-8 px-2 opacity-100 sm:ml-0 sm:w-0 sm:min-w-0 sm:overflow-hidden sm:px-0 sm:opacity-0 sm:group-hover:ml-1 sm:group-hover:w-auto sm:group-hover:min-w-8 sm:group-hover:px-2 sm:group-hover:opacity-100';
+  return iconActionVisibilityClass(visible);
 }
 
 const FileDownloadAction = memo(function FileDownloadAction({ path }: { path: string }) {
@@ -473,9 +473,10 @@ const FileTreeItem = memo(function FileTreeItem({
             onClick={handleReferenceClick}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-            title={t('fileTree.insertRefTitle')}
+            aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
+            title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
-            {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
+            {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
           </span>
         )}
       </div>
@@ -746,9 +747,10 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
             onClick={handleReferenceClick}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-            title={t('fileTree.insertRefTitle')}
+            aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
+            title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
-            {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
+            {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
           </span>
         )}
       </div>
@@ -907,9 +909,10 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
             }}
             {...getReferenceLongPressHandlers(referenceText, referenceKey)}
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-[11px] font-semibold transition active:scale-95 ${textActionVisibilityClass(referenceInserted || referenceCopied)} ${referenceInserted || referenceCopied ? 'bg-surface-elevated text-foreground' : 'bg-primary/10 text-primary'}`}
-            title={t('fileTree.insertRefTitle')}
+            aria-label={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
+            title={referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRefTitle')}
           >
-            {referenceCopied ? t('rightSidebar.copied') : referenceInserted ? t('rightSidebar.inserted') : t('fileTree.insertRef')}
+            {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
           </span>
         )}
       </div>

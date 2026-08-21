@@ -33,6 +33,7 @@ import {
   Upload as RiUpload,
   Trash2 as RiTrash,
   PencilLine as RiPencilLine,
+  Check as RiCheck,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
@@ -4158,16 +4159,6 @@ function buildGitBundleRequestSlotId(cwd: string | undefined): string {
   return `right-sidebar-git-bundle:${(hash >>> 0).toString(36)}`;
 }
 
-function formatGitCacheAge(ms: number | null | undefined): string {
-  if (typeof ms !== 'number' || !Number.isFinite(ms)) return 'just now';
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 5) return 'just now';
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  return `${Math.floor(minutes / 60)}h ago`;
-}
-
 function formatAuditTimestamp(timestamp: number | null | undefined, locale: string): string | null {
   if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) return null;
   return new Intl.DateTimeFormat(locale === 'zh' ? 'zh-CN' : 'en', {
@@ -5495,7 +5486,7 @@ export function FilePreview({
               </button>
             )}
             <div className="min-w-0" title={readablePath}>
-              <div className={`${isMobile ? 'max-w-[46vw]' : ''} truncate text-sm font-medium text-foreground`}>{display.name}</div>
+              <div className="truncate text-sm font-medium text-foreground">{display.name}</div>
               {display.dir && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{display.dir}</div>}
             </div>
           </div>
@@ -5512,10 +5503,13 @@ export function FilePreview({
                   });
                   onLineRangeChange(null);
                 }}
-                className="inline-flex h-9 items-center gap-1 rounded-full bg-surface-2 px-2.5 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 sm:px-3"
+                className={`inline-flex h-9 shrink-0 items-center justify-center gap-1 rounded-full bg-surface-2 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 ${isMobile ? 'w-9 px-0' : 'px-3'}`}
+                aria-label={markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
                 title={markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
               >
-                {markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
+                {isMobile
+                  ? (markdownViewMode === 'preview' ? <RiFileText size={14} /> : <RiEye size={14} />)
+                  : markdownViewMode === 'preview' ? t('rightSidebar.markdownSource') : t('rightSidebar.markdownPreview')}
               </button>
             )}
             {isHtml && previewState.kind === 'text' && (
@@ -5529,10 +5523,13 @@ export function FilePreview({
                   });
                   onLineRangeChange(null);
                 }}
-                className="inline-flex h-9 items-center gap-1 rounded-full bg-surface-2 px-2.5 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 sm:px-3"
+                className={`inline-flex h-9 shrink-0 items-center justify-center gap-1 rounded-full bg-surface-2 text-xs font-semibold text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 ${isMobile ? 'w-9 px-0' : 'px-3'}`}
+                aria-label={htmlViewMode === 'preview' ? t('rightSidebar.htmlSource') : t('rightSidebar.htmlPreview')}
                 title={htmlViewMode === 'preview' ? t('rightSidebar.htmlSource') : t('rightSidebar.htmlPreview')}
               >
-                {htmlViewMode === 'preview' ? t('rightSidebar.htmlSource') : t('rightSidebar.htmlPreview')}
+                {isMobile
+                  ? (htmlViewMode === 'preview' ? <RiFileText size={14} /> : <RiEye size={14} />)
+                  : htmlViewMode === 'preview' ? t('rightSidebar.htmlSource') : t('rightSidebar.htmlPreview')}
               </button>
             )}
             {!isMobile && (
@@ -5822,6 +5819,10 @@ export function RightSidebar(
     () => readCache(CONTEXT_DRAFT_TEXT_STORAGE_KEY, isStringValue) ?? '',
   );
   const [draftFocusRequest, setDraftFocusRequest] = useState(0);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const [explorerMenuOpen, setExplorerMenuOpen] = useState(false);
+  const headerMenuRef = useRef<HTMLDivElement | null>(null);
+  const explorerMenuRef = useRef<HTMLDivElement | null>(null);
   // 草稿插入终端失败（session 断联/无活跃终端）：保留草稿并提示
   const [draftInsertFailed, setDraftInsertFailed] = useState(false);
   // Line-range selection lives in the sidebar so the sticky action bar and
@@ -5927,7 +5928,6 @@ export function RightSidebar(
   const gitBundleSlow = useSidebarStore((s) => s.gitBundleSlow);
   const gitBundleError = useSidebarStore((s) => s.gitBundleError);
   const gitBundleLastLoadedAt = useSidebarStore((s) => s.gitBundleLastLoadedAt);
-  const gitBundleCacheInfo = useSidebarStore((s) => s.gitBundleCacheInfo);
   const setGitBundleLoading = useSidebarStore((s) => s.setGitBundleLoading);
   const setGitBundleSlow = useSidebarStore((s) => s.setGitBundleSlow);
   const setGitBundleError = useSidebarStore((s) => s.setGitBundleError);
@@ -9700,9 +9700,34 @@ export function RightSidebar(
     setLineRange(null);
   }, [onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen]);
 
+  useEffect(() => {
+    if (!isOpen) {
+      setHeaderMenuOpen(false);
+      setExplorerMenuOpen(false);
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!headerMenuOpen && !explorerMenuOpen) return;
+    const closeMenus = (event: globalThis.MouseEvent | globalThis.KeyboardEvent) => {
+      if (event instanceof globalThis.KeyboardEvent && event.key !== 'Escape') return;
+      if (event instanceof globalThis.MouseEvent && event.target instanceof Node) {
+        if (headerMenuRef.current?.contains(event.target) || explorerMenuRef.current?.contains(event.target)) return;
+      }
+      setHeaderMenuOpen(false);
+      setExplorerMenuOpen(false);
+    };
+    window.addEventListener('mousedown', closeMenus);
+    window.addEventListener('keydown', closeMenus);
+    return () => {
+      window.removeEventListener('mousedown', closeMenus);
+      window.removeEventListener('keydown', closeMenus);
+    };
+  }, [explorerMenuOpen, headerMenuOpen]);
+
   const fileExplorerNavigation = (
-    <div className="sticky top-0 z-10 border-b border-border/15 bg-surface/95 px-2.5 py-1.5 backdrop-blur">
-      <div className="flex min-h-9 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+    <div data-local-layer="file-explorer-menu-host" className="sticky top-0 z-20 bg-surface/95 px-2.5 py-1.5 backdrop-blur">
+      <div className="flex min-h-9 min-w-0 items-center gap-1.5">
         <button
           type="button"
           onClick={goToExplorerParent}
@@ -9733,66 +9758,69 @@ export function RightSidebar(
         >
           <RiRefresh size={13} />
         </button>
+        <div className="min-w-0 flex-1 px-1" title={fileTreeRoot ?? undefined}>
+          <div className="truncate text-[12px] font-medium text-foreground">{explorerName}</div>
+        </div>
         <button
           type="button"
-          onClick={togglePinnedExplorerRoot}
-          disabled={!canPinFileTreeRoot}
-          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition disabled:cursor-not-allowed disabled:opacity-35 active:scale-95 ${fileTreeRootPinned ? 'bg-primary/15 text-primary hover:bg-primary/25' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
-          aria-label={fileTreeRootPinned ? t('rightSidebar.unpinCurrentFolder') : t('rightSidebar.pinCurrentFolder')}
-          title={fileTreeRootPinned ? t('rightSidebar.unpinCurrentFolder') : t('rightSidebar.pinCurrentFolder')}
+          onClick={() => fileTreeRoot && insertPathReference(fileTreeRoot, fileTreeRootReferenceKey ?? undefined)}
+          disabled={!fileTreeRoot}
+          {...(fileTreeRoot && fileTreeRootReferenceKey ? getReferenceLongPressHandlers(getPathReferenceText(fileTreeRoot), fileTreeRootReferenceKey) : {})}
+          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition disabled:cursor-not-allowed disabled:opacity-35 active:scale-95 ${
+            fileTreeRootReferenceKey && (insertedReferenceKey === fileTreeRootReferenceKey || copiedReferenceKey === fileTreeRootReferenceKey)
+              ? 'bg-surface-elevated text-foreground'
+              : 'bg-primary/10 text-primary hover:bg-primary/20'
+          }`}
+          aria-label={fileTreeRootReferenceKey && copiedReferenceKey === fileTreeRootReferenceKey
+            ? t('rightSidebar.copied')
+            : fileTreeRootReferenceKey && insertedReferenceKey === fileTreeRootReferenceKey
+              ? t('rightSidebar.inserted')
+              : t('rightSidebar.insertCurrentFolder')}
+          title={t('rightSidebar.insertCurrentFolder')}
         >
-          {fileTreeRootPinned ? <RiPinOff size={13} /> : <RiPin size={13} />}
+          {fileTreeRootReferenceKey && (insertedReferenceKey === fileTreeRootReferenceKey || copiedReferenceKey === fileTreeRootReferenceKey)
+            ? <RiCheck size={13} />
+            : <RiLink size={13} />}
         </button>
-        <button
-          type="button"
-          onClick={toggleShowHiddenFiles}
-          aria-pressed={showHiddenFiles}
-          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition active:scale-95 ${showHiddenFiles ? 'bg-primary/15 text-primary hover:bg-primary/25' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
-          aria-label={showHiddenFiles ? t('rightSidebar.hideHiddenFiles') : t('rightSidebar.showHiddenFiles')}
-          title={showHiddenFiles ? t('rightSidebar.hideHiddenFiles') : t('rightSidebar.showHiddenFiles')}
-        >
-          {showHiddenFiles ? <RiEye size={13} /> : <RiEyeOff size={13} />}
-        </button>
-        <div className="mx-1 hidden h-4 w-px shrink-0 bg-border/20 sm:block" />
-        <div className="min-w-0 flex-1 basis-full pt-0.5 sm:basis-0 sm:pt-0" title={fileTreeRoot ?? undefined}>
-          <div className="flex min-w-0 items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <span className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                {t('rightSidebar.browsingLocation')}
-              </span>
-              <span className="truncate text-[12px] font-medium text-foreground">{explorerName}</span>
-            </div>
+        <div ref={explorerMenuRef} className="relative shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setHeaderMenuOpen(false);
+              setExplorerMenuOpen((open) => !open);
+            }}
+            className={`inline-flex h-7 w-7 items-center justify-center rounded-md transition active:scale-95 ${explorerMenuOpen ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
+            aria-expanded={explorerMenuOpen}
+            aria-haspopup="menu"
+            aria-label={t('sidebar.moreActions')}
+            title={t('sidebar.moreActions')}
+          >
+            <RiMoreHorizontal size={14} />
+          </button>
+          {explorerMenuOpen && (
+            <div role="menu" data-local-layer="file-explorer-menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-48 overflow-hidden rounded-xl border border-border/15 bg-surface p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in">
               <button
                 type="button"
-                onClick={() => fileTreeRoot && insertPathReference(fileTreeRoot, fileTreeRootReferenceKey ?? undefined)}
-                disabled={!fileTreeRoot}
-                {...(fileTreeRoot && fileTreeRootReferenceKey ? getReferenceLongPressHandlers(getPathReferenceText(fileTreeRoot), fileTreeRootReferenceKey) : {})}
-                className={`inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-full px-2 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-35 active:scale-95 ${
-                fileTreeRootReferenceKey && (insertedReferenceKey === fileTreeRootReferenceKey || copiedReferenceKey === fileTreeRootReferenceKey)
-                  ? 'bg-surface-elevated text-foreground'
-                  : 'bg-primary/10 text-primary hover:bg-primary/20'
-              }`}
-                aria-label={t('rightSidebar.insertCurrentFolder')}
-                title={t('rightSidebar.insertCurrentFolder')}
+                role="menuitem"
+                onClick={() => { setExplorerMenuOpen(false); togglePinnedExplorerRoot(); }}
+                disabled={!canPinFileTreeRoot}
+                className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition disabled:opacity-40 ${fileTreeRootPinned ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}
               >
-                <RiLink size={12} />
-              <span>{fileTreeRootReferenceKey && copiedReferenceKey === fileTreeRootReferenceKey ? t('rightSidebar.copied') : fileTreeRootReferenceKey && insertedReferenceKey === fileTreeRootReferenceKey ? t('rightSidebar.inserted') : t('rightSidebar.insertCurrentFolderShort')}</span>
+                {fileTreeRootPinned ? <RiPinOff size={14} /> : <RiPin size={14} className="text-muted-foreground" />}
+                <span>{fileTreeRootPinned ? t('rightSidebar.unpinCurrentFolder') : t('rightSidebar.pinCurrentFolder')}</span>
               </button>
-          </div>
-          {fileTreeRoot && (
-            <div className="mt-0.5 truncate text-[10px] text-muted-foreground/75">
-              {fileTreeRoot}
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => { setExplorerMenuOpen(false); toggleShowHiddenFiles(); }}
+                className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${showHiddenFiles ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}
+              >
+                {showHiddenFiles ? <RiEyeOff size={14} /> : <RiEye size={14} className="text-muted-foreground" />}
+                <span>{showHiddenFiles ? t('rightSidebar.hideHiddenFiles') : t('rightSidebar.showHiddenFiles')}</span>
+              </button>
             </div>
           )}
         </div>
-        {browsingOutsideProject && (
-          <span
-            className="hidden shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary sm:inline-flex"
-            title={t('rightSidebar.browsingOutsideProjectHint')}
-          >
-            {t('rightSidebar.browsingOutsideProject')}
-          </span>
-        )}
       </div>
       {rootPath && (pinnedExplorerRoots.length > 0 || browsingOutsideProject) && (
         <div className="mt-1 flex flex-wrap items-center gap-1 pb-0.5 text-[11px]">
@@ -9836,6 +9864,11 @@ export function RightSidebar(
           })}
         </div>
       )}
+      <span
+        data-local-layer="file-explorer-divider"
+        className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-px bg-border/15"
+        aria-hidden="true"
+      />
     </div>
   );
 
@@ -9992,41 +10025,8 @@ export function RightSidebar(
                   <span className="max-w-[7rem] truncate">{gitContext.branch}</span>
                 </span>
               )}
-              {(!isMobile || mobileSidebarSettled) && gitBundleLastLoadedAt && (
-                <span
-                  className={`truncate text-[10px] ${gitBundleCacheInfo?.stale ? 'text-[color:var(--warning)]' : 'text-muted-foreground/75'}`}
-                  title={[
-                    `Git data loaded ${formatGitCacheAge(gitBundleCacheInfo?.cacheAgeMs ?? (Date.now() - gitBundleLastLoadedAt))}`,
-                    gitBundleCacheInfo?.cached ? 'from server cache' : 'fresh',
-                    gitBundleCacheInfo?.stale ? 'stale cache' : null,
-                  ].filter(Boolean).join(' · ')}
-                >
-                  Git {formatGitCacheAge(gitBundleCacheInfo?.cacheAgeMs ?? (Date.now() - gitBundleLastLoadedAt))}
-                  {gitBundleCacheInfo?.cached ? ' cached' : ''}
-                </span>
-              )}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setContextDraftEnabled((enabled) => !enabled);
-              setContextDraftCollapsed(false);
-            }}
-            className={`relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
-              contextDraftEnabled
-                ? 'bg-primary/15 text-primary'
-                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-            }`}
-            aria-pressed={contextDraftEnabled}
-            aria-label={t('rightSidebar.toggleContextDraft')}
-            title={t('rightSidebar.toggleContextDraft')}
-          >
-            <RiPencilLine size={14} />
-            {!contextDraftEnabled && contextDraftText.trim() && (
-              <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
-            )}
-          </button>
           <button
             type="button"
             onClick={() => setRightSearchOpen(!searchOpen)}
@@ -10040,16 +10040,6 @@ export function RightSidebar(
           >
             <RiSearch size={14} />
           </button>
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 disabled:opacity-50"
-            aria-label={t('rightSidebar.uploadFiles')}
-            title={t('rightSidebar.uploadFiles')}
-          >
-            {uploading ? <RiLoader size={14} className="animate-spin" /> : <RiUpload size={14} />}
-          </button>
           <input
             ref={fileInputRef}
             type="file"
@@ -10062,17 +10052,65 @@ export function RightSidebar(
               e.target.value = '';
             }}
           />
-          {onTogglePinned && (
+          <div ref={headerMenuRef} className="relative shrink-0">
             <button
               type="button"
-              onClick={onTogglePinned}
-              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${pinned ? 'bg-primary/15 text-primary hover:bg-primary/20' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
-              aria-label={pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar')}
-              title={pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar')}
+              onClick={() => {
+                setExplorerMenuOpen(false);
+                setHeaderMenuOpen((open) => !open);
+              }}
+              className={`relative inline-flex h-8 w-8 items-center justify-center rounded-full transition active:scale-95 ${headerMenuOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+              aria-expanded={headerMenuOpen}
+              aria-haspopup="menu"
+              aria-label={t('sidebar.moreActions')}
+              title={t('sidebar.moreActions')}
             >
-              {pinned ? <RiPinOff size={14} /> : <RiPin size={14} />}
+              <RiMoreHorizontal size={15} />
+              {!contextDraftEnabled && contextDraftText.trim() && (
+                <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
+              )}
             </button>
-          )}
+            {headerMenuOpen && (
+              <div role="menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-48 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={contextDraftEnabled}
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
+                    setContextDraftEnabled((enabled) => !enabled);
+                    setContextDraftCollapsed(false);
+                  }}
+                  className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${contextDraftEnabled ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}
+                >
+                  <RiPencilLine size={14} className={contextDraftEnabled ? '' : 'text-muted-foreground'} />
+                  <span className="min-w-0 flex-1 truncate">{t('rightSidebar.contextDraftTitle')}</span>
+                  {contextDraftEnabled && <RiCheck size={13} />}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setHeaderMenuOpen(false); fileInputRef.current?.click(); }}
+                  disabled={uploading}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2 disabled:opacity-50"
+                >
+                  {uploading ? <RiLoader size={14} className="animate-spin text-muted-foreground" /> : <RiUpload size={14} className="text-muted-foreground" />}
+                  <span>{t('rightSidebar.uploadFiles')}</span>
+                </button>
+                {onTogglePinned && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { setHeaderMenuOpen(false); onTogglePinned(); }}
+                    className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${pinned ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}
+                  >
+                    {pinned ? <RiPinOff size={14} /> : <RiPin size={14} className="text-muted-foreground" />}
+                    <span>{pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar')}</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           <button
             type="button"
             onClick={onClose}
@@ -10406,6 +10444,7 @@ export function RightSidebar(
                 aria-orientation="vertical"
                 aria-label={t('rightSidebar.resizeFileTree')}
                 title={t('rightSidebar.resizeFileTree')}
+                data-local-layer="file-preview-separator"
                 className="group relative z-10 w-2 shrink-0 cursor-col-resize touch-none border-l border-border/15 bg-surface"
                 onPointerDown={startFileTreeResize}
                 onPointerMove={handleFileTreeResizeMove}

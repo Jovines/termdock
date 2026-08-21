@@ -39,6 +39,18 @@ function parseTokenScale(): Record<string, number> {
   return scale;
 }
 
+function parseRegisteredLocalLayers(): Record<string, number> {
+  const layers: Record<string, number> = {};
+  for (const file of walk(srcRoot)) {
+    const text = readFileSync(file, 'utf-8');
+    for (const match of text.matchAll(/data-local-layer="([^"]+)"[\s\S]{0,240}?className="([^"]+)"/g)) {
+      const zClass = match[2]!.match(/(?:^|\s)z-(10|20|30)(?:\s|$)/);
+      if (zClass) layers[match[1]!] = Number.parseInt(zClass[1]!, 10);
+    }
+  }
+  return layers;
+}
+
 describe('overlay z-index single source of truth', () => {
   it('defines the full semantic token scale in index.css', () => {
     const scale = parseTokenScale();
@@ -121,5 +133,20 @@ describe('overlay z-index single source of truth', () => {
     }
     expect(offenders, `In-panel controls must use local z-10/20/30 (< 40), not global overlay tokens:\n${offenders.join('\n')}`)
       .toEqual([]);
+  });
+
+  it('keeps registered local dividers below menu hosts and menus', () => {
+    // A z-30 child cannot escape a z-10 ancestor stacking context. Register
+    // cross-sibling local overlays so the whole chain is guarded, not merely
+    // the popup's own class.
+    const layers = parseRegisteredLocalLayers();
+    expect(layers['file-explorer-divider']).toBe(10);
+    expect(layers['file-preview-separator']).toBe(10);
+    expect(layers['file-explorer-menu-host']).toBe(20);
+    expect(layers['file-explorer-menu']).toBe(30);
+    expect(layers['file-explorer-divider']!).toBeLessThan(layers['file-explorer-menu']!);
+    expect(layers['file-preview-separator']!).toBeLessThan(layers['file-explorer-menu-host']!);
+    expect(layers['file-explorer-menu-host']!).toBeLessThan(layers['file-explorer-menu']!);
+    expect(layers['file-explorer-menu']!).toBeLessThan(40);
   });
 });
