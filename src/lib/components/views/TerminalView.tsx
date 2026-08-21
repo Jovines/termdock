@@ -345,6 +345,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
 
       debugKeyboard('desktop resume focus', { reason });
+      // Electron/macOS can keep document.activeElement on the terminal input
+      // while the native window is occluded. Calling focus() again then emits
+      // no DOM focus event, so the old code never asked xterm's DOM renderer to
+      // repaint its stale backing surface. Refresh explicitly before restoring
+      // keyboard focus; this remains scoped to the active terminal.
+      terminalControllerRef.current?.requestRefresh('focus', {
+        force: true,
+        forceRedraw: true,
+        skipResizePush: true,
+        skipScrollToBottom: true,
+      });
       terminalControllerRef.current?.focus();
     }, 50);
   }, [debugKeyboard]);
