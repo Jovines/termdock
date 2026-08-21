@@ -97,6 +97,11 @@ export async function refreshQuota(): Promise<QuotaStatus> {
 const FS_REQUEST_TIMEOUT_MS = 8_000;
 const GIT_REQUEST_TIMEOUT_MS = 10_000;
 const GIT_FILE_DIFF_REQUEST_TIMEOUT_MS = 45_000;
+export const TERMINAL_CSRF_REQUEST_TIMEOUT_MS = 8_000;
+export const TERMINAL_HEALTH_REQUEST_TIMEOUT_MS = 8_000;
+export const TERMINAL_SESSION_OPEN_REQUEST_TIMEOUT_MS = 15_000;
+const TERMINAL_FORCE_KILL_REQUEST_TIMEOUT_MS = 10_000;
+const TERMINAL_RESPONSE_BODY_TIMEOUT_MS = 5_000;
 let diffApiLogSeq = 0;
 const diffApiLogQueue: string[] = [];
 let diffApiLogFlushing = false;
@@ -187,6 +192,15 @@ async function readResponseTextWithTimeout(response: Response, timeoutMs: number
   }
 }
 
+async function readJsonResponseWithTimeout<T>(
+  response: Response,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<T> {
+  const raw = await readResponseTextWithTimeout(response, timeoutMs, timeoutMessage);
+  return JSON.parse(raw) as T;
+}
+
 if (typeof window !== 'undefined' && !(window as any).__termdockFetchPatched) {
   (window as any).__termdockFetchPatched = true;
   const originalFetch = window.fetch.bind(window);
@@ -207,9 +221,19 @@ if (typeof window !== 'undefined' && !(window as any).__termdockFetchPatched) {
 
 async function getCsrfToken(): Promise<string> {
   if (csrfToken) return csrfToken;
-  const response = await fetch('/api/csrf-token');
+  const response = await fetchWithTimeout(
+    '/api/csrf-token',
+    undefined,
+    TERMINAL_CSRF_REQUEST_TIMEOUT_MS,
+    'CSRF token request timed out',
+  );
   if (!response.ok) throw new Error('Failed to get CSRF token');
-  const data = await response.json();
+  const data = await readJsonResponseWithTimeout<{ csrfToken?: string }>(
+    response,
+    TERMINAL_RESPONSE_BODY_TIMEOUT_MS,
+    'CSRF token response timed out',
+  );
+  if (!data.csrfToken) throw new Error('Invalid CSRF token response');
   csrfToken = data.csrfToken;
   return csrfToken as string;
 }
@@ -1000,13 +1024,26 @@ export async function checkTerminalHealth(sessionId: string): Promise<{
   backend?: string; mode?: 'shell' | 'tmux'; tmuxSessionName?: string | null;
   activeProgram?: string | null; activeProgramRaw?: string | null; activeProgramSource?: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
 }> {
-  const response = await fetch(`/api/terminal/${sessionId}/health`, { method: 'GET' });
+  const response = await fetchWithTimeout(
+    `/api/terminal/${sessionId}/health`,
+    { method: 'GET' },
+    TERMINAL_HEALTH_REQUEST_TIMEOUT_MS,
+    'Terminal health check timed out',
+  );
   if (!response.ok) {
     if (response.status === 404) return { healthy: false, sessionId };
-    const error = await response.json().catch(() => ({ error: 'Failed to check terminal health' }));
+    const error = await readJsonResponseWithTimeout<{ error?: string }>(
+      response,
+      TERMINAL_RESPONSE_BODY_TIMEOUT_MS,
+      'Terminal health error response timed out',
+    ).catch(() => ({ error: 'Failed to check terminal health' }));
     throw new Error(error.error || 'Failed to check terminal health');
   }
-  return response.json();
+  return readJsonResponseWithTimeout(
+    response,
+    TERMINAL_RESPONSE_BODY_TIMEOUT_MS,
+    'Terminal health response timed out',
+  );
 }
 
 export async function attachTerminalSession(sessionId: string): Promise<{
@@ -1027,13 +1064,22 @@ export async function forceKillTerminal(options: {
   sessionId?: string; cwd?: string;
 }): Promise<void> {
   const csrfTokenHeader = await getCsrfToken();
-  const response = await fetch('/api/terminal/force-kill', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
-    body: JSON.stringify(options),
-  });
+  const response = await fetchWithTimeout(
+    '/api/terminal/force-kill',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+      body: JSON.stringify(options),
+    },
+    TERMINAL_FORCE_KILL_REQUEST_TIMEOUT_MS,
+    'Terminal force-kill request timed out',
+  );
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to force kill terminal' }));
+    const error = await readJsonResponseWithTimeout<{ error?: string }>(
+      response,
+      TERMINAL_RESPONSE_BODY_TIMEOUT_MS,
+      'Terminal force-kill error response timed out',
+    ).catch(() => ({ error: 'Failed to force kill terminal' }));
     throw new Error(error.error || 'Failed to force kill terminal');
   }
 }
@@ -1121,20 +1167,33 @@ export async function openSessionInventoryEntry(
   if (pending) return pending;
 
   const csrfTokenHeader = await getCsrfToken();
-  const request = fetch('/api/terminal/session-inventory/open', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
-    body: JSON.stringify(options),
-  }).then(async (response) => {
+  const request = fetchWithTimeout(
+    '/api/terminal/session-inventory/open',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+      body: JSON.stringify(options),
+    },
+    TERMINAL_SESSION_OPEN_REQUEST_TIMEOUT_MS,
+    'Terminal session open request timed out',
+  ).then(async (response) => {
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Failed to open session' }));
+      const error = await readJsonResponseWithTimeout<{ error?: string; code?: string }>(
+        response,
+        TERMINAL_RESPONSE_BODY_TIMEOUT_MS,
+        'Terminal session open error response timed out',
+      ).catch((): { error: string; code?: string } => ({ error: 'Failed to open session' }));
       throw new TerminalApiError(
         error.error || 'Failed to open session',
         response.status,
         typeof error.code === 'string' ? error.code : undefined,
       );
     }
-    return response.json() as Promise<OpenSessionInventoryResult>;
+    return readJsonResponseWithTimeout<OpenSessionInventoryResult>(
+      response,
+      TERMINAL_RESPONSE_BODY_TIMEOUT_MS,
+      'Terminal session open response timed out',
+    );
   }).finally(() => {
     if (openSessionInventoryPending.get(key) === request) openSessionInventoryPending.delete(key);
   });
