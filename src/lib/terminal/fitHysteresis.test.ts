@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HYSTERESIS_THRESHOLD, decideFitHysteresis } from './fitHysteresis';
+import { HYSTERESIS_THRESHOLD, decideFitHysteresis, shouldPushFittedSize } from './fitHysteresis';
 
 describe('decideFitHysteresis', () => {
   const SIZE = { currentCols: 80, currentRows: 24 };
@@ -135,5 +135,43 @@ describe('decideFitHysteresis', () => {
       expect(b.colsDelta).toBe(2);
       expect(b.rowsDelta).toBe(2);
     });
+  });
+});
+
+describe('shouldPushFittedSize', () => {
+  const fitted = { cols: 100, rows: 30 };
+
+  it('pushes when the local fit is stable but the server still has a stale cold-start size', () => {
+    expect(shouldPushFittedSize({
+      before: fitted,
+      after: fitted,
+      lastServerSize: { cols: 80, rows: 24 },
+      reconcileServerSize: true,
+    })).toBe(true);
+  });
+
+  it('pushes the first fitted size when no server baseline exists', () => {
+    expect(shouldPushFittedSize({
+      before: fitted,
+      after: fitted,
+      lastServerSize: null,
+    })).toBe(true);
+  });
+
+  it('skips only when both the fit and the server already agree', () => {
+    expect(shouldPushFittedSize({
+      before: fitted,
+      after: fitted,
+      lastServerSize: fitted,
+    })).toBe(false);
+  });
+
+  it('does not let an incidental background refresh fight another client size', () => {
+    expect(shouldPushFittedSize({
+      before: fitted,
+      after: fitted,
+      lastServerSize: { cols: 80, rows: 24 },
+      reconcileServerSize: false,
+    })).toBe(false);
   });
 });

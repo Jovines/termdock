@@ -73,3 +73,18 @@ export function decideFitHysteresis(input: FitHysteresisInput): FitHysteresisDec
     : (colsDelta >= HYSTERESIS_THRESHOLD || rowsDelta >= HYSTERESIS_THRESHOLD);
   return { accept, isRealResize, colsDelta, rowsDelta };
 }
+
+export function shouldPushFittedSize(input: {
+  before: { cols: number; rows: number };
+  after: { cols: number; rows: number };
+  lastServerSize: { cols: number; rows: number } | null;
+  reconcileServerSize?: boolean;
+}): boolean {
+  return input.before.cols !== input.after.cols ||
+    input.before.rows !== input.after.rows ||
+    input.lastServerSize === null ||
+    (input.reconcileServerSize === true && (
+      input.lastServerSize.cols !== input.after.cols ||
+      input.lastServerSize.rows !== input.after.rows
+    ));
+}

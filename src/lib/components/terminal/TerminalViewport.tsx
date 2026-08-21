@@ -27,6 +27,7 @@ import {
 } from '../../terminal/selectionHandles';
 import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal/imeAnchor';
 import { buildBracketedPastePayload } from '../../terminal/bracketedPaste';
+import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHysteresis';
 import {
   TERMINAL_FALLBACK_LIGATURES,
   TERMINAL_LIGATURE_FEATURE_SETTINGS,
@@ -280,6 +281,10 @@ export type RefreshOptions = {
   resizeDebounceMs?: number;
   /** 跳过 throttle / dedupe。 */
   force?: boolean;
+  /** WebGL renderer 仍存活时也完整重绘 buffer；只用于低频稳定化刷新。 */
+  forceRedraw?: boolean;
+  /** 本地 fit 未变化时，也把与服务端广播不一致的尺寸重新推回。仅前台稳定化使用。 */
+  reconcileServerSize?: boolean;
   /**
    * 自定义 dedupe key。编排器对每个 reason 维护"上次处理过的 key"：
    * 再次调用时 key 相同则整次跳过（不进 runRefreshSequence）。
@@ -714,7 +719,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const inputFocusHandlerRef = React.useRef<typeof onInputFocusChange>(onInputFocusChange);
     const flowControlHandlerRef = React.useRef<typeof onFlowControl>(onFlowControl);
     const rendererModeRef = React.useRef(terminalSettings.rendererMode);
-    const lastReportedSizeRef = React.useRef<{ cols: number; rows: number } | null>(null);
     const pendingWriteRef = React.useRef('');
     const pendingBytesRef = React.useRef(0);
     const flowPausedRef = React.useRef(false);
@@ -2766,9 +2770,22 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
       try {
         const before = { cols: terminal.cols, rows: terminal.rows };
-        fitAddon.fit();
+        const proposed = fitAddon.proposeDimensions();
+        if (!proposed || proposed.cols <= 0 || proposed.rows <= 0) {
+          return;
+        }
+        const hysteresis = decideFitHysteresis({
+          reason,
+          currentCols: before.cols,
+          currentRows: before.rows,
+          proposedCols: proposed.cols,
+          proposedRows: proposed.rows,
+        });
+        if (hysteresis.accept) {
+          terminal.resize(proposed.cols, proposed.rows);
+          remainderPxRef.current = 0;
+        }
         const next = { cols: terminal.cols, rows: terminal.rows };
-        const previous = lastReportedSizeRef.current;
 
         debugTerminal('fit', {
           reason,
@@ -2776,15 +2793,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           width: Math.round(rect.width),
           height: Math.round(rect.height),
           before,
+          proposed,
           next,
+          hysteresis,
           changed: before.cols !== next.cols || before.rows !== next.rows,
         });
-
-        if (!previous || previous.cols !== next.cols || previous.rows !== next.rows) {
-          lastReportedSizeRef.current = next;
-          remainderPxRef.current = 0;
-          resizeHandlerRef.current(next.cols, next.rows);
-        }
       } catch {
         // fit failure is non-fatal; the next refresh attempt will retry.
       }
@@ -3125,7 +3138,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             refreshTextureAtlasNow(`refresh:${reason}`);
           }
         } else {
-          if (webglAddonRef.current && shouldUseWebgl) {
+          if (webglAddonRef.current && shouldUseWebgl && !options.forceRedraw) {
             debugTerminal('webgl refresh skipped: renderer alive', { reason });
           } else {
             refreshTextureAtlasNow(`refresh:${reason}`);
@@ -3149,8 +3162,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               pushResizeToServer(c.cols, c.rows, debounce);
             }
           } else {
-            // 跳过没变化的情况（before/after 完全一致 + 上次 fit 之后没新数据）
-            if (before.cols !== after.cols || before.rows !== after.rows || lastServerSizeRef.current === null) {
+            // 冷启动时 pty-size 广播可能先把服务端旧尺寸写进 lastServerSizeRef，
+            // 而本地 fit 前后刚好不变。只比较 before/after 会误判“不用推”，直到
+            // 软键盘改变 rows 才修好。这里必须同时比较本地与服务端事实。
+            if (shouldPushFittedSize({
+              before,
+              after,
+              lastServerSize: lastServerSizeRef.current,
+              reconcileServerSize: options.reconcileServerSize,
+            })) {
               const debounce = options.resizeDebounceMs ?? DEFAULT_RESIZE_DEBOUNCE_MS;
               pushResizeToServer(after.cols, after.rows, debounce);
             }
@@ -3158,7 +3178,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }
 
         // 4) ScrollToBottom：等 viewport 切到新 rows 后再滚
-        if (!options.skipScrollToBottom) {
+        const shouldScrollToBottom =
+          !options.skipScrollToBottom && reason !== 'resize' && reason !== 'dpr-change';
+        if (shouldScrollToBottom) {
           const raf = requestAnimationFrame(() => {
             const t = terminalRef.current;
             if (!t) return;
@@ -3337,6 +3359,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       let disposed = false;
       let localTerminal: Terminal | null = null;
       let localResizeObserver: ResizeObserver | null = null;
+      let localResizeSettleTimer: number | null = null;
       let localDisposables: Array<{ dispose: () => void }> = [];
 
       const container = containerRef.current;
@@ -3695,6 +3718,29 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             } else {
               requestRefresh('resize');
             }
+
+            // 冷启动的 safe-area / Swiper / visualViewport 往往分几轮收敛。
+            // ResizeObserver 的即时 fit 负责尺寸，最后一轮静止后再对屏幕内终端
+            // 完整重绘一次，等价于过去“弹一下软键盘就好了”，但不会惊动后台 tab。
+            if (localResizeSettleTimer !== null) {
+              window.clearTimeout(localResizeSettleTimer);
+            }
+            localResizeSettleTimer = window.setTimeout(() => {
+              localResizeSettleTimer = null;
+              const rect = container.getBoundingClientRect();
+              const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
+              const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+              const isOnScreen = rect.width > 0 && rect.height > 0 &&
+                rect.right > 0 && rect.bottom > 0 &&
+                rect.left < viewportWidth && rect.top < viewportHeight;
+              if (!isOnScreen || document.visibilityState !== 'visible') return;
+              requestRefresh('resize', {
+                force: true,
+                forceRedraw: true,
+                reconcileServerSize: true,
+                skipScrollToBottom: true,
+              });
+            }, 180);
           });
           localResizeObserver.observe(container);
 
@@ -3765,6 +3811,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           disposable.dispose();
         }
         localResizeObserver?.disconnect();
+        if (localResizeSettleTimer !== null) {
+          window.clearTimeout(localResizeSettleTimer);
+          localResizeSettleTimer = null;
+        }
 
         if (wheelHandlerRef.current) {
           container.removeEventListener('wheel', wheelHandlerRef.current);
@@ -3777,7 +3827,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         fitAddonRef.current = null;
         viewportRef.current = null;
         lastBufferTypeRef.current = null;
-        lastReportedSizeRef.current = null;
         resetWriteState({ notifyFlowResume: true });
       };
     }, [
@@ -3853,7 +3902,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
       terminal.reset();
       resetWriteState();
-      lastReportedSizeRef.current = null;
       sentValueRef.current = '';
       sentCursorRef.current = 0;
       if (hiddenInputRef.current) {
