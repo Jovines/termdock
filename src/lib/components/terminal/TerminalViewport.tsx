@@ -28,6 +28,7 @@ import {
 import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal/imeAnchor';
 import { buildBracketedPastePayload } from '../../terminal/bracketedPaste';
 import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHysteresis';
+import { shouldAllowTerminalTransparency } from '../../terminal/renderer';
 import {
   TERMINAL_FALLBACK_LIGATURES,
   TERMINAL_LIGATURE_FEATURE_SETTINGS,
@@ -3406,7 +3407,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             cursorStyle: 'block',
             cursorInactiveStyle: 'bar',
             scrollback: onTmuxScroll ? 2000 : 5000,
-            allowTransparency: enableImages,
+            allowTransparency: shouldAllowTerminalTransparency(rendererMode, enableImages),
             convertEol: terminalConvertEol,
             drawBoldTextInBrightColors,
             rescaleOverlappingGlyphs,
