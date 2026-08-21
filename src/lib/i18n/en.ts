@@ -155,6 +155,7 @@ export const en: TranslationDictionary = {
     contextDraftSend: 'Send draft',
     contextDraftAppended: 'Reference added',
     contextDraftResize: 'Drag to resize, double-click for default height',
+    contextDraftAutoCollapseAfterSend: 'Collapse after insert/send',
     contextDraftInsertFailed: 'Terminal disconnected — draft kept',
     contextDraftCharacterCount: ({ count }) => `${count} chars`,
     selectFilePrompt: 'Select a file to preview its contents',

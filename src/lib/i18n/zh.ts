@@ -155,6 +155,7 @@ export const zh: TranslationDictionary = {
     contextDraftSend: '发送草稿',
     contextDraftAppended: '已追加引用',
     contextDraftResize: '拖动调整高度，双击恢复默认',
+    contextDraftAutoCollapseAfterSend: '插入/发送后收起',
     contextDraftInsertFailed: '终端未连接，草稿已保留',
     contextDraftCharacterCount: ({ count }) => `${count} 字`,
     selectFilePrompt: '选择文件以预览内容',

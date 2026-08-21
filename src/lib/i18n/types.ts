@@ -172,6 +172,7 @@ export type TranslationDictionary = {
     contextDraftSend: string;
     contextDraftAppended: string;
     contextDraftResize: string;
+    contextDraftAutoCollapseAfterSend: string;
     contextDraftInsertFailed: string;
     contextDraftCharacterCount: (params: TranslatorParams) => string;
     selectFilePrompt: string;

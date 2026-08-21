@@ -107,6 +107,7 @@ const GIT_BUNDLE_SNAPSHOT_STORAGE_KEY = 'termdock:right-sidebar:git-bundle-snaps
 const ACTIVE_GIT_REPO_STORAGE_KEY = 'termdock:right-sidebar:active-git-repo:v1';
 const CONTEXT_DRAFT_ENABLED_STORAGE_KEY = 'termdock:right-sidebar:context-draft-enabled:v1';
 const CONTEXT_DRAFT_COLLAPSED_STORAGE_KEY = 'termdock:right-sidebar:context-draft-collapsed:v1';
+const CONTEXT_DRAFT_AUTO_COLLAPSE_STORAGE_KEY = 'termdock:right-sidebar:context-draft-auto-collapse:v1';
 const CONTEXT_DRAFT_TEXT_STORAGE_KEY = 'termdock:right-sidebar:context-draft-text:v1';
 const CONTEXT_DRAFT_WRITE_MS = 300;
 const MAX_FILE_TREE_SCROLL_ROOTS = 20;
@@ -5814,6 +5815,9 @@ export function RightSidebar(
   const [contextDraftCollapsed, setContextDraftCollapsed] = useState(
     () => readCache(CONTEXT_DRAFT_COLLAPSED_STORAGE_KEY, isDiffWrap) ?? false,
   );
+  const [contextDraftAutoCollapse, setContextDraftAutoCollapse] = useState(
+    () => readCache(CONTEXT_DRAFT_AUTO_COLLAPSE_STORAGE_KEY, isDiffWrap) ?? false,
+  );
   const [contextDraftText, setContextDraftText] = useState(
     () => readCache(CONTEXT_DRAFT_TEXT_STORAGE_KEY, isStringValue) ?? '',
   );
@@ -6971,6 +6975,10 @@ export function RightSidebar(
   }, [contextDraftCollapsed]);
 
   useEffect(() => {
+    writeCache(CONTEXT_DRAFT_AUTO_COLLAPSE_STORAGE_KEY, contextDraftAutoCollapse);
+  }, [contextDraftAutoCollapse]);
+
+  useEffect(() => {
     writeCacheThrottled(CONTEXT_DRAFT_TEXT_STORAGE_KEY, contextDraftText, CONTEXT_DRAFT_WRITE_MS);
   }, [contextDraftText]);
 
@@ -7074,7 +7082,8 @@ export function RightSidebar(
     // 行分隔符，让整段草稿作为一条消息发送而不是拆成多条。
     const paste = submit && contextDraftText.trim().includes('\n');
     // 断联的 session 无法接收输入：终端侧会拒绝并回 ack。只有 ack 成功
-    // 才清空草稿并收起；失败（含超时无活跃终端）保留草稿并提示。
+    // 才清空草稿；是否收起由用户偏好决定。失败（含超时无活跃终端）
+    // 保留草稿并展开提示。
     const nonce = `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     let settled = false;
     const settle = (ok: boolean) => {
@@ -7085,7 +7094,7 @@ export function RightSidebar(
       if (ok) {
         setDraftInsertFailed(false);
         setContextDraftText('');
-        setContextDraftCollapsed(true);
+        if (contextDraftAutoCollapse) setContextDraftCollapsed(true);
       } else {
         setDraftInsertFailed(true);
         setContextDraftCollapsed(false);
@@ -7102,7 +7111,7 @@ export function RightSidebar(
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
       detail: { text: payload, focus: false, paste, nonce },
     }));
-  }, [contextDraftText]);
+  }, [contextDraftAutoCollapse, contextDraftText]);
 
   const rootName = useMemo(() => {
     if (!rootPath) return t('rightSidebar.workspace');
@@ -11078,6 +11087,7 @@ export function RightSidebar(
         <ContextDraftDock
           value={contextDraftText}
           collapsed={contextDraftCollapsed}
+          autoCollapseAfterSend={contextDraftAutoCollapse}
           focusRequest={draftFocusRequest}
           insertError={draftInsertFailed ? t('rightSidebar.contextDraftInsertFailed') : null}
           onChange={(next) => {
@@ -11085,6 +11095,7 @@ export function RightSidebar(
             setContextDraftText(next);
           }}
           onCollapsedChange={setContextDraftCollapsed}
+          onAutoCollapseAfterSendChange={setContextDraftAutoCollapse}
           onDisable={() => setContextDraftEnabled(false)}
           onClear={() => setContextDraftText('')}
           onInsert={() => sendContextDraftToTerminal(false)}
@@ -11104,6 +11115,7 @@ export function RightSidebar(
             send: t('rightSidebar.contextDraftSend'),
             appended: t('rightSidebar.contextDraftAppended'),
             resize: t('rightSidebar.contextDraftResize'),
+            autoCollapseAfterSend: t('rightSidebar.contextDraftAutoCollapseAfterSend'),
             characterCount: (count) => t('rightSidebar.contextDraftCharacterCount', { count }),
           }}
         />

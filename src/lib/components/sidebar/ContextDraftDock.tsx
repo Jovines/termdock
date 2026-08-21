@@ -25,6 +25,7 @@ interface ContextDraftDockLabels {
   send: string;
   appended: string;
   resize: string;
+  autoCollapseAfterSend: string;
   characterCount: (count: number) => string;
 }
 
@@ -33,10 +34,12 @@ interface ContextDraftDockProps {
   collapsed: boolean;
   labels: ContextDraftDockLabels;
   focusRequest?: number;
+  autoCollapseAfterSend: boolean;
   /** 插入/发送失败提示（如终端断联），非空时展示并保持编辑态 */
   insertError?: string | null;
   onChange: (value: string) => void;
   onCollapsedChange: (collapsed: boolean) => void;
+  onAutoCollapseAfterSendChange: (enabled: boolean) => void;
   onDisable: () => void;
   onClear: () => void;
   onInsert: () => void;
@@ -89,8 +92,10 @@ export function ContextDraftDock({
   labels,
   focusRequest,
   insertError,
+  autoCollapseAfterSend,
   onChange,
   onCollapsedChange,
+  onAutoCollapseAfterSendChange,
   onDisable,
   onClear,
   onInsert,
@@ -404,6 +409,26 @@ export function ContextDraftDock({
           <ChevronDown size={11} className="shrink-0 text-muted-foreground/60" aria-hidden="true" />
           <span className="truncate text-[11px] font-semibold text-muted-foreground">{labels.title}</span>
           {charCount}
+        </button>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoCollapseAfterSend}
+          onPointerDown={keepFocus}
+          onClick={() => onAutoCollapseAfterSendChange(!autoCollapseAfterSend)}
+          className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-[10px] text-muted-foreground/70 transition hover:bg-surface-2 hover:text-foreground"
+          aria-label={labels.autoCollapseAfterSend}
+          title={labels.autoCollapseAfterSend}
+        >
+          <span>{labels.autoCollapseAfterSend}</span>
+          <span
+            aria-hidden="true"
+            className={`relative h-3.5 w-6 rounded-full transition ${autoCollapseAfterSend ? 'bg-primary' : 'bg-surface-elevated'}`}
+          >
+            <span
+              className={`absolute top-0.5 h-2.5 w-2.5 rounded-full bg-primary-foreground transition-transform ${autoCollapseAfterSend ? 'translate-x-3' : 'translate-x-0.5'}`}
+            />
+          </span>
         </button>
         <button
           type="button"

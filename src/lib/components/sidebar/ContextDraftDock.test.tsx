@@ -18,6 +18,7 @@ const labels = {
   send: 'Send draft',
   appended: 'Reference added',
   resize: 'Drag to resize',
+  autoCollapseAfterSend: 'Collapse after insert/send',
   characterCount: (count: number) => `${count} chars`,
 };
 
@@ -25,6 +26,7 @@ function renderDock(value = 'Review this') {
   const handlers = {
     onChange: vi.fn(),
     onCollapsedChange: vi.fn(),
+    onAutoCollapseAfterSendChange: vi.fn(),
     onDisable: vi.fn(),
     onClear: vi.fn(),
     onInsert: vi.fn(),
@@ -34,6 +36,7 @@ function renderDock(value = 'Review this') {
     <ContextDraftDock
       value={value}
       collapsed={false}
+      autoCollapseAfterSend={false}
       labels={labels}
       {...handlers}
     />,
@@ -63,6 +66,7 @@ describe('ContextDraftDock', () => {
     const handlers = {
       onChange: vi.fn(),
       onCollapsedChange: vi.fn(),
+      onAutoCollapseAfterSendChange: vi.fn(),
       onDisable: vi.fn(),
       onClear: vi.fn(),
       onInsert: vi.fn(),
@@ -72,6 +76,7 @@ describe('ContextDraftDock', () => {
       <ContextDraftDock
         value="Review this"
         collapsed={true}
+        autoCollapseAfterSend={false}
         labels={labels}
         {...handlers}
       />,
@@ -109,6 +114,7 @@ describe('ContextDraftDock', () => {
     const handlers = {
       onChange: vi.fn(),
       onCollapsedChange: vi.fn(),
+      onAutoCollapseAfterSendChange: vi.fn(),
       onDisable: vi.fn(),
       onClear: vi.fn(),
       onInsert: vi.fn(),
@@ -118,6 +124,7 @@ describe('ContextDraftDock', () => {
       <ContextDraftDock
         value="Review this"
         collapsed={false}
+        autoCollapseAfterSend={false}
         focusRequest={0}
         labels={labels}
         {...handlers}
@@ -130,6 +137,7 @@ describe('ContextDraftDock', () => {
       <ContextDraftDock
         value={'Review this\n\n/repo/src/App.tsx'}
         collapsed={false}
+        autoCollapseAfterSend={false}
         focusRequest={1}
         labels={labels}
         {...handlers}
@@ -151,5 +159,15 @@ describe('ContextDraftDock', () => {
 
     expect(handlers.onCollapsedChange).not.toHaveBeenCalled();
     expect(handlers.onClear).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the user toggle automatic collapse after send', () => {
+    const handlers = renderDock();
+
+    const toggle = screen.getByRole('switch', { name: 'Collapse after insert/send' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+
+    fireEvent.click(toggle);
+    expect(handlers.onAutoCollapseAfterSendChange).toHaveBeenCalledWith(true);
   });
 });
