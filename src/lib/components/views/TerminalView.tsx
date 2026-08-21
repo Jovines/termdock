@@ -18,6 +18,7 @@ import { createDebugLogger } from '../../utils/debug';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../../terminal/settings';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 import { useI18n } from '../../i18n';
+import { getVisibleReconnectWatchdogDelayMs } from '../../terminal/resumeScheduling';
 
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
@@ -55,6 +56,8 @@ interface TerminalViewProps {
   focusRequestToken?: number;
   resumeRequestToken?: number;
   resumeRequestReason?: Extract<RefreshReason, 'visibility' | 'bfcache' | 'online'>;
+  resumeRequestDelayMs?: number;
+  initialConnectDelayMs?: number;
   onKeyboardVisibilityChange?: (sessionId: string, isOpen: boolean) => void;
   suppressKeyboard?: boolean;
   keyboardPortalTarget?: HTMLElement | null;
@@ -75,6 +78,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   focusRequestToken = 0,
   resumeRequestToken = 0,
   resumeRequestReason = 'visibility',
+  resumeRequestDelayMs = 0,
+  initialConnectDelayMs = 0,
   onKeyboardVisibilityChange,
   suppressKeyboard = false,
   keyboardPortalTarget = null,
@@ -89,6 +94,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const terminal = React.useMemo(() => createTermdockAPI(), []);
   const debugSession = React.useMemo(() => createDebugLogger('session'), []);
   const debugKeyboard = React.useMemo(() => createDebugLogger('keyboard'), []);
+  const resumeRequestDelayRef = React.useRef(resumeRequestDelayMs);
+  resumeRequestDelayRef.current = resumeRequestDelayMs;
 
   // Sync with external fontSize changes while allowing local pinch-to-zoom overrides
   React.useEffect(() => {
@@ -143,25 +150,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   });
   const [mobileCopyFeedback, setMobileCopyFeedback] = React.useState<'idle' | 'copied' | 'failed'>('idle');
 
-  const terminalStore = useTerminalStore();
-  const terminalSessions = terminalStore.sessions;
-  const setTerminalSession = terminalStore.setTerminalSession;
-  const setConnecting = terminalStore.setConnecting;
-  const appendToBuffer = terminalStore.appendToBuffer;
-  const clearTerminalSession = terminalStore.clearTerminalSession;
-  const removeTerminalSession = terminalStore.removeTerminalSession;
-  const clearBuffer = terminalStore.clearBuffer;
-  const setSessionActiveProgram = terminalStore.setSessionActiveProgram;
-  const setSessionCwd = terminalStore.setSessionCwd;
-  const setSessionCopyMode = terminalStore.setSessionCopyMode;
-  const setSessionAgentStatus = terminalStore.setSessionAgentStatus;
-  const setSessionShellTitle = terminalStore.setSessionShellTitle;
-  const setSessionPromptState = terminalStore.setSessionPromptState;
-
-  const terminalState = React.useMemo(() => {
-    if (!sessionId) return undefined;
-    return terminalSessions.get(sessionId);
-  }, [terminalSessions, sessionId]);
+  const terminalState = useTerminalStore((state) => state.sessions.get(sessionId));
+  const {
+    setTerminalSession,
+    setConnecting,
+    appendToBuffer,
+    clearTerminalSession,
+    removeTerminalSession,
+    clearBuffer,
+    setSessionActiveProgram,
+    setSessionCwd,
+    setSessionCopyMode,
+    setSessionAgentStatus,
+    setSessionShellTitle,
+    setSessionPromptState,
+    clearAgentNeedsReview,
+  } = useTerminalStore.getState();
 
   const fallbackTmuxSessionName = React.useMemo(() => `wt-${sessionId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 12)}`, [sessionId]);
 
@@ -184,6 +188,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const isConnectionTransitionRef = React.useRef(false);
   const [isFatalError, setIsFatalError] = React.useState(false);
   const [isRestarting, setIsRestarting] = React.useState(false);
+  const [reconnectStartedAt, setReconnectStartedAt] = React.useState<number | null>(null);
   // 触发器：当后端 session 丢失（服务端重启 / idle 清理）后，bump 这个值
   // 让 ensureSession 的 useEffect 重新跑。只改 ref 没用，React 不会因此 re-run effect。
   const [restartTrigger, setRestartTrigger] = React.useState(0);
@@ -284,11 +289,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     let raf2 = 0;
     raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
-        terminalControllerRef.current?.requestRefresh('page-flip');
+        terminalControllerRef.current?.requestRefresh('page-flip', { forceRedraw: true, reconcileServerSize: true });
       });
     });
     const postTransitionTimer = window.setTimeout(() => {
-      terminalControllerRef.current?.requestRefresh('page-flip');
+      terminalControllerRef.current?.requestRefresh('page-flip', { forceRedraw: true, reconcileServerSize: true });
     }, 360);
     return () => {
       cancelAnimationFrame(raf1);
@@ -478,14 +483,24 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [isActive, scheduleDesktopResumeFocus]);
 
   // MultiTerminalView 在 visibility/pageshow/online 时给所有 TerminalView 广播。
-  // 不区分 active / non-active：每个 session 都走同一套恢复刷新和 WS 探测。
+  // 可见 slide 立即恢复；后台 session 带错峰 delay。timer 在 token 更新、组件
+  // 卸载时会清掉，避免旧一轮恢复请求晚到后干扰新状态。
   React.useEffect(() => {
     if (!resumeRequestToken) return;
-    terminalControllerRef.current?.requestRefresh(resumeRequestReason);
-    probeOrRestartSession('global-resume');
+    const delayMs = resumeRequestDelayRef.current;
+    const resume = () => {
+      terminalControllerRef.current?.requestRefresh(resumeRequestReason);
+      probeOrRestartSession(delayMs > 0 ? 'global-resume-background' : 'global-resume-visible');
+    };
+    if (delayMs <= 0) {
+      resume();
+      return;
+    }
+    const timer = window.setTimeout(resume, delayMs);
+    return () => window.clearTimeout(timer);
   }, [resumeRequestToken, resumeRequestReason, probeOrRestartSession]);
 
-  // 失败态自愈：session 用尽底层 10 次重试后会进入 fatal（connection failed），
+  // 失败态自愈：session 用尽底层重试后会进入 fatal（connection failed），
   // 此时 wsConnections 里的 conn 已被 cleanup 删除，仅靠 visibility/focus/online
   // 事件才会触发 probeOrRestartSession 重连。但如果页面一直开在前台、没有任何
   // 可见性/聚焦变化（桌面常驻、或弱网下某条 session 首连就失败），这条 session
@@ -698,6 +713,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
 
       debugSession(`[startStream] Starting stream for frontendSessionId=${sessionId} backendSessionId=${terminalId}`);
+      setReconnectStartedAt(null);
       disconnectStream();
       const streamVersion = streamVersionRef.current + 1;
       streamVersionRef.current = streamVersion;
@@ -723,6 +739,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setConnecting(storeSessionId, false);
                 setConnectionError(null);
                 setIsFatalError(false);
+                setReconnectStartedAt(null);
 
                 // 标记 WS 已就绪：编排器从这一刻起才允许 push resize 给服务端。
                 setIsStreamReady(true);
@@ -784,7 +801,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 // 编排器内部默认会推 first-fit immediate resize 告诉服务端真实尺寸。
                 requestAnimationFrame(() => {
                   requestAnimationFrame(() => {
-                    terminalControllerRef.current?.requestRefresh('connected', { force: true, resizeDebounceMs: 0 });
+                    terminalControllerRef.current?.requestRefresh('connected', {
+                      force: true,
+                      forceRedraw: true,
+                      reconcileServerSize: isActiveRef.current,
+                      resizeDebounceMs: 0,
+                    });
                   });
                 });
                 // 移动端兜底：软键盘 / Safari 视口尺寸在 connected 后才稳定，
@@ -792,10 +814,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 // 让用户看到第二次 fit + scroll 的"闪一下"，所以仅 mobile 启用。
                 if (typeof window !== 'undefined' && isActiveRef.current && isMobileRef.current) {
                   window.setTimeout(() => {
-                    terminalControllerRef.current?.requestRefresh('connected', { force: true, resizeDebounceMs: 0 });
+                    terminalControllerRef.current?.requestRefresh('connected', {
+                      force: true,
+                      forceRedraw: true,
+                      reconcileServerSize: isActiveRef.current,
+                      resizeDebounceMs: 0,
+                    });
                   }, 120);
                   window.setTimeout(() => {
-                    terminalControllerRef.current?.requestRefresh('connected', { force: true, resizeDebounceMs: 0 });
+                    terminalControllerRef.current?.requestRefresh('connected', {
+                      force: true,
+                      forceRedraw: true,
+                      reconcileServerSize: isActiveRef.current,
+                      resizeDebounceMs: 0,
+                    });
                   }, 360);
                 }
 
@@ -856,6 +888,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               case 'reconnecting': {
                 const attempt = event.attempt ?? 0;
                 const maxAttempts = event.maxAttempts ?? 3;
+                setReconnectStartedAt((startedAt) => startedAt ?? Date.now());
                 setConnectionError(`Reconnecting (${attempt}/${maxAttempts})...`);
                 setIsFatalError(false);
                 break;
@@ -958,6 +991,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setConnectionError('Terminal session ended');
                 setIsStreamReady(false);
                 setIsFatalError(false);
+                setReconnectStartedAt(null);
                 setTmuxLayout(null);
                 setSessionCopyMode(storeSessionId, false);
                 disconnectStream();
@@ -995,6 +1029,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             setIsFatalError(!!fatal);
 
             if (fatal) {
+              setReconnectStartedAt(null);
               setConnecting(storeSessionId, false);
               disconnectStream();
 
@@ -1036,7 +1071,34 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, reportFlowControl, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
   );
 
+  // 后台会话允许长时间退避，覆盖锁屏和系统冻结；但只要会话进入前台，连续
+  // reconnecting 最多保留 60 秒。超过上限就清掉旧 WS 状态并进入可点击 Retry
+  // 的 fatal 状态，随后既有 self-heal 仍会按退避自动尝试，不再要求刷新页面。
+  React.useEffect(() => {
+    const delayMs = getVisibleReconnectWatchdogDelayMs({
+      isActive,
+      isStreamReady,
+      reconnectStartedAt,
+      now: Date.now(),
+    });
+    if (delayMs === null) return;
+
+    const timer = window.setTimeout(() => {
+      debugSession('[Terminal] visible reconnect watchdog expired', {
+        backendSessionId: terminalIdRef.current,
+        reconnectStartedAt,
+      });
+      disconnectStream();
+      setConnecting(sessionId, false);
+      setConnectionError('Connection recovery timed out');
+      setIsFatalError(true);
+      setReconnectStartedAt(null);
+    }, delayMs);
+    return () => window.clearTimeout(timer);
+  }, [debugSession, disconnectStream, isActive, isStreamReady, reconnectStartedAt, sessionId, setConnecting]);
+
   const hasInitializedRef = React.useRef(false);
+  const hasStartedInitialConnectRef = React.useRef(false);
   const currentRunIdRef = React.useRef(0);
 
   React.useEffect(() => {
@@ -1065,6 +1127,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (sessionIdRef.current !== sessionId) {
       debugSession(`[useEffect] sessionId changed from ${sessionIdRef.current} to ${sessionId}, allowing reinitialization`);
       hasInitializedRef.current = false;
+      hasStartedInitialConnectRef.current = false;
     }
 
     if (hasInitializedRef.current && sessionIdRef.current === sessionId) {
@@ -1072,12 +1135,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
 
-    debugSession(`[useEffect] Running ensureSession for sessionId=${sessionId}, hasInitialized=${hasInitializedRef.current}`);
-    hasInitializedRef.current = true;
-
-    const runId = ++currentRunIdRef.current;
-
-    const ensureSession = async () => {
+    const ensureSession = async (runId: number) => {
       debugSession(`[ensureSession] Starting for sessionId=${sessionId}, runId=${runId}`);
 
       if (!sessionIdRef.current || sessionIdRef.current !== sessionId) {
@@ -1247,12 +1305,38 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       debugSession(`[ensureSession] ensureSession completed for sessionId=${sessionId}, terminalId=${terminalId}`);
     };
 
-    void ensureSession();
+    let scheduledRunId: number | null = null;
+    let connectTimer: number | null = null;
+    const beginEnsureSession = () => {
+      connectTimer = null;
+      if (hasInitializedRef.current && sessionIdRef.current === sessionId) {
+        return;
+      }
+
+      debugSession(`[useEffect] Running ensureSession for sessionId=${sessionId}, hasInitialized=${hasInitializedRef.current}`);
+      hasInitializedRef.current = true;
+      hasStartedInitialConnectRef.current = true;
+      scheduledRunId = ++currentRunIdRef.current;
+      void ensureSession(scheduledRunId);
+    };
+
+    const connectDelayMs = hasStartedInitialConnectRef.current
+      ? 0
+      : Math.max(0, initialConnectDelayMs);
+    if (connectDelayMs > 0) {
+      debugSession(`[useEffect] Delaying initial connection for sessionId=${sessionId} by ${connectDelayMs}ms`);
+      connectTimer = window.setTimeout(beginEnsureSession, connectDelayMs);
+    } else {
+      beginEnsureSession();
+    }
 
     return () => {
-      debugSession(`[useEffect] Cleanup for sessionId=${sessionId}, runId=${runId}`);
+      if (connectTimer !== null) {
+        window.clearTimeout(connectTimer);
+      }
+      debugSession(`[useEffect] Cleanup for sessionId=${sessionId}, runId=${scheduledRunId ?? 'pending'}`);
     };
-  }, [sessionId, restartTrigger, startStream, disconnectStream, terminal, debugSession, desiredSessionMode, desiredTmuxSessionName, fallbackTmuxSessionName]);
+  }, [sessionId, restartTrigger, startStream, disconnectStream, terminal, debugSession, desiredSessionMode, desiredTmuxSessionName, fallbackTmuxSessionName, initialConnectDelayMs]);
 
   const handleHardRestart = React.useCallback(async () => {
     if (!sessionId) return;
@@ -1261,6 +1345,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     setIsRestarting(true);
     setConnectionError(null);
     setIsFatalError(false);
+    setReconnectStartedAt(null);
     disconnectStream();
 
     try {
@@ -1373,7 +1458,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
           await terminal.sendInput(terminalId, payload);
           // If user is on the session and agent just finished, user input = reviewed
-          terminalStore.clearAgentNeedsReview(sessionId);
+          clearAgentNeedsReview(sessionId);
         } catch (error) {
           setConnectionError(error instanceof Error ? error.message : 'Failed to send input');
         }
@@ -1388,7 +1473,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         focusTerminalIfActive();
       }
     },
-    [activeModifier, focusTerminalIfActive, isTmuxMode, lockedModifier, terminal]
+    [activeModifier, clearAgentNeedsReview, focusTerminalIfActive, isTmuxMode, lockedModifier, terminal]
   );
 
   React.useEffect(() => {

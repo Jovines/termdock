@@ -4,10 +4,15 @@ import type { Swiper as SwiperInstance } from 'swiper';
 import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
+import { VIEWPORT_LAYOUT_CHANGE_EVENT } from '../hooks/useViewportHeight';
 import { closeTerminal, killTmuxSession } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../terminal/settings';
 import type { TermdockColorTheme } from '../terminal/theme';
+import {
+  BACKGROUND_RESUME_INITIAL_DELAY_MS,
+  buildResumeDelayBySessionId,
+} from '../terminal/resumeScheduling';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { deriveGroupedOrder, getCwdLeafName, getSessionDisplayLines } from '../terminal/display';
@@ -472,6 +477,18 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     () => findSplitWorkspace(splitWorkspaces, activeSessionId),
     [activeSessionId, splitWorkspaces],
   );
+  const visibleSessionIds = useMemo(() => {
+    const activeSlide = workspaceSlides.find((slide) =>
+      slide.sessions.some((session) => session.id === activeSessionId)
+    );
+    return new Set(activeSlide?.sessions.map((session) => session.id) ?? []);
+  }, [activeSessionId, workspaceSlides]);
+  const backgroundResumeDelayBySessionId = useMemo(() => {
+    return buildResumeDelayBySessionId(
+      workspaceSlides.flatMap((slide) => slide.sessions.map((session) => session.id)),
+      visibleSessionIds,
+    );
+  }, [visibleSessionIds, workspaceSlides]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -810,27 +827,44 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [groupByFolder, arrangedKey, updateSwiperLayout]);
 
   useEffect(() => {
-    const updateSwiperSize = () => {
-      requestAnimationFrame(() => updateSwiperLayout('viewport-change'));
+    let pendingLayoutRaf: number | null = null;
+    let pendingReason = 'mount';
+    const scheduleSwiperUpdate = (reason: string) => {
+      pendingReason = reason;
+      if (pendingLayoutRaf !== null) return;
+      pendingLayoutRaf = requestAnimationFrame(() => {
+        pendingLayoutRaf = null;
+        updateSwiperLayout(`viewport-change:${pendingReason}`);
+      });
+    };
+    const handleWindowResize = () => scheduleSwiperUpdate('window-resize');
+    const handleVisualViewportResize = () => scheduleSwiperUpdate('visual-viewport-resize');
+    const handleVisualViewportScroll = () => scheduleSwiperUpdate('visual-viewport-scroll');
+    const handleMeasuredLayout = (event: CustomEvent<{ source?: string }>) => {
+      scheduleSwiperUpdate(`measured:${event.detail?.source ?? 'unknown'}`);
     };
 
-    window.addEventListener('resize', updateSwiperSize);
-    window.visualViewport?.addEventListener('resize', updateSwiperSize);
-    window.visualViewport?.addEventListener('scroll', updateSwiperSize);
+    window.addEventListener('resize', handleWindowResize);
+    window.visualViewport?.addEventListener('resize', handleVisualViewportResize);
+    window.visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
+    document.addEventListener(VIEWPORT_LAYOUT_CHANGE_EVENT, handleMeasuredLayout);
 
-    updateSwiperSize();
+    scheduleSwiperUpdate('mount');
 
     return () => {
-      window.removeEventListener('resize', updateSwiperSize);
-      window.visualViewport?.removeEventListener('resize', updateSwiperSize);
-      window.visualViewport?.removeEventListener('scroll', updateSwiperSize);
+      window.removeEventListener('resize', handleWindowResize);
+      window.visualViewport?.removeEventListener('resize', handleVisualViewportResize);
+      window.visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);
+      document.removeEventListener(VIEWPORT_LAYOUT_CHANGE_EVENT, handleMeasuredLayout);
+      if (pendingLayoutRaf !== null) cancelAnimationFrame(pendingLayoutRaf);
     };
   }, [updateSwiperLayout]);
 
   // PWA 从后台恢复 / 网络恢复时，不能只让当前 active slide 自检：
   // Swiper 中其它 TerminalView 虽然不可见但仍持有各自 WebSocket，服务重启后
-  // 它们也会变成半开/已关闭连接。这里广播一个 token 给所有子 TerminalView，
-  // 让每个 session 都 probe / 必要时重新 ensureSession。
+  // 它们也会变成半开/已关闭连接。这里广播一个 token 给所有子 TerminalView；
+  // 当前可见 slide（包括分屏里的所有可见 pane）立即 probe，后台 session 从
+  // 300ms 起按 120ms 错峰补连，优先恢复用户眼前内容并压低瞬时连接风暴。
   useEffect(() => {
     if (typeof document === 'undefined') return;
 
@@ -1643,6 +1677,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
             resumeRequestToken={resumeRequest.token}
             resumeRequestReason={resumeRequest.reason}
+            resumeRequestDelayMs={options.hidden
+              ? BACKGROUND_RESUME_INITIAL_DELAY_MS
+              : backgroundResumeDelayBySessionId.get(session.id) ?? BACKGROUND_RESUME_INITIAL_DELAY_MS}
+            initialConnectDelayMs={backgroundResumeDelayBySessionId.get(session.id) ?? BACKGROUND_RESUME_INITIAL_DELAY_MS}
             onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
             showDebug={showDebug}
             onStatusChange={isActive ? onStatusChange : undefined}
