@@ -711,7 +711,10 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
   const window = new BrowserWindow({
     title: options ? `Termdock — ${options.label}` : 'Termdock — 连接中心',
     show: false,
-    width: 1280,
+    // The web workspace enables its persistent right inspector at 1440px.
+    // Open service windows above that breakpoint so the visible pin action
+    // cannot write a pinned state that the initial layout refuses to render.
+    width: options ? 1500 : 1280,
     height: 820,
     minWidth: 760,
     minHeight: 520,
