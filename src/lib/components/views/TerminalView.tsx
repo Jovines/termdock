@@ -19,6 +19,7 @@ import { getDefaultTerminalSettings, type TerminalSettings } from '../../termina
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 import { useI18n } from '../../i18n';
 import { getVisibleReconnectWatchdogDelayMs } from '../../terminal/resumeScheduling';
+import { shouldForceSettledRedraw } from '../../terminal/refreshRedraw';
 
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
@@ -284,16 +285,28 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (suppressPageFlipRefresh) {
       return;
     }
-    // 双 rAF 等 swiper 的 transform 收尾，容器尺寸稳定后再 fit
+    const pageFlipStartDimensions = terminalControllerRef.current?.getDimensions() ?? null;
+    // 双 rAF 先等 swiper transform 收尾并校准尺寸。这里不完整重画、也不滚底；
+    // 真正的稳定化刷新统一留给 transition 结束后的那一轮，避免可见的双重扫屏。
     let raf1 = 0;
     let raf2 = 0;
     raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
-        terminalControllerRef.current?.requestRefresh('page-flip', { forceRedraw: true, reconcileServerSize: true });
+        terminalControllerRef.current?.requestRefresh('page-flip', {
+          reconcileServerSize: true,
+          skipScrollToBottom: true,
+        });
       });
     });
     const postTransitionTimer = window.setTimeout(() => {
-      terminalControllerRef.current?.requestRefresh('page-flip', { forceRedraw: true, reconcileServerSize: true });
+      const controller = terminalControllerRef.current;
+      const settledDimensions = controller?.getDimensions() ?? null;
+      controller?.requestRefresh('page-flip', {
+        // terminal.resize() already repaints when the swiper settle changed
+        // rows/cols. Only force a full-buffer redraw when fit stayed unchanged.
+        forceRedraw: shouldForceSettledRedraw(pageFlipStartDimensions, settledDimensions),
+        reconcileServerSize: true,
+      });
     }, 360);
     return () => {
       cancelAnimationFrame(raf1);
@@ -816,7 +829,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                       force: true,
                       forceRedraw: true,
                       reconcileServerSize: isActiveRef.current,
-                      resizeDebounceMs: 0,
                     });
                   });
                 });
@@ -829,7 +841,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                       force: true,
                       forceRedraw: true,
                       reconcileServerSize: isActiveRef.current,
-                      resizeDebounceMs: 0,
                     });
                   }, 120);
                   window.setTimeout(() => {
@@ -837,7 +848,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                       force: true,
                       forceRedraw: true,
                       reconcileServerSize: isActiveRef.current,
-                      resizeDebounceMs: 0,
                     });
                   }, 360);
                 }
@@ -1522,8 +1532,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [focusTerminalIfActive]);
 
   // 推 resize 给服务端。本组件不再做 debounce / skip-if-same —— 编排器在
-  // TerminalViewport 内部已经决定了 first-fit immediate / 90ms debounce /
-  // skip-if-same，调用本函数说明编排器已经决策好了，直接发。
+  // TerminalViewport 内部已按动画帧合并并完成 skip-if-same，调用本函数说明
+  // 编排器已经决策好了，直接通过当前 WebSocket 发送。
   const handleViewportResize = React.useCallback(
     (cols: number, rows: number) => {
       const terminalId = terminalIdRef.current;
@@ -1880,11 +1890,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const normalizedLines = Math.max(1, Math.min(Math.floor(lines) || 1, 40));
     handleTmuxScroll(direction, normalizedLines);
   }, [handleTmuxScroll, quickKeysDisabled]);
+
   React.useEffect(() => {
     if (!isActive || !isMobile) return;
     const controller = terminalControllerRef.current;
     controller?.requestRefresh('resize', {
-      resizeDebounceMs: 0,
       skipScrollToBottom: !isViewportKeyboardOpen,
       force: true,
     });
@@ -1895,7 +1905,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const handleViewportKeyboardChange = (event: Event) => {
       const detail = (event as CustomEvent<{ isOpen?: boolean }>).detail;
       terminalControllerRef.current?.requestRefresh('resize', {
-        resizeDebounceMs: 0,
         skipScrollToBottom: detail?.isOpen !== true,
         force: true,
       });
@@ -1905,7 +1914,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       document.removeEventListener('termdock:viewport-keyboard-change', handleViewportKeyboardChange);
     };
   }, [isActive, isMobile, sessionId]);
-
   // 桌面端工具条的「显隐」只看 preset 是否声明 showOnDesktop，不再绑 isActive。
   // 否则每个非激活 tab 的工具条会被收成 max-h-0，切到该 tab 时 isActive false→true
   // 重新从 0 撑开，重放 150ms 展开动画 + 终端回流，表现为「先消失再冒出来」。
@@ -1915,12 +1923,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const isKeyboardVisible = !suppressKeyboard && (isMobile || toolbarPreset.showOnDesktop === true);
   const isKeyboardInteractive = isActive;
 
-  // The translateY / margin-top formulas are always applied on mobile.
-  // They naturally evaluate to 0 when the keyboard is closed (appVh ===
-  // appBaseVh), so we don't gate them on isViewportKeyboardOpen.  This
-  // avoids a 1-frame race between the CSS-variable rAF (useViewportHeight)
-  // and the React-state rAF (useViewportKeyboardState).  Layout depends
-  // ONLY on CSS custom properties, not React state.
+  // Apply both values from the same CSS-variable update so the terminal top
+  // remains visible while the toolbar moves above the soft keyboard.
   const wrapperStyle = isMobile && !sharedMobileKeyboardLayout
     ? {
         transform: 'translateY(var(--kb-translate-y, 0px))',

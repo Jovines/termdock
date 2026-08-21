@@ -28,6 +28,7 @@ import {
 import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal/imeAnchor';
 import { buildBracketedPastePayload } from '../../terminal/bracketedPaste';
 import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHysteresis';
+import { shouldForceSettledRedraw, type TerminalDimensions } from '../../terminal/refreshRedraw';
 import { shouldAllowTerminalTransparency } from '../../terminal/renderer';
 import {
   TERMINAL_FALLBACK_LIGATURES,
@@ -246,7 +247,7 @@ function findScrollableViewport(container: HTMLElement): HTMLElement | null {
  * `requestRefresh(reason, options?)` 这一个入口，编排器在内部决定：
  *   - 是否重建 WebGL renderer
  *   - 是否需要 fit
- *   - 是否要推 resize 给服务端（first-fit immediate / 90ms debounce / skip）
+ *   - 是否要推 resize 给服务端（animation-frame coalescing / skip-if-same）
  *   - 是否滚到底
  *   - 触发 throttle / dedupe
  */
@@ -278,8 +279,6 @@ export type RefreshOptions = {
   skipScrollToBottom?: boolean;
   /** 服务端报上来的尺寸；如果比当前 xterm 小则忽略（防 shrink）。 */
   candidateSize?: { cols: number; rows: number };
-  /** resize 推送的去抖窗口，默认 0（first-fit immediate）。 */
-  resizeDebounceMs?: number;
   /** 跳过 throttle / dedupe。 */
   force?: boolean;
   /** WebGL renderer 仍存活时也完整重绘 buffer；只用于低频稳定化刷新。 */
@@ -1945,6 +1944,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // 用 ref 桥接到最新版本。
     const tmuxSendSgrScrollRef = React.useRef(tmuxSendSgrScroll);
     tmuxSendSgrScrollRef.current = tmuxSendSgrScroll;
+    // ResizeObserver 的刷新按动画帧合并。桌面滚轮和 resize 走同一条 WS，
+    // 所以滚轮帧发送 SGR 序列前，先同步 flush 尚未执行的 resize refresh，
+    // 服务端即可严格按 resize -> input 的顺序处理，不需要人为等待。
+    const flushPendingResizeBeforeTmuxScrollRef = React.useRef<() => void>(() => {});
 
     const tmuxDynamicEff = React.useCallback((): number => {
       const lineHeightPx = getMeasuredLineHeightPx(terminalRef.current, fontSize, lineHeight);
@@ -2922,20 +2925,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     //   3) renderer：仅 context 已知死或 forceRendererRecreate → 重建
     //                否则 → terminal.refresh（不主动清 WebGL atlas）
     //   4) fit() → 拿到新 cols/rows
-    //   5) resize push：first-fit immediate / 90ms debounce / skip-if-same /
+    //   5) resize push：animation-frame coalescing / skip-if-same /
     //                   candidateSize 防 shrink
     //   6) 滚底（非 alternate buffer 且未 skipScrollToBottom）→ rAF 等稳定
     // ============================================================
 
-    const DEFAULT_RESIZE_DEBOUNCE_MS = 90;
     const RESUME_THROTTLE_MS = 200;
 
     // 每个 reason 上一次被调用的时间戳（用于 visibility/bfcache/online 互斥）
     const lastResumeAtRef = React.useRef(0);
     // 同 reason 的 pending rAF 句柄：连续调用只保留最后一次
     const pendingReasonRafRef = React.useRef<Map<RefreshReason, number>>(new Map());
-    // resize 推送给服务端的 debounce 句柄（per fit cycle）
-    const pendingResizeTimerRef = React.useRef<number | null>(null);
+    // pending rAF 对应的最后一次 options；桌面滚轮可据此同步 flush resize。
+    const pendingReasonOptionsRef = React.useRef<Map<RefreshReason, RefreshOptions>>(new Map());
     // last sent to server，first-fit immediate 路径用它做"和上次一样就不发"判定
     const lastServerSizeRef = React.useRef<{ cols: number; rows: number } | null>(null);
     // 每个 reason 上一次处理的 dedupeKey（用于 tmux-layout 之类的服务端重复推送）
@@ -2954,24 +2956,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         cancelAnimationFrame(id);
         map.delete(reason);
       }
+      pendingReasonOptionsRef.current.delete(reason);
     }, []);
 
     const cancelAllPendingReasonRafs = React.useCallback(() => {
       const map = pendingReasonRafRef.current;
       map.forEach((id) => cancelAnimationFrame(id));
       map.clear();
-    }, []);
-
-    const cancelPendingResizeTimer = React.useCallback(() => {
-      if (pendingResizeTimerRef.current !== null) {
-        window.clearTimeout(pendingResizeTimerRef.current);
-        pendingResizeTimerRef.current = null;
-      }
+      pendingReasonOptionsRef.current.clear();
     }, []);
 
     const pushResizeToServer = React.useCallback(
-      (cols: number, rows: number, debounceMs: number) => {
-        cancelPendingResizeTimer();
+      (cols: number, rows: number) => {
         const last = lastServerSizeRef.current;
         if (last && last.cols === cols && last.rows === rows) {
           // 尺寸没变，不发
@@ -2987,19 +2983,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // connected 那次就发不出来了。
           return;
         }
-        if (debounceMs <= 0 || last === null) {
-          // first-fit immediate
-          lastServerSizeRef.current = { cols, rows };
-          resizeHandlerRef.current(cols, rows);
-          return;
-        }
-        pendingResizeTimerRef.current = window.setTimeout(() => {
-          pendingResizeTimerRef.current = null;
-          lastServerSizeRef.current = { cols, rows };
-          resizeHandlerRef.current(cols, rows);
-        }, debounceMs);
+        lastServerSizeRef.current = { cols, rows };
+        resizeHandlerRef.current(cols, rows);
       },
-      [cancelPendingResizeTimer]
+      []
     );
 
     // ── 多端同步 / 防拉扯支持 ──
@@ -3027,9 +3014,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }
         const cleanCols = Math.floor(cols);
         const cleanRows = Math.floor(rows);
-        // 取消本端排队中的 resize push：服务端尺寸是新的事实，再发已 stale
-        // 的尺寸只会拖累。
-        cancelPendingResizeTimer();
         lastServerSizeRef.current = { cols: cleanCols, rows: cleanRows };
         lastServerBroadcastAtRef.current = Date.now();
         debugTerminal('pty-size broadcast received', {
@@ -3038,7 +3022,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           source: source ?? 'unknown',
         });
       },
-      [cancelPendingResizeTimer, debugTerminal]
+      [debugTerminal]
     );
 
     const ensureSizeMatches = React.useCallback(
@@ -3159,8 +3143,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             if (c.cols < after.cols || c.rows < after.rows) {
               // 已经在请求的尺寸之上，不缩
             } else {
-              const debounce = options.resizeDebounceMs ?? DEFAULT_RESIZE_DEBOUNCE_MS;
-              pushResizeToServer(c.cols, c.rows, debounce);
+              pushResizeToServer(c.cols, c.rows);
             }
           } else {
             // 冷启动时 pty-size 广播可能先把服务端旧尺寸写进 lastServerSizeRef，
@@ -3172,8 +3155,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               lastServerSize: lastServerSizeRef.current,
               reconcileServerSize: options.reconcileServerSize,
             })) {
-              const debounce = options.resizeDebounceMs ?? DEFAULT_RESIZE_DEBOUNCE_MS;
-              pushResizeToServer(after.cols, after.rows, debounce);
+              pushResizeToServer(after.cols, after.rows);
             }
           }
         }
@@ -3222,7 +3204,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (reason === 'session-key-change') {
           lastServerSizeRef.current = null;
           lastDedupeKeyRef.current.clear();
-          cancelPendingResizeTimer();
           cancelAllPendingReasonRafs();
         }
 
@@ -3244,40 +3225,53 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // 3) 调度：rAF 内跑序列；runRefreshSequence 内部还会再开 rAF 做 scrollToBottom
         const raf = requestAnimationFrame(() => {
           pendingReasonRafRef.current.delete(reason);
+          pendingReasonOptionsRef.current.delete(reason);
           runRefreshSequence(reason, options);
         });
         pendingReasonRafRef.current.set(reason, raf);
+        pendingReasonOptionsRef.current.set(reason, options);
       },
       [
         debugTerminal,
         cancelPendingReasonRaf,
         cancelAllPendingReasonRafs,
-        cancelPendingResizeTimer,
         runRefreshSequence,
       ]
     );
 
-    // 组件 unmount / sessionKey 变化时清理所有 pending raf 和 timer
+    const flushPendingRefresh = React.useCallback(
+      (reason: RefreshReason) => {
+        const raf = pendingReasonRafRef.current.get(reason);
+        if (raf === undefined) return;
+        const options = pendingReasonOptionsRef.current.get(reason) ?? {};
+        cancelAnimationFrame(raf);
+        pendingReasonRafRef.current.delete(reason);
+        pendingReasonOptionsRef.current.delete(reason);
+        runRefreshSequence(reason, options);
+      },
+      [runRefreshSequence]
+    );
+    flushPendingResizeBeforeTmuxScrollRef.current = () => flushPendingRefresh('resize');
+
+    // 组件 unmount / sessionKey 变化时清理所有 pending rAF。
     React.useEffect(() => {
       return () => {
         cancelAllPendingReasonRafs();
-        cancelPendingResizeTimer();
         if (desktopMouseFocusTimerRef.current !== null) {
           window.clearTimeout(desktopMouseFocusTimerRef.current);
           desktopMouseFocusTimerRef.current = null;
         }
       };
-    }, [sessionKey, cancelAllPendingReasonRafs, cancelPendingResizeTimer]);
+    }, [sessionKey, cancelAllPendingReasonRafs]);
 
     // sessionKey 变化 = 切到别的 session = 重置 lastServerSize /
     // dedupe keys / renderer-ready，让下一个 session 的 first-fit 走 immediate 路径
     React.useEffect(() => {
       lastServerSizeRef.current = null;
       lastDedupeKeyRef.current.clear();
-      cancelPendingResizeTimer();
       // renderer 状态不在这里重置：disposeWebglRenderer 在 cleanup 跑，
       // 下一次 init useEffect 会再 enableWebglRenderer 并把 ready 置 true。
-    }, [sessionKey, cancelPendingResizeTimer]);
+    }, [sessionKey]);
 
     const flushWrites = React.useCallback(() => {
       if (isWritingRef.current) {
@@ -3361,6 +3355,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       let localTerminal: Terminal | null = null;
       let localResizeObserver: ResizeObserver | null = null;
       let localResizeSettleTimer: number | null = null;
+      let localResizeCycleStartDimensions: TerminalDimensions | null = null;
       let localDisposables: Array<{ dispose: () => void }> = [];
 
       const container = containerRef.current;
@@ -3537,6 +3532,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             let rafId: number | null = null;
             const flushWheel = () => {
               rafId = null;
+              // 若侧栏拖动刚触发 ResizeObserver，而 resize refresh 还排在本帧，
+              // 先同步提交最终 cols/rows。resize 与下面的 SGR input 使用同一条
+              // WebSocket，服务端会按发送顺序处理，不引入固定等待时间。
+              flushPendingResizeBeforeTmuxScrollRef.current();
               const lineHeightPx = getMeasuredLineHeightPx(terminalRef.current, fontSize, lineHeight);
               const total = desktopWheelRemainderRef.current + pendingDeltaPx;
               pendingDeltaPx = 0;
@@ -3701,6 +3700,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           };
 
           localResizeObserver = new ResizeObserver((entries) => {
+            if (localResizeSettleTimer === null) {
+              const currentTerminal = terminalRef.current;
+              localResizeCycleStartDimensions = currentTerminal
+                ? { cols: currentTerminal.cols, rows: currentTerminal.rows }
+                : null;
+            }
             const firstEntry = entries[0];
             if (firstEntry) {
               debugTerminal('resize observer', {
@@ -3712,10 +3717,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             const dprChanged = detectDevicePixelRatioChange('resize-observer');
 
             // ResizeObserver 触发：所有刷新都走编排器。
-            //   - 普通 resize：reason='resize'，default debounce 90ms 推给服务端
-            //   - DPR 变化：reason='dpr-change'，debounce 0 立即刷 atlas + 立即推
+            //   - 普通 resize：reason='resize'，下一动画帧 fit 并立即推给服务端
+            //   - DPR 变化：reason='dpr-change'，立即刷 atlas + 推送尺寸
             if (dprChanged) {
-              requestRefresh('dpr-change', { resizeDebounceMs: 0 });
+              requestRefresh('dpr-change');
             } else {
               requestRefresh('resize');
             }
@@ -3734,13 +3739,27 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               const isOnScreen = rect.width > 0 && rect.height > 0 &&
                 rect.right > 0 && rect.bottom > 0 &&
                 rect.left < viewportWidth && rect.top < viewportHeight;
-              if (!isOnScreen || document.visibilityState !== 'visible') return;
+              if (!isOnScreen || document.visibilityState !== 'visible') {
+                localResizeCycleStartDimensions = null;
+                return;
+              }
+              const currentTerminal = terminalRef.current;
+              const settledDimensions = currentTerminal
+                ? { cols: currentTerminal.cols, rows: currentTerminal.rows }
+                : null;
               requestRefresh('resize', {
                 force: true,
-                forceRedraw: true,
+                // If fit changed rows/cols during this ResizeObserver burst,
+                // terminal.resize() already repainted. Avoid a second full
+                // buffer refresh that looks like a top-to-bottom sweep.
+                forceRedraw: shouldForceSettledRedraw(
+                  localResizeCycleStartDimensions,
+                  settledDimensions,
+                ),
                 reconcileServerSize: true,
                 skipScrollToBottom: true,
               });
+              localResizeCycleStartDimensions = null;
             }, 180);
           });
           localResizeObserver.observe(container);
@@ -3748,7 +3767,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           if (typeof window !== 'undefined') {
             const handleWindowResize = () => {
               if (detectDevicePixelRatioChange('window-resize')) {
-                requestRefresh('dpr-change', { resizeDebounceMs: 0 });
+                requestRefresh('dpr-change');
               }
             };
             window.addEventListener('resize', handleWindowResize);
@@ -3760,7 +3779,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             if (visualViewport) {
               const handleVisualViewportResize = () => {
                 if (detectDevicePixelRatioChange('visual-viewport-resize')) {
-                  requestRefresh('dpr-change', { resizeDebounceMs: 0 });
+                  requestRefresh('dpr-change');
                 }
               };
               visualViewport.addEventListener('resize', handleVisualViewportResize);
