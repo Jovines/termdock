@@ -13,3 +13,16 @@ export const DEFAULT_TERMINAL_RENDERER_MODE: TerminalRendererMode = 'auto';
 export function isTerminalRendererMode(value: unknown): value is TerminalRendererMode {
   return value === 'auto' || value === 'webgl' || value === 'canvas';
 }
+
+/**
+ * The image addon is only loaded alongside the WebGL renderer. Keeping xterm
+ * transparent in the DOM fallback creates an unnecessary composited surface;
+ * on macOS that surface can retain a stale backing frame after window
+ * occlusion and flash as terminal rows continue to update.
+ */
+export function shouldAllowTerminalTransparency(
+  rendererMode: TerminalRendererMode,
+  enableImages: boolean,
+): boolean {
+  return rendererMode === 'webgl' && enableImages;
+}
