@@ -783,6 +783,18 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
       }
       html[data-termdock-desktop='true'] #root main > div > div:first-child {
         padding-left: 80px !important;
+        position: relative;
+        -webkit-app-region: no-drag;
+      }
+      html[data-termdock-desktop='true'] #root main > div > div:first-child::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        width: min(240px, 25vw);
+        transform: translateX(-50%);
+        pointer-events: none;
         -webkit-app-region: drag;
       }
       html[data-termdock-desktop='true'] #root .h-full.flex.flex-col.app-chrome-bg.border-r > .shrink-0.border-b {
@@ -800,7 +812,13 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
       html[data-termdock-desktop='true'] [data-sidebar='right'] {
         padding-top: 0 !important;
       }
+      html[data-termdock-desktop='true'] [data-sidebar='right'][style*='pointer-events: auto'] {
+        transform: none !important;
+      }
       html[data-termdock-desktop='true'] [data-sidebar='right'] > div:first-child {
+        -webkit-app-region: no-drag;
+      }
+      html[data-termdock-desktop='true'] [data-sidebar='right'] > div:first-child > div:first-child > .min-w-0.flex-1 {
         -webkit-app-region: drag;
       }
     `);
