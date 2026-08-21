@@ -824,6 +824,15 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
       html[data-termdock-desktop='true'] [data-sidebar='right'] > div:first-child > div:first-child > .min-w-0.flex-1 {
         -webkit-app-region: drag;
       }
+      html[data-termdock-desktop='true'] [data-sidebar='right'] div:has(> [data-right-search]) + div:has(> button[aria-pressed]) {
+        width: fit-content !important;
+        margin-left: auto !important;
+      }
+      html[data-termdock-desktop='true'] [data-sidebar='right'] div:has(> [data-right-search]) + div:has(> button[aria-pressed]) > button {
+        flex: none !important;
+        padding: 0.125rem 0.5rem !important;
+        font-size: 10px !important;
+      }
     `);
   });
   window.on('closed', () => {
