@@ -8,6 +8,7 @@ interface UseViewportHeightOptions {
 const KEYBOARD_OPEN_THRESHOLD_PX = 80;
 const BASE_WIDTH_CHANGE_THRESHOLD_PX = 60;
 const KEYBOARD_CHANGE_EVENT = 'termdock:viewport-keyboard-change';
+export const VIEWPORT_LAYOUT_CHANGE_EVENT = 'termdock:viewport-layout-change';
 const MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX = 240;
 const DEFAULT_BOOTSTRAP_VIEWPORT_HEIGHT_PX = 640;
 const DEFAULT_BOOTSTRAP_VIEWPORT_WIDTH_PX = 360;
@@ -22,6 +23,7 @@ interface SafeAreaInsets {
 declare global {
   interface DocumentEventMap {
     [KEYBOARD_CHANGE_EVENT]: CustomEvent<ViewportKeyboardChangeDetail>;
+    [VIEWPORT_LAYOUT_CHANGE_EVENT]: CustomEvent<ViewportLayoutChangeDetail>;
   }
 }
 
@@ -32,6 +34,14 @@ export interface ViewportKeyboardChangeDetail {
   offsetTop: number;
   keyboardHeight: number;
   isOpen: boolean;
+  source: string;
+}
+
+export interface ViewportLayoutChangeDetail {
+  height: number;
+  baseHeight: number;
+  visibleHeight: number;
+  offsetTop: number;
   source: string;
 }
 
@@ -200,6 +210,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
     let rafId: number | null = null;
     let safeAreaProbe: HTMLDivElement | null = null;
+    const settledSyncTimers = new Set<number>();
 
     const medianOf3 = (a: number, b: number, c: number) =>
       [a, b, c].sort((x, y) => x - y)[1];
@@ -381,6 +392,20 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
           source,
         });
       }
+
+      // CSS custom-property changes do not produce a browser resize event.
+      // Notify layout managers after every measured pass so cold-start
+      // settling can repair Swiper geometry even when visualViewport silently
+      // changes after pageshow but emits no resize of its own.
+      document.dispatchEvent(new CustomEvent<ViewportLayoutChangeDetail>(VIEWPORT_LAYOUT_CHANGE_EVENT, {
+        detail: {
+          height: filteredHeight,
+          baseHeight: baseVh,
+          visibleHeight,
+          offsetTop: nextOffsetTop,
+          source,
+        },
+      }));
     };
 
     const scheduleSync = (source = 'event') => {
@@ -395,12 +420,19 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
     const scheduleSettledSync = (source: string) => {
       scheduleSync(`${source}:now`);
-      window.setTimeout(() => scheduleSync(`${source}:50ms`), 50);
-      window.setTimeout(() => scheduleSync(`${source}:150ms`), 150);
-      window.setTimeout(() => scheduleSync(`${source}:300ms`), 300);
+      for (const delay of [50, 150, 300]) {
+        const timer = window.setTimeout(() => {
+          settledSyncTimers.delete(timer);
+          scheduleSync(`${source}:${delay}ms`);
+        }, delay);
+        settledSyncTimers.add(timer);
+      }
     };
 
-    scheduleSync('mount');
+    // Mobile browser chrome and standalone-PWA safe areas often settle after
+    // the React tree mounts without emitting resize. Cold start therefore needs
+    // the same bounded convergence passes as pageshow/focus recovery.
+    scheduleSettledSync('mount');
 
     const handleResize = () => scheduleSync('resize');
     const handleOrientationChange = () => scheduleSync('orientationchange');
@@ -455,6 +487,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       if (rafId !== null) {
         window.cancelAnimationFrame(rafId);
       }
+      settledSyncTimers.forEach((timer) => window.clearTimeout(timer));
+      settledSyncTimers.clear();
       safeAreaProbe?.remove();
     };
   }, [cssVarName, debugViewport, getViewportHeight]);
