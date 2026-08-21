@@ -20,6 +20,7 @@ import type { TerminalTheme } from '../../terminal';
 import type { TerminalChunk } from '../../terminal';
 import {
   cellToClientPoint,
+  clampMobileCopyPopoverPosition,
   clampCellToBuffer,
   getTerminalGridMetrics,
   orderSelectionEndpoints,
@@ -658,7 +659,11 @@ function readDocumentCssPx(name: string): number {
   return Number.isFinite(value) ? value : 0;
 }
 
-function getMobileCopyPopoverPosition(clientX: number, clientY: number): { left: number; top: number } {
+function getMobileCopyPopoverPosition(
+  clientX: number,
+  clientY: number,
+  terminalRect: DOMRect,
+): { left: number; top: number } {
   if (typeof window === 'undefined') {
     return { left: 0, top: 0 };
   }
@@ -670,20 +675,28 @@ function getMobileCopyPopoverPosition(clientX: number, clientY: number): { left:
   const viewportHeight = visualViewport?.height ?? window.innerHeight;
   const safeTop = readDocumentCssPx('--safe-top-inset');
   const safeBottom = readDocumentCssPx('--safe-bottom-inset');
-  const minLeft = viewportLeft + MOBILE_COPY_POPOVER_MARGIN_PX;
-  const maxLeft = viewportLeft + viewportWidth - MOBILE_COPY_POPOVER_WIDTH_PX - MOBILE_COPY_POPOVER_MARGIN_PX;
-  const minTop = viewportTop + safeTop + MOBILE_COPY_POPOVER_MARGIN_PX;
-  const maxTop = viewportTop + viewportHeight - safeBottom - MOBILE_COPY_POPOVER_HEIGHT_PX - MOBILE_COPY_POPOVER_MARGIN_PX;
-
-  const unclampedLeft = clientX - MOBILE_COPY_POPOVER_WIDTH_PX / 2;
-  const left = Math.max(minLeft, Math.min(unclampedLeft, Math.max(minLeft, maxLeft)));
-
-  const preferredTop = clientY - MOBILE_COPY_POPOVER_HEIGHT_PX - MOBILE_COPY_POPOVER_FINGER_GAP_PX;
-  const fallbackTop = clientY + MOBILE_COPY_POPOVER_FINGER_GAP_PX;
-  const topCandidate = preferredTop >= minTop ? preferredTop : fallbackTop;
-  const top = Math.max(minTop, Math.min(topCandidate, Math.max(minTop, maxTop)));
-
-  return { left: Math.round(left), top: Math.round(top) };
+  const clientPosition = clampMobileCopyPopoverPosition({
+    clientX,
+    clientY,
+    viewport: {
+      left: viewportLeft,
+      top: viewportTop + safeTop,
+      right: viewportLeft + viewportWidth,
+      bottom: viewportTop + viewportHeight - safeBottom,
+    },
+    terminal: terminalRect,
+    width: MOBILE_COPY_POPOVER_WIDTH_PX,
+    height: MOBILE_COPY_POPOVER_HEIGHT_PX,
+    margin: MOBILE_COPY_POPOVER_MARGIN_PX,
+    fingerGap: MOBILE_COPY_POPOVER_FINGER_GAP_PX,
+  });
+  // The terminal carousel uses transforms, which turn fixed descendants into
+  // locally positioned elements. Keep the coordinates explicitly local so the
+  // popover cannot drift by the terminal's page offset.
+  return {
+    left: clientPosition.left - terminalRect.left,
+    top: clientPosition.top - terminalRect.top,
+  };
 }
 
 const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewportProps>(
@@ -2633,7 +2646,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           session.focus = finalEnd ?? s.copyStart;
           session.dragging = null;
           updateSelectionHandles();
-          showMobileCopyPopover(getMobileCopyPopoverPosition(e.clientX, e.clientY), { persistent: true });
+          const terminalRect = containerRef.current?.getBoundingClientRect();
+          if (terminalRect) {
+            showMobileCopyPopover(
+              getMobileCopyPopoverPosition(e.clientX, e.clientY, terminalRect),
+              { persistent: true },
+            );
+          }
           suppressMobileTapFocus(1800);
           hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
         } else {
@@ -4191,10 +4210,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           <button
             type="button"
             data-terminal-copy-popover="true"
-            // z-chrome-hint(30)：chrome 层瞬时提示——高于键盘条(20)，低于侧栏
-            // 抽屉(40+)。抽屉/lightbox 一打开就被盖住，曾经用 z-popover(200)
-            // 导致它浮在全屏浮层上面。
-            className="fixed z-chrome-hint inline-flex h-9 w-[88px] select-none items-center justify-center gap-1.5 rounded-full border border-white/15 bg-[rgb(28_28_30_/_0.92)] px-3 text-[13px] font-semibold text-white shadow-[0_10px_28px_rgb(0_0_0_/_0.32),0_2px_8px_rgb(0_0_0_/_0.18)] backdrop-blur-xl transition-transform duration-100 ease-out active:scale-[0.96]"
+            // Terminal 内的局部浮层：坐标和层级都留在面板内，避免 Swiper
+            // transform 让 fixed 坐标偏移，也不会越过全局抽屉/lightbox。
+            className="absolute z-30 inline-flex h-9 w-[88px] select-none items-center justify-center gap-1.5 rounded-full border border-white/15 bg-[rgb(28_28_30_/_0.92)] px-3 text-[13px] font-semibold text-white shadow-[0_10px_28px_rgb(0_0_0_/_0.32),0_2px_8px_rgb(0_0_0_/_0.18)] backdrop-blur-xl transition-transform duration-100 ease-out active:scale-[0.96]"
             style={{
               left: mobileCopyPopover.left,
               top: mobileCopyPopover.top,

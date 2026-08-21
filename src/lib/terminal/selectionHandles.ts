@@ -9,6 +9,13 @@ export interface SelectionCell {
   row: number;
 }
 
+export interface ClientRectBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 /** xterm Terminal 的最小结构子集，测试里可用 stub 传入。 */
 export interface TerminalGeometryLike {
   cols: number;
@@ -112,4 +119,38 @@ export function orderSelectionEndpoints(
   return anchorOffset <= focusOffset
     ? { start: anchor, end: focus }
     : { start: focus, end: anchor };
+}
+
+/**
+ * 把移动端复制气泡放进「可视窗口 ∩ 当前终端」内。
+ * preferredAbove 放不下时尝试手指下方，最终再钳到有效矩形；即使终端
+ * 比气泡还窄/矮，也固定在其左上安全边缘，避免算出反向边界。
+ */
+export function clampMobileCopyPopoverPosition(input: {
+  clientX: number;
+  clientY: number;
+  viewport: ClientRectBounds;
+  terminal: ClientRectBounds;
+  width: number;
+  height: number;
+  margin: number;
+  fingerGap: number;
+}): { left: number; top: number } {
+  const boundsLeft = Math.max(input.viewport.left, input.terminal.left);
+  const boundsTop = Math.max(input.viewport.top, input.terminal.top);
+  const boundsRight = Math.min(input.viewport.right, input.terminal.right);
+  const boundsBottom = Math.min(input.viewport.bottom, input.terminal.bottom);
+  const minLeft = boundsLeft + input.margin;
+  const minTop = boundsTop + input.margin;
+  const maxLeft = Math.max(minLeft, boundsRight - input.width - input.margin);
+  const maxTop = Math.max(minTop, boundsBottom - input.height - input.margin);
+
+  const unclampedLeft = input.clientX - input.width / 2;
+  const left = Math.max(minLeft, Math.min(unclampedLeft, maxLeft));
+  const preferredTop = input.clientY - input.height - input.fingerGap;
+  const fallbackTop = input.clientY + input.fingerGap;
+  const topCandidate = preferredTop >= minTop ? preferredTop : fallbackTop;
+  const top = Math.max(minTop, Math.min(topCandidate, maxTop));
+
+  return { left: Math.round(left), top: Math.round(top) };
 }

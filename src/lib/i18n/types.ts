@@ -61,6 +61,14 @@ export type TranslationDictionary = {
     subscriptionQuota: string;
     pinSidebar: string;
     unpinSidebar: string;
+    updateAvailable: (params: TranslatorParams) => string;
+    updateInstalling: string;
+    updateReady: string;
+    updateRestart: string;
+    updateRestartConfirm: (params: TranslatorParams) => string;
+    updateRestarting: string;
+    updateFailed: string;
+    updateRetry: string;
     filterSessions: string;
     clearSearch: string;
     groupByFolder: string;

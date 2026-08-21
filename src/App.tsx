@@ -42,8 +42,8 @@ import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
 import { shouldDestroySessionDirectly } from './lib/terminal/sessionClose';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
-import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession } from './lib/terminal/api';
-import type { ProgramLabelRule, ProgramDetectionConfig, LocalAccessState } from './lib/terminal/api';
+import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession, getTermdockUpdateState, checkTermdockUpdate, confirmTermdockUpdateRestart } from './lib/terminal/api';
+import type { ProgramLabelRule, ProgramDetectionConfig, LocalAccessState, TermdockUpdateState } from './lib/terminal/api';
 import { readCache, writeCache, shallowJsonEqual } from './lib/utils/localStorageCache';
 import { syncThemeColorMeta } from './lib/utils/themeColorMeta';
 import {
@@ -522,6 +522,8 @@ function App() {
   const [localAccessSaving, setLocalAccessSaving] = React.useState(false);
   const [localAccessError, setLocalAccessError] = React.useState<string | null>(null);
   const [localAccessCopied, setLocalAccessCopied] = React.useState<string | null>(null);
+  const [termdockUpdateState, setTermdockUpdateState] = React.useState<TermdockUpdateState | null>(null);
+  const [updateActionPending, setUpdateActionPending] = React.useState(false);
   const desktopBridge = React.useMemo(() => getTermdockDesktopBridge(), []);
   const [desktopSnapshot, setDesktopSnapshot] = React.useState<DesktopNativeSnapshot | null>(null);
   const [desktopActionMessage, setDesktopActionMessage] = React.useState<string | null>(null);
@@ -565,6 +567,46 @@ function App() {
       ));
     });
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getTermdockUpdateState()
+      .then((state) => { if (!cancelled) setTermdockUpdateState(state); })
+      .catch(() => undefined);
+    const unsubscribe = subscribeClientState((event) => {
+      if (event.type === 'update-state' && !cancelled) setTermdockUpdateState(event.state);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  const handleConfirmUpdateRestart = useCallback(async () => {
+    const latestVersion = termdockUpdateState?.latestVersion;
+    if (!latestVersion || updateActionPending) return;
+    if (!window.confirm(t('sidebar.updateRestartConfirm', { version: latestVersion }))) return;
+    setUpdateActionPending(true);
+    try {
+      setTermdockUpdateState(await confirmTermdockUpdateRestart());
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      setUpdateActionPending(false);
+    }
+  }, [termdockUpdateState?.latestVersion, t, updateActionPending]);
+
+  const handleRetryUpdate = useCallback(async () => {
+    if (updateActionPending) return;
+    setUpdateActionPending(true);
+    try {
+      setTermdockUpdateState(await checkTermdockUpdate());
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      setUpdateActionPending(false);
+    }
+  }, [updateActionPending]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = colorTheme;
@@ -4537,6 +4579,10 @@ function App() {
         onSessionMenu={openTabMenu}
         onOpenSettings={handleOpenSettings}
         onOpenQuota={() => setIsQuotaOpen(true)}
+        updateState={termdockUpdateState}
+        updateActionPending={updateActionPending}
+        onConfirmUpdateRestart={handleConfirmUpdateRestart}
+        onRetryUpdate={handleRetryUpdate}
         tmuxAvailable={tmuxStatus.available}
         defaultSessionMode={newSessionMode}
         onTogglePinned={isDesktopViewport ? handleToggleLeftPinned : undefined}
@@ -4636,6 +4682,10 @@ function App() {
             onSessionMenu={openTabMenu}
             onOpenSettings={handleOpenSettings}
             onOpenQuota={() => setIsQuotaOpen(true)}
+            updateState={termdockUpdateState}
+            updateActionPending={updateActionPending}
+            onConfirmUpdateRestart={handleConfirmUpdateRestart}
+            onRetryUpdate={handleRetryUpdate}
             tmuxAvailable={tmuxStatus.available}
             defaultSessionMode={newSessionMode}
             pinned={true}

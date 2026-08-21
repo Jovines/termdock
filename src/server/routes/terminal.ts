@@ -75,6 +75,7 @@ import {
   startQuotaManager,
 } from '../quota/QuotaManager.js';
 import type { QuotaStatusWirePayload } from '../quota/types.js';
+import { TermdockAutoUpdateManager } from '../utils/autoUpdate.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -482,6 +483,72 @@ function sendClientStatePayload(payload: string): void {
 
 function broadcastControlEvent(payload: unknown): void {
   sendClientStatePayload(JSON.stringify(payload));
+}
+
+let serverRestartScheduled = false;
+
+function requestServerRestartAfterUpdate(): void {
+  if (serverRestartScheduled) return;
+  serverRestartScheduled = true;
+
+  // The bridge is detached before this process exits. It waits for the old
+  // PID to release the port, then resolves `termdock` from PATH again so an
+  // npm-replaced global binary is used instead of the old loaded file.
+  const bridgeSource = String.raw`
+const fs = require('node:fs');
+const { spawn } = require('node:child_process');
+const payload = JSON.parse(process.argv[1]);
+const alive = () => { try { process.kill(payload.parentPid, 0); return true; } catch { return false; } };
+const launch = () => {
+  let fd;
+  try { fd = fs.openSync(payload.logFile, 'a'); } catch { fd = 'ignore'; }
+  const command = process.platform === 'win32' ? 'termdock.cmd' : 'termdock';
+  const child = spawn(command, payload.args, {
+    detached: true,
+    stdio: ['ignore', fd, fd],
+    env: process.env,
+  });
+  child.unref();
+  if (typeof fd === 'number') fs.closeSync(fd);
+};
+const deadline = Date.now() + 15000;
+const timer = setInterval(() => {
+  if (alive() && Date.now() < deadline) return;
+  clearInterval(timer);
+  setTimeout(launch, 250);
+}, 100);
+`;
+  const payload = JSON.stringify({
+    parentPid: process.pid,
+    args: process.argv.slice(2),
+    logFile: path.join(TERMDOCK_DIR, 'server.log'),
+  });
+  const bridge = spawn(process.execPath, ['-e', bridgeSource, payload], {
+    detached: true,
+    stdio: 'ignore',
+    env: process.env,
+  });
+  bridge.unref();
+
+  const exitTimer = setTimeout(() => {
+    process.kill(process.pid, 'SIGTERM');
+  }, 750);
+  exitTimer.unref?.();
+}
+
+const npmAutoUpdateManager = new TermdockAutoUpdateManager({
+  currentVersion: TERMDOCK_VERSION,
+  stateFilePath: path.join(TERMDOCK_DIR, 'update-state.json'),
+  broadcast: (state) => broadcastControlEvent({ type: 'update-state', state }),
+  requestRestart: requestServerRestartAfterUpdate,
+  log: (message) => console.warn(message),
+});
+
+// Packaged desktop builds already have a signed app/runtime updater. The npm
+// updater only owns standalone CLI services, otherwise both mechanisms could
+// race to replace the runtime.
+if (process.env.TERMDOCK_DESKTOP !== '1') {
+  npmAutoUpdateManager.start();
 }
 
 async function flushClientStateBroadcast(): Promise<void> {
@@ -1757,7 +1824,10 @@ async function configureTmuxWheelBindings(): Promise<void> {
   ]);
   await runTmux([
     'bind-key', '-n', 'MouseDrag1Pane',
-    "if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' 'send-keys -M' 'if-shell -F \"#{||:#{e|>=:#{e|-:#{mouse_x},#{@termdock-mouse-down-x}},1},#{e|>=:#{e|-:#{@termdock-mouse-down-x},#{mouse_x}},1},#{e|>=:#{e|-:#{mouse_y},#{@termdock-mouse-down-y}},1},#{e|>=:#{e|-:#{@termdock-mouse-down-y},#{mouse_y}},1}}\" \"copy-mode -M\"'",
+    // xterm reports button-motion in character cells. A one-cell movement is
+    // common mouse jitter during an ordinary click, so require two cells before
+    // treating the gesture as an intentional text-selection drag.
+    "if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' 'send-keys -M' 'if-shell -F \"#{||:#{||:#{e|>=:#{e|-:#{mouse_x},#{@termdock-mouse-down-x}},2},#{e|>=:#{e|-:#{@termdock-mouse-down-x},#{mouse_x}},2}},#{||:#{e|>=:#{e|-:#{mouse_y},#{@termdock-mouse-down-y}},2},#{e|>=:#{e|-:#{@termdock-mouse-down-y},#{mouse_y}},2}}}\" \"copy-mode -M\"'",
   ]);
   await runTmux([
     'bind-key', '-n', 'DoubleClick1Pane',
@@ -4949,6 +5019,23 @@ router.get('/settings', async (_req, res) => {
   res.json(await getSettingsPayload());
 });
 
+router.get('/update', (_req, res) => {
+  res.json(npmAutoUpdateManager.getState());
+});
+
+router.post('/update/check', async (_req, res) => {
+  res.json(await npmAutoUpdateManager.checkNow());
+});
+
+router.post('/update/restart', (_req, res) => {
+  try {
+    const state = npmAutoUpdateManager.confirmRestart();
+    res.status(202).json(state);
+  } catch (error) {
+    res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
 router.put('/settings', async (req, res) => {
   const body = req.body ?? {};
   if (typeof body.preventSleep === 'boolean') {
@@ -6398,6 +6485,7 @@ export function handleControlWebSocket(ws: WebSocket, clientId: string): void {
     }
     try {
       ws.send(JSON.stringify({ type: 'client-state', seq: initialSeq, state: globalSessionState, inventory: inventory ?? latestSessionInventory }));
+      ws.send(JSON.stringify({ type: 'update-state', state: npmAutoUpdateManager.getState() }));
     } catch {
       controlClients.delete(clientId);
       return;

@@ -20,6 +20,11 @@ import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 import { useI18n } from '../../i18n';
 import { getVisibleReconnectWatchdogDelayMs } from '../../terminal/resumeScheduling';
 import { shouldForceSettledRedraw } from '../../terminal/refreshRedraw';
+import {
+  CONFIRMED_SESSION_MISSING_MESSAGE,
+  isConfirmedSessionMissing,
+  isTransientBackendSessionMiss,
+} from '../../terminal/sessionRecovery';
 
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
@@ -538,6 +543,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // 非 fatal 的 WebSocket 重连由底层持续处理。
     if (!isFatalError) return;
     if (connectionError === 'Authentication required') return;
+    if (connectionError === CONFIRMED_SESSION_MISSING_MESSAGE) return;
 
     const attempt = fatalSelfHealAttemptRef.current;
     // 退避：2s, 4s, 8s … 上限 30s。给后端/网络恢复留时间，又不至于太久无响应。
@@ -1035,15 +1041,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             if (!storeSessionId) return;
 
             const isAuthenticationFailure = fatal && error.message === 'Authentication required';
+            const isRecoverableBackendMiss = isTransientBackendSessionMiss(error);
             const errorMsg = isAuthenticationFailure
               ? error.message
+              : isRecoverableBackendMiss
+                ? 'Reconnecting...'
               : fatal
                 ? 'Reconnecting...'
                 : error.message || 'Terminal stream connection error';
             console.error(`[Terminal] Stream error (fatal=${fatal}):`, errorMsg);
 
             // 单独高亮 Session not found，方便 grep / 自动化检测
-            if (error.message === 'Session not found on server') {
+            if (isRecoverableBackendMiss) {
               // eslint-disable-next-line no-console
               console.warn('[Terminal] SESSION_NOT_FOUND_DETECTED', {
                 terminalIdAtError: terminalIdRef.current,
@@ -1065,24 +1074,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
               // Session lost on server (e.g. server restart) — automatically
               // recreate instead of making the user manually refresh.
-              if (error.message === 'Session not found on server') {
+              if (isRecoverableBackendMiss) {
                 debugSession(`[onError] Session lost, auto-recreating`);
-                // 友好提示：先把红字 "Connection failed" 替换成普通灰字 "Reconnecting..."，
-                // 这样 200ms 过渡期 UI 不会闪一下错误，紧接着 setConnectionError(null) 收尾。
                 setConnectionError('Reconnecting...');
                 setIsFatalError(false);
                 clearTerminalSession(storeSessionId);
                 clearBuffer(storeSessionId);
                 terminalIdRef.current = null;
-                // Allow ensureSession to run again
                 hasInitializedRef.current = false;
-                // Small delay to let cleanup settle, then re-init.
-                // 关键：bump restartTrigger 才能真正让 useEffect 重跑；
-                // 只重置 ref + 清 error state 不会触发 effect。
-                setTimeout(() => {
-                  hasInitializedRef.current = false;
-                  setRestartTrigger((t) => t + 1);
-                }, 200);
+                // 4001 only means this server process does not currently own
+                // the old backend id. Restart recovery immediately; inventory
+                // open remains in Reconnecting until persisted state is ready.
+                restartEnsureSession();
               }
             }
           },
@@ -1098,7 +1101,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, reportFlowControl, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
+    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, reportFlowControl, restartEnsureSession, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
   );
 
   // 后台会话允许长时间退避，覆盖锁屏和系统冻结；可见会话连续重连超过 60 秒时，
@@ -1299,12 +1302,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               debugSession(`[ensureSession] Stale run after session creation failed, skipping error handling`);
               return;
             }
-            if (error instanceof TerminalApiError && error.code === 'STALE_SESSION_RESTORE_REJECTED') {
-              debugSession('[ensureSession] Dropping stale persisted session:', { sessionId, error: error.message });
+            if (error instanceof TerminalApiError && isConfirmedSessionMissing(error)) {
+              debugSession('[ensureSession] Confirmed missing persisted session:', { sessionId, error: error.message });
               store.clearTerminalSession(sessionId);
-              window.dispatchEvent(new CustomEvent('close-terminal-session', {
-                detail: { sessionId, closeMode: 'detach' },
-              }));
+              setConnectionError(CONFIRMED_SESSION_MISSING_MESSAGE);
+              setIsFatalError(true);
+              store.setConnecting(sessionId, false);
               return;
             }
             setConnectionError('Reconnecting...');
@@ -1393,7 +1396,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       terminalIdRef.current = session.sessionId;
       startStream(session.sessionId);
     } catch (error) {
-      setConnectionError('Reconnecting...');
+      setConnectionError(
+        error instanceof TerminalApiError && isConfirmedSessionMissing(error)
+          ? CONFIRMED_SESSION_MISSING_MESSAGE
+          : 'Reconnecting...',
+      );
       setIsFatalError(true);
       setConnecting(sessionId, false);
     } finally {

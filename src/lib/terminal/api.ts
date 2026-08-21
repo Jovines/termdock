@@ -73,6 +73,46 @@ export interface QuotaStatus {
   updatedAt: number;
 }
 
+export type TermdockUpdateStatus = 'idle' | 'checking' | 'current' | 'installing' | 'ready' | 'restarting' | 'error';
+
+export interface TermdockUpdateState {
+  status: TermdockUpdateStatus;
+  currentVersion: string;
+  latestVersion: string | null;
+  source: 'official' | 'configured' | null;
+  checkedAt: number | null;
+  error: string | null;
+}
+
+export async function getTermdockUpdateState(): Promise<TermdockUpdateState> {
+  const response = await fetch('/api/terminal/update');
+  if (!response.ok) throw new TerminalApiError('Failed to load update state', response.status);
+  return response.json() as Promise<TermdockUpdateState>;
+}
+
+export async function checkTermdockUpdate(): Promise<TermdockUpdateState> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/update/check', {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) throw new TerminalApiError('Failed to check for updates', response.status);
+  return response.json() as Promise<TermdockUpdateState>;
+}
+
+export async function confirmTermdockUpdateRestart(): Promise<TermdockUpdateState> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/update/restart', {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: 'Failed to restart Termdock' }));
+    throw new TerminalApiError(body.error || 'Failed to restart Termdock', response.status);
+  }
+  return response.json() as Promise<TermdockUpdateState>;
+}
+
 /** Fetch the latest quota status from the backend. */
 export async function fetchQuota(): Promise<QuotaStatus> {
   const res = await fetch('/api/terminal/quota');

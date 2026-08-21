@@ -12,6 +12,7 @@
 // lazily on first subscribe so SSR / non-browser contexts are safe.
 
 import type { PersistedTerminalClientSession, SessionInventory } from '../terminal';
+import type { TermdockUpdateState } from '../terminal/api';
 
 export interface ClientStateSnapshot {
   sessions: PersistedTerminalClientSession[];
@@ -40,10 +41,16 @@ export interface ControlContextDraftEvent {
   origin: string | null;
 }
 
+export interface ControlUpdateStateEvent {
+  type: 'update-state';
+  state: TermdockUpdateState;
+}
+
 export type ControlEvent =
   | ControlSnapshot
   | ControlConfigUpdatedEvent
-  | ControlContextDraftEvent;
+  | ControlContextDraftEvent
+  | ControlUpdateStateEvent;
 
 type Listener = (state: ControlEvent) => void;
 
@@ -166,13 +173,27 @@ function connect(): void {
 
   ws.onmessage = (event) => {
     lastServerPingAt = Date.now();
-    let msg: { type?: string; state?: ClientStateSnapshot; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number; text?: string; origin?: string | null } | null = null;
+    let msg: { type?: string; state?: ClientStateSnapshot | TermdockUpdateState; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number; text?: string; origin?: string | null } | null = null;
     try {
       msg = JSON.parse(event.data as string);
     } catch {
       return;
     }
     if (!msg) return;
+    if (msg.type === 'update-state') {
+      const state = msg.state as Partial<TermdockUpdateState> | undefined;
+      if (!state || typeof state.status !== 'string' || typeof state.currentVersion !== 'string') return;
+      const updateEvent: ControlUpdateStateEvent = {
+        type: 'update-state',
+        state: state as TermdockUpdateState,
+      };
+      for (const listener of sync.listeners) {
+        try { listener(updateEvent); } catch (error) {
+          console.error('[clientStateSync] listener threw:', error);
+        }
+      }
+      return;
+    }
     if (msg.type === 'context-draft') {
       if (typeof msg.text !== 'string') return;
       const draftEvent: ControlContextDraftEvent = {
@@ -205,11 +226,12 @@ function connect(): void {
       return;
     }
     if (msg.type !== 'client-state' || !msg.state) return;
+    const clientState = msg.state as ClientStateSnapshot;
     const snapshot: ControlSnapshot = {
       type: 'client-state',
       clientState: {
-        sessions: Array.isArray(msg.state.sessions) ? msg.state.sessions : [],
-        updatedAt: typeof msg.state.updatedAt === 'number' ? msg.state.updatedAt : Date.now(),
+        sessions: Array.isArray(clientState.sessions) ? clientState.sessions : [],
+        updatedAt: typeof clientState.updatedAt === 'number' ? clientState.updatedAt : Date.now(),
       },
       inventory: msg.inventory,
       seq: typeof msg.seq === 'number' ? msg.seq : undefined,

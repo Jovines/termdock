@@ -15,6 +15,7 @@ import {
   Pencil as RiPencilLine,
   GripVertical as RiDragHandleLine,
   MoreHorizontal as RiMoreHorizontal,
+  RefreshCw as RiRefreshLine,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
@@ -27,6 +28,7 @@ import { useI18n } from '../../i18n';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
+import type { TermdockUpdateState } from '../../terminal/api';
 
 
 interface LeftSidebarProps {
@@ -70,6 +72,10 @@ interface LeftSidebarProps {
   onSessionMenu?: (sessionId: string, anchor?: { x: number; y: number }) => void;
   onOpenSettings: () => void;
   onOpenQuota?: () => void;
+  updateState?: TermdockUpdateState | null;
+  updateActionPending?: boolean;
+  onConfirmUpdateRestart?: () => void;
+  onRetryUpdate?: () => void;
   tmuxAvailable?: boolean;
   defaultSessionMode?: 'shell' | 'tmux';
   push?: boolean;
@@ -135,6 +141,7 @@ export function LeftSidebar(
     onNewSession, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, splitWorkspaces,
     onSetSplitLayout, onReorderSplitWorkspace, onRenameSplitWorkspace, onCombineSplitSessions,
     onReorderSessions, onSessionMenu, onOpenSettings, onOpenQuota,
+    updateState, updateActionPending = false, onConfirmUpdateRestart, onRetryUpdate,
     tmuxAvailable = true,
     defaultSessionMode = 'shell',
     push,
@@ -149,6 +156,10 @@ export function LeftSidebar(
   const [draggedSplitMember, setDraggedSplitMember] = useState<{ workspaceId: string; sessionId: string } | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
+  const pendingUpdate = Boolean(
+    updateState?.latestVersion
+    && ['installing', 'ready', 'restarting', 'error'].includes(updateState.status),
+  );
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
@@ -906,20 +917,73 @@ export function LeftSidebar(
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            <div ref={headerMenuRef} className="relative">
+            <div ref={headerMenuRef} className={headerMenuOpen ? 'relative z-20' : 'relative'}>
               <button
                 type="button"
                 onClick={() => setHeaderMenuOpen((open) => !open)}
-                className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${headerMenuOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+                className={`relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${headerMenuOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
                 aria-expanded={headerMenuOpen}
                 aria-haspopup="menu"
-                aria-label={t('sidebar.moreActions')}
-                title={t('sidebar.moreActions')}
+                aria-label={pendingUpdate && updateState?.latestVersion
+                  ? `${t('sidebar.moreActions')}: ${t('sidebar.updateAvailable', { version: updateState.latestVersion })}`
+                  : t('sidebar.moreActions')}
+                title={pendingUpdate && updateState?.latestVersion
+                  ? `${t('sidebar.moreActions')}: ${t('sidebar.updateAvailable', { version: updateState.latestVersion })}`
+                  : t('sidebar.moreActions')}
               >
                 <RiMoreHorizontal size={15} />
+                {pendingUpdate && (
+                  <span
+                    className="absolute right-0.5 top-0.5 z-10 h-2 w-2 rounded-full bg-[var(--warning)] ring-2 ring-[var(--chrome-bg)]"
+                    aria-hidden="true"
+                  />
+                )}
               </button>
               {headerMenuOpen && (
-                <div role="menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+                <div role="menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-60 overflow-hidden rounded-xl border border-border/15 bg-surface p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in">
+                  {pendingUpdate && updateState?.latestVersion && (
+                    <div className="mb-1 rounded-lg bg-[rgb(var(--warning-rgb)_/_0.10)] px-2.5 py-2.5 text-foreground">
+                      <div className="flex items-start gap-2">
+                        <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[rgb(var(--warning-rgb)_/_0.16)] text-[color:var(--warning)]">
+                          <RiRefreshLine size={13} className={updateState.status === 'installing' || updateState.status === 'restarting' ? 'animate-spin' : ''} />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block font-semibold">{t('sidebar.updateAvailable', { version: updateState.latestVersion })}</span>
+                          <span className="mt-0.5 block text-[10.5px] leading-relaxed text-muted-foreground">
+                            {updateState.status === 'installing'
+                              ? t('sidebar.updateInstalling')
+                              : updateState.status === 'ready'
+                                ? t('sidebar.updateReady')
+                                : updateState.status === 'restarting'
+                                  ? t('sidebar.updateRestarting')
+                                  : t('sidebar.updateFailed')}
+                          </span>
+                        </span>
+                      </div>
+                      {updateState.status === 'ready' && onConfirmUpdateRestart && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={updateActionPending}
+                          onClick={onConfirmUpdateRestart}
+                          className="mt-2 flex w-full items-center justify-center rounded-md bg-[var(--warning)] px-2 py-1.5 text-[11px] font-semibold text-[color:var(--bg)] transition hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
+                        >
+                          {t('sidebar.updateRestart')}
+                        </button>
+                      )}
+                      {updateState.status === 'error' && onRetryUpdate && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={updateActionPending}
+                          onClick={onRetryUpdate}
+                          className="mt-2 flex w-full items-center justify-center rounded-md bg-surface-elevated px-2 py-1.5 text-[11px] font-semibold text-foreground transition hover:bg-surface-2 disabled:cursor-wait disabled:opacity-60"
+                        >
+                          {t('sidebar.updateRetry')}
+                        </button>
+                      )}
+                    </div>
+                  )}
                   {onOpenQuota && (
                     <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); onOpenQuota(); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
                       <RiChartBarLine size={14} className="text-muted-foreground" />

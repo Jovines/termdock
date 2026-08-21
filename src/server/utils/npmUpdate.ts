@@ -15,6 +15,10 @@ export interface NpmUpdateResult {
 }
 
 export type NpmUpdateFallbackStage = 'query' | 'install';
+export type NpmUpdateLatestCallback = (
+  latestVersion: string,
+  source: NpmUpdateResult['source'],
+) => void;
 
 function parseVersion(value: string): { numbers: number[]; prerelease: string | null } | null {
   const match = value.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
@@ -119,6 +123,7 @@ function installVersion(version: string, registry: string | null): Promise<void>
 export async function updateTermdockFromOfficialRegistry(
   currentVersion: string,
   onFallback?: (stage: NpmUpdateFallbackStage, error: Error) => void,
+  onLatest?: NpmUpdateLatestCallback,
 ): Promise<NpmUpdateResult> {
   if (!parseVersion(currentVersion)) throw new Error(`Invalid installed Termdock version: ${currentVersion}`);
   let source: NpmUpdateResult['source'] = 'official';
@@ -131,6 +136,7 @@ export async function updateTermdockFromOfficialRegistry(
     source = 'configured';
     latestVersion = await fetchLatestVersion(null);
   }
+  onLatest?.(latestVersion, source);
   const comparison = compareVersions(currentVersion, latestVersion);
   if (comparison === 0) return { status: 'current', currentVersion, latestVersion, source };
   if (comparison > 0) return { status: 'newer-than-registry', currentVersion, latestVersion, source };

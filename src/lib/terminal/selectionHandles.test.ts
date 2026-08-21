@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   cellToClientPoint,
+  clampMobileCopyPopoverPosition,
   clampCellToBuffer,
   getTerminalGridMetrics,
   orderSelectionEndpoints,
@@ -135,5 +136,46 @@ describe('orderSelectionEndpoints', () => {
     const r = orderSelectionEndpoints({ col: 30, row: 7 }, { col: 10, row: 7 }, 80);
     expect(r.start.col).toBe(10);
     expect(r.end.col).toBe(30);
+  });
+});
+
+describe('clampMobileCopyPopoverPosition', () => {
+  const base = {
+    viewport: { left: 0, top: 0, right: 390, bottom: 844 },
+    terminal: { left: 20, top: 100, right: 370, bottom: 700 },
+    width: 88,
+    height: 36,
+    margin: 10,
+    fingerGap: 14,
+  };
+
+  it('把横向位置限制在当前终端内', () => {
+    expect(clampMobileCopyPopoverPosition({ ...base, clientX: 0, clientY: 300 }).left).toBe(30);
+    expect(clampMobileCopyPopoverPosition({ ...base, clientX: 390, clientY: 300 }).left).toBe(272);
+  });
+
+  it('把纵向位置限制在当前终端内，并在顶部放不下时改放手指下方', () => {
+    expect(clampMobileCopyPopoverPosition({ ...base, clientX: 200, clientY: 105 }).top).toBe(119);
+    expect(clampMobileCopyPopoverPosition({ ...base, clientX: 200, clientY: 710 }).top).toBe(654);
+  });
+
+  it('终端与 visual viewport 相交后再计算安全边界', () => {
+    const position = clampMobileCopyPopoverPosition({
+      ...base,
+      clientX: 200,
+      clientY: 400,
+      viewport: { left: 50, top: 180, right: 340, bottom: 600 },
+    });
+    expect(position).toEqual({ left: 156, top: 350 });
+  });
+
+  it('终端空间小于气泡时不会产生反向边界', () => {
+    const position = clampMobileCopyPopoverPosition({
+      ...base,
+      clientX: 45,
+      clientY: 125,
+      terminal: { left: 20, top: 100, right: 70, bottom: 140 },
+    });
+    expect(position).toEqual({ left: 30, top: 110 });
   });
 });
