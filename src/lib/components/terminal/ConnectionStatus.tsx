@@ -9,9 +9,8 @@ interface ConnectionStatusProps {
   onHardRestart: () => void;
 }
 
-// "Reconnecting (x/y)..." 由 reconnecting 事件回填到 connectionError，
-// 但它是过渡态（短线重连），不应该用 destructive 红字吓用户。
-// 这里把它识别成软提示，跟首次连接的 "Reconnecting..." 同款样式。
+// Reconnecting 可能同时携带内部恢复标志，用于驱动 ensureSession 重试；
+// 对用户它始终是可恢复的过渡态，不显示红色失败或手动 Retry。
 const RECONNECTING_RE = /^Reconnecting/i;
 
 export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
@@ -22,7 +21,7 @@ export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
   onHardRestart,
 }) => {
   const { t } = useI18n();
-  const isTransientReconnect = !!connectionError && !isFatalError && RECONNECTING_RE.test(connectionError);
+  const isTransientReconnect = !!connectionError && RECONNECTING_RE.test(connectionError);
 
   if ((isConnecting && !connectionError) || isTransientReconnect) {
     return (

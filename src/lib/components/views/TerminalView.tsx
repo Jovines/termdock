@@ -36,9 +36,8 @@ function detectMobileTerminalLayout(): boolean {
 
 const STREAM_OPTIONS = {
   retry: {
-    // PWA 退后台时 JS timer 可能被系统冻结/合并，短重试窗口会在后台被耗尽，
-    // 回前台时已经 cleanup，visibility probe 也找不到连接可修复。
-    // 拉长到 15 分钟以上，覆盖锁屏/切后台/弱网恢复；回前台还会立刻 probe。
+    // maxRetries 只作为指数退避阶数上限；达到 maxDelay 后仍持续重连。
+    // 回前台时 visibility probe 会跳过旧退避，立即换新连接。
     maxRetries: 60,
     initialDelayMs: 1000,
     maxDelayMs: 20000,
@@ -526,22 +525,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return () => window.clearTimeout(timer);
   }, [resumeRequestToken, resumeRequestReason, probeOrRestartSession]);
 
-  // 失败态自愈：session 用尽底层重试后会进入 fatal（connection failed），
-  // 此时 wsConnections 里的 conn 已被 cleanup 删除，仅靠 visibility/focus/online
-  // 事件才会触发 probeOrRestartSession 重连。但如果页面一直开在前台、没有任何
-  // 可见性/聚焦变化（桌面常驻、或弱网下某条 session 首连就失败），这条 session
-  // 会永久停在失败态：tab 一直显示默认名、没有程序名/目录——正是偶现「某些
-  // session 一直连接失败」的根因。
-  //
-  // 这里加一个不依赖用户操作的后台自愈定时器：fatal 持续期间按退避节奏自动
-  // 重跑 ensureSession，最多 MAX 次，避免对真正挂掉的后端无限打。
-  //
-  // 实现要点（避免状态抖动）：
-  //  - 成功判据用 isStreamReady（connected 时才置 true），不用 isFatalError，
-  //    因为 timer 重连过程中 isFatalError 会经历 true→false→true 抖动。
-  //  - 每次自愈调用 restartEnsureSession（bump restartTrigger），本 effect 依赖
-  //    restartTrigger，故每次尝试后必然重跑：连上了就 reset 收手，没连上就按
-  //    递增 attempt 继续退避，到 MAX 上限后停手等用户手动 Retry。
+  // ensureSession 自愈：HTTP 建连失败等发生在 WebSocket 之前的错误也必须持续恢复。
+  // 普通网络错误始终显示 Reconnecting，并按封顶退避重跑；只有明确的鉴权失败
+  // 停止自动恢复，等待登录流程处理。
   const fatalSelfHealAttemptRef = React.useRef(0);
   React.useEffect(() => {
     // 已连上（流就绪）：清零计数，结束自愈。
@@ -549,15 +535,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       fatalSelfHealAttemptRef.current = 0;
       return;
     }
-    // 只在 fatal 失败态下自愈；非 fatal 的正常连接中/重连中交给既有路径。
+    // 非 fatal 的 WebSocket 重连由底层持续处理。
     if (!isFatalError) return;
-
-    const MAX_SELF_HEAL = 8;
-    if (fatalSelfHealAttemptRef.current >= MAX_SELF_HEAL) return;
+    if (connectionError === 'Authentication required') return;
 
     const attempt = fatalSelfHealAttemptRef.current;
     // 退避：2s, 4s, 8s … 上限 30s。给后端/网络恢复留时间，又不至于太久无响应。
-    const delay = Math.min(2000 * Math.pow(2, attempt), 30000);
+    const delay = Math.min(2000 * Math.pow(2, Math.min(attempt, 4)), 30000);
     const timer = setTimeout(() => {
       fatalSelfHealAttemptRef.current += 1;
       debugSession('[Terminal] fatal self-heal: auto restarting ensureSession', {
@@ -570,7 +554,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }, delay);
 
     return () => clearTimeout(timer);
-  }, [isFatalError, isStreamReady, restartTrigger, debugSession, restartEnsureSession]);
+  }, [connectionError, isFatalError, isStreamReady, restartTrigger, debugSession, restartEnsureSession]);
 
   // iOS detection
   React.useEffect(() => {
@@ -910,10 +894,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 break;
               }
               case 'reconnecting': {
-                const attempt = event.attempt ?? 0;
-                const maxAttempts = event.maxAttempts ?? 3;
                 setReconnectStartedAt((startedAt) => startedAt ?? Date.now());
-                setConnectionError(`Reconnecting (${attempt}/${maxAttempts})...`);
+                setConnectionError('Reconnecting...');
                 setIsFatalError(false);
                 break;
               }
@@ -1052,9 +1034,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             const storeSessionId = sessionId;
             if (!storeSessionId) return;
 
-            const errorMsg = fatal
-              ? `Connection failed: ${error.message}`
-              : error.message || 'Terminal stream connection error';
+            const isAuthenticationFailure = fatal && error.message === 'Authentication required';
+            const errorMsg = isAuthenticationFailure
+              ? error.message
+              : fatal
+                ? 'Reconnecting...'
+                : error.message || 'Terminal stream connection error';
             console.error(`[Terminal] Stream error (fatal=${fatal}):`, errorMsg);
 
             // 单独高亮 Session not found，方便 grep / 自动化检测
@@ -1116,9 +1101,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, reportFlowControl, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
   );
 
-  // 后台会话允许长时间退避，覆盖锁屏和系统冻结；但只要会话进入前台，连续
-  // reconnecting 最多保留 60 秒。超过上限就清掉旧 WS 状态并进入可点击 Retry
-  // 的 fatal 状态，随后既有 self-heal 仍会按退避自动尝试，不再要求刷新页面。
+  // 后台会话允许长时间退避，覆盖锁屏和系统冻结；可见会话连续重连超过 60 秒时，
+  // 主动废弃可能卡死的连接并立即重建，但仍保持 Reconnecting 状态。
   React.useEffect(() => {
     const delayMs = getVisibleReconnectWatchdogDelayMs({
       isActive,
@@ -1135,12 +1119,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       });
       disconnectStream();
       setConnecting(sessionId, false);
-      setConnectionError('Connection recovery timed out');
-      setIsFatalError(true);
-      setReconnectStartedAt(null);
+      setConnectionError('Reconnecting...');
+      setIsFatalError(false);
+      setReconnectStartedAt(Date.now());
+      restartEnsureSession();
     }, delayMs);
     return () => window.clearTimeout(timer);
-  }, [debugSession, disconnectStream, isActive, isStreamReady, reconnectStartedAt, sessionId, setConnecting]);
+  }, [debugSession, disconnectStream, isActive, isStreamReady, reconnectStartedAt, restartEnsureSession, sessionId, setConnecting]);
 
   const hasInitializedRef = React.useRef(false);
   const hasStartedInitialConnectRef = React.useRef(false);
@@ -1322,11 +1307,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               }));
               return;
             }
-            setConnectionError(
-              error instanceof Error
-                ? error.message
-                : 'Failed to start terminal session'
-            );
+            setConnectionError('Reconnecting...');
             setIsFatalError(true);
             store.setConnecting(sessionId, false);
             return;
@@ -1412,9 +1393,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       terminalIdRef.current = session.sessionId;
       startStream(session.sessionId);
     } catch (error) {
-      setConnectionError(
-        error instanceof Error ? error.message : 'Failed to create terminal'
-      );
+      setConnectionError('Reconnecting...');
       setIsFatalError(true);
       setConnecting(sessionId, false);
     } finally {

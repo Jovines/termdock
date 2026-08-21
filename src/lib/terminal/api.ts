@@ -399,8 +399,8 @@ export function connectTerminalStream(
   options: ConnectStreamOptions = {}
 ): () => void {
   const {
-    // 调长重连窗口：覆盖电梯/地铁/锁屏 1-2 分钟的常见弱网场景。
-    // 10 次指数退避 + 20s 上限 ≈ 总等待 3 分钟。
+    // maxRetries 现在只限制指数退避的阶数，不再限制总尝试次数。
+    // 普通网络错误会在 maxRetryDelay 上持续重连，直到连接恢复或调用方关闭。
     maxRetries = 10,
     initialRetryDelay = 1000,
     maxRetryDelay = 20000,
@@ -489,6 +489,9 @@ export function connectTerminalStream(
 
     retryState.connectionTimeoutId = setTimeout(() => {
       if (ws.readyState !== WebSocket.OPEN) {
+        // close 事件随后还会异步到达；先标记本轮已处理，避免 timeout 与
+        // onclose 各自安排一条重连链。
+        handlingError = true;
         ws.close();
         handleError(new Error('WebSocket connection timeout'), false);
       }
@@ -758,8 +761,13 @@ export function connectTerminalStream(
   const handleError = (error: Error, isFatal: boolean) => {
     if (retryState.isClosed) return;
 
-    if (retryState.retryCount < maxRetries && !isFatal) {
-      retryState.retryCount++;
+    if (!isFatal) {
+      // retryCount 在退避上限处饱和，既避免指数计算溢出，也让链路质量
+      // 判断保持稳定；是否继续重连不再由它决定。
+      retryState.retryCount = Math.min(
+        retryState.retryCount + 1,
+        Math.max(1, maxRetries),
+      );
       const delay = Math.min(
         initialRetryDelay * Math.pow(2, retryState.retryCount - 1),
         maxRetryDelay,
@@ -775,8 +783,9 @@ export function connectTerminalStream(
         if (!retryState.isClosed) connect();
       }, delay);
     } else {
-      // Retries exhausted → treat as fatal so UI shows Retry button
-      onError?.(error, isFatal || retryState.retryCount >= maxRetries);
+      // Authentication and other explicitly fatal protocol errors still stop.
+      // Ordinary disconnects never reach this branch and retry indefinitely.
+      onError?.(error, true);
       cleanup();
     }
   };

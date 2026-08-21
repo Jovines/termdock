@@ -82,7 +82,14 @@ npx termdock --host 127.0.0.1 --port 4000
 termdock --foreground            # 前台运行
 termdock --status                # 查看后台状态
 termdock --stop                  # 停止后台服务
+td update                        # 从 npm 官方源升级全局 CLI
 ```
+
+`td update`（也可写作 `td upgrade`）会优先使用 npm 官方源
+`https://registry.npmjs.org` 查询并安装最新正式版；仅当官方源查询或安装失败时，
+才会回退到本机 `.npmrc` 配置的源（npm 命令不再传入 `--registry`）。
+如果后台服务正在运行，升级不会打断现有终端会话；可在方便时执行
+`td --stop && td`，让服务切换到新版本。
 
 ### 设置访问密码（强烈推荐）
 

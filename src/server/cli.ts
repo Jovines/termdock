@@ -29,6 +29,7 @@ import { isFirstRunCompleted, markFirstRunCompleted, normalizeLocalAccessName, s
 import { runBootChecks, formatBootCheckReport } from './utils/bootCheck.js';
 import { localAccessManager, getLanIPv4Addresses } from './utils/localAccess.js';
 import type { CertificateRefreshResult, StartServerResult } from './entry.js';
+import { OFFICIAL_NPM_REGISTRY, updateTermdockFromOfficialRegistry } from './utils/npmUpdate.js';
 import {
   clearAuthFile,
   destroyAllSessions,
@@ -124,6 +125,7 @@ interface CliOptions {
   foreground: boolean;
   status: boolean;
   stop: boolean;
+  update: boolean;
   setPassword: boolean;
   clearPassword: boolean;
   tls: boolean;
@@ -194,6 +196,7 @@ Options:
   --foreground       Run in the foreground
   --status           Show background server status
   --stop             Stop the background server
+  --update           Update the global CLI from the official npm registry
   -v, --version      Print version and exit
   --set-password     Set or update the access password (interactive prompt)
   --clear-password   Remove the access password and disable authentication
@@ -247,6 +250,8 @@ Short commands:
   st                 Same as --status
   x                  Same as --stop
   stop               Same as --stop
+  update             Update the global CLI from the official npm registry
+  upgrade            Same as update
   l                  Same as --tls
   ls                 Same as --tls
   la                 Same as --tls --all
@@ -570,6 +575,7 @@ function parseArgs(argv: string[]): CliOptions {
   let foreground = false;
   let status = false;
   let stop = false;
+  let update = false;
   let setPassword = false;
   let clearPassword = false;
   let tls = false;
@@ -609,6 +615,9 @@ function parseArgs(argv: string[]): CliOptions {
       argv = argv.slice(1);
     } else if (command === 'x' || command === 'stop') {
       stop = true;
+      argv = argv.slice(1);
+    } else if (command === 'update' || command === 'upgrade') {
+      update = true;
       argv = argv.slice(1);
     } else if (command === 'p' || command === 'pw') {
       setPassword = true;
@@ -757,6 +766,11 @@ function parseArgs(argv: string[]): CliOptions {
 
     if (arg === '--stop') {
       stop = true;
+      continue;
+    }
+
+    if (arg === '--update') {
+      update = true;
       continue;
     }
 
@@ -944,6 +958,7 @@ function parseArgs(argv: string[]): CliOptions {
     foreground,
     status,
     stop,
+    update,
     setPassword,
     clearPassword,
     tls,
@@ -2952,6 +2967,31 @@ async function refreshDefaultHttpsCertificateSafely(): Promise<boolean> {
 }
 
 async function main(): Promise<void> {
+  if (options.update) {
+    console.log(`${ICON.info} ${c.dim(`Checking ${OFFICIAL_NPM_REGISTRY} for updates...`)}`);
+    const result = await updateTermdockFromOfficialRegistry(TERMDOCK_VERSION, (stage, error) => {
+      const action = stage === 'query' ? 'query' : 'installation';
+      console.warn(`${ICON.warn} ${c.yellow(`Official npm registry ${action} failed; retrying with your configured npm registry.`)}`);
+      console.warn(`  ${c.dim(error.message)}`);
+    });
+    if (result.status === 'current') {
+      console.log(`${ICON.ok} ${c.green(`Termdock ${result.currentVersion} is already up to date.`)}`);
+      process.exit(0);
+    }
+    if (result.status === 'newer-than-registry') {
+      console.log(`${ICON.info} ${c.dim(`Installed Termdock ${result.currentVersion} is newer than npm latest ${result.latestVersion}; nothing changed.`)}`);
+      process.exit(0);
+    }
+
+    const sourceLabel = result.source === 'official' ? 'official npm registry' : 'configured npm registry';
+    console.log(`${ICON.ok} ${c.green(`Updated Termdock ${result.currentVersion} → ${result.latestVersion} via ${sourceLabel}.`)}`);
+    if (getRunningState()) {
+      console.log(`${ICON.info} ${c.yellow('The running server is still using the previous version.')}`);
+      console.log(`  ${c.dim('Restart when convenient with:')} ${c.cyan('td --stop && td')}`);
+    }
+    process.exit(0);
+  }
+
   if (options.setupLocalHttps) {
     try {
       await runSetupLocalHttps();

@@ -39,8 +39,10 @@ export type RefractorNode = RefractorElement | RefractorText;
  * Skip highlighting above these limits. Plain text keeps the UI responsive for
  * minified bundles, lock files, generated code, etc.
  */
-export const MAX_HIGHLIGHT_BYTES = 512 * 1024; // ~0.5 MB
-export const MAX_HIGHLIGHT_LINES = 5000;
+// Large hand-written source modules can comfortably exceed 10k lines. Keep
+// those eligible while the per-line limit below still filters minified output.
+export const MAX_HIGHLIGHT_BYTES = 1024 * 1024; // 1 MB
+export const MAX_HIGHLIGHT_LINES = 20_000;
 export const MAX_HIGHLIGHT_LINE_LENGTH = 2000;
 
 /**
