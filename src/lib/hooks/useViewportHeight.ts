@@ -12,12 +12,48 @@ export const VIEWPORT_LAYOUT_CHANGE_EVENT = 'termdock:viewport-layout-change';
 const MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX = 240;
 const DEFAULT_BOOTSTRAP_VIEWPORT_HEIGHT_PX = 640;
 const DEFAULT_BOOTSTRAP_VIEWPORT_WIDTH_PX = 360;
+const KEYBOARD_SETTLED_SYNC_DELAYS_MS = [50, 150, 300, 500, 800, 1200] as const;
+const IOS_KEYBOARD_TOOLBAR_MIN_PX = 28;
+const IOS_KEYBOARD_TOOLBAR_MAX_PX = 72;
+const IOS_KEYBOARD_REFERENCE_MIN_AGE_MS = 500;
 
 interface SafeAreaInsets {
   top: number;
   right: number;
   bottom: number;
   left: number;
+}
+
+interface IOSKeyboardHeightCorrectionInput {
+  measuredHeight: number;
+  referenceHeight: number;
+  keyboardOpenAgeMs: number;
+  isIOS: boolean;
+  isTerminalInputFocused: boolean;
+}
+
+export function correctIOSKeyboardToolbarUndercount({
+  measuredHeight,
+  referenceHeight,
+  keyboardOpenAgeMs,
+  isIOS,
+  isTerminalInputFocused,
+}: IOSKeyboardHeightCorrectionInput): number {
+  const missingHeight = referenceHeight - measuredHeight;
+  const looksLikeMissingSystemToolbar =
+    missingHeight >= IOS_KEYBOARD_TOOLBAR_MIN_PX &&
+    missingHeight <= IOS_KEYBOARD_TOOLBAR_MAX_PX;
+
+  if (
+    isIOS &&
+    isTerminalInputFocused &&
+    keyboardOpenAgeMs >= IOS_KEYBOARD_REFERENCE_MIN_AGE_MS &&
+    looksLikeMissingSystemToolbar
+  ) {
+    return referenceHeight;
+  }
+
+  return measuredHeight;
 }
 
 declare global {
@@ -202,6 +238,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
   const lastWidthRef = React.useRef(0);
   const lastKeyboardHeightRef = React.useRef(0);
   const lastKeyboardOpenRef = React.useRef(false);
+  const keyboardOpenStartedAtRef = React.useRef<number | null>(null);
+  const iosKeyboardReferenceHeightsRef = React.useRef(new Map<string, number>());
 
   React.useEffect(() => {
     if (typeof window === 'undefined') {
@@ -346,8 +384,45 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       // terminal under-translate by exactly that intermittent offsetTop.
       const keyboardViewportHeight = Math.min(filteredHeight, rawViewportHeight);
       const visibleHeight = Math.max(0, Math.min(baseVh, visualBottom));
-      const keyboardHeight = Math.max(0, Math.round(baseVh - visibleHeight - safeBottom));
+      const measuredKeyboardHeight = Math.max(0, Math.round(baseVh - visibleHeight - safeBottom));
+      const isMeasuredKeyboardOpen = measuredKeyboardHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
+      const now = performance.now();
+      if (isMeasuredKeyboardOpen && keyboardOpenStartedAtRef.current === null) {
+        keyboardOpenStartedAtRef.current = now;
+      } else if (!isMeasuredKeyboardOpen) {
+        keyboardOpenStartedAtRef.current = null;
+      }
+
+      const keyboardOpenAgeMs = keyboardOpenStartedAtRef.current === null
+        ? 0
+        : Math.max(0, now - keyboardOpenStartedAtRef.current);
+      const viewportOrientation = currentWidth > baseVh ? 'landscape' : 'portrait';
+      const viewportWidthBucket = Math.round(currentWidth / 20) * 20;
+      const keyboardReferenceKey = `${viewportOrientation}:${viewportWidthBucket}`;
+      const referenceKeyboardHeight = iosKeyboardReferenceHeightsRef.current.get(keyboardReferenceKey) ?? 0;
+      const isTerminalInputFocused = document.activeElement?.matches('[data-terminal-input-anchor="true"]') === true;
+      const keyboardHeight = correctIOSKeyboardToolbarUndercount({
+        measuredHeight: measuredKeyboardHeight,
+        referenceHeight: referenceKeyboardHeight,
+        keyboardOpenAgeMs,
+        isIOS: isIOSLike(),
+        isTerminalInputFocused,
+      });
       const isKeyboardOpen = keyboardHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
+
+      // Keep a high-water reference for this orientation. A later opening that
+      // is shorter by roughly one iOS keyboard/browser toolbar can reuse it
+      // after the animation has settled. The raw measurement remains the
+      // reference source so a corrected value cannot inflate the cache.
+      if (
+        isIOSLike() &&
+        isTerminalInputFocused &&
+        isMeasuredKeyboardOpen &&
+        keyboardOpenAgeMs >= IOS_KEYBOARD_REFERENCE_MIN_AGE_MS &&
+        measuredKeyboardHeight > referenceKeyboardHeight
+      ) {
+        iosKeyboardReferenceHeightsRef.current.set(keyboardReferenceKey, measuredKeyboardHeight);
+      }
       const ty = -keyboardHeight;
       const mt = keyboardHeight;
       document.documentElement.style.setProperty('--kb-translate-y', `${ty}px`);
@@ -385,6 +460,10 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
           rawHeight: nextHeight,
           appliedHeight: filteredHeight,
           keyboardViewportHeight,
+          measuredKeyboardHeight,
+          referenceKeyboardHeight,
+          keyboardOpenAgeMs: Math.round(keyboardOpenAgeMs),
+          correctedKeyboardToolbar: keyboardHeight !== measuredKeyboardHeight,
           keyboardHeight,
           isKeyboardOpen,
           safeAreaInsets,
@@ -420,7 +499,7 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
 
     const scheduleSettledSync = (source: string) => {
       scheduleSync(`${source}:now`);
-      for (const delay of [50, 150, 300]) {
+      for (const delay of KEYBOARD_SETTLED_SYNC_DELAYS_MS) {
         const timer = window.setTimeout(() => {
           settledSyncTimers.delete(timer);
           scheduleSync(`${source}:${delay}ms`);
