@@ -166,11 +166,11 @@ module.exports = {
       : {
           osxSign: {
             identity: signingIdentity,
-            // Executables copied into Contents/Resources are signed explicitly
-            // by signBundledRuntime above. Let the outer app signature seal the
-            // remaining static assets instead of asking codesign to timestamp
-            // every .pak, font, and server resource individually.
-            ignore: (filePath) => filePath.includes('/Resources/'),
+            // Executables copied into the main app's Contents/Resources are
+            // signed explicitly by signBundledRuntime above. Do not ignore
+            // Resources folders inside frameworks: Squirrel's ShipIt helper
+            // lives there and must receive Developer ID, timestamp, and runtime.
+            ignore: (filePath) => filePath.includes('/Termdock.app/Contents/Resources/'),
           },
           ...(notarizeConfig ? { osxNotarize: notarizeConfig } : {}),
         }),
