@@ -498,12 +498,14 @@ export function AgentFloatingSessionButtons({
   reviewCount,
   runningCount,
   runningButtonEnabled,
+  canJumpToRunningSession,
   isDesktopLayout,
   containerElement,
 }: {
   reviewCount: number;
   runningCount: number;
   runningButtonEnabled: boolean;
+  canJumpToRunningSession: boolean;
   isDesktopLayout: boolean;
   containerElement: HTMLElement | null;
 }): React.ReactElement | null {
@@ -514,7 +516,10 @@ export function AgentFloatingSessionButtons({
   const floatingChromeVisible = isDesktopLayout
     || (!sidebarLeftOpen && !sidebarRightOpen && !keyboardOpen);
   const attentionVisible = reviewCount > 0 && floatingChromeVisible;
-  const runningVisible = runningButtonEnabled && runningCount > 0 && floatingChromeVisible;
+  const runningVisible = runningButtonEnabled
+    && runningCount > 0
+    && canJumpToRunningSession
+    && floatingChromeVisible;
   const preferencesRef = React.useRef<Record<FloatingSessionButtonKind, MobileAttentionPreference>>({
     attention: readFloatingButtonPreference(
       MOBILE_ATTENTION_POSITION_KEY,

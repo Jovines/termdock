@@ -1961,6 +1961,11 @@ function App() {
     }
     return { running, review };
   }, [sessions, terminalSessions]);
+  const canJumpToRunningSession = agentTabCounts.running > 1
+    || (
+      agentTabCounts.running === 1
+      && terminalSessions.get(activeSessionId ?? '')?.agentStatus !== 'working'
+    );
   // inline 用 'nearest' 而非 'center'：激活 tab 已在可视区内时完全不滚动，
   // 只有它溢出屏幕才滚最小距离。'center' 会在 tab 多（条溢出）时每切一次
   // 整条横移去居中，切换频繁时视觉上就是横向抖动。
@@ -2990,6 +2995,7 @@ function App() {
         reviewCount={agentTabCounts.review}
         runningCount={agentTabCounts.running}
         runningButtonEnabled={runningSessionButtonEnabled}
+        canJumpToRunningSession={canJumpToRunningSession}
         isDesktopLayout={isDesktopViewport}
         containerElement={terminalAreaElement}
       />

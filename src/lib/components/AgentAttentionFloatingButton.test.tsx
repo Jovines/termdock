@@ -62,6 +62,7 @@ describe('AgentFloatingSessionButtons', () => {
         reviewCount={2}
         runningCount={0}
         runningButtonEnabled={false}
+        canJumpToRunningSession={false}
         isDesktopLayout
         containerElement={terminalArea}
       />,
@@ -90,6 +91,7 @@ describe('AgentFloatingSessionButtons', () => {
         reviewCount={1}
         runningCount={0}
         runningButtonEnabled={false}
+        canJumpToRunningSession={false}
         isDesktopLayout
         containerElement={terminalArea}
       />,
@@ -102,6 +104,7 @@ describe('AgentFloatingSessionButtons', () => {
         reviewCount={1}
         runningCount={0}
         runningButtonEnabled={false}
+        canJumpToRunningSession={false}
         isDesktopLayout={false}
         containerElement={terminalArea}
       />,
@@ -117,6 +120,7 @@ describe('AgentFloatingSessionButtons', () => {
         reviewCount={2}
         runningCount={3}
         runningButtonEnabled
+        canJumpToRunningSession
         isDesktopLayout
         containerElement={terminalArea}
       />,
@@ -136,5 +140,33 @@ describe('AgentFloatingSessionButtons', () => {
     fireEvent.pointerUp(running, { pointerId: 7, clientX: bounds.left, clientY: startY });
 
     expect(Number.parseFloat(running.style.left)).toBe(bounds.left + MOBILE_ATTENTION_EDGE_GAP_PX);
+  });
+
+  it('hides the running button when the only running session is already active', () => {
+    const terminalArea = createTerminalArea();
+    const { rerender } = render(
+      <AgentFloatingSessionButtons
+        reviewCount={0}
+        runningCount={1}
+        runningButtonEnabled
+        canJumpToRunningSession={false}
+        isDesktopLayout
+        containerElement={terminalArea}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: 'Jump to next running session: 1' })).toBeNull();
+
+    rerender(
+      <AgentFloatingSessionButtons
+        reviewCount={0}
+        runningCount={1}
+        runningButtonEnabled
+        canJumpToRunningSession
+        isDesktopLayout
+        containerElement={terminalArea}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Jump to next running session: 1' })).toBeTruthy();
   });
 });
