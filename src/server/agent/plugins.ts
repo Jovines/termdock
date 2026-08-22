@@ -22,9 +22,10 @@ import type {
   AgentStatusTone,
 } from './session.js';
 
-const PLUGINS_DIR = path.join(os.homedir(), '.termdock', 'agent-plugins');
-const MANIFEST_FILE = 'manifest.json';
-const ICON_FILE = 'icon.svg';
+export const PLUGINS_DIR = path.join(os.homedir(), '.termdock', 'agent-plugins');
+export const MANIFEST_FILE = 'manifest.json';
+export const ICON_FILE = 'icon.svg';
+export const SOURCE_METADATA_FILE = '.termdock-source.json';
 
 // ---------------------------------------------------------------------------
 // Manifest schema
@@ -95,6 +96,49 @@ export interface LoadedPlugin {
   iconPath: string | null;
   /** Icon file's mtime (ms), for cache-busting. */
   iconMtime: number;
+  /** Where this plugin package came from. Older manifest-only plugins omit it. */
+  source: PluginSourceMetadata | null;
+}
+
+export type PluginSourceType = 'git' | 'local' | 'manifest';
+
+export interface PluginSourceMetadata {
+  version: 1;
+  type: PluginSourceType;
+  source: string | null;
+  revision: string | null;
+  latestRevision: string | null;
+  installedAt: number;
+  updatedAt: number;
+  checkedAt: number | null;
+}
+
+function parseSourceMetadata(raw: unknown): PluginSourceMetadata | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  if (value.version !== 1 || !['git', 'local', 'manifest'].includes(String(value.type))) return null;
+  return {
+    version: 1,
+    type: value.type as PluginSourceType,
+    source: typeof value.source === 'string' ? value.source : null,
+    revision: typeof value.revision === 'string' ? value.revision : null,
+    latestRevision: typeof value.latestRevision === 'string' ? value.latestRevision : null,
+    installedAt: typeof value.installedAt === 'number' ? value.installedAt : 0,
+    updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : 0,
+    checkedAt: typeof value.checkedAt === 'number' ? value.checkedAt : null,
+  };
+}
+
+export function readPluginSourceMetadata(dir: string): PluginSourceMetadata | null {
+  try {
+    return parseSourceMetadata(JSON.parse(fs.readFileSync(path.join(dir, SOURCE_METADATA_FILE), 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+export function writePluginSourceMetadata(dir: string, metadata: PluginSourceMetadata): void {
+  fs.writeFileSync(path.join(dir, SOURCE_METADATA_FILE), JSON.stringify(metadata, null, 2), 'utf8');
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +176,15 @@ function isValidSlug(s: string): boolean {
 
 const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
 
+function isSafeSvgIcon(svg: string): boolean {
+  return /^\s*<svg\b/i.test(svg)
+    && !/<(?:script|style|foreignObject|iframe|object|embed)\b/i.test(svg)
+    && !/<\?(?:xml|xml-stylesheet)\b|<!DOCTYPE\b/i.test(svg)
+    && !/\bon[a-z]+\s*=/i.test(svg)
+    && !/(?:href|src)\s*=\s*["']?\s*(?!#)[^"'\s>]+/i.test(svg)
+    && !/url\(\s*(?!["']?#)[^)]+\)/i.test(svg);
+}
+
 // ---------------------------------------------------------------------------
 // Path resolution: ~ → home directory
 // ---------------------------------------------------------------------------
@@ -141,6 +194,34 @@ function resolveHome(p: string): string {
     return path.join(os.homedir(), p.slice(1));
   }
   return p;
+}
+
+function validateHookTarget(target: string): string | null {
+  if (!target.startsWith('~/') || !target.toLowerCase().endsWith('.json')) {
+    return 'hooks.target must be a ~/ path to a JSON file';
+  }
+  const home = path.resolve(os.homedir());
+  const resolved = path.resolve(home, target.slice(2));
+  if (resolved === home || !resolved.startsWith(`${home}${path.sep}`)) {
+    return 'hooks.target must stay inside the user home directory';
+  }
+
+  // Existing symlinks in any target component could redirect a later write
+  // outside $HOME. Refuse them instead of relying on a racy realpath check.
+  let current = home;
+  for (const part of path.relative(home, resolved).split(path.sep)) {
+    current = path.join(current, part);
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        return 'hooks.target may not traverse symbolic links';
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return 'hooks.target could not be safely inspected';
+      }
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,13 +270,14 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
   }
 
   const displayName = m.displayName;
-  if (typeof displayName !== 'string' || displayName.trim().length === 0) {
-    errors.push('displayName is required and must be a non-empty string');
+  if (typeof displayName !== 'string' || displayName.trim().length === 0 || displayName.length > 80) {
+    errors.push('displayName is required and must be a non-empty string (max 80 chars)');
   }
 
   const aliases = m.aliases;
-  if (!Array.isArray(aliases) || aliases.length === 0 || !aliases.every((a) => typeof a === 'string' && a.trim().length > 0)) {
-    errors.push('aliases must be a non-empty array of strings');
+  if (!Array.isArray(aliases) || aliases.length === 0 || aliases.length > 16
+    || !aliases.every((a) => typeof a === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(a))) {
+    errors.push('aliases must contain 1-16 safe command names');
   }
 
   const accentColor = m.accentColor;
@@ -270,6 +352,9 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
       const target = h.target;
       if (typeof target !== 'string' || target.trim().length === 0) {
         errors.push('hooks.target is required and must be a file path (~-abbreviated ok)');
+      } else {
+        const targetError = validateHookTarget(target.trim());
+        if (targetError) errors.push(targetError);
       }
       const events = h.events;
       if (!Array.isArray(events) || events.length === 0) {
@@ -285,15 +370,15 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
           const evt = e as Record<string, unknown>;
           const hook = evt.hook;
           const event = evt.event;
-          if (typeof hook !== 'string' || hook.trim().length === 0) {
+          if (typeof hook !== 'string' || hook.trim().length === 0 || hook.length > 120) {
             errors.push(`hooks.events[${i}].hook is required`);
           }
           if (typeof event !== 'string' || !VALID_EVENT_KINDS.has(event as AgentEventKind)) {
             errors.push(`hooks.events[${i}].event must be one of: ${[...VALID_EVENT_KINDS].join(', ')}`);
           }
           const matcher = evt.matcher;
-          if (matcher !== undefined && typeof matcher !== 'string') {
-            errors.push(`hooks.events[${i}].matcher must be a string if provided`);
+          if (matcher !== undefined && (typeof matcher !== 'string' || matcher.length > 512)) {
+            errors.push(`hooks.events[${i}].matcher must be a string (max 512 chars) if provided`);
           }
           const timeout = evt.timeout;
           if (timeout !== undefined && (typeof timeout !== 'number' || timeout <= 0)) {
@@ -328,10 +413,20 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
       const command = r.command;
       if (typeof command !== 'string' || !command.includes('{sessionId}')) {
         errors.push('resume.command must contain the {sessionId} placeholder');
+      } else {
+        const tokens = command.trim().split(/\s+/);
+        const executable = path.basename(tokens[0] ?? '');
+        if (command.length > 1024
+          || !tokens.every((token) => /^[A-Za-z0-9_./:@%+,={}-]+$/.test(token))
+          || !Array.isArray(aliases)
+          || !(aliases as string[]).includes(executable)) {
+          errors.push('resume.command must be a simple argv-like command whose executable is one of aliases; shell syntax is not allowed');
+        }
       }
       const staleFlags = r.staleFlags;
-      if (staleFlags !== undefined && (!Array.isArray(staleFlags) || !staleFlags.every((f) => typeof f === 'string'))) {
-        errors.push('resume.staleFlags must be an array of strings if provided');
+      if (staleFlags !== undefined && (!Array.isArray(staleFlags) || staleFlags.length > 32
+        || !staleFlags.every((f) => typeof f === 'string' && /^--?[A-Za-z0-9][A-Za-z0-9-]{0,79}$/.test(f)))) {
+        errors.push('resume.staleFlags must be an array of safe CLI flags if provided');
       }
       resumeConfig = {
         command: command as string,
@@ -351,10 +446,12 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
       const n = m.titleNamer as Record<string, unknown>;
       const command = n.command;
       const args = n.args;
-      if (typeof command !== 'string' || command.trim().length === 0) {
+      if (typeof command !== 'string' || command.trim().length === 0 || command.length > 1024) {
         errors.push('titleNamer.command is required');
       }
-      if (!Array.isArray(args) || !args.every((arg) => typeof arg === 'string') || !args.some((arg) => arg.includes('{prompt}'))) {
+      if (!Array.isArray(args) || args.length > 64
+        || !args.every((arg) => typeof arg === 'string' && arg.length <= 16_384)
+        || !args.some((arg) => arg.includes('{prompt}'))) {
         errors.push('titleNamer.args must be a string array containing {prompt}');
       }
       let models: PluginTitleNamerConfig['models'];
@@ -363,10 +460,11 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
           errors.push('titleNamer.models must be an object if present');
         } else {
           const rawModels = n.models as Record<string, unknown>;
-          if (typeof rawModels.command !== 'string' || rawModels.command.trim().length === 0) {
+          if (typeof rawModels.command !== 'string' || rawModels.command.trim().length === 0 || rawModels.command.length > 1024) {
             errors.push('titleNamer.models.command is required');
           }
-          if (rawModels.args !== undefined && (!Array.isArray(rawModels.args) || !rawModels.args.every((arg) => typeof arg === 'string'))) {
+          if (rawModels.args !== undefined && (!Array.isArray(rawModels.args) || rawModels.args.length > 64
+            || !rawModels.args.every((arg) => typeof arg === 'string' && arg.length <= 16_384))) {
             errors.push('titleNamer.models.args must be a string array if present');
           }
           if (typeof rawModels.command === 'string') {
@@ -464,15 +562,25 @@ export function loadPlugins(): PluginLoadResult {
 
     const iconPath = path.join(dir, ICON_FILE);
     let iconMtime = 0;
-    const iconExists = fs.existsSync(iconPath);
+    let iconExists = fs.existsSync(iconPath);
     if (iconExists) {
-      try { iconMtime = fs.statSync(iconPath).mtimeMs; } catch { /* keep 0 */ }
+      try {
+        if (!isSafeSvgIcon(fs.readFileSync(iconPath, 'utf8'))) {
+          errors.push({ slug: result.manifest.slug, errors: ['icon.svg contains unsafe or invalid SVG content'] });
+          iconExists = false;
+        } else {
+          iconMtime = fs.statSync(iconPath).mtimeMs;
+        }
+      } catch {
+        iconExists = false;
+      }
     }
     plugins.push({
       manifest: result.manifest,
       dir,
       iconPath: iconExists ? iconPath : null,
       iconMtime,
+      source: readPluginSourceMetadata(dir),
     });
   }
 
@@ -487,6 +595,17 @@ export function savePlugin(manifest: AgentPluginManifest): string {
   fs.mkdirSync(dir, { recursive: true });
   const manifestPath = path.join(dir, MANIFEST_FILE);
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+  const now = Date.now();
+  writePluginSourceMetadata(dir, {
+    version: 1,
+    type: 'manifest',
+    source: null,
+    revision: null,
+    latestRevision: null,
+    installedAt: now,
+    updatedAt: now,
+    checkedAt: null,
+  });
   return dir;
 }
 

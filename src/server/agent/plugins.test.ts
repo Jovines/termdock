@@ -39,6 +39,7 @@ function makePlugin(manifest: AgentPluginManifest): LoadedPlugin {
     dir: '/tmp/test',
     iconPath: null,
     iconMtime: 0,
+    source: null,
   };
 }
 
@@ -56,6 +57,17 @@ describe('plugin validation', () => {
       hooks: { ...TEST_PLUGIN.hooks, events: [{ hook: 'Stop', event: 'stop', status: 'missing' }] },
     }, '/tmp/test');
     expect(invalid).toHaveProperty('error');
+  });
+
+  it('confines plugin hook targets to non-symlinked JSON paths under home', () => {
+    expect(validateManifest({
+      ...TEST_PLUGIN,
+      hooks: { ...TEST_PLUGIN.hooks, target: '/tmp/agent-hooks.json' },
+    }, '/tmp/test')).toHaveProperty('error');
+    expect(validateManifest({
+      ...TEST_PLUGIN,
+      hooks: { ...TEST_PLUGIN.hooks, target: '~/.test-agent/hooks.toml' },
+    }, '/tmp/test')).toHaveProperty('error');
   });
 
   it('validates an injectable title provider and requires a prompt placeholder', () => {
@@ -82,6 +94,17 @@ describe('plugin validation', () => {
     expect(result.error.migration?.guideCommand).toBe('td agent-plugin --json');
     expect(result.error.migration?.aiPrompt).toContain('Return only the corrected manifest JSON');
     expect(result.error.errors.join(' ')).toContain('manifest v1 is no longer supported');
+  });
+
+  it('rejects shell syntax in aliases and resume templates', () => {
+    expect(validateManifest({
+      ...TEST_PLUGIN,
+      resume: { command: 'test-agent --resume {sessionId}; touch /tmp/pwned' },
+    }, '/tmp/test')).toHaveProperty('error');
+    expect(validateManifest({
+      ...TEST_PLUGIN,
+      aliases: ['test-agent;evil'],
+    }, '/tmp/test')).toHaveProperty('error');
   });
 });
 
