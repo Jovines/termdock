@@ -35,6 +35,8 @@ export interface SettingsDoc {
   autoRenamePromptPreference: string;
   /** Total characters of raw prompt-submit payloads retained for title generation. */
   autoRenamePromptPayloadChars: number;
+  /** Agent launched by default from the left-sidebar new-session action. */
+  newSessionAgentSlug: string | null;
   updatedAt: number;
 }
 
@@ -90,9 +92,15 @@ function normalizeContextDraftHeight(value: unknown): { mobile: number | null; d
   return { mobile: normalizeOne(raw.mobile), desktop: normalizeOne(raw.desktop) };
 }
 
+export function normalizeNewSessionAgentSlug(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const slug = value.trim().toLowerCase();
+  return /^[a-z][a-z0-9-]{0,39}$/.test(slug) ? slug : null;
+}
+
 function normalizeSettings(value: unknown): SettingsDoc {
   const raw = value && typeof value === 'object'
-    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; autoRenameAgents?: unknown; autoRenameNamer?: unknown; autoRenameModels?: unknown; autoRenameIntervalMinutes?: unknown; autoRenamePromptPreference?: unknown; autoRenamePromptPayloadChars?: unknown; updatedAt?: unknown }
+    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; autoRenameAgents?: unknown; autoRenameNamer?: unknown; autoRenameModels?: unknown; autoRenameIntervalMinutes?: unknown; autoRenamePromptPreference?: unknown; autoRenamePromptPayloadChars?: unknown; newSessionAgentSlug?: unknown; updatedAt?: unknown }
     : {};
   const autoRenameAgents = Array.isArray(raw.autoRenameAgents)
     ? [...new Set(raw.autoRenameAgents
@@ -133,6 +141,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
       && raw.autoRenamePromptPayloadChars <= 64_000
       ? raw.autoRenamePromptPayloadChars
       : 12_000,
+    newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -328,5 +337,15 @@ export function setAutoRenameModelsSetting(models: Record<string, string>): Sett
         /^[a-z][a-z0-9-]{0,39}$/.test(slug)
         && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(model)
       )));
+  });
+}
+
+export function getNewSessionAgentSlugSetting(): string | null {
+  return loadSettings().newSessionAgentSlug;
+}
+
+export function setNewSessionAgentSlugSetting(slug: string | null): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.newSessionAgentSlug = normalizeNewSessionAgentSlug(slug);
   });
 }
