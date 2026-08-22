@@ -181,6 +181,42 @@ https://<name>.termdock.local:9834
 
 注意：mDNS 依赖同一局域网的 `.local` 组播；访客 Wi‑Fi、客户端隔离、VPN 或部分企业网络可能会阻止解析。此时 `localhost` 访问仍然可用，但手机上的漂亮域名可能不可用。
 
+### 分享和安装 Agent 插件
+
+Agent 适配可以作为独立 Git 仓库分享。插件仓库根目录必须包含 `manifest.json`，可以同时携带 `icon.svg` 和标题生成等辅助脚本：
+
+```text
+my-agent-termdock-plugin/
+├── manifest.json
+├── icon.svg          # 可选
+└── scripts/          # 可选；manifest 中用 {pluginDir} 引用
+```
+
+安装和维护命令：
+
+```bash
+td plugin-install https://github.com/owner/my-agent-termdock-plugin
+td plugin-list --json
+td plugin-check my-agent
+td plugin-update my-agent
+td plugin-hooks my-agent install
+td plugin-hooks my-agent uninstall
+td plugin-remove my-agent
+```
+
+`plugin-install/update/remove` 管理完整插件包；`plugin-hooks` 只管理写入 Agent 原生配置文件的 Termdock hook 条目，两者生命周期互相独立。设置界面提供相同操作。
+
+安全上，安装插件只会注册声明式能力，不会自动安装 hooks，也不会因打开设置页就执行插件的模型探测命令。只有用户启用该插件的自动标题后，才会调用它声明的 CLI。插件 hook 目标必须是用户目录内、不经过符号链接的 JSON 文件；实际 hook 命令由 Termdock 生成，插件不能注入任意 shell。仍应只安装你信任且审查过的仓库。
+
+开发本地插件时可直接传目录；旧的 manifest-only 命令仍可使用：
+
+```bash
+td plugin-install ./my-agent-termdock-plugin
+td plugin-create ./manifest.json
+```
+
+插件作者和 Agent 可以运行 `td agent-plugin --json` 获取机器可读的当前协议、manifest schema、状态模型和全部公共命令。v1 manifest 会返回可直接交给 AI 修复的迁移说明。
+
 ### 从源码安装
 
 ```bash

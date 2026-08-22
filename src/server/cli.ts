@@ -147,7 +147,12 @@ interface CliOptions {
   pluginInit: boolean;
   pluginInitJson: boolean;
   pluginCreate?: string;
+  pluginInstall?: string;
   pluginList: boolean;
+  pluginListJson: boolean;
+  pluginCheck?: string;
+  pluginUpdate?: string;
+  pluginHooks?: { slug: string; action: 'install' | 'uninstall' };
   pluginRemove?: string;
   agentEvent?: { slug: string; event: string; status?: string };
 }
@@ -238,7 +243,15 @@ Options:
   --plugin-init      Print the Agent integration protocol reference
   --plugin-create <file>
                      Create a plugin from a manifest JSON file
+  --plugin-install <source>
+                     Install a complete plugin package from HTTPS Git or a local path
   --plugin-list      List installed agent plugins
+  --plugin-check <slug>
+                     Check the installed plugin source for updates
+  --plugin-update <slug>
+                     Update a plugin package from its recorded source
+  --plugin-hooks <slug> <install|uninstall>
+                     Manage the Agent-native hook entries for a plugin
   --plugin-remove <slug>
                      Remove an installed agent plugin
   -h, --help         Show this help message
@@ -252,7 +265,16 @@ Short commands:
   pi                 Same as agent-plugin
   plugin-create <file>
                      Same as --plugin-create <file>
-  plugin-list        Same as --plugin-list
+  plugin-install <source>
+                     Install a shareable plugin repository or local package
+  plugin-list [--json]
+                     List plugin packages and their recorded sources
+  plugin-check <slug>
+                     Check one plugin for updates
+  plugin-update <slug>
+                     Update one plugin from its recorded source
+  plugin-hooks <slug> <install|uninstall>
+                     Install or uninstall only that plugin's Agent hooks
   plugin-remove <slug>
                      Same as --plugin-remove <slug>
   s                  Same as --status
@@ -605,7 +627,12 @@ function parseArgs(argv: string[]): CliOptions {
   let pluginInit = false;
   let pluginInitJson = false;
   let pluginCreate: string | undefined;
+  let pluginInstall: string | undefined;
   let pluginList = false;
+  let pluginListJson = false;
+  let pluginCheck: string | undefined;
+  let pluginUpdate: string | undefined;
+  let pluginHooks: { slug: string; action: 'install' | 'uninstall' } | undefined;
   let pluginRemove: string | undefined;
   let agentEvent: { slug: string; event: string; status?: string } | undefined;
 
@@ -705,18 +732,37 @@ function parseArgs(argv: string[]): CliOptions {
         pluginCreate = next;
         argv = argv.slice(2);
       } else {
-        pluginCreate = undefined;
+        pluginCreate = '';
         argv = argv.slice(1);
       }
+    } else if (command === 'pinstall' || command === 'plugin-install') {
+      pluginInstall = next && !next.startsWith('-') ? next : '';
+      argv = argv.slice(pluginInstall ? 2 : 1);
     } else if (command === 'pinfo' || command === 'plugin-list') {
       pluginList = true;
-      argv = argv.slice(1);
+      pluginListJson = next === '--json';
+      argv = argv.slice(pluginListJson ? 2 : 1);
+    } else if (command === 'pcheck' || command === 'plugin-check') {
+      pluginCheck = next && !next.startsWith('-') ? next : '';
+      argv = argv.slice(pluginCheck ? 2 : 1);
+    } else if (command === 'pupdate' || command === 'plugin-update') {
+      pluginUpdate = next && !next.startsWith('-') ? next : '';
+      argv = argv.slice(pluginUpdate ? 2 : 1);
+    } else if (command === 'phooks' || command === 'plugin-hooks') {
+      const action = argv[2];
+      if (next && (action === 'install' || action === 'uninstall')) {
+        pluginHooks = { slug: next, action };
+        argv = argv.slice(3);
+      } else {
+        console.error(`${ICON.err} ${c.red('Usage: td plugin-hooks <slug> <install|uninstall>')}`);
+        process.exit(1);
+      }
     } else if (command === 'premove' || command === 'plugin-remove') {
       if (next && !next.startsWith('-')) {
         pluginRemove = next;
         argv = argv.slice(2);
       } else {
-        pluginRemove = undefined;
+        pluginRemove = '';
         argv = argv.slice(1);
       }
     }
@@ -818,6 +864,7 @@ function parseArgs(argv: string[]): CliOptions {
 
     if (arg === '--json') {
       if (pluginInit) pluginInitJson = true;
+      else if (pluginList) pluginListJson = true;
       else tlsJson = true;
       continue;
     }
@@ -934,7 +981,7 @@ function parseArgs(argv: string[]): CliOptions {
         pluginCreate = next;
         index += 1;
       } else {
-        pluginCreate = undefined;
+        pluginCreate = '';
       }
       continue;
     }
@@ -944,13 +991,43 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === '--plugin-install' || arg === '--plugin-check' || arg === '--plugin-update') {
+      const next = argv[index + 1];
+      if (next && !next.startsWith('-')) {
+        if (arg === '--plugin-install') pluginInstall = next;
+        else if (arg === '--plugin-check') pluginCheck = next;
+        else pluginUpdate = next;
+        index += 1;
+      } else if (arg === '--plugin-install') {
+        pluginInstall = '';
+      } else if (arg === '--plugin-check') {
+        pluginCheck = '';
+      } else {
+        pluginUpdate = '';
+      }
+      continue;
+    }
+
+    if (arg === '--plugin-hooks') {
+      const slug = argv[index + 1];
+      const action = argv[index + 2];
+      if (slug && (action === 'install' || action === 'uninstall')) {
+        pluginHooks = { slug, action };
+        index += 2;
+      } else {
+        console.error(`${ICON.err} ${c.red('Usage: td --plugin-hooks <slug> <install|uninstall>')}`);
+        process.exit(1);
+      }
+      continue;
+    }
+
     if (arg === '--plugin-remove') {
       const next = argv[index + 1];
       if (next && !next.startsWith('-')) {
         pluginRemove = next;
         index += 1;
       } else {
-        pluginRemove = undefined;
+        pluginRemove = '';
       }
       continue;
     }
@@ -1002,7 +1079,12 @@ function parseArgs(argv: string[]): CliOptions {
     pluginInit,
     pluginInitJson,
     pluginCreate,
+    pluginInstall,
     pluginList,
+    pluginListJson,
+    pluginCheck,
+    pluginUpdate,
+    pluginHooks,
     pluginRemove,
     agentEvent,
   };
@@ -1914,8 +1996,12 @@ function runPluginInitJson(): void {
     commands: {
       guide: 'td agent-plugin --json',
       register: 'td plugin-create ./manifest.json',
+      installPackage: 'td plugin-install https://github.com/owner/repository',
+      checkUpdate: 'td plugin-check <slug>',
+      updatePackage: 'td plugin-update <slug>',
       emit: 'td agent-event <slug> <event> [status]',
-      inspect: 'td plugin-list',
+      inspect: 'td plugin-list --json',
+      hooks: 'td plugin-hooks <slug> <install|uninstall>',
       remove: 'td plugin-remove <slug>',
     },
     ui: {
@@ -1935,6 +2021,13 @@ function runPluginInitJson(): void {
       indicator: 'Theme-safe visual indicator.',
       tone: 'Theme token; arbitrary status colors are not accepted.',
     },
+    security: {
+      source: 'Only public HTTPS repository roots on approved Git hosts or explicit local paths are accepted; URL credentials are rejected.',
+      package: 'Symlinks, active/external SVG content, oversized files, submodules, and excessive unpacked size are rejected.',
+      hooks: 'hooks.target must be a non-symlinked ~/ JSON path. Termdock generates the hook command; manifests cannot inject shell.',
+      titleCommands: 'Installing or inspecting a plugin never executes its title/model commands. They run only after the user enables automatic titles for that plugin.',
+      updates: 'Changes to hook or title command declarations revoke the corresponding prior opt-in.',
+    },
     migrationV1: {
       errorCode: 'AGENT_PLUGIN_MANIFEST_V1_UNSUPPORTED',
       guideCommand: 'td agent-plugin --json',
@@ -1946,12 +2039,14 @@ function runPluginInitJson(): void {
       example: 'printf \'%s\' \'{"session_id":"abc","message":"Indexing"}\' | td agent-event my-agent prompt-submit thinking',
     },
     integrationSteps: [
-      'Generate a version 2 manifest using this schema and save it as JSON.',
-      'Run td plugin-create <manifest-file>; the Agent appears in Termdock immediately.',
+      'Create a repository with manifest.json at its root; icon.svg and helper files are optional.',
+      'Publish the repository, then install it with td plugin-install <https-git-url>. Local directories are also supported.',
+      'For manifest-only development, td plugin-create <manifest-file> remains available.',
       'Ask the user to open Settings > Detection Rules and click Install for this Agent. They can uninstall it there later.',
       'If the Agent hook format is not a Claude-style hooks map, configure native hooks to call td agent-event directly.',
       'Map the completed-turn hook to event "stop"; this is also the automatic-title trigger when the user enables titles for the Agent.',
       'Optionally declare titleNamer so this Agent can generate titles and dynamically publish its own model catalog.',
+      'Tell the user that enabling a plugin title provider executes that plugin\'s declared CLI; installation alone never does.',
       'Run td plugin-list to verify registration.',
     ],
     manifest: AGENT_PLUGIN_EXAMPLE,
@@ -2037,7 +2132,7 @@ ${c.dim('───────────────────')}
 
   ${c.dim('// ── optional: hook installation (bring your own hooks.json surface) ──')}
   "hooks": {
-    ${c.dim("// Path to the agent's hooks config file (~-abbreviated).")}
+    ${c.dim("// JSON path under ~/ only; symlink traversal is rejected.")}
     ${c.dim('// termdock inserts marker-carrying entries; leaves user entries untouched.')}
     "target": "~/.trae/settings.json",
 
@@ -2063,7 +2158,8 @@ ${c.dim('───────────────────')}
 
   ${c.dim('// ── optional: injectable automatic-title provider ──')}
   "titleNamer": {
-    ${c.dim('// No shell expansion. {prompt} is required; a bare {model} arg is omitted when automatic.')}
+    ${c.dim('// No shell expansion. Commands run only after the user enables this title provider.')}
+    ${c.dim('// {prompt} is required; a bare {model} arg is omitted when automatic.')}
     "command": "trae",
     "args": ["title", "--prompt", "{prompt}", "--model={model}"],
     ${c.dim('// Must print JSON: strings or {id, displayName, description, isDefault} objects.')}
@@ -2090,11 +2186,19 @@ ${c.dim('──────────────────')}
   ${c.dim('# Inject the Agent definition; it appears in the UI immediately')}
   td plugin-create ./trae-manifest.json
 
+  ${c.dim('# Or install a complete, updateable package from a public HTTPS Git repository')}
+  td plugin-install https://github.com/owner/trae-termdock-plugin
+
   ${c.dim('# The user then opens Settings > Detection Rules and clicks Install.')}
   ${c.dim('# The same UI button can uninstall the hooks later.')}
 
   ${c.dim('# Verify registration')}
-  td plugin-list
+  td plugin-list --json
+
+  ${c.dim('# Manage the package and its hooks independently')}
+  td plugin-check trae
+  td plugin-update trae
+  td plugin-hooks trae install
 
   ${c.dim('# Remove')}
   td plugin-remove trae
@@ -2174,11 +2278,25 @@ async function runPluginCreate(manifestPath: string): Promise<void> {
   console.log(`  ${c.dim('The user can click Install or Uninstall there.')}`);
 }
 
-async function runPluginList(): Promise<void> {
+async function runPluginInstall(source: string): Promise<void> {
+  const { baseUrl, token } = requireRunningServer();
+  const normalizedSource = /^https:\/\//i.test(source) ? source : path.resolve(source);
+  const response = await postLocalJson(baseUrl, token, '/api/terminal/agent-plugins/install', { source: normalizedSource });
+  const body = JSON.parse(response.body || '{}') as { slug?: string; dir?: string; error?: string; code?: string };
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    console.error(`${ICON.err} ${c.red(body.code ? `${body.code}: ${body.error ?? 'Plugin installation failed'}` : body.error ?? 'Plugin installation failed')}`);
+    process.exit(1);
+  }
+  console.log(`${ICON.ok} ${c.green(`Plugin "${body.slug}" installed.`)}`);
+  if (body.dir) console.log(`  ${c.dim('Directory:')} ${c.cyan(body.dir)}`);
+  console.log(`  ${c.dim('Next:')} ${c.cyan(`td plugin-hooks ${body.slug} install`)} ${c.dim('or use Settings > Detection Rules')}`);
+}
+
+async function runPluginList(json = false): Promise<void> {
   const { baseUrl, token } = requireRunningServer();
   const response = await getLocalJson(baseUrl, token, '/api/terminal/agent-plugins');
   const body = JSON.parse(response.body || '{}') as {
-    plugins?: Array<{ slug: string; displayName: string; aliases: string[]; accentColor: string; iconMode: string; hasHooks: boolean; hasResume: boolean; hasIcon: boolean }>;
+    plugins?: Array<{ slug: string; displayName: string; aliases: string[]; accentColor: string; iconMode: string; hasHooks: boolean; hasResume: boolean; hasIcon: boolean; sourceType?: string; source?: string | null; revision?: string | null; updateAvailable?: boolean }>;
     errors?: Array<{
       slug: string;
       errors: string[];
@@ -2189,6 +2307,10 @@ async function runPluginList(): Promise<void> {
   if (response.statusCode < 200 || response.statusCode >= 300) {
     console.error(`${ICON.err} ${c.red('Failed to list plugins')}`);
     process.exit(1);
+  }
+  if (json) {
+    console.log(JSON.stringify(body, null, 2));
+    return;
   }
   const plugins = body.plugins ?? [];
   if (plugins.length === 0) {
@@ -2203,7 +2325,9 @@ async function runPluginList(): Promise<void> {
       if (p.hasHooks) flags.push('hooks');
       if (p.hasResume) flags.push('resume');
       if (p.iconMode !== 'mask') flags.push(p.iconMode);
+      if (p.updateAvailable) flags.push('update');
       console.log(`  ${c.cyan(p.slug)}  ${c.dim(p.displayName)}  ${c.gray(p.accentColor)}  ${c.dim(flags.length > 0 ? `[${flags.join(', ')}]` : '')}`);
+      if (p.source) console.log(`    ${c.dim(`${p.sourceType ?? 'source'}: ${p.source}${p.revision ? ` @ ${p.revision.slice(0, 8)}` : ''}`)}`);
     }
   }
   const errors = body.errors ?? [];
@@ -2217,6 +2341,36 @@ async function runPluginList(): Promise<void> {
       if (e.migration?.aiPrompt) console.log(`    ${c.dim('Copy this to your AI:')} ${e.migration.aiPrompt}`);
     }
   }
+}
+
+async function runPluginSourceAction(slug: string, action: 'check-update' | 'update'): Promise<void> {
+  const { baseUrl, token } = requireRunningServer();
+  const response = await postLocalJson(baseUrl, token, `/api/terminal/agent-plugins/${encodeURIComponent(slug)}/${action}`, {});
+  const body = JSON.parse(response.body || '{}') as { error?: string; updateAvailable?: boolean; revision?: string | null; latestRevision?: string | null; hookWarning?: string | null; titleWarning?: string | null };
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    console.error(`${ICON.err} ${c.red(body.error ?? `Plugin ${action} failed`)}`);
+    process.exit(1);
+  }
+  if (action === 'check-update') {
+    console.log(body.updateAvailable
+      ? `${ICON.warn} ${c.yellow(`Update available for ${slug}`)} ${c.dim(`${body.revision?.slice(0, 8) ?? '?'} → ${body.latestRevision?.slice(0, 8) ?? '?'}`)}`
+      : `${ICON.ok} ${c.green(`${slug} is up to date.`)}`);
+  } else {
+    console.log(`${ICON.ok} ${c.green(`Plugin "${slug}" updated.`)}`);
+    if (body.hookWarning) console.log(`${ICON.warn} ${c.yellow(`Hooks need attention: ${body.hookWarning}`)}`);
+    if (body.titleWarning) console.log(`${ICON.warn} ${c.yellow(`Title commands need attention: ${body.titleWarning}`)}`);
+  }
+}
+
+async function runPluginHooks(slug: string, action: 'install' | 'uninstall'): Promise<void> {
+  const { baseUrl, token } = requireRunningServer();
+  const response = await postLocalJson(baseUrl, token, `/api/terminal/agent-hooks/${encodeURIComponent(slug)}/${action}`, {});
+  const body = JSON.parse(response.body || '{}') as { error?: string; summary?: string; state?: string };
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    console.error(`${ICON.err} ${c.red(body.error ?? `Plugin hook ${action} failed`)}`);
+    process.exit(1);
+  }
+  console.log(`${ICON.ok} ${c.green(body.summary ?? `Hooks ${action === 'install' ? 'installed' : 'removed'}.`)}`);
 }
 
 async function runPluginRemove(slug: string): Promise<void> {
@@ -3294,8 +3448,40 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  if (options.pluginInstall !== undefined) {
+    if (!options.pluginInstall) {
+      console.error(`${ICON.err} ${c.red('plugin-install requires an HTTPS Git URL or local package path')}`);
+      process.exit(1);
+    }
+    await runPluginInstall(options.pluginInstall);
+    process.exit(0);
+  }
+
   if (options.pluginList) {
-    await runPluginList();
+    await runPluginList(options.pluginListJson);
+    process.exit(0);
+  }
+
+  if (options.pluginCheck !== undefined) {
+    if (!options.pluginCheck) {
+      console.error(`${ICON.err} ${c.red('plugin-check requires a plugin slug')}`);
+      process.exit(1);
+    }
+    await runPluginSourceAction(options.pluginCheck, 'check-update');
+    process.exit(0);
+  }
+
+  if (options.pluginUpdate !== undefined) {
+    if (!options.pluginUpdate) {
+      console.error(`${ICON.err} ${c.red('plugin-update requires a plugin slug')}`);
+      process.exit(1);
+    }
+    await runPluginSourceAction(options.pluginUpdate, 'update');
+    process.exit(0);
+  }
+
+  if (options.pluginHooks) {
+    await runPluginHooks(options.pluginHooks.slug, options.pluginHooks.action);
     process.exit(0);
   }
 
