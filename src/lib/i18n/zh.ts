@@ -67,6 +67,7 @@ export const zh: TranslationDictionary = {
     confirmNewShell: '创建 Shell？',
     confirmNewTmux: '创建 Tmux？',
     newSession: '新建 Terminal',
+    newSessionWithAgent: ({ agent }) => `新建 ${agent}`,
     newSessionAdvanced: '快速启动 Agent',
     newSessionHint: '确认目录，然后点一个 Agent 立即启动。',
     workingDirectory: '工作目录',

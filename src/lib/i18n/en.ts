@@ -67,6 +67,7 @@ export const en: TranslationDictionary = {
     confirmNewShell: 'Create Shell?',
     confirmNewTmux: 'Create Tmux?',
     newSession: 'New terminal',
+    newSessionWithAgent: ({ agent }) => `New ${agent}`,
     newSessionAdvanced: 'Quick-launch agent',
     newSessionHint: 'Confirm the directory, then click an agent to launch.',
     workingDirectory: 'Working directory',

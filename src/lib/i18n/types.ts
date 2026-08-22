@@ -84,6 +84,7 @@ export type TranslationDictionary = {
     confirmNewShell: string;
     confirmNewTmux: string;
     newSession: string;
+    newSessionWithAgent: (params: TranslatorParams) => string;
     newSessionAdvanced: string;
     newSessionHint: string;
     workingDirectory: string;
