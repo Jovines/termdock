@@ -7,7 +7,12 @@ import { TerminalViewport, type RefreshReason, type TerminalController } from '.
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
 import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, sendTerminalViewingState, updateSessionInventoryEntry } from '../../terminal/api';
-import { computeTerminalLogicalFocus, computeTerminalLogicalViewing } from '../../terminal/focus';
+import {
+  computeTerminalLogicalFocus,
+  computeTerminalLogicalViewing,
+  shouldAutoFocusTerminalAfterInsert,
+  shouldRestoreTerminalFocusAfterInteraction,
+} from '../../terminal/focus';
 import { getTermdockDesktopBridge } from '../../desktop/nativeBridge';
 import { isTmuxMouseOrFocusInput, shouldConsumeAfterTmuxCopyModeExit } from '../../terminal/copyModeInput';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
@@ -227,6 +232,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const isActiveRef = React.useRef(isActive);
   const isMobileRef = React.useRef(isMobile);
   const desktopResumeFocusTimerRef = React.useRef<number | null>(null);
+  const desktopInteractionFocusTimerRef = React.useRef<number | null>(null);
   const pendingShellTitleRef = React.useRef<{ sessionId: string; title: string | null } | null>(null);
   const shellTitleRafRef = React.useRef<number | null>(null);
   const mobileCopyFeedbackTimerRef = React.useRef<number | null>(null);
@@ -392,12 +398,61 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         window.clearTimeout(desktopResumeFocusTimerRef.current);
       }
       desktopResumeFocusTimerRef.current = null;
+      if (desktopInteractionFocusTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(desktopInteractionFocusTimerRef.current);
+      }
+      desktopInteractionFocusTimerRef.current = null;
       if (mobileCopyFeedbackTimerRef.current !== null && typeof window !== 'undefined') {
         window.clearTimeout(mobileCopyFeedbackTimerRef.current);
       }
       mobileCopyFeedbackTimerRef.current = null;
     };
   }, []);
+
+  React.useEffect(() => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') {
+      return;
+    }
+
+    const handleDesktopPointerUp = () => {
+      if (desktopInteractionFocusTimerRef.current !== null) {
+        window.clearTimeout(desktopInteractionFocusTimerRef.current);
+      }
+      // Wait until the click handler has opened/focused any real editor. Other
+      // interactions normally leave focus on body or a button, in which case
+      // the active terminal retakes keyboard ownership.
+      desktopInteractionFocusTimerRef.current = window.setTimeout(() => {
+        desktopInteractionFocusTimerRef.current = null;
+        const activeElement = document.activeElement as HTMLElement | null;
+        const isTerminalInput = activeElement?.getAttribute('data-terminal-input-anchor') === 'true';
+        const activeElementIsEditable = !isTerminalInput && Boolean(activeElement && (
+          activeElement instanceof HTMLInputElement ||
+          activeElement instanceof HTMLTextAreaElement ||
+          activeElement instanceof HTMLSelectElement ||
+          activeElement.isContentEditable
+        ));
+
+        if (!shouldRestoreTerminalFocusAfterInteraction({
+          isActive: isActiveRef.current,
+          isMobile: isMobileRef.current,
+          documentVisible: !document.hidden,
+          activeElementIsEditable,
+        })) {
+          return;
+        }
+        focusTerminalIfActive();
+      }, 0);
+    };
+
+    document.addEventListener('pointerup', handleDesktopPointerUp);
+    return () => {
+      document.removeEventListener('pointerup', handleDesktopPointerUp);
+      if (desktopInteractionFocusTimerRef.current !== null) {
+        window.clearTimeout(desktopInteractionFocusTimerRef.current);
+        desktopInteractionFocusTimerRef.current = null;
+      }
+    };
+  }, [focusTerminalIfActive]);
 
   const restartEnsureSession = React.useCallback(() => {
     hasInitializedRef.current = false;
@@ -1546,7 +1601,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           detail: { nonce, ok: true },
         }));
       }
-      if (customEvent.detail?.focus !== false) {
+      if (shouldAutoFocusTerminalAfterInsert(isMobileRef.current, customEvent.detail?.focus !== false)) {
         focusTerminalIfActive();
       }
     };

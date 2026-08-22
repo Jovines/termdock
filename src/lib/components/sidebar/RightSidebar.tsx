@@ -6924,7 +6924,7 @@ export function RightSidebar(
       }
     } else {
       window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-        detail: { text: suffix ? text + suffix : text, focus: false },
+        detail: { text: suffix ? text + suffix : text, focus: true },
       }));
     }
     markReferenceInserted(key);
@@ -6988,7 +6988,7 @@ export function RightSidebar(
     window.addEventListener('termdock-insert-reference-ack', handleAck);
     setDraftInsertFailed(false);
     window.dispatchEvent(new CustomEvent('termdock-insert-reference', {
-      detail: { text: payload, focus: false, paste, nonce },
+      detail: { text: payload, focus: true, paste, nonce },
     }));
   }, [contextDraftAutoCollapse, contextDraftText]);
 

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { computeTerminalLogicalFocus, computeTerminalLogicalViewing } from './focus';
+import {
+  computeTerminalLogicalFocus,
+  computeTerminalLogicalViewing,
+  shouldAutoFocusTerminalAfterInsert,
+  shouldRestoreTerminalFocusAfterInteraction,
+} from './focus';
 
 const focusedState = {
   isActive: true,
@@ -44,5 +49,33 @@ describe('computeTerminalLogicalViewing', () => {
       streamReady: true,
       isDesktop: false,
     })).toBe(true);
+  });
+});
+
+describe('desktop terminal focus restoration', () => {
+  const desktopInteraction = {
+    isActive: true,
+    isMobile: false,
+    documentVisible: true,
+    activeElementIsEditable: false,
+  };
+
+  it('restores the active terminal after desktop pointer interactions', () => {
+    expect(shouldRestoreTerminalFocusAfterInteraction(desktopInteraction)).toBe(true);
+  });
+
+  it.each([
+    ['mobile layout', { isMobile: true }],
+    ['inactive terminal', { isActive: false }],
+    ['hidden document', { documentVisible: false }],
+    ['editable control', { activeElementIsEditable: true }],
+  ])('does not restore focus for %s', (_label, patch) => {
+    expect(shouldRestoreTerminalFocusAfterInteraction({ ...desktopInteraction, ...patch })).toBe(false);
+  });
+
+  it('auto-focuses successful insertions only on desktop when requested', () => {
+    expect(shouldAutoFocusTerminalAfterInsert(false, true)).toBe(true);
+    expect(shouldAutoFocusTerminalAfterInsert(true, true)).toBe(false);
+    expect(shouldAutoFocusTerminalAfterInsert(false, false)).toBe(false);
   });
 });
