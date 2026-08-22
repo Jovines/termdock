@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { shouldForceSettledRedraw } from './refreshRedraw';
+import { shouldForceSettledRedraw, shouldSchedulePageFlipRefresh } from './refreshRedraw';
+
+describe('shouldSchedulePageFlipRefresh', () => {
+  it('keeps the page-flip stabilization refresh on desktop', () => {
+    expect(shouldSchedulePageFlipRefresh(false, false)).toBe(true);
+  });
+
+  it('skips the duplicate page-flip refresh on mobile', () => {
+    expect(shouldSchedulePageFlipRefresh(true, false)).toBe(false);
+  });
+
+  it('honors an explicit refresh suppression', () => {
+    expect(shouldSchedulePageFlipRefresh(false, true)).toBe(false);
+  });
+});
 
 describe('shouldForceSettledRedraw', () => {
   it('keeps the recovery redraw when terminal dimensions stayed unchanged', () => {

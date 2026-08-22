@@ -4,6 +4,19 @@ export interface TerminalDimensions {
 }
 
 /**
+ * Mobile activation already schedules a forced resize refresh so xterm can
+ * fit the newly active slide. Running the desktop page-flip refresh as well
+ * causes multiple full-buffer paints around the Swiper settle frame, which is
+ * visible as a brief flash on phones.
+ */
+export function shouldSchedulePageFlipRefresh(
+  isMobile: boolean,
+  suppressPageFlipRefresh: boolean,
+): boolean {
+  return !isMobile && !suppressPageFlipRefresh;
+}
+
+/**
  * A real xterm resize already repaints the terminal. Only keep the settled
  * full-buffer redraw when dimensions stayed unchanged, or when either sample
  * is unavailable and the conservative recovery path is safer.
