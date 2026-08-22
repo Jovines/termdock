@@ -16,6 +16,7 @@ function ev(kind: AgentEventKind, opts: Partial<AgentEvent> = {}): AgentEvent {
     sessionId: null,
     message: null,
     cwd: null,
+    status: null,
     ...opts,
   };
 }
@@ -70,6 +71,25 @@ describe('buildHookSequence ↔ parseAgentEvent round-trip', () => {
 });
 
 describe('agent session state machine', () => {
+  it('applies plugin presentation while preserving a stable semantic phase', () => {
+    const s = defaultAgentSessionState();
+    applyAgentEvent(s, ev('prompt-submit', {
+      status: {
+        id: 'indexing',
+        phase: 'working',
+        label: 'Indexing workspace',
+        indicator: 'pulse',
+        tone: 'info',
+      },
+    }));
+    expect(s.status).toBe('working');
+    expect(s.presentation?.id).toBe('indexing');
+
+    applyAgentEvent(s, ev('tool-complete'));
+    expect(s.status).toBe('working');
+    expect(s.presentation).toBeNull();
+  });
+
   it('follows the turn lifecycle', () => {
     const s = defaultAgentSessionState();
     expect(s.status).toBe('idle');

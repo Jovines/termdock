@@ -1,5 +1,5 @@
 import { describe, expect, it, afterEach } from 'vitest';
-import { loadPlugins, savePlugin, removePlugin, type AgentPluginManifest, type LoadedPlugin } from './plugins.js';
+import { loadPlugins, savePlugin, removePlugin, validateManifest, type AgentPluginManifest, type LoadedPlugin } from './plugins.js';
 import {
   agentBySlug,
   buildResumeCommand,
@@ -7,18 +7,23 @@ import {
   detectAgentFromArgv,
   registerPluginAgents,
 } from './registry.js';
+import { applyAgentEvent, buildHookSequence, defaultAgentSessionState, parseAgentEvent } from './session.js';
 
 const TEST_PLUGIN: AgentPluginManifest = {
-  version: 1,
+  version: 2,
   slug: 'test-agent',
   displayName: 'Test Agent',
   aliases: ['test-agent', 'tai'],
   accentColor: '#FF6600',
+  statuses: [
+    { id: 'thinking', phase: 'working', label: 'Thinking', indicator: 'spinner', tone: 'info' },
+    { id: 'approval', phase: 'waiting', label: 'Needs approval', indicator: 'question', tone: 'warning' },
+  ],
   hooks: {
     target: '~/.test-agent/hooks.json',
     events: [
       { hook: 'SessionStart', event: 'session-start' },
-      { hook: 'Stop', event: 'stop' },
+      { hook: 'Stop', event: 'stop', status: 'approval' },
     ],
   },
   resume: {
@@ -42,6 +47,25 @@ describe('plugin validation', () => {
     // Built-in registry should not be affected
     expect(Array.isArray(plugins.plugins)).toBe(true);
   });
+
+  it('validates dynamic statuses and hook references', () => {
+    expect(validateManifest(TEST_PLUGIN, '/tmp/test')).toHaveProperty('manifest');
+    const invalid = validateManifest({
+      ...TEST_PLUGIN,
+      hooks: { ...TEST_PLUGIN.hooks, events: [{ hook: 'Stop', event: 'stop', status: 'missing' }] },
+    }, '/tmp/test');
+    expect(invalid).toHaveProperty('error');
+  });
+
+  it('returns an AI-ready migration diagnostic for manifest v1', () => {
+    const result = validateManifest({ ...TEST_PLUGIN, version: 1 }, '/tmp/test');
+    expect(result).toHaveProperty('error');
+    if (!('error' in result)) throw new Error('expected validation error');
+    expect(result.error.code).toBe('AGENT_PLUGIN_MANIFEST_V1_UNSUPPORTED');
+    expect(result.error.migration?.guideCommand).toBe('td agent-plugin --json');
+    expect(result.error.migration?.aiPrompt).toContain('Return only the corrected manifest JSON');
+    expect(result.error.errors.join(' ')).toContain('manifest v1 is no longer supported');
+  });
 });
 
 describe('registerPluginAgents', () => {
@@ -60,9 +84,22 @@ describe('registerPluginAgents', () => {
     expect(agent!.displayName).toBe('Test Agent');
     expect(agent!.accentColor).toBe('#FF6600');
     expect(agent!.isPlugin).toBe(true);
+    expect(agent!.statuses?.map((status) => status.id)).toEqual(['thinking', 'approval']);
 
     // Alias works for detection, not slug lookup
     expect(detectAgentFromArgv(['tai'])?.slug).toBe('test-agent');
+  });
+
+  it('resolves a manifest status from the hook wire into the shared phase model', () => {
+    registerPluginAgents([makePlugin(TEST_PLUGIN)]);
+    const event = parseAgentEvent(
+      buildHookSequence('test-agent', 'permission-request', '{"message":"Approve deploy"}', 'approval').slice(2, -1),
+    );
+    expect(event?.status?.label).toBe('Needs approval');
+    const state = defaultAgentSessionState();
+    applyAgentEvent(state, event!);
+    expect(state.status).toBe('waiting');
+    expect(state.presentation?.id).toBe('approval');
   });
 
   it('detects plugin agents from argv', () => {
@@ -128,7 +165,7 @@ describe('plugin resume', () => {
 
   it('returns null for plugin without resume config', () => {
     const noResume: AgentPluginManifest = {
-      version: 1,
+      version: 2,
       slug: 'no-resume-agent',
       displayName: 'No Resume',
       aliases: ['nra'],

@@ -4,10 +4,10 @@ import { readCache, writeCache } from '../utils/localStorageCache';
 
 export type RightSidebarTab = 'git' | 'files' | 'diff' | 'file';
 
-const RIGHT_SIDEBAR_TABS_BY_ROOT_CACHE_KEY = 'termdock:right-sidebar:tabs-by-root:v1';
-const EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:explorer-roots:v1';
+const RIGHT_SIDEBAR_TABS_BY_CONTEXT_CACHE_KEY = 'termdock:right-sidebar:tabs-by-session:v2';
+const EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:explorer-roots-by-session:v2';
 const PINNED_EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:pinned-explorer-roots:v1';
-const SELECTED_FILE_PATHS_CACHE_KEY = 'termdock:right-sidebar:selected-files:v1';
+const SELECTED_FILE_PATHS_CACHE_KEY = 'termdock:right-sidebar:selected-files-by-session:v2';
 const SHOW_HIDDEN_FILES_CACHE_KEY = 'termdock:right-sidebar:show-hidden-files:v1';
 // 分组开关 / 折叠状态：复用 LeftSidebar 旧 localStorage key 以保留用户已有偏好。
 // 旧编码是裸 localStorage（'1' 与 JSON 数组），与 readCache 包装格式不兼容，
@@ -150,14 +150,14 @@ function isRightSidebarTabCache(value: unknown): value is Record<string, RightSi
 }
 
 function readRightSidebarTabCache(): Record<string, RightSidebarTab> {
-  return readCache(RIGHT_SIDEBAR_TABS_BY_ROOT_CACHE_KEY, isRightSidebarTabCache) ?? {};
+  return readCache(RIGHT_SIDEBAR_TABS_BY_CONTEXT_CACHE_KEY, isRightSidebarTabCache) ?? {};
 }
 
-function writeRightSidebarTab(rootPath: string | null, tab: RightSidebarTab): void {
-  if (!rootPath) return;
-  writeCache(RIGHT_SIDEBAR_TABS_BY_ROOT_CACHE_KEY, {
+function writeRightSidebarTab(contextKey: string | null, tab: RightSidebarTab): void {
+  if (!contextKey) return;
+  writeCache(RIGHT_SIDEBAR_TABS_BY_CONTEXT_CACHE_KEY, {
     ...readRightSidebarTabCache(),
-    [rootPath]: tab,
+    [contextKey]: tab,
   });
 }
 
@@ -234,12 +234,17 @@ function readSelectedFilePathCache(): Record<string, string> {
   return readCache(SELECTED_FILE_PATHS_CACHE_KEY, isSelectedFilePathCache) ?? {};
 }
 
-function writeSelectedFilePath(rootPath: string | null, path: string | null): void {
-  if (!rootPath) return;
+function writeSelectedFilePath(contextKey: string | null, path: string | null): void {
+  if (!contextKey) return;
   const cache = { ...readSelectedFilePathCache() };
-  if (path) cache[rootPath] = path;
-  else delete cache[rootPath];
+  if (path) cache[contextKey] = path;
+  else delete cache[contextKey];
   writeCache(SELECTED_FILE_PATHS_CACHE_KEY, cache);
+}
+
+function getSidebarContextKey(sessionId: string | null, rootPath: string | null): string | null {
+  if (!rootPath) return null;
+  return sessionId ? `${sessionId}\u0000${rootPath}` : rootPath;
 }
 
 function isBoolean(value: unknown): value is boolean {
@@ -312,6 +317,7 @@ interface SidebarState {
 
   // File tree state
   rootPath: string | null;
+  contextKey: string | null;
   explorerRoot: string | null;
   explorerRootCache: Record<string, string>;
   pinnedExplorerRootsCache: Record<string, PinnedExplorerEntry[]>;
@@ -365,7 +371,7 @@ interface SidebarState {
   openRightSearch: () => void;
   closeRightSearch: () => void;
   setRightSearchOpen: (open: boolean) => void;
-  setRootPath: (path: string | null) => void;
+  setRootPath: (path: string | null, sessionId?: string | null) => void;
   setExplorerRoot: (path: string | null) => void;
   resetExplorerToProject: () => void;
   pinExplorerRoot: (path: string, kind?: PinnedEntryKind) => void;
@@ -397,6 +403,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   rightTab: 'files',
   rightSearchOpen: false,
   rootPath: null,
+  contextKey: null,
   explorerRoot: null,
   explorerRootCache: readExplorerRootCache(),
   pinnedExplorerRootsCache: readPinnedExplorerRootsCache(),
@@ -461,17 +468,18 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   closeAll: () => set({ leftOpen: false, rightOpen: false, rightSearchOpen: false }),
 
   setRightTab: (tab) => set((s) => {
-    writeRightSidebarTab(s.rootPath, tab);
+    writeRightSidebarTab(s.contextKey, tab);
     return { rightTab: tab };
   }),
   openRightSearch: () => set({ rightSearchOpen: true }),
   closeRightSearch: () => set({ rightSearchOpen: false }),
   setRightSearchOpen: (open) => set({ rightSearchOpen: open }),
-  setRootPath: (path) => set((s) => {
-    if (s.rootPath === path) return s;
+  setRootPath: (path, sessionId = null) => set((s) => {
+    const contextKey = getSidebarContextKey(sessionId, path);
+    if (s.contextKey === contextKey) return s;
     const projectStateCache = new Map(s.projectStateCache);
-    if (s.rootPath) {
-      projectStateCache.set(s.rootPath, {
+    if (s.contextKey) {
+      projectStateCache.set(s.contextKey, {
         rightTab: s.rightTab,
         explorerRoot: s.explorerRoot,
         expandedPaths: new Set(s.expandedPaths),
@@ -484,12 +492,13 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       });
     }
 
-    const cached = path ? projectStateCache.get(path) : undefined;
-    const persistedRightTab = path ? readRightSidebarTabCache()[path] : undefined;
-    const persistedExplorerRoot = path ? s.explorerRootCache[path] : undefined;
-    const persistedSelectedFilePath = path ? readSelectedFilePathCache()[path] : undefined;
+    const cached = contextKey ? projectStateCache.get(contextKey) : undefined;
+    const persistedRightTab = contextKey ? readRightSidebarTabCache()[contextKey] : undefined;
+    const persistedExplorerRoot = contextKey ? s.explorerRootCache[contextKey] : undefined;
+    const persistedSelectedFilePath = contextKey ? readSelectedFilePathCache()[contextKey] : undefined;
     return {
       rootPath: path,
+      contextKey,
       rightTab: cached?.rightTab ?? persistedRightTab ?? 'files',
       explorerRoot: cached?.explorerRoot ?? persistedExplorerRoot ?? path,
       expandedPaths: cached ? new Set(cached.expandedPaths) : new Set(),
@@ -508,8 +517,8 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   setExplorerRoot: (path) => set((s) => {
     if (s.explorerRoot === path) return s;
     const explorerRootCache = { ...s.explorerRootCache };
-    if (s.rootPath && path) {
-      explorerRootCache[s.rootPath] = path;
+    if (s.contextKey && path) {
+      explorerRootCache[s.contextKey] = path;
       writeExplorerRootCache(explorerRootCache);
     }
     return { explorerRoot: path, explorerRootCache };
@@ -518,8 +527,8 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   resetExplorerToProject: () => set((s) => {
     if (s.explorerRoot === s.rootPath) return s;
     const explorerRootCache = { ...s.explorerRootCache };
-    if (s.rootPath) {
-      explorerRootCache[s.rootPath] = s.rootPath;
+    if (s.contextKey && s.rootPath) {
+      explorerRootCache[s.contextKey] = s.rootPath;
       writeExplorerRootCache(explorerRootCache);
     }
     return { explorerRoot: s.rootPath, explorerRootCache };
@@ -558,7 +567,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     }),
 
   selectFile: (path) => set((s) => {
-    writeSelectedFilePath(s.rootPath, path);
+    writeSelectedFilePath(s.contextKey, path);
     return { selectedFilePath: path };
   }),
 

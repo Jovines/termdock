@@ -274,6 +274,7 @@ interface GitBundlePayload {
   cached?: boolean;
   stale?: boolean;
   cacheAgeMs?: number;
+  cacheUpdatedAt?: number;
   nestedDeferred?: boolean;
   untrackedDeferred?: boolean;
   error?: string;
@@ -1218,7 +1219,7 @@ function buildNestedRepoDisplayRootSet(workspaceRoot: string, repositories: Disc
 async function buildGitBundle(resolvedCwd: string, gitRoot: string, signal?: AbortSignal, options: { gitTimeoutMs?: number | null } = {}): Promise<GitBundlePayload> {
   const [branchOutput, changedResult] = await Promise.all([
     execGit(['branch', '--show-current'], gitRoot, signal, options.gitTimeoutMs).catch(emptyOnNonAbortGitError),
-    getChangedFiles(gitRoot, signal, { includeUntracked: false, gitTimeoutMs: options.gitTimeoutMs }),
+    getChangedFiles(gitRoot, signal, { includeUntracked: true, gitTimeoutMs: options.gitTimeoutMs }),
   ]);
   const files = changedResult.files;
   const annotatedFiles = annotateRepoFiles(files, gitRoot, gitRoot);
@@ -1322,7 +1323,6 @@ function mergeChangedFilesByPath(current: GitChangedFile[], incoming: GitChanged
 
 function updateGitBundleCachesWithUntracked(repoRoot: string, files: GitChangedFile[]): void {
   if (files.length === 0) return;
-  const now = Date.now();
   for (const [cacheKey, cached] of gitBundleCache.entries()) {
     const bundle = cached.bundle;
     const repositories = bundle.repositories;
@@ -1354,7 +1354,7 @@ function updateGitBundleCachesWithUntracked(repoRoot: string, files: GitChangedF
         repoFilters: buildGitRepositoryFilters(primary?.root ?? repoRoot, nextRepositories),
         untrackedDeferred: nextRepositories.some((repo) => repo.untrackedDeferred),
       };
-      gitBundleCache.set(cacheKey, { bundle: nextBundle, expiresAt: now + GIT_BUNDLE_CACHE_TTL_MS });
+      gitBundleCache.set(cacheKey, { bundle: nextBundle, expiresAt: cached.expiresAt, updatedAt: cached.updatedAt });
       continue;
     }
 
@@ -1371,7 +1371,7 @@ function updateGitBundleCachesWithUntracked(repoRoot: string, files: GitChangedF
       context: nextContext,
       untrackedDeferred: false,
     };
-    gitBundleCache.set(cacheKey, { bundle: nextBundle, expiresAt: now + GIT_BUNDLE_CACHE_TTL_MS });
+    gitBundleCache.set(cacheKey, { bundle: nextBundle, expiresAt: cached.expiresAt, updatedAt: cached.updatedAt });
   }
 }
 
@@ -1444,6 +1444,7 @@ async function getCachedGitBundle(resolvedCwd: string, gitRoot: string, includeN
       cached: true,
       stale: cached.expiresAt <= now,
       cacheAgeMs,
+      cacheUpdatedAt: cached.updatedAt,
     };
   }
 
@@ -1456,8 +1457,9 @@ async function getCachedGitBundle(resolvedCwd: string, gitRoot: string, includeN
 
   const promise = buildWorkspaceGitBundle(resolvedCwd, gitRoot, includeNested, signal)
     .then((bundle) => {
-      gitBundleCache.set(cacheKey, { bundle, expiresAt: Date.now() + GIT_BUNDLE_CACHE_TTL_MS });
-      return bundle;
+      const updatedAt = Date.now();
+      gitBundleCache.set(cacheKey, { bundle, expiresAt: updatedAt + GIT_BUNDLE_CACHE_TTL_MS, updatedAt });
+      return { ...bundle, cacheUpdatedAt: updatedAt };
     })
     .finally(() => {
       if (gitBundleBuildPromises.get(cacheKey) === promise) gitBundleBuildPromises.delete(cacheKey);
@@ -1472,8 +1474,9 @@ async function refreshGitBundleCacheDetached(resolvedCwd: string, gitRoot: strin
   if (pending) return pending;
   const promise = buildWorkspaceGitBundle(resolvedCwd, gitRoot, includeNested, undefined, options)
     .then((bundle) => {
-      gitBundleCache.set(cacheKey, { bundle, expiresAt: Date.now() + GIT_BUNDLE_CACHE_TTL_MS });
-      return bundle;
+      const updatedAt = Date.now();
+      gitBundleCache.set(cacheKey, { bundle, expiresAt: updatedAt + GIT_BUNDLE_CACHE_TTL_MS, updatedAt });
+      return { ...bundle, cacheUpdatedAt: updatedAt };
     })
     .finally(() => {
       if (gitBundleBuildPromises.get(cacheKey) === promise) gitBundleBuildPromises.delete(cacheKey);
@@ -1494,6 +1497,7 @@ function getGitBundleCache(gitRoot: string, includeNested: boolean, allowStale =
     cached: true,
     stale: cached.expiresAt <= now,
     cacheAgeMs,
+    cacheUpdatedAt: cached.updatedAt,
   };
 }
 
@@ -2483,7 +2487,7 @@ async function getCommitDiffPayload(
 // (open sidebar fires ~3 git fetches at once).
 const GIT_ROOT_CACHE_TTL_MS = 5_000;
 const gitRootCache = new Map<string, { root: string | null; expiresAt: number }>();
-const gitBundleCache = new Map<string, { bundle: GitBundlePayload; expiresAt: number }>();
+const gitBundleCache = new Map<string, { bundle: GitBundlePayload; expiresAt: number; updatedAt: number }>();
 const gitBundleBuildPromises = new Map<string, Promise<GitBundlePayload>>();
 
 function getGitBundleCacheKey(gitRoot: string, includeNested: boolean): string {

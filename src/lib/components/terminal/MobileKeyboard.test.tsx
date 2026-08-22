@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MobileKeyboard } from './MobileKeyboard';
 
 const baseProps = {
@@ -27,8 +27,16 @@ const baseProps = {
 };
 
 describe('MobileKeyboard interaction state', () => {
+  beforeEach(() => {
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+  });
+
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
   });
 
   it('keeps the toolbar visible without firing actions when non-interactive', () => {
@@ -84,6 +92,34 @@ describe('MobileKeyboard interaction state', () => {
 
     rerender(<MobileKeyboard {...baseProps} longPressMode="copy" copyFeedback="failed" />);
     expect(screen.getByTitle('Copy failed')).toBeTruthy();
+  });
+
+  it('returns to arrow mode and announces it after a successful copy', () => {
+    const onLongPressModeToggle = vi.fn();
+    const { rerender } = render(
+      <MobileKeyboard {...baseProps} longPressMode="copy" copyFeedback="idle" onLongPressModeToggle={onLongPressModeToggle} />,
+    );
+
+    rerender(
+      <MobileKeyboard {...baseProps} longPressMode="copy" copyFeedback="copied" onLongPressModeToggle={onLongPressModeToggle} />,
+    );
+
+    expect(onLongPressModeToggle).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('status').textContent).toBe('Copied · Long press sends arrow keys');
+  });
+
+  it('keeps copy mode active and announces it when copying fails', () => {
+    const onLongPressModeToggle = vi.fn();
+    const { rerender } = render(
+      <MobileKeyboard {...baseProps} longPressMode="copy" copyFeedback="idle" onLongPressModeToggle={onLongPressModeToggle} />,
+    );
+
+    rerender(
+      <MobileKeyboard {...baseProps} longPressMode="copy" copyFeedback="failed" onLongPressModeToggle={onLongPressModeToggle} />,
+    );
+
+    expect(onLongPressModeToggle).not.toHaveBeenCalled();
+    expect(screen.getByRole('status').textContent).toBe('Copy failed · Long press selects text');
   });
 
 });

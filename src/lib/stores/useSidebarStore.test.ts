@@ -9,6 +9,7 @@ function resetSidebarStore(): void {
     rightTab: 'files',
     rightSearchOpen: false,
     rootPath: null,
+    contextKey: null,
     explorerRoot: null,
     explorerRootCache: {},
     pinnedExplorerRootsCache: {},
@@ -60,6 +61,52 @@ describe('useSidebarStore right tab persistence', () => {
     useSidebarStore.getState().setRootPath('/workspace/fresh');
 
     expect(useSidebarStore.getState().rightTab).toBe('files');
+  });
+});
+
+describe('useSidebarStore session-scoped right sidebar state', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  it('keeps open file, explorer root, expansion, and tab separate for sessions in the same directory', () => {
+    useSidebarStore.getState().setRootPath('/workspace/shared', 'session-a');
+    useSidebarStore.getState().setRightTab('file');
+    useSidebarStore.getState().setExplorerRoot('/workspace/shared/docs');
+    useSidebarStore.getState().toggleExpanded('/workspace/shared/docs');
+    useSidebarStore.getState().selectFile('/workspace/shared/docs/a.md');
+
+    useSidebarStore.getState().setRootPath('/workspace/shared', 'session-b');
+    expect(useSidebarStore.getState().rightTab).toBe('files');
+    expect(useSidebarStore.getState().explorerRoot).toBe('/workspace/shared');
+    expect(useSidebarStore.getState().expandedPaths.size).toBe(0);
+    expect(useSidebarStore.getState().selectedFilePath).toBeNull();
+
+    useSidebarStore.getState().setExplorerRoot('/workspace/shared/src');
+    useSidebarStore.getState().selectFile('/workspace/shared/src/b.ts');
+    useSidebarStore.getState().setRootPath('/workspace/shared', 'session-a');
+
+    expect(useSidebarStore.getState().rightTab).toBe('file');
+    expect(useSidebarStore.getState().explorerRoot).toBe('/workspace/shared/docs');
+    expect(useSidebarStore.getState().expandedPaths).toEqual(new Set(['/workspace/shared/docs']));
+    expect(useSidebarStore.getState().selectedFilePath).toBe('/workspace/shared/docs/a.md');
+  });
+
+  it('continues sharing pinned entries between sessions in the same directory', () => {
+    useSidebarStore.getState().setRootPath('/workspace/shared', 'session-a');
+    useSidebarStore.getState().pinExplorerRoot('/workspace/shared/README.md', 'file');
+
+    useSidebarStore.getState().setRootPath('/workspace/shared', 'session-b');
+
+    expect(useSidebarStore.getState().pinnedExplorerRootsCache['/workspace/shared']).toEqual([
+      { path: '/workspace/shared/README.md', kind: 'file' },
+    ]);
   });
 });
 

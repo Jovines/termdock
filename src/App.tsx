@@ -71,6 +71,7 @@ import { useTerminalStore } from './lib/stores/useTerminalStore';
 import { useSidebarStore } from './lib/stores/useSidebarStore';
 import { subscribeClientState } from './lib/utils/clientStateSync';
 import { clientLog } from './lib/utils/clientLog';
+import { shouldClearSessionFilePreview } from './lib/utils/rightSidebarSessionState';
 import { useI18n } from './lib/i18n';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
@@ -89,7 +90,7 @@ const PROGRAM_RULES_CACHE_KEY = 'termdock-program-rules-cache';
 const TOOLBAR_PRESETS_CACHE_KEY = 'termdock-toolbar-presets-cache';
 const SETTINGS_CACHE_KEY = 'termdock-settings-cache';
 const COLOR_THEME_CACHE_KEY = 'termdock-color-theme';
-const RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_ROOT_CACHE_KEY = 'termdock:right-sidebar:file-preview-open-by-root:v1';
+const RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_SESSION_CACHE_KEY = 'termdock:right-sidebar:file-preview-open-by-session:v2';
 const MAX_RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_ROOTS = 60;
 const DESKTOP_TAB_MENU_WIDTH = 320;
 const DESKTOP_TAB_MENU_MAX_HEIGHT = 420;
@@ -394,6 +395,7 @@ type TabTerminalSessionState = Pick<
   | 'isConnecting'
   | 'agentStatus'
   | 'agentIndicator'
+  | 'agentStatusDetail'
   | 'agent'
   | 'agentMessage'
   | 'agentNativeSessionId'
@@ -418,6 +420,7 @@ function pickTabTerminalSessions(
       isConnecting: state.isConnecting,
       agentStatus: state.agentStatus,
       agentIndicator: state.agentIndicator,
+      agentStatusDetail: state.agentStatusDetail,
       agent: state.agent,
       agentMessage: state.agentMessage,
       agentNativeSessionId: state.agentNativeSessionId,
@@ -449,6 +452,7 @@ function areTabTerminalSessionsEqual(
       currentState.isConnecting !== nextState.isConnecting ||
       currentState.agentStatus !== nextState.agentStatus ||
       currentState.agentIndicator !== nextState.agentIndicator ||
+      currentState.agentStatusDetail !== nextState.agentStatusDetail ||
       currentState.agent !== nextState.agent ||
       currentState.agentMessage !== nextState.agentMessage ||
       currentState.agentNativeSessionId !== nextState.agentNativeSessionId ||
@@ -529,7 +533,7 @@ function App() {
   const [desktopActionMessage, setDesktopActionMessage] = React.useState<string | null>(null);
   const [showBackGuardHint, setShowBackGuardHint] = React.useState(false);
   const [rightSidebarFilePreviewOpenByRoot, setRightSidebarFilePreviewOpenByRoot] = React.useState<RightSidebarFilePreviewOpenCache>(() => (
-    normalizeOpenByRootCache(readCache(RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_ROOT_CACHE_KEY, isRightSidebarFilePreviewOpenCache) ?? {})
+    normalizeOpenByRootCache(readCache(RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_SESSION_CACHE_KEY, isRightSidebarFilePreviewOpenCache) ?? {})
   ));
   const [rightSidebarFilePreviewCloseSignal, setRightSidebarFilePreviewCloseSignal] = React.useState(0);
   const [rightSidebarRepoPickerOpen, setRightSidebarRepoPickerOpen] = React.useState(false);
@@ -616,7 +620,7 @@ function App() {
 
   useEffect(() => {
     writeCache(
-      RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_ROOT_CACHE_KEY,
+      RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_SESSION_CACHE_KEY,
       normalizeOpenByRootCache(rightSidebarFilePreviewOpenByRoot),
     );
   }, [rightSidebarFilePreviewOpenByRoot]);
@@ -634,6 +638,7 @@ function App() {
   const sidebarRightPinned = useSidebarStore((s) => s.rightPinned);
   const sidebarRightWidth = useSidebarStore((s) => s.rightSidebarWidth);
   const sidebarRootPath = useSidebarStore((s) => s.rootPath);
+  const sidebarContextKey = useSidebarStore((s) => s.contextKey);
   const sidebarSelectedFilePath = useSidebarStore((s) => s.selectedFilePath);
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
@@ -715,12 +720,12 @@ function App() {
   // Sync the active session's cwd to the sidebar from the live terminal store.
   // The tab metadata snapshot can lag during session switches, which otherwise
   // leaves Git/files browsing pointed at the previously active workspace.
-  useEffect(() => {
+  React.useLayoutEffect(() => {
     const syncRootPath = () => {
       const cwd = activeSessionId
         ? useTerminalStore.getState().sessions.get(activeSessionId)?.cwd ?? null
         : null;
-      useSidebarStore.getState().setRootPath(cwd);
+      useSidebarStore.getState().setRootPath(cwd, activeSessionId);
     };
 
     syncRootPath();
@@ -728,7 +733,7 @@ function App() {
       const current = activeSessionId ? state.sessions.get(activeSessionId)?.cwd ?? null : null;
       const prev = activeSessionId ? previous.sessions.get(activeSessionId)?.cwd ?? null : null;
       if (current !== prev) {
-        useSidebarStore.getState().setRootPath(current);
+        useSidebarStore.getState().setRootPath(current, activeSessionId);
       }
     });
   }, [activeSessionId]);
@@ -755,7 +760,9 @@ function App() {
     ? Math.min(Math.max(viewportWidth * 0.22, 280), 340)
     : Math.min(viewportWidth * 0.86, 380);
 
-  const rightSidebarFilePreviewKey = sidebarRootPath ?? '';
+  const rightSidebarFilePreviewKey = activeSessionId && sidebarRootPath
+    ? `${activeSessionId}\u0000${sidebarRootPath}`
+    : '';
   const rightSidebarFilePreviewOpen = Boolean(
     rightSidebarFilePreviewKey &&
     sidebarSelectedFilePath &&
@@ -780,14 +787,22 @@ function App() {
   }, [rightSidebarFilePreviewKey]);
 
   useEffect(() => {
-    if (!rightSidebarFilePreviewKey || sidebarSelectedFilePath) return;
+    // activeSessionId changes one render before the sidebar store swaps to the
+    // matching session context. During that transition selectedFilePath still
+    // belongs to the previous session; treating it as B's empty selection
+    // deletes B's persisted second-page state just before B is restored.
+    if (!shouldClearSessionFilePreview(
+      rightSidebarFilePreviewKey,
+      sidebarContextKey,
+      sidebarSelectedFilePath,
+    )) return;
     setRightSidebarFilePreviewOpenByRoot((current) => {
       if (!current[rightSidebarFilePreviewKey]) return current;
       const next = { ...current };
       delete next[rightSidebarFilePreviewKey];
       return next;
     });
-  }, [rightSidebarFilePreviewKey, sidebarSelectedFilePath]);
+  }, [rightSidebarFilePreviewKey, sidebarContextKey, sidebarSelectedFilePath]);
 
   const rightSidebarFilePreviewOverlayOpen = sidebarRightOpen && rightSidebarFilePreviewOpen;
   const activeHistoryOverlay: HistoryOverlay | null = markdownImageLightboxOpen
@@ -2205,20 +2220,21 @@ function App() {
     useTerminalStore.getState().setActiveSessionId(data.activeSessionId);
   }, []);
 
-  const dispatchNewSession = useCallback((overrides?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => {
+  const dispatchNewSession = useCallback((overrides?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string }) => {
     const mode = overrides?.mode ?? newSessionMode;
     const tmuxSessionName = mode === 'tmux'
       ? (overrides?.tmuxSessionName?.trim() || newSessionTmuxName.trim() || undefined)
       : undefined;
     // Inherit cwd from the currently active session
-    const activeCwd = activeSessionId
+    const activeCwd = overrides?.cwd || (activeSessionId
       ? useTerminalStore.getState().sessions.get(activeSessionId)?.cwd
-      : undefined;
+      : undefined);
     window.dispatchEvent(new CustomEvent('new-terminal-session', {
       detail: {
         mode,
         tmuxSessionName,
         cwd: activeCwd,
+        command: overrides?.command,
       },
     }));
   }, [newSessionMode, newSessionTmuxName, activeSessionId]);
@@ -2444,7 +2460,7 @@ function App() {
       : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
         ? 'var(--warning)'
         : ts?.inCopyMode
-          ? 'var(--warning)'
+          ? 'var(--tmux)'
           : null;
 
     // 内联重命名输入只在桌面端使用；移动端改用独立重命名卡片
@@ -2529,13 +2545,13 @@ function App() {
             </span>
             {tabDirLabel ? (
               <span className="flex min-w-0 flex-col justify-center leading-[0.82rem] sm:leading-[0.85rem]">
-                <span className={`whitespace-nowrap text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>{displayName}</span>
+                <span className={`whitespace-nowrap text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--tmux)]' : ''}`}>{displayName}</span>
                 <span className="truncate text-[9px] text-muted-foreground/80 sm:text-[9.5px]">
                   {tabDirLabel}
                 </span>
               </span>
             ) : (
-              <span className={`whitespace-nowrap text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>{displayName}</span>
+              <span className={`whitespace-nowrap text-[11px] sm:text-[12px] ${ts?.inCopyMode ? 'text-[color:var(--tmux)]' : ''}`}>{displayName}</span>
             )}
           </span>
         </button>
@@ -2572,7 +2588,7 @@ function App() {
         : pinnedActiveTs.agentNeedsReview
           ? 'bg-gradient-to-r from-[rgb(var(--warning-rgb)_/_0.08)] to-transparent'
           : pinnedActiveTs.inCopyMode
-            ? 'bg-gradient-to-r from-[rgb(var(--warning-rgb)_/_0.05)] to-transparent'
+            ? 'bg-gradient-to-r from-[rgb(var(--tmux-rgb)_/_0.07)] to-transparent'
             : ''
     : '';
 
@@ -2616,7 +2632,7 @@ function App() {
                 {pinnedActiveSession ? (
                   <>
                     {renderTabIcon(pinnedActiveSession.mode, pinnedActiveTs)}
-                    <span className={`truncate text-[12px] font-medium ${pinnedActiveTs?.inCopyMode ? 'text-[color:var(--warning)]' : 'text-foreground'}`}>
+                    <span className={`truncate text-[12px] font-medium ${pinnedActiveTs?.inCopyMode ? 'text-[color:var(--tmux)]' : 'text-foreground'}`}>
                       {pinnedDisplayName}
                     </span>
                     {pinnedActiveTs?.agentStatus === 'working' && (
@@ -4608,7 +4624,7 @@ function App() {
         markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
         onOpenMarkdownImageLightbox={handleOpenMarkdownImageLightbox}
         onCloseMarkdownImageLightbox={handleCloseMarkdownImageLightbox}
-        onTogglePinned={isWideDesktopViewport ? handleToggleRightPinned : undefined}
+        onTogglePinned={isDesktopViewport ? handleToggleRightPinned : undefined}
       />}
 
       {showBackGuardHint && !isIOS && (

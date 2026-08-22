@@ -23,6 +23,12 @@ export interface SettingsDoc {
   locale: string;
   /** 上下文草稿坞手动拖出的输入框高度（px），手机/桌面分别存。 */
   contextDraftHeight: { mobile: number | null; desktop: number | null };
+  /** Agent slugs whose completed turns may automatically update the Termdock tab title. */
+  autoRenameAgents: string[];
+  /** `auto` follows the active session when its CLI is supported. */
+  autoRenameNamer: 'auto' | 'codex' | 'claude';
+  /** Per-CLI model choices. Missing means use that CLI's current default. */
+  autoRenameModels: Record<string, string>;
   updatedAt: number;
 }
 
@@ -80,8 +86,14 @@ function normalizeContextDraftHeight(value: unknown): { mobile: number | null; d
 
 function normalizeSettings(value: unknown): SettingsDoc {
   const raw = value && typeof value === 'object'
-    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; updatedAt?: unknown }
+    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; autoRenameAgents?: unknown; autoRenameNamer?: unknown; autoRenameModels?: unknown; updatedAt?: unknown }
     : {};
+  const autoRenameAgents = Array.isArray(raw.autoRenameAgents)
+    ? [...new Set(raw.autoRenameAgents
+      .filter((slug): slug is string => typeof slug === 'string')
+      .map((slug) => slug.trim().toLowerCase())
+      .filter((slug) => /^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)))]
+    : [];
   return {
     version: 1,
     preventSleep: raw.preventSleep === true,
@@ -89,6 +101,18 @@ function normalizeSettings(value: unknown): SettingsDoc {
     firstRunCompleted: (raw as { firstRunCompleted?: unknown }).firstRunCompleted === true,
     locale: typeof (raw as { locale?: unknown }).locale === 'string' && (raw as { locale: string }).locale === 'zh' ? 'zh' : 'en',
     contextDraftHeight: normalizeContextDraftHeight(raw.contextDraftHeight),
+    autoRenameAgents,
+    autoRenameNamer: raw.autoRenameNamer === 'codex' || raw.autoRenameNamer === 'claude'
+      ? raw.autoRenameNamer
+      : 'auto',
+    autoRenameModels: raw.autoRenameModels && typeof raw.autoRenameModels === 'object'
+      ? Object.fromEntries(Object.entries(raw.autoRenameModels as Record<string, unknown>)
+        .filter((entry): entry is [string, string] => (
+          ['codex', 'claude'].includes(entry[0])
+          && typeof entry[1] === 'string'
+          && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(entry[1])
+        )))
+      : {},
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -218,5 +242,41 @@ export function getContextDraftHeightSetting(): { mobile: number | null; desktop
 export function setContextDraftHeightSetting(device: 'mobile' | 'desktop', height: number | null): SettingsDoc {
   return updateSettings((settings) => {
     settings.contextDraftHeight[device] = height;
+  });
+}
+
+export function getAutoRenameAgentsSetting(): string[] {
+  return loadSettings().autoRenameAgents.slice();
+}
+
+export function setAutoRenameAgentsSetting(slugs: string[]): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.autoRenameAgents = [...new Set(slugs
+      .map((slug) => slug.trim().toLowerCase())
+      .filter((slug) => /^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)))];
+  });
+}
+
+export function getAutoRenameNamerSetting(): 'auto' | 'codex' | 'claude' {
+  return loadSettings().autoRenameNamer;
+}
+
+export function setAutoRenameNamerSetting(namer: 'auto' | 'codex' | 'claude'): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.autoRenameNamer = namer;
+  });
+}
+
+export function getAutoRenameModelsSetting(): Record<string, string> {
+  return { ...loadSettings().autoRenameModels };
+}
+
+export function setAutoRenameModelsSetting(models: Record<string, string>): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.autoRenameModels = Object.fromEntries(Object.entries(models)
+      .filter(([slug, model]) => (
+        ['codex', 'claude'].includes(slug)
+        && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(model)
+      )));
   });
 }

@@ -148,6 +148,7 @@ function main(): void {
     if (args[0] === 'agent-hook') args.shift();
     let agent = args[0] ?? '';
     const eventArg = args[1] ?? '';
+    const statusArg = args[2] ?? '';
     if (!agent || !eventArg) return;
     if (process.env[GROK_HOOK_ENV]) agent = 'grok';
 
@@ -166,7 +167,7 @@ function main(): void {
     const event = effectiveEvent(agent, eventArg, input);
     if (!event) return;
 
-    writeToControllingTty(buildHookSequence(agent, event, input), inTmuxPane);
+    writeToControllingTty(buildHookSequence(agent, event, input, statusArg || undefined), inTmuxPane);
   } catch {
     // Never break the agent's flow.
   }

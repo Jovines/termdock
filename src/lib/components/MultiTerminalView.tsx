@@ -5,7 +5,7 @@ import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
 import { VIEWPORT_LAYOUT_CHANGE_EVENT } from '../hooks/useViewportHeight';
-import { closeTerminal, killTmuxSession } from '../terminal/api';
+import { closeTerminal, killTmuxSession, sendTerminalInput } from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../terminal/settings';
 import type { TermdockColorTheme } from '../terminal/theme';
@@ -58,6 +58,7 @@ interface NewSessionEventDetail {
   tmuxSessionName?: string;
   cwd?: string;
   createIfEmpty?: boolean;
+  command?: string;
 }
 
 interface CloseSessionEventDetail {
@@ -1133,6 +1134,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         mode: nextSession.mode,
         tmuxSessionName: nextSession.tmuxSessionName,
       });
+      const command = options?.command?.trim();
+      if (command) {
+        await sendTerminalInput(terminalSession.sessionId, `${command}\r`);
+      }
       return nextSession.id;
     } catch (error) {
       console.error('[Session] Failed to create new session:', error);

@@ -104,7 +104,6 @@ const COLLAPSED_DIFF_DIRECTORIES_STORAGE_KEY = 'termdock:right-sidebar:collapsed
 const BRANCH_AUDIT_MODULE_OPEN_STORAGE_KEY = 'termdock:right-sidebar:branch-audit-module-open:v1';
 const BRANCH_AUDIT_MODULE_STORAGE_KEY = 'termdock:right-sidebar:branch-audit-module:v1';
 const BRANCH_AUDIT_MODULE_CACHE_WRITE_MS = 150;
-const GIT_BUNDLE_SNAPSHOT_STORAGE_KEY = 'termdock:right-sidebar:git-bundle-snapshots:v1';
 const ACTIVE_GIT_REPO_STORAGE_KEY = 'termdock:right-sidebar:active-git-repo:v1';
 const CONTEXT_DRAFT_ENABLED_STORAGE_KEY = 'termdock:right-sidebar:context-draft-enabled:v1';
 const CONTEXT_DRAFT_COLLAPSED_STORAGE_KEY = 'termdock:right-sidebar:context-draft-collapsed:v1';
@@ -113,8 +112,6 @@ const CONTEXT_DRAFT_TEXT_STORAGE_KEY = 'termdock:right-sidebar:context-draft-tex
 const CONTEXT_DRAFT_WRITE_MS = 300;
 const MAX_FILE_TREE_SCROLL_ROOTS = 20;
 const MAX_FILE_PREVIEW_READING_STATE_FILES = 120;
-const MAX_GIT_BUNDLE_SNAPSHOT_ROOTS = 8;
-const GIT_BUNDLE_SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const FILE_TREE_SCROLL_WRITE_MS = 250;
 const FILE_PREVIEW_READING_STATE_WRITE_MS = 250;
 const FILE_TREE_WIDTH_WRITE_MS = 120;
@@ -227,149 +224,6 @@ function isFileSearchMode(value: unknown): value is FileSearchMode {
 
 function readFileSearchMode(): FileSearchMode {
   return readCache(FILE_SEARCH_MODE_STORAGE_KEY, isFileSearchMode) ?? 'name';
-}
-
-function isOptionalStringArray(value: unknown): value is string[] | undefined {
-  return value === undefined || (Array.isArray(value) && value.every((entry) => typeof entry === 'string'));
-}
-
-function isGitChangedFileCacheValue(value: unknown): value is GitChangedFile {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const file = value as Partial<GitChangedFile>;
-  return typeof file.path === 'string'
-    && typeof file.absolutePath === 'string'
-    && typeof file.status === 'string'
-    && typeof file.staged === 'boolean'
-    && typeof file.unstaged === 'boolean'
-    && typeof file.untracked === 'boolean'
-    && typeof file.tracked === 'boolean'
-    && typeof file.canStage === 'boolean'
-    && typeof file.canUnstage === 'boolean'
-    && typeof file.canStash === 'boolean'
-    && typeof file.canRestoreWorktree === 'boolean'
-    && (file.repoRoot === undefined || typeof file.repoRoot === 'string')
-    && (file.repoRelativeRoot === undefined || typeof file.repoRelativeRoot === 'string')
-    && (file.repoName === undefined || typeof file.repoName === 'string')
-    && (file.oldPath === undefined || typeof file.oldPath === 'string')
-    && (file.indexStatus === undefined || typeof file.indexStatus === 'string')
-    && (file.worktreeStatus === undefined || typeof file.worktreeStatus === 'string');
-}
-
-function isGitContextFileCacheValue(value: unknown): value is NonNullable<GitContext['changedFiles']>[number] {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const file = value as Partial<NonNullable<GitContext['changedFiles']>[number]>;
-  return typeof file.path === 'string' && typeof file.absolutePath === 'string' && typeof file.status === 'string';
-}
-
-function isGitContextCacheValue(value: unknown): value is GitContext {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const context = value as Partial<GitContext>;
-  return typeof context.available === 'boolean'
-    && (context.cwd === undefined || typeof context.cwd === 'string')
-    && (context.root === undefined || typeof context.root === 'string')
-    && (context.branch === undefined || context.branch === null || typeof context.branch === 'string')
-    && isOptionalStringArray(context.remotes)
-    && isOptionalStringArray(context.branches)
-    && isOptionalStringArray(context.remoteBranches)
-    && (context.upstream === undefined || context.upstream === null || typeof context.upstream === 'string')
-    && (context.upstreamRemote === undefined || context.upstreamRemote === null || typeof context.upstreamRemote === 'string')
-    && (context.upstreamBranch === undefined || context.upstreamBranch === null || typeof context.upstreamBranch === 'string')
-    && (context.ahead === undefined || context.ahead === null || typeof context.ahead === 'number')
-    && (context.behind === undefined || context.behind === null || typeof context.behind === 'number')
-    && (context.status === undefined || typeof context.status === 'string')
-    && isOptionalStringArray(context.recentCommits)
-    && (context.changedFiles === undefined || (Array.isArray(context.changedFiles) && context.changedFiles.every(isGitContextFileCacheValue)))
-    && (context.truncated === undefined || typeof context.truncated === 'boolean')
-    && (context.error === undefined || typeof context.error === 'string')
-    && (context.code === undefined || typeof context.code === 'string');
-}
-
-function isGitRepositoryBundleCacheValue(value: unknown): value is GitRepositoryBundle {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const repo = value as Partial<GitRepositoryBundle>;
-  return typeof repo.id === 'string'
-    && typeof repo.root === 'string'
-    && (repo.displayRoot === undefined || typeof repo.displayRoot === 'string')
-    && typeof repo.relativeRoot === 'string'
-    && typeof repo.name === 'string'
-    && typeof repo.depth === 'number'
-    && typeof repo.nested === 'boolean'
-    && typeof repo.available === 'boolean'
-    && Array.isArray(repo.files)
-    && repo.files.every(isGitChangedFileCacheValue)
-    && (repo.context === null || repo.context === undefined || isGitContextCacheValue(repo.context))
-    && (repo.untrackedDeferred === undefined || typeof repo.untrackedDeferred === 'boolean')
-    && (repo.error === undefined || typeof repo.error === 'string');
-}
-
-function isGitRepositoryFilterCacheValue(value: unknown): value is GitRepositoryFilter {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const repo = value as Partial<GitRepositoryFilter>;
-  return typeof repo.root === 'string'
-    && typeof repo.label === 'string'
-    && (repo.branch === undefined || repo.branch === null || typeof repo.branch === 'string')
-    && typeof repo.count === 'number'
-    && typeof repo.staged === 'number';
-}
-
-function isGitBundleResponseCacheValue(value: unknown): value is GitBundleResponse {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const bundle = value as Partial<GitBundleResponse>;
-  return typeof bundle.available === 'boolean'
-    && Array.isArray(bundle.files)
-    && bundle.files.every(isGitChangedFileCacheValue)
-    && (bundle.context === null || bundle.context === undefined || isGitContextCacheValue(bundle.context))
-    && (bundle.repositories === undefined || (Array.isArray(bundle.repositories) && bundle.repositories.every(isGitRepositoryBundleCacheValue)))
-    && (bundle.repoFilters === undefined || (Array.isArray(bundle.repoFilters) && bundle.repoFilters.every(isGitRepositoryFilterCacheValue)))
-    && (bundle.truncatedRepositories === undefined || typeof bundle.truncatedRepositories === 'boolean')
-    && (bundle.untrackedDeferred === undefined || typeof bundle.untrackedDeferred === 'boolean')
-    && (bundle.error === undefined || typeof bundle.error === 'string')
-    && (bundle.code === undefined || typeof bundle.code === 'string');
-}
-
-interface GitBundleSnapshot {
-  bundle: GitBundleResponse;
-  updatedAt: number;
-}
-
-function isGitBundleSnapshotCache(value: unknown): value is Record<string, GitBundleSnapshot> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  return Object.values(value as Record<string, unknown>).every((entry) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
-    const snapshot = entry as Partial<GitBundleSnapshot>;
-    return typeof snapshot.updatedAt === 'number' && isGitBundleResponseCacheValue(snapshot.bundle);
-  });
-}
-
-function readGitBundleSnapshotCache(): Record<string, GitBundleSnapshot> {
-  return readCache(GIT_BUNDLE_SNAPSHOT_STORAGE_KEY, isGitBundleSnapshotCache) ?? {};
-}
-
-function readGitBundleSnapshot(rootPath: string | null): GitBundleSnapshot | null {
-  if (!rootPath) return null;
-  const snapshot = readGitBundleSnapshotCache()[rootPath];
-  if (!snapshot) return null;
-  if (Date.now() - snapshot.updatedAt > GIT_BUNDLE_SNAPSHOT_MAX_AGE_MS) return null;
-  return snapshot;
-}
-
-function toCacheableGitBundle(bundle: GitBundleResponse): GitBundleResponse {
-  const cacheable: GitBundleResponse = { ...bundle };
-  delete cacheable.cached;
-  delete cacheable.stale;
-  delete cacheable.cacheAgeMs;
-  delete cacheable.nestedDeferred;
-  return cacheable;
-}
-
-function writeGitBundleSnapshot(rootPath: string | null, bundle: GitBundleResponse): void {
-  if (!rootPath || !bundle.available || bundle.error) return;
-  const cache = readGitBundleSnapshotCache();
-  cache[rootPath] = { bundle: toCacheableGitBundle(bundle), updatedAt: Date.now() };
-  const entries = Object.entries(cache)
-    .sort(([, a], [, b]) => b.updatedAt - a.updatedAt)
-    .slice(0, MAX_GIT_BUNDLE_SNAPSHOT_ROOTS);
-  writeCache(GIT_BUNDLE_SNAPSHOT_STORAGE_KEY, Object.fromEntries(entries));
 }
 
 function getRepositoriesFromGitBundle(bundle: GitBundleResponse): GitRepositoryBundle[] {
@@ -5895,6 +5749,8 @@ export function RightSidebar(
   const [completedGitAction, setCompletedGitAction] = useState<{ action: GitActionKey; path?: string; label: string } | null>(null);
   const [confirmGitAction, setConfirmGitAction] = useState<ConfirmGitAction | null>(null);
   const [gitActionError, setGitActionError] = useState<string | null>(null);
+  const [gitCacheUpdatedAt, setGitCacheUpdatedAt] = useState<number | null>(null);
+  const [gitCacheClock, setGitCacheClock] = useState(() => Date.now());
   const [gitQuickActionsOpen, setGitQuickActionsOpen] = useState(false);
   const [gitDetailsLoading, setGitDetailsLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
@@ -5958,9 +5814,28 @@ export function RightSidebar(
   const branchAuditModuleSkipWriteRootRef = useRef<string | null>(null);
   const diffStreamSyncedPathRef = useRef<string | null>(null);
   const lastAutoRefreshRootRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (gitCacheUpdatedAt === null) return;
+    const elapsedMs = Math.max(0, Date.now() - gitCacheUpdatedAt);
+    const unitMs = elapsedMs < 60_000
+      ? 1_000
+      : elapsedMs < 3_600_000
+        ? 60_000
+        : elapsedMs < 86_400_000
+          ? 3_600_000
+          : 86_400_000;
+    const delayMs = Math.max(50, unitMs - (elapsedMs % unitMs));
+    const timer = window.setTimeout(() => setGitCacheClock(Date.now()), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [gitCacheClock, gitCacheUpdatedAt]);
   const fileTreeResizeRef = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null);
   const mobileFileSwiperRef = useRef<SwiperInstance | null>(null);
   const mobileDiffSwiperRef = useRef<SwiperInstance | null>(null);
+  // A pinned sidebar survives session switches. Programmatic page restoration
+  // must not be mistaken for a user swiping back to the file list, otherwise
+  // the old session's onSlideChange closes the newly active session's preview.
+  const mobileFileProgrammaticSlideRef = useRef<number | null>(null);
   const isCurrentSidebarRoot = useCallback((expectedRootPath: string | null): boolean => (
     useSidebarStore.getState().rootPath === expectedRootPath
   ), []);
@@ -6057,14 +5932,6 @@ export function RightSidebar(
                   : current
               ));
             }
-            writeGitBundleSnapshot(rootPath, {
-              available: true,
-              files: nextRepositories.flatMap((repo) => repo.files),
-              context: rootRepo?.context ?? gitContext,
-              repositories: nextRepositories,
-              repoFilters: buildRepoFiltersFromBundles(nextRepositories, rootPath),
-              untrackedDeferred: nextRepositories.some((repo) => repo.untrackedDeferred),
-            });
             return nextRepositories;
           });
         }
@@ -6201,7 +6068,6 @@ export function RightSidebar(
 
   const applyGitBundle = useCallback((bundle: GitBundleResponse, options: {
     reloadDiff?: boolean;
-    persistSnapshot?: boolean;
     syncActiveRepo?: boolean;
     activeRepoRoot?: string | null;
     loadDeferred?: boolean;
@@ -6292,9 +6158,7 @@ export function RightSidebar(
       setActiveGitRepoRoot(nextActiveRoot);
       writeActiveGitRepoRoot(rootPath, nextActiveRoot);
     }
-    if (options.persistSnapshot !== false) {
-      writeGitBundleSnapshot(rootPath, { ...bundle, repositories, repoFilters });
-    }
+    if (typeof bundle.cacheUpdatedAt === 'number') setGitCacheUpdatedAt(bundle.cacheUpdatedAt);
     setGitContext((current) => {
       if (!bundle.context) return null;
       const currentRoot = current?.root ?? rootPath;
@@ -6327,16 +6191,12 @@ export function RightSidebar(
   }, [activeGitRepoRoot, isCurrentSidebarRoot, loadChangeAuditRecords, loadUntrackedFiles, rootPath, selectFile, setChangedFiles]);
 
   useEffect(() => {
-    const gitBundleSnapshot = readGitBundleSnapshot(rootPath);
     branchAuditModuleHydratedRootRef.current = null;
     branchAuditModuleSkipWriteRootRef.current = rootPath;
-    const snapshotBundle = gitBundleSnapshot?.bundle ?? null;
-    const snapshotRepositories = snapshotBundle ? getRepositoriesFromGitBundle(snapshotBundle) : [];
-    const snapshotRepoFilters = snapshotBundle?.repoFilters ?? [];
+    const snapshotRepositories: GitRepositoryBundle[] = [];
+    const snapshotRepoFilters: GitRepositoryFilter[] = [];
     const persistedActiveGitRepoRoot = readActiveGitRepoRoot(rootPath);
-    const restoredActiveGitRepoRoot = snapshotBundle
-      ? resolveActiveGitRepoRootFromBundle({ ...snapshotBundle, repositories: snapshotRepositories, repoFilters: snapshotRepoFilters }, persistedActiveGitRepoRoot)
-      : null;
+    const restoredActiveGitRepoRoot = persistedActiveGitRepoRoot;
     gitBundleRequestIdRef.current += 1;
     gitDetailsRequestIdRef.current += 1;
     untrackedRequestSeqRef.current += 1;
@@ -6409,26 +6269,17 @@ export function RightSidebar(
     setBranchAuditIncludeUncommitted(branchAuditModuleState?.includeUncommitted ?? true);
     branchAuditModuleHydratedRootRef.current = rootPath;
     setGitDetailsLoading(false);
-    setActiveGitRepoRoot(restoredActiveGitRepoRoot);
+    setActiveGitRepoRoot(restoredActiveGitRepoRoot ?? null);
     untrackedCompletedRootsRef.current.clear();
     untrackedRunningRootsRef.current.clear();
     setRunningGitAction(null);
     setCompletedGitAction(null);
     setConfirmGitAction(null);
     setGitActionError(null);
-    if (gitBundleSnapshot && snapshotBundle) {
-      setChangedFiles(toChangedFileMap(snapshotBundle.files));
-      markGitBundleLoaded({
-        cached: true,
-        stale: true,
-        cacheAgeMs: Math.max(0, Date.now() - gitBundleSnapshot.updatedAt),
-        nestedDeferred: false,
-        untrackedDeferred: snapshotBundle.untrackedDeferred,
-      });
-    }
+    setGitCacheUpdatedAt(null);
     setGitRepositories(snapshotRepositories);
     setGitRepoFilters(snapshotRepoFilters);
-    setGitContext(snapshotBundle?.context ?? null);
+    setGitContext(null);
     lastAutoRefreshRootRef.current = null;
   }, [rootPath]);
 
@@ -6508,7 +6359,6 @@ export function RightSidebar(
       }
       applyGitBundle(bundle, {
         reloadDiff: options.reloadDiff,
-        persistSnapshot: includeNested,
         syncActiveRepo: includeNested,
         background,
         cacheOnly,
@@ -6683,28 +6533,54 @@ export function RightSidebar(
   useEffect(() => {
     if (!isMobile) return;
     setMobileFilePreviewOpen(rightSidebarFilePreviewOpen);
-    if (!rightSidebarFilePreviewOpen) {
+    if (rightSidebarFilePreviewOpen && selectedFilePath) {
+      // Session switches do not remount a pinned sidebar. Restore the second
+      // swiper page explicitly; otherwise the newly restored selected file is
+      // loaded while the shared swiper instance remains on the previous
+      // session's file-list page. selectedFilePath is a dependency because two
+      // sessions in the same cwd may both have their preview marked open.
+      setMobileFileSlideIndex(1);
+      const swiper = mobileFileSwiperRef.current;
+      if (swiper) {
+        swiper.update();
+        if (swiper.activeIndex !== 1) {
+          mobileFileProgrammaticSlideRef.current = 1;
+          swiper.slideTo(1, 0);
+        }
+      }
+    } else {
       // The App-level close only flips state — also slide the swiper back to
       // the file list. Without this, mobileFileSlideIndex stays 1, which keeps
       // the FilePreview mounted and visible (filePath prop stays truthy), so
       // the preview pane looks stuck and the back button appears to need two
       // taps: one to clear App state, one to actually navigate back.
       setMobileFileSlideIndex(0);
-      mobileFileSwiperRef.current?.slideTo(0);
+      const swiper = mobileFileSwiperRef.current;
+      if (swiper && swiper.activeIndex !== 0) {
+        mobileFileProgrammaticSlideRef.current = 0;
+        swiper.slideTo(0, 0);
+      }
       setLineRange(null);
     }
-  }, [isMobile, rightSidebarFilePreviewOpen, rootPath]);
+  }, [isMobile, rightSidebarFilePreviewOpen, rootPath, selectedFilePath]);
 
   useEffect(() => {
-    if (rightSidebarFilePreviewCloseSignal !== undefined) {
+    if (rightSidebarFilePreviewCloseSignal !== undefined && !rightSidebarFilePreviewOpen) {
       // Same slide-back as above, for close paths that only bump the signal
-      // (e.g. Android/hardware back handled via popstate).
+      // (e.g. Android/hardware back handled via popstate). The signal is
+      // app-global and may arrive after a pinned sidebar has switched to a
+      // different session. Never let that stale close override a session whose
+      // own preview state has already been restored as open.
       setMobileFileSlideIndex(0);
-      mobileFileSwiperRef.current?.slideTo(0);
+      const swiper = mobileFileSwiperRef.current;
+      if (swiper && swiper.activeIndex !== 0) {
+        mobileFileProgrammaticSlideRef.current = 0;
+        swiper.slideTo(0, 0);
+      }
       setMobileFilePreviewOpen(false);
       setLineRange(null);
     }
-  }, [rightSidebarFilePreviewCloseSignal]);
+  }, [rightSidebarFilePreviewCloseSignal, rightSidebarFilePreviewOpen]);
 
   useEffect(() => {
     if (rightSidebarRepoPickerCloseSignal !== undefined) {
@@ -6794,20 +6670,19 @@ export function RightSidebar(
     return () => window.cancelAnimationFrame(frame);
   }, [diffPaneActive, isMobile]);
 
-  // A non-git result can be stale. When the user opens Git/Changes, only sync
-  // from the backend cache here; rebuilding that cache is reserved for manual
-  // refresh so normal tab switches do not start expensive Git I/O.
+  // A non-git result can be stale. Re-check through the server-owned cache so
+  // a newly initialized repository can populate the Git/Changes panes.
   useEffect(() => {
     if (!gitKnownUnavailable || !rootPath || gitBundleLoading) return;
     const handle = window.setTimeout(() => {
-      void loadGitBundle(rootPath, { includeNested: true, background: true, cacheOnly: true });
+      void loadGitBundle(rootPath, { includeNested: true, background: true });
     }, 3_000);
     return () => window.clearTimeout(handle);
   }, [gitKnownUnavailable, rootPath, gitBundleLoading, loadGitBundle]);
 
-  // Git/Changes share one cache-backed data source. Opening either pane restores
-  // the frontend snapshot immediately, then performs a backend-cache sync only.
-  // Manual refresh is the only path that rebuilds the backend Git cache.
+  // Git/Changes share the server-owned cache. A warm cache returns immediately;
+  // a cold cache is populated by the server on first open. Manual refresh still
+  // forces a rebuild instead of accepting stale cache data.
   useEffect(() => {
     const shouldLoadGit = isOpen && (gitPaneActive || diffPaneActive);
     if (!shouldLoadGit || !rootPath || gitBundleLoading) return;
@@ -6816,7 +6691,7 @@ export function RightSidebar(
     lastAutoRefreshRootRef.current = rootPath;
     const delay = gitPaneActive && !isMobile ? 0 : SIDEBAR_BACKGROUND_IO_DELAY_MS;
     const handle = window.setTimeout(() => {
-      void loadGitBundle(rootPath, { includeNested: true, background: true, cacheOnly: true });
+      void loadGitBundle(rootPath, { includeNested: true, background: true });
     }, delay);
     return () => {
       window.clearTimeout(handle);
@@ -9876,17 +9751,46 @@ export function RightSidebar(
     </div>
   );
 
+  const gitCacheTimeLabel = useMemo(() => {
+    if (gitCacheUpdatedAt === null) return null;
+    const locale = typeof navigator === 'undefined' ? undefined : navigator.language;
+    const exact = new Intl.DateTimeFormat(locale, {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).format(gitCacheUpdatedAt);
+    const elapsedSeconds = Math.max(0, Math.floor((gitCacheClock - gitCacheUpdatedAt) / 1_000));
+    const formatter = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
+    const [value, unit] = elapsedSeconds < 60
+      ? [-elapsedSeconds, 'second' as const]
+      : elapsedSeconds < 3_600
+        ? [-Math.floor(elapsedSeconds / 60), 'minute' as const]
+        : elapsedSeconds < 86_400
+          ? [-Math.floor(elapsedSeconds / 3_600), 'hour' as const]
+          : [-Math.floor(elapsedSeconds / 86_400), 'day' as const];
+    return { exact, relative: formatter.format(value, unit) };
+  }, [gitCacheClock, gitCacheUpdatedAt]);
+
   const diffRefreshButton = rootPath ? (
-    <button
-      type="button"
-      onClick={() => void refreshGitState()}
-      disabled={gitBundleLoading}
-      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
-      aria-label={t('rightSidebar.refreshGit')}
-      title={t('rightSidebar.refreshGit')}
-    >
-      <RiRefresh size={13} className={gitBundleLoading ? 'animate-spin' : ''} />
-    </button>
+    <div className="inline-flex shrink-0 items-center gap-1.5">
+      {gitCacheTimeLabel ? (
+        <span
+          className="whitespace-nowrap text-[10px] text-muted-foreground"
+          title={t('rightSidebar.gitLastUpdated', { time: gitCacheTimeLabel.exact })}
+        >
+          {gitCacheTimeLabel.exact} · {gitCacheTimeLabel.relative}
+        </span>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => void refreshGitState()}
+        disabled={gitBundleLoading}
+        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 active:scale-95"
+        aria-label={t('rightSidebar.refreshGit')}
+        title={t('rightSidebar.refreshGit')}
+      >
+        <RiRefresh size={13} className={gitBundleLoading ? 'animate-spin' : ''} />
+      </button>
+    </div>
   ) : null;
 
   const changeAuditScopeLabel = changeAuditTargetsAllRepos
@@ -10056,6 +9960,21 @@ export function RightSidebar(
               e.target.value = '';
             }}
           />
+          {onTogglePinned && (
+            <button
+              type="button"
+              onClick={onTogglePinned}
+              className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
+                pinned
+                  ? 'bg-primary/15 text-primary'
+                  : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+              }`}
+              aria-label={pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar')}
+              title={pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar')}
+            >
+              {pinned ? <RiPinOff size={14} /> : <RiPin size={14} />}
+            </button>
+          )}
           <div ref={headerMenuRef} className="relative shrink-0">
             <button
               type="button"
@@ -10142,16 +10061,14 @@ export function RightSidebar(
                 enterKeyHint="search"
                 spellCheck={false}
               />
-              {/* Desktop keeps the mode switch compact and inline so it doesn't
-                  add a second full-width row. Mobile uses the larger segmented
-                  control below where tap targets matter more. */}
-              {!isMobile && (
-                <div className="flex shrink-0 items-center gap-0.5 rounded-full bg-surface/70 p-0.5 text-[10px] font-medium">
+              {/* Keep the mode switch inline on every viewport. Mobile retains
+                  a slightly larger target without consuming a second row. */}
+              <div className={`flex shrink-0 items-center gap-0.5 rounded-full bg-surface/70 p-0.5 font-medium ${isMobile ? 'text-[11px]' : 'text-[10px]'}`}>
                   <button
                     type="button"
                     onClick={() => updateSearchMode('name')}
                     aria-pressed={searchMode === 'name'}
-                    className={`rounded-full px-2 py-0.5 transition active:scale-95 ${searchMode === 'name' ? 'bg-primary/15 text-primary' : 'text-muted-foreground/80 hover:text-foreground'}`}
+                    className={`rounded-full px-2 transition active:scale-95 ${isMobile ? 'py-1' : 'py-0.5'} ${searchMode === 'name' ? 'bg-primary/15 text-primary' : 'text-muted-foreground/80 hover:text-foreground'}`}
                   >
                     {t('rightSidebar.searchModeName')}
                   </button>
@@ -10159,12 +10076,11 @@ export function RightSidebar(
                     type="button"
                     onClick={() => updateSearchMode('content')}
                     aria-pressed={searchMode === 'content'}
-                    className={`rounded-full px-2 py-0.5 transition active:scale-95 ${searchMode === 'content' ? 'bg-primary/15 text-primary' : 'text-muted-foreground/80 hover:text-foreground'}`}
+                    className={`rounded-full px-2 transition active:scale-95 ${isMobile ? 'py-1' : 'py-0.5'} ${searchMode === 'content' ? 'bg-primary/15 text-primary' : 'text-muted-foreground/80 hover:text-foreground'}`}
                   >
                     {t('rightSidebar.searchModeContent')}
                   </button>
-                </div>
-              )}
+              </div>
               {fileQuery && (
                 <button
                   type="button"
@@ -10176,26 +10092,6 @@ export function RightSidebar(
                 </button>
               )}
             </div>
-            {isMobile && (
-            <div className="flex items-center gap-0.5 rounded-full bg-surface-2 p-0.5 text-[11px] font-medium">
-              <button
-                type="button"
-                onClick={() => setSearchMode('name')}
-                aria-pressed={searchMode === 'name'}
-                className={`flex-1 rounded-full px-2 py-1 transition active:scale-95 ${searchMode === 'name' ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
-              >
-                {t('rightSidebar.searchModeName')}
-              </button>
-              <button
-                type="button"
-                onClick={() => setSearchMode('content')}
-                aria-pressed={searchMode === 'content'}
-                className={`flex-1 rounded-full px-2 py-1 transition active:scale-95 ${searchMode === 'content' ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
-              >
-                {t('rightSidebar.searchModeContent')}
-              </button>
-            </div>
-            )}
           </div>
         )}
 
@@ -10506,6 +10402,10 @@ export function RightSidebar(
               }}
               onSlideChange={(instance) => {
                 setMobileFileSlideIndex(instance.activeIndex);
+                if (mobileFileProgrammaticSlideRef.current === instance.activeIndex) {
+                  mobileFileProgrammaticSlideRef.current = null;
+                  return;
+                }
                 if (instance.activeIndex === 0) {
                   setMobileFilePreviewOpen(false);
                   setLineRange(null);

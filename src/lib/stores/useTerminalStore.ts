@@ -98,6 +98,7 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     isConnecting: false,
     agentStatus: null,
     agentIndicator: null,
+    agentStatusDetail: null,
     agent: null,
     agentMessage: null,
     agentNativeSessionId: null,
@@ -465,6 +466,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
 
     const agentStatus = payload.agentStatus ?? null;
     const nextAgentIndicator = agentStatus && agentStatus !== 'idle' ? (payload.agentIndicator ?? existing.agentIndicator ?? null) : null;
+    const nextAgentStatusDetail = agentStatus && agentStatus !== 'idle'
+      ? (payload.agentStatusDetail ?? null)
+      : null;
     const nextAgent = payload.agent !== undefined ? payload.agent : existing.agent;
     const nextMessage = payload.agentMessage !== undefined ? payload.agentMessage : (agentStatus ? existing.agentMessage : null);
     const nextNativeId = payload.agentNativeSessionId !== undefined ? payload.agentNativeSessionId : existing.agentNativeSessionId;
@@ -486,6 +490,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     if (
       existing.agentStatus === agentStatus &&
       existing.agentIndicator === nextAgentIndicator &&
+      existing.agentStatusDetail === nextAgentStatusDetail &&
       existing.agent === nextAgent &&
       existing.agentMessage === nextMessage &&
       existing.agentNativeSessionId === nextNativeId &&
@@ -500,6 +505,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       ...existing,
       agentStatus,
       agentIndicator: nextAgentIndicator,
+      agentStatusDetail: nextAgentStatusDetail,
       agent: nextAgent,
       agentMessage: nextMessage,
       agentNativeSessionId: nextNativeId,
@@ -701,6 +707,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
           isConnecting: false,
           agentStatus: null,
           agentIndicator: null,
+          agentStatusDetail: null,
           agent: null,
           agentMessage: null,
           agentNeedsReview: false,

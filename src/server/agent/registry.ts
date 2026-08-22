@@ -1,4 +1,5 @@
 import type { LoadedPlugin } from './plugins.js';
+import type { AgentStatusDefinition } from './session.js';
 
 /**
  * Third-party CLI coding-agent registry + detection.
@@ -38,6 +39,8 @@ export interface AgentInfo {
   iconMode?: 'mask' | 'native';
   /** Plugin icon file mtime (ms), for cache-busting query param. */
   iconVersion?: number;
+  /** Plugin-defined presentation states; semantic behavior still uses phase. */
+  statuses?: AgentStatusDefinition[];
 }
 
 // Registry order matters only for iteration stability; lookup is by alias.
@@ -329,6 +332,7 @@ export function registerPluginAgents(plugins: LoadedPlugin[]): { registered: num
       isPlugin: true,
       iconMode: manifest.iconMode,
       iconVersion: p.iconMtime || undefined,
+      statuses: manifest.statuses,
     };
     BY_SLUG.set(info.slug, info);
     for (const alias of info.aliases) BY_ALIAS.set(alias, info);

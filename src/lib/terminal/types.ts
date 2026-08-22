@@ -5,6 +5,12 @@ export type TerminalMode = 'shell' | 'tmux';
  *  waiting = blocked on the user (permission/question); done = turn finished. */
 export type AgentStatus = 'idle' | 'working' | 'waiting' | 'done';
 export type AgentIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal' | 'question';
+export type AgentStatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger' | 'accent';
+export interface AgentStatusDetail {
+  id: string;
+  label: string;
+  tone: AgentStatusTone;
+}
 
 /** Recognized coding-agent identity (server registry). */
 export interface AgentIdentity {
@@ -188,6 +194,7 @@ export interface TerminalStreamEvent {
   activeProgramSource?: 'tmux-pane' | 'tmux-tty' | 'shell-tty' | 'shell-pid' | 'unknown' | null;
   agentStatus?: AgentStatus | null;
   agentIndicator?: AgentIndicator | null;
+  agentStatusDetail?: AgentStatusDetail | null;
   agent?: AgentIdentity | null;
   agentMessage?: string | null;
   agentNativeSessionId?: string | null;
@@ -340,6 +347,7 @@ export interface TerminalSessionState {
   isConnecting: boolean;
   agentStatus: AgentStatus | null;
   agentIndicator: AgentIndicator | null;
+  agentStatusDetail: AgentStatusDetail | null;
   agent: AgentIdentity | null;         // 识别到的 agent 身份（品牌）
   agentMessage: string | null;         // waiting/done 的上下文（如"需要 Bash 权限"）
   agentNativeSessionId: string | null; // agent 原生会话 id（resume 用）

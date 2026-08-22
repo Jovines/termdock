@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, Move, Plus, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, Move, X } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { vibrate as hapticVibrate } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
@@ -104,6 +104,11 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   const toolbarDisabled = disabled || !visible || !interactive;
   const buttonDisabled = disabled || !visible;
   const presetButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const longPressModeButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const modePulsePrimaryRef = React.useRef<HTMLSpanElement | null>(null);
+  const modePulseSecondaryRef = React.useRef<HTMLSpanElement | null>(null);
+  const modeNoticeHapticTimerRef = React.useRef<number | null>(null);
+  const previousCopyFeedbackRef = React.useRef(copyFeedback);
   const pendingTapRef = React.useRef<{
     actionId: string;
     timer: number;
@@ -207,6 +212,55 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     };
   }, [showPresetMenu]);
 
+  React.useEffect(() => {
+    const previousFeedback = previousCopyFeedbackRef.current;
+    previousCopyFeedbackRef.current = copyFeedback;
+    if (copyFeedback === 'idle' || copyFeedback === previousFeedback) return;
+
+    if (modeNoticeHapticTimerRef.current !== null) window.clearTimeout(modeNoticeHapticTimerRef.current);
+
+    const prefersReducedMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!prefersReducedMotion) {
+      if (copyFeedback === 'copied') {
+        longPressModeButtonRef.current?.animate?.([
+          { transform: 'scale(1)' },
+          { transform: 'scale(1.16)', offset: 0.28 },
+          { transform: 'scale(0.96)', offset: 0.62 },
+          { transform: 'scale(1)' },
+        ], { duration: 720, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+        const pulseFrames: Keyframe[] = [
+          { opacity: 0, transform: 'scale(0.65)' },
+          { opacity: 0.75, transform: 'scale(0.9)', offset: 0.18 },
+          { opacity: 0, transform: 'scale(1.65)' },
+        ];
+        modePulsePrimaryRef.current?.animate?.(pulseFrames, { duration: 760, easing: 'ease-out' });
+        modePulseSecondaryRef.current?.animate?.(pulseFrames, { duration: 760, delay: 130, easing: 'ease-out' });
+      } else {
+        longPressModeButtonRef.current?.animate?.([
+          { transform: 'translateX(0)' },
+          { transform: 'translateX(-2px)' },
+          { transform: 'translateX(2px)' },
+          { transform: 'translateX(0)' },
+        ], { duration: 280, easing: 'ease-out' });
+      }
+    }
+
+    hapticVibrate(TOOLBAR_HAPTIC_PATTERN_MS);
+    if (copyFeedback === 'copied') {
+      modeNoticeHapticTimerRef.current = window.setTimeout(() => {
+        hapticVibrate(TOOLBAR_HAPTIC_PATTERN_MS);
+        modeNoticeHapticTimerRef.current = null;
+      }, 90);
+      if (longPressMode === 'copy') onLongPressModeToggle?.();
+    }
+
+  }, [copyFeedback, longPressMode, onLongPressModeToggle]);
+
+  React.useEffect(() => () => {
+    if (modeNoticeHapticTimerRef.current !== null) window.clearTimeout(modeNoticeHapticTimerRef.current);
+  }, []);
+
   const handleSinglePointerDown = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>, key: MobileKey) => {
       if (toolbarDisabled) {
@@ -251,20 +305,6 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         }
         return next;
       });
-    },
-    [toolbarDisabled]
-  );
-
-  // 新建 session 走 window 事件,由 MultiTerminalView 的 'new-terminal-session'
-  // 监听器接住(detail 为空时回退到 defaultSessionMode 并继承当前 session 的 cwd),
-  // 不需要从 App 层层传 prop 下来。
-  const handleNewSessionPointerDown = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      if (toolbarDisabled) {
-        return;
-      }
-      event.preventDefault();
-      window.dispatchEvent(new CustomEvent('new-terminal-session'));
     },
     [toolbarDisabled]
   );
@@ -494,13 +534,11 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         /*
           移动端工具栏第一行(约定:加按钮先看这里)。
 
-          10 列网格贴底全宽,是手机上最好够的位置(拇指热区在下半屏偏右):
+          9 列网格贴底全宽,是手机上最好够的位置(拇指热区在下半屏偏右):
           - 高频键靠右放;展开键固定最右一列,不要动;
-          - 非按键类操作(如新建 session)也放这一行,dispatch window 事件
-            (见 handleNewSessionPointerDown),不要从 App 层层传 prop;
-          - 放不下的键进下方扩展行(expandedRows),第一行保持 10 列。
+          - 放不下的键进下方扩展行(expandedRows),第一行保持 9 列。
         */
-        <div className="grid grid-cols-10 gap-1">
+        <div className="grid grid-cols-9 gap-1">
         <button
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'esc')}
@@ -552,18 +590,6 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         >
           /
         </button>
-        {/* 新建 session 紧跟 / 键之后 */}
-        <button
-          type="button"
-          onPointerDown={handleNewSessionPointerDown}
-          tabIndex={-1}
-          disabled={buttonDisabled}
-          title={t('tab.new')}
-          aria-label={t('tab.new')}
-          className="h-7 w-full rounded-full bg-surface-2 shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center"
-        >
-          <Plus size={15} />
-        </button>
         <button
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'enter')}
@@ -574,6 +600,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           <RiArrowGoBackLine size={16} />
         </button>
         <button
+          ref={longPressModeButtonRef}
           type="button"
           data-mobile-copy-button="true"
           onPointerDown={stopClipboardButtonPointer}
@@ -583,7 +610,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           disabled={buttonDisabled}
           title={copyFeedback === 'copied' ? t('terminal.copied') : copyFeedback === 'failed' ? t('terminal.copyFailed') : longPressMode === 'copy' ? t('terminal.longPressSelectsText') : t('terminal.longPressSendsArrows')}
           aria-label={longPressMode === 'copy' ? t('terminal.switchLongPressToArrows') : t('terminal.switchLongPressToCopy')}
-          className={`h-7 w-full rounded-full shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center ${
+          className={`relative isolate h-7 w-full overflow-visible rounded-full shadow-sm active:bg-accent active:text-accent-foreground transition-colors keyboard-button-active disabled:opacity-50 flex items-center justify-center ${
             copyFeedback === 'copied'
               ? 'bg-primary/15 text-primary'
               : copyFeedback === 'failed'
@@ -593,11 +620,49 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
               : 'bg-surface-2'
           }`}
         >
-          {copyFeedback === 'copied'
-            ? <Check size={15} />
-            : copyFeedback === 'failed'
-              ? <X size={15} />
-              : longPressMode === 'copy' ? <Clipboard size={15} /> : <Move size={15} />}
+          <span
+            ref={modePulsePrimaryRef}
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 z-0 rounded-full border border-primary/70 opacity-0"
+          />
+          <span
+            ref={modePulseSecondaryRef}
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 z-0 rounded-full border border-primary/40 opacity-0"
+          />
+          <span className="relative z-10 h-4 w-4" aria-hidden="true">
+            <Check
+              size={16}
+              className={`absolute inset-0 transition-[opacity,transform] duration-300 ease-out motion-reduce:transition-none ${
+                copyFeedback === 'copied' ? 'scale-100 rotate-0 opacity-100' : 'scale-50 -rotate-45 opacity-0'
+              }`}
+            />
+            <X
+              size={16}
+              className={`absolute inset-0 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none ${
+                copyFeedback === 'failed' ? 'scale-100 opacity-100' : 'scale-50 opacity-0'
+              }`}
+            />
+            <Clipboard
+              size={15}
+              className={`absolute inset-0 transition-[opacity,transform] duration-300 ease-out motion-reduce:transition-none ${
+                copyFeedback === 'idle' && longPressMode === 'copy' ? 'scale-100 opacity-100' : 'scale-50 opacity-0'
+              }`}
+            />
+            <Move
+              size={15}
+              className={`absolute inset-0 transition-[opacity,transform] duration-300 ease-out motion-reduce:transition-none ${
+                copyFeedback === 'idle' && longPressMode === 'arrows' ? 'scale-100 rotate-0 opacity-100' : 'scale-50 rotate-45 opacity-0'
+              }`}
+            />
+          </span>
+          {copyFeedback !== 'idle' && (
+            <span className="sr-only" role="status" aria-live="polite">
+              {copyFeedback === 'copied'
+                ? `${t('terminal.copied')} · ${t('terminal.longPressSendsArrows')}`
+                : `${t('terminal.copyFailed')} · ${t('terminal.longPressSelectsText')}`}
+            </span>
+          )}
         </button>
         <button
           type="button"

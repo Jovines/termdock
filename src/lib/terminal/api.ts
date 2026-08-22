@@ -4,6 +4,7 @@ import type {
   CreateTerminalOptions,
   ConnectStreamOptions,
   AgentIndicator,
+  AgentStatusDetail,
   TmuxActionPayload,
   TmuxLayout,
   TmuxSessionSummary,
@@ -38,6 +39,7 @@ export class TerminalApiError extends Error {
 export interface AgentStatusPayload {
   agentStatus: import('./types').AgentStatus | null;
   agentIndicator?: AgentIndicator | null;
+  agentStatusDetail?: AgentStatusDetail | null;
   agent?: import('./types').AgentIdentity | null;
   agentMessage?: string | null;
   agentNativeSessionId?: string | null;
@@ -643,6 +645,7 @@ export function connectTerminalStream(
             type: 'agent-status',
             agentStatus: msg.agentStatus ?? null,
             agentIndicator: msg.agentIndicator ?? null,
+            agentStatusDetail: msg.agentStatusDetail ?? null,
             agent: msg.agent ?? null,
             agentMessage: msg.agentMessage ?? null,
             agentNativeSessionId: msg.agentNativeSessionId ?? null,
@@ -1420,6 +1423,9 @@ export interface SettingsState {
   networkAvailable: boolean;
   localAccess: LocalAccessState;
   contextDraftHeight: { mobile: number | null; desktop: number | null };
+  autoRenameAgents: string[];
+  autoRenameNamer: 'auto' | 'codex' | 'claude';
+  autoRenameModels: Record<string, string>;
 }
 
 export async function getSettings(): Promise<SettingsState> {
@@ -1431,7 +1437,7 @@ export async function getSettings(): Promise<SettingsState> {
   return response.json();
 }
 
-export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null } }): Promise<SettingsState> {
+export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: 'auto' | 'codex' | 'claude'; autoRenameModels?: Record<string, string> }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -1443,6 +1449,28 @@ export async function updateSettings(settings: { preventSleep?: boolean; localAc
     throw new Error(error.error || 'Failed to update settings');
   }
   return response.json();
+}
+
+export interface TitleNamerModelInfo {
+  id: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+}
+
+export interface TitleNamerInfo {
+  slug: 'codex' | 'claude';
+  displayName: string;
+  available: boolean;
+  models: TitleNamerModelInfo[];
+  recommendedModel: string | null;
+}
+
+export async function getTitleNamerCatalog(refresh = false): Promise<TitleNamerInfo[]> {
+  const response = await fetch(`/api/terminal/auto-title/catalog${refresh ? '?refresh=1' : ''}`);
+  if (!response.ok) throw new Error('Failed to discover title models');
+  const data = await response.json();
+  return Array.isArray(data?.namers) ? data.namers : [];
 }
 
 // ---- Context draft (cross-device realtime sync) ----
@@ -1554,6 +1582,29 @@ export interface AgentHookInfo {
   iconVersion: number | null;
 }
 
+export interface AgentLauncherInfo {
+  slug: string;
+  displayName: string;
+  command: string;
+}
+
+export async function getAgentLaunchers(): Promise<AgentLauncherInfo[]> {
+  const response = await fetch('/api/terminal/agent-launchers');
+  if (!response.ok) throw new Error('Failed to detect agent launchers');
+  const data = await response.json();
+  return Array.isArray(data?.agents) ? data.agents : [];
+}
+
+export async function getDirectorySuggestions(query: string, signal?: AbortSignal): Promise<string[]> {
+  const params = new URLSearchParams({ q: query });
+  const response = await fetch(`/api/terminal/directory-suggestions?${params}`, { signal });
+  if (!response.ok) throw new Error('Failed to suggest directories');
+  const data = await response.json();
+  return Array.isArray(data?.directories)
+    ? data.directories.filter((directory: unknown): directory is string => typeof directory === 'string')
+    : [];
+}
+
 export async function getAgentHooks(): Promise<AgentHookInfo[]> {
   const response = await fetch('/api/terminal/agent-hooks');
   if (!response.ok) throw new Error('Failed to get agent hooks');
@@ -1599,6 +1650,22 @@ export interface AgentPluginInfo {
 export interface AgentPluginErrors {
   slug: string;
   errors: string[];
+  code?: string;
+  migration?: {
+    guideCommand: string;
+    aiPrompt: string;
+  };
+}
+
+export class AgentPluginManifestError extends Error {
+  constructor(
+    message: string,
+    public code?: string,
+    public migration?: AgentPluginErrors['migration'],
+  ) {
+    super(message);
+    this.name = 'AgentPluginManifestError';
+  }
 }
 
 export async function getAgentPlugins(): Promise<{ plugins: AgentPluginInfo[]; errors: AgentPluginErrors[] }> {
@@ -1615,7 +1682,13 @@ export async function createAgentPlugin(manifest: Record<string, unknown>): Prom
     body: JSON.stringify(manifest),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || 'Failed to create agent plugin');
+  if (!response.ok) {
+    throw new AgentPluginManifestError(
+      data.error || 'Failed to create agent plugin',
+      data.code,
+      data.migration,
+    );
+  }
   return data;
 }
 
@@ -2523,6 +2596,7 @@ export interface GitBundleResponse {
   cached?: boolean;
   stale?: boolean;
   cacheAgeMs?: number;
+  cacheUpdatedAt?: number;
   nestedDeferred?: boolean;
   untrackedDeferred?: boolean;
   error?: string;

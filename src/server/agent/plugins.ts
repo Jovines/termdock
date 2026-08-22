@@ -14,7 +14,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import type { AgentEventKind } from './session.js';
+import type {
+  AgentEventKind,
+  AgentSessionStatus,
+  AgentStatusDefinition,
+  AgentStatusIndicator,
+  AgentStatusTone,
+} from './session.js';
 
 const PLUGINS_DIR = path.join(os.homedir(), '.termdock', 'agent-plugins');
 const MANIFEST_FILE = 'manifest.json';
@@ -24,7 +30,7 @@ const ICON_FILE = 'icon.svg';
 // Manifest schema
 // ---------------------------------------------------------------------------
 
-export const PLUGIN_MANIFEST_VERSION = 1;
+export const PLUGIN_MANIFEST_VERSION = 2;
 
 export interface PluginHookEvent {
   /** Agent's native hook event name (e.g. "SessionStart"). */
@@ -35,6 +41,8 @@ export interface PluginHookEvent {
   matcher?: string;
   /** Optional timeout in seconds for this hook invocation. */
   timeout?: number;
+  /** Optional plugin status id to activate when this hook fires. */
+  status?: string;
 }
 
 export interface PluginHookConfig {
@@ -59,6 +67,8 @@ export interface AgentPluginManifest {
   accentColor: string;
   /** Icon rendering mode: 'mask' = CSS mask+accentColor (default, monochrome); 'native' = raw SVG colors. */
   iconMode?: 'mask' | 'native';
+  /** Fine-grained display statuses mapped onto stable behavioral phases. */
+  statuses?: AgentStatusDefinition[];
   hooks?: PluginHookConfig;
   resume?: PluginResumeConfig;
 }
@@ -87,6 +97,10 @@ const VALID_EVENT_KINDS = new Set<AgentEventKind>([
   'stop',
   'session-end',
 ]);
+const VALID_STATUS_PHASES = new Set<AgentSessionStatus>(['idle', 'working', 'waiting', 'done']);
+const VALID_STATUS_INDICATORS = new Set<AgentStatusIndicator>(['spinner', 'pulse', 'dot', 'ring', 'badge', 'terminal', 'question']);
+const VALID_STATUS_TONES = new Set<AgentStatusTone>(['neutral', 'info', 'success', 'warning', 'danger', 'accent']);
+const STATUS_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
 
 // ---------------------------------------------------------------------------
 // Slug validation (alphanumeric + hyphens, non-empty)
@@ -122,9 +136,24 @@ function resolveHome(p: string): string {
 export interface PluginValidationError {
   slug: string;
   errors: string[];
+  code?: 'AGENT_PLUGIN_MANIFEST_V1_UNSUPPORTED';
+  migration?: {
+    guideCommand: string;
+    aiPrompt: string;
+  };
 }
 
-function validateManifest(raw: unknown, dir: string): { manifest: AgentPluginManifest } | { error: PluginValidationError } {
+export const V1_MIGRATION_GUIDE_COMMAND = 'td agent-plugin --json';
+export const V1_MIGRATION_AI_PROMPT = [
+  'Please migrate the attached Termdock Agent plugin manifest from v1 to v2.',
+  'Preserve slug, displayName, aliases, accentColor, iconMode, hooks.target, and resume.',
+  'Add statuses[] entries with id, phase (idle|working|waiting|done), label, indicator, and tone.',
+  'Add a status reference to each relevant hooks.events[] mapping while keeping its core event value.',
+  `Use the output of \`${V1_MIGRATION_GUIDE_COMMAND}\` as the authoritative schema.`,
+  'Return only the corrected manifest JSON.',
+].join(' ');
+
+export function validateManifest(raw: unknown, dir: string): { manifest: AgentPluginManifest } | { error: PluginValidationError } {
   const errors: string[] = [];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { error: { slug: path.basename(dir), errors: ['manifest.json is not a JSON object'] } };
@@ -132,7 +161,11 @@ function validateManifest(raw: unknown, dir: string): { manifest: AgentPluginMan
   const m = raw as Record<string, unknown>;
 
   const version = m.version;
-  if (typeof version !== 'number' || version !== PLUGIN_MANIFEST_VERSION) {
+  const isV1 = version === 1;
+  if (isV1) {
+    errors.push('manifest v1 is no longer supported; migrate this plugin to manifest v2');
+    errors.push(`read the current machine-readable schema with: ${V1_MIGRATION_GUIDE_COMMAND}`);
+  } else if (typeof version !== 'number' || version !== PLUGIN_MANIFEST_VERSION) {
     errors.push(`version must be ${PLUGIN_MANIFEST_VERSION}`);
   }
 
@@ -160,6 +193,57 @@ function validateManifest(raw: unknown, dir: string): { manifest: AgentPluginMan
   const iconMode = m.iconMode;
   if (iconMode !== undefined && iconMode !== 'mask' && iconMode !== 'native') {
     errors.push('iconMode must be "mask" or "native" if provided');
+  }
+
+  // Optional plugin-defined status vocabulary. These decorate the stable
+  // idle/working/waiting/done phases instead of replacing their semantics.
+  let statuses: AgentStatusDefinition[] | undefined;
+  const statusIds = new Set<string>();
+  if (m.statuses !== undefined) {
+    if (!Array.isArray(m.statuses) || m.statuses.length === 0) {
+      errors.push('statuses must be a non-empty array if present');
+    } else {
+      const validStatuses: AgentStatusDefinition[] = [];
+      for (let i = 0; i < m.statuses.length; i++) {
+        const rawStatus = m.statuses[i];
+        if (!rawStatus || typeof rawStatus !== 'object' || Array.isArray(rawStatus)) {
+          errors.push(`statuses[${i}] is not an object`);
+          continue;
+        }
+        const status = rawStatus as Record<string, unknown>;
+        const id = status.id;
+        const phase = status.phase;
+        const label = status.label;
+        const indicator = status.indicator;
+        const tone = status.tone;
+        if (typeof id !== 'string' || !STATUS_ID_RE.test(id)) {
+          errors.push(`statuses[${i}].id must be lowercase alphanumeric with hyphens (max 40 chars)`);
+          continue;
+        }
+        if (statusIds.has(id)) errors.push(`statuses[${i}].id duplicates "${id}"`);
+        statusIds.add(id);
+        if (typeof phase !== 'string' || !VALID_STATUS_PHASES.has(phase as AgentSessionStatus)) {
+          errors.push(`statuses[${i}].phase must be one of: ${[...VALID_STATUS_PHASES].join(', ')}`);
+        }
+        if (typeof label !== 'string' || label.trim().length === 0 || label.length > 80) {
+          errors.push(`statuses[${i}].label must be a non-empty string (max 80 chars)`);
+        }
+        if (indicator !== undefined && (typeof indicator !== 'string' || !VALID_STATUS_INDICATORS.has(indicator as AgentStatusIndicator))) {
+          errors.push(`statuses[${i}].indicator must be one of: ${[...VALID_STATUS_INDICATORS].join(', ')}`);
+        }
+        if (tone !== undefined && (typeof tone !== 'string' || !VALID_STATUS_TONES.has(tone as AgentStatusTone))) {
+          errors.push(`statuses[${i}].tone must be one of: ${[...VALID_STATUS_TONES].join(', ')}`);
+        }
+        validStatuses.push({
+          id,
+          phase: phase as AgentSessionStatus,
+          label: typeof label === 'string' ? label.trim() : '',
+          indicator: indicator as AgentStatusIndicator | undefined,
+          tone: tone as AgentStatusTone | undefined,
+        });
+      }
+      if (validStatuses.length > 0) statuses = validStatuses;
+    }
   }
 
   // Optional hooks
@@ -201,11 +285,16 @@ function validateManifest(raw: unknown, dir: string): { manifest: AgentPluginMan
           if (timeout !== undefined && (typeof timeout !== 'number' || timeout <= 0)) {
             errors.push(`hooks.events[${i}].timeout must be a positive number if provided`);
           }
+          const status = evt.status;
+          if (status !== undefined && (typeof status !== 'string' || !statusIds.has(status))) {
+            errors.push(`hooks.events[${i}].status must reference a declared statuses[].id`);
+          }
           validEvents.push({
             hook: hook as string,
             event: event as AgentEventKind,
             matcher: typeof matcher === 'string' ? matcher : undefined,
             timeout: typeof timeout === 'number' ? timeout : undefined,
+            status: typeof status === 'string' ? status : undefined,
           });
         }
         if (validEvents.length > 0) {
@@ -238,7 +327,16 @@ function validateManifest(raw: unknown, dir: string): { manifest: AgentPluginMan
   }
 
   if (errors.length > 0) {
-    return { error: { slug: typeof slug === 'string' ? slug : path.basename(dir), errors } };
+    return {
+      error: {
+        slug: typeof slug === 'string' ? slug : path.basename(dir),
+        errors,
+        code: isV1 ? 'AGENT_PLUGIN_MANIFEST_V1_UNSUPPORTED' : undefined,
+        migration: isV1
+          ? { guideCommand: V1_MIGRATION_GUIDE_COMMAND, aiPrompt: V1_MIGRATION_AI_PROMPT }
+          : undefined,
+      },
+    };
   }
 
   return {
@@ -249,6 +347,7 @@ function validateManifest(raw: unknown, dir: string): { manifest: AgentPluginMan
       aliases: (aliases as string[]).map((a) => (a as string).trim().toLowerCase()),
       accentColor: accentColor as string,
       iconMode: iconMode as 'mask' | 'native' | undefined,
+      statuses,
       hooks,
       resume: resumeConfig,
     },

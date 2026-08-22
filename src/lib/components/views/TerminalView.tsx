@@ -960,6 +960,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 setSessionAgentStatus(storeSessionId, {
                   agentStatus: event.agentStatus ?? null,
                   agentIndicator: event.agentIndicator ?? null,
+                  agentStatusDetail: event.agentStatusDetail ?? null,
                   agent: event.agent ?? null,
                   agentMessage: event.agentMessage ?? null,
                   agentNativeSessionId: event.agentNativeSessionId ?? null,

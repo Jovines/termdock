@@ -6,7 +6,7 @@ import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import QRCode from 'qrcode';
 import { execFile, spawn, type ChildProcess } from 'child_process';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { promisify } from 'util';
 import type { WebSocket } from 'ws';
 import { caffeinateManager } from '../utils/caffeinate.js';
@@ -21,6 +21,12 @@ import {
   setLocaleSetting,
   getContextDraftHeightSetting,
   setContextDraftHeightSetting,
+  getAutoRenameAgentsSetting,
+  setAutoRenameAgentsSetting,
+  getAutoRenameNamerSetting,
+  setAutoRenameNamerSetting,
+  getAutoRenameModelsSetting,
+  setAutoRenameModelsSetting,
 } from '../utils/settings.js';
 import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
@@ -43,6 +49,7 @@ import {
   agentBySlug,
   buildResumeCommand,
   detectAgentFromCommand,
+  listAgents,
   type AgentInfo,
 } from '../agent/registry.js';
 import {
@@ -52,6 +59,7 @@ import {
   type AgentEvent,
   type AgentSessionState,
   type AgentSessionStatus,
+  type AgentStatusTone,
 } from '../agent/session.js';
 import {
   listAllHookAgents,
@@ -64,9 +72,9 @@ import {
   savePlugin,
   removePlugin,
   readPluginIcon,
-  type AgentPluginManifest,
+  validateManifest,
 } from '../agent/plugins.js';
-import { registerPluginAgents } from '../agent/registry.js';
+import { clearPluginAgents, registerPluginAgents } from '../agent/registry.js';
 import { notifyAgentTransition, notifyTerminalExit } from '../notifications/pushService.js';
 import { setClientViewingSession } from '../notifications/pushViewers.js';
 import {
@@ -76,6 +84,8 @@ import {
 } from '../quota/QuotaManager.js';
 import type { QuotaStatusWirePayload } from '../quota/types.js';
 import { TermdockAutoUpdateManager } from '../utils/autoUpdate.js';
+import { cleanTerminalContext, generateAgentTitle, isNewAgentSessionId, shouldReplaceAutoTitle } from '../agent/autoTitle.js';
+import { getTitleNamerCatalog } from '../agent/titleNamerCatalog.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -221,6 +231,8 @@ interface TerminalSession {
   // only while an agent is detected in the foreground.
   agent: AgentInfo | null;
   agentSession: AgentSessionState | null;
+  /** Recent output from the current agent turn, bounded and used only when auto-title is enabled. */
+  autoTitleContext: string;
   // Carries reviewed across agentSession nullification in syncAgentIdentity so
   // the yellow unread dot survives the poll window. Cleared on manual ack.
   lastAgentReviewed: boolean | null;
@@ -266,6 +278,8 @@ interface PersistedClientSession {
   sessionId: string;
   name: string;
   customName?: boolean;
+  /** Present only when customName was produced by Termdock, so later turns may refresh it. */
+  autoTitle?: { agentSlug: string; contentHash: string; updatedAt: number } | null;
   backendSessionId: string | null;
   mode: TerminalMode;
   tmuxSessionName: string | null;
@@ -1035,6 +1049,12 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
     sessionId: candidate.sessionId,
     name: candidate.name,
     customName: candidate.customName === true ? true : undefined,
+    autoTitle: candidate.autoTitle
+      && typeof candidate.autoTitle.agentSlug === 'string'
+      && typeof candidate.autoTitle.contentHash === 'string'
+      && typeof candidate.autoTitle.updatedAt === 'number'
+      ? candidate.autoTitle
+      : null,
     backendSessionId: typeof candidate.backendSessionId === 'string' && candidate.backendSessionId.trim().length > 0
       ? candidate.backendSessionId
       : null,
@@ -2663,11 +2683,108 @@ function detectSessionAgent(session: TerminalSession): AgentInfo | null {
   return null;
 }
 
+const AUTO_TITLE_CONTEXT_LIMIT = 24_000;
+const AUTO_TITLE_REEVALUATE_MS = 60 * 60_000;
+const autoTitlePending = new Set<string>();
+
+function appendAutoTitleContext(session: TerminalSession, data: string): void {
+  session.autoTitleContext = (session.autoTitleContext + data).slice(-AUTO_TITLE_CONTEXT_LIMIT);
+}
+
+function clearAutoTitleForNewAgentSession(sessionId: string, session: TerminalSession): void {
+  const record = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
+  if (!record?.autoTitle) return;
+  const next: PersistedClientSession = { ...record, customName: undefined, autoTitle: null };
+  upsertGlobalSessionRecord(next);
+  session.autoTitleContext = '';
+  if (next.mode === 'tmux' && next.tmuxSessionName) {
+    void unsetTmuxOption(next.tmuxSessionName, '@termdock-friendly-name');
+  }
+  schedulePersistGlobalState();
+  broadcastClientState();
+  console.log(`[auto-title] cleared stale title for new agent session in ${sessionId}`);
+}
+
+async function maybeAutoRenameSession(sessionId: string, agent: AgentInfo, rawContext: string): Promise<void> {
+  if (autoTitlePending.has(sessionId)) return;
+  if (!getAutoRenameAgentsSetting().includes(agent.slug)) return;
+
+  const record = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
+  if (!record || (record.customName === true && !record.autoTitle)) return;
+  if (record.autoTitle && Date.now() - record.autoTitle.updatedAt < AUTO_TITLE_REEVALUATE_MS) return;
+
+  const context = cleanTerminalContext(rawContext);
+  if (context.length < 120) return;
+  const contentHash = createHash('sha256').update(context).digest('hex');
+  if (record.autoTitle?.contentHash === contentHash) return;
+
+  autoTitlePending.add(sessionId);
+  try {
+    const savedModels = getAutoRenameModelsSetting();
+    const catalog = await getTitleNamerCatalog();
+    const availableModels = new Map(catalog.map((namer) => [
+      namer.slug,
+      new Set(namer.models.map((model) => model.id)),
+    ]));
+    const validModels = Object.fromEntries(Object.entries(savedModels)
+      .filter(([slug, model]) => availableModels.get(slug as 'codex' | 'claude')?.has(model)));
+    for (const namer of catalog) {
+      if (!validModels[namer.slug] && namer.recommendedModel) {
+        validModels[namer.slug] = namer.recommendedModel;
+      }
+    }
+    const title = await generateAgentTitle(agent.slug, agent.displayName, context, {
+      namer: getAutoRenameNamerSetting(),
+      models: validModels,
+      currentTitle: record.autoTitle ? record.name : undefined,
+    });
+    if (!title) return;
+
+    // A manual rename performed while the namer was running always wins.
+    const current = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
+    if (!current || (current.customName === true && !current.autoTitle)) return;
+
+    if (current.autoTitle && !shouldReplaceAutoTitle(current.name, title)) {
+      upsertGlobalSessionRecord({
+        ...current,
+        autoTitle: { agentSlug: agent.slug, contentHash, updatedAt: Date.now() },
+      });
+      await persistGlobalStateNow();
+      console.log(`[auto-title] kept ${sessionId} title ${JSON.stringify(current.name)}`);
+      return;
+    }
+
+    const next: PersistedClientSession = {
+      ...current,
+      name: title,
+      customName: true,
+      autoTitle: { agentSlug: agent.slug, contentHash, updatedAt: Date.now() },
+    };
+    if (next.mode === 'tmux' && next.tmuxSessionName) {
+      await setTmuxOption(next.tmuxSessionName, '@termdock-friendly-name', title);
+    }
+    upsertGlobalSessionRecord(next);
+    await persistGlobalStateNow();
+    broadcastClientState();
+    console.log(`[auto-title] renamed ${sessionId} (${agent.slug}) to ${JSON.stringify(title)}`);
+  } catch (error) {
+    console.warn(`[auto-title] failed for ${sessionId}: ${getErrorMessage(error)}`);
+  } finally {
+    autoTitlePending.delete(sessionId);
+  }
+}
+
 export interface AgentStatusWirePayload {
   type: 'agent-status';
   /** State-machine value; null when no agent session is tracked. */
   agentStatus: AgentSessionStatus | null;
   agentIndicator: AgentIndicator | null;
+  /** Plugin-defined status id/label/tone. `agentStatus` remains the semantic phase. */
+  agentStatusDetail: {
+    id: string;
+    label: string;
+    tone: AgentStatusTone;
+  } | null;
   agent: {
     slug: string;
     displayName: string;
@@ -2711,7 +2828,8 @@ function isPaneAtShellPrompt(session: TerminalSession): boolean {
 function buildAgentStatusPayload(sessionId: string, session: TerminalSession): AgentStatusWirePayload {
   const state = session.agentSession;
   const status = state ? state.status : null;
-  const indicator = status ? AGENT_STATUS_INDICATOR[status] : null;
+  const presentation = state?.presentation ?? null;
+  const indicator = presentation?.indicator ?? (status ? AGENT_STATUS_INDICATOR[status] : null);
   let agent = session.agent;
   let nativeSessionId = state?.sessionId ?? null;
   // The agent just exited: keep offering its last conversation for resume
@@ -2731,6 +2849,9 @@ function buildAgentStatusPayload(sessionId: string, session: TerminalSession): A
     type: 'agent-status',
     agentStatus: status,
     agentIndicator: indicator ?? null,
+    agentStatusDetail: presentation
+      ? { id: presentation.id, label: presentation.label, tone: presentation.tone ?? 'neutral' }
+      : null,
     agent: agent
       ? { slug: agent.slug, displayName: agent.displayName, accentColor: agent.accentColor, icon: agent.icon, isPlugin: agent.isPlugin ?? false, iconMode: agent.iconMode, iconVersion: agent.iconVersion }
       : null,
@@ -2863,6 +2984,7 @@ function applyAgentSignals(
   session.agentLeftAt = null;
 
   let identityChanged = false;
+  let completedTurnAgent: AgentInfo | null = null;
   for (const event of events) {
     // An event naming an agent brands the pane even when the process poll
     // can't see through a wrapper: identity via protocol.
@@ -2872,7 +2994,25 @@ function applyAgentSignals(
     }
     const state = session.agentSession ?? defaultAgentSessionState();
     session.agentSession = state;
+    const previousNativeSessionId = state.sessionId
+      ?? globalSessionState.sessions.find((item) => item.backendSessionId === sessionId)?.agentResume?.sessionId
+      ?? null;
+    if (event.kind === 'session-start' && isNewAgentSessionId(previousNativeSessionId, event.sessionId)) {
+      clearAutoTitleForNewAgentSession(sessionId, session);
+    }
+    if (event.kind === 'prompt-submit') {
+      // Before the first automatic title, keep accumulating short turns until
+      // there is enough substance to name the session. Once titled, only the
+      // latest turn is relevant to the conservative re-evaluation path.
+      const persisted = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
+      if (persisted?.autoTitle) {
+        session.autoTitleContext = '';
+      }
+    }
     applyAgentEvent(state, event);
+    if (event.kind === 'stop') {
+      completedTurnAgent = event.agent ?? session.agent;
+    }
     if (event.kind === 'session-start' || event.kind === 'session-end' || event.kind === 'stop') {
       persistAgentResumeBinding(sessionId, session);
     }
@@ -2908,6 +3048,14 @@ function applyAgentSignals(
   maybeRefreshGitStatusForAgent(sessionId, session);
 
   broadcastAgentStatus(sessionId, session, identityChanged);
+
+  if (completedTurnAgent) {
+    const agent = completedTurnAgent;
+    // Let the current PTY chunk reach the rolling context before reading it.
+    setTimeout(() => {
+      void maybeAutoRenameSession(sessionId, agent, session.autoTitleContext);
+    }, 250).unref?.();
+  }
 }
 
 // ── Git status (branch + diff size) ──
@@ -3074,6 +3222,9 @@ try {
   }
   for (const err of errors) {
     console.warn(`[agent-plugins] validation error in "${err.slug}": ${err.errors.join('; ')}`);
+    if (err.migration?.aiPrompt) {
+      console.warn(`[agent-plugins] AI migration prompt for "${err.slug}": ${err.migration.aiPrompt}`);
+    }
   }
 } catch { /* plugin loading must never block startup */ }
 
@@ -4160,6 +4311,7 @@ function processSessionOutput(sessionId: string, session: TerminalSession, data:
   } catch { /* sniff failure should never block data */ }
 
   if (opts.broadcast) {
+    appendAutoTitleContext(session, data);
     broadcastEvent(sessionId, seq !== undefined ? { type: 'data', data, seq } : { type: 'data', data });
   }
 }
@@ -4350,6 +4502,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     activeProgram: null,
     agent: null,
     agentSession: null,
+    autoTitleContext: '',
     lastAgentReviewed: null,
     agentLeftAt: null,
     gitStatus: null,
@@ -4433,6 +4586,7 @@ async function adoptPtyHostSessions(): Promise<void> {
       activeProgram: null,
       agent: null,
       agentSession: null,
+      autoTitleContext: '',
       lastAgentReviewed: null,
       agentLeftAt: null,
       gitStatus: null,
@@ -4864,9 +5018,11 @@ router.patch('/session-inventory/sessions/:frontendSessionId', async (req, res) 
   const next: PersistedClientSession = { ...previous, lastActivity: Date.now() };
   if (typeof body.name === 'string' && body.name.trim().length > 0) {
     next.name = body.name.trim();
+    next.autoTitle = null;
   }
   if (typeof body.customName === 'boolean') {
     next.customName = body.customName ? true : undefined;
+    next.autoTitle = null;
   }
   if (Object.prototype.hasOwnProperty.call(body, 'backendSessionId')) {
     next.backendSessionId = typeof body.backendSessionId === 'string' && body.backendSessionId.trim().length > 0
@@ -5006,6 +5162,9 @@ async function getSettingsPayload() {
     networkAvailable: caffeinateManager.isNetworkAvailable(),
     locale: getLocaleSetting(),
     contextDraftHeight: getContextDraftHeightSetting(),
+    autoRenameAgents: getAutoRenameAgentsSetting(),
+    autoRenameNamer: getAutoRenameNamerSetting(),
+    autoRenameModels: getAutoRenameModelsSetting(),
     localAccess: {
       ...localAccess,
       interfaces,
@@ -5017,6 +5176,11 @@ async function getSettingsPayload() {
 // ── Settings (prevent sleep) ──────────────────────────────────────────
 router.get('/settings', async (_req, res) => {
   res.json(await getSettingsPayload());
+});
+
+router.get('/auto-title/catalog', async (req, res) => {
+  const force = req.query.refresh === '1';
+  res.json({ namers: await getTitleNamerCatalog(force) });
 });
 
 router.get('/update', (_req, res) => {
@@ -5056,6 +5220,38 @@ router.put('/settings', async (req, res) => {
         setContextDraftHeightSetting(device, Math.round(value));
       }
     }
+  }
+
+  if (Array.isArray(body.autoRenameAgents)) {
+    const knownSlugs = new Set(listAgents().map((agent) => agent.slug));
+    const requested = (body.autoRenameAgents as unknown[])
+      .filter((slug): slug is string => typeof slug === 'string' && knownSlugs.has(slug));
+    setAutoRenameAgentsSetting(requested);
+  }
+
+  if (typeof body.autoRenameNamer === 'string') {
+    if (!['auto', 'codex', 'claude'].includes(body.autoRenameNamer)) {
+      res.status(400).json({ error: 'Unsupported automatic title agent', code: 'AUTO_RENAME_NAMER_INVALID' });
+      return;
+    }
+    setAutoRenameNamerSetting(body.autoRenameNamer as 'auto' | 'codex' | 'claude');
+  }
+
+  if (body.autoRenameModels && typeof body.autoRenameModels === 'object') {
+    const requested = body.autoRenameModels as Record<string, unknown>;
+    const catalog = await getTitleNamerCatalog();
+    const allowed = new Map(catalog.map((namer) => [namer.slug, new Set(namer.models.map((model) => model.id))]));
+    const models: Record<string, string> = {};
+    for (const slug of ['codex', 'claude'] as const) {
+      const model = requested[slug];
+      if (model === undefined || model === '') continue;
+      if (typeof model !== 'string' || !allowed.get(slug)?.has(model)) {
+        res.status(400).json({ error: `Unsupported ${slug} title model`, code: 'AUTO_RENAME_MODEL_INVALID' });
+        return;
+      }
+      models[slug] = model;
+    }
+    setAutoRenameModelsSetting(models);
   }
 
   if (body.localAccess && typeof body.localAccess === 'object') {
@@ -5109,6 +5305,73 @@ router.get('/agent-hooks', (_req, res) => {
   res.json({ agents: listAllHookAgents() });
 });
 
+router.get('/agent-launchers', async (_req, res) => {
+  const pathEntries = buildAugmentedPath().split(path.delimiter).filter(Boolean);
+  const executableExtensions = process.platform === 'win32'
+    ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';')
+    : [''];
+  const detected = [] as Array<{ slug: string; displayName: string; command: string }>;
+
+  for (const agent of listAgents()) {
+    let command: string | null = null;
+    for (const alias of agent.aliases) {
+      for (const directory of pathEntries) {
+        for (const extension of executableExtensions) {
+          const candidate = path.join(directory, `${alias}${extension}`);
+          try {
+            await fs.promises.access(candidate, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
+            command = alias;
+            break;
+          } catch { /* keep looking */ }
+        }
+        if (command) break;
+      }
+      if (command) break;
+    }
+    if (command) detected.push({ slug: agent.slug, displayName: agent.displayName, command });
+  }
+
+  res.json({ agents: detected });
+});
+
+router.get('/directory-suggestions', async (req, res) => {
+  const rawQuery = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const expandedQuery = rawQuery === '~'
+    ? os.homedir()
+    : rawQuery.startsWith(`~${path.sep}`)
+      ? path.join(os.homedir(), rawQuery.slice(2))
+      : rawQuery;
+  const absoluteQuery = expandedQuery || os.homedir();
+  const hasTrailingSeparator = absoluteQuery.endsWith(path.sep);
+  const parentCandidate = hasTrailingSeparator ? absoluteQuery : path.dirname(absoluteQuery);
+  const namePrefix = hasTrailingSeparator ? '' : path.basename(absoluteQuery).toLowerCase();
+
+  try {
+    const parent = req.pathValidator
+      ? await req.pathValidator.validateAsync(parentCandidate)
+      : await fs.promises.realpath(parentCandidate);
+    const entries = await fs.promises.readdir(parent, { withFileTypes: true });
+    const matching = entries
+      .filter((entry) => !entry.name.startsWith('.') && entry.name.toLowerCase().startsWith(namePrefix))
+      .slice(0, 30);
+    const directories: string[] = [];
+    for (const entry of matching) {
+      const candidate = path.join(parent, entry.name);
+      if (entry.isDirectory()) {
+        directories.push(candidate);
+      } else if (entry.isSymbolicLink()) {
+        try {
+          if ((await fs.promises.stat(candidate)).isDirectory()) directories.push(candidate);
+        } catch { /* omit broken/inaccessible symlinks */ }
+      }
+      if (directories.length >= 10) break;
+    }
+    res.json({ directories });
+  } catch {
+    res.json({ directories: [] });
+  }
+});
+
 router.post('/agent-hooks/:agent/install', async (req, res) => {
   const agent = req.params.agent;
   try {
@@ -5146,7 +5409,7 @@ router.get('/agent-plugins', (_req, res) => {
       hasResume: p.manifest.resume !== undefined,
       hasIcon: p.iconPath !== null,
     })),
-    errors: errors.map((e) => ({ slug: e.slug, errors: e.errors })),
+    errors: errors.map((e) => ({ slug: e.slug, errors: e.errors, code: e.code, migration: e.migration })),
   });
 });
 
@@ -5165,8 +5428,20 @@ router.post('/agent-plugins', async (req, res) => {
       res.status(409).json({ error: `Plugin "${existing.manifest.slug}" already exists` });
       return;
     }
-    const dir = savePlugin(manifest as AgentPluginManifest);
-    res.json({ slug: (manifest as Record<string, unknown>).slug, dir, state: 'created' });
+    const validation = validateManifest(manifest, path.join(os.homedir(), '.termdock', 'agent-plugins', 'pending'));
+    if ('error' in validation) {
+      res.status(400).json({
+        error: validation.error.errors.join('\n'),
+        code: validation.error.code ?? 'AGENT_PLUGIN_MANIFEST_INVALID',
+        migration: validation.error.migration,
+      });
+      return;
+    }
+    const dir = savePlugin(validation.manifest);
+    clearPluginAgents();
+    const loaded = loadPlugins();
+    registerPluginAgents(loaded.plugins);
+    res.json({ slug: validation.manifest.slug, dir, state: 'created' });
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
   }
@@ -5176,6 +5451,8 @@ router.delete('/agent-plugins/:slug', async (req, res) => {
   const { slug } = req.params;
   try {
     removePlugin(slug);
+    clearPluginAgents();
+    registerPluginAgents(loadPlugins().plugins);
     res.json({ slug, state: 'removed' });
   } catch (error) {
     res.status(404).json({ error: (error as Error).message });

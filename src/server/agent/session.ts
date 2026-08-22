@@ -23,6 +23,19 @@ export const AGENT_EVENT_PROTOCOL_VERSION = 1;
  */
 export type AgentSessionStatus = 'idle' | 'working' | 'waiting' | 'done';
 
+/** Presentation is plugin-defined; phase remains the stable behavioral API
+ * used by notifications, attention, and resume logic. */
+export type AgentStatusIndicator = 'spinner' | 'pulse' | 'dot' | 'ring' | 'badge' | 'terminal' | 'question';
+export type AgentStatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger' | 'accent';
+
+export interface AgentStatusDefinition {
+  id: string;
+  phase: AgentSessionStatus;
+  label: string;
+  indicator?: AgentStatusIndicator;
+  tone?: AgentStatusTone;
+}
+
 export type AgentEventKind =
   | 'session-start'
   | 'prompt-submit'
@@ -48,6 +61,8 @@ export interface AgentEvent {
   message: string | null;
   /** The agent's working directory at the moment the hook fired, when carried. */
   cwd: string | null;
+  /** Optional plugin-defined presentation status resolved from its manifest. */
+  status: AgentStatusDefinition | null;
 }
 
 /**
@@ -81,6 +96,8 @@ export interface AgentSessionState {
   /** Whether the user has acknowledged the current turn's result. Server-
    *  authoritative so the 'needs review' indicator survives page refresh. */
   reviewed: boolean;
+  /** Rich, plugin-defined display state. Behavioral code must use `status`. */
+  presentation: AgentStatusDefinition | null;
 }
 
 export function defaultAgentSessionState(): AgentSessionState {
@@ -93,6 +110,7 @@ export function defaultAgentSessionState(): AgentSessionState {
     agentCwd: null,
     activity: 0,
     reviewed: true,
+    presentation: null,
   };
 }
 
@@ -104,6 +122,9 @@ export function applyAgentEvent(state: AgentSessionState, ev: AgentEvent): void 
   state.rich = true;
   if (ev.sessionId) state.sessionId = ev.sessionId;
   if (ev.cwd) state.agentCwd = ev.cwd;
+  // A custom state is scoped to one hook edge; never let it leak into the
+  // next core lifecycle event that did not explicitly declare it.
+  state.presentation = null;
 
   switch (ev.kind) {
     case 'session-start':
@@ -166,6 +187,11 @@ export function applyAgentEvent(state: AgentSessionState, ev: AgentEvent): void 
       state.agentCwd = null;
       break;
   }
+
+  if (ev.status) {
+    state.status = ev.status.phase;
+    state.presentation = ev.status;
+  }
 }
 
 function nonEmpty(s: unknown): string | null {
@@ -196,12 +222,19 @@ export function parseAgentEvent(payload: string): AgentEvent | null {
   const eventName = nonEmpty(w.event);
   if (!eventName || !EVENT_KINDS.has(eventName as AgentEventKind)) return null;
 
+  const agent = agentBySlug(nonEmpty(w.agent));
+  const statusId = nonEmpty(w.status);
+  const status = statusId
+    ? agent?.statuses?.find((definition) => definition.id === statusId) ?? null
+    : null;
+
   return {
-    agent: agentBySlug(nonEmpty(w.agent)),
+    agent,
     kind: eventName as AgentEventKind,
     sessionId: nonEmpty(w.session_id),
     message: nonEmpty(w.message),
     cwd: nonEmpty(w.cwd),
+    status,
   };
 }
 
@@ -211,7 +244,7 @@ export function parseAgentEvent(payload: string): AgentEvent | null {
  * `payloadJson` is the hook's raw stdin JSON from the agent; fields are lifted
  * into the sentinel body (snake_case, with camelCase aliases for Grok).
  */
-export function buildHookSequence(agent: string, event: string, stdinJson: string): string {
+export function buildHookSequence(agent: string, event: string, stdinJson: string, statusId?: string): string {
   let payload: Record<string, unknown> = {};
   try {
     const parsed = JSON.parse(stdinJson) as unknown;
@@ -223,6 +256,7 @@ export function buildHookSequence(agent: string, event: string, stdinJson: strin
     agent,
     event,
   };
+  if (statusId) body.status = statusId;
   for (const [key, alias] of [['session_id', 'sessionId'], ['message', 'message'], ['cwd', 'cwd']] as const) {
     const v = nonEmpty(payload[key]) ?? nonEmpty(payload[alias]);
     if (v) body[key] = v;

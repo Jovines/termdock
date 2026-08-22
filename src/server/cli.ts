@@ -20,10 +20,11 @@ import https from 'https';
 import path from 'path';
 import readline from 'readline';
 import { createHash, randomUUID } from 'crypto';
-import { spawn, execFile } from 'child_process';
+import { spawn, spawnSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { Writable } from 'stream';
 import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
 import { PORT, DEFAULT_HOST, TMUX } from './config.js';
 import { isFirstRunCompleted, markFirstRunCompleted, normalizeLocalAccessName, setLocalAccessSetting, getLocalAccessSetting, getPreventSleepSetting } from './utils/settings.js';
 import { runBootChecks, formatBootCheckReport } from './utils/bootCheck.js';
@@ -144,9 +145,11 @@ interface CliOptions {
   changeAuditShow?: { id: string; cwd?: string };
   injectChangeAuditHunk?: { id: string; cwd?: string };
   pluginInit: boolean;
+  pluginInitJson: boolean;
   pluginCreate?: string;
   pluginList: boolean;
   pluginRemove?: string;
+  agentEvent?: { slug: string; event: string; status?: string };
 }
 
 interface ServerState {
@@ -203,7 +206,8 @@ Options:
   --tls              List termdock-managed tmux sessions (reads tmux directly,
                      no server connection required)
   -a, --all          With --tls/--attach-tmux: include tmux sessions not stamped by termdock
-  --json             With --tls: emit JSON instead of a table
+  --json             With --tls: emit session JSON; with --plugin-init:
+                     emit the machine-readable Agent integration protocol
   --attach-tmux [n]  Attach to a termdock-managed tmux session.
                      With no name: interactive picker.
                      With name: attach directly (e.g. --attach-tmux wt-foo).
@@ -231,7 +235,7 @@ Options:
   --change-audit-explain <id> [cwd]
                      Read a natural-language explanation from stdin and inject
                       it for the specified Termdock hunk ID.
-  --plugin-init      Print the agent plugin manifest schema reference
+  --plugin-init      Print the Agent integration protocol reference
   --plugin-create <file>
                      Create a plugin from a manifest JSON file
   --plugin-list      List installed agent plugins
@@ -240,7 +244,12 @@ Options:
   -h, --help         Show this help message
 
 Short commands:
-  pi                 Same as --plugin-init
+  agent-plugin [--json]
+                     Explain how an Agent integrates itself. JSON mode is
+                     machine-readable and intended for Agent consumption.
+  agent-event <slug> <event> [status]
+                     Emit one lifecycle/status event from an Agent hook.
+  pi                 Same as agent-plugin
   plugin-create <file>
                      Same as --plugin-create <file>
   plugin-list        Same as --plugin-list
@@ -594,9 +603,11 @@ function parseArgs(argv: string[]): CliOptions {
   let changeAuditShow: { id: string; cwd?: string } | undefined;
   let injectChangeAuditHunk: { id: string; cwd?: string } | undefined;
   let pluginInit = false;
+  let pluginInitJson = false;
   let pluginCreate: string | undefined;
   let pluginList = false;
   let pluginRemove: string | undefined;
+  let agentEvent: { slug: string; event: string; status?: string } | undefined;
 
   // Short command aliases for the common path. Keep these positional-only so
   // long-form flags remain the single source of truth for option semantics.
@@ -675,9 +686,20 @@ function parseArgs(argv: string[]): CliOptions {
       if (command === 'audit-show') changeAuditShow = { id: next, cwd };
       else injectChangeAuditHunk = { id: next, cwd };
       argv = argv.slice(cwd ? 3 : 2);
-    } else if (command === 'pi' || command === 'plugin-init') {
+    } else if (command === 'pi' || command === 'plugin-init' || command === 'agent-plugin') {
       pluginInit = true;
-      argv = argv.slice(1);
+      pluginInitJson = next === '--json';
+      argv = argv.slice(pluginInitJson ? 2 : 1);
+    } else if (command === 'agent-event') {
+      const event = argv[2];
+      const customStatus = argv[3];
+      if (next && event && !next.startsWith('-') && !event.startsWith('-')) {
+        agentEvent = { slug: next, event, status: customStatus && !customStatus.startsWith('-') ? customStatus : undefined };
+        argv = argv.slice(agentEvent.status ? 4 : 3);
+      } else {
+        console.error(`${ICON.err} ${c.red('Usage: td agent-event <slug> <event> [status]')}`);
+        process.exit(1);
+      }
     } else if (command === 'pcreate' || command === 'plugin-create') {
       if (next && !next.startsWith('-')) {
         pluginCreate = next;
@@ -795,7 +817,8 @@ function parseArgs(argv: string[]): CliOptions {
     }
 
     if (arg === '--json') {
-      tlsJson = true;
+      if (pluginInit) pluginInitJson = true;
+      else tlsJson = true;
       continue;
     }
 
@@ -977,9 +1000,11 @@ function parseArgs(argv: string[]): CliOptions {
     changeAuditShow,
     injectChangeAuditHunk,
     pluginInit,
+    pluginInitJson,
     pluginCreate,
     pluginList,
     pluginRemove,
+    agentEvent,
   };
 }
 
@@ -1836,10 +1861,129 @@ function requireRunningServer(): { baseUrl: string; token: string } {
   return { baseUrl: resolveServerBaseUrl(state), token };
 }
 
+const AGENT_EVENT_KINDS = [
+  'session-start',
+  'prompt-submit',
+  'permission-request',
+  'question-asked',
+  'tool-complete',
+  'notification',
+  'stop',
+  'session-end',
+] as const;
+
+const AGENT_PLUGIN_EXAMPLE = {
+  version: 2,
+  slug: 'my-agent',
+  displayName: 'My Agent',
+  aliases: ['my-agent'],
+  accentColor: '#4385BE',
+  iconMode: 'mask',
+  statuses: [
+    { id: 'thinking', phase: 'working', label: 'Thinking', indicator: 'spinner', tone: 'info' },
+    { id: 'approval', phase: 'waiting', label: 'Needs approval', indicator: 'question', tone: 'warning' },
+    { id: 'complete', phase: 'done', label: 'Complete', indicator: 'badge', tone: 'success' },
+  ],
+  hooks: {
+    target: '~/.my-agent/settings.json',
+    events: [
+      { hook: 'UserPromptSubmit', event: 'prompt-submit', status: 'thinking' },
+      { hook: 'PermissionRequest', event: 'permission-request', status: 'approval' },
+      { hook: 'Stop', event: 'stop', status: 'complete' },
+    ],
+  },
+  resume: {
+    command: 'my-agent --resume {sessionId}',
+    staleFlags: ['--resume'],
+  },
+} as const;
+
+function runPluginInitJson(): void {
+  console.log(JSON.stringify({
+    protocol: 'termdock-agent-plugin',
+    version: 2,
+    purpose: 'Register this Agent with Termdock and publish lifecycle/status updates.',
+    commands: {
+      guide: 'td agent-plugin --json',
+      register: 'td plugin-create ./manifest.json',
+      emit: 'td agent-event <slug> <event> [status]',
+      inspect: 'td plugin-list',
+      remove: 'td plugin-remove <slug>',
+    },
+    ui: {
+      location: 'Settings > Detection Rules',
+      registration: 'A successfully created plugin appears immediately without restarting Termdock.',
+      install: 'The user clicks Install to write the declared hook mappings into hooks.target.',
+      uninstall: 'The user clicks Uninstall to remove only Termdock-owned hook entries.',
+    },
+    lifecycleEvents: AGENT_EVENT_KINDS,
+    phases: ['idle', 'working', 'waiting', 'done'],
+    indicators: ['spinner', 'pulse', 'dot', 'ring', 'badge', 'terminal', 'question'],
+    tones: ['neutral', 'info', 'success', 'warning', 'danger', 'accent'],
+    statusModel: {
+      phase: 'Stable Termdock behavior used for notifications and attention.',
+      id: 'Agent-defined fine-grained status referenced by hook mappings or agent-event.',
+      label: 'Human-readable status text.',
+      indicator: 'Theme-safe visual indicator.',
+      tone: 'Theme token; arbitrary status colors are not accepted.',
+    },
+    migrationV1: {
+      errorCode: 'AGENT_PLUGIN_MANIFEST_V1_UNSUPPORTED',
+      guideCommand: 'td agent-plugin --json',
+      aiPrompt: 'Please migrate the attached Termdock Agent plugin manifest from v1 to v2. Preserve slug, displayName, aliases, accentColor, iconMode, hooks.target, and resume. Add statuses[] entries with id, phase (idle|working|waiting|done), label, indicator, and tone. Add a status reference to each relevant hooks.events[] mapping while keeping its core event value. Use the output of `td agent-plugin --json` as the authoritative schema. Return only the corrected manifest JSON.',
+    },
+    hookPayload: {
+      stdin: 'Optional JSON object.',
+      recognizedFields: ['session_id', 'sessionId', 'message', 'cwd'],
+      example: 'printf \'%s\' \'{"session_id":"abc","message":"Indexing"}\' | td agent-event my-agent prompt-submit thinking',
+    },
+    integrationSteps: [
+      'Generate a version 2 manifest using this schema and save it as JSON.',
+      'Run td plugin-create <manifest-file>; the Agent appears in Termdock immediately.',
+      'Ask the user to open Settings > Detection Rules and click Install for this Agent. They can uninstall it there later.',
+      'If the Agent hook format is not a Claude-style hooks map, configure native hooks to call td agent-event directly.',
+      'Run td plugin-list to verify registration.',
+    ],
+    manifest: AGENT_PLUGIN_EXAMPLE,
+  }, null, 2));
+}
+
+function runAgentEvent(input: { slug: string; event: string; status?: string }): void {
+  const slugPattern = /^[a-z][a-z0-9-]{0,39}$/;
+  if (!slugPattern.test(input.slug)) {
+    console.error(`${ICON.err} ${c.red('agent-event slug must be lowercase alphanumeric with hyphens')}`);
+    process.exit(1);
+  }
+  if (!(AGENT_EVENT_KINDS as readonly string[]).includes(input.event)) {
+    console.error(`${ICON.err} ${c.red(`Unknown agent event: ${input.event}`)}`);
+    console.error(`  ${c.dim(`Expected one of: ${AGENT_EVENT_KINDS.join(', ')}`)}`);
+    process.exit(1);
+  }
+  if (input.status && !slugPattern.test(input.status)) {
+    console.error(`${ICON.err} ${c.red('agent-event status must be lowercase alphanumeric with hyphens')}`);
+    process.exit(1);
+  }
+
+  const script = fileURLToPath(new URL('./agentHook.js', import.meta.url));
+  const result = spawnSync(process.execPath, [script, 'agent-hook', input.slug, input.event, ...(input.status ? [input.status] : [])], {
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (result.error) {
+    console.error(`${ICON.err} ${c.red(`Failed to emit Agent event: ${result.error.message}`)}`);
+    process.exit(1);
+  }
+  process.exit(result.status ?? 0);
+}
+
 function runPluginInit(): void {
   console.log(`\
-${c.bold('Agent Plugin Reference')}
-${c.dim('─────────────────────')}
+${c.bold('Termdock Agent Integration Protocol v2')}
+${c.dim('──────────────────────────────────────')}
+
+Machine-readable form for an Agent to inspect itself:
+
+  ${c.cyan('td agent-plugin --json')}
 
 A plugin is a directory under ${c.cyan('~/.termdock/agent-plugins/<slug>/')} containing:
 
@@ -1850,8 +1994,8 @@ ${c.bold('manifest.json schema')}
 ${c.dim('───────────────────')}
 
 {
-  ${c.dim('// Manifest version. Must be')} ${c.green('1')}${c.dim('.')}
-  "version": 1,
+  ${c.dim('// Manifest version. Must be')} ${c.green('2')}${c.dim('.')}
+  "version": 2,
 
   ${c.dim('// Unique slug (lowercase alphanum + hyphens, max 40 chars).')}
   ${c.dim('// Must not collide with built-in agent slugs.')}
@@ -1874,6 +2018,13 @@ ${c.dim('───────────────────')}
   ${c.dim('//   "native" - SVG rendered directly, preserving original fills/gradients.')}
   "iconMode": "native",
 
+  ${c.dim('// Optional fine-grained states. phase drives behavior; the rest drives UI.')}
+  "statuses": [
+    { "id": "thinking", "phase": "working", "label": "Thinking", "indicator": "spinner", "tone": "info" },
+    { "id": "approval", "phase": "waiting", "label": "Needs approval", "indicator": "question", "tone": "warning" },
+    { "id": "complete", "phase": "done", "label": "Complete", "indicator": "badge", "tone": "success" }
+  ],
+
   ${c.dim('// ── optional: hook installation (bring your own hooks.json surface) ──')}
   "hooks": {
     ${c.dim("// Path to the agent's hooks config file (~-abbreviated).")}
@@ -1884,10 +2035,10 @@ ${c.dim('───────────────────')}
     ${c.dim('// Optional matcher narrows the subscription (e.g. permission type).')}
     "events": [
       { "hook": "SessionStart",       "event": "session-start" },
-      { "hook": "UserPromptSubmit",   "event": "prompt-submit" },
-      { "hook": "Notification",       "event": "notification", "matcher": "elicitation_dialog" },
+      { "hook": "UserPromptSubmit",   "event": "prompt-submit", "status": "thinking" },
+      { "hook": "Notification",       "event": "notification", "status": "approval", "matcher": "elicitation_dialog" },
       { "hook": "PostToolUse",        "event": "tool-complete" },
-      { "hook": "Stop",               "event": "stop" },
+      { "hook": "Stop",               "event": "stop", "status": "complete" },
       { "hook": "SessionEnd",         "event": "session-end" }
     ]
   },
@@ -1916,28 +2067,48 @@ ${c.dim('─────────────────────')}
 ${c.bold('Creating a plugin')}
 ${c.dim('──────────────────')}
 
-  # 1. Create the plugin directory with manifest + icon
-  mkdir -p ~/.termdock/agent-plugins/trae
-  cp manifest.json icon.svg ~/.termdock/agent-plugins/trae/
-
-  ${c.dim('# 2. Install the plugin via CLI (needs running server)')}
-  td plugin-create ~/.termdock/agent-plugins/trae/manifest.json
-
-  ${c.dim('# 3. Or create directly from the manifest JSON')}
+  ${c.dim('# Inject the Agent definition; it appears in the UI immediately')}
   td plugin-create ./trae-manifest.json
 
-  ${c.dim('# 4. List installed plugins')}
+  ${c.dim('# The user then opens Settings > Detection Rules and clicks Install.')}
+  ${c.dim('# The same UI button can uninstall the hooks later.')}
+
+  ${c.dim('# Verify registration')}
   td plugin-list
 
-  ${c.dim('# 5. Remove a plugin')}
+  ${c.dim('# Remove')}
   td plugin-remove trae
+
+${c.bold('Direct event bridge for any hook system')}
+${c.dim('───────────────────────────────────────')}
+
+  If the Agent does not use a Claude-style hooks JSON file, configure its
+  native hooks to invoke this stable public CLI command instead:
+
+  td agent-event trae prompt-submit thinking
+  td agent-event trae permission-request approval
+  td agent-event trae stop complete
+
+  Hook JSON may be piped on stdin. Termdock recognizes session_id/sessionId,
+  message, and cwd:
+
+  printf '%s' '{"session_id":"abc","message":"Indexing"}' | td agent-event trae prompt-submit thinking
 
 ${c.bold('Manifest validation at startup')}
 ${c.dim('───────────────────────────────')}
 
-  Termdock validates every plugin manifest on server start. Errors are logged
+  Termdock validates every plugin manifest before registration. Errors are logged
   to ${c.cyan('~/.termdock/server.log')} and visible via ${c.cyan('td plugin-list')}${c.dim('.')}
   Slugs/aliases that collide with built-in agents are skipped.
+
+${c.bold('Migrating a v1 plugin')}
+${c.dim('─────────────────────')}
+
+  v1 manifests fail with ${c.cyan('AGENT_PLUGIN_MANIFEST_V1_UNSUPPORTED')} and an
+  AI-ready repair prompt. Copy that prompt together with the old manifest to
+  an AI, or let the AI inspect the current schema directly:
+
+  ${c.cyan('td agent-plugin --json')}
 `);
 }
 
@@ -1959,14 +2130,28 @@ async function runPluginCreate(manifestPath: string): Promise<void> {
   }
   const { baseUrl, token } = requireRunningServer();
   const response = await postLocalJson(baseUrl, token, '/api/terminal/agent-plugins', manifest);
-  const body = JSON.parse(response.body || '{}') as { slug?: string; error?: string; dir?: string };
+  const body = JSON.parse(response.body || '{}') as {
+    slug?: string;
+    error?: string;
+    dir?: string;
+    code?: string;
+    migration?: { guideCommand?: string; aiPrompt?: string };
+  };
   if (response.statusCode < 200 || response.statusCode >= 300) {
-    console.error(`${ICON.err} ${c.red(body.error || 'Failed to create plugin')}`);
+    console.error(`${ICON.err} ${c.red(body.code ? `${body.code}:` : 'Plugin validation failed:')}`);
+    console.error(body.error || 'Failed to create plugin');
+    if (body.migration?.guideCommand) {
+      console.error(`\n${c.bold('Current schema:')} ${c.cyan(body.migration.guideCommand)}`);
+    }
+    if (body.migration?.aiPrompt) {
+      console.error(`\n${c.bold('Copy this to your AI:')}\n${body.migration.aiPrompt}`);
+    }
     process.exit(1);
   }
   console.log(`${ICON.ok} ${c.green(`Plugin "${body.slug}" created.`)}`);
   console.log(`  ${c.dim('Directory:')} ${c.cyan(body.dir ?? resolved)}`);
-  console.log(`  ${c.dim('Restart Termdock to activate:')} ${c.cyan('td --stop && td')}`);
+  console.log(`  ${c.dim('Visible immediately in Settings > Detection Rules; no restart required.')}`);
+  console.log(`  ${c.dim('The user can click Install or Uninstall there.')}`);
 }
 
 async function runPluginList(): Promise<void> {
@@ -1974,7 +2159,12 @@ async function runPluginList(): Promise<void> {
   const response = await getLocalJson(baseUrl, token, '/api/terminal/agent-plugins');
   const body = JSON.parse(response.body || '{}') as {
     plugins?: Array<{ slug: string; displayName: string; aliases: string[]; accentColor: string; iconMode: string; hasHooks: boolean; hasResume: boolean; hasIcon: boolean }>;
-    errors?: Array<{ slug: string; errors: string[] }>;
+    errors?: Array<{
+      slug: string;
+      errors: string[];
+      code?: string;
+      migration?: { guideCommand?: string; aiPrompt?: string };
+    }>;
   };
   if (response.statusCode < 200 || response.statusCode >= 300) {
     console.error(`${ICON.err} ${c.red('Failed to list plugins')}`);
@@ -1983,7 +2173,7 @@ async function runPluginList(): Promise<void> {
   const plugins = body.plugins ?? [];
   if (plugins.length === 0) {
     console.log(`${c.dim('No plugins installed.')}`);
-    console.log(`  ${c.dim('See:')} ${c.cyan('td plugin-init')}`);
+    console.log(`  ${c.dim('See:')} ${c.cyan('td agent-plugin')}`);
   } else {
     console.log(`${c.bold('Installed plugins')} ${c.dim(`(${plugins.length})`)}`);
     console.log('');
@@ -2001,7 +2191,10 @@ async function runPluginList(): Promise<void> {
     console.log('');
     console.log(`${c.yellow('Validation errors')}`);
     for (const e of errors) {
-      console.log(`  ${c.red('✗')} ${c.cyan(e.slug)}${c.dim(':')} ${e.errors.join('; ')}`);
+      console.log(`  ${c.red('✗')} ${c.cyan(e.slug)}${c.dim(':')} ${e.code ? c.yellow(e.code) : e.errors.join('; ')}`);
+      for (const message of e.errors) console.log(`    ${message}`);
+      if (e.migration?.guideCommand) console.log(`    ${c.dim('Current schema:')} ${c.cyan(e.migration.guideCommand)}`);
+      if (e.migration?.aiPrompt) console.log(`    ${c.dim('Copy this to your AI:')} ${e.migration.aiPrompt}`);
     }
   }
 }
@@ -3062,8 +3255,13 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  if (options.agentEvent) {
+    runAgentEvent(options.agentEvent);
+  }
+
   if (options.pluginInit) {
-    runPluginInit();
+    if (options.pluginInitJson) runPluginInitJson();
+    else runPluginInit();
     process.exit(0);
   }
 

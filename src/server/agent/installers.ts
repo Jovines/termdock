@@ -723,7 +723,7 @@ interface PluginHookAgentEntry {
   slug: string;
   displayName: string;
   targetPath: string;
-  events: Array<[string, string, string | null, number?]>;
+  events: Array<[string, string, string | null, number?, string?]>;
 }
 
 /** Collect all plugin agents that define hooks. */
@@ -732,8 +732,8 @@ function pluginHookEntries(): PluginHookAgentEntry[] {
   return plugins
     .filter((p) => p.manifest.hooks && p.manifest.hooks.events.length > 0)
     .map((p) => {
-      const events: Array<[string, string, string | null, number?]> = p.manifest.hooks!.events.map(
-        (e: PluginHookEvent) => [e.hook, e.event, e.matcher ?? null, e.timeout],
+      const events: Array<[string, string, string | null, number?, string?]> = p.manifest.hooks!.events.map(
+        (e: PluginHookEvent) => [e.hook, e.event, e.matcher ?? null, e.timeout, e.status],
       );
       return {
         slug: p.manifest.slug,
@@ -745,9 +745,10 @@ function pluginHookEntries(): PluginHookAgentEntry[] {
 }
 
 /** Hook command for a plugin agent. Uses the same emitter script but with the plugin slug. */
-function hookCommandForPlugin(slug: string, event: string): string {
+function hookCommandForPlugin(slug: string, event: string, status?: string): string {
   const { script } = resolveHookScript();
-  return `"${process.execPath}" "${script}" agent-hook ${slug} ${event}`;
+  const statusArg = status ? ` ${status}` : '';
+  return `"${process.execPath}" "${script}" agent-hook ${slug} ${event}${statusArg}`;
 }
 
 /**
@@ -774,7 +775,7 @@ export function listAllHookAgents(): HookAgentInfo[] {
       slug: entry.slug,
       displayName: entry.displayName,
       targetDisplay: abbreviateHome(entry.targetPath),
-      state: pluginHooksState(entry.slug, entry.targetPath, entry.events.map(([h, s]) => [h, s]) as Array<[string, string]>),
+      state: pluginHooksState(entry.slug, entry.targetPath, entry.events),
       accentColor: agent?.accentColor ?? '#878580',
       icon: agent?.icon ?? null,
       iconMode: agent?.iconMode ?? null,
@@ -792,7 +793,7 @@ export function hooksStateForSlug(slug: string): HooksState {
     return pluginHooksState(
       slug,
       entry.targetPath,
-      entry.events.map(([h, s]) => [h, s]) as Array<[string, string]>,
+      entry.events,
     );
   }
   return hooksState(slug as HookAgentSlug);
@@ -826,7 +827,7 @@ export async function uninstallHooksForSlug(slug: string): Promise<string> {
 function pluginHooksState(
   slug: string,
   file: string,
-  events: Array<[string, string]>,
+  events: Array<[string, string, string | null, number?, string?]>,
 ): HooksState {
   const root = readJsonObject(file);
   if (!root) return 'not-installed';
@@ -834,7 +835,7 @@ function pluginHooksState(
   const hooks = root.hooks;
   let any = false;
   let complete = true;
-  for (const [hookEvent, sentinel] of events) {
+  for (const [hookEvent, sentinel, , , status] of events) {
     const list = hooks && typeof hooks === 'object'
       ? (hooks as JsonObject)[hookEvent]
       : null;
@@ -843,7 +844,7 @@ function pluginHooksState(
       : null;
     if (ours !== null) {
       any = true;
-      if (ours !== hookCommandForPlugin(slug, sentinel)) complete = false;
+      if (ours !== hookCommandForPlugin(slug, sentinel, status)) complete = false;
     } else {
       complete = false;
     }
@@ -856,7 +857,7 @@ function pluginHooksState(
 function installPluginHooks(
   slug: string,
   file: string,
-  events: Array<[string, string, string | null, number?]>,
+  events: Array<[string, string, string | null, number?, string?]>,
 ): InstallResult {
   const { devMode } = resolveHookScript();
   let root: JsonObject = {};
@@ -880,8 +881,8 @@ function installPluginHooks(
   const hooks = root.hooks as JsonObject;
   const mark = marker(slug as HookAgentSlug);
 
-  for (const [hookEvent, sentinel, matcher] of events) {
-    const command = hookCommandForPlugin(slug, sentinel);
+  for (const [hookEvent, sentinel, matcher, , status] of events) {
+    const command = hookCommandForPlugin(slug, sentinel, status);
     let list = hooks[hookEvent];
     if (list === undefined) {
       list = [];
@@ -946,7 +947,7 @@ export function refreshStaleHooksAtLaunch(): number {
     const state = pluginHooksState(
       entry.slug,
       entry.targetPath,
-      entry.events.map(([h, s]) => [h, s]) as Array<[string, string]>,
+      entry.events,
     );
     if (state !== 'outdated') continue;
     try {

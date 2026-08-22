@@ -16,6 +16,7 @@ import {
   RefreshCw as RiRefreshLine,
   Plus as RiAddLine,
   Code as RiCodeLine,
+  Clipboard as RiClipboardLine,
 } from 'lucide-react';
 import {
   getAgentHooks,
@@ -24,11 +25,18 @@ import {
   getAgentPlugins,
   createAgentPlugin,
   deleteAgentPlugin,
+  getSettings,
+  updateSettings,
+  getTitleNamerCatalog,
   type AgentHookInfo,
   type AgentPluginInfo,
+  type AgentPluginErrors,
+  AgentPluginManifestError,
+  type TitleNamerInfo,
 } from '../../terminal/api';
 import { AgentBrandAvatar } from '../AgentIndicators';
 import { useI18n } from '../../i18n';
+import { Switch } from '../ui/Switch';
 
 const STATE_STYLE: Record<AgentHookInfo['state'], string> = {
   installed: 'text-[color:var(--success)]',
@@ -46,6 +54,14 @@ function AgentHooksSettings(): React.ReactElement {
   const [pluginManifest, setPluginManifest] = React.useState('');
   const [pluginError, setPluginError] = React.useState<string | null>(null);
   const [plugins, setPlugins] = React.useState<AgentPluginInfo[]>([]);
+  const [pluginLoadErrors, setPluginLoadErrors] = React.useState<AgentPluginErrors[]>([]);
+  const [copiedMigrationSlug, setCopiedMigrationSlug] = React.useState<string | null>(null);
+  const [autoRenameAgents, setAutoRenameAgents] = React.useState<Set<string>>(new Set());
+  const [busyAutoRenameSlug, setBusyAutoRenameSlug] = React.useState<string | null>(null);
+  const [autoRenameNamer, setAutoRenameNamer] = React.useState<'auto' | 'codex' | 'claude'>('auto');
+  const [autoRenameModels, setAutoRenameModels] = React.useState<Record<string, string>>({});
+  const [titleNamers, setTitleNamers] = React.useState<TitleNamerInfo[] | null>(null);
+  const [savingTitleChoice, setSavingTitleChoice] = React.useState<string | null>(null);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -56,8 +72,23 @@ function AgentHooksSettings(): React.ReactElement {
     try {
       const data = await getAgentPlugins();
       setPlugins(data.plugins ?? []);
+      setPluginLoadErrors(data.errors ?? []);
     } catch {
       setPlugins([]);
+      setPluginLoadErrors([]);
+    }
+    try {
+      const settings = await getSettings();
+      setAutoRenameAgents(new Set(settings.autoRenameAgents ?? []));
+      setAutoRenameNamer(settings.autoRenameNamer ?? 'auto');
+      setAutoRenameModels(settings.autoRenameModels ?? {});
+    } catch {
+      setAutoRenameAgents(new Set());
+    }
+    try {
+      setTitleNamers(await getTitleNamerCatalog());
+    } catch {
+      setTitleNamers([]);
     }
   }, []);
 
@@ -105,6 +136,18 @@ function AgentHooksSettings(): React.ReactElement {
       setShowPluginEditor(false);
       await refresh();
     } catch (err) {
+      if (err instanceof AgentPluginManifestError && err.migration) {
+        setPluginLoadErrors((current) => [
+          {
+            slug: typeof manifest.slug === 'string' ? manifest.slug : 'manifest.json',
+            errors: err.message.split('\n'),
+            code: err.code,
+            migration: err.migration,
+          },
+          ...current.filter((item) => item.slug !== manifest.slug),
+        ]);
+        return;
+      }
       setPluginError(err instanceof Error ? err.message : String(err));
     }
   };
@@ -118,10 +161,133 @@ function AgentHooksSettings(): React.ReactElement {
     }
   };
 
+  const copyMigrationPrompt = async (migrationError: AgentPluginErrors) => {
+    const text = migrationError.migration?.aiPrompt ?? migrationError.errors.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedMigrationSlug(migrationError.slug);
+      window.setTimeout(() => setCopiedMigrationSlug((slug) => slug === migrationError.slug ? null : slug), 1800);
+    } catch {
+      setPluginError(text);
+    }
+  };
+
+  const toggleAutoRename = async (slug: string) => {
+    if (busyAutoRenameSlug) return;
+    const previous = autoRenameAgents;
+    const next = new Set(previous);
+    if (next.has(slug)) next.delete(slug);
+    else next.add(slug);
+    setAutoRenameAgents(next);
+    setBusyAutoRenameSlug(slug);
+    setError(null);
+    try {
+      const settings = await updateSettings({ autoRenameAgents: [...next] });
+      setAutoRenameAgents(new Set(settings.autoRenameAgents ?? []));
+    } catch (err) {
+      setAutoRenameAgents(previous);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAutoRenameSlug(null);
+    }
+  };
+
+  const changeAutoRenameNamer = async (namer: 'auto' | 'codex' | 'claude') => {
+    const previous = autoRenameNamer;
+    setAutoRenameNamer(namer);
+    setSavingTitleChoice('namer');
+    setError(null);
+    try {
+      const settings = await updateSettings({ autoRenameNamer: namer });
+      setAutoRenameNamer(settings.autoRenameNamer ?? 'auto');
+    } catch (err) {
+      setAutoRenameNamer(previous);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingTitleChoice(null);
+    }
+  };
+
+  const changeAutoRenameModel = async (slug: 'codex' | 'claude', model: string) => {
+    const previous = autoRenameModels;
+    const next = { ...previous };
+    if (model) next[slug] = model;
+    else delete next[slug];
+    setAutoRenameModels(next);
+    setSavingTitleChoice(slug);
+    setError(null);
+    try {
+      const settings = await updateSettings({ autoRenameModels: next });
+      setAutoRenameModels(settings.autoRenameModels ?? {});
+    } catch (err) {
+      setAutoRenameModels(previous);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingTitleChoice(null);
+    }
+  };
+
   const pluginSlugs = new Set(plugins.map((p) => p.slug));
 
   return (
     <div className="space-y-3">
+      <div className="rounded-xl bg-surface-2 px-3 py-2.5">
+        <div className="text-[12px] font-medium text-foreground">{t('settings.agentAutoRename')}</div>
+        <p className="mt-1 text-[10px] text-muted-foreground">{t('settings.agentAutoRenameHint')}</p>
+        <label className="mt-2 flex items-center justify-between gap-3">
+          <span className="text-[11px] text-muted-foreground">{t('settings.agentAutoRenameNamer')}</span>
+          <select
+            value={autoRenameNamer}
+            disabled={savingTitleChoice !== null}
+            onChange={(event) => void changeAutoRenameNamer(event.target.value as 'auto' | 'codex' | 'claude')}
+            className="min-w-0 rounded-lg bg-surface px-2.5 py-1.5 text-[11px] text-foreground outline-none disabled:opacity-50"
+          >
+            <option value="auto">{t('settings.agentAutoRenameFollow')}</option>
+            {titleNamers?.filter((namer) => namer.available).map((namer) => (
+              <option key={namer.slug} value={namer.slug}>{namer.displayName}</option>
+            ))}
+          </select>
+        </label>
+        <div className="mt-2 space-y-1.5 border-t border-border/40 pt-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] text-muted-foreground">{t('settings.agentAutoRenameModelsFromCli')}</span>
+            <button
+              type="button"
+              onClick={async () => {
+                setTitleNamers(null);
+                try { setTitleNamers(await getTitleNamerCatalog(true)); }
+                catch { setTitleNamers([]); }
+              }}
+              className="rounded p-1 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+              title={t('settings.agentAutoRenameRefreshModels')}
+            >
+              <RiRefreshLine size={11} className={titleNamers === null ? 'animate-spin' : ''} />
+            </button>
+          </div>
+          {titleNamers?.filter((namer) => namer.available).map((namer) => {
+            const recommendedModel = namer.models.find((model) => model.id === namer.recommendedModel);
+            return (
+              <label key={namer.slug} className="flex items-center justify-between gap-3">
+                <span className="text-[11px] text-muted-foreground">{namer.displayName}</span>
+                <select
+                  value={autoRenameModels[namer.slug] ?? ''}
+                  disabled={savingTitleChoice !== null}
+                  onChange={(event) => void changeAutoRenameModel(namer.slug, event.target.value)}
+                  className="min-w-0 max-w-[68%] rounded-lg bg-surface px-2.5 py-1.5 text-[11px] text-foreground outline-none disabled:opacity-50"
+                >
+                  <option value="">{t('settings.agentAutoRenameAutomatic')}{recommendedModel ? ` · ${recommendedModel.displayName}` : ''}</option>
+                  {namer.models.map((model) => (
+                    <option key={model.id} value={model.id}>{model.displayName}</option>
+                  ))}
+                </select>
+              </label>
+            );
+          })}
+          {titleNamers?.length === 0 && (
+            <div className="text-[10px] text-[color:var(--warning)]">{t('settings.agentAutoRenameNoCli')}</div>
+          )}
+        </div>
+      </div>
       {agents === null && (
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
           <RiLoaderCircle size={12} className="animate-spin" /> …
@@ -172,6 +338,17 @@ function AgentHooksSettings(): React.ReactElement {
               )}
             </div>
             <div className="flex items-center gap-1">
+              <button
+                type="button"
+                disabled={busyAutoRenameSlug !== null}
+                onClick={() => void toggleAutoRename(agent.slug)}
+                className="flex shrink-0 items-center gap-1.5 rounded-full px-2 py-1 text-[10px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+                aria-pressed={autoRenameAgents.has(agent.slug)}
+                title={t('settings.agentAutoRenameToggle')}
+              >
+                <span>{t('settings.agentAutoRenameShort')}</span>
+                <Switch checked={autoRenameAgents.has(agent.slug)} disabled={busyAutoRenameSlug !== null} size="sm" />
+              </button>
               {isPlugin && (
                 <button
                   type="button"
@@ -235,6 +412,35 @@ function AgentHooksSettings(): React.ReactElement {
         </div>
         <p className="mt-1 text-[10px] text-muted-foreground">{t('settings.agentPluginHint')}</p>
 
+        {pluginLoadErrors.map((pluginLoadError) => (
+          <div
+            key={pluginLoadError.slug}
+            className="mt-2 rounded-lg bg-[rgb(var(--warning-rgb)_/_0.10)] px-3 py-2 text-[10px] text-[color:var(--warning)]"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium">
+                {pluginLoadError.slug}: {pluginLoadError.code ?? t('settings.agentPluginInvalid')}
+              </span>
+              <button
+                type="button"
+                onClick={() => void copyMigrationPrompt(pluginLoadError)}
+                className="flex shrink-0 items-center gap-1 rounded-full bg-[rgb(var(--warning-rgb)_/_0.14)] px-2 py-1 font-medium transition hover:bg-[rgb(var(--warning-rgb)_/_0.22)]"
+              >
+                {copiedMigrationSlug === pluginLoadError.slug ? <RiCircleCheck size={10} /> : <RiClipboardLine size={10} />}
+                {copiedMigrationSlug === pluginLoadError.slug
+                  ? t('settings.agentPluginCopied')
+                  : t('settings.agentPluginCopyAiPrompt')}
+              </button>
+            </div>
+            <div className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">
+              {pluginLoadError.errors.join('\n')}
+            </div>
+            {pluginLoadError.migration?.guideCommand && (
+              <code className="mt-1 block select-all text-foreground">{pluginLoadError.migration.guideCommand}</code>
+            )}
+          </div>
+        ))}
+
         {showPluginEditor && (
           <div className="mt-2 space-y-2">
             <textarea
@@ -243,22 +449,28 @@ function AgentHooksSettings(): React.ReactElement {
               rows={10}
               className="w-full rounded-lg bg-surface px-3 py-2 font-mono text-[11px] text-foreground placeholder:text-muted-foreground outline-none resize-y"
               placeholder={`{
-  "version": 1,
+  "version": 2,
   "slug": "my-agent",
   "displayName": "My Agent",
   "aliases": ["my-agent"],
   "accentColor": "#4385BE",
+  "statuses": [
+    { "id": "thinking", "phase": "working", "label": "Thinking", "indicator": "spinner", "tone": "info" },
+    { "id": "approval", "phase": "waiting", "label": "Needs approval", "indicator": "question", "tone": "warning" },
+    { "id": "complete", "phase": "done", "label": "Complete", "indicator": "badge", "tone": "success" }
+  ],
   "hooks": {
     "target": "~/.my-agent/settings.json",
     "events": [
-      { "hook": "SessionStart", "event": "session-start" },
-      { "hook": "UserPromptSubmit", "event": "prompt-submit" }
+      { "hook": "UserPromptSubmit", "event": "prompt-submit", "status": "thinking" },
+      { "hook": "PermissionRequest", "event": "permission-request", "status": "approval" },
+      { "hook": "Stop", "event": "stop", "status": "complete" }
     ]
   }
 }`}
             />
             {pluginError && (
-              <div className="text-[10px] text-[color:var(--warning)]">{pluginError}</div>
+              <div className="whitespace-pre-wrap break-words text-[10px] text-[color:var(--warning)]">{pluginError}</div>
             )}
             <div className="flex items-center gap-2">
               <button

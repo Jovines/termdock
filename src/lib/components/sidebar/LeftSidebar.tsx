@@ -16,6 +16,7 @@ import {
   GripVertical as RiDragHandleLine,
   MoreHorizontal as RiMoreHorizontal,
   RefreshCw as RiRefreshLine,
+  Bot as RiBotLine,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
@@ -29,6 +30,7 @@ import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import type { TermdockUpdateState } from '../../terminal/api';
+import { NewSessionComposer } from './NewSessionComposer';
 
 
 interface LeftSidebarProps {
@@ -49,6 +51,7 @@ interface LeftSidebarProps {
     inCopyMode?: boolean;
     isConnecting?: boolean;
     agentStatus: AgentStatus | null;
+    agentStatusDetail?: import('../../terminal/types').AgentStatusDetail | null;
     agent?: AgentIdentity | null;
     agentNeedsReview?: boolean;
     shellTitle?: string | null;
@@ -56,7 +59,7 @@ interface LeftSidebarProps {
     tuiProgress?: TuiProgressReport | null;
     gitStatus?: GitStatusReport | null;
   }>; 
-  onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string }) => void;
+  onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string }) => void;
   onCloseSession: (sessionId: string, event: React.MouseEvent) => void;
   onSplitSession: (sessionId: string) => void;
   onCloseSplit: (sessionId: string) => void;
@@ -128,10 +131,11 @@ function buildSidebarEntities(
 
 function StatusDot({
   status,
+  detail,
   needsReview,
   inCopyMode,
-}: { status: AgentStatus | null; needsReview?: boolean; inCopyMode?: boolean }) {
-  return <AgentSessionDot status={status} needsReview={needsReview} inCopyMode={inCopyMode} />;
+}: { status: AgentStatus | null; detail?: import('../../terminal/types').AgentStatusDetail | null; needsReview?: boolean; inCopyMode?: boolean }) {
+  return <AgentSessionDot status={status} detail={detail} needsReview={needsReview} inCopyMode={inCopyMode} />;
 }
 
 export function LeftSidebar(
@@ -155,6 +159,7 @@ export function LeftSidebar(
   const [expandedSplitWorkspaceIds, setExpandedSplitWorkspaceIds] = useState<Set<string>>(new Set());
   const [draggedSplitMember, setDraggedSplitMember] = useState<{ workspaceId: string; sessionId: string } | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const pendingUpdate = Boolean(
     updateState?.latestVersion
@@ -252,6 +257,7 @@ export function LeftSidebar(
     if (!isOpen) {
       setConfirmNewMode(null);
       setHeaderMenuOpen(false);
+      setNewSessionComposerOpen(false);
     }
   }, [isOpen]);
 
@@ -299,7 +305,7 @@ export function LeftSidebar(
       return 'bg-[rgb(var(--success-rgb)_/_0.08)] text-foreground';
     }
     if (state?.inCopyMode) {
-      return 'bg-[rgb(var(--warning-rgb)_/_0.05)] text-foreground';
+      return 'bg-[rgb(var(--tmux-rgb)_/_0.08)] text-foreground';
     }
     return null;
   }, [sessionStates]);
@@ -337,7 +343,7 @@ export function LeftSidebar(
       : (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview)
         ? 'bg-[var(--warning)]'
         : ts?.inCopyMode
-          ? 'bg-[rgb(var(--warning-rgb)_/_0.70)]'
+          ? 'bg-[var(--tmux)]'
           : 'bg-primary';
     return (
       <>
@@ -382,6 +388,7 @@ export function LeftSidebar(
             )}
             <StatusDot
               status={ts?.agentStatus ?? null}
+              detail={ts?.agentStatusDetail}
               needsReview={ts?.agentNeedsReview}
               inCopyMode={ts?.inCopyMode}
             />
@@ -389,7 +396,7 @@ export function LeftSidebar(
           <span className="min-w-0 flex-1">
             <span className={`block truncate text-[13px] leading-tight ${
               isActive ? 'font-medium text-foreground' : ''
-            } ${ts?.inCopyMode ? 'text-[color:var(--warning)]' : ''}`}>
+            } ${ts?.inCopyMode ? 'text-[color:var(--tmux)]' : ''}`}>
               {displayName}
             </span>
             {(cwdSecondary || ts?.gitStatus) && (
@@ -537,62 +544,6 @@ export function LeftSidebar(
     handleEntityDragEnd(result, entities, groupKey);
   }, [folderGroups, sessionsById, splitWorkspaces, handleEntityDragEnd, onReorderSessions]);
 
-  // 「待处理」是桌面多任务的工作队列，独立于用户选择的会话组织方式。
-  // 按 sessions 原始顺序排列。这样无论会话属于哪个组、组是否折叠，都能在
-  // 顶部一眼看到并直接点入——动态紧急度独立于稳定的分组组织。
-  const attentionSessions = useMemo(() => {
-    return sessions.filter((session) => {
-      const ts = sessionStates.get(session.id);
-      return ts?.agentStatus === 'waiting' || ts?.agentNeedsReview;
-    });
-  }, [sessions, sessionStates]);
-  const waitingAttentionSessions = useMemo(
-    () => attentionSessions.filter((session) => sessionStates.get(session.id)?.agentStatus === 'waiting'),
-    [attentionSessions, sessionStates],
-  );
-  const completedAttentionSessions = useMemo(
-    () => attentionSessions.filter((session) => sessionStates.get(session.id)?.agentStatus !== 'waiting'),
-    [attentionSessions, sessionStates],
-  );
-  const attentionPanel = attentionSessions.length > 0 ? (
-    <div className="mb-1.5 rounded-lg bg-[rgb(var(--warning-rgb)_/_0.08)] pb-1 ring-1 ring-[rgb(var(--warning-rgb)_/_0.18)]">
-      <div className="flex items-center gap-1.5 px-1.5 py-1 text-[color:var(--warning)]">
-        <RiBellLine size={13} className="shrink-0" />
-        <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold uppercase tracking-wide">
-          {t('sidebar.needsAttention')}
-        </span>
-        <span className="shrink-0 text-[10.5px] text-[rgb(var(--warning-rgb)_/_0.70)]">{attentionSessions.length}</span>
-      </div>
-      {[
-        [t('sidebar.waitingForYou'), waitingAttentionSessions],
-        [t('sidebar.completedUnread'), completedAttentionSessions],
-      ].map(([label, lane]) => {
-        const laneSessions = lane as typeof attentionSessions;
-        if (laneSessions.length === 0) return null;
-        return (
-          <div key={label as string} className="px-1 pb-0.5">
-            <div className="px-1.5 pb-0.5 pt-1 text-[9.5px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
-              {label as string} · {laneSessions.length}
-            </div>
-            {laneSessions.map((session) => (
-              <div
-                key={`attention:${session.id}`}
-                {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
-                className={`group relative flex items-center gap-1 rounded-lg pr-1 transition ${
-                  session.id === activeSessionId
-                    ? 'bg-surface-elevated text-foreground'
-                    : 'text-muted-foreground hover:bg-surface-2'
-                }`}
-              >
-                {renderSessionRowBody(session, undefined, true)}
-              </div>
-            ))}
-          </div>
-        );
-      })}
-    </div>
-  ) : null;
-
   const renderSplitWorkspaceItem = (
     workspace: SplitWorkspaceSummary,
     members: LeftSidebarProps['sessions'],
@@ -661,7 +612,7 @@ export function LeftSidebar(
                 : workingMembers.length > 0
                   ? 'bg-[rgb(var(--success-rgb)_/_0.06)] hover:bg-[rgb(var(--success-rgb)_/_0.10)]'
                   : copyModeMembers.length > 0
-                    ? 'bg-[rgb(var(--warning-rgb)_/_0.05)] hover:bg-[rgb(var(--warning-rgb)_/_0.08)]'
+                    ? 'bg-[rgb(var(--tmux-rgb)_/_0.07)] hover:bg-[rgb(var(--tmux-rgb)_/_0.11)]'
                     : hasActive
                       ? 'bg-primary/[0.07]'
                       : 'hover:bg-surface-2'
@@ -755,7 +706,7 @@ export function LeftSidebar(
           )}
           {copyModeMembers.length > 0 && reviewMembers.length === 0 && workingMembers.length === 0 && (
             <span
-              className="h-1.5 w-1.5 shrink-0 rounded-full bg-[rgb(var(--warning-rgb)_/_0.70)]"
+              className="h-2 w-2 shrink-0 rounded-[2px] bg-[var(--tmux)]"
               title={t('agent.copyMode')}
             />
           )}
@@ -1019,7 +970,6 @@ export function LeftSidebar(
 
       {/* Session list */}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 py-1.5">
-        {!groupByFolder && attentionPanel}
         {sessions.length === 0 ? (
           <div className="rounded-xl bg-surface-2/60 px-4 py-8 text-center">
             <RiTerminalLine size={26} className="mx-auto mb-2 text-muted-foreground" />
@@ -1031,7 +981,6 @@ export function LeftSidebar(
           </div>
         ) : groupByFolder ? (
           <div className="space-y-1.5">
-            {attentionPanel}
             <DragDropContext onDragEnd={handleGroupedDragEnd}>
               <Droppable droppableId="sidebar-groups" type="group" direction="vertical">
                 {(groupsProvided) => (
@@ -1160,6 +1109,24 @@ export function LeftSidebar(
         )}
       </div>
 
+      {newSessionComposerOpen && (
+        <NewSessionComposer
+          directories={sessions.flatMap((session) => {
+            const directory = sessionStates.get(session.id)?.cwd;
+            return directory ? [directory] : [];
+          })}
+          initialDirectory={activeSessionId ? sessionStates.get(activeSessionId)?.cwd ?? undefined : undefined}
+          tmuxAvailable={tmuxAvailable}
+          defaultMode={defaultSessionMode}
+          onClose={() => setNewSessionComposerOpen(false)}
+          onCreate={(options) => {
+            onNewSession(options);
+            setNewSessionComposerOpen(false);
+            closeIfOverlay();
+          }}
+        />
+      )}
+
       {/* Footer — split new-session button */}
       <div className="shrink-0 border-t border-border/15 p-2">
         <div className="flex items-stretch gap-1.5">
@@ -1199,6 +1166,17 @@ export function LeftSidebar(
             <span className={tmuxHighlighted ? 'whitespace-nowrap' : 'hidden'}>
               {tmuxConfirming ? t('sidebar.confirmNewTmux') : t('sidebar.newTmux')}
             </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setNewSessionComposerOpen((open) => !open)}
+            className={`inline-flex shrink-0 items-center justify-center gap-1 rounded-lg px-2 transition active:scale-[0.98] ${newSessionComposerOpen ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+            title={t('sidebar.newSessionAdvanced')}
+            aria-label={t('sidebar.newSessionAdvanced')}
+            aria-expanded={newSessionComposerOpen}
+          >
+            <RiBotLine size={13} />
+            <span className="text-[10.5px] font-semibold">Agent</span>
           </button>
         </div>
       </div>

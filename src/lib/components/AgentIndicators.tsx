@@ -6,7 +6,8 @@
  *   - waiting → 黄色问号跳动（等你授权/回答——最需要关注的时刻）
  *   - done    → 绿色对勾（回合完成，结果待读）
  *   - idle    → agent 品牌头像（无状态点），无身份时回落 shell/tmux 图标
- *   - review/copy-mode → 黄色呼吸动效（needsReview/inCopyMode）
+ *   - review → 黄色呼吸动效（needsReview）
+ *   - copy-mode → 紫色静态方点（与待查看的黄色圆点明确区分）
  */
 
 import React from 'react';
@@ -18,8 +19,9 @@ import {
   CircleHelp as RiCircleHelp,
   BellDot as RiBellDot,
   Bot as RiBot,
+  CircleDot as RiCircleDot,
 } from 'lucide-react';
-import type { AgentStatus, AgentIdentity } from '../terminal/types';
+import type { AgentStatus, AgentIdentity, AgentIndicator, AgentStatusDetail } from '../terminal/types';
 import { useI18n } from '../i18n';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
@@ -35,10 +37,12 @@ import {
   type MobileAttentionViewport,
 } from '../utils/mobileAttentionPosition';
 
-/** 黄色（待查看 / 等待用户 / copy mode） */
+/** 黄色（待查看 / 等待用户） */
 export const AGENT_COLOR_ATTENTION = 'var(--warning)';
 /** 绿色（working/done） */
 export const AGENT_COLOR_RUNNING = 'var(--success)';
+/** 紫色（tmux copy mode） */
+export const AGENT_COLOR_COPY_MODE = 'var(--tmux)';
 const MOBILE_ATTENTION_POSITION_KEY = 'termdock:mobile-attention-position:v1';
 const MOBILE_ATTENTION_DEFAULT_PREFERENCE: MobileAttentionPreference = {
   side: 'right',
@@ -121,7 +125,37 @@ export interface AgentVisualState {
   agentStatus: AgentStatus | null;
   agent?: AgentIdentity | null;
   agentMessage?: string | null;
+  agentIndicator?: AgentIndicator | null;
+  agentStatusDetail?: AgentStatusDetail | null;
   agentNeedsReview?: boolean;
+}
+
+function statusToneColor(tone: AgentStatusDetail['tone']): string {
+  switch (tone) {
+    case 'success': return 'var(--success)';
+    case 'warning': return 'var(--warning)';
+    case 'danger': return 'var(--destructive)';
+    case 'info':
+    case 'accent': return 'var(--accent)';
+    default: return 'var(--muted-foreground)';
+  }
+}
+
+function DynamicStatusIcon({ indicator, tone, size }: {
+  indicator: AgentIndicator;
+  tone: AgentStatusDetail['tone'];
+  size: number;
+}): React.ReactElement {
+  const color = statusToneColor(tone);
+  switch (indicator) {
+    case 'spinner': return <RiLoaderCircle size={size} className="shrink-0 animate-spin" style={{ color }} />;
+    case 'question': return <RiCircleHelp size={size} className="shrink-0 animate-bounce-y" style={{ color }} />;
+    case 'badge': return <RiBellDot size={size + 1} className="shrink-0 animate-pulse" style={{ color }} />;
+    case 'terminal': return <RiTerminalLine size={size} className="shrink-0" style={{ color }} />;
+    case 'pulse': return <RiCircleDot size={size} className="shrink-0 animate-pulse" style={{ color }} />;
+    case 'ring': return <span className="block shrink-0 rounded-full border-2" style={{ width: size, height: size, borderColor: color }} />;
+    case 'dot': return <span className="block shrink-0 rounded-full" style={{ width: Math.max(5, size - 4), height: Math.max(5, size - 4), backgroundColor: color }} />;
+  }
 }
 
 /**
@@ -213,6 +247,17 @@ export function AgentTabIcon({
       ? <RiLayoutGridLine size={size} className="shrink-0" />
       : <RiTerminalLine size={size} className="shrink-0" />;
 
+  // A completed turn's unread bell is a product-level attention signal and
+  // intentionally wins over plugin presentation. Other custom states render
+  // entirely from the manifest-provided metadata.
+  if (state?.agentStatusDetail && state.agentIndicator && !(state.agentStatus === 'done' && state.agentNeedsReview)) {
+    return (
+      <span title={state.agentMessage ?? state.agentStatusDetail.label} aria-label={state.agentStatusDetail.label}>
+        <DynamicStatusIcon indicator={state.agentIndicator} tone={state.agentStatusDetail.tone} size={size} />
+      </span>
+    );
+  }
+
   if (state?.agentStatus === 'working') {
     return (
       <span title={state.agentMessage ?? state.agent?.displayName}>
@@ -248,8 +293,8 @@ export function AgentTabIcon({
 
   if (state?.inCopyMode) {
     return sessionMode === 'tmux'
-      ? <RiLayoutGridLine size={size} className="shrink-0 text-[color:var(--warning)] animate-pulse" />
-      : <RiTerminalLine size={size} className="shrink-0 text-[color:var(--warning)] animate-pulse" />;
+      ? <RiLayoutGridLine size={size} className="shrink-0 animate-pulse" style={{ color: AGENT_COLOR_COPY_MODE }} />
+      : <RiTerminalLine size={size} className="shrink-0 animate-pulse" style={{ color: AGENT_COLOR_COPY_MODE }} />;
   }
 
   return baseIcon;
@@ -257,19 +302,30 @@ export function AgentTabIcon({
 
 /**
  * 左栏 session 项右上角的小圆点。
- * working=绿，waiting/review=黄，done=绿（静态），copy-mode=黄。
+ * working=绿，waiting/review=黄色圆点，done=绿（静态），copy-mode=紫色方点。
  * 不显示则返回 null。
  */
 export function AgentSessionDot({
   status,
+  detail,
   needsReview,
   inCopyMode,
 }: {
   status: AgentStatus | null;
+  detail?: AgentStatusDetail | null;
   needsReview?: boolean;
   inCopyMode?: boolean;
 }): React.ReactElement | null {
   const { t } = useI18n();
+  if (detail && !needsReview) {
+    return (
+      <span
+        className="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-surface animate-pulse"
+        style={{ backgroundColor: statusToneColor(detail.tone) }}
+        title={detail.label}
+      />
+    );
+  }
   if (status === 'working') {
     return (
       <span
@@ -297,7 +353,7 @@ export function AgentSessionDot({
   if (inCopyMode) {
     return (
       <span
-        className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[rgb(var(--warning-rgb)_/_0.80)] ring-2 ring-surface animate-pulse"
+        className="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-[2px] bg-[var(--tmux)] ring-2 ring-surface"
         title={t('agent.copyMode')}
       />
     );
