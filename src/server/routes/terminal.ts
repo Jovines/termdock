@@ -33,6 +33,8 @@ import {
   setAutoRenamePromptPreferenceSetting,
   getAutoRenamePromptPayloadCharsSetting,
   setAutoRenamePromptPayloadCharsSetting,
+  getNewSessionAgentSlugSetting,
+  setNewSessionAgentSlugSetting,
 } from '../utils/settings.js';
 import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
@@ -5390,6 +5392,7 @@ async function getSettingsPayload() {
     autoRenameIntervalMinutes: getAutoRenameIntervalMinutesSetting(),
     autoRenamePromptPreference: getAutoRenamePromptPreferenceSetting(),
     autoRenamePromptPayloadChars: getAutoRenamePromptPayloadCharsSetting(),
+    newSessionAgentSlug: getNewSessionAgentSlugSetting(),
     localAccess: {
       ...localAccess,
       interfaces,
@@ -5497,6 +5500,17 @@ router.put('/settings', async (req, res) => {
     && body.autoRenamePromptPayloadChars >= 1000
     && body.autoRenamePromptPayloadChars <= 64_000) {
     setAutoRenamePromptPayloadCharsSetting(body.autoRenamePromptPayloadChars);
+  }
+
+  if (body.newSessionAgentSlug === null) {
+    setNewSessionAgentSlugSetting(null);
+  } else if (typeof body.newSessionAgentSlug === 'string') {
+    const slug = body.newSessionAgentSlug.trim().toLowerCase();
+    if (!listAgents().some((agent) => agent.slug === slug)) {
+      res.status(400).json({ error: 'Unsupported new-session agent', code: 'NEW_SESSION_AGENT_INVALID' });
+      return;
+    }
+    setNewSessionAgentSlugSetting(slug);
   }
 
   if (body.localAccess && typeof body.localAccess === 'object') {
