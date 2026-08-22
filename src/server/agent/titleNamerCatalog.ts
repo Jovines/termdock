@@ -28,6 +28,7 @@ export interface TitleNamerModel {
   displayName: string;
   description: string;
   isDefault: boolean;
+  isEconomical?: boolean;
 }
 
 export interface TitleNamerInfo {
@@ -36,6 +37,26 @@ export interface TitleNamerInfo {
   available: boolean;
   models: TitleNamerModel[];
   recommendedModel: string | null;
+}
+
+export interface PluginTitleNamerDoctorResult {
+  slug: string;
+  displayName: string;
+  hasTitleNamer: boolean;
+  hasModelCommand: boolean;
+  status: 'ok' | 'missing-title-namer' | 'cli-default' | 'no-models' | 'probe-failed';
+  models: TitleNamerModel[];
+  recommendedModel: string | null;
+  selectionBehavior: string;
+  warnings: string[];
+  error: string | null;
+  nextSteps: string[];
+}
+
+export interface NormalizedModelCatalog {
+  models: TitleNamerModel[];
+  recommendedModel: string | null;
+  ignoredEntries: number;
 }
 
 interface CatalogCacheDoc {
@@ -60,21 +81,16 @@ function normalizeCachedCatalog(input: unknown): CatalogCacheDoc | null {
     const candidate = entry as Partial<TitleNamerInfo>;
     if (typeof candidate.slug !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(candidate.slug)) return [];
     if (!Array.isArray(candidate.models)) return [];
-    const models = candidate.models.filter((model): model is TitleNamerModel => Boolean(
-      model
-      && typeof model.id === 'string'
-      && typeof model.displayName === 'string'
-      && typeof model.description === 'string'
-      && typeof model.isDefault === 'boolean',
-    ));
+    const catalog = normalizeDiscoveredModelCatalog({
+      models: candidate.models,
+      recommendedModel: candidate.recommendedModel,
+    });
     return [{
       slug: candidate.slug,
       displayName: typeof candidate.displayName === 'string' ? candidate.displayName : candidate.slug,
       available: candidate.available === true,
-      models,
-      recommendedModel: typeof candidate.recommendedModel === 'string'
-        ? candidate.recommendedModel
-        : recommendTitleModel(models),
+      models: catalog.models,
+      recommendedModel: catalog.recommendedModel,
     }];
   });
   return value.length > 0 ? { version: 1, updatedAt: doc.updatedAt, value } : null;
@@ -97,7 +113,7 @@ async function savePersistentCache(doc: CatalogCacheDoc): Promise<void> {
 }
 
 export function recommendTitleModel(models: TitleNamerModel[]): string | null {
-  return models.find((model) => /affordable|cost[- ]efficient|cost[- ]sensitive/i.test(model.description))?.id
+  return models.find((model) => model.isEconomical)?.id
     ?? models.find((model) => model.isDefault)?.id
     ?? null;
 }
@@ -145,6 +161,7 @@ async function listCodexModels(): Promise<TitleNamerModel[]> {
               displayName: model.displayName,
               description: typeof model.description === 'string' ? model.description : '',
               isDefault: model.isDefault === true,
+              isEconomical: false,
             }];
           }) : [];
           finish(models);
@@ -166,7 +183,7 @@ export function parseClaudeSupportedModels(output: string): TitleNamerModel[] {
     .split(/,|\band\b/i)
     .map((model) => model.trim().replace(/^["'`]+|["'`]+$/g, ''))
     .filter((model) => /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(model))
-    .map((model) => ({ id: model, displayName: model, description: '', isDefault: false }));
+    .map((model) => ({ id: model, displayName: model, description: '', isDefault: false, isEconomical: false }));
 }
 
 async function listClaudeModels(): Promise<TitleNamerModel[]> {
@@ -184,30 +201,79 @@ async function listClaudeModels(): Promise<TitleNamerModel[]> {
   }
 }
 
-function normalizeDiscoveredModels(input: unknown): TitleNamerModel[] {
-  if (!Array.isArray(input)) return [];
-  return input.flatMap((entry): TitleNamerModel[] => {
-    if (typeof entry === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(entry)) {
-      return [{ id: entry, displayName: entry, description: '', isDefault: false }];
+export function normalizeDiscoveredModelCatalog(input: unknown): NormalizedModelCatalog {
+  const root = input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : null;
+  const entries = Array.isArray(input)
+    ? input
+    : Array.isArray(root?.models)
+      ? root.models
+      : Array.isArray(root?.data)
+        ? root.data
+        : [];
+  let ignoredEntries = 0;
+  const seenIds = new Set<string>();
+  const models = entries.flatMap((entry): TitleNamerModel[] => {
+    const rawId = typeof entry === 'string'
+      ? entry
+      : entry && typeof entry === 'object'
+        ? (() => {
+          const model = entry as Record<string, unknown>;
+          return typeof model.id === 'string'
+            ? model.id
+            : typeof model.name === 'string'
+              ? model.name
+              : typeof model.model === 'string'
+                ? model.model
+                : '';
+        })()
+        : '';
+    const id = rawId.trim();
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(id) || seenIds.has(id)) {
+      ignoredEntries += 1;
+      return [];
     }
-    if (!entry || typeof entry !== 'object') return [];
+    seenIds.add(id);
+    if (typeof entry === 'string') {
+      return [{ id, displayName: id, description: '', isDefault: false, isEconomical: false }];
+    }
+    if (!entry || typeof entry !== 'object') {
+      ignoredEntries += 1;
+      return [];
+    }
     const model = entry as Record<string, unknown>;
-    if (typeof model.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(model.id)) return [];
+    const rawDisplayName = typeof model.displayName === 'string'
+      ? model.displayName
+      : typeof model.display_name === 'string'
+        ? model.display_name
+        : typeof model.label === 'string'
+          ? model.label
+          : id;
+    const displayName = rawDisplayName.trim().slice(0, 160) || id;
     return [{
-      id: model.id,
-      displayName: typeof model.displayName === 'string' ? model.displayName : model.id,
-      description: typeof model.description === 'string' ? model.description : '',
-      isDefault: model.isDefault === true,
+      id,
+      displayName,
+      description: typeof model.description === 'string' ? model.description.trim().slice(0, 1000) : '',
+      isDefault: model.isDefault === true || model.is_default === true || model.default === true,
+      isEconomical: model.isEconomical === true || model.is_economical === true || model.economical === true,
     }];
   });
+  const declared = typeof (root?.recommendedModel ?? root?.recommended_model) === 'string'
+    ? String(root?.recommendedModel ?? root?.recommended_model).trim()
+    : '';
+  const recommendedModel = declared && models.some((model) => model.id === declared)
+    ? declared
+    : recommendTitleModel(models);
+  return { models, recommendedModel, ignoredEntries };
 }
 
 function expandPluginPath(value: string, pluginDir: string): string {
   return value.replaceAll('{pluginDir}', pluginDir);
 }
 
-async function listPluginModels(config: PluginTitleNamerConfig, pluginDir: string): Promise<TitleNamerModel[]> {
-  if (!config.models) return [];
+async function listPluginModels(config: PluginTitleNamerConfig, pluginDir: string): Promise<NormalizedModelCatalog> {
+  if (!config.models) return { models: [], recommendedModel: null, ignoredEntries: 0 };
   const { stdout } = await execFileAsync(
     expandPluginPath(config.models.command, pluginDir),
     (config.models.args ?? []).map((arg) => expandPluginPath(arg, pluginDir)),
@@ -218,7 +284,7 @@ async function listPluginModels(config: PluginTitleNamerConfig, pluginDir: strin
     env: pluginCommandEnv(),
     },
   );
-  return normalizeDiscoveredModels(JSON.parse(stdout));
+  return normalizeDiscoveredModelCatalog(JSON.parse(stdout));
 }
 
 function pluginTitleNamers() {
@@ -241,6 +307,134 @@ function isPluginTitleExecutionEnabled(slug: string): boolean {
   return shouldRunPluginTitleCommands(slug, getAutoRenameNamerSetting(), getAutoRenameAgentsSetting());
 }
 
+async function cacheExplicitPluginProbe(slug: string, displayName: string, catalog: NormalizedModelCatalog): Promise<void> {
+  if (!cached) cached = await loadPersistentCache();
+  const current = cached?.value ?? await getTitleNamerCatalog();
+  const value = current.map((entry): TitleNamerInfo => entry.slug === slug
+    ? {
+      slug,
+      displayName,
+      available: true,
+      models: catalog.models,
+      recommendedModel: catalog.recommendedModel,
+    }
+    : entry);
+  cached = { version: 1, updatedAt: Date.now(), value };
+  await savePersistentCache(cached).catch(() => undefined);
+}
+
+function expandTitleArg(value: string, pluginDir: string, prompt: string, model: string): string {
+  return expandPluginPath(value, pluginDir).replaceAll('{prompt}', prompt).replaceAll('{model}', model);
+}
+
+export function buildPluginTitleArgs(
+  config: PluginTitleNamerConfig,
+  pluginDir: string,
+  prompt: string,
+  model?: string,
+): string[] {
+  const baseArgs: string[] = [];
+  for (const arg of config.args) {
+    if (arg.includes('{model}') && !model) {
+      // Legacy v2 manifests put paired flags in args. Remove an immediately
+      // preceding standalone flag too, so `-c model={model}` cannot degrade
+      // into the invalid `-c -p ...`. New plugins should use modelArgs.
+      if (baseArgs.at(-1)?.startsWith('-') && !baseArgs.at(-1)?.includes('=')) baseArgs.pop();
+      continue;
+    }
+    baseArgs.push(expandTitleArg(arg, pluginDir, prompt, model ?? ''));
+  }
+  const selectedModelArgs = model && config.modelArgs
+    ? config.modelArgs.map((arg) => expandTitleArg(arg, pluginDir, prompt, model))
+    : [];
+  return [...selectedModelArgs, ...baseArgs];
+}
+
+export async function probePluginTitleNamer(slug: string): Promise<PluginTitleNamerDoctorResult | null> {
+  const plugin = loadPlugins().plugins.find((entry) => entry.manifest.slug === slug);
+  if (!plugin) return null;
+  const config = plugin.manifest.titleNamer;
+  if (!config) {
+    return {
+      slug,
+      displayName: plugin.manifest.displayName,
+      hasTitleNamer: false,
+      hasModelCommand: false,
+      status: 'missing-title-namer',
+      models: [],
+      recommendedModel: null,
+      selectionBehavior: 'This plugin cannot generate titles until manifest.titleNamer is added.',
+      warnings: ['manifest.json has no titleNamer declaration.'],
+      error: null,
+      nextSteps: ['Run `td agent-plugin --json`, add manifest.titleNamer, then update/reinstall the plugin.'],
+    };
+  }
+  const warnings: string[] = [];
+  if (!config.modelArgs && config.args.some((arg) => arg.includes('{model}'))) {
+    warnings.push('Legacy {model} placement detected in args; use modelArgs for optional paired flags.');
+  }
+  if (!config.models) {
+    return {
+      slug,
+      displayName: plugin.manifest.displayName,
+      hasTitleNamer: true,
+      hasModelCommand: false,
+      status: 'cli-default',
+      models: [],
+      recommendedModel: null,
+      selectionBehavior: 'Termdock will omit all model arguments and use the Agent CLI default model.',
+      warnings,
+      error: null,
+      nextSteps: ['Optional: add titleNamer.models to expose selectable models; otherwise the CLI default is used.'],
+    };
+  }
+  try {
+    const catalog = await listPluginModels(config, plugin.dir);
+    await cacheExplicitPluginProbe(slug, plugin.manifest.displayName, catalog);
+    if (catalog.ignoredEntries > 0) {
+      warnings.push(`${catalog.ignoredEntries} model entr${catalog.ignoredEntries === 1 ? 'y was' : 'ies were'} ignored because its identifier was invalid or duplicated.`);
+    }
+    if (catalog.models.length > 0 && !catalog.recommendedModel) {
+      warnings.push('No recommendedModel, isEconomical, or isDefault marker was found; automatic mode will use the Agent CLI default model.');
+    }
+    return {
+      slug,
+      displayName: plugin.manifest.displayName,
+      hasTitleNamer: true,
+      hasModelCommand: true,
+      status: catalog.models.length > 0 ? 'ok' : 'no-models',
+      models: catalog.models,
+      recommendedModel: catalog.recommendedModel,
+      selectionBehavior: catalog.recommendedModel
+        ? `Automatic selection will pass model ${catalog.recommendedModel}.`
+        : 'No recommended model was declared; Termdock will omit model arguments and use the Agent CLI default model.',
+      warnings: catalog.models.length === 0
+        ? [...warnings, 'The model command succeeded but returned no usable models.']
+        : warnings,
+      error: null,
+      nextSteps: catalog.models.length > 0
+        ? catalog.recommendedModel
+          ? ['Select this provider/model in Settings, then enable automatic titles for the Agent.']
+          : ['Declare recommendedModel, mark one model isEconomical/isDefault, or let users select a model manually.']
+        : ['Return a JSON array (or {models}) using id/name/model plus optional displayName, description, isDefault, and isEconomical fields.'],
+    };
+  } catch (error) {
+    return {
+      slug,
+      displayName: plugin.manifest.displayName,
+      hasTitleNamer: true,
+      hasModelCommand: true,
+      status: 'probe-failed',
+      models: [],
+      recommendedModel: null,
+      selectionBehavior: 'Model selection is unavailable until the probe succeeds; title generation falls back to the Agent CLI default model.',
+      warnings,
+      error: (error as Error).message,
+      nextSteps: ['Run the declared models command directly, ensure it prints JSON only, or use a {pluginDir} adapter script to normalize its output.'],
+    };
+  }
+}
+
 export async function runTitleNamer(slug: string, prompt: string, model?: string): Promise<string | null> {
   let command: string;
   let args: string[];
@@ -256,10 +450,7 @@ export async function runTitleNamer(slug: string, prompt: string, model?: string
     if (!provider || !isPluginTitleExecutionEnabled(slug)) return null;
     cwd = provider.dir;
     command = expandPluginPath(provider.config.command, provider.dir);
-    args = provider.config.args.flatMap((arg) => {
-      if (arg.includes('{model}') && !model) return [];
-      return [expandPluginPath(arg, provider.dir).replaceAll('{prompt}', prompt).replaceAll('{model}', model ?? '')];
-    });
+    args = buildPluginTitleArgs(provider.config, provider.dir, prompt, model);
   }
   try {
     const { stdout } = await execFileAsync(command, args, {
@@ -283,7 +474,7 @@ async function refreshTitleNamerCatalog(): Promise<TitleNamerInfo[]> {
     listClaudeModels(),
     ...plugins.map((provider) => provider.config.models && isPluginTitleExecutionEnabled(provider.slug)
       ? listPluginModels(provider.config, provider.dir)
-      : Promise.resolve([])),
+      : Promise.resolve({ models: [], recommendedModel: null, ignoredEntries: 0 })),
   ]);
   const previousCodex = cached?.value.find((namer) => namer.slug === 'codex');
   const previousClaude = cached?.value.find((namer) => namer.slug === 'claude');
@@ -307,13 +498,14 @@ async function refreshTitleNamerCatalog(): Promise<TitleNamerInfo[]> {
     ...plugins.map((provider, index): TitleNamerInfo => {
       const result = pluginResults[index];
       const previous = cached?.value.find((namer) => namer.slug === provider.slug);
-      const models = result?.status === 'fulfilled' ? result.value : previous?.models ?? [];
+      const discovered = result?.status === 'fulfilled' ? result.value : null;
+      const models = discovered?.models ?? previous?.models ?? [];
       return {
         slug: provider.slug,
         displayName: provider.displayName,
         available: provider.config.models ? result?.status === 'fulfilled' || previous?.available === true : true,
         models,
-        recommendedModel: recommendTitleModel(models),
+        recommendedModel: discovered?.recommendedModel ?? recommendTitleModel(models),
       };
     }),
   ];
