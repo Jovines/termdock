@@ -552,6 +552,8 @@ export const zh: TranslationDictionary = {
     agentAutoRenamePreference: '补充偏好',
     agentAutoRenamePreferenceHint: '可选。仅补充你对标题风格或重点的偏好；Termdock 的默认起名规则仍会保留。离开输入框时自动保存。',
     agentAutoRenamePreferencePlaceholder: '例如：突出用户收益；优先使用动宾结构；避免技术术语',
+    agentAutoRenamePayloadLimit: '用户消息上下文上限（字符）',
+    agentAutoRenamePayloadLimitHint: '保留 prompt-submit 原始 payload 的总字符数，默认 12000，可设置 1000–64000。',
     agentPlugins: 'Agent 插件',
     agentPluginAdd: '添加插件',
     agentPluginHint: '从 HTTPS Git 仓库或本地目录安装；请先审查来源。Hooks 和可执行的标题 CLI 均需用户分别启用。',

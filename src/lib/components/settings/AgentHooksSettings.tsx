@@ -74,6 +74,7 @@ function AgentHooksSettings(): React.ReactElement {
   const [autoRenameIntervalMinutes, setAutoRenameIntervalMinutes] = React.useState(10);
   const [autoRenamePromptPreference, setAutoRenamePromptPreference] = React.useState('');
   const [savedAutoRenamePromptPreference, setSavedAutoRenamePromptPreference] = React.useState('');
+  const [autoRenamePromptPayloadChars, setAutoRenamePromptPayloadChars] = React.useState(12_000);
   const [busyPluginAction, setBusyPluginAction] = React.useState<string | null>(null);
   const [pluginDoctorResult, setPluginDoctorResult] = React.useState<AgentPluginDoctorResult | null>(null);
 
@@ -101,6 +102,7 @@ function AgentHooksSettings(): React.ReactElement {
       setAutoRenameIntervalMinutes(settings.autoRenameIntervalMinutes ?? 10);
       setAutoRenamePromptPreference(settings.autoRenamePromptPreference ?? '');
       setSavedAutoRenamePromptPreference(settings.autoRenamePromptPreference ?? '');
+      setAutoRenamePromptPayloadChars(settings.autoRenamePromptPayloadChars ?? 12_000);
     } else {
       setAutoRenameAgents(new Set());
     }
@@ -344,6 +346,23 @@ function AgentHooksSettings(): React.ReactElement {
     }
   };
 
+  const saveAutoRenamePromptPayloadChars = async (value: number) => {
+    const next = Math.max(1000, Math.min(64_000, Math.round(value || 12_000)));
+    const previous = autoRenamePromptPayloadChars;
+    setAutoRenamePromptPayloadChars(next);
+    setSavingTitleChoice('payload-limit');
+    setError(null);
+    try {
+      const settings = await updateSettings({ autoRenamePromptPayloadChars: next });
+      setAutoRenamePromptPayloadChars(settings.autoRenamePromptPayloadChars ?? 12_000);
+    } catch (err) {
+      setAutoRenamePromptPayloadChars(previous);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingTitleChoice(null);
+    }
+  };
+
   const pluginSlugs = new Set(plugins.map((p) => p.slug));
   const pluginDoctorStatusText = pluginDoctorResult
     ? {
@@ -407,6 +426,21 @@ function AgentHooksSettings(): React.ReactElement {
             <span className="mt-1 block text-right text-[10px] text-muted-foreground">
               {savingTitleChoice === 'preference' ? t('settings.saving') : `${autoRenamePromptPreference.length}/2000`}
             </span>
+          </label>
+          <label className="mt-2 block">
+            <span className="text-[11px] font-medium text-foreground">{t('settings.agentAutoRenamePayloadLimit')}</span>
+            <span className="mt-0.5 block text-[10px] text-muted-foreground">{t('settings.agentAutoRenamePayloadLimitHint')}</span>
+            <input
+              type="number"
+              min={1000}
+              max={64000}
+              step={1000}
+              value={autoRenamePromptPayloadChars}
+              disabled={savingTitleChoice !== null}
+              onChange={(event) => setAutoRenamePromptPayloadChars(Number(event.target.value))}
+              onBlur={(event) => void saveAutoRenamePromptPayloadChars(Number(event.target.value))}
+              className="mt-1.5 w-full rounded-lg bg-surface px-2.5 py-2 text-[11px] text-foreground outline-none focus:ring-1 focus:ring-primary/50 disabled:opacity-50"
+            />
           </label>
         </details>
         <div className="mt-2 space-y-1.5 border-t border-border/40 pt-2">

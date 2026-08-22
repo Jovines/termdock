@@ -552,6 +552,8 @@ export const en: TranslationDictionary = {
     agentAutoRenamePreference: 'Additional preferences',
     agentAutoRenamePreferenceHint: 'Optional. Add preferences for title style or emphasis; Termdock keeps its default naming rules. Saved when you leave the field.',
     agentAutoRenamePreferencePlaceholder: 'For example: emphasize user value; use action phrases; avoid technical jargon',
+    agentAutoRenamePayloadLimit: 'User-message context limit (characters)',
+    agentAutoRenamePayloadLimitHint: 'Total raw prompt-submit payload characters retained. Default 12000; range 1000–64000.',
     agentPlugins: 'Agent Plugins',
     agentPluginAdd: 'Add Plugin',
     agentPluginHint: 'Install from an HTTPS Git repository or local directory after reviewing the source. Hooks and executable title CLIs require separate user opt-in.',

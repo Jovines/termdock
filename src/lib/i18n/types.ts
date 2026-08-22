@@ -569,6 +569,8 @@ export type TranslationDictionary = {
     agentAutoRenamePreference: string;
     agentAutoRenamePreferenceHint: string;
     agentAutoRenamePreferencePlaceholder: string;
+    agentAutoRenamePayloadLimit: string;
+    agentAutoRenamePayloadLimitHint: string;
     agentPlugins: string;
     agentPluginAdd: string;
     agentPluginHint: string;
