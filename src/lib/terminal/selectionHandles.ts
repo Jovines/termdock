@@ -16,6 +16,19 @@ export interface ClientRectBounds {
   bottom: number;
 }
 
+function intersectRects(a: ClientRectBounds, b: ClientRectBounds): ClientRectBounds | null {
+  const left = Math.max(a.left, b.left);
+  const top = Math.max(a.top, b.top);
+  const right = Math.min(a.right, b.right);
+  const bottom = Math.min(a.bottom, b.bottom);
+  return right > left && bottom > top ? { left, top, right, bottom } : null;
+}
+
+function overlapArea(a: ClientRectBounds, b: ClientRectBounds): number {
+  const overlap = intersectRects(a, b);
+  return overlap ? (overlap.right - overlap.left) * (overlap.bottom - overlap.top) : 0;
+}
+
 /** xterm Terminal 的最小结构子集，测试里可用 stub 传入。 */
 export interface TerminalGeometryLike {
   cols: number;
@@ -122,9 +135,48 @@ export function orderSelectionEndpoints(
 }
 
 /**
+ * 当前可视部分的选区包围盒。单行选区按真实首尾列计算，多行选区中间行
+ * 会铺满终端宽度，因此横向使用完整网格。选区完全滚出视口时返回 null。
+ */
+export function selectionCellsToClientBounds(
+  terminal: TerminalGeometryLike,
+  anchor: SelectionCell,
+  focus: SelectionCell,
+): ClientRectBounds | null {
+  const m = getTerminalGridMetrics(terminal);
+  if (!m) return null;
+  const { start, end } = orderSelectionEndpoints(anchor, focus, terminal.cols);
+  const viewportY = terminal.buffer.active.viewportY;
+  const viewportEnd = viewportY + terminal.rows - 1;
+  if (end.row < viewportY || start.row > viewportEnd) return null;
+
+  const visibleStartRow = Math.max(start.row, viewportY);
+  const visibleEndRow = Math.min(end.row, viewportEnd);
+  const top = m.originTop + (visibleStartRow - viewportY) * m.cellH;
+  const bottom = m.originTop + (visibleEndRow - viewportY + 1) * m.cellH;
+  if (start.row === end.row) {
+    return {
+      left: m.originLeft + start.col * m.cellW,
+      top,
+      right: m.originLeft + (end.col + 1) * m.cellW,
+      bottom,
+    };
+  }
+  return {
+    left: m.originLeft,
+    top,
+    right: m.originLeft + terminal.cols * m.cellW,
+    bottom,
+  };
+}
+
+/**
  * 把移动端复制气泡放进「可视窗口 ∩ 当前终端」内。
- * preferredAbove 放不下时尝试手指下方，最终再钳到有效矩形；即使终端
- * 比气泡还窄/矮，也固定在其左上安全边缘，避免算出反向边界。
+ * 有选区时依次考虑上、下、左右与安全区边角，并按以下优先级评分：
+ * 1. 绝不挡住选区手柄/当前手指的触控热区；
+ * 2. 尽量不盖住选中文字；
+ * 3. 同等条件下优先选区上方。
+ * 没有选区几何时保留原先的“手指上方，放不下则下方”回退。
  */
 export function clampMobileCopyPopoverPosition(input: {
   clientX: number;
@@ -135,6 +187,15 @@ export function clampMobileCopyPopoverPosition(input: {
   height: number;
   margin: number;
   fingerGap: number;
+  selection?: ClientRectBounds | null;
+  avoid?: ClientRectBounds[];
+  selectionGap?: number;
+  preference?: {
+    vertical: 'above' | 'below';
+    alignX: number;
+    focusX: number;
+    focusY: number;
+  };
 }): { left: number; top: number } {
   const boundsLeft = Math.max(input.viewport.left, input.terminal.left);
   const boundsTop = Math.max(input.viewport.top, input.terminal.top);
@@ -145,12 +206,80 @@ export function clampMobileCopyPopoverPosition(input: {
   const maxLeft = Math.max(minLeft, boundsRight - input.width - input.margin);
   const maxTop = Math.max(minTop, boundsBottom - input.height - input.margin);
 
-  const unclampedLeft = input.clientX - input.width / 2;
-  const left = Math.max(minLeft, Math.min(unclampedLeft, maxLeft));
-  const preferredTop = input.clientY - input.height - input.fingerGap;
-  const fallbackTop = input.clientY + input.fingerGap;
-  const topCandidate = preferredTop >= minTop ? preferredTop : fallbackTop;
-  const top = Math.max(minTop, Math.min(topCandidate, maxTop));
+  const clampLeft = (left: number) => Math.max(minLeft, Math.min(left, maxLeft));
+  const clampTop = (top: number) => Math.max(minTop, Math.min(top, maxTop));
+  const selection = input.selection ? intersectRects(input.selection, {
+    left: boundsLeft,
+    top: boundsTop,
+    right: boundsRight,
+    bottom: boundsBottom,
+  }) : null;
 
-  return { left: Math.round(left), top: Math.round(top) };
+  if (!selection) {
+    const left = clampLeft(input.clientX - input.width / 2);
+    const preferredTop = input.clientY - input.height - input.fingerGap;
+    const fallbackTop = input.clientY + input.fingerGap;
+    const top = clampTop(preferredTop >= minTop ? preferredTop : fallbackTop);
+    return { left: Math.round(left), top: Math.round(top) };
+  }
+
+  const centerX = (selection.left + selection.right) / 2;
+  const centerY = (selection.top + selection.bottom) / 2;
+  const alignX = input.preference?.alignX ?? centerX;
+  const selectionGap = input.selectionGap ?? input.fingerGap;
+  const aboveTop = selection.top - input.height - selectionGap;
+  const belowTop = selection.bottom + selectionGap;
+  const preferredTop = input.preference?.vertical === 'below' ? belowTop : aboveTop;
+  const oppositeTop = input.preference?.vertical === 'below' ? aboveTop : belowTop;
+  const corners = [
+    { left: minLeft, top: minTop },
+    { left: maxLeft, top: minTop },
+    { left: minLeft, top: maxTop },
+    { left: maxLeft, top: maxTop },
+  ];
+  if (input.preference) {
+    corners.sort((a, b) => {
+      const distance = (candidate: { left: number; top: number }) => {
+        const x = candidate.left + input.width / 2;
+        const y = candidate.top + input.height / 2;
+        return Math.hypot(x - input.preference!.focusX, y - input.preference!.focusY);
+      };
+      return distance(b) - distance(a);
+    });
+  }
+  const rawCandidates = [
+    // 首选始终在拖动方向的“身后”，并偏向固定端；第二候选才居中。
+    { left: alignX - input.width / 2, top: preferredTop },
+    { left: centerX - input.width / 2, top: preferredTop },
+    { left: alignX - input.width / 2, top: oppositeTop },
+    { left: centerX - input.width / 2, top: oppositeTop },
+    { left: selection.left - input.width - input.fingerGap, top: centerY - input.height / 2 },
+    { left: selection.right + input.fingerGap, top: centerY - input.height / 2 },
+    ...corners,
+  ].map((candidate) => ({
+    left: clampLeft(candidate.left),
+    top: clampTop(candidate.top),
+  }));
+
+  let best = rawCandidates[0];
+  let bestScore = Number.POSITIVE_INFINITY;
+  rawCandidates.forEach((candidate, index) => {
+    const rect = {
+      left: candidate.left,
+      top: candidate.top,
+      right: candidate.left + input.width,
+      bottom: candidate.top + input.height,
+    };
+    const avoidOverlap = (input.avoid ?? []).reduce((sum, avoid) => sum + overlapArea(rect, avoid), 0);
+    const score = (avoidOverlap > 0 ? 1_000_000 : 0)
+      + avoidOverlap * 100
+      + overlapArea(rect, selection) * 10
+      + index * 0.01;
+    if (score < bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  });
+
+  return { left: Math.round(best.left), top: Math.round(best.top) };
 }

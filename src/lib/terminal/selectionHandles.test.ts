@@ -5,6 +5,7 @@ import {
   clampCellToBuffer,
   getTerminalGridMetrics,
   orderSelectionEndpoints,
+  selectionCellsToClientBounds,
   type TerminalGeometryLike,
 } from './selectionHandles';
 
@@ -139,6 +140,33 @@ describe('orderSelectionEndpoints', () => {
   });
 });
 
+describe('selectionCellsToClientBounds', () => {
+  it('单行选区使用真实首尾列', () => {
+    expect(selectionCellsToClientBounds(makeTerminal(), { col: 3, row: 2 }, { col: 8, row: 2 })).toEqual({
+      left: 40,
+      top: 60,
+      right: 100,
+      bottom: 80,
+    });
+  });
+
+  it('多行选区横向覆盖完整终端，并裁到当前视口', () => {
+    expect(selectionCellsToClientBounds(
+      makeTerminal({ viewportY: 100 }),
+      { col: 30, row: 98 },
+      { col: 4, row: 105 },
+    )).toEqual({ left: 10, top: 20, right: 810, bottom: 140 });
+  });
+
+  it('选区完全滚出视口时返回 null', () => {
+    expect(selectionCellsToClientBounds(
+      makeTerminal({ viewportY: 100 }),
+      { col: 0, row: 90 },
+      { col: 5, row: 91 },
+    )).toBeNull();
+  });
+});
+
 describe('clampMobileCopyPopoverPosition', () => {
   const base = {
     viewport: { left: 0, top: 0, right: 390, bottom: 844 },
@@ -177,5 +205,76 @@ describe('clampMobileCopyPopoverPosition', () => {
       terminal: { left: 20, top: 100, right: 70, bottom: 140 },
     });
     expect(position).toEqual({ left: 30, top: 110 });
+  });
+
+  it('有空间时优先放在选区上方，而不是跟随抬手位置', () => {
+    const position = clampMobileCopyPopoverPosition({
+      ...base,
+      clientX: 330,
+      clientY: 610,
+      selection: { left: 80, top: 300, right: 260, bottom: 340 },
+    });
+    expect(position).toEqual({ left: 126, top: 250 });
+  });
+
+  it('顶部放不下时放到选区下方', () => {
+    const position = clampMobileCopyPopoverPosition({
+      ...base,
+      clientX: 120,
+      clientY: 150,
+      selection: { left: 80, top: 105, right: 260, bottom: 145 },
+    });
+    expect(position).toEqual({ left: 126, top: 159 });
+  });
+
+  it('安全空间不足时避开手柄和手指热区', () => {
+    const avoid = { left: 140, top: 110, right: 230, bottom: 190 };
+    const position = clampMobileCopyPopoverPosition({
+      ...base,
+      clientX: 185,
+      clientY: 150,
+      terminal: { left: 20, top: 100, right: 370, bottom: 240 },
+      selection: { left: 20, top: 100, right: 370, bottom: 240 },
+      avoid: [avoid],
+    });
+    const popover = { left: position.left, top: position.top, right: position.left + 88, bottom: position.top + 36 };
+    const overlapsAvoid = popover.left < avoid.right && popover.right > avoid.left
+      && popover.top < avoid.bottom && popover.bottom > avoid.top;
+    expect(overlapsAvoid).toBe(false);
+  });
+
+  it('向上扩选时把按钮放在选区下方，留出活动端前方空间', () => {
+    const position = clampMobileCopyPopoverPosition({
+      ...base,
+      clientX: 120,
+      clientY: 300,
+      selection: { left: 60, top: 280, right: 330, bottom: 500 },
+      preference: { vertical: 'below', alignX: 195, focusX: 120, focusY: 280 },
+    });
+    expect(position).toEqual({ left: 151, top: 514 });
+  });
+
+  it('同行扩选时可偏向固定端，不占活动端上方', () => {
+    const position = clampMobileCopyPopoverPosition({
+      ...base,
+      clientX: 300,
+      clientY: 320,
+      selection: { left: 80, top: 300, right: 320, bottom: 320 },
+      preference: { vertical: 'above', alignX: 140, focusX: 300, focusY: 310 },
+    });
+    expect(position).toEqual({ left: 96, top: 250 });
+  });
+
+  it('为选区外侧的 44px 手柄热区预留完整净空', () => {
+    const position = clampMobileCopyPopoverPosition({
+      ...base,
+      clientX: 300,
+      clientY: 340,
+      selection: { left: 80, top: 320, right: 320, bottom: 340 },
+      selectionGap: 52,
+      preference: { vertical: 'above', alignX: 200, focusX: 300, focusY: 330 },
+    });
+    expect(position).toEqual({ left: 156, top: 232 });
+    expect(position.top + base.height).toBe(320 - 52);
   });
 });
