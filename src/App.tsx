@@ -4624,7 +4624,7 @@ function App() {
         markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
         onOpenMarkdownImageLightbox={handleOpenMarkdownImageLightbox}
         onCloseMarkdownImageLightbox={handleCloseMarkdownImageLightbox}
-        onTogglePinned={isDesktopViewport ? handleToggleRightPinned : undefined}
+        onTogglePinned={isWideDesktopViewport ? handleToggleRightPinned : undefined}
       />}
 
       {showBackGuardHint && !isIOS && (
