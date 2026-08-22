@@ -93,9 +93,11 @@ import {
 import type { QuotaStatusWirePayload } from '../quota/types.js';
 import { TermdockAutoUpdateManager } from '../utils/autoUpdate.js';
 import {
+  AUTO_TITLE_LONG_RUNNING_DELAY_MS,
   AUTO_TITLE_MIN_CONTEXT_CHARS,
   cleanTerminalContext,
   generateAgentTitle,
+  hasSubstantiveAutoTitleContext,
   isNewAgentSessionId,
   isAutoTitleReevaluationDue,
   shouldReplaceAutoTitle,
@@ -248,6 +250,10 @@ interface TerminalSession {
   agentSession: AgentSessionState | null;
   /** Recent output from the current agent turn, bounded and used only when auto-title is enabled. */
   autoTitleContext: string;
+  /** One delayed first-title attempt for an agent turn that has not emitted stop yet. */
+  autoTitleLongRunningTimer: ReturnType<typeof setTimeout> | null;
+  /** Allows stop to refine the provisional title without waiting for the normal refresh interval. */
+  autoTitleGeneratedMidTurn: boolean;
   // Carries reviewed across agentSession nullification in syncAgentIdentity so
   // the yellow unread dot survives the poll window. Cleared on manual ack.
   lastAgentReviewed: boolean | null;
@@ -2719,25 +2725,30 @@ function clearAutoTitleForNewAgentSession(sessionId: string, session: TerminalSe
   console.log(`[auto-title] cleared stale title for new agent session in ${sessionId}`);
 }
 
-async function maybeAutoRenameSession(sessionId: string, agent: AgentInfo, rawContext: string): Promise<void> {
-  if (autoTitlePending.has(sessionId)) return;
-  if (!getAutoRenameAgentsSetting().includes(agent.slug)) return;
+async function maybeAutoRenameSession(
+  sessionId: string,
+  agent: AgentInfo,
+  rawContext: string,
+  options: { forceReevaluation?: boolean } = {},
+): Promise<boolean> {
+  if (autoTitlePending.has(sessionId)) return false;
+  if (!getAutoRenameAgentsSetting().includes(agent.slug)) return false;
 
   const record = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
-  if (!record || (record.customName === true && !record.autoTitle)) return;
-  if (record.autoTitle && !isAutoTitleReevaluationDue(
+  if (!record || (record.customName === true && !record.autoTitle)) return false;
+  if (record.autoTitle && !options.forceReevaluation && !isAutoTitleReevaluationDue(
     record.autoTitle.updatedAt,
     getAutoRenameIntervalMinutesSetting(),
-  )) return;
+  )) return false;
 
   const context = cleanTerminalContext(rawContext);
   // A new session gets one cheap attempt after its first real exchange. Short
   // conversations ("hi" plus a brief reply) are still valid sessions; the
   // one-hour re-evaluation guard below keeps this from becoming noisy after a
   // title exists.
-  if (context.length < AUTO_TITLE_MIN_CONTEXT_CHARS) return;
+  if (context.length < AUTO_TITLE_MIN_CONTEXT_CHARS) return false;
   const contentHash = createHash('sha256').update(context).digest('hex');
-  if (record.autoTitle?.contentHash === contentHash) return;
+  if (record.autoTitle?.contentHash === contentHash) return false;
 
   autoTitlePending.add(sessionId);
   try {
@@ -2759,11 +2770,11 @@ async function maybeAutoRenameSession(sessionId: string, agent: AgentInfo, rawCo
       models: validModels,
       currentTitle: record.autoTitle ? record.name : undefined,
     });
-    if (!title) return;
+    if (!title) return false;
 
     // A manual rename performed while the namer was running always wins.
     const current = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
-    if (!current || (current.customName === true && !current.autoTitle)) return;
+    if (!current || (current.customName === true && !current.autoTitle)) return false;
 
     if (current.autoTitle && !shouldReplaceAutoTitle(current.name, title)) {
       upsertGlobalSessionRecord({
@@ -2772,7 +2783,7 @@ async function maybeAutoRenameSession(sessionId: string, agent: AgentInfo, rawCo
       });
       await persistGlobalStateNow();
       console.log(`[auto-title] kept ${sessionId} title ${JSON.stringify(current.name)}`);
-      return;
+      return true;
     }
 
     const next: PersistedClientSession = {
@@ -2788,11 +2799,51 @@ async function maybeAutoRenameSession(sessionId: string, agent: AgentInfo, rawCo
     await persistGlobalStateNow();
     broadcastClientState();
     console.log(`[auto-title] renamed ${sessionId} (${agent.slug}) to ${JSON.stringify(title)}`);
+    return true;
   } catch (error) {
     console.warn(`[auto-title] failed for ${sessionId}: ${getErrorMessage(error)}`);
+    return false;
   } finally {
     autoTitlePending.delete(sessionId);
   }
+}
+
+function cancelLongRunningAutoTitle(session: TerminalSession): void {
+  if (session.autoTitleLongRunningTimer === null) return;
+  clearTimeout(session.autoTitleLongRunningTimer);
+  session.autoTitleLongRunningTimer = null;
+}
+
+function maybeScheduleLongRunningAutoTitle(sessionId: string, session: TerminalSession): void {
+  if (session.autoTitleLongRunningTimer !== null || session.autoTitleGeneratedMidTurn) return;
+  const agent = session.agent;
+  if (!agent || !getAutoRenameAgentsSetting().includes(agent.slug)) return;
+  const phase = session.agentSession?.status;
+  if (phase === 'done' || phase === 'idle') return;
+  const record = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
+  if (!record || record.autoTitle || record.customName === true) return;
+  if (!hasSubstantiveAutoTitleContext(session.autoTitleContext)) return;
+
+  session.autoTitleLongRunningTimer = setTimeout(() => {
+    session.autoTitleLongRunningTimer = null;
+    const liveSession = terminalSessions.get(sessionId);
+    if (liveSession !== session || liveSession.agent?.slug !== agent.slug) return;
+    const phase = liveSession.agentSession?.status;
+    if (phase === 'done' || phase === 'idle') return;
+    const current = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
+    if (!current || current.autoTitle || current.customName === true) return;
+    void maybeAutoRenameSession(sessionId, agent, liveSession.autoTitleContext).then((generated) => {
+      if (!generated || terminalSessions.get(sessionId) !== liveSession) return;
+      const completedWhileNaming = liveSession.agentSession?.status === 'done'
+        || liveSession.agentSession?.status === 'idle';
+      if (completedWhileNaming) {
+        void maybeAutoRenameSession(sessionId, agent, liveSession.autoTitleContext, { forceReevaluation: true });
+        return;
+      }
+      liveSession.autoTitleGeneratedMidTurn = true;
+    });
+  }, AUTO_TITLE_LONG_RUNNING_DELAY_MS);
+  session.autoTitleLongRunningTimer.unref?.();
 }
 
 export interface AgentStatusWirePayload {
@@ -3020,6 +3071,8 @@ function applyAgentSignals(
       ?? globalSessionState.sessions.find((item) => item.backendSessionId === sessionId)?.agentResume?.sessionId
       ?? null;
     if (event.kind === 'session-start' && isNewAgentSessionId(previousNativeSessionId, event.sessionId)) {
+      cancelLongRunningAutoTitle(session);
+      session.autoTitleGeneratedMidTurn = false;
       clearAutoTitleForNewAgentSession(sessionId, session);
     }
     if (event.kind === 'prompt-submit') {
@@ -3033,7 +3086,11 @@ function applyAgentSignals(
     }
     applyAgentEvent(state, event);
     if (event.kind === 'stop') {
+      cancelLongRunningAutoTitle(session);
       completedTurnAgent = event.agent ?? session.agent;
+    }
+    if (event.kind === 'session-end') {
+      cancelLongRunningAutoTitle(session);
     }
     if (event.kind === 'session-start' || event.kind === 'session-end' || event.kind === 'stop') {
       persistAgentResumeBinding(sessionId, session);
@@ -3073,9 +3130,11 @@ function applyAgentSignals(
 
   if (completedTurnAgent) {
     const agent = completedTurnAgent;
+    const forceReevaluation = session.autoTitleGeneratedMidTurn;
+    session.autoTitleGeneratedMidTurn = false;
     // Let the current PTY chunk reach the rolling context before reading it.
     setTimeout(() => {
-      void maybeAutoRenameSession(sessionId, agent, session.autoTitleContext);
+      void maybeAutoRenameSession(sessionId, agent, session.autoTitleContext, { forceReevaluation });
     }, 250).unref?.();
   }
 }
@@ -4028,6 +4087,7 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
 
   session.dataDisposable?.dispose();
   session.exitDisposable?.dispose();
+  cancelLongRunningAutoTitle(session);
   lastAgentStatusSnapshots.delete(sessionId);
   lastGitStatusSnapshots.delete(sessionId);
   destroyTmuxControl(session.tmuxControl);
@@ -4386,6 +4446,7 @@ function processSessionOutput(sessionId: string, session: TerminalSession, data:
 
   if (opts.broadcast) {
     appendAutoTitleContext(session, data);
+    maybeScheduleLongRunningAutoTitle(sessionId, session);
     broadcastEvent(sessionId, seq !== undefined ? { type: 'data', data, seq } : { type: 'data', data });
   }
 }
@@ -4577,6 +4638,8 @@ async function spawnTerminalSession(req: express.Request, input: {
     agent: null,
     agentSession: null,
     autoTitleContext: '',
+    autoTitleLongRunningTimer: null,
+    autoTitleGeneratedMidTurn: false,
     lastAgentReviewed: null,
     agentLeftAt: null,
     gitStatus: null,
@@ -4661,6 +4724,8 @@ async function adoptPtyHostSessions(): Promise<void> {
       agent: null,
       agentSession: null,
       autoTitleContext: '',
+      autoTitleLongRunningTimer: null,
+      autoTitleGeneratedMidTurn: false,
       lastAgentReviewed: null,
       agentLeftAt: null,
       gitStatus: null,
