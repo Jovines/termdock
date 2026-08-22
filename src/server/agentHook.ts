@@ -109,6 +109,43 @@ function ancestorTtyDevice(): string | null {
 }
 
 /**
+ * tmux passthrough is version/configuration sensitive and, more importantly,
+ * only works while tmux considers the escape sequence pane output. Termdock
+ * itself is an attached tmux client, so write the sentinel to that client's
+ * tty directly when possible. This also works for detached hook subprocesses
+ * whose own `/dev/tty` is unavailable.
+ */
+function tmuxClientTtyDevices(): string[] {
+  const pane = process.env.TMUX_PANE;
+  if (!process.env.TMUX || !pane) return [];
+  try {
+    const output = execFileSync('tmux', ['list-clients', '-t', pane, '-F', '#{client_tty}\t#{client_pid}'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2000,
+    });
+    return [...new Set(output.split(/\r?\n/).flatMap((line) => {
+      const [device, pid] = line.trim().split('\t');
+      if (!/^\/dev\/(?:pts\/\d+|tty[^/]*)$/.test(device ?? '')) return [];
+      // On Linux the environment gives us an exact ownership marker. An
+      // ordinary `tmux attach` must not steal a Termdock sentinel merely
+      // because tmux listed that client first.
+      const environ = pid && /^\d+$/.test(pid) ? `/proc/${pid}/environ` : null;
+      if (environ && fs.existsSync(environ)) {
+        try {
+          if (!fs.readFileSync(environ).toString().split('\0').includes('TERMDOCK=1')) return [];
+        } catch {
+          return [];
+        }
+      }
+      return [device];
+    }))];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Write the sequence to the pane's PTY so the server sniffs it as pane output.
  * Two routes: /dev/tty (hook attached to its tty), or an ancestor's tty
  * device (agent ran us detached — write its PTY slave directly; writing the
@@ -121,6 +158,12 @@ function ancestorTtyDevice(): string | null {
  * the termdock server — as the plain inner OSC.
  */
 function writeToControllingTty(sequence: string, inTmuxPane: boolean): boolean {
+  if (inTmuxPane) {
+    const clientTtys = tmuxClientTtyDevices();
+    if (clientTtys.length > 0) {
+      return clientTtys.some((device) => writeDev(device, sequence));
+    }
+  }
   // Only genuine tmux panes (TMUX_PANE is set by tmux itself) get the DCS
   // passthrough wrap; a bare inherited TMUX just means an ancestor ran tmux.
   const wire = inTmuxPane

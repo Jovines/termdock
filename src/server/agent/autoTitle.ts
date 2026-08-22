@@ -1,9 +1,7 @@
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { getTitleNamerCatalog, runTitleNamer } from './titleNamerCatalog.js';
 
-const execFileAsync = promisify(execFile);
 const MAX_CONTEXT_CHARS = 16_000;
-const TITLE_TIMEOUT_MS = 45_000;
+export const AUTO_TITLE_MIN_CONTEXT_CHARS = 12;
 
 export function cleanTerminalContext(input: string): string {
   return input
@@ -51,10 +49,16 @@ export function normalizeGeneratedTitle(output: string): string | null {
 
 export function resolveTitleNamerOrder(
   sessionAgentSlug: string,
-  namer: 'auto' | 'codex' | 'claude',
-): Array<'codex' | 'claude'> {
+  namer: string,
+  availableSlugs: string[] = ['codex', 'claude'],
+): string[] {
   if (namer !== 'auto') return [namer];
-  return sessionAgentSlug === 'claude' ? ['claude', 'codex'] : ['codex', 'claude'];
+  return [...new Set([
+    ...(availableSlugs.includes(sessionAgentSlug) ? [sessionAgentSlug] : []),
+    'codex',
+    'claude',
+    ...availableSlugs,
+  ])].filter((slug) => availableSlugs.includes(slug));
 }
 
 function titleUnits(title: string): string[] {
@@ -80,52 +84,30 @@ export function isNewAgentSessionId(previous: string | null, next: string | null
   return Boolean(previous && next && previous !== next);
 }
 
-async function runNamer(command: string, args: string[]): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync(command, args, {
-      timeout: TITLE_TIMEOUT_MS,
-      maxBuffer: 256 * 1024,
-      env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
-    });
-    return normalizeGeneratedTitle(stdout);
-  } catch {
-    return null;
-  }
-}
-
 export async function generateAgentTitle(
   sessionAgentSlug: string,
   agentName: string,
   rawContext: string,
   options: {
-    namer: 'auto' | 'codex' | 'claude';
+    namer: string;
     models: Record<string, string>;
     currentTitle?: string;
   },
 ): Promise<string | null> {
   const context = cleanTerminalContext(rawContext);
-  if (context.length < 40) return null;
+  if (context.length < AUTO_TITLE_MIN_CONTEXT_CHARS) return null;
   const prompt = buildAutoTitlePrompt(agentName, context, options.currentTitle);
 
-  const preferred = resolveTitleNamerOrder(sessionAgentSlug, options.namer);
+  const catalog = await getTitleNamerCatalog();
+  const preferred = resolveTitleNamerOrder(
+    sessionAgentSlug,
+    options.namer,
+    catalog.filter((entry) => entry.available).map((entry) => entry.slug),
+  );
   for (const namer of preferred) {
     const model = options.models[namer];
-    const title = namer === 'claude'
-      ? await runNamer('claude', [
-        ...(model ? ['--model', model] : []),
-        '--no-session-persistence',
-        '-p',
-        prompt,
-      ])
-      : await runNamer('codex', [
-        'exec',
-        '--ephemeral',
-        '--skip-git-repo-check',
-        '--color',
-        'never',
-        ...(model ? ['--model', model] : []),
-        prompt,
-      ]);
+    const output = await runTitleNamer(namer, prompt, model);
+    const title = output ? normalizeGeneratedTitle(output) : null;
     if (title) return title;
   }
   return null;

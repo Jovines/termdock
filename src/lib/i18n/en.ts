@@ -522,6 +522,8 @@ export const en: TranslationDictionary = {
     agentHooksInstall: 'Install',
     agentHooksInstalled: 'Installed',
     agentHooksOutdated: 'Outdated',
+    agentHooksNeedsApproval: 'Needs approval',
+    agentHooksApprovalHint: 'Run /hooks in Codex and approve the Termdock hooks',
     agentHooksNotInstalled: 'Not installed',
     agentHooksUninstall: 'Uninstall',
     agentHooksReinstall: 'Reinstall',

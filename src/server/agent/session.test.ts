@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  agentEventMatchesCurrentAgent,
   applyAgentEvent,
   buildHookSequence,
   defaultAgentSessionState,
@@ -12,6 +13,7 @@ import { agentBySlug } from './registry.js';
 function ev(kind: AgentEventKind, opts: Partial<AgentEvent> = {}): AgentEvent {
   return {
     agent: agentBySlug('claude'),
+    agentSlug: 'claude',
     kind,
     sessionId: null,
     message: null,
@@ -27,6 +29,7 @@ describe('parseAgentEvent', () => {
       '777;notify;termdock://cli-agent;{"v":1,"agent":"claude","event":"permission-request","session_id":"abc-123","message":"Claude needs your permission to use Bash"}',
     );
     expect(parsed?.agent?.slug).toBe('claude');
+    expect(parsed?.agentSlug).toBe('claude');
     expect(parsed?.kind).toBe('permission-request');
     expect(parsed?.sessionId).toBe('abc-123');
     expect(parsed?.message).toContain('permission');
@@ -37,6 +40,24 @@ describe('parseAgentEvent', () => {
     expect(parseAgentEvent('777;notify;termdock://cli-agent;{"event":"quantum-leap"}')).toBeNull();
     expect(parseAgentEvent('777;notify;termdock://cli-agent;{oops')).toBeNull();
     expect(parseAgentEvent('9;4;3;0')).toBeNull();
+  });
+});
+
+describe('agent event identity isolation', () => {
+  it('accepts an event for an unclaimed or matching pane and rejects a foreign Agent', () => {
+    const claude = agentBySlug('claude')!;
+    const codex = agentBySlug('codex')!;
+    const event = ev('stop', { agent: claude });
+    expect(agentEventMatchesCurrentAgent(null, event)).toBe(true);
+    expect(agentEventMatchesCurrentAgent(claude, event)).toBe(true);
+    expect(agentEventMatchesCurrentAgent(codex, event)).toBe(false);
+  });
+
+  it('rejects stale events from an Agent that is no longer registered', () => {
+    const codex = agentBySlug('codex')!;
+    const event = ev('question-asked', { agent: null, agentSlug: 'removed-plugin' });
+    expect(agentEventMatchesCurrentAgent(null, event)).toBe(false);
+    expect(agentEventMatchesCurrentAgent(codex, event)).toBe(false);
   });
 });
 

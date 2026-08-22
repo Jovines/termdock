@@ -1896,6 +1896,14 @@ const AGENT_PLUGIN_EXAMPLE = {
     command: 'my-agent --resume {sessionId}',
     staleFlags: ['--resume'],
   },
+  titleNamer: {
+    command: 'my-agent',
+    args: ['title', '--json', '--prompt', '{prompt}', '--model={model}'],
+    models: {
+      command: 'my-agent',
+      args: ['models', '--json'],
+    },
+  },
 } as const;
 
 function runPluginInitJson(): void {
@@ -1942,6 +1950,8 @@ function runPluginInitJson(): void {
       'Run td plugin-create <manifest-file>; the Agent appears in Termdock immediately.',
       'Ask the user to open Settings > Detection Rules and click Install for this Agent. They can uninstall it there later.',
       'If the Agent hook format is not a Claude-style hooks map, configure native hooks to call td agent-event directly.',
+      'Map the completed-turn hook to event "stop"; this is also the automatic-title trigger when the user enables titles for the Agent.',
+      'Optionally declare titleNamer so this Agent can generate titles and dynamically publish its own model catalog.',
       'Run td plugin-list to verify registration.',
     ],
     manifest: AGENT_PLUGIN_EXAMPLE,
@@ -2049,6 +2059,15 @@ ${c.dim('───────────────────')}
     "command": "trae --resume {sessionId}",
     ${c.dim('// Flags to strip from the original launch argv when replaying the resume.')}
     "staleFlags": ["--resume", "-r", "--session-id", "--continue"]
+  },
+
+  ${c.dim('// ── optional: injectable automatic-title provider ──')}
+  "titleNamer": {
+    ${c.dim('// No shell expansion. {prompt} is required; a bare {model} arg is omitted when automatic.')}
+    "command": "trae",
+    "args": ["title", "--prompt", "{prompt}", "--model={model}"],
+    ${c.dim('// Must print JSON: strings or {id, displayName, description, isDefault} objects.')}
+    "models": { "command": "trae", "args": ["models", "--json"] }
   }
 }
 
@@ -2062,6 +2081,7 @@ ${c.dim('─────────────────────')}
   tool-complete           A tool execution completed (unblocks waiting state)
   notification            Generic notification from the agent (heuristic gated)
   stop                    Agent turn finished / went idle
+                          Also triggers automatic title generation when enabled
   session-end             Agent session closed / binary exited
 
 ${c.bold('Creating a plugin')}

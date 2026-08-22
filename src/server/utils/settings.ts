@@ -26,7 +26,7 @@ export interface SettingsDoc {
   /** Agent slugs whose completed turns may automatically update the Termdock tab title. */
   autoRenameAgents: string[];
   /** `auto` follows the active session when its CLI is supported. */
-  autoRenameNamer: 'auto' | 'codex' | 'claude';
+  autoRenameNamer: string;
   /** Per-CLI model choices. Missing means use that CLI's current default. */
   autoRenameModels: Record<string, string>;
   updatedAt: number;
@@ -102,13 +102,12 @@ function normalizeSettings(value: unknown): SettingsDoc {
     locale: typeof (raw as { locale?: unknown }).locale === 'string' && (raw as { locale: string }).locale === 'zh' ? 'zh' : 'en',
     contextDraftHeight: normalizeContextDraftHeight(raw.contextDraftHeight),
     autoRenameAgents,
-    autoRenameNamer: raw.autoRenameNamer === 'codex' || raw.autoRenameNamer === 'claude'
-      ? raw.autoRenameNamer
-      : 'auto',
+    autoRenameNamer: typeof raw.autoRenameNamer === 'string' && /^(?:auto|[a-z][a-z0-9-]{0,39})$/.test(raw.autoRenameNamer)
+      ? raw.autoRenameNamer : 'auto',
     autoRenameModels: raw.autoRenameModels && typeof raw.autoRenameModels === 'object'
       ? Object.fromEntries(Object.entries(raw.autoRenameModels as Record<string, unknown>)
         .filter((entry): entry is [string, string] => (
-          ['codex', 'claude'].includes(entry[0])
+          /^[a-z][a-z0-9-]{0,39}$/.test(entry[0])
           && typeof entry[1] === 'string'
           && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(entry[1])
         )))
@@ -257,11 +256,11 @@ export function setAutoRenameAgentsSetting(slugs: string[]): SettingsDoc {
   });
 }
 
-export function getAutoRenameNamerSetting(): 'auto' | 'codex' | 'claude' {
+export function getAutoRenameNamerSetting(): string {
   return loadSettings().autoRenameNamer;
 }
 
-export function setAutoRenameNamerSetting(namer: 'auto' | 'codex' | 'claude'): SettingsDoc {
+export function setAutoRenameNamerSetting(namer: string): SettingsDoc {
   return updateSettings((settings) => {
     settings.autoRenameNamer = namer;
   });
@@ -275,7 +274,7 @@ export function setAutoRenameModelsSetting(models: Record<string, string>): Sett
   return updateSettings((settings) => {
     settings.autoRenameModels = Object.fromEntries(Object.entries(models)
       .filter(([slug, model]) => (
-        ['codex', 'claude'].includes(slug)
+        /^[a-z][a-z0-9-]{0,39}$/.test(slug)
         && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(model)
       )));
   });

@@ -41,6 +41,7 @@ import { Switch } from '../ui/Switch';
 const STATE_STYLE: Record<AgentHookInfo['state'], string> = {
   installed: 'text-[color:var(--success)]',
   outdated: 'text-[color:var(--warning)]',
+  'needs-approval': 'text-[color:var(--warning)]',
   'not-installed': 'text-muted-foreground',
 };
 
@@ -58,7 +59,7 @@ function AgentHooksSettings(): React.ReactElement {
   const [copiedMigrationSlug, setCopiedMigrationSlug] = React.useState<string | null>(null);
   const [autoRenameAgents, setAutoRenameAgents] = React.useState<Set<string>>(new Set());
   const [busyAutoRenameSlug, setBusyAutoRenameSlug] = React.useState<string | null>(null);
-  const [autoRenameNamer, setAutoRenameNamer] = React.useState<'auto' | 'codex' | 'claude'>('auto');
+  const [autoRenameNamer, setAutoRenameNamer] = React.useState<string>('auto');
   const [autoRenameModels, setAutoRenameModels] = React.useState<Record<string, string>>({});
   const [titleNamers, setTitleNamers] = React.useState<TitleNamerInfo[] | null>(null);
   const [savingTitleChoice, setSavingTitleChoice] = React.useState<string | null>(null);
@@ -118,6 +119,7 @@ function AgentHooksSettings(): React.ReactElement {
   const stateLabel = (state: AgentHookInfo['state']): string => {
     if (state === 'installed') return t('settings.agentHooksInstalled');
     if (state === 'outdated') return t('settings.agentHooksOutdated');
+    if (state === 'needs-approval') return t('settings.agentHooksNeedsApproval');
     return t('settings.agentHooksNotInstalled');
   };
 
@@ -192,7 +194,7 @@ function AgentHooksSettings(): React.ReactElement {
     }
   };
 
-  const changeAutoRenameNamer = async (namer: 'auto' | 'codex' | 'claude') => {
+  const changeAutoRenameNamer = async (namer: string) => {
     const previous = autoRenameNamer;
     setAutoRenameNamer(namer);
     setSavingTitleChoice('namer');
@@ -239,7 +241,7 @@ function AgentHooksSettings(): React.ReactElement {
           <select
             value={autoRenameNamer}
             disabled={savingTitleChoice !== null}
-            onChange={(event) => void changeAutoRenameNamer(event.target.value as 'auto' | 'codex' | 'claude')}
+            onChange={(event) => void changeAutoRenameNamer(event.target.value)}
             className="min-w-0 rounded-lg bg-surface px-2.5 py-1.5 text-[11px] text-foreground outline-none disabled:opacity-50"
           >
             <option value="auto">{t('settings.agentAutoRenameFollow')}</option>
@@ -324,7 +326,7 @@ function AgentHooksSettings(): React.ReactElement {
                 )}
                 <span className={`text-[10px] ${STATE_STYLE[agent.state]}`}>
                   {agent.state === 'installed' && <RiCircleCheck size={10} className="mr-0.5 inline" />}
-                  {agent.state === 'outdated' && <RiAlertLine size={10} className="mr-0.5 inline" />}
+                  {(agent.state === 'outdated' || agent.state === 'needs-approval') && <RiAlertLine size={10} className="mr-0.5 inline" />}
                   {stateLabel(agent.state)}
                 </span>
               </div>
@@ -334,6 +336,11 @@ function AgentHooksSettings(): React.ReactElement {
               {devModeSlug === agent.slug && (
                 <div className="mt-0.5 text-[10px] text-[color:var(--warning)]">
                   {t('settings.agentHooksDevMode')}
+                </div>
+              )}
+              {agent.state === 'needs-approval' && (
+                <div className="mt-0.5 text-[10px] text-[color:var(--warning)]">
+                  {t('settings.agentHooksApprovalHint')}
                 </div>
               )}
             </div>

@@ -54,6 +54,7 @@ import {
 } from '../agent/registry.js';
 import {
   applyAgentEvent,
+  agentEventMatchesCurrentAgent,
   defaultAgentSessionState,
   parseAgentEvent,
   type AgentEvent,
@@ -84,8 +85,14 @@ import {
 } from '../quota/QuotaManager.js';
 import type { QuotaStatusWirePayload } from '../quota/types.js';
 import { TermdockAutoUpdateManager } from '../utils/autoUpdate.js';
-import { cleanTerminalContext, generateAgentTitle, isNewAgentSessionId, shouldReplaceAutoTitle } from '../agent/autoTitle.js';
-import { getTitleNamerCatalog } from '../agent/titleNamerCatalog.js';
+import {
+  AUTO_TITLE_MIN_CONTEXT_CHARS,
+  cleanTerminalContext,
+  generateAgentTitle,
+  isNewAgentSessionId,
+  shouldReplaceAutoTitle,
+} from '../agent/autoTitle.js';
+import { getTitleNamerCatalog, invalidateTitleNamerCatalog } from '../agent/titleNamerCatalog.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -2714,7 +2721,11 @@ async function maybeAutoRenameSession(sessionId: string, agent: AgentInfo, rawCo
   if (record.autoTitle && Date.now() - record.autoTitle.updatedAt < AUTO_TITLE_REEVALUATE_MS) return;
 
   const context = cleanTerminalContext(rawContext);
-  if (context.length < 120) return;
+  // A new session gets one cheap attempt after its first real exchange. Short
+  // conversations ("hi" plus a brief reply) are still valid sessions; the
+  // one-hour re-evaluation guard below keeps this from becoming noisy after a
+  // title exists.
+  if (context.length < AUTO_TITLE_MIN_CONTEXT_CHARS) return;
   const contentHash = createHash('sha256').update(context).digest('hex');
   if (record.autoTitle?.contentHash === contentHash) return;
 
@@ -2727,7 +2738,7 @@ async function maybeAutoRenameSession(sessionId: string, agent: AgentInfo, rawCo
       new Set(namer.models.map((model) => model.id)),
     ]));
     const validModels = Object.fromEntries(Object.entries(savedModels)
-      .filter(([slug, model]) => availableModels.get(slug as 'codex' | 'claude')?.has(model)));
+      .filter(([slug, model]) => availableModels.get(slug)?.has(model)));
     for (const namer of catalog) {
       if (!validModels[namer.slug] && namer.recommendedModel) {
         validModels[namer.slug] = namer.recommendedModel;
@@ -2986,6 +2997,7 @@ function applyAgentSignals(
   let identityChanged = false;
   let completedTurnAgent: AgentInfo | null = null;
   for (const event of events) {
+    if (!agentEventMatchesCurrentAgent(session.agent, event)) continue;
     // An event naming an agent brands the pane even when the process poll
     // can't see through a wrapper: identity via protocol.
     if (!session.agent && event.agent) {
@@ -5230,11 +5242,12 @@ router.put('/settings', async (req, res) => {
   }
 
   if (typeof body.autoRenameNamer === 'string') {
-    if (!['auto', 'codex', 'claude'].includes(body.autoRenameNamer)) {
+    const available = new Set((await getTitleNamerCatalog()).filter((entry) => entry.available).map((entry) => entry.slug));
+    if (body.autoRenameNamer !== 'auto' && !available.has(body.autoRenameNamer)) {
       res.status(400).json({ error: 'Unsupported automatic title agent', code: 'AUTO_RENAME_NAMER_INVALID' });
       return;
     }
-    setAutoRenameNamerSetting(body.autoRenameNamer as 'auto' | 'codex' | 'claude');
+    setAutoRenameNamerSetting(body.autoRenameNamer);
   }
 
   if (body.autoRenameModels && typeof body.autoRenameModels === 'object') {
@@ -5242,8 +5255,7 @@ router.put('/settings', async (req, res) => {
     const catalog = await getTitleNamerCatalog();
     const allowed = new Map(catalog.map((namer) => [namer.slug, new Set(namer.models.map((model) => model.id))]));
     const models: Record<string, string> = {};
-    for (const slug of ['codex', 'claude'] as const) {
-      const model = requested[slug];
+    for (const [slug, model] of Object.entries(requested)) {
       if (model === undefined || model === '') continue;
       if (typeof model !== 'string' || !allowed.get(slug)?.has(model)) {
         res.status(400).json({ error: `Unsupported ${slug} title model`, code: 'AUTO_RENAME_MODEL_INVALID' });
@@ -5301,8 +5313,8 @@ router.put('/context-draft', (req, res) => {
 
 // ── Agent hooks API (rich status channel installers, built-in + plugin) ──
 
-router.get('/agent-hooks', (_req, res) => {
-  res.json({ agents: listAllHookAgents() });
+router.get('/agent-hooks', async (_req, res) => {
+  res.json({ agents: await listAllHookAgents() });
 });
 
 router.get('/agent-launchers', async (_req, res) => {
@@ -5407,6 +5419,7 @@ router.get('/agent-plugins', (_req, res) => {
       iconMode: p.manifest.iconMode ?? 'mask',
       hasHooks: p.manifest.hooks !== undefined,
       hasResume: p.manifest.resume !== undefined,
+      hasTitleNamer: p.manifest.titleNamer !== undefined,
       hasIcon: p.iconPath !== null,
     })),
     errors: errors.map((e) => ({ slug: e.slug, errors: e.errors, code: e.code, migration: e.migration })),
@@ -5438,6 +5451,7 @@ router.post('/agent-plugins', async (req, res) => {
       return;
     }
     const dir = savePlugin(validation.manifest);
+    invalidateTitleNamerCatalog();
     clearPluginAgents();
     const loaded = loadPlugins();
     registerPluginAgents(loaded.plugins);
@@ -5450,12 +5464,29 @@ router.post('/agent-plugins', async (req, res) => {
 router.delete('/agent-plugins/:slug', async (req, res) => {
   const { slug } = req.params;
   try {
+    const plugin = loadPlugins().plugins.find((entry) => entry.manifest.slug === slug);
+    if (!plugin) {
+      res.status(404).json({ error: `Plugin "${slug}" not found` });
+      return;
+    }
+    // Uninstall while the manifest is still present: after deletion we no
+    // longer know the target file or event shape and would orphan commands in
+    // the Agent's config.
+    if (plugin.manifest.hooks) await uninstallHooksForSlug(slug);
     removePlugin(slug);
+    invalidateTitleNamerCatalog();
+    setAutoRenameAgentsSetting(getAutoRenameAgentsSetting().filter((entry) => entry !== slug));
+    if (getAutoRenameNamerSetting() === slug) setAutoRenameNamerSetting('auto');
+    const models = getAutoRenameModelsSetting();
+    if (models[slug]) {
+      delete models[slug];
+      setAutoRenameModelsSetting(models);
+    }
     clearPluginAgents();
     registerPluginAgents(loadPlugins().plugins);
     res.json({ slug, state: 'removed' });
   } catch (error) {
-    res.status(404).json({ error: (error as Error).message });
+    res.status(400).json({ error: (error as Error).message });
   }
 });
 

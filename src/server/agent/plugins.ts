@@ -59,6 +59,18 @@ export interface PluginResumeConfig {
   staleFlags?: string[];
 }
 
+export interface PluginTitleNamerConfig {
+  /** Executable used to generate a title (no shell expansion). */
+  command: string;
+  /** Arguments; must include {prompt}. {model} is omitted when unset. */
+  args: string[];
+  /** Optional CLI command that prints a JSON array of model descriptors. */
+  models?: {
+    command: string;
+    args?: string[];
+  };
+}
+
 export interface AgentPluginManifest {
   version: number;
   slug: string;
@@ -71,6 +83,8 @@ export interface AgentPluginManifest {
   statuses?: AgentStatusDefinition[];
   hooks?: PluginHookConfig;
   resume?: PluginResumeConfig;
+  /** Make this Agent available as an automatic-title provider. */
+  titleNamer?: PluginTitleNamerConfig;
 }
 
 export interface LoadedPlugin {
@@ -326,6 +340,49 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
     }
   }
 
+  // Optional automatic-title provider. Commands are argv arrays rather than
+  // shell snippets so a UI-installed manifest cannot gain accidental shell
+  // interpolation beyond the executable it explicitly declares.
+  let titleNamer: PluginTitleNamerConfig | undefined;
+  if (m.titleNamer !== undefined) {
+    if (typeof m.titleNamer !== 'object' || Array.isArray(m.titleNamer) || m.titleNamer === null) {
+      errors.push('titleNamer must be an object if present');
+    } else {
+      const n = m.titleNamer as Record<string, unknown>;
+      const command = n.command;
+      const args = n.args;
+      if (typeof command !== 'string' || command.trim().length === 0) {
+        errors.push('titleNamer.command is required');
+      }
+      if (!Array.isArray(args) || !args.every((arg) => typeof arg === 'string') || !args.some((arg) => arg.includes('{prompt}'))) {
+        errors.push('titleNamer.args must be a string array containing {prompt}');
+      }
+      let models: PluginTitleNamerConfig['models'];
+      if (n.models !== undefined) {
+        if (typeof n.models !== 'object' || Array.isArray(n.models) || n.models === null) {
+          errors.push('titleNamer.models must be an object if present');
+        } else {
+          const rawModels = n.models as Record<string, unknown>;
+          if (typeof rawModels.command !== 'string' || rawModels.command.trim().length === 0) {
+            errors.push('titleNamer.models.command is required');
+          }
+          if (rawModels.args !== undefined && (!Array.isArray(rawModels.args) || !rawModels.args.every((arg) => typeof arg === 'string'))) {
+            errors.push('titleNamer.models.args must be a string array if present');
+          }
+          if (typeof rawModels.command === 'string') {
+            models = {
+              command: rawModels.command.trim(),
+              args: Array.isArray(rawModels.args) ? rawModels.args as string[] : undefined,
+            };
+          }
+        }
+      }
+      if (typeof command === 'string' && Array.isArray(args)) {
+        titleNamer = { command: command.trim(), args: args as string[], models };
+      }
+    }
+  }
+
   if (errors.length > 0) {
     return {
       error: {
@@ -350,6 +407,7 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
       statuses,
       hooks,
       resume: resumeConfig,
+      titleNamer,
     },
   };
 }

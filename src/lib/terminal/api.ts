@@ -1424,7 +1424,7 @@ export interface SettingsState {
   localAccess: LocalAccessState;
   contextDraftHeight: { mobile: number | null; desktop: number | null };
   autoRenameAgents: string[];
-  autoRenameNamer: 'auto' | 'codex' | 'claude';
+  autoRenameNamer: string;
   autoRenameModels: Record<string, string>;
 }
 
@@ -1437,7 +1437,7 @@ export async function getSettings(): Promise<SettingsState> {
   return response.json();
 }
 
-export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: 'auto' | 'codex' | 'claude'; autoRenameModels?: Record<string, string> }): Promise<SettingsState> {
+export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string> }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -1459,7 +1459,7 @@ export interface TitleNamerModelInfo {
 }
 
 export interface TitleNamerInfo {
-  slug: 'codex' | 'claude';
+  slug: string;
   displayName: string;
   available: boolean;
   models: TitleNamerModelInfo[];
@@ -1575,7 +1575,7 @@ export interface AgentHookInfo {
   slug: string;
   displayName: string;
   targetDisplay: string;
-  state: 'not-installed' | 'installed' | 'outdated';
+  state: 'not-installed' | 'installed' | 'outdated' | 'needs-approval';
   accentColor: string | null;
   icon: string | null;
   iconMode: string | null;
@@ -1644,6 +1644,7 @@ export interface AgentPluginInfo {
   iconMode: 'mask' | 'native';
   hasHooks: boolean;
   hasResume: boolean;
+  hasTitleNamer: boolean;
   hasIcon: boolean;
 }
 

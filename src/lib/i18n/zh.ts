@@ -522,6 +522,8 @@ export const zh: TranslationDictionary = {
     agentHooksInstall: '安装',
     agentHooksInstalled: '已安装',
     agentHooksOutdated: '需更新',
+    agentHooksNeedsApproval: '待授权',
+    agentHooksApprovalHint: '在 Codex 中输入 /hooks，批准 Termdock Hook 后生效',
     agentHooksNotInstalled: '未安装',
     agentHooksUninstall: '卸载',
     agentHooksReinstall: '重新安装',

@@ -539,6 +539,8 @@ export type TranslationDictionary = {
     agentHooksInstall: string;
     agentHooksInstalled: string;
     agentHooksOutdated: string;
+    agentHooksNeedsApproval: string;
+    agentHooksApprovalHint: string;
     agentHooksNotInstalled: string;
     agentHooksUninstall: string;
     agentHooksReinstall: string;

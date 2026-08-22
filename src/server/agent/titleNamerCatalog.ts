@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
+import { loadPlugins, type PluginTitleNamerConfig } from './plugins.js';
 
 const execFileAsync = promisify(execFile);
 const CACHE_FRESH_MS = 24 * 60 * 60_000;
@@ -17,7 +18,7 @@ export interface TitleNamerModel {
 }
 
 export interface TitleNamerInfo {
-  slug: 'codex' | 'claude';
+  slug: string;
   displayName: string;
   available: boolean;
   models: TitleNamerModel[];
@@ -33,6 +34,10 @@ interface CatalogCacheDoc {
 let cached: CatalogCacheDoc | null = null;
 let refreshPromise: Promise<TitleNamerInfo[]> | null = null;
 
+export function invalidateTitleNamerCatalog(): void {
+  cached = null;
+}
+
 function normalizeCachedCatalog(input: unknown): CatalogCacheDoc | null {
   if (!input || typeof input !== 'object') return null;
   const doc = input as Partial<CatalogCacheDoc>;
@@ -40,7 +45,7 @@ function normalizeCachedCatalog(input: unknown): CatalogCacheDoc | null {
   const value = doc.value.flatMap((entry): TitleNamerInfo[] => {
     if (!entry || typeof entry !== 'object') return [];
     const candidate = entry as Partial<TitleNamerInfo>;
-    if (candidate.slug !== 'codex' && candidate.slug !== 'claude') return [];
+    if (typeof candidate.slug !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(candidate.slug)) return [];
     if (!Array.isArray(candidate.models)) return [];
     const models = candidate.models.filter((model): model is TitleNamerModel => Boolean(
       model
@@ -166,10 +171,83 @@ async function listClaudeModels(): Promise<TitleNamerModel[]> {
   }
 }
 
+function normalizeDiscoveredModels(input: unknown): TitleNamerModel[] {
+  if (!Array.isArray(input)) return [];
+  return input.flatMap((entry): TitleNamerModel[] => {
+    if (typeof entry === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(entry)) {
+      return [{ id: entry, displayName: entry, description: '', isDefault: false }];
+    }
+    if (!entry || typeof entry !== 'object') return [];
+    const model = entry as Record<string, unknown>;
+    if (typeof model.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(model.id)) return [];
+    return [{
+      id: model.id,
+      displayName: typeof model.displayName === 'string' ? model.displayName : model.id,
+      description: typeof model.description === 'string' ? model.description : '',
+      isDefault: model.isDefault === true,
+    }];
+  });
+}
+
+async function listPluginModels(config: PluginTitleNamerConfig): Promise<TitleNamerModel[]> {
+  if (!config.models) return [];
+  const { stdout } = await execFileAsync(config.models.command, config.models.args ?? [], {
+    timeout: PROBE_TIMEOUT_MS,
+    maxBuffer: 256 * 1024,
+    env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
+  });
+  return normalizeDiscoveredModels(JSON.parse(stdout));
+}
+
+function pluginTitleNamers() {
+  return loadPlugins().plugins.flatMap((plugin) => plugin.manifest.titleNamer
+    ? [{
+      slug: plugin.manifest.slug,
+      displayName: plugin.manifest.displayName,
+      config: plugin.manifest.titleNamer,
+    }]
+    : []);
+}
+
+export async function runTitleNamer(slug: string, prompt: string, model?: string): Promise<string | null> {
+  let command: string;
+  let args: string[];
+  if (slug === 'codex') {
+    command = 'codex';
+    args = ['exec', '--ephemeral', '--skip-git-repo-check', '--color', 'never', ...(model ? ['--model', model] : []), prompt];
+  } else if (slug === 'claude') {
+    command = 'claude';
+    args = [...(model ? ['--model', model] : []), '--no-session-persistence', '-p', prompt];
+  } else {
+    const provider = pluginTitleNamers().find((entry) => entry.slug === slug);
+    if (!provider) return null;
+    command = provider.config.command;
+    args = provider.config.args.flatMap((arg) => {
+      if (arg.includes('{model}') && !model) return [];
+      return [arg.replaceAll('{prompt}', prompt).replaceAll('{model}', model ?? '')];
+    });
+  }
+  try {
+    const { stdout } = await execFileAsync(command, args, {
+      timeout: 45_000,
+      maxBuffer: 256 * 1024,
+      env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
+    });
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
 async function refreshTitleNamerCatalog(): Promise<TitleNamerInfo[]> {
   if (refreshPromise) return refreshPromise;
   refreshPromise = (async () => {
-  const [codex, claude] = await Promise.allSettled([listCodexModels(), listClaudeModels()]);
+  const plugins = pluginTitleNamers();
+  const [codex, claude, ...pluginResults] = await Promise.allSettled([
+    listCodexModels(),
+    listClaudeModels(),
+    ...plugins.map((provider) => listPluginModels(provider.config)),
+  ]);
   const previousCodex = cached?.value.find((namer) => namer.slug === 'codex');
   const previousClaude = cached?.value.find((namer) => namer.slug === 'claude');
   const codexModels = codex.status === 'fulfilled' ? codex.value : previousCodex?.models ?? [];
@@ -189,6 +267,18 @@ async function refreshTitleNamerCatalog(): Promise<TitleNamerInfo[]> {
       models: claudeModels,
       recommendedModel: recommendTitleModel(claudeModels),
     },
+    ...plugins.map((provider, index): TitleNamerInfo => {
+      const result = pluginResults[index];
+      const previous = cached?.value.find((namer) => namer.slug === provider.slug);
+      const models = result?.status === 'fulfilled' ? result.value : previous?.models ?? [];
+      return {
+        slug: provider.slug,
+        displayName: provider.displayName,
+        available: provider.config.models ? result?.status === 'fulfilled' || previous?.available === true : true,
+        models,
+        recommendedModel: recommendTitleModel(models),
+      };
+    }),
   ];
     cached = { version: 1, updatedAt: Date.now(), value };
     await savePersistentCache(cached).catch(() => undefined);
@@ -203,6 +293,11 @@ export async function getTitleNamerCatalog(force = false): Promise<TitleNamerInf
   if (force) return refreshTitleNamerCatalog();
   if (!cached) cached = await loadPersistentCache();
   if (!cached) return refreshTitleNamerCatalog();
+
+  const expectedSlugs = new Set(['codex', 'claude', ...pluginTitleNamers().map((provider) => provider.slug)]);
+  if (cached.value.length !== expectedSlugs.size || cached.value.some((entry) => !expectedSlugs.has(entry.slug))) {
+    return refreshTitleNamerCatalog();
+  }
 
   if (Date.now() - cached.updatedAt > CACHE_FRESH_MS) {
     // Stale-while-revalidate: callers get the last known catalog immediately.

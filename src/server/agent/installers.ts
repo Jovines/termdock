@@ -17,13 +17,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { agentBySlug, isPluginAgent } from './registry.js';
 import { loadPlugins, resolveHookTarget, type PluginHookEvent } from './plugins.js';
 
 export type HookAgentSlug = 'claude' | 'codex' | 'copilot' | 'opencode' | 'pi' | 'grok' | 'kimi';
 
-export type HooksState = 'not-installed' | 'installed' | 'outdated';
+export type HooksState = 'not-installed' | 'installed' | 'outdated' | 'needs-approval';
 
 export interface HookAgentInfo {
   slug: string;
@@ -153,13 +153,14 @@ const CLAUDE_HOOK_EVENTS: Array<[string, string]> = [
   ['SessionEnd', 'session-end'],
 ];
 
-/** Codex's hook events (~/.codex/hooks.json, Claude-shaped). Codex is
- *  turn-level only: no Notification hook, and no SessionEnd — the pane's
- *  foreground detection clears the badge when Codex exits. */
+/** Codex's native hooks.json event vocabulary. */
 const CODEX_HOOK_EVENTS: Array<[string, string]> = [
   ['SessionStart', 'session-start'],
   ['UserPromptSubmit', 'prompt-submit'],
+  ['PermissionRequest', 'permission-request'],
+  ['PostToolUse', 'tool-complete'],
   ['Stop', 'stop'],
+  ['SessionEnd', 'session-end'],
 ];
 
 /**
@@ -653,6 +654,68 @@ export function hooksState(agent: HookAgentSlug): HooksState {
   return ownedFileState(file, expected, marker(agent));
 }
 
+interface CodexHookMetadata {
+  command?: string;
+  trustStatus?: string;
+  enabled?: boolean;
+}
+
+let codexRuntimeStateCache: { at: number; state: HooksState } | null = null;
+
+/** Query Codex's own hook registry: a structurally present hook can still be
+ * quarantined until the user approves its current hash in `/hooks`. */
+async function codexRuntimeHooksState(): Promise<HooksState> {
+  const structural = hooksState('codex');
+  if (structural !== 'installed') return structural;
+  if (codexRuntimeStateCache && Date.now() - codexRuntimeStateCache.at < 30_000) {
+    return codexRuntimeStateCache.state;
+  }
+  const state = await new Promise<HooksState>((resolve) => {
+    const child = spawn('codex', ['app-server', '--stdio'], {
+      stdio: ['pipe', 'pipe', 'ignore'],
+      env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
+    });
+    let buffer = '';
+    let settled = false;
+    const finish = (value: HooksState) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(structural), 5_000);
+    timer.unref?.();
+    child.on('error', () => finish(structural));
+    child.stdout.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString();
+      for (;;) {
+        const newline = buffer.indexOf('\n');
+        if (newline < 0) break;
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        let message: { id?: number; result?: { data?: Array<{ hooks?: CodexHookMetadata[] }> } };
+        try { message = JSON.parse(line) as typeof message; } catch { continue; }
+        if (message.id === 1) {
+          child.stdin.write(`${JSON.stringify({ method: 'initialized', params: {} })}\n`);
+          child.stdin.write(`${JSON.stringify({ id: 2, method: 'hooks/list', params: { cwds: [process.cwd()] } })}\n`);
+        } else if (message.id === 2) {
+          const ours = (message.result?.data ?? [])
+            .flatMap((entry) => entry.hooks ?? [])
+            .filter((hook) => typeof hook.command === 'string' && hook.command.includes(marker('codex')));
+          if (ours.length < CODEX_HOOK_EVENTS.length) finish('outdated');
+          else if (ours.some((hook) => hook.enabled === false || !['trusted', 'managed'].includes(hook.trustStatus ?? ''))) finish('needs-approval');
+          else finish('installed');
+        }
+      }
+    });
+    child.stdin.write(`${JSON.stringify({ id: 1, method: 'initialize', params: { clientInfo: { name: 'termdock', version: '1' } } })}\n`);
+  });
+  codexRuntimeStateCache = { at: Date.now(), state };
+  return state;
+}
+
 export function listHookAgents(): HookAgentInfo[] {
   return HOOK_AGENTS.map((slug) => ({
     slug,
@@ -681,9 +744,10 @@ export async function installHooks(agent: HookAgentSlug): Promise<InstallResult>
   }
   if (agent === 'codex') {
     hookMapInstall(file, agent, CODEX_HOOK_EVENTS);
+    codexRuntimeStateCache = null;
     try {
       await enableCodexHooksFeature();
-      return { summary: 'Installed', devMode };
+      return { summary: 'Installed — open /hooks in Codex and approve any new Termdock hooks', devMode };
     } catch (error) {
       return {
         summary: `Installed, but couldn't run \`codex features enable hooks\` (${(error as Error).message}) — run it once manually`,
@@ -707,6 +771,7 @@ export async function installHooks(agent: HookAgentSlug): Promise<InstallResult>
 export async function uninstallHooks(agent: HookAgentSlug): Promise<string> {
   const file = targetPath(agent);
   if (agent === 'claude' || agent === 'codex') {
+    if (agent === 'codex') codexRuntimeStateCache = null;
     return hookMapUninstall(file, agent);
   }
   if (agent === 'kimi') {
@@ -755,7 +820,7 @@ function hookCommandForPlugin(slug: string, event: string, status?: string): str
  * List all agents with hook support — both built-in and plugin-defined.
  * Plugin agents appear after built-in agents.
  */
-export function listAllHookAgents(): HookAgentInfo[] {
+export async function listAllHookAgents(): Promise<HookAgentInfo[]> {
   const builtIn = HOOK_AGENTS.map((slug) => {
     const agent = agentBySlug(slug);
     return {
@@ -782,6 +847,8 @@ export function listAllHookAgents(): HookAgentInfo[] {
       iconVersion: agent?.iconVersion ?? null,
     };
   });
+  const codex = builtIn.find((entry) => entry.slug === 'codex');
+  if (codex) codex.state = await codexRuntimeHooksState();
   return [...builtIn, ...pluginAgents];
 }
 
@@ -824,7 +891,7 @@ export async function uninstallHooksForSlug(slug: string): Promise<string> {
 // ---------------------------------------------------------------------------
 
 /** Generic state check for a hookmap-style hooks file. */
-function pluginHooksState(
+export function pluginHooksState(
   slug: string,
   file: string,
   events: Array<[string, string, string | null, number?, string?]>,
@@ -835,16 +902,24 @@ function pluginHooksState(
   const hooks = root.hooks;
   let any = false;
   let complete = true;
-  for (const [hookEvent, sentinel, , , status] of events) {
+  for (const [hookEvent, sentinel, matcher, timeout, status] of events) {
     const list = hooks && typeof hooks === 'object'
       ? (hooks as JsonObject)[hookEvent]
       : null;
     const ours = Array.isArray(list)
-      ? list.map((entry) => markerCommand(entry, mark)).find((c) => c !== null) ?? null
-      : null;
-    if (ours !== null) {
+      ? list.find((entry) => markerCommand(entry, mark) !== null)
+      : undefined;
+    if (ours !== undefined) {
       any = true;
-      if (ours !== hookCommandForPlugin(slug, sentinel, status)) complete = false;
+      const group = ours && typeof ours === 'object' ? ours as JsonObject : {};
+      const handler = Array.isArray(group.hooks) && group.hooks[0] && typeof group.hooks[0] === 'object'
+        ? group.hooks[0] as JsonObject
+        : {};
+      if (
+        handler.command !== hookCommandForPlugin(slug, sentinel, status)
+        || (matcher ?? undefined) !== group.matcher
+        || (timeout ?? undefined) !== handler.timeout
+      ) complete = false;
     } else {
       complete = false;
     }
@@ -854,7 +929,7 @@ function pluginHooksState(
 }
 
 /** Generic install for a hookmap-style hooks file. */
-function installPluginHooks(
+export function installPluginHooks(
   slug: string,
   file: string,
   events: Array<[string, string, string | null, number?, string?]>,
@@ -881,7 +956,7 @@ function installPluginHooks(
   const hooks = root.hooks as JsonObject;
   const mark = marker(slug as HookAgentSlug);
 
-  for (const [hookEvent, sentinel, matcher, , status] of events) {
+  for (const [hookEvent, sentinel, matcher, timeout, status] of events) {
     const command = hookCommandForPlugin(slug, sentinel, status);
     let list = hooks[hookEvent];
     if (list === undefined) {
@@ -890,7 +965,9 @@ function installPluginHooks(
     }
     if (!Array.isArray(list)) continue;
     const kept = list.filter((entry) => markerCommand(entry, mark) === null);
-    const entry: JsonObject = { hooks: [{ type: 'command', command }] };
+    const handler: JsonObject = { type: 'command', command };
+    if (timeout !== undefined) handler.timeout = timeout;
+    const entry: JsonObject = { hooks: [handler] };
     if (matcher) entry.matcher = matcher;
     kept.push(entry);
     hooks[hookEvent] = kept;

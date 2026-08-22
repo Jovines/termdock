@@ -1,10 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { buildAutoTitlePrompt, cleanTerminalContext, isNewAgentSessionId, normalizeGeneratedTitle, resolveTitleNamerOrder, shouldReplaceAutoTitle } from './autoTitle.js';
+import {
+  AUTO_TITLE_MIN_CONTEXT_CHARS,
+  buildAutoTitlePrompt,
+  cleanTerminalContext,
+  isNewAgentSessionId,
+  normalizeGeneratedTitle,
+  resolveTitleNamerOrder,
+  shouldReplaceAutoTitle,
+} from './autoTitle.js';
 
 describe('agent auto titles', () => {
   it('removes terminal control sequences and keeps recent readable content', () => {
     const input = `old\n\x1b[31mFix login redirect\x1b[0m\n\x1b]0;/tmp/project\x07done`;
     expect(cleanTerminalContext(input)).toBe('old\nFix login redirect\ndone');
+  });
+
+  it('allows a short first exchange to trigger a title attempt', () => {
+    expect(AUTO_TITLE_MIN_CONTEXT_CHARS).toBeLessThanOrEqual('hi\nHi! How can I help?'.length);
   });
 
   it('asks for one concise title using the agent identity', () => {
@@ -23,6 +35,8 @@ describe('agent auto titles', () => {
     expect(resolveTitleNamerOrder('claude', 'auto')).toEqual(['claude', 'codex']);
     expect(resolveTitleNamerOrder('codex', 'auto')).toEqual(['codex', 'claude']);
     expect(resolveTitleNamerOrder('claude', 'codex')).toEqual(['codex']);
+    expect(resolveTitleNamerOrder('test-agent', 'auto', ['codex', 'claude', 'test-agent']))
+      .toEqual(['test-agent', 'codex', 'claude']);
   });
 
   it('keeps cosmetic title variants and accepts a clear topic shift', () => {

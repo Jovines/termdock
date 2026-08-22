@@ -56,6 +56,9 @@ export interface AgentEvent {
   /** Which agent sent it, when the payload names one we know. Lets the event
    *  brand a pane even where argv detection can't see through a wrapper. */
   agent: AgentInfo | null;
+  /** Raw declared identity. Kept even when the plugin is no longer registered
+   * so stale hooks cannot decorate an unrelated live Agent. */
+  agentSlug: string | null;
   kind: AgentEventKind;
   sessionId: string | null;
   message: string | null;
@@ -63,6 +66,13 @@ export interface AgentEvent {
   cwd: string | null;
   /** Optional plugin-defined presentation status resolved from its manifest. */
   status: AgentStatusDefinition | null;
+}
+
+/** A hook may brand an unclaimed pane, but it may not overwrite or decorate
+ * a pane already owned by a different detected Agent. */
+export function agentEventMatchesCurrentAgent(current: AgentInfo | null, event: AgentEvent): boolean {
+  if (event.agentSlug && !event.agent) return false;
+  return !current || !event.agent || current.slug === event.agent.slug;
 }
 
 /**
@@ -222,7 +232,8 @@ export function parseAgentEvent(payload: string): AgentEvent | null {
   const eventName = nonEmpty(w.event);
   if (!eventName || !EVENT_KINDS.has(eventName as AgentEventKind)) return null;
 
-  const agent = agentBySlug(nonEmpty(w.agent));
+  const agentSlug = nonEmpty(w.agent);
+  const agent = agentBySlug(agentSlug);
   const statusId = nonEmpty(w.status);
   const status = statusId
     ? agent?.statuses?.find((definition) => definition.id === statusId) ?? null
@@ -230,6 +241,7 @@ export function parseAgentEvent(payload: string): AgentEvent | null {
 
   return {
     agent,
+    agentSlug,
     kind: eventName as AgentEventKind,
     sessionId: nonEmpty(w.session_id),
     message: nonEmpty(w.message),

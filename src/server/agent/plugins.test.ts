@@ -5,6 +5,7 @@ import {
   buildResumeCommand,
   clearPluginAgents,
   detectAgentFromArgv,
+  listAgents,
   registerPluginAgents,
 } from './registry.js';
 import { applyAgentEvent, buildHookSequence, defaultAgentSessionState, parseAgentEvent } from './session.js';
@@ -57,6 +58,22 @@ describe('plugin validation', () => {
     expect(invalid).toHaveProperty('error');
   });
 
+  it('validates an injectable title provider and requires a prompt placeholder', () => {
+    const provider = {
+      ...TEST_PLUGIN,
+      titleNamer: {
+        command: 'test-agent',
+        args: ['title', '--prompt', '{prompt}', '--model={model}'],
+        models: { command: 'test-agent', args: ['models', '--json'] },
+      },
+    };
+    expect(validateManifest(provider, '/tmp/test')).toHaveProperty('manifest');
+    expect(validateManifest({
+      ...provider,
+      titleNamer: { ...provider.titleNamer, args: ['title'] },
+    }, '/tmp/test')).toHaveProperty('error');
+  });
+
   it('returns an AI-ready migration diagnostic for manifest v1', () => {
     const result = validateManifest({ ...TEST_PLUGIN, version: 1 }, '/tmp/test');
     expect(result).toHaveProperty('error');
@@ -85,6 +102,7 @@ describe('registerPluginAgents', () => {
     expect(agent!.accentColor).toBe('#FF6600');
     expect(agent!.isPlugin).toBe(true);
     expect(agent!.statuses?.map((status) => status.id)).toEqual(['thinking', 'approval']);
+    expect(listAgents().some((entry) => entry.slug === 'test-agent')).toBe(true);
 
     // Alias works for detection, not slug lookup
     expect(detectAgentFromArgv(['tai'])?.slug).toBe('test-agent');

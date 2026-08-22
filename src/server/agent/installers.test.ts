@@ -4,6 +4,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   KIMI_HOOK_EVENTS,
+  installPluginHooks,
+  pluginHooksState,
   tomlHooksInstall,
   tomlHooksState,
   tomlHooksUninstall,
@@ -96,5 +98,36 @@ describe('toml hooks installer (kimi)', () => {
     fs.writeFileSync(file, USER_CONFIG);
     expect(tomlHooksUninstall(file, 'kimi')).toBe('No termdock hooks found; nothing to remove');
     expect(fs.readFileSync(file, 'utf8')).toBe(USER_CONFIG);
+  });
+});
+
+describe('plugin JSON hook-map installer', () => {
+  let dir: string;
+  let file: string;
+  const events: Array<[string, string, string | null, number?, string?]> = [
+    ['BeforeTurn', 'prompt-submit', '^interactive$', 7, 'thinking'],
+    ['AfterTurn', 'stop', null, 3, 'complete'],
+  ];
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'termdock-plugin-hooks-'));
+    file = path.join(dir, 'hooks.json');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('round-trips matcher, timeout, status and detects configuration drift', () => {
+    installPluginHooks('fake-agent', file, events);
+    expect(pluginHooksState('fake-agent', file, events)).toBe('installed');
+    const root = JSON.parse(fs.readFileSync(file, 'utf8'));
+    expect(root.hooks.BeforeTurn[0].matcher).toBe('^interactive$');
+    expect(root.hooks.BeforeTurn[0].hooks[0].timeout).toBe(7);
+    expect(root.hooks.BeforeTurn[0].hooks[0].command).toContain('agent-hook fake-agent prompt-submit thinking');
+
+    root.hooks.BeforeTurn[0].hooks[0].timeout = 8;
+    fs.writeFileSync(file, JSON.stringify(root));
+    expect(pluginHooksState('fake-agent', file, events)).toBe('outdated');
   });
 });

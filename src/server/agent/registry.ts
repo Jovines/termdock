@@ -79,7 +79,7 @@ export function agentBySlug(slug: string | null | undefined): AgentInfo | null {
 }
 
 export function listAgents(): AgentInfo[] {
-  return AGENTS.slice();
+  return [...BY_SLUG.values()];
 }
 
 function matchToken(token: string): AgentInfo | null {
