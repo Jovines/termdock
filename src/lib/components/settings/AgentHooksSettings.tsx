@@ -24,6 +24,9 @@ import {
   uninstallAgentHooks,
   getAgentPlugins,
   createAgentPlugin,
+  installAgentPluginSource,
+  checkAgentPluginUpdate,
+  updateAgentPlugin,
   deleteAgentPlugin,
   getSettings,
   updateSettings,
@@ -52,6 +55,8 @@ function AgentHooksSettings(): React.ReactElement {
   const [error, setError] = React.useState<string | null>(null);
   const [devModeSlug, setDevModeSlug] = React.useState<string | null>(null);
   const [showPluginEditor, setShowPluginEditor] = React.useState(false);
+  const [showPluginInstaller, setShowPluginInstaller] = React.useState(false);
+  const [pluginSource, setPluginSource] = React.useState('');
   const [pluginManifest, setPluginManifest] = React.useState('');
   const [pluginError, setPluginError] = React.useState<string | null>(null);
   const [plugins, setPlugins] = React.useState<AgentPluginInfo[]>([]);
@@ -63,34 +68,35 @@ function AgentHooksSettings(): React.ReactElement {
   const [autoRenameModels, setAutoRenameModels] = React.useState<Record<string, string>>({});
   const [titleNamers, setTitleNamers] = React.useState<TitleNamerInfo[] | null>(null);
   const [savingTitleChoice, setSavingTitleChoice] = React.useState<string | null>(null);
+  const [autoRenameIntervalMinutes, setAutoRenameIntervalMinutes] = React.useState(10);
+  const [busyPluginAction, setBusyPluginAction] = React.useState<string | null>(null);
 
   const refresh = React.useCallback(async () => {
-    try {
-      setAgents(await getAgentHooks());
-    } catch {
-      setAgents([]);
-    }
-    try {
-      const data = await getAgentPlugins();
+    const [hooksResult, pluginsResult, settingsResult, namersResult] = await Promise.allSettled([
+      getAgentHooks(),
+      getAgentPlugins(),
+      getSettings(),
+      getTitleNamerCatalog(),
+    ]);
+    setAgents(hooksResult.status === 'fulfilled' ? hooksResult.value : []);
+    if (pluginsResult.status === 'fulfilled') {
+      const data = pluginsResult.value;
       setPlugins(data.plugins ?? []);
       setPluginLoadErrors(data.errors ?? []);
-    } catch {
+    } else {
       setPlugins([]);
       setPluginLoadErrors([]);
     }
-    try {
-      const settings = await getSettings();
+    if (settingsResult.status === 'fulfilled') {
+      const settings = settingsResult.value;
       setAutoRenameAgents(new Set(settings.autoRenameAgents ?? []));
       setAutoRenameNamer(settings.autoRenameNamer ?? 'auto');
       setAutoRenameModels(settings.autoRenameModels ?? {});
-    } catch {
+      setAutoRenameIntervalMinutes(settings.autoRenameIntervalMinutes ?? 10);
+    } else {
       setAutoRenameAgents(new Set());
     }
-    try {
-      setTitleNamers(await getTitleNamerCatalog());
-    } catch {
-      setTitleNamers([]);
-    }
+    setTitleNamers(namersResult.status === 'fulfilled' ? namersResult.value : []);
   }, []);
 
   React.useEffect(() => {
@@ -154,12 +160,60 @@ function AgentHooksSettings(): React.ReactElement {
     }
   };
 
+  const handleInstallPluginSource = async () => {
+    const source = pluginSource.trim();
+    if (!source) return;
+    setBusyPluginAction('install');
+    setPluginError(null);
+    try {
+      await installAgentPluginSource(source);
+      setPluginSource('');
+      setShowPluginInstaller(false);
+      await refresh();
+    } catch (err) {
+      setPluginError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyPluginAction(null);
+    }
+  };
+
   const handleDeletePlugin = async (slug: string) => {
+    setBusyPluginAction(`remove:${slug}`);
     try {
       await deleteAgentPlugin(slug);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyPluginAction(null);
+    }
+  };
+
+  const handleCheckPlugin = async (slug: string) => {
+    setBusyPluginAction(`check:${slug}`);
+    setError(null);
+    try {
+      await checkAgentPluginUpdate(slug);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyPluginAction(null);
+    }
+  };
+
+  const handleUpdatePlugin = async (slug: string) => {
+    setBusyPluginAction(`update:${slug}`);
+    setError(null);
+    try {
+      const result = await updateAgentPlugin(slug);
+      const warning = [result.hookWarning, result.titleWarning].filter(Boolean).join(' ');
+      if (warning) setError(warning);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyPluginAction(null);
     }
   };
 
@@ -186,6 +240,7 @@ function AgentHooksSettings(): React.ReactElement {
     try {
       const settings = await updateSettings({ autoRenameAgents: [...next] });
       setAutoRenameAgents(new Set(settings.autoRenameAgents ?? []));
+      setTitleNamers(await getTitleNamerCatalog(true));
     } catch (err) {
       setAutoRenameAgents(previous);
       setError(err instanceof Error ? err.message : String(err));
@@ -202,6 +257,7 @@ function AgentHooksSettings(): React.ReactElement {
     try {
       const settings = await updateSettings({ autoRenameNamer: namer });
       setAutoRenameNamer(settings.autoRenameNamer ?? 'auto');
+      setTitleNamers(await getTitleNamerCatalog(true));
     } catch (err) {
       setAutoRenameNamer(previous);
       setError(err instanceof Error ? err.message : String(err));
@@ -210,7 +266,7 @@ function AgentHooksSettings(): React.ReactElement {
     }
   };
 
-  const changeAutoRenameModel = async (slug: 'codex' | 'claude', model: string) => {
+  const changeAutoRenameModel = async (slug: string, model: string) => {
     const previous = autoRenameModels;
     const next = { ...previous };
     if (model) next[slug] = model;
@@ -223,6 +279,22 @@ function AgentHooksSettings(): React.ReactElement {
       setAutoRenameModels(settings.autoRenameModels ?? {});
     } catch (err) {
       setAutoRenameModels(previous);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingTitleChoice(null);
+    }
+  };
+
+  const changeAutoRenameInterval = async (minutes: number) => {
+    const previous = autoRenameIntervalMinutes;
+    setAutoRenameIntervalMinutes(minutes);
+    setSavingTitleChoice('interval');
+    setError(null);
+    try {
+      const settings = await updateSettings({ autoRenameIntervalMinutes: minutes });
+      setAutoRenameIntervalMinutes(settings.autoRenameIntervalMinutes ?? 10);
+    } catch (err) {
+      setAutoRenameIntervalMinutes(previous);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSavingTitleChoice(null);
@@ -247,6 +319,19 @@ function AgentHooksSettings(): React.ReactElement {
             <option value="auto">{t('settings.agentAutoRenameFollow')}</option>
             {titleNamers?.filter((namer) => namer.available).map((namer) => (
               <option key={namer.slug} value={namer.slug}>{namer.displayName}</option>
+            ))}
+          </select>
+        </label>
+        <label className="mt-2 flex items-center justify-between gap-3">
+          <span className="text-[11px] text-muted-foreground">{t('settings.agentAutoRenameInterval')}</span>
+          <select
+            value={autoRenameIntervalMinutes}
+            disabled={savingTitleChoice !== null}
+            onChange={(event) => void changeAutoRenameInterval(Number(event.target.value))}
+            className="min-w-0 rounded-lg bg-surface px-2.5 py-1.5 text-[11px] text-foreground outline-none disabled:opacity-50"
+          >
+            {[5, 10, 30, 60].map((minutes) => (
+              <option key={minutes} value={minutes}>{minutes} {t('settings.agentAutoRenameMinutes')}</option>
             ))}
           </select>
         </label>
@@ -356,17 +441,6 @@ function AgentHooksSettings(): React.ReactElement {
                 <span>{t('settings.agentAutoRenameShort')}</span>
                 <Switch checked={autoRenameAgents.has(agent.slug)} disabled={busyAutoRenameSlug !== null} size="sm" />
               </button>
-              {isPlugin && (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void handleDeletePlugin(agent.slug)}
-                  className="flex shrink-0 items-center rounded-full p-1 text-[11px] text-muted-foreground hover:bg-surface-elevated hover:text-[color:var(--warning)] transition disabled:opacity-50"
-                  title={t('settings.agentPluginDelete')}
-                >
-                  <RiDeleteBinLine size={11} />
-                </button>
-              )}
               <button
                 type="button"
                 disabled={busy}
@@ -410,7 +484,7 @@ function AgentHooksSettings(): React.ReactElement {
           <span className="text-[12px] font-medium text-foreground">{t('settings.agentPlugins')}</span>
           <button
             type="button"
-            onClick={() => setShowPluginEditor(!showPluginEditor)}
+            onClick={() => setShowPluginInstaller(!showPluginInstaller)}
             className="flex items-center gap-1 rounded-full bg-[rgb(var(--success-rgb)_/_0.14)] px-2.5 py-1 text-[11px] font-medium text-[color:var(--success)] hover:bg-[rgb(var(--success-rgb)_/_0.22)] transition"
           >
             <RiAddLine size={11} />
@@ -418,6 +492,76 @@ function AgentHooksSettings(): React.ReactElement {
           </button>
         </div>
         <p className="mt-1 text-[10px] text-muted-foreground">{t('settings.agentPluginHint')}</p>
+
+        {showPluginInstaller && (
+          <div className="mt-2 space-y-2">
+            <div className="flex gap-2">
+              <input
+                value={pluginSource}
+                onChange={(event) => setPluginSource(event.target.value)}
+                onKeyDown={(event) => { if (event.key === 'Enter') void handleInstallPluginSource(); }}
+                className="min-w-0 flex-1 rounded-lg bg-surface px-3 py-2 font-mono text-[11px] text-foreground placeholder:text-muted-foreground outline-none"
+                placeholder={t('settings.agentPluginSourcePlaceholder')}
+              />
+              <button
+                type="button"
+                disabled={!pluginSource.trim() || busyPluginAction !== null}
+                onClick={() => void handleInstallPluginSource()}
+                className="flex items-center gap-1 rounded-full bg-[rgb(var(--success-rgb)_/_0.14)] px-3 py-1 text-[11px] font-medium text-[color:var(--success)] transition hover:bg-[rgb(var(--success-rgb)_/_0.22)] disabled:opacity-50"
+              >
+                {busyPluginAction === 'install' ? <RiLoaderCircle size={11} className="animate-spin" /> : <RiDownloadLine size={11} />}
+                {t('settings.agentPluginInstallPackage')}
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowPluginEditor(!showPluginEditor)}
+              className="text-[10px] text-muted-foreground transition hover:text-foreground"
+            >
+              {t('settings.agentPluginAdvancedManifest')}
+            </button>
+          </div>
+        )}
+
+        {plugins.map((plugin) => {
+          const revision = plugin.revision?.slice(0, 8);
+          const actionBusy = busyPluginAction?.endsWith(`:${plugin.slug}`) === true;
+          return (
+            <div key={plugin.slug} className="mt-2 flex items-center gap-2 border-t border-border/40 pt-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+                  <span className="truncate">{plugin.displayName}</span>
+                  {plugin.updateAvailable && (
+                    <span className="text-[9px] text-[color:var(--warning)]">{t('settings.agentPluginUpdateAvailable')}</span>
+                  )}
+                </div>
+                <div className="truncate text-[9px] text-muted-foreground" title={plugin.source ?? undefined}>
+                  {plugin.source ?? t('settings.agentPluginManualSource')}{revision ? ` · ${revision}` : ''}
+                </div>
+              </div>
+              {plugin.updateSupported && (
+                <button
+                  type="button"
+                  disabled={busyPluginAction !== null}
+                  onClick={() => void (plugin.updateAvailable ? handleUpdatePlugin(plugin.slug) : handleCheckPlugin(plugin.slug))}
+                  className="flex items-center gap-1 rounded-full bg-surface px-2 py-1 text-[10px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+                >
+                  {actionBusy ? <RiLoaderCircle size={10} className="animate-spin" /> : <RiRefreshLine size={10} />}
+                  {plugin.updateAvailable ? t('settings.agentPluginUpdate') : t('settings.agentPluginCheck')}
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={busyPluginAction !== null}
+                onClick={() => void handleDeletePlugin(plugin.slug)}
+                className="rounded-full p-1 text-muted-foreground transition hover:bg-surface-elevated hover:text-[color:var(--warning)] disabled:opacity-50"
+                title={t('settings.agentPluginDelete')}
+              >
+                <RiDeleteBinLine size={11} />
+              </button>
+            </div>
+          );
+        })}
 
         {pluginLoadErrors.map((pluginLoadError) => (
           <div
@@ -448,7 +592,7 @@ function AgentHooksSettings(): React.ReactElement {
           </div>
         ))}
 
-        {showPluginEditor && (
+        {showPluginInstaller && showPluginEditor && (
           <div className="mt-2 space-y-2">
             <textarea
               value={pluginManifest}

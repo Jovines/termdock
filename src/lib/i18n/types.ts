@@ -565,6 +565,15 @@ export type TranslationDictionary = {
     agentPluginInvalid: string;
     agentPluginCopyAiPrompt: string;
     agentPluginCopied: string;
+    agentPluginSourcePlaceholder: string;
+    agentPluginInstallPackage: string;
+    agentPluginAdvancedManifest: string;
+    agentPluginUpdateAvailable: string;
+    agentPluginManualSource: string;
+    agentPluginUpdate: string;
+    agentPluginCheck: string;
+    agentAutoRenameInterval: string;
+    agentAutoRenameMinutes: string;
     mobileKeyboard: string;
     saving: string;
     rulesHint: string;

@@ -1426,6 +1426,7 @@ export interface SettingsState {
   autoRenameAgents: string[];
   autoRenameNamer: string;
   autoRenameModels: Record<string, string>;
+  autoRenameIntervalMinutes: number;
 }
 
 export async function getSettings(): Promise<SettingsState> {
@@ -1437,7 +1438,7 @@ export async function getSettings(): Promise<SettingsState> {
   return response.json();
 }
 
-export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string> }): Promise<SettingsState> {
+export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -1646,6 +1647,14 @@ export interface AgentPluginInfo {
   hasResume: boolean;
   hasTitleNamer: boolean;
   hasIcon: boolean;
+  sourceType: 'git' | 'local' | 'manifest';
+  source: string | null;
+  revision: string | null;
+  latestRevision: string | null;
+  checkedAt: number | null;
+  updatedAt: number | null;
+  updateSupported: boolean;
+  updateAvailable: boolean;
 }
 
 export interface AgentPluginErrors {
@@ -1690,6 +1699,42 @@ export async function createAgentPlugin(manifest: Record<string, unknown>): Prom
       data.migration,
     );
   }
+  return data;
+}
+
+export async function installAgentPluginSource(source: string): Promise<{ slug: string; dir: string }> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/agent-plugins/install', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-XSRF-TOKEN': csrfTokenHeader },
+    body: JSON.stringify({ source }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new AgentPluginManifestError(data.error || 'Failed to install agent plugin', data.code, data.migration);
+  }
+  return data;
+}
+
+export async function checkAgentPluginUpdate(slug: string): Promise<{ updateAvailable: boolean }> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/agent-plugins/${encodeURIComponent(slug)}/check-update`, {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Failed to check plugin updates');
+  return data;
+}
+
+export async function updateAgentPlugin(slug: string): Promise<{ hookWarning?: string | null; titleWarning?: string | null }> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/agent-plugins/${encodeURIComponent(slug)}/update`, {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Failed to update plugin');
   return data;
 }
 
