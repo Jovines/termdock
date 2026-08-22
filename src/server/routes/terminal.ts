@@ -100,7 +100,7 @@ import {
   isAutoTitleReevaluationDue,
   shouldReplaceAutoTitle,
 } from '../agent/autoTitle.js';
-import { getTitleNamerCatalog, invalidateTitleNamerCatalog } from '../agent/titleNamerCatalog.js';
+import { getTitleNamerCatalog, invalidateTitleNamerCatalog, probePluginTitleNamer } from '../agent/titleNamerCatalog.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -5544,6 +5544,15 @@ router.post('/agent-plugins/:slug/check-update', async (req, res) => {
   } catch (error) {
     res.status(400).json({ error: (error as Error).message, code: 'AGENT_PLUGIN_UPDATE_CHECK_FAILED' });
   }
+});
+
+router.post('/agent-plugins/:slug/doctor', async (req, res) => {
+  const result = await probePluginTitleNamer(req.params.slug);
+  if (!result) {
+    res.status(404).json({ error: `Plugin "${req.params.slug}" not found`, code: 'AGENT_PLUGIN_NOT_FOUND' });
+    return;
+  }
+  res.json(result);
 });
 
 router.post('/agent-plugins/:slug/update', async (req, res) => {

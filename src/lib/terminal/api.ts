@@ -1457,6 +1457,7 @@ export interface TitleNamerModelInfo {
   displayName: string;
   description: string;
   isDefault: boolean;
+  isEconomical?: boolean;
 }
 
 export interface TitleNamerInfo {
@@ -1735,6 +1736,31 @@ export async function updateAgentPlugin(slug: string): Promise<{ hookWarning?: s
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || 'Failed to update plugin');
+  return data;
+}
+
+export interface AgentPluginDoctorResult {
+  slug: string;
+  displayName: string;
+  hasTitleNamer: boolean;
+  hasModelCommand: boolean;
+  status: 'ok' | 'missing-title-namer' | 'cli-default' | 'no-models' | 'probe-failed';
+  models: TitleNamerModelInfo[];
+  recommendedModel: string | null;
+  selectionBehavior: string;
+  warnings: string[];
+  error: string | null;
+  nextSteps: string[];
+}
+
+export async function doctorAgentPlugin(slug: string): Promise<AgentPluginDoctorResult> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/agent-plugins/${encodeURIComponent(slug)}/doctor`, {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Failed to diagnose plugin');
   return data;
 }
 
