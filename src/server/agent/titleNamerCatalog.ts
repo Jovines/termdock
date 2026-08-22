@@ -9,6 +9,8 @@ import { getAutoRenameAgentsSetting, getAutoRenameNamerSetting } from '../utils/
 const execFileAsync = promisify(execFile);
 const CACHE_FRESH_MS = 24 * 60 * 60_000;
 const PROBE_TIMEOUT_MS = 10_000;
+const TITLE_TIMEOUT_MS = 45_000;
+const TITLE_MAX_OUTPUT_BYTES = 256 * 1024;
 const CACHE_FILE = path.join(os.homedir(), '.termdock', 'title-namer-catalog.json');
 
 function pluginCommandEnv(): NodeJS.ProcessEnv {
@@ -21,6 +23,74 @@ function pluginCommandEnv(): NodeJS.ProcessEnv {
     if (key.startsWith('LC_') && value !== undefined) env[key] = value;
   }
   return env;
+}
+
+/** Native title CLIs need the user's normal auth/provider environment, but
+ * must never inherit Termdock's terminal-routing markers. Otherwise their own
+ * hooks write back into the pane that launched the server and recursively
+ * trigger more title jobs. */
+export function nativeTitleCommandEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...source, NO_COLOR: '1', TERM: 'dumb' };
+  delete env.TERMDOCK;
+  delete env.TMUX;
+  delete env.TMUX_PANE;
+  return env;
+}
+
+export function executeTitleCommand(
+  command: string,
+  args: string[],
+  options: { cwd?: string; env: NodeJS.ProcessEnv; timeoutMs?: number },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      // Codex treats a piped stdin as additional prompt input and waits for
+      // EOF. execFile() leaves that pipe open, so explicitly attach /dev/null.
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let outputBytes = 0;
+    let timedOut = false;
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(stdout);
+    };
+    const append = (target: 'stdout' | 'stderr', chunk: Buffer) => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > TITLE_MAX_OUTPUT_BYTES) {
+        child.kill();
+        finish(new Error('output exceeded 256 KiB'));
+        return;
+      }
+      if (target === 'stdout') stdout += chunk.toString();
+      else stderr += chunk.toString();
+    };
+    child.stdout.on('data', (chunk: Buffer) => append('stdout', chunk));
+    child.stderr.on('data', (chunk: Buffer) => append('stderr', chunk));
+    child.on('error', (error) => finish(error));
+    child.on('close', (code, signal) => {
+      if (timedOut) {
+        finish(new Error(`timed out after ${options.timeoutMs ?? TITLE_TIMEOUT_MS}ms${signal ? ` (${signal})` : ''}`));
+      } else if (code !== 0) {
+        const detail = stderr.trim().slice(-500);
+        finish(new Error(`exited with code ${code ?? 'unknown'}${detail ? `: ${detail}` : ''}`));
+      } else {
+        finish();
+      }
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, options.timeoutMs ?? TITLE_TIMEOUT_MS);
+    timer.unref?.();
+  });
 }
 
 export interface TitleNamerModel {
@@ -453,14 +523,13 @@ export async function runTitleNamer(slug: string, prompt: string, model?: string
     args = buildPluginTitleArgs(provider.config, provider.dir, prompt, model);
   }
   try {
-    const { stdout } = await execFileAsync(command, args, {
-      timeout: 45_000,
-      maxBuffer: 256 * 1024,
+    return await executeTitleCommand(command, args, {
       cwd,
-      env: cwd ? pluginCommandEnv() : { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
+      env: cwd ? pluginCommandEnv() : nativeTitleCommandEnv(),
     });
-    return stdout;
-  } catch {
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`[title-namer] ${slug} failed: ${reason}`);
     return null;
   }
 }

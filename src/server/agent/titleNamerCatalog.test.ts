@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildPluginTitleArgs,
+  executeTitleCommand,
+  nativeTitleCommandEnv,
   normalizeDiscoveredModelCatalog,
   parseClaudeSupportedModels,
   recommendTitleModel,
@@ -8,6 +10,33 @@ import {
 } from './titleNamerCatalog.js';
 
 describe('title namer catalog', () => {
+  it('isolates native title CLIs from Termdock and tmux hook routing', () => {
+    expect(nativeTitleCommandEnv({
+      PATH: '/bin',
+      OPENAI_API_KEY: 'keep-auth',
+      TERMDOCK: '1',
+      TMUX: '/tmp/tmux,1,2',
+      TMUX_PANE: '%4',
+    })).toEqual(expect.objectContaining({
+      PATH: '/bin',
+      OPENAI_API_KEY: 'keep-auth',
+      NO_COLOR: '1',
+      TERM: 'dumb',
+    }));
+    const env = nativeTitleCommandEnv({ TERMDOCK: '1', TMUX: 'x', TMUX_PANE: '%1' });
+    expect(env).not.toHaveProperty('TERMDOCK');
+    expect(env).not.toHaveProperty('TMUX');
+    expect(env).not.toHaveProperty('TMUX_PANE');
+  });
+
+  it('closes title CLI stdin so commands waiting for EOF can finish', async () => {
+    const stdout = await executeTitleCommand(process.execPath, [
+      '-e',
+      "process.stdin.on('end', () => process.stdout.write('stdin-closed')); process.stdin.resume();",
+    ], { env: process.env, timeoutMs: 2_000 });
+    expect(stdout).toBe('stdin-closed');
+  });
+
   it('does not authorize plugin commands merely because the package is installed', () => {
     expect(shouldRunPluginTitleCommands('orbit', 'auto', [])).toBe(false);
     expect(shouldRunPluginTitleCommands('orbit', 'codex', ['orbit'])).toBe(false);
