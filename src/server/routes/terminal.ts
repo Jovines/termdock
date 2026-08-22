@@ -100,6 +100,7 @@ import {
   cleanTerminalContext,
   generateAgentTitle,
   hasSubstantiveAutoTitleContext,
+  isLongRunningAutoTitleTurnEligible,
   isNewAgentSessionId,
   isAutoTitleReevaluationDue,
   shouldReplaceAutoTitle,
@@ -256,6 +257,10 @@ interface TerminalSession {
   autoTitleLongRunningTimer: ReturnType<typeof setTimeout> | null;
   /** Allows stop to refine the provisional title without waiting for the normal refresh interval. */
   autoTitleGeneratedMidTurn: boolean;
+  /** True after this server instance has observed a real prompt submission for the native agent session. */
+  autoTitleObservedPrompt: boolean;
+  /** True only between that prompt submission and its stop/session-end event. */
+  autoTitleTurnActive: boolean;
   // Carries reviewed across agentSession nullification in syncAgentIdentity so
   // the yellow unread dot survives the poll window. Cleared on manual ack.
   lastAgentReviewed: boolean | null;
@@ -2822,7 +2827,11 @@ function maybeScheduleLongRunningAutoTitle(sessionId: string, session: TerminalS
   const agent = session.agent;
   if (!agent || !getAutoRenameAgentsSetting().includes(agent.slug)) return;
   const phase = session.agentSession?.status;
-  if (phase === 'done' || phase === 'idle') return;
+  if (!isLongRunningAutoTitleTurnEligible(
+    phase,
+    session.autoTitleObservedPrompt,
+    session.autoTitleTurnActive,
+  )) return;
   const record = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
   if (!record || record.autoTitle || record.customName === true) return;
   if (!hasSubstantiveAutoTitleContext(session.autoTitleContext)) return;
@@ -2832,7 +2841,11 @@ function maybeScheduleLongRunningAutoTitle(sessionId: string, session: TerminalS
     const liveSession = terminalSessions.get(sessionId);
     if (liveSession !== session || liveSession.agent?.slug !== agent.slug) return;
     const phase = liveSession.agentSession?.status;
-    if (phase === 'done' || phase === 'idle') return;
+    if (!isLongRunningAutoTitleTurnEligible(
+      phase,
+      liveSession.autoTitleObservedPrompt,
+      liveSession.autoTitleTurnActive,
+    )) return;
     const current = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
     if (!current || current.autoTitle || current.customName === true) return;
     void maybeAutoRenameSession(sessionId, agent, liveSession.autoTitleContext).then((generated) => {
@@ -3078,22 +3091,32 @@ function applyAgentSignals(
       session.autoTitleGeneratedMidTurn = false;
       clearAutoTitleForNewAgentSession(sessionId, session);
     }
+    if (event.kind === 'session-start') {
+      session.autoTitleObservedPrompt = false;
+      session.autoTitleTurnActive = false;
+    }
     if (event.kind === 'prompt-submit') {
       // Before the first automatic title, keep accumulating short turns until
       // there is enough substance to name the session. Once titled, only the
       // latest turn is relevant to the conservative re-evaluation path.
       const persisted = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
-      if (persisted?.autoTitle) {
+      if (!session.autoTitleObservedPrompt || persisted?.autoTitle) {
         session.autoTitleContext = '';
       }
+      cancelLongRunningAutoTitle(session);
+      session.autoTitleGeneratedMidTurn = false;
+      session.autoTitleObservedPrompt = true;
+      session.autoTitleTurnActive = true;
     }
     applyAgentEvent(state, event);
     if (event.kind === 'stop') {
       cancelLongRunningAutoTitle(session);
+      session.autoTitleTurnActive = false;
       completedTurnAgent = event.agent ?? session.agent;
     }
     if (event.kind === 'session-end') {
       cancelLongRunningAutoTitle(session);
+      session.autoTitleTurnActive = false;
     }
     if (event.kind === 'session-start' || event.kind === 'session-end' || event.kind === 'stop') {
       persistAgentResumeBinding(sessionId, session);
@@ -4643,6 +4666,8 @@ async function spawnTerminalSession(req: express.Request, input: {
     autoTitleContext: '',
     autoTitleLongRunningTimer: null,
     autoTitleGeneratedMidTurn: false,
+    autoTitleObservedPrompt: false,
+    autoTitleTurnActive: false,
     lastAgentReviewed: null,
     agentLeftAt: null,
     gitStatus: null,
@@ -4729,6 +4754,8 @@ async function adoptPtyHostSessions(): Promise<void> {
       autoTitleContext: '',
       autoTitleLongRunningTimer: null,
       autoTitleGeneratedMidTurn: false,
+      autoTitleObservedPrompt: false,
+      autoTitleTurnActive: false,
       lastAgentReviewed: null,
       agentLeftAt: null,
       gitStatus: null,

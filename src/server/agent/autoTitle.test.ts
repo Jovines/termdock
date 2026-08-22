@@ -7,6 +7,7 @@ import {
   cleanTerminalContext,
   hasSubstantiveAutoTitleContext,
   isNewAgentSessionId,
+  isLongRunningAutoTitleTurnEligible,
   isAutoTitleReevaluationDue,
   normalizeGeneratedTitle,
   resolveTitleNamerOrder,
@@ -29,10 +30,27 @@ describe('agent auto titles', () => {
     expect(hasSubstantiveAutoTitleContext(`\x1b[32m${'x'.repeat(AUTO_TITLE_LONG_RUNNING_CONTEXT_CHARS)}\x1b[0m`)).toBe(true);
   });
 
-  it('asks for one concise title using the agent identity', () => {
+  it('requires a confirmed active prompt before scheduling a long-running title', () => {
+    expect(isLongRunningAutoTitleTurnEligible(undefined, false, false)).toBe(false);
+    expect(isLongRunningAutoTitleTurnEligible('working', false, false)).toBe(false);
+    expect(isLongRunningAutoTitleTurnEligible('working', true, false)).toBe(false);
+    expect(isLongRunningAutoTitleTurnEligible('idle', true, true)).toBe(false);
+    expect(isLongRunningAutoTitleTurnEligible('done', true, true)).toBe(false);
+    expect(isLongRunningAutoTitleTurnEligible('working', true, true)).toBe(true);
+  });
+
+  it('asks for a stable purpose-oriented title using the agent identity', () => {
     const prompt = buildAutoTitlePrompt('Codex', 'Implemented the cache');
     expect(prompt).toContain('Codex coding session');
+    expect(prompt).toContain("session's primary purpose");
+    expect(prompt).toContain('not the latest activity, implementation details, commands, progress, or completion status');
     expect(prompt).toContain('<terminal_context>\nImplemented the cache');
+  });
+
+  it('keeps an existing title only while it represents the primary purpose', () => {
+    const prompt = buildAutoTitlePrompt('Codex', 'Implemented the cache', 'Improve caching');
+    expect(prompt).toContain('Keep it unchanged if it still represents the session\'s primary purpose');
+    expect(prompt).toContain('rename only when that primary purpose clearly changed');
   });
 
   it('appends optional user preferences without exposing or replacing the default prompt', () => {

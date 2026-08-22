@@ -22,6 +22,14 @@ export function hasSubstantiveAutoTitleContext(input: string): boolean {
   return cleanTerminalContext(input).length >= AUTO_TITLE_LONG_RUNNING_CONTEXT_CHARS;
 }
 
+export function isLongRunningAutoTitleTurnEligible(
+  status: string | null | undefined,
+  observedPrompt: boolean,
+  turnActive: boolean,
+): boolean {
+  return observedPrompt && turnActive && status === 'working';
+}
+
 export function buildAutoTitlePrompt(
   agentName: string,
   context: string,
@@ -31,9 +39,11 @@ export function buildAutoTitlePrompt(
   const preference = userPreference?.trim().slice(0, 2000);
   return [
     `Create a concise title for this ${agentName} coding session.`,
-    'Describe what the work actually became, not the initial command or generic activity.',
+    "Describe the session's primary purpose: the user problem being solved or the intended change.",
+    'Choose a stable title that represents the whole session, not the latest activity, implementation details, commands, progress, or completion status.',
+    'If several related tasks support one broader goal, title that shared goal.',
     currentTitle
-      ? `Current title: ${JSON.stringify(currentTitle)}. Return it unchanged if it is still substantially accurate; rename only when the main work clearly shifted.`
+      ? `Current title: ${JSON.stringify(currentTitle)}. Keep it unchanged if it still represents the session's primary purpose; rename only when that primary purpose clearly changed.`
       : 'This session has no previous automatic title.',
     'Use the dominant language of the terminal content. Return only the title.',
     'Constraints: 6-18 Chinese characters or 3-10 words; no quotes; no markdown; no trailing punctuation.',
