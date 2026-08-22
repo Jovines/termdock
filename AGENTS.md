@@ -25,6 +25,18 @@
   `--force-with-lease` 推送,并告知其他 Agent 同步。
 - 非运行时资产(3D 模型、预览图、诊断脚本等)不入库;大文件先问用户,放仓库外。
 
+## macOS 原生通知验收
+
+- 新增或修改 macOS 原生通知后，必须用 Developer ID 签名的 `/Applications/Termdock.app`
+  在一个此前未授权 Termdock 通知的用户账户上验收；确认 `com.jovines.termdock`
+  实际出现在“系统设置 → 通知”的应用列表中，并能选择横幅/提醒样式。
+- Dock 徽标、前端 `granted`、IPC 返回 `true` 都不能代替系统注册与原生投递验证；
+  必须检查 Info.plist 通知声明、签名身份，并以 Electron `show` / `failed` 事件和
+  macOS 通知中心的实际记录为准。
+- 安装包升级后要复测现有用户和新用户两个路径；若系统列表中没有 Termdock，优先
+  检查安装版本、Bundle ID、Developer ID 签名和首次原生通知请求，不把问题误判为
+  单纯的横幅开关。
+
 ## 工具
 
 - 搜索用 `rg`,列文件用 `rg --files`,不要 `grep -r` / `find`。
