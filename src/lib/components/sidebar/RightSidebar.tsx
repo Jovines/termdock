@@ -9754,10 +9754,6 @@ export function RightSidebar(
   const gitCacheTimeLabel = useMemo(() => {
     if (gitCacheUpdatedAt === null) return null;
     const locale = typeof navigator === 'undefined' ? undefined : navigator.language;
-    const exact = new Intl.DateTimeFormat(locale, {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-    }).format(gitCacheUpdatedAt);
     const elapsedSeconds = Math.max(0, Math.floor((gitCacheClock - gitCacheUpdatedAt) / 1_000));
     const formatter = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
     const [value, unit] = elapsedSeconds < 60
@@ -9767,7 +9763,7 @@ export function RightSidebar(
         : elapsedSeconds < 86_400
           ? [-Math.floor(elapsedSeconds / 3_600), 'hour' as const]
           : [-Math.floor(elapsedSeconds / 86_400), 'day' as const];
-    return { exact, relative: formatter.format(value, unit) };
+    return formatter.format(value, unit);
   }, [gitCacheClock, gitCacheUpdatedAt]);
 
   const diffRefreshButton = rootPath ? (
@@ -9775,9 +9771,9 @@ export function RightSidebar(
       {gitCacheTimeLabel ? (
         <span
           className="whitespace-nowrap text-[10px] text-muted-foreground"
-          title={t('rightSidebar.gitLastUpdated', { time: gitCacheTimeLabel.exact })}
+          title={t('rightSidebar.gitLastUpdated', { time: gitCacheTimeLabel })}
         >
-          {gitCacheTimeLabel.exact} · {gitCacheTimeLabel.relative}
+          {gitCacheTimeLabel}
         </span>
       ) : null}
       <button
