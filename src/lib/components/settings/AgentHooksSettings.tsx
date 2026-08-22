@@ -17,6 +17,7 @@ import {
   Plus as RiAddLine,
   Code as RiCodeLine,
   Clipboard as RiClipboardLine,
+  Stethoscope as RiStethoscopeLine,
 } from 'lucide-react';
 import {
   getAgentHooks,
@@ -27,6 +28,7 @@ import {
   installAgentPluginSource,
   checkAgentPluginUpdate,
   updateAgentPlugin,
+  doctorAgentPlugin,
   deleteAgentPlugin,
   getSettings,
   updateSettings,
@@ -34,6 +36,7 @@ import {
   type AgentHookInfo,
   type AgentPluginInfo,
   type AgentPluginErrors,
+  type AgentPluginDoctorResult,
   AgentPluginManifestError,
   type TitleNamerInfo,
 } from '../../terminal/api';
@@ -70,6 +73,7 @@ function AgentHooksSettings(): React.ReactElement {
   const [savingTitleChoice, setSavingTitleChoice] = React.useState<string | null>(null);
   const [autoRenameIntervalMinutes, setAutoRenameIntervalMinutes] = React.useState(10);
   const [busyPluginAction, setBusyPluginAction] = React.useState<string | null>(null);
+  const [pluginDoctorResult, setPluginDoctorResult] = React.useState<AgentPluginDoctorResult | null>(null);
 
   const refresh = React.useCallback(async () => {
     const [hooksResult, pluginsResult, settingsResult, namersResult] = await Promise.allSettled([
@@ -181,6 +185,7 @@ function AgentHooksSettings(): React.ReactElement {
     setBusyPluginAction(`remove:${slug}`);
     try {
       await deleteAgentPlugin(slug);
+      setPluginDoctorResult((current) => current?.slug === slug ? null : current);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -209,7 +214,23 @@ function AgentHooksSettings(): React.ReactElement {
       const result = await updateAgentPlugin(slug);
       const warning = [result.hookWarning, result.titleWarning].filter(Boolean).join(' ');
       if (warning) setError(warning);
+      setPluginDoctorResult((current) => current?.slug === slug ? null : current);
       await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyPluginAction(null);
+    }
+  };
+
+  const handleDoctorPlugin = async (slug: string) => {
+    setBusyPluginAction(`doctor:${slug}`);
+    setError(null);
+    setPluginDoctorResult(null);
+    try {
+      const result = await doctorAgentPlugin(slug);
+      setPluginDoctorResult(result);
+      setTitleNamers(await getTitleNamerCatalog());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -302,6 +323,15 @@ function AgentHooksSettings(): React.ReactElement {
   };
 
   const pluginSlugs = new Set(plugins.map((p) => p.slug));
+  const pluginDoctorStatusText = pluginDoctorResult
+    ? {
+      ok: t('settings.agentPluginDoctorStatusOk'),
+      'missing-title-namer': t('settings.agentPluginDoctorStatusMissing'),
+      'cli-default': t('settings.agentPluginDoctorStatusCliDefault'),
+      'no-models': t('settings.agentPluginDoctorStatusNoModels'),
+      'probe-failed': t('settings.agentPluginDoctorStatusFailed'),
+    }[pluginDoctorResult.status]
+    : '';
 
   return (
     <div className="space-y-3">
@@ -362,7 +392,11 @@ function AgentHooksSettings(): React.ReactElement {
                   onChange={(event) => void changeAutoRenameModel(namer.slug, event.target.value)}
                   className="min-w-0 max-w-[68%] rounded-lg bg-surface px-2.5 py-1.5 text-[11px] text-foreground outline-none disabled:opacity-50"
                 >
-                  <option value="">{t('settings.agentAutoRenameAutomatic')}{recommendedModel ? ` · ${recommendedModel.displayName}` : ''}</option>
+                  <option value="">
+                    {recommendedModel
+                      ? `${t('settings.agentAutoRenameAutomatic')} · ${recommendedModel.displayName}`
+                      : t('settings.agentAutoRenameCliDefault')}
+                  </option>
                   {namer.models.map((model) => (
                     <option key={model.id} value={model.id}>{model.displayName}</option>
                   ))}
@@ -539,6 +573,18 @@ function AgentHooksSettings(): React.ReactElement {
                   {plugin.source ?? t('settings.agentPluginManualSource')}{revision ? ` · ${revision}` : ''}
                 </div>
               </div>
+              <button
+                type="button"
+                disabled={busyPluginAction !== null}
+                onClick={() => void handleDoctorPlugin(plugin.slug)}
+                className="flex items-center gap-1 rounded-full bg-surface px-2 py-1 text-[10px] text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+                title={t('settings.agentPluginDoctorHint')}
+              >
+                {busyPluginAction === `doctor:${plugin.slug}`
+                  ? <RiLoaderCircle size={10} className="animate-spin" />
+                  : <RiStethoscopeLine size={10} />}
+                {t('settings.agentPluginDoctor')}
+              </button>
               {plugin.updateSupported && (
                 <button
                   type="button"
@@ -562,6 +608,34 @@ function AgentHooksSettings(): React.ReactElement {
             </div>
           );
         })}
+
+        {pluginDoctorResult && (
+          <div className={`mt-2 rounded-lg px-3 py-2 text-[10px] ${
+            pluginDoctorResult.status === 'ok' || pluginDoctorResult.status === 'cli-default'
+              ? 'bg-[rgb(var(--success-rgb)_/_0.10)] text-[color:var(--success)]'
+              : 'bg-[rgb(var(--warning-rgb)_/_0.10)] text-[color:var(--warning)]'
+          }`}>
+            <div className="font-medium">
+              {pluginDoctorResult.displayName}: {pluginDoctorStatusText}
+            </div>
+            <div className="mt-1 text-muted-foreground">
+              {pluginDoctorResult.models.length > 0
+                ? `${pluginDoctorResult.models.length} ${t('settings.agentPluginDoctorModels')}${pluginDoctorResult.recommendedModel ? ` · ${t('settings.agentPluginDoctorAutomatic')} ${pluginDoctorResult.recommendedModel}` : ''}`
+                : t('settings.agentPluginDoctorCliDefault')}
+            </div>
+            {pluginDoctorResult.error && <div className="mt-1 break-words">{pluginDoctorResult.error}</div>}
+            {pluginDoctorResult.warnings.length > 0 && (
+              <div className="mt-1 space-y-0.5 text-muted-foreground">
+                {pluginDoctorResult.warnings.map((warning) => <div key={warning}>• {warning}</div>)}
+              </div>
+            )}
+            {pluginDoctorResult.nextSteps.length > 0 && (
+              <div className="mt-1 space-y-0.5 text-muted-foreground">
+                {pluginDoctorResult.nextSteps.map((step) => <div key={step}>→ {step}</div>)}
+              </div>
+            )}
+          </div>
+        )}
 
         {pluginLoadErrors.map((pluginLoadError) => (
           <div

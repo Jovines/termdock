@@ -572,6 +572,16 @@ export type TranslationDictionary = {
     agentPluginManualSource: string;
     agentPluginUpdate: string;
     agentPluginCheck: string;
+    agentPluginDoctor: string;
+    agentPluginDoctorHint: string;
+    agentPluginDoctorStatusOk: string;
+    agentPluginDoctorStatusMissing: string;
+    agentPluginDoctorStatusCliDefault: string;
+    agentPluginDoctorStatusNoModels: string;
+    agentPluginDoctorStatusFailed: string;
+    agentPluginDoctorModels: string;
+    agentPluginDoctorAutomatic: string;
+    agentPluginDoctorCliDefault: string;
     agentAutoRenameInterval: string;
     agentAutoRenameMinutes: string;
     mobileKeyboard: string;
