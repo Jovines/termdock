@@ -2,6 +2,8 @@ import { getTitleNamerCatalog, runTitleNamer } from './titleNamerCatalog.js';
 
 const MAX_CONTEXT_CHARS = 16_000;
 export const AUTO_TITLE_MIN_CONTEXT_CHARS = 12;
+export const AUTO_TITLE_LONG_RUNNING_CONTEXT_CHARS = 800;
+export const AUTO_TITLE_LONG_RUNNING_DELAY_MS = 30_000;
 
 export function cleanTerminalContext(input: string): string {
   return input
@@ -14,6 +16,10 @@ export function cleanTerminalContext(input: string): string {
     .replace(/\n{4,}/g, '\n\n\n')
     .trim()
     .slice(-MAX_CONTEXT_CHARS);
+}
+
+export function hasSubstantiveAutoTitleContext(input: string): boolean {
+  return cleanTerminalContext(input).length >= AUTO_TITLE_LONG_RUNNING_CONTEXT_CHARS;
 }
 
 export function buildAutoTitlePrompt(agentName: string, context: string, currentTitle?: string): string {

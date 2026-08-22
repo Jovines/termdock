@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AUTO_TITLE_LONG_RUNNING_CONTEXT_CHARS,
+  AUTO_TITLE_LONG_RUNNING_DELAY_MS,
   AUTO_TITLE_MIN_CONTEXT_CHARS,
   buildAutoTitlePrompt,
   cleanTerminalContext,
+  hasSubstantiveAutoTitleContext,
   isNewAgentSessionId,
   isAutoTitleReevaluationDue,
   normalizeGeneratedTitle,
@@ -18,6 +21,12 @@ describe('agent auto titles', () => {
 
   it('allows a short first exchange to trigger a title attempt', () => {
     expect(AUTO_TITLE_MIN_CONTEXT_CHARS).toBeLessThanOrEqual('hi\nHi! How can I help?'.length);
+  });
+
+  it('waits for substantial output before scheduling a long-running title', () => {
+    expect(AUTO_TITLE_LONG_RUNNING_DELAY_MS).toBe(30_000);
+    expect(hasSubstantiveAutoTitleContext('x'.repeat(AUTO_TITLE_LONG_RUNNING_CONTEXT_CHARS - 1))).toBe(false);
+    expect(hasSubstantiveAutoTitleContext(`\x1b[32m${'x'.repeat(AUTO_TITLE_LONG_RUNNING_CONTEXT_CHARS)}\x1b[0m`)).toBe(true);
   });
 
   it('asks for one concise title using the agent identity', () => {
