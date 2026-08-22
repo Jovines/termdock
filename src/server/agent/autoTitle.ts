@@ -18,6 +18,14 @@ export function cleanTerminalContext(input: string): string {
     .slice(-MAX_CONTEXT_CHARS);
 }
 
+function cleanPromptSubmitPayload(input: string): string {
+  return input
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .trim();
+}
+
 export function hasSubstantiveAutoTitleContext(input: string): boolean {
   return cleanTerminalContext(input).length >= AUTO_TITLE_LONG_RUNNING_CONTEXT_CHARS;
 }
@@ -35,8 +43,13 @@ export function buildAutoTitlePrompt(
   context: string,
   currentTitle?: string,
   userPreference?: string,
+  promptSubmitPayloads: string[] = [],
 ): string {
   const preference = userPreference?.trim().slice(0, 2000);
+  const submittedPayloads = promptSubmitPayloads
+    .map((payload) => cleanPromptSubmitPayload(payload))
+    .filter(Boolean)
+    .slice(-12);
   return [
     `Create a concise title for this ${agentName} coding session.`,
     "Describe the session's primary purpose: the user problem being solved or the intended change.",
@@ -53,6 +66,13 @@ export function buildAutoTitlePrompt(
       '<user_title_preferences>',
       preference,
       '</user_title_preferences>',
+    ] : []),
+    ...(submittedPayloads.length > 0 ? [
+      '',
+      `These are raw payloads emitted by ${agentName} prompt-submit hooks when the user submitted messages. Their field shapes are Agent-specific. Use any user-authored request content as the primary evidence of session purpose; ignore hook metadata.`,
+      '<prompt_submit_payloads>',
+      ...submittedPayloads.map((payload, index) => `[payload ${index + 1}] ${payload}`),
+      '</prompt_submit_payloads>',
     ] : []),
     '',
     '<terminal_context>',
@@ -130,11 +150,20 @@ export async function generateAgentTitle(
     models: Record<string, string>;
     currentTitle?: string;
     userPreference?: string;
+    promptSubmitPayloads?: string[];
   },
 ): Promise<string | null> {
   const context = cleanTerminalContext(rawContext);
-  if (context.length < AUTO_TITLE_MIN_CONTEXT_CHARS) return null;
-  const prompt = buildAutoTitlePrompt(agentName, context, options.currentTitle, options.userPreference);
+  const promptSubmitPayloads = options.promptSubmitPayloads ?? [];
+  const payloadChars = promptSubmitPayloads.reduce((total, payload) => total + cleanPromptSubmitPayload(payload).length, 0);
+  if (context.length + payloadChars < AUTO_TITLE_MIN_CONTEXT_CHARS) return null;
+  const prompt = buildAutoTitlePrompt(
+    agentName,
+    context,
+    options.currentTitle,
+    options.userPreference,
+    promptSubmitPayloads,
+  );
 
   const catalog = await getTitleNamerCatalog();
   const preferred = resolveTitleNamerOrder(

@@ -60,6 +60,25 @@ describe('agent auto titles', () => {
     expect(buildAutoTitlePrompt('Codex', 'Implemented the cache')).not.toContain('<user_title_preferences>');
   });
 
+  it('labels raw Agent prompt-submit payloads without assuming their schema', () => {
+    const prompt = buildAutoTitlePrompt(
+      'Codex',
+      'Running tests',
+      undefined,
+      undefined,
+      ['{"prompt":"修复自动标题"}', '{"request":{"text":"不要让 Loading 污染上下文"}}'],
+    );
+    expect(prompt).toContain('raw payloads emitted by Codex prompt-submit hooks');
+    expect(prompt).toContain('[payload 1] {"prompt":"修复自动标题"}');
+    expect(prompt).toContain('[payload 2] {"request":{"text":"不要让 Loading 污染上下文"}}');
+  });
+
+  it('does not silently truncate a configured payload at the terminal-context limit', () => {
+    const payload = `{"prompt":"${'x'.repeat(20_000)}"}`;
+    const prompt = buildAutoTitlePrompt('Codex', 'static output', undefined, undefined, [payload]);
+    expect(prompt).toContain(payload);
+  });
+
   it('normalizes common model wrappers around a title', () => {
     expect(normalizeGeneratedTitle('标题：修复登录跳转。\n')).toBe('修复登录跳转');
     expect(normalizeGeneratedTitle('```text\nImprove cache invalidation\n```')).toBe('Improve cache invalidation');
