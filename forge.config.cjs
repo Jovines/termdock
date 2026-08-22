@@ -3,6 +3,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const signingIdentity = process.env.APPLE_SIGNING_IDENTITY || '-';
+const macosDeploymentTarget = '12.0';
 const runtimeEntitlements = path.resolve(__dirname, 'desktop/entitlements.runtime.plist');
 const notarizeConfig = (
   process.env.APPLE_ID
@@ -83,10 +84,22 @@ function installUniqueMacLauncher(buildPath, _electronVersion, platform, _arch, 
         '-Os',
         '-Wall',
         '-Wextra',
+        `-mmacosx-version-min=${macosDeploymentTarget}`,
         '-o',
         launcherPath,
         path.resolve(__dirname, 'desktop/native/launcher.c'),
       ], { stdio: 'inherit' });
+      const buildVersion = execFileSync('/usr/bin/xcrun', [
+        'vtool',
+        '-show-build',
+        launcherPath,
+      ], { encoding: 'utf8' });
+      const minimumVersion = buildVersion.match(/\bminos\s+(\S+)/)?.[1];
+      if (minimumVersion !== macosDeploymentTarget) {
+        throw new Error(
+          `Termdock launcher requires macOS ${minimumVersion ?? 'unknown'}, expected ${macosDeploymentTarget}`,
+        );
+      }
     }
     callback();
   } catch (error) {
@@ -123,6 +136,7 @@ module.exports = {
     appCategoryType: 'public.app-category.developer-tools',
     icon: path.resolve(__dirname, 'desktop/assets/Termdock.icns'),
     extendInfo: {
+      LSMinimumSystemVersion: macosDeploymentTarget,
       NSLocalNetworkUsageDescription:
         'Termdock 需要访问本地网络，以连接你在本机或局域网其他设备上运行的 Termdock 服务。',
       NSAppTransportSecurity: {
