@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { FilePreview } from './RightSidebar';
-import { formatModelDimension, formatModelDimensions, resolveModel3dLoaderKind } from './ModelPreview';
+import { classifyModelWheelGesture, formatModelDimension, formatModelDimensions, resolveModel3dLoaderKind, resolvePickedPartName } from './ModelPreview';
 
 const { stlParseMock, gltfParseMock, readModel3dBlobMock, readFileContentMock } = vi.hoisted(() => ({
   stlParseMock: vi.fn(),
@@ -42,16 +42,27 @@ function makeStlGeometryMock() {
 
 vi.mock('three', () => {
   class Vector3 {
-    x = 0;
-    y = 0;
-    z = 0;
+    constructor(public x = 0, public y = 0, public z = 0) {}
     length() { return Math.hypot(this.x, this.y, this.z); }
     set(x: number, y: number, z: number) { this.x = x; this.y = y; this.z = z; return this; }
     sub(v: Vector3) { this.x -= v.x; this.y -= v.y; this.z -= v.z; return this; }
+    add(v: Vector3) { this.x += v.x; this.y += v.y; this.z += v.z; return this; }
     copy(v: Vector3) { this.x = v.x; this.y = v.y; this.z = v.z; return this; }
     clone() { return new Vector3().set(this.x, this.y, this.z); }
+    crossVectors(a: Vector3, b: Vector3) {
+      this.x = a.y * b.z - a.z * b.y;
+      this.y = a.z * b.x - a.x * b.z;
+      this.z = a.x * b.y - a.y * b.x;
+      return this;
+    }
+    multiplyScalar(value: number) { this.x *= value; this.y *= value; this.z *= value; return this; }
+    distanceTo(v: Vector3) { return Math.hypot(this.x - v.x, this.y - v.y, this.z - v.z); }
+    setLength(value: number) { return this.normalize().multiplyScalar(value); }
     project() { return this; }
-    normalize() { return this; }
+    normalize() {
+      const length = this.length();
+      return length > 0 ? this.multiplyScalar(1 / length) : this;
+    }
     negate() { this.x = -this.x; this.y = -this.y; this.z = -this.z; return this; }
   }
   class Plane {
@@ -78,8 +89,10 @@ vi.mock('three', () => {
     aspect = 1;
     near = 0.1;
     far = 10000;
-    position = { set: () => {}, distanceTo: () => 100 };
+    position = new Vector3();
+    up = new Vector3(0, 1, 0);
     constructor(fov: number) { this.fov = fov; }
+    getWorldDirection(target: Vector3) { return target.set(0, 0, -1); }
     updateProjectionMatrix() {}
   }
   class WebGLRenderer {
@@ -165,6 +178,17 @@ vi.mock('three/examples/jsm/controls/OrbitControls.js', () => ({
   OrbitControls: class {
     enableDamping = false;
     dampingFactor = 0;
+    screenSpacePanning = false;
+    zoomToCursor = false;
+    zoomSpeed = 1;
+    minDistance = 0;
+    maxDistance = Infinity;
+    target = new (class {
+      x = 0;
+      y = 0;
+      z = 0;
+      add(v: { x: number; y: number; z: number }) { this.x += v.x; this.y += v.y; this.z += v.z; return this; }
+    })();
     update() {}
     dispose() {}
   },
@@ -231,6 +255,22 @@ describe('ModelPreview pure logic', () => {
     expect(formatModelDimension(123.4)).toBe('123');
     expect(formatModelDimensions({ x: 10, y: 20.04, z: 300 }, 'mm')).toBe('10.0 × 20.0 × 300 mm');
   });
+
+  it('distinguishes trackpad pan, pinch zoom, and a traditional mouse wheel', () => {
+    expect(classifyModelWheelGesture({ ctrlKey: true, metaKey: false, deltaMode: 0, deltaX: 0, deltaY: 8 })).toBe('pinch-zoom');
+    expect(classifyModelWheelGesture({ ctrlKey: false, metaKey: false, deltaMode: 0, deltaX: 12, deltaY: 4 })).toBe('trackpad-pan');
+    expect(classifyModelWheelGesture({ ctrlKey: false, metaKey: false, deltaMode: 0, deltaX: 0, deltaY: 7.5 })).toBe('trackpad-pan');
+    expect(classifyModelWheelGesture({ ctrlKey: false, metaKey: false, deltaMode: 0, deltaX: 0, deltaY: 73, wheelDeltaY: 73 })).toBe('trackpad-pan');
+    expect(classifyModelWheelGesture({ ctrlKey: false, metaKey: false, deltaMode: 1, deltaX: 0, deltaY: 3 })).toBe('wheel-zoom');
+    expect(classifyModelWheelGesture({ ctrlKey: false, metaKey: false, deltaMode: 0, deltaX: 0, deltaY: 3, wheelDeltaY: 120 })).toBe('wheel-zoom');
+    expect(classifyModelWheelGesture({ ctrlKey: false, metaKey: false, deltaMode: 0, deltaX: 0, deltaY: 100 })).toBe('wheel-zoom');
+  });
+
+  it('uses the nearest named glTF part group instead of a mojibake leaf mesh name', () => {
+    const part = { name: '罩板和门框（参照，罩板已上移）', type: 'Group', parent: null };
+    const leaf = { name: 'ç½©æ¿åé¨æ¡', type: 'Mesh', parent: part };
+    expect(resolvePickedPartName(leaf as never)).toBe('罩板和门框（参照，罩板已上移）');
+  });
 });
 
 describe('right sidebar 3D model preview', () => {
@@ -281,7 +321,11 @@ describe('right sidebar 3D model preview', () => {
     expect(screen.getAllByText('gear.stl').length).toBeGreaterThanOrEqual(2);
     // The canvas container opts out of the sidebar swiper gestures.
     expect(container.querySelector('.swiper-no-swiping')).not.toBeNull();
-    expect(container.querySelector('canvas')).not.toBeNull();
+    const canvas = container.querySelector('canvas');
+    expect(canvas).not.toBeNull();
+    const trackpadPan = new WheelEvent('wheel', { deltaX: 6, deltaY: 4, deltaMode: 0, cancelable: true });
+    canvas!.dispatchEvent(trackpadPan);
+    expect(trackpadPan.defaultPrevented).toBe(true);
   });
 
   it('falls back to the binary hint for .step files and never calls the 3D loader', async () => {

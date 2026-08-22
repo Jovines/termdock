@@ -208,7 +208,7 @@ export const en: TranslationDictionary = {
     model3dLoading: 'Loading 3D model…',
     model3dLoadFailed: 'Failed to load 3D model preview',
     model3dDimensions: ({ dims }) => `Dimensions: ${dims}`,
-    model3dHintMouse: 'Left-drag to orbit · right-drag to pan · scroll to zoom',
+    model3dHintMouse: 'Drag to orbit · two-finger pan · pinch or scroll to zoom',
     model3dHintTouch: 'One finger to orbit · two fingers to zoom & pan',
     model3dFullscreenEnter: 'Fullscreen',
     model3dFullscreenExit: 'Exit fullscreen',

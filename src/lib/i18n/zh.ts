@@ -208,7 +208,7 @@ export const zh: TranslationDictionary = {
     model3dLoading: '正在加载 3D 模型…',
     model3dLoadFailed: '3D 模型预览加载失败',
     model3dDimensions: ({ dims }) => `尺寸: ${dims}`,
-    model3dHintMouse: '左键旋转 / 右键平移 / 滚轮缩放',
+    model3dHintMouse: '拖拽旋转 / 双指平移 / 捏合或滚轮缩放',
     model3dHintTouch: '单指旋转 / 双指缩放平移',
     model3dFullscreenEnter: '全屏查看',
     model3dFullscreenExit: '退出全屏',

@@ -51,6 +51,40 @@ export function formatModelDimensions(size: { x: number; y: number; z: number },
   return unit ? `${dims} ${unit}` : dims;
 }
 
+/** Resolve a raycast leaf to the nearest logical glTF assembly part. */
+export function resolvePickedPartName(start: Object3D | null): string {
+  let node = start;
+  let fallback = '';
+  while (node) {
+    if (node.name && !fallback) fallback = node.name;
+    // Exporters often put generated/internal names on leaf Mesh objects while
+    // the nearest Group carries the human-facing assembly part name.
+    if (node.name && node.type === 'Group') return node.name;
+    node = node.parent;
+  }
+  return fallback;
+}
+
+export type ModelWheelGesture = 'pinch-zoom' | 'trackpad-pan' | 'wheel-zoom';
+
+/**
+ * Browsers expose trackpad scrolling and a mouse wheel through the same event.
+ * Pinches are reliably marked with ctrlKey on Chromium/WebKit, while smooth
+ * pixel deltas are the best cross-browser signal for a two-finger scroll.
+ */
+export function classifyModelWheelGesture(event: Pick<WheelEvent, 'ctrlKey' | 'metaKey' | 'deltaMode' | 'deltaX' | 'deltaY'> & { wheelDeltaY?: number }): ModelWheelGesture {
+  if (event.ctrlKey || event.metaKey) return 'pinch-zoom';
+  if (event.deltaMode !== 0) return 'wheel-zoom';
+  const legacyDelta = Math.abs(event.wheelDeltaY ?? 0);
+  // Chromium/WebKit retain 120-step legacy deltas for a notched mouse wheel;
+  // trackpad deltas are continuous, including during fast momentum scrolling.
+  if (legacyDelta >= 120 && legacyDelta % 120 === 0) return 'wheel-zoom';
+  if (Math.abs(event.deltaX) > 0.01) return 'trackpad-pan';
+  if (legacyDelta > 0 && legacyDelta % 120 !== 0) return 'trackpad-pan';
+  if (!Number.isInteger(event.deltaY) || Math.abs(event.deltaY) < 50) return 'trackpad-pan';
+  return 'wheel-zoom';
+}
+
 type ViewerAppearanceMode = 'light' | 'dark';
 
 // Self-contained viewer palette: the exact look of the standalone
@@ -358,6 +392,69 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
+  controls.screenSpacePanning = true;
+  controls.zoomToCursor = true;
+  controls.zoomSpeed = 0.85;
+
+  // OrbitControls treats every wheel event as zoom. On a Mac that turns the
+  // trackpad's two-finger scroll into accidental zoom, so intercept smooth
+  // wheel deltas and translate the camera/target in screen space instead.
+  // ctrl+wheel (the browser representation of a pinch) still flows through to
+  // OrbitControls, whose zoomToCursor keeps the point under the fingers fixed.
+  const panTrackpad = (deltaX: number, deltaY: number) => {
+    const viewportHeight = Math.max(1, renderer.domElement.clientHeight || container.clientHeight);
+    const distance = Math.max(camera.position.distanceTo(controls.target), 1e-6);
+    const worldUnitsPerPixel = (2 * distance * Math.tan(((camera.fov * Math.PI) / 180) / 2)) / viewportHeight;
+    const forward = camera.getWorldDirection(new Vector3());
+    const right = new Vector3().crossVectors(forward, camera.up).normalize();
+    const screenUp = new Vector3().crossVectors(right, forward).normalize();
+    const translation = right
+      .multiplyScalar(deltaX * worldUnitsPerPixel)
+      .add(screenUp.multiplyScalar(-deltaY * worldUnitsPerPixel));
+    camera.position.add(translation);
+    controls.target.add(translation);
+  };
+
+  const handleWheelCapture = (event: WheelEvent) => {
+    if (classifyModelWheelGesture(event) !== 'trackpad-pan') return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    panTrackpad(event.deltaX, event.deltaY);
+  };
+  renderer.domElement.addEventListener('wheel', handleWheelCapture, { capture: true, passive: false });
+
+  // Safari also exposes native GestureEvents for trackpad pinch. Chromium
+  // takes the ctrl+wheel path above; these listeners are harmless there.
+  type SafariGestureEvent = Event & { scale?: number };
+  let previousGestureScale = 1;
+  const handleGestureStart = (rawEvent: Event) => {
+    const event = rawEvent as SafariGestureEvent;
+    previousGestureScale = event.scale && event.scale > 0 ? event.scale : 1;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  const handleGestureChange = (rawEvent: Event) => {
+    const event = rawEvent as SafariGestureEvent;
+    const scale = event.scale && event.scale > 0 ? event.scale : previousGestureScale;
+    const factor = Math.min(2, Math.max(0.5, scale / Math.max(previousGestureScale, 1e-6)));
+    previousGestureScale = scale;
+    const offset = camera.position.clone().sub(controls.target);
+    const nextDistance = Math.min(controls.maxDistance, Math.max(controls.minDistance, offset.length() / factor));
+    if (Number.isFinite(nextDistance) && nextDistance > 0) {
+      camera.position.copy(controls.target).add(offset.setLength(nextDistance));
+      controls.update();
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  const handleGestureEnd = (event: Event) => {
+    previousGestureScale = 1;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  renderer.domElement.addEventListener('gesturestart', handleGestureStart, { passive: false });
+  renderer.domElement.addEventListener('gesturechange', handleGestureChange, { passive: false });
+  renderer.domElement.addEventListener('gestureend', handleGestureEnd, { passive: false });
 
   // 特征标记遮挡检测: 从相机向特征点做射线, 若先命中模型其他表面则判为背面
   const raycaster = new Raycaster();
@@ -469,16 +566,8 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
       const normal: [number, number, number] | null = hit.face
         ? [hit.face.normal.x, hit.face.normal.y, hit.face.normal.z]
         : null;
-      // 部位名: 向上找第一个有名字的节点(GLTF 零件节点, 如 base/clip)
-      let node: Object3D | null = hit.object;
-      let part = '';
-      while (node) {
-        if (node.name) {
-          part = node.name;
-          break;
-        }
-        node = node.parent;
-      }
+      // 优先最近的零件 Group；底层 Mesh 名可能是导出器生成名或乱码。
+      const part = resolvePickedPartName(hit.object);
       return { part, point, normal };
     },
     setSelection: (selections) => {
@@ -548,6 +637,10 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
       }
       selectionEntries = [];
       resizeObserver.disconnect();
+      renderer.domElement.removeEventListener('wheel', handleWheelCapture, { capture: true });
+      renderer.domElement.removeEventListener('gesturestart', handleGestureStart);
+      renderer.domElement.removeEventListener('gesturechange', handleGestureChange);
+      renderer.domElement.removeEventListener('gestureend', handleGestureEnd);
       controls.dispose();
       if (grid) {
         scene.remove(grid);
