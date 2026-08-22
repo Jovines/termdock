@@ -13,6 +13,7 @@ import {
 } from 'electron';
 import { execFile, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import dgram from 'node:dgram';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -62,6 +63,20 @@ let unreadNotificationCount = 0;
 function clearUnreadNotifications(): void {
   unreadNotificationCount = 0;
   app.setBadgeCount(0);
+}
+
+function triggerLocalNetworkPermission(): void {
+  if (process.platform !== 'darwin') return;
+  const socket = dgram.createSocket('udp4');
+  const close = () => {
+    try {
+      socket.close();
+    } catch {
+      // The socket may already be closed after an immediate send failure.
+    }
+  };
+  socket.once('error', close);
+  socket.send(Buffer.from('Termdock'), 5353, '224.0.0.251', close);
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -1178,6 +1193,7 @@ function installMenu(): void {
 }
 
 app.whenReady().then(async () => {
+  triggerLocalNetworkPermission();
   configureLocalServiceCertificateTrust();
   installIpcHandlers();
   installMenu();
