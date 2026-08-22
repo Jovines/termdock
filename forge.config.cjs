@@ -137,6 +137,7 @@ module.exports = {
     icon: path.resolve(__dirname, 'desktop/assets/Termdock.icns'),
     extendInfo: {
       LSMinimumSystemVersion: macosDeploymentTarget,
+      NSUserNotificationAlertStyle: 'banner',
       NSLocalNetworkUsageDescription:
         'Termdock 需要访问本地网络，以连接你在本机或局域网其他设备上运行的 Termdock 服务。',
       NSAppTransportSecurity: {

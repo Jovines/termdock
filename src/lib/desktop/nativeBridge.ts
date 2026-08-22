@@ -17,12 +17,38 @@ export interface DesktopNativeSnapshot {
   };
 }
 
+export type DesktopAppUpdateStatus =
+  | 'unsupported'
+  | 'idle'
+  | 'checking'
+  | 'current'
+  | 'downloading'
+  | 'ready'
+  | 'installing'
+  | 'error';
+
+export interface DesktopAppUpdateState {
+  status: DesktopAppUpdateStatus;
+  currentVersion: string;
+  latestVersion: string | null;
+  releaseName: string | null;
+  checkedAt: number | null;
+  error: string | null;
+}
+
 export interface TermdockDesktopBridge {
   platform: string;
+  /** Present when the desktop shell only acknowledges confirmed native delivery. */
+  notificationDeliveryConfirmation?: boolean;
   snapshot(): Promise<DesktopNativeSnapshot>;
   installCli(): Promise<DesktopNativeSnapshot>;
+  desktopUpdateState?(): Promise<DesktopAppUpdateState>;
+  checkDesktopUpdate?(): Promise<DesktopAppUpdateState>;
+  installDesktopUpdate?(): Promise<DesktopAppUpdateState>;
+  onDesktopUpdateState?(callback: (state: DesktopAppUpdateState) => void): void;
   showConnectionCenter(): Promise<void>;
   revealDataDirectory(): Promise<void>;
+  openNotificationSettings?(): Promise<void>;
   showNotification(payload: DesktopNotificationPayload): Promise<boolean>;
   onNativeFileDrop(
     callback: (payload: NativeFileDropPayload) => void,

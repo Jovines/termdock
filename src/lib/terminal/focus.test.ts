@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeTerminalLogicalFocus } from './focus';
+import { computeTerminalLogicalFocus, computeTerminalLogicalViewing } from './focus';
 
 const focusedState = {
   isActive: true,
@@ -22,5 +22,27 @@ describe('computeTerminalLogicalFocus', () => {
     ['stream disconnected', { streamReady: false }],
   ])('is not focused when %s', (_label, patch) => {
     expect(computeTerminalLogicalFocus({ ...focusedState, ...patch })).toBe(false);
+  });
+});
+
+describe('computeTerminalLogicalViewing', () => {
+  it('uses native window focus for desktop windows that keep rendering in the background', () => {
+    expect(computeTerminalLogicalViewing({
+      isActive: true,
+      documentVisible: true,
+      windowFocused: false,
+      streamReady: true,
+      isDesktop: true,
+    })).toBe(false);
+  });
+
+  it('keeps the visibility-only behavior for mobile browsers', () => {
+    expect(computeTerminalLogicalViewing({
+      isActive: true,
+      documentVisible: true,
+      windowFocused: false,
+      streamReady: true,
+      isDesktop: false,
+    })).toBe(true);
   });
 });

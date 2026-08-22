@@ -1,7 +1,8 @@
 /**
- * Tracks which push-subscribed clients are actively viewing which terminal
- * session, so agent-transition pushes can skip the very client that is
- * already looking at the session (its notification would be redundant).
+ * Tracks which push-subscribed clients are actively viewing the app, using
+ * their visible terminal sessions as presence signals. Pushes can then skip
+ * every client that already has Termdock in the foreground, regardless of
+ * which session produced the event.
  *
  * The per-terminal WebSocket reports viewing state (session active + document
  * visible + window focused + stream ready — deliberately NOT textarea focus,
@@ -34,12 +35,7 @@ export function setClientViewingSession(
   sessions.add(sessionId);
 }
 
-/** Push subscription clientIds currently looking at the given session. */
-export function getViewingPushClientIds(sessionId: string): Set<string> {
-  const result = new Set<string>();
-  if (!sessionId) return result;
-  for (const [pushClientId, sessions] of viewingSessionsByClient) {
-    if (sessions.has(sessionId)) result.add(pushClientId);
-  }
-  return result;
+/** Push subscription clientIds that currently have Termdock in the foreground. */
+export function getForegroundPushClientIds(): Set<string> {
+  return new Set(viewingSessionsByClient.keys());
 }

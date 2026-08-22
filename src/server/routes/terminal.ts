@@ -5569,7 +5569,16 @@ router.get('/agent-launchers', async (_req, res) => {
   const executableExtensions = process.platform === 'win32'
     ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';')
     : [''];
-  const detected = [] as Array<{ slug: string; displayName: string; command: string }>;
+  const detected = [] as Array<{
+    slug: string;
+    displayName: string;
+    command: string;
+    accentColor: string;
+    icon: string | null;
+    isPlugin: boolean;
+    iconMode?: 'mask' | 'native';
+    iconVersion?: number;
+  }>;
 
   for (const agent of listAgents()) {
     let command: string | null = null;
@@ -5587,7 +5596,18 @@ router.get('/agent-launchers', async (_req, res) => {
       }
       if (command) break;
     }
-    if (command) detected.push({ slug: agent.slug, displayName: agent.displayName, command });
+    if (command) {
+      detected.push({
+        slug: agent.slug,
+        displayName: agent.displayName,
+        command,
+        accentColor: agent.accentColor,
+        icon: agent.icon,
+        isPlugin: agent.isPlugin ?? false,
+        iconMode: agent.iconMode,
+        iconVersion: agent.iconVersion,
+      });
+    }
   }
 
   res.json({ agents: detected });

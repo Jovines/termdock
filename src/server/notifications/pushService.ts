@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import webpush, { type PushSubscription } from 'web-push';
-import { getViewingPushClientIds } from './pushViewers.js';
+import { getForegroundPushClientIds } from './pushViewers.js';
 
 export type PushAlertStyle = 'normal' | 'quiet' | 'persistent';
 
@@ -227,7 +227,7 @@ export function notifyAgentTransition(
   const agentName = current.agent?.displayName ?? previous?.agent?.displayName ?? 'Agent';
   void sendPayload({
     enabled: (entry) => entry.aiEnabled,
-    skipClientIds: getViewingPushClientIds(sessionId),
+    skipClientIds: getForegroundPushClientIds(),
     urgency: kind === 'waiting' ? 'high' : 'normal',
     ttlSeconds: kind === 'waiting' ? 24 * 60 * 60 : 60 * 60,
     build: (locale) => {
@@ -259,7 +259,7 @@ export function notifyAgentTransition(
 export function notifyTerminalExit(sessionId: string, exitCode: number | null): void {
   void sendPayload({
     enabled: (entry) => entry.exitEnabled,
-    skipClientIds: getViewingPushClientIds(sessionId),
+    skipClientIds: getForegroundPushClientIds(),
     build: (locale) => {
       const text = terminalExitText(locale, exitCode);
       return {

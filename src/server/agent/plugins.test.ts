@@ -137,12 +137,22 @@ describe('registerPluginAgents', () => {
     expect(agent).not.toBeNull();
     expect(agent!.displayName).toBe('Test Agent');
     expect(agent!.accentColor).toBe('#FF6600');
+    expect(agent!.icon).toBeNull();
     expect(agent!.isPlugin).toBe(true);
     expect(agent!.statuses?.map((status) => status.id)).toEqual(['thinking', 'approval']);
     expect(listAgents().some((entry) => entry.slug === 'test-agent')).toBe(true);
 
     // Alias works for detection, not slug lookup
     expect(detectAgentFromArgv(['tai'])?.slug).toBe('test-agent');
+  });
+
+  it('publishes the plugin icon key only when icon.svg exists', () => {
+    registerPluginAgents([{ ...makePlugin(TEST_PLUGIN), iconPath: '/tmp/test/icon.svg', iconMtime: 123 }]);
+
+    expect(agentBySlug('test-agent')).toMatchObject({
+      icon: 'test-agent',
+      iconVersion: 123,
+    });
   });
 
   it('resolves a manifest status from the hook wire into the shared phase model', () => {

@@ -3,6 +3,7 @@ import type {
   TerminalStreamEvent,
   CreateTerminalOptions,
   ConnectStreamOptions,
+  AgentIdentity,
   AgentIndicator,
   AgentStatusDetail,
   TmuxActionPayload,
@@ -1587,9 +1588,7 @@ export interface AgentHookInfo {
   iconVersion: number | null;
 }
 
-export interface AgentLauncherInfo {
-  slug: string;
-  displayName: string;
+export interface AgentLauncherInfo extends AgentIdentity {
   command: string;
 }
 

@@ -328,7 +328,9 @@ export function registerPluginAgents(plugins: LoadedPlugin[]): { registered: num
       displayName: manifest.displayName,
       aliases: manifest.aliases,
       accentColor: manifest.accentColor,
-      icon: manifest.slug, // plugins use slug as icon key; frontend checks /agent-plugin-icon/<slug>
+      // Plugins use their slug as the frontend icon key only when icon.svg exists.
+      // Otherwise AgentBrandAvatar must receive null so it can render its Bot fallback.
+      icon: p.iconPath ? manifest.slug : null,
       isPlugin: true,
       iconMode: manifest.iconMode,
       iconVersion: p.iconMtime || undefined,

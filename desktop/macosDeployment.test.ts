@@ -9,6 +9,7 @@ const forgeSource = readFileSync(new URL('../forge.config.cjs', import.meta.url)
 describe('macOS deployment target', () => {
   it('keeps the launcher binary and Info.plist on macOS 12', () => {
     expect(forgeConfig.packagerConfig.extendInfo.LSMinimumSystemVersion).toBe('12.0');
+    expect(forgeConfig.packagerConfig.extendInfo.NSUserNotificationAlertStyle).toBe('banner');
     expect(forgeSource).toContain('`-mmacosx-version-min=${macosDeploymentTarget}`');
     expect(forgeSource).toContain("'vtool'");
     expect(forgeSource).toContain("'-show-build'");

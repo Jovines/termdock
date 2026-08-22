@@ -19,6 +19,11 @@ export function readNewSessionAgentPreference(): NewSessionAgentPreference {
       slug: value.slug,
       command: value.command,
       displayName: typeof value.displayName === 'string' ? value.displayName : value.slug,
+      accentColor: typeof value.accentColor === 'string' ? value.accentColor : 'var(--muted-foreground)',
+      icon: typeof value.icon === 'string' ? value.icon : null,
+      isPlugin: value.isPlugin === true,
+      iconMode: value.iconMode === 'native' ? 'native' : value.iconMode === 'mask' ? 'mask' : undefined,
+      iconVersion: typeof value.iconVersion === 'number' ? value.iconVersion : undefined,
     };
   } catch {
     return null;

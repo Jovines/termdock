@@ -419,7 +419,7 @@ export async function showPwaNotification(payload: PwaNotificationPayload): Prom
   const desktopBridge = getTermdockDesktopBridge();
   if (desktopBridge) {
     const alertStyle = payload.alertStyle ?? getStoredPwaNotificationAlertStyle();
-    return desktopBridge.showNotification({
+    const delivered = await desktopBridge.showNotification({
       title: payload.title,
       body: payload.body,
       tag: payload.tag,
@@ -427,6 +427,10 @@ export async function showPwaNotification(payload: PwaNotificationPayload): Prom
       silent: alertStyle === 'quiet',
       persistent: alertStyle === 'persistent',
     });
+    // Older desktop shells returned true immediately after show(), even when
+    // macOS silently discarded the notification. Do not report that legacy
+    // acknowledgement as a successful test.
+    return desktopBridge.notificationDeliveryConfirmation === true && delivered;
   }
   if (Notification.permission !== 'granted') return false;
   const registration = await getNotificationRegistration();

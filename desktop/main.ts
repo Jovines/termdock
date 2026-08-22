@@ -31,6 +31,9 @@ import {
   checkForDesktopUpdates,
   configureDesktopUpdater,
   ensureLatestRuntime,
+  getDesktopUpdateState,
+  installDownloadedDesktopUpdate,
+  subscribeDesktopUpdateState,
 } from './updater.js';
 import {
   resolvePackagedRuntime,
@@ -38,6 +41,7 @@ import {
   type DesktopRuntimePaths,
 } from './runtime.js';
 import { isExternalLinkStagingUrl, isSafeExternalUrl } from './externalLinks.js';
+import { shouldThrottleDesktopRenderer } from './windowPolicy.js';
 
 const execFileAsync = promisify(execFile);
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -63,12 +67,23 @@ function clearUnreadNotifications(): void {
 let mainWindow: BrowserWindow | null = null;
 const serviceWindows = new Map<string, BrowserWindow>();
 const windowServiceOrigins = new WeakMap<BrowserWindow, string>();
+let lastFocusedServiceWindow: BrowserWindow | null = null;
 let isQuitting = false;
 
 function focusedWorkspaceWindow(): BrowserWindow | null {
   const focused = BrowserWindow.getFocusedWindow();
   if (focused && windowServiceOrigins.has(focused)) return focused;
+  if (lastFocusedServiceWindow && !lastFocusedServiceWindow.isDestroyed()) {
+    return lastFocusedServiceWindow;
+  }
   return [...serviceWindows.values()].find((window) => !window.isDestroyed()) ?? null;
+}
+
+function showAndFocusWindow(window: BrowserWindow): void {
+  if (windowServiceOrigins.has(window)) lastFocusedServiceWindow = window;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
 }
 
 function serviceLabel(url: string): string {
@@ -657,8 +672,13 @@ async function connectWindow(rawUrl: string): Promise<ServiceProbe> {
   const key = parsed.origin;
   const existingWindow = serviceWindows.get(key);
   if (existingWindow && !existingWindow.isDestroyed()) {
-    existingWindow.show();
-    existingWindow.focus();
+    const config = readDesktopConfig();
+    config.lastConnectionUrl = probe.url;
+    const existing = config.connections.find((entry) => entry.url === probe.url);
+    if (existing) existing.lastConnectedAt = Date.now();
+    writeDesktopConfig(config);
+    mainWindow?.hide();
+    showAndFocusWindow(existingWindow);
     return probe;
   }
 
@@ -672,8 +692,8 @@ async function connectWindow(rawUrl: string): Promise<ServiceProbe> {
       const existing = config.connections.find((entry) => entry.url === probe.url);
       if (existing) existing.lastConnectedAt = Date.now();
       writeDesktopConfig(config);
-      workspaceWindow.show();
-      workspaceWindow.focus();
+      mainWindow?.hide();
+      showAndFocusWindow(workspaceWindow);
       return probe;
     } catch (error) {
       const message = networkErrorDetails(error);
@@ -703,8 +723,7 @@ async function showConnectionCenter(): Promise<void> {
     ? path.join(process.resourcesPath, 'renderer', 'index.html')
     : path.join(projectRoot, 'desktop', 'renderer', 'index.html');
   await mainWindow?.loadFile(rendererPath);
-  mainWindow?.show();
-  mainWindow?.focus();
+  if (mainWindow) showAndFocusWindow(mainWindow);
 }
 
 function createDesktopWindow(options?: { serviceOrigin: string; label: string }): BrowserWindow {
@@ -726,6 +745,10 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
+      // A service window owns live terminal streams. If Chromium suspends it
+      // while macOS places the app in the background, tens of seconds of WS
+      // messages can hit the renderer in one burst when the user returns.
+      backgroundThrottling: shouldThrottleDesktopRenderer(Boolean(options)),
     },
   });
   if (options) windowServiceOrigins.set(window, options.serviceOrigin);
@@ -837,12 +860,14 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
   });
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null;
+    if (lastFocusedServiceWindow === window) lastFocusedServiceWindow = null;
     const serviceOrigin = windowServiceOrigins.get(window);
     if (serviceOrigin && serviceWindows.get(serviceOrigin) === window) {
       serviceWindows.delete(serviceOrigin);
     }
   });
   window.on('focus', () => {
+    if (windowServiceOrigins.has(window)) lastFocusedServiceWindow = window;
     // User is looking at the app — the Dock badge has served its purpose.
     clearUnreadNotifications();
   });
@@ -885,11 +910,19 @@ function installIpcHandlers(): void {
   ipcMain.handle('desktop:connect', (_event, url: string) => connectWindow(url));
   ipcMain.handle('desktop:start-local', () => startLocalService());
   ipcMain.handle('desktop:install-cli', () => installCli());
+  ipcMain.handle('desktop:update-state', () => getDesktopUpdateState());
+  ipcMain.handle('desktop:check-update', () => checkForDesktopUpdates());
+  ipcMain.handle('desktop:install-update', () => installDownloadedDesktopUpdate());
   ipcMain.handle('desktop:show-connection-center', () => showConnectionCenter());
   ipcMain.handle('desktop:reveal-data-directory', async () => {
     fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
     const error = await shell.openPath(termdockDir);
     if (error) throw new Error(error);
+  });
+  ipcMain.handle('desktop:open-notification-settings', async () => {
+    await shell.openExternal(
+      'x-apple.systempreferences:com.apple.Notifications-Settings.extension?bundleId=com.jovines.termdock',
+    );
   });
   ipcMain.handle('desktop:show-notification', (event, payload: {
     title?: unknown;
@@ -932,15 +965,39 @@ function installIpcHandlers(): void {
         targetWindow?.webContents.send('desktop:focus-session', payload.sessionId);
       }
     });
-    notification.show();
-    unreadNotificationCount += 1;
-    app.setBadgeCount(unreadNotificationCount);
-    // macOS banners auto-dismiss even for "persistent" alerts; bounce the Dock
-    // icon so the signal survives until the user looks at the app.
-    if (payload.persistent === true && !sourceWindow?.isFocused()) {
-      app.dock?.bounce('informational');
-    }
-    return true;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (delivered: boolean, error?: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (!delivered) {
+          if (tag && activeNotifications.get(tag) === notification) {
+            activeNotifications.delete(tag);
+          }
+          if (error) console.error(`[desktop notification] ${error}`);
+          resolve(false);
+          return;
+        }
+        unreadNotificationCount += 1;
+        app.setBadgeCount(unreadNotificationCount);
+        // macOS banners auto-dismiss even for "persistent" alerts; bounce the Dock
+        // icon so the signal survives until the user looks at the app.
+        if (payload.persistent === true && !sourceWindow?.isFocused()) {
+          app.dock?.bounce('informational');
+        }
+        resolve(true);
+      };
+      notification.once('show', () => finish(true));
+      notification.once('failed', (_notificationEvent, error) => finish(false, error));
+      // macOS can silently discard notifications when this user disabled the
+      // app in System Settings. Do not report success or increment the Dock
+      // badge unless Electron confirms delivery.
+      const timeout = setTimeout(() => {
+        finish(false, 'macOS did not confirm notification delivery');
+      }, 2_000);
+      notification.show();
+    });
   });
 }
 
@@ -989,7 +1046,7 @@ function installMenu(): void {
           click: () => focusedWorkspaceWindow()?.webContents.send('desktop:open-settings'),
         },
         {
-          label: '连接中心',
+          label: '新建连接或切换服务…',
           accelerator: 'CmdOrCtrl+N',
           click: () => void showConnectionCenter(),
         },
@@ -1006,7 +1063,7 @@ function installMenu(): void {
         },
         {
           label: '检查更新…',
-          click: () => void checkForDesktopUpdates(true),
+          click: () => void checkForDesktopUpdates({ presentNativeDialogs: true }),
         },
         {
           label: '打开 Termdock 数据目录',
@@ -1124,24 +1181,26 @@ app.whenReady().then(async () => {
   configureLocalServiceCertificateTrust();
   installIpcHandlers();
   installMenu();
-  mainWindow = createDesktopWindow();
   configureDesktopUpdater(showDesktopMessageBox);
-  await showConnectionCenter();
+  subscribeDesktopUpdateState((state) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send('desktop:update-state-changed', state);
+    }
+  });
   const lastConnectionUrl = readDesktopConfig().lastConnectionUrl;
   if (lastConnectionUrl) {
     const probe = await connectWindow(lastConnectionUrl);
-    if (!probe.ok && mainWindow?.webContents.getURL().startsWith('file:') === false) {
-      await showConnectionCenter();
-    }
+    if (!probe.ok) await showConnectionCenter();
+  } else {
+    await showConnectionCenter();
   }
   app.on('activate', () => {
-    if (!mainWindow) {
-      mainWindow = createDesktopWindow();
-      void showConnectionCenter();
-    } else {
-      mainWindow.show();
-      mainWindow.focus();
+    const workspaceWindow = focusedWorkspaceWindow();
+    if (workspaceWindow) {
+      showAndFocusWindow(workspaceWindow);
+      return;
     }
+    void showConnectionCenter();
   });
 }).catch((error) => {
   void dialog.showErrorBox('Termdock 启动失败', error instanceof Error ? error.message : String(error));

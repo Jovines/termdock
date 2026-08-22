@@ -1,9 +1,10 @@
-import { Bot, Check, Folder, LoaderCircle, RefreshCw, Terminal, X } from 'lucide-react';
+import { Check, Folder, LoaderCircle, RefreshCw, Terminal, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { getDirectorySuggestions, type AgentLauncherInfo } from '../../terminal/api';
 import { getCwdLeafName } from '../../terminal/display';
 import { useI18n } from '../../i18n';
 import type { NewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
+import { AgentBrandAvatar } from '../AgentIndicators';
 
 export function NewSessionComposer({
   directories,
@@ -122,7 +123,7 @@ export function NewSessionComposer({
               title={agent.command}
               className={`flex min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${selected ? 'bg-primary/15 text-primary ring-1 ring-primary/30' : 'bg-surface text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
             >
-              <Bot size={12} className="shrink-0" />
+              <AgentBrandAvatar agent={agent} size={14} />
               <span className="truncate text-[11px] font-semibold">{agent.displayName}</span>
               {selected && <Check size={11} className="ml-auto shrink-0" />}
             </button>

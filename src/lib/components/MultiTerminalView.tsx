@@ -12,6 +12,7 @@ import type { TermdockColorTheme } from '../terminal/theme';
 import {
   BACKGROUND_RESUME_INITIAL_DELAY_MS,
   buildResumeDelayBySessionId,
+  shouldScheduleForegroundResume,
 } from '../terminal/resumeScheduling';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
@@ -861,7 +862,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     };
   }, [updateSwiperLayout]);
 
-  // PWA 从后台恢复 / 网络恢复时，不能只让当前 active slide 自检：
+  // PWA / Electron 从后台恢复或网络恢复时，不能只让当前 active slide 自检：
   // Swiper 中其它 TerminalView 虽然不可见但仍持有各自 WebSocket，服务重启后
   // 它们也会变成半开/已关闭连接。这里广播一个 token 给所有子 TerminalView；
   // 当前可见 slide（包括分屏里的所有可见 pane）立即 probe，后台 session 从
@@ -870,8 +871,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (typeof document === 'undefined') return;
 
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastResumeScheduledAt: number | null = null;
     const scheduleResume = (reason: string) => {
       if (reason !== 'online' && document.hidden) return;
+      const now = performance.now();
+      if (!shouldScheduleForegroundResume(lastResumeScheduledAt, now)) return;
+      lastResumeScheduledAt = now;
       const refreshReason = reason === 'bfcache' || reason === 'online' ? reason : 'visibility';
       setResumeRequest((request) => ({ token: request.token + 1, reason: refreshReason }));
 
@@ -892,14 +897,17 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       scheduleResume(event.persisted ? 'bfcache' : 'pageshow');
     };
     const handleOnline = () => scheduleResume('online');
+    const handleWindowFocus = () => scheduleResume('focus');
 
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('pageshow', handlePageShow);
     window.addEventListener('online', handleOnline);
+    window.addEventListener('focus', handleWindowFocus);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('pageshow', handlePageShow);
       window.removeEventListener('online', handleOnline);
+      window.removeEventListener('focus', handleWindowFocus);
       if (settleTimer) clearTimeout(settleTimer);
     };
   }, [updateSwiperLayout]);

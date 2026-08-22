@@ -1,8 +1,9 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { DesktopSnapshot, ServiceProbe } from './types.js';
+import type { DesktopAppUpdateState, DesktopSnapshot, ServiceProbe } from './types.js';
 
 contextBridge.exposeInMainWorld('termdockDesktop', {
   platform: process.platform,
+  notificationDeliveryConfirmation: true,
   snapshot: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:snapshot'),
   probe: (url: string): Promise<ServiceProbe> => ipcRenderer.invoke('desktop:probe', url),
   saveConnection: (url: string, label: string): Promise<DesktopSnapshot> =>
@@ -12,8 +13,15 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
   connect: (url: string): Promise<ServiceProbe> => ipcRenderer.invoke('desktop:connect', url),
   startLocal: (): Promise<ServiceProbe> => ipcRenderer.invoke('desktop:start-local'),
   installCli: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:install-cli'),
+  desktopUpdateState: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:update-state'),
+  checkDesktopUpdate: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:check-update'),
+  installDesktopUpdate: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:install-update'),
+  onDesktopUpdateState: (callback: (state: DesktopAppUpdateState) => void): void => {
+    ipcRenderer.on('desktop:update-state-changed', (_event, state: DesktopAppUpdateState) => callback(state));
+  },
   showConnectionCenter: (): Promise<void> => ipcRenderer.invoke('desktop:show-connection-center'),
   revealDataDirectory: (): Promise<void> => ipcRenderer.invoke('desktop:reveal-data-directory'),
+  openNotificationSettings: (): Promise<void> => ipcRenderer.invoke('desktop:open-notification-settings'),
   showNotification: (payload: {
     title: string;
     body?: string;

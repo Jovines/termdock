@@ -13,3 +13,14 @@ export function computeTerminalLogicalFocus(input: TerminalLogicalFocusInput): b
     input.windowFocused &&
     input.streamReady;
 }
+
+export function computeTerminalLogicalViewing(
+  input: Pick<TerminalLogicalFocusInput, 'isActive' | 'documentVisible' | 'windowFocused' | 'streamReady'> & {
+    isDesktop: boolean;
+  },
+): boolean {
+  return input.isActive &&
+    input.documentVisible &&
+    input.streamReady &&
+    (!input.isDesktop || input.windowFocused);
+}

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nProvider } from '../../i18n';
 import type { TermdockUpdateState } from '../../terminal/api';
+import type { DesktopAppUpdateState } from '../../desktop/nativeBridge';
 import { TermdockUpdateSettings } from './TermdockUpdateSettings';
 
 afterEach(() => {
@@ -11,10 +12,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderSettings(state: TermdockUpdateState) {
+function renderSettings(state: TermdockUpdateState, desktopState?: DesktopAppUpdateState) {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ locale: 'en' }) })));
   const onCheck = vi.fn();
   const onConfirmRestart = vi.fn();
+  const onCheckDesktop = vi.fn();
+  const onInstallDesktop = vi.fn();
   render(
     <I18nProvider>
       <TermdockUpdateSettings
@@ -22,10 +25,13 @@ function renderSettings(state: TermdockUpdateState) {
         pending={false}
         onCheck={onCheck}
         onConfirmRestart={onConfirmRestart}
+        desktopState={desktopState}
+        onCheckDesktop={onCheckDesktop}
+        onInstallDesktop={onInstallDesktop}
       />
     </I18nProvider>,
   );
-  return { onCheck, onConfirmRestart };
+  return { onCheck, onConfirmRestart, onCheckDesktop, onInstallDesktop };
 }
 
 describe('TermdockUpdateSettings', () => {
@@ -49,5 +55,36 @@ describe('TermdockUpdateSettings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Restart and finish update' }));
     expect(actions.onConfirmRestart).toHaveBeenCalledOnce();
     expect(actions.onCheck).not.toHaveBeenCalled();
+  });
+
+  it('checks the desktop app independently from the CLI runtime', () => {
+    const actions = renderSettings(
+      {
+        status: 'current', currentVersion: '1.4.81', latestVersion: '1.4.81',
+        source: 'official', checkedAt: Date.now(), error: null,
+      },
+      {
+        status: 'current', currentVersion: '1.4.80', latestVersion: null,
+        releaseName: null, checkedAt: Date.now(), error: null,
+      },
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: 'Check again' })[1]);
+    expect(actions.onCheckDesktop).toHaveBeenCalledOnce();
+    expect(actions.onCheck).not.toHaveBeenCalled();
+  });
+
+  it('offers restart and install after the desktop download finishes', () => {
+    const actions = renderSettings(
+      {
+        status: 'current', currentVersion: '1.4.81', latestVersion: '1.4.81',
+        source: 'official', checkedAt: Date.now(), error: null,
+      },
+      {
+        status: 'ready', currentVersion: '1.4.80', latestVersion: '1.4.81',
+        releaseName: 'v1.4.81', checkedAt: Date.now(), error: null,
+      },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Restart and install' }));
+    expect(actions.onInstallDesktop).toHaveBeenCalledOnce();
   });
 });

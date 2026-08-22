@@ -1160,7 +1160,9 @@ export function LeftSidebar(
             title={newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}
             aria-label={newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}
           >
-            <RiAddLine size={15} className="shrink-0" />
+            {newSessionAgent
+              ? <AgentBrandAvatar agent={newSessionAgent} size={16} />
+              : <RiAddLine size={15} className="shrink-0" />}
             <span className="truncate">{newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}</span>
           </button>
           <button

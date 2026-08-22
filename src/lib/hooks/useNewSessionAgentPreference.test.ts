@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { resolveNewSessionAgentPreference } from './useNewSessionAgentPreference';
 
 const agents = [
-  { slug: 'codex', displayName: 'Codex', command: 'codex' },
-  { slug: 'claude', displayName: 'Claude Code', command: 'claude' },
+  { slug: 'codex', displayName: 'Codex', command: 'codex', accentColor: 'var(--ui)', icon: 'codex' },
+  { slug: 'claude', displayName: 'Claude Code', command: 'claude', accentColor: 'var(--accent)', icon: 'claude' },
 ];
 
 describe('resolveNewSessionAgentPreference', () => {

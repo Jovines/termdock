@@ -2,10 +2,20 @@ import { describe, expect, it } from 'vitest';
 import {
   BACKGROUND_RESUME_INITIAL_DELAY_MS,
   BACKGROUND_RESUME_STAGGER_MS,
+  FOREGROUND_RESUME_COALESCE_MS,
   VISIBLE_RECONNECT_WATCHDOG_MS,
   buildResumeDelayBySessionId,
   getVisibleReconnectWatchdogDelayMs,
+  shouldScheduleForegroundResume,
 } from './resumeScheduling';
+
+describe('shouldScheduleForegroundResume', () => {
+  it('coalesces the focus and visibility events emitted by one foreground transition', () => {
+    expect(shouldScheduleForegroundResume(null, 1_000)).toBe(true);
+    expect(shouldScheduleForegroundResume(1_000, 1_000 + FOREGROUND_RESUME_COALESCE_MS - 1)).toBe(false);
+    expect(shouldScheduleForegroundResume(1_000, 1_000 + FOREGROUND_RESUME_COALESCE_MS)).toBe(true);
+  });
+});
 
 describe('buildResumeDelayBySessionId', () => {
   it('resumes every visible split pane immediately and staggers background sessions', () => {

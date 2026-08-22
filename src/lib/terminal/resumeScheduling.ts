@@ -1,6 +1,14 @@
 export const BACKGROUND_RESUME_INITIAL_DELAY_MS = 300;
 export const BACKGROUND_RESUME_STAGGER_MS = 120;
+export const FOREGROUND_RESUME_COALESCE_MS = 250;
 export const VISIBLE_RECONNECT_WATCHDOG_MS = 60_000;
+
+export function shouldScheduleForegroundResume(
+  lastScheduledAt: number | null,
+  now: number,
+): boolean {
+  return lastScheduledAt === null || now - lastScheduledAt >= FOREGROUND_RESUME_COALESCE_MS;
+}
 
 export function getVisibleReconnectWatchdogDelayMs(options: {
   isActive: boolean;

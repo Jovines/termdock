@@ -6,6 +6,14 @@ Termdock Desktop is split into two independently versioned layers:
   native production dependencies, and the bundled toolchain.
 - **App Runtime**: the npm package's compiled `dist/server` and `dist/client`.
 
+The settings panel reports and updates these layers separately:
+
+- **CLI and service Runtime** checks the signed npm package and stages a compatible
+  Runtime without replacing the desktop shell.
+- **macOS desktop app** always checks the Squirrel.Mac GitHub release feed. A
+  current Runtime never suppresses this desktop check. The user can start the
+  check manually and, after download, explicitly restart to install it.
+
 The shell always contains a complete fallback Runtime, so it remains usable
 offline and can recover from a bad downloaded update.
 

@@ -96,8 +96,10 @@ Users can download `Termdock.dmg` from the GitHub Releases page. Installed,
 signed builds use Electron's native Squirrel.Mac updater and the public
 `update.electronjs.org/Jovines/termdock` feed. Termdock checks after launch and
 periodically in the background; **Termdock → Check for Updates…** starts a
-manual check. A downloaded update is installed only after the user accepts the
-native restart prompt.
+manual check. The in-app settings panel exposes the same desktop check beside
+the independently versioned CLI/Runtime update, and offers **Restart and
+install** after the download completes. A downloaded update is installed only
+after the user accepts either restart action.
 
 The ZIP filename includes `darwin-arm64`, which is required for the update
 service to select the Apple Silicon asset. The repository must remain public

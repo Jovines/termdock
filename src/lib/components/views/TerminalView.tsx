@@ -7,7 +7,8 @@ import { TerminalViewport, type RefreshReason, type TerminalController } from '.
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
 import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, sendTerminalViewingState, updateSessionInventoryEntry } from '../../terminal/api';
-import { computeTerminalLogicalFocus } from '../../terminal/focus';
+import { computeTerminalLogicalFocus, computeTerminalLogicalViewing } from '../../terminal/focus';
+import { getTermdockDesktopBridge } from '../../desktop/nativeBridge';
 import { isTmuxMouseOrFocusInput, shouldConsumeAfterTmuxCopyModeExit } from '../../terminal/copyModeInput';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { MobileKeyboard, getSequenceForKey } from '../terminal/MobileKeyboard';
@@ -446,11 +447,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     streamReady: isStreamReady,
   });
 
-  // 推送抑制的“正在看这个 session”：不要求 textarea 聚焦（移动端键盘收起
-  // 但还在看输出是常态），也不要求 document.hasFocus() —— iOS installed PWA
-  // 在用户交互前 hasFocus 经常是 false（前台看着输出也一样），visibilityState
-  // 才是可靠的“应用在前台”信号。只要 active + 页面可见 + 流就绪。
-  const logicalViewing = isActive && isDocumentVisible && isStreamReady;
+  // 推送抑制的“正在看这个 session”：移动浏览器不要求 textarea/window focus，
+  // 因为 iOS installed PWA 在用户交互前 hasFocus 经常是 false。Electron 则会
+  // 为持续排空终端输出而关闭 workspace 的 backgroundThrottling；这会削弱 Page
+  // Visibility 的后台信号，所以桌面版额外以原生窗口 focus 作为 viewing gate。
+  const logicalViewing = computeTerminalLogicalViewing({
+    isActive,
+    documentVisible: isDocumentVisible,
+    windowFocused: isWindowFocused,
+    streamReady: isStreamReady,
+    isDesktop: getTermdockDesktopBridge() !== null,
+  });
 
   // Latest logical focus, kept in a ref so the WS 'connected' handler can
   // re-assert it after reconnects without a stale closure.

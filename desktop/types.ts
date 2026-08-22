@@ -46,6 +46,25 @@ export interface DesktopSnapshot {
   lastConnectionUrl: string | null;
 }
 
+export type DesktopAppUpdateStatus =
+  | 'unsupported'
+  | 'idle'
+  | 'checking'
+  | 'current'
+  | 'downloading'
+  | 'ready'
+  | 'installing'
+  | 'error';
+
+export interface DesktopAppUpdateState {
+  status: DesktopAppUpdateStatus;
+  currentVersion: string;
+  latestVersion: string | null;
+  releaseName: string | null;
+  checkedAt: number | null;
+  error: string | null;
+}
+
 export interface DesktopConfig {
   version: 1;
   connections: SavedConnection[];

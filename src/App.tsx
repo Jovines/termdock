@@ -82,7 +82,7 @@ import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { TermdockUpdateSettings } from './lib/components/settings/TermdockUpdateSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 import type { TermdockColorTheme } from './lib/terminal/theme';
-import { getTermdockDesktopBridge, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
+import { getTermdockDesktopBridge, type DesktopAppUpdateState, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
 import type { SplitLayout, SplitWorkspaceSummary } from './lib/terminal/splitWorkspaces';
 
 // Cache keys for app-level lazy data fetched from the server. 缓存只是"上次看到"的
@@ -530,7 +530,14 @@ function App() {
   const [termdockUpdateState, setTermdockUpdateState] = React.useState<TermdockUpdateState | null>(null);
   const [updateActionPending, setUpdateActionPending] = React.useState(false);
   const desktopBridge = React.useMemo(() => getTermdockDesktopBridge(), []);
+  const desktopUpdateSupported = Boolean(
+    desktopBridge?.desktopUpdateState &&
+    desktopBridge.checkDesktopUpdate &&
+    desktopBridge.installDesktopUpdate,
+  );
   const [desktopSnapshot, setDesktopSnapshot] = React.useState<DesktopNativeSnapshot | null>(null);
+  const [desktopUpdateState, setDesktopUpdateState] = React.useState<DesktopAppUpdateState | null>(null);
+  const [desktopUpdatePending, setDesktopUpdatePending] = React.useState(false);
   const [desktopActionMessage, setDesktopActionMessage] = React.useState<string | null>(null);
   const [showBackGuardHint, setShowBackGuardHint] = React.useState(false);
   const [rightSidebarFilePreviewOpenByRoot, setRightSidebarFilePreviewOpenByRoot] = React.useState<RightSidebarFilePreviewOpenCache>(() => (
@@ -559,10 +566,21 @@ function App() {
 
   useEffect(() => {
     if (!desktopBridge || !isDrawerOpen) return;
-    desktopBridge.snapshot()
-      .then(setDesktopSnapshot)
+    Promise.all([
+      desktopBridge.snapshot(),
+      desktopBridge.desktopUpdateState?.() ?? Promise.resolve(null),
+    ])
+      .then(([snapshot, updateState]) => {
+        setDesktopSnapshot(snapshot);
+        setDesktopUpdateState(updateState);
+      })
       .catch((error) => setDesktopActionMessage(error instanceof Error ? error.message : String(error)));
   }, [desktopBridge, isDrawerOpen]);
+
+  useEffect(() => {
+    if (!desktopBridge?.onDesktopUpdateState) return;
+    desktopBridge.onDesktopUpdateState(setDesktopUpdateState);
+  }, [desktopBridge]);
 
   useEffect(() => {
     return useTerminalStore.subscribe((state) => {
@@ -612,6 +630,30 @@ function App() {
       setUpdateActionPending(false);
     }
   }, [updateActionPending]);
+
+  const handleCheckDesktopUpdate = useCallback(async () => {
+    if (!desktopBridge?.checkDesktopUpdate || desktopUpdatePending) return;
+    setDesktopUpdatePending(true);
+    try {
+      setDesktopUpdateState(await desktopBridge.checkDesktopUpdate());
+    } catch (error) {
+      setDesktopActionMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDesktopUpdatePending(false);
+    }
+  }, [desktopBridge, desktopUpdatePending]);
+
+  const handleInstallDesktopUpdate = useCallback(async () => {
+    if (!desktopBridge?.installDesktopUpdate || desktopUpdatePending || desktopUpdateState?.status !== 'ready') return;
+    if (!window.confirm(t('settings.desktopUpdateRestartConfirm'))) return;
+    setDesktopUpdatePending(true);
+    try {
+      setDesktopUpdateState(await desktopBridge.installDesktopUpdate());
+    } catch (error) {
+      setDesktopActionMessage(error instanceof Error ? error.message : String(error));
+      setDesktopUpdatePending(false);
+    }
+  }, [desktopBridge, desktopUpdatePending, desktopUpdateState?.status, t]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = colorTheme;
@@ -1432,6 +1474,7 @@ function App() {
 
   const [isToolbarPresetsOpen, setIsToolbarPresetsOpen] = React.useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = React.useState(false);
+  const [notificationTestStatus, setNotificationTestStatus] = React.useState<'idle' | 'checking' | 'delivered' | 'failed'>('idle');
   // Toolbar presets are owned by the server (~/.termdock/toolbar-presets.json)
   // and shared across every browser pointing at this server. We start with the
   // built-in defaults so the UI is usable on first paint, then load + reconcile
@@ -1736,14 +1779,28 @@ function App() {
     setPwaNotificationsEnabled(true);
     setStoredPwaNotificationsEnabled(true);
     await syncPwaPushSubscription(true, true);
-    void showPwaNotification({
+    setNotificationTestStatus('checking');
+    const delivered = await showPwaNotification({
       title: 'Termdock',
       body: t('settings.notificationsTestBody'),
       tag: 'termdock-notifications-enabled',
       requireHidden: false,
       data: { url: '/' },
     });
+    setNotificationTestStatus(delivered ? 'delivered' : 'failed');
   }, [pwaNotificationsEnabled, t]);
+
+  const handleTestNotification = useCallback(async () => {
+    setNotificationTestStatus('checking');
+    const delivered = await showPwaNotification({
+      title: 'Termdock',
+      body: t('settings.notificationsTestBody'),
+      tag: 'termdock-notification-test',
+      requireHidden: false,
+      data: { url: '/' },
+    });
+    setNotificationTestStatus(delivered ? 'delivered' : 'failed');
+  }, [t]);
 
   const handleTogglePwaAiNotifications = useCallback((enabled: boolean) => {
     setPwaAiNotificationsEnabled(enabled);
@@ -3171,6 +3228,10 @@ function App() {
                 pending={updateActionPending}
                 onCheck={() => void handleRetryUpdate()}
                 onConfirmRestart={() => void handleConfirmUpdateRestart()}
+                desktopState={desktopUpdateSupported ? desktopUpdateState : undefined}
+                desktopPending={desktopUpdatePending}
+                onCheckDesktop={() => void handleCheckDesktopUpdate()}
+                onInstallDesktop={() => void handleInstallDesktopUpdate()}
               />
 
               {desktopBridge && (
@@ -4134,23 +4195,33 @@ function App() {
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
                   <span className={`rounded-full px-2 py-0.5 ${pwaNotificationPermission === 'granted' ? 'bg-primary/15 text-primary' : 'bg-surface text-muted-foreground'}`}>
-                    {t('settings.notificationsPermission')}: {pwaNotificationPermission}
+                    {t('settings.notificationsPermission')}: {getTermdockDesktopBridge() ? t('settings.notificationsPermissionSystem') : pwaNotificationPermission}
                   </span>
                   <button
                     type="button"
-                    disabled={!pwaNotificationsEnabled || pwaNotificationPermission !== 'granted'}
-                    onClick={() => void showPwaNotification({
-                      title: 'Termdock',
-                      body: t('settings.notificationsTestBody'),
-                      tag: 'termdock-notification-test',
-                      requireHidden: false,
-                      data: { url: '/' },
-                    })}
+                    disabled={!pwaNotificationsEnabled || pwaNotificationPermission !== 'granted' || notificationTestStatus === 'checking'}
+                    onClick={() => void handleTestNotification()}
                     className="rounded-full bg-surface px-3 py-1.5 font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {t('settings.notificationsTest')}
+                    {notificationTestStatus === 'checking' ? t('settings.notificationsTestChecking') : t('settings.notificationsTest')}
                   </button>
+                  {getTermdockDesktopBridge()?.openNotificationSettings && (
+                    <button
+                      type="button"
+                      onClick={() => void getTermdockDesktopBridge()?.openNotificationSettings?.()}
+                      className="rounded-full bg-surface px-3 py-1.5 font-medium text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
+                    >
+                      {t('settings.notificationsOpenSystemSettings')}
+                    </button>
+                  )}
                 </div>
+                {notificationTestStatus !== 'idle' && notificationTestStatus !== 'checking' && (
+                  <div className={`mt-2 text-[11px] leading-relaxed ${notificationTestStatus === 'delivered' ? 'text-primary' : 'text-[var(--warning)]'}`}>
+                    {notificationTestStatus === 'delivered'
+                      ? t('settings.notificationsTestDelivered')
+                      : t('settings.notificationsTestFailed')}
+                  </div>
+                )}
               </div>
 
               <div className="mt-4 rounded-2xl bg-surface-2 p-3">
