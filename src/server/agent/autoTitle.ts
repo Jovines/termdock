@@ -22,7 +22,13 @@ export function hasSubstantiveAutoTitleContext(input: string): boolean {
   return cleanTerminalContext(input).length >= AUTO_TITLE_LONG_RUNNING_CONTEXT_CHARS;
 }
 
-export function buildAutoTitlePrompt(agentName: string, context: string, currentTitle?: string): string {
+export function buildAutoTitlePrompt(
+  agentName: string,
+  context: string,
+  currentTitle?: string,
+  userPreference?: string,
+): string {
+  const preference = userPreference?.trim().slice(0, 2000);
   return [
     `Create a concise title for this ${agentName} coding session.`,
     'Describe what the work actually became, not the initial command or generic activity.',
@@ -31,6 +37,13 @@ export function buildAutoTitlePrompt(agentName: string, context: string, current
       : 'This session has no previous automatic title.',
     'Use the dominant language of the terminal content. Return only the title.',
     'Constraints: 6-18 Chinese characters or 3-10 words; no quotes; no markdown; no trailing punctuation.',
+    ...(preference ? [
+      '',
+      'Apply these optional user title preferences when they are relevant:',
+      '<user_title_preferences>',
+      preference,
+      '</user_title_preferences>',
+    ] : []),
     '',
     '<terminal_context>',
     context,
@@ -106,11 +119,12 @@ export async function generateAgentTitle(
     namer: string;
     models: Record<string, string>;
     currentTitle?: string;
+    userPreference?: string;
   },
 ): Promise<string | null> {
   const context = cleanTerminalContext(rawContext);
   if (context.length < AUTO_TITLE_MIN_CONTEXT_CHARS) return null;
-  const prompt = buildAutoTitlePrompt(agentName, context, options.currentTitle);
+  const prompt = buildAutoTitlePrompt(agentName, context, options.currentTitle, options.userPreference);
 
   const catalog = await getTitleNamerCatalog();
   const preferred = resolveTitleNamerOrder(

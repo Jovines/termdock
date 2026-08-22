@@ -9948,6 +9948,27 @@ export function RightSidebar(
           >
             <RiSearch size={14} />
           </button>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={contextDraftEnabled}
+            onClick={() => {
+              setContextDraftEnabled((enabled) => !enabled);
+              setContextDraftCollapsed(false);
+            }}
+            className={`relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
+              contextDraftEnabled
+                ? 'bg-primary/15 text-primary'
+                : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
+            }`}
+            aria-label={t('rightSidebar.toggleContextDraft')}
+            title={t('rightSidebar.contextDraftTitle')}
+          >
+            <RiPencilLine size={14} />
+            {!contextDraftEnabled && contextDraftText.trim() && (
+              <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
+            )}
+          </button>
           <input
             ref={fileInputRef}
             type="file"
@@ -9989,27 +10010,9 @@ export function RightSidebar(
               title={t('sidebar.moreActions')}
             >
               <RiMoreHorizontal size={15} />
-              {!contextDraftEnabled && contextDraftText.trim() && (
-                <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
-              )}
             </button>
             {headerMenuOpen && (
               <div role="menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-48 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
-                <button
-                  type="button"
-                  role="menuitemcheckbox"
-                  aria-checked={contextDraftEnabled}
-                  onClick={() => {
-                    setHeaderMenuOpen(false);
-                    setContextDraftEnabled((enabled) => !enabled);
-                    setContextDraftCollapsed(false);
-                  }}
-                  className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${contextDraftEnabled ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}
-                >
-                  <RiPencilLine size={14} className={contextDraftEnabled ? '' : 'text-muted-foreground'} />
-                  <span className="min-w-0 flex-1 truncate">{t('rightSidebar.contextDraftTitle')}</span>
-                  {contextDraftEnabled && <RiCheck size={13} />}
-                </button>
                 <button
                   type="button"
                   role="menuitem"

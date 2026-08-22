@@ -35,6 +35,13 @@ describe('agent auto titles', () => {
     expect(prompt).toContain('<terminal_context>\nImplemented the cache');
   });
 
+  it('appends optional user preferences without exposing or replacing the default prompt', () => {
+    const prompt = buildAutoTitlePrompt('Codex', 'Implemented the cache', undefined, '突出用户收益，避免技术术语');
+    expect(prompt).toContain('Create a concise title for this Codex coding session.');
+    expect(prompt).toContain('<user_title_preferences>\n突出用户收益，避免技术术语\n</user_title_preferences>');
+    expect(buildAutoTitlePrompt('Codex', 'Implemented the cache')).not.toContain('<user_title_preferences>');
+  });
+
   it('normalizes common model wrappers around a title', () => {
     expect(normalizeGeneratedTitle('标题：修复登录跳转。\n')).toBe('修复登录跳转');
     expect(normalizeGeneratedTitle('```text\nImprove cache invalidation\n```')).toBe('Improve cache invalidation');

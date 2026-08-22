@@ -469,6 +469,14 @@ export type TranslationDictionary = {
     debug: string;
     noSleep: string;
     noSleepUnavailable: string;
+    updateTitle: string;
+    updateHint: string;
+    updateCheck: string;
+    updateCheckAgain: string;
+    updateChecking: string;
+    updateCheckingShort: string;
+    updateInstallingShort: string;
+    updateCurrent: string;
     notifications: string;
     notificationsTitle: string;
     notificationsHint: string;
@@ -557,6 +565,10 @@ export type TranslationDictionary = {
     agentAutoRenameCliDefault: string;
     agentAutoRenameAutomatic: string;
     agentAutoRenameNoCli: string;
+    agentAutoRenameAdvanced: string;
+    agentAutoRenamePreference: string;
+    agentAutoRenamePreferenceHint: string;
+    agentAutoRenamePreferencePlaceholder: string;
     agentPlugins: string;
     agentPluginAdd: string;
     agentPluginHint: string;

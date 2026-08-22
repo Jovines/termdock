@@ -29,6 +29,8 @@ import {
   setAutoRenameModelsSetting,
   getAutoRenameIntervalMinutesSetting,
   setAutoRenameIntervalMinutesSetting,
+  getAutoRenamePromptPreferenceSetting,
+  setAutoRenamePromptPreferenceSetting,
 } from '../utils/settings.js';
 import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
@@ -2769,6 +2771,7 @@ async function maybeAutoRenameSession(
       namer: getAutoRenameNamerSetting(),
       models: validModels,
       currentTitle: record.autoTitle ? record.name : undefined,
+      userPreference: getAutoRenamePromptPreferenceSetting(),
     });
     if (!title) return false;
 
@@ -5305,6 +5308,7 @@ async function getSettingsPayload() {
     autoRenameNamer: getAutoRenameNamerSetting(),
     autoRenameModels: getAutoRenameModelsSetting(),
     autoRenameIntervalMinutes: getAutoRenameIntervalMinutesSetting(),
+    autoRenamePromptPreference: getAutoRenamePromptPreferenceSetting(),
     localAccess: {
       ...localAccess,
       interfaces,
@@ -5401,6 +5405,10 @@ router.put('/settings', async (req, res) => {
     && body.autoRenameIntervalMinutes >= 5
     && body.autoRenameIntervalMinutes <= 1440) {
     setAutoRenameIntervalMinutesSetting(body.autoRenameIntervalMinutes);
+  }
+
+  if (typeof body.autoRenamePromptPreference === 'string' && body.autoRenamePromptPreference.length <= 2000) {
+    setAutoRenamePromptPreferenceSetting(body.autoRenamePromptPreference);
   }
 
   if (body.localAccess && typeof body.localAccess === 'object') {

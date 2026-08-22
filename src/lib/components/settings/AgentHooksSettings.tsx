@@ -72,6 +72,8 @@ function AgentHooksSettings(): React.ReactElement {
   const [titleNamers, setTitleNamers] = React.useState<TitleNamerInfo[] | null>(null);
   const [savingTitleChoice, setSavingTitleChoice] = React.useState<string | null>(null);
   const [autoRenameIntervalMinutes, setAutoRenameIntervalMinutes] = React.useState(10);
+  const [autoRenamePromptPreference, setAutoRenamePromptPreference] = React.useState('');
+  const [savedAutoRenamePromptPreference, setSavedAutoRenamePromptPreference] = React.useState('');
   const [busyPluginAction, setBusyPluginAction] = React.useState<string | null>(null);
   const [pluginDoctorResult, setPluginDoctorResult] = React.useState<AgentPluginDoctorResult | null>(null);
 
@@ -97,6 +99,8 @@ function AgentHooksSettings(): React.ReactElement {
       setAutoRenameNamer(settings.autoRenameNamer ?? 'auto');
       setAutoRenameModels(settings.autoRenameModels ?? {});
       setAutoRenameIntervalMinutes(settings.autoRenameIntervalMinutes ?? 10);
+      setAutoRenamePromptPreference(settings.autoRenamePromptPreference ?? '');
+      setSavedAutoRenamePromptPreference(settings.autoRenamePromptPreference ?? '');
     } else {
       setAutoRenameAgents(new Set());
     }
@@ -322,6 +326,24 @@ function AgentHooksSettings(): React.ReactElement {
     }
   };
 
+  const saveAutoRenamePromptPreference = async () => {
+    const next = autoRenamePromptPreference.trim();
+    if (next === savedAutoRenamePromptPreference) return;
+    setSavingTitleChoice('preference');
+    setError(null);
+    try {
+      const settings = await updateSettings({ autoRenamePromptPreference: next });
+      const saved = settings.autoRenamePromptPreference ?? '';
+      setAutoRenamePromptPreference(saved);
+      setSavedAutoRenamePromptPreference(saved);
+    } catch (err) {
+      setAutoRenamePromptPreference(savedAutoRenamePromptPreference);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingTitleChoice(null);
+    }
+  };
+
   const pluginSlugs = new Set(plugins.map((p) => p.slug));
   const pluginDoctorStatusText = pluginDoctorResult
     ? {
@@ -365,6 +387,28 @@ function AgentHooksSettings(): React.ReactElement {
             ))}
           </select>
         </label>
+        <details className="mt-2 border-t border-border/40 pt-2">
+          <summary className="cursor-pointer select-none text-[11px] text-muted-foreground transition hover:text-foreground">
+            {t('settings.agentAutoRenameAdvanced')}
+          </summary>
+          <label className="mt-2 block">
+            <span className="text-[11px] font-medium text-foreground">{t('settings.agentAutoRenamePreference')}</span>
+            <span className="mt-0.5 block text-[10px] text-muted-foreground">{t('settings.agentAutoRenamePreferenceHint')}</span>
+            <textarea
+              value={autoRenamePromptPreference}
+              maxLength={2000}
+              rows={3}
+              disabled={savingTitleChoice !== null}
+              placeholder={t('settings.agentAutoRenamePreferencePlaceholder')}
+              onChange={(event) => setAutoRenamePromptPreference(event.target.value)}
+              onBlur={() => void saveAutoRenamePromptPreference()}
+              className="mt-1.5 w-full resize-y rounded-lg bg-surface px-2.5 py-2 text-[11px] text-foreground outline-none placeholder:text-muted-foreground/70 focus:ring-1 focus:ring-primary/50 disabled:opacity-50"
+            />
+            <span className="mt-1 block text-right text-[10px] text-muted-foreground">
+              {savingTitleChoice === 'preference' ? t('settings.saving') : `${autoRenamePromptPreference.length}/2000`}
+            </span>
+          </label>
+        </details>
         <div className="mt-2 space-y-1.5 border-t border-border/40 pt-2">
           <div className="flex items-center justify-between gap-2">
             <span className="text-[10px] text-muted-foreground">{t('settings.agentAutoRenameModelsFromCli')}</span>

@@ -16,7 +16,7 @@ import {
   GripVertical as RiDragHandleLine,
   MoreHorizontal as RiMoreHorizontal,
   RefreshCw as RiRefreshLine,
-  Bot as RiBotLine,
+  ChevronDown as RiChevronDownLine,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
@@ -30,7 +30,7 @@ import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import type { TermdockUpdateState } from '../../terminal/api';
-import { NewSessionComposer } from './NewSessionComposer';
+import { NewSessionComposer, readNewSessionAgentPreference } from './NewSessionComposer';
 
 
 interface LeftSidebarProps {
@@ -154,12 +154,16 @@ export function LeftSidebar(
   }: LeftSidebarProps,
 ) {
   const { t } = useI18n();
-  const [confirmNewMode, setConfirmNewMode] = useState<'shell' | 'tmux' | null>(null);
   const [editingSplitWorkspaceId, setEditingSplitWorkspaceId] = useState<string | null>(null);
   const [expandedSplitWorkspaceIds, setExpandedSplitWorkspaceIds] = useState<Set<string>>(new Set());
   const [draggedSplitMember, setDraggedSplitMember] = useState<{ workspaceId: string; sessionId: string } | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
+  const [newSessionOptions, setNewSessionOptions] = useState<{
+    mode: 'shell' | 'tmux';
+    cwd?: string;
+    command?: string;
+  }>({ mode: defaultSessionMode, command: readNewSessionAgentPreference().command });
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const pendingUpdate = Boolean(
     updateState?.latestVersion
@@ -255,7 +259,6 @@ export function LeftSidebar(
 
   useEffect(() => {
     if (!isOpen) {
-      setConfirmNewMode(null);
       setHeaderMenuOpen(false);
       setNewSessionComposerOpen(false);
     }
@@ -276,24 +279,32 @@ export function LeftSidebar(
     };
   }, [headerMenuOpen]);
 
-  useEffect(() => {
-    setConfirmNewMode(null);
-  }, [defaultSessionMode, tmuxAvailable]);
-
   const closeIfOverlay = () => {
     if (!push && !pinned) onClose();
   };
-  const shellConfirming = confirmNewMode === 'shell';
-  const tmuxConfirming = confirmNewMode === 'tmux';
-  const highlightedNewMode = confirmNewMode ?? defaultSessionMode;
-  const shellHighlighted = highlightedNewMode === 'shell';
-  const tmuxHighlighted = highlightedNewMode === 'tmux' && tmuxAvailable;
-  const handleNewSessionClick = (mode: 'shell' | 'tmux') => {
-    if (mode === 'tmux' && !tmuxAvailable) return;
-
-    setConfirmNewMode(null);
-    onNewSession({ mode });
+  const handleNewSessionClick = () => {
+    const options = newSessionComposerOpen
+      ? { ...newSessionOptions, cwd: newSessionOptions.cwd?.trim() || undefined }
+      : {
+        mode: defaultSessionMode === 'tmux' && !tmuxAvailable ? 'shell' as const : defaultSessionMode,
+        command: readNewSessionAgentPreference().command,
+      };
+    onNewSession(options);
+    setNewSessionComposerOpen(false);
     closeIfOverlay();
+  };
+
+  const toggleNewSessionComposer = () => {
+    if (newSessionComposerOpen) {
+      setNewSessionComposerOpen(false);
+      return;
+    }
+    setNewSessionOptions({
+      mode: defaultSessionMode === 'tmux' && !tmuxAvailable ? 'shell' : defaultSessionMode,
+      cwd: activeSessionId ? sessionStates.get(activeSessionId)?.cwd ?? undefined : undefined,
+      command: readNewSessionAgentPreference().command,
+    });
+    setNewSessionComposerOpen(true);
   };
 
   const getSessionStatusBackground = useCallback((sessionId: string): string | null => {
@@ -1115,68 +1126,35 @@ export function LeftSidebar(
             const directory = sessionStates.get(session.id)?.cwd;
             return directory ? [directory] : [];
           })}
-          initialDirectory={activeSessionId ? sessionStates.get(activeSessionId)?.cwd ?? undefined : undefined}
           tmuxAvailable={tmuxAvailable}
-          defaultMode={defaultSessionMode}
+          options={newSessionOptions}
           onClose={() => setNewSessionComposerOpen(false)}
-          onCreate={(options) => {
-            onNewSession(options);
-            setNewSessionComposerOpen(false);
-            closeIfOverlay();
-          }}
+          onOptionsChange={setNewSessionOptions}
         />
       )}
 
-      {/* Footer — split new-session button */}
+      {/* Footer — one primary action, with optional launch details behind the chevron. */}
       <div className="shrink-0 border-t border-border/15 p-2">
-        <div className="flex items-stretch gap-1.5">
+        <div className="flex overflow-hidden rounded-lg bg-primary text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25">
           <button
             type="button"
-            onClick={() => handleNewSessionClick('shell')}
-            className={`flex min-w-0 items-center justify-center gap-1.5 rounded-lg text-[13px] font-semibold transition active:scale-[0.98] ${
-              shellHighlighted
-                ? 'flex-[2.7] bg-primary px-3 py-2.5 text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25 hover:bg-primary/90'
-                : 'flex-[0.78] bg-surface-2 px-2 py-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-            }`}
-            title={shellConfirming ? t('sidebar.confirmNewShell') : t('sidebar.newShell')}
-            aria-label={shellConfirming ? t('sidebar.confirmNewShell') : t('sidebar.newShell')}
+            onClick={handleNewSessionClick}
+            className="flex min-w-0 flex-1 items-center justify-center gap-2 px-3 py-2.5 text-[13px] font-semibold transition hover:bg-primary/90 active:scale-[0.99]"
+            title={t('sidebar.newSession')}
+            aria-label={t('sidebar.newSession')}
           >
-            <RiAddLine size={14} className={shellHighlighted ? 'shrink-0' : 'hidden'} />
-            <RiTerminalLine size={12} />
-            <span className={shellHighlighted ? 'whitespace-nowrap' : 'hidden'}>
-              {shellConfirming ? t('sidebar.confirmNewShell') : t('sidebar.newShell')}
-            </span>
+            <RiAddLine size={15} className="shrink-0" />
+            <span className="truncate">{t('sidebar.newSession')}</span>
           </button>
           <button
             type="button"
-            disabled={!tmuxAvailable}
-            onClick={() => handleNewSessionClick('tmux')}
-            className={`flex min-w-0 items-center justify-center gap-1.5 rounded-lg text-[13px] font-semibold transition active:scale-[0.98] ${
-              tmuxAvailable
-                ? tmuxHighlighted
-                  ? 'flex-[2.7] bg-primary px-3 py-2.5 text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25 hover:bg-primary/90'
-                  : 'flex-[0.78] bg-surface-2 px-2 py-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'
-                : 'flex-1 bg-surface-2/50 text-muted-foreground/50 cursor-not-allowed'
-            }`}
-            title={tmuxAvailable ? (tmuxConfirming ? t('sidebar.confirmNewTmux') : t('sidebar.newTmux')) : t('sidebar.newTmuxDisabled')}
-            aria-label={tmuxConfirming ? t('sidebar.confirmNewTmux') : t('sidebar.newTmux')}
-          >
-            <RiAddLine size={14} className={tmuxHighlighted ? 'shrink-0' : 'hidden'} />
-            <RiLayoutGridLine size={12} />
-            <span className={tmuxHighlighted ? 'whitespace-nowrap' : 'hidden'}>
-              {tmuxConfirming ? t('sidebar.confirmNewTmux') : t('sidebar.newTmux')}
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setNewSessionComposerOpen((open) => !open)}
-            className={`inline-flex shrink-0 items-center justify-center gap-1 rounded-lg px-2 transition active:scale-[0.98] ${newSessionComposerOpen ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
-            title={t('sidebar.newSessionAdvanced')}
-            aria-label={t('sidebar.newSessionAdvanced')}
+            onClick={toggleNewSessionComposer}
+            className={`inline-flex w-10 shrink-0 items-center justify-center border-l border-primary-foreground/20 transition hover:bg-primary/90 active:bg-primary/80 ${newSessionComposerOpen ? 'bg-primary/80' : ''}`}
+            title={t('sidebar.newSession')}
+            aria-label={t('sidebar.newSession')}
             aria-expanded={newSessionComposerOpen}
           >
-            <RiBotLine size={13} />
-            <span className="text-[10.5px] font-semibold">Agent</span>
+            <RiChevronDownLine size={15} className={`transition-transform duration-200 ${newSessionComposerOpen ? 'rotate-180' : ''}`} />
           </button>
         </div>
       </div>

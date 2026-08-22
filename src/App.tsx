@@ -79,6 +79,7 @@ import { QuotaView } from './lib/components/sidebar/QuotaView';
 import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay } from './lib/components/AgentIndicators';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
+import { TermdockUpdateSettings } from './lib/components/settings/TermdockUpdateSettings';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 import type { TermdockColorTheme } from './lib/terminal/theme';
 import { getTermdockDesktopBridge, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
@@ -646,9 +647,6 @@ function App() {
   const [isDesktopViewport, setIsDesktopViewport] = useState(() => (
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1024px)').matches
   ));
-  const [isWideDesktopViewport, setIsWideDesktopViewport] = useState(() => (
-    typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1440px)').matches
-  ));
   // Landscape orientation. A phone in landscape (typically 667-896px wide)
   // has plenty of room for a wide workbench-style drawer, even though
   // its *short* side is < 1024px so the regular desktop check returns
@@ -701,15 +699,6 @@ function App() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const media = window.matchMedia('(min-width: 1440px)');
-    const updateViewportMode = () => setIsWideDesktopViewport(media.matches);
-    updateViewportMode();
-    media.addEventListener('change', updateViewportMode);
-    return () => media.removeEventListener('change', updateViewportMode);
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
     const media = window.matchMedia('(orientation: landscape)');
     const updateOrientation = () => setIsLandscape(media.matches);
     updateOrientation();
@@ -750,7 +739,7 @@ function App() {
   // device's *short* side is < 1024px so the regular desktop check
   // returns false — the orientation check is what tells us there's
   // enough horizontal real estate for a wide drawer.
-  const useDesktopDrawer = isWideDesktopViewport;
+  const useDesktopDrawer = isDesktopViewport || isLandscape;
   const useDesktopLeftDrawer = isDesktopViewport || isLandscape;
   const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
   const rightDrawerWidthPx = useDesktopDrawer
@@ -815,7 +804,7 @@ function App() {
           ? 'right-sidebar-file-preview'
           : isDrawerOpen
             ? 'settings'
-            : sidebarRightOpen && !(sidebarRightPinned && isWideDesktopViewport)
+            : sidebarRightOpen && !(sidebarRightPinned && isDesktopViewport)
               ? 'right-sidebar'
               : sidebarLeftOpen && !(sidebarLeftPinned && isDesktopViewport)
                 ? 'left-sidebar'
@@ -1548,7 +1537,7 @@ function App() {
         handleCloseSettings();
         return;
       }
-      const rightPinnedInline = sidebarRightPinned && isWideDesktopViewport;
+      const rightPinnedInline = sidebarRightPinned && isDesktopViewport;
       if (sidebarRightOpen && !rightPinnedInline) {
         event.preventDefault();
         requestCloseHistoryOverlay('right-sidebar');
@@ -1574,7 +1563,6 @@ function App() {
     sidebarLeftOpen,
     sidebarLeftPinned,
     isDesktopViewport,
-    isWideDesktopViewport,
     handleCloseSettings,
     requestCloseHistoryOverlay,
   ]);
@@ -2560,7 +2548,7 @@ function App() {
   };
 
   const showPinnedLeft = sidebarLeftPinned && isDesktopViewport;
-  const showPinnedRight = sidebarRightPinned && isWideDesktopViewport;
+  const showPinnedRight = sidebarRightPinned && isDesktopViewport;
 
   // Pin mode: compute active session display info and agent state for the
   // centered top-bar title + background tint.
@@ -3177,6 +3165,13 @@ function App() {
                   {localAccessError && <div className="text-destructive">{localAccessError}</div>}
                 </div>
               </details>
+
+              <TermdockUpdateSettings
+                state={termdockUpdateState}
+                pending={updateActionPending}
+                onCheck={() => void handleRetryUpdate()}
+                onConfirmRestart={() => void handleConfirmUpdateRestart()}
+              />
 
               {desktopBridge && (
                 <div className="mt-3 overflow-hidden rounded-xl bg-surface-2">
@@ -4624,7 +4619,7 @@ function App() {
         markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
         onOpenMarkdownImageLightbox={handleOpenMarkdownImageLightbox}
         onCloseMarkdownImageLightbox={handleCloseMarkdownImageLightbox}
-        onTogglePinned={isWideDesktopViewport ? handleToggleRightPinned : undefined}
+        onTogglePinned={isDesktopViewport ? handleToggleRightPinned : undefined}
       />}
 
       {showBackGuardHint && !isIOS && (

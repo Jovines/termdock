@@ -74,15 +74,15 @@ function writeRightPinned(pinned: boolean): void {
   } catch { /* best-effort */ }
 }
 
-function readRightSidebarWidth(): number {
-  if (typeof window === 'undefined') return 600;
+export function readRightSidebarWidth(): number {
+  if (typeof window === 'undefined') return 760;
   try {
     const stored = window.localStorage.getItem(RIGHT_SIDEBAR_WIDTH_KEY);
-    if (!stored) return 600;
+    if (!stored) return 760;
     const parsed = parseInt(stored, 10);
-    return Number.isFinite(parsed) && parsed >= 320 && parsed <= 760 ? parsed : 600;
+    return Number.isFinite(parsed) && parsed >= 320 && parsed <= 760 ? parsed : 760;
   } catch {
-    return 600;
+    return 760;
   }
 }
 

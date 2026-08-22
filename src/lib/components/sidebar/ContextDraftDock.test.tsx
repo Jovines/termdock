@@ -49,11 +49,11 @@ describe('ContextDraftDock', () => {
 
   it('edits, inserts, and sends from the editing state', () => {
     const handlers = renderDock();
-    const input = screen.getByPlaceholderText('Write a prompt');
+    const input = screen.getByPlaceholderText('Context draft');
 
     fireEvent.change(input, { target: { value: 'Updated prompt' } });
     fireEvent.click(screen.getByRole('button', { name: 'Insert' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Insert & send' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send draft' }));
 
     expect(handlers.onChange).toHaveBeenCalledWith('Updated prompt');
     expect(handlers.onInsert).toHaveBeenCalledTimes(1);
@@ -92,7 +92,7 @@ describe('ContextDraftDock', () => {
   it('uses command/control-enter as the send shortcut', () => {
     const handlers = renderDock();
 
-    fireEvent.keyDown(screen.getByPlaceholderText('Write a prompt'), {
+    fireEvent.keyDown(screen.getByPlaceholderText('Context draft'), {
       key: 'Enter',
       ctrlKey: true,
     });
@@ -102,7 +102,7 @@ describe('ContextDraftDock', () => {
 
   it('never collapses on blur (continuous editing)', () => {
     const handlers = renderDock();
-    const input = screen.getByPlaceholderText('Write a prompt');
+    const input = screen.getByPlaceholderText('Context draft');
 
     // 草稿坞主打持续编辑：失焦不收起，收起只靠显式操作（箭头/Esc/发送）。
     fireEvent.blur(input);
@@ -130,7 +130,7 @@ describe('ContextDraftDock', () => {
         {...handlers}
       />,
     );
-    const input = screen.getByPlaceholderText('Write a prompt') as HTMLTextAreaElement;
+    const input = screen.getByPlaceholderText('Context draft') as HTMLTextAreaElement;
     input.setSelectionRange(0, 0);
 
     rerender(
@@ -151,7 +151,7 @@ describe('ContextDraftDock', () => {
   it('clears the draft without collapsing on touch', () => {
     const handlers = renderDock();
     const dock = document.querySelector('[data-context-draft-dock]')!;
-    const input = screen.getByPlaceholderText('Write a prompt');
+    const input = screen.getByPlaceholderText('Context draft');
 
     fireEvent.pointerDown(dock);
     fireEvent.blur(input);

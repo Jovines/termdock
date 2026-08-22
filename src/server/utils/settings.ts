@@ -31,6 +31,8 @@ export interface SettingsDoc {
   autoRenameModels: Record<string, string>;
   /** Minimum delay before an existing automatic title may be reconsidered. */
   autoRenameIntervalMinutes: number;
+  /** Optional user preferences appended to Termdock's built-in title prompt. */
+  autoRenamePromptPreference: string;
   updatedAt: number;
 }
 
@@ -88,7 +90,7 @@ function normalizeContextDraftHeight(value: unknown): { mobile: number | null; d
 
 function normalizeSettings(value: unknown): SettingsDoc {
   const raw = value && typeof value === 'object'
-    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; autoRenameAgents?: unknown; autoRenameNamer?: unknown; autoRenameModels?: unknown; autoRenameIntervalMinutes?: unknown; updatedAt?: unknown }
+    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; autoRenameAgents?: unknown; autoRenameNamer?: unknown; autoRenameModels?: unknown; autoRenameIntervalMinutes?: unknown; autoRenamePromptPreference?: unknown; updatedAt?: unknown }
     : {};
   const autoRenameAgents = Array.isArray(raw.autoRenameAgents)
     ? [...new Set(raw.autoRenameAgents
@@ -120,6 +122,9 @@ function normalizeSettings(value: unknown): SettingsDoc {
       && raw.autoRenameIntervalMinutes <= 1440
       ? raw.autoRenameIntervalMinutes
       : 10,
+    autoRenamePromptPreference: typeof raw.autoRenamePromptPreference === 'string'
+      ? raw.autoRenamePromptPreference.trim().slice(0, 2000)
+      : '',
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -285,6 +290,16 @@ export function getAutoRenameIntervalMinutesSetting(): number {
 export function setAutoRenameIntervalMinutesSetting(minutes: number): SettingsDoc {
   return updateSettings((settings) => {
     settings.autoRenameIntervalMinutes = Math.max(5, Math.min(1440, Math.round(minutes)));
+  });
+}
+
+export function getAutoRenamePromptPreferenceSetting(): string {
+  return loadSettings().autoRenamePromptPreference;
+}
+
+export function setAutoRenamePromptPreferenceSetting(preference: string): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.autoRenamePromptPreference = preference.trim().slice(0, 2000);
   });
 }
 

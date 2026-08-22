@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { readLeftPinnedPreference, useSidebarStore } from './useSidebarStore';
+import { readLeftPinnedPreference, readRightSidebarWidth, useSidebarStore } from './useSidebarStore';
 
 function resetSidebarStore(): void {
   useSidebarStore.setState({
@@ -137,6 +137,25 @@ describe('useSidebarStore left sidebar pin preference', () => {
 
     expect(window.localStorage.getItem('termdock-left-sidebar-pinned')).toBe('1');
     expect(readLeftPinnedPreference()).toBe(true);
+  });
+});
+
+describe('useSidebarStore right sidebar width', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+  });
+
+  it('starts wide enough for the desktop split workspace', () => {
+    expect(readRightSidebarWidth()).toBe(760);
+  });
+
+  it('preserves a user-resized narrow width for responsive sidebar layout', () => {
+    window.localStorage.setItem('termdock-right-sidebar-width', '520');
+    expect(readRightSidebarWidth()).toBe(520);
   });
 });
 

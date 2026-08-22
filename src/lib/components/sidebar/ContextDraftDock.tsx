@@ -48,7 +48,7 @@ interface ContextDraftDockProps {
 
 const SEND_FEEDBACK_MS = 1400;
 const APPEND_FLASH_MS = 1200;
-const MIN_TEXTAREA_HEIGHT = 56;
+const MIN_TEXTAREA_HEIGHT = 44;
 // 手动拖动的高度上限
 const DRAG_MAX_HEIGHT_RATIO = 0.7;
 
@@ -331,16 +331,16 @@ export function ContextDraftDock({
         className="shrink-0 border-t border-border/15 text-foreground"
         data-context-draft-dock
       >
-        <div className="flex h-9 items-center gap-1.5 px-2.5">
+        <div className="flex h-8 items-center gap-1 px-2">
           <button
             type="button"
             onClick={() => expand(true)}
-            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition hover:bg-surface-2"
+            className="group flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-surface/70"
             aria-expanded={false}
             aria-label={labels.expand}
             title={labels.expand}
           >
-            <PenLine size={11} className="shrink-0 text-muted-foreground/60" aria-hidden="true" />
+            <PenLine size={11} className="shrink-0 text-muted-foreground/55 transition-colors group-hover:text-muted-foreground" aria-hidden="true" />
             <span
               className={`truncate text-[11px] ${
                 insertError
@@ -360,15 +360,15 @@ export function ContextDraftDock({
             type="button"
             onClick={handleSend}
             disabled={!hasDraft}
-            className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition active:scale-95 disabled:opacity-35 ${
+            className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition active:scale-95 disabled:opacity-30 ${
               hasDraft
-                ? 'bg-primary/15 text-primary hover:bg-primary/25'
-                : 'bg-surface-2 text-muted-foreground'
+                ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                : 'text-muted-foreground'
             }`}
             aria-label={labels.send}
             title={labels.send}
           >
-            {lastAction === 'sent' ? <Check size={13} /> : <Send size={13} />}
+            {lastAction === 'sent' ? <Check size={12} /> : <Send size={12} />}
           </button>
         </div>
       </section>
@@ -395,19 +395,19 @@ export function ContextDraftDock({
         <span className="h-1 w-8 rounded-full bg-border/50 transition group-hover:bg-border" />
       </div>
 
-      {/* Header */}
-      <div className="flex h-8 items-center gap-1.5 px-2.5">
+      {/* Header：只保留定位与轻量设置，避免在窄侧栏里形成一排标签。 */}
+      <div className="flex h-7 items-center gap-0.5 px-2">
         <button
           type="button"
           onPointerDown={keepFocus}
           onClick={() => onCollapsedChange(true)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition hover:bg-surface-2"
+          className="group flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-surface/70"
           aria-expanded={true}
           aria-label={labels.collapse}
           title={labels.collapse}
         >
-          <ChevronDown size={11} className="shrink-0 text-muted-foreground/60" aria-hidden="true" />
-          <span className="truncate text-[11px] font-semibold text-muted-foreground">{labels.title}</span>
+          <ChevronDown size={11} className="shrink-0 text-muted-foreground/55 transition-colors group-hover:text-muted-foreground" aria-hidden="true" />
+          <span className="truncate text-[10px] font-medium text-foreground/75">{labels.title}</span>
           {charCount}
         </button>
         <button
@@ -416,17 +416,16 @@ export function ContextDraftDock({
           aria-checked={autoCollapseAfterSend}
           onPointerDown={keepFocus}
           onClick={() => onAutoCollapseAfterSendChange(!autoCollapseAfterSend)}
-          className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-[10px] text-muted-foreground/70 transition hover:bg-surface-2 hover:text-foreground"
+          className="inline-flex h-6 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-surface/70 hover:text-foreground"
           aria-label={labels.autoCollapseAfterSend}
           title={labels.autoCollapseAfterSend}
         >
-          <span>{labels.autoCollapseAfterSend}</span>
           <span
             aria-hidden="true"
-            className={`relative h-3.5 w-6 rounded-full transition ${autoCollapseAfterSend ? 'bg-primary' : 'bg-surface-elevated'}`}
+            className={`relative h-3 w-5 rounded-full transition-colors ${autoCollapseAfterSend ? 'bg-primary' : 'bg-surface-elevated'}`}
           >
             <span
-              className={`absolute top-0.5 h-2.5 w-2.5 rounded-full bg-primary-foreground transition-transform ${autoCollapseAfterSend ? 'translate-x-3' : 'translate-x-0.5'}`}
+              className={`absolute top-0.5 h-2 w-2 rounded-full bg-primary-foreground transition-transform ${autoCollapseAfterSend ? 'translate-x-2.5' : 'translate-x-0.5'}`}
             />
           </span>
         </button>
@@ -434,74 +433,71 @@ export function ContextDraftDock({
           type="button"
           onPointerDown={keepFocus}
           onClick={onDisable}
-          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 transition hover:bg-surface-2 hover:text-foreground active:scale-95"
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground/50 transition hover:bg-surface/70 hover:text-foreground active:scale-95"
           aria-label={labels.disable}
           title={labels.disable}
         >
-          <X size={12} />
+          <X size={11} />
         </button>
       </div>
 
-      <div className="px-2.5 pb-2.5">
-        {/* 输入井：比面板略深的同族色，聚焦时描边点亮 */}
-        <div className="rounded-lg border border-border/15 bg-surface-2 transition focus-within:border-primary/45">
+      <div className="px-2 pb-2">
+        {/* 输入与操作共用一个 composer surface，减少卡片和工具条的拼接感。 */}
+        <div className="overflow-hidden rounded-lg bg-surface/80 ring-1 ring-border/10 transition focus-within:ring-primary/35">
           <textarea
             ref={textareaRef}
             value={value}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={labels.placeholder}
-            rows={2}
-            className="block min-h-14 w-full resize-none bg-transparent px-2.5 py-2 font-mono text-[13px] leading-relaxed text-foreground placeholder:text-muted-foreground/35 focus:outline-none"
+            placeholder={labels.title}
+            rows={1}
+            className="block min-h-11 w-full resize-none bg-transparent px-2.5 py-2 font-mono text-[12px] leading-relaxed text-foreground placeholder:text-muted-foreground/30 focus:outline-none"
             autoCapitalize="sentences"
             spellCheck
             data-context-draft-input
           />
-        </div>
-
-        {/* Action row */}
-        <div className="mt-2 flex items-center gap-1.5">
-          <button
-            type="button"
-            onPointerDown={keepFocus}
-            onClick={onClear}
-            disabled={!hasDraft}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95 disabled:opacity-35"
-            aria-label={labels.clear}
-            title={labels.clear}
-          >
-            <Trash2 size={13} />
-          </button>
-          {insertError ? (
-            <span className="min-w-0 flex-1 truncate px-1 text-[10px] text-destructive" role="alert">
-              {insertError}
-            </span>
-          ) : (
-            <span className="flex-1" />
-          )}
-          <kbd className="hidden shrink-0 select-none rounded border border-border/20 px-1 py-0.5 font-mono text-[9px] text-muted-foreground/40 sm:inline">
-            {sendShortcut}
-          </kbd>
-          <button
-            type="button"
-            onPointerDown={keepFocus}
-            onClick={handleInsert}
-            disabled={!hasDraft}
-            className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-surface-2 px-3 text-[12px] font-semibold text-foreground transition hover:bg-surface-elevated active:scale-[0.98] disabled:opacity-35"
-          >
-            <CornerDownLeft size={13} />
-            <span>{lastAction === 'inserted' ? labels.inserted : labels.insert}</span>
-          </button>
-          <button
-            type="button"
-            onPointerDown={keepFocus}
-            onClick={handleSend}
-            disabled={!hasDraft}
-            className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 text-[12px] font-semibold text-primary-foreground transition hover:bg-primary/90 active:scale-[0.98] disabled:opacity-35"
-          >
-            {lastAction === 'sent' ? <Check size={13} /> : <Send size={13} />}
-            <span>{lastAction === 'sent' ? labels.sent : labels.insertAndSend}</span>
-          </button>
+          {/* Action row：内嵌在输入面内，只让最终发送成为强操作。 */}
+          <div className="flex items-center gap-0.5 border-t border-border/10 px-1 py-1">
+            <button
+              type="button"
+              onPointerDown={keepFocus}
+              onClick={onClear}
+              disabled={!hasDraft}
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground/65 transition hover:bg-surface-2 hover:text-foreground active:scale-95 disabled:opacity-30"
+              aria-label={labels.clear}
+              title={labels.clear}
+            >
+              <Trash2 size={11} />
+            </button>
+            {insertError ? (
+              <span className="min-w-0 flex-1 truncate px-1 text-[10px] text-destructive" role="alert">
+                {insertError}
+              </span>
+            ) : (
+              <span className="flex-1" />
+            )}
+            <button
+              type="button"
+              onPointerDown={keepFocus}
+              onClick={handleInsert}
+              disabled={!hasDraft}
+              className="inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-[10px] font-medium text-foreground/75 transition hover:bg-surface-2 hover:text-foreground active:scale-[0.98] disabled:opacity-30"
+            >
+              <CornerDownLeft size={11} />
+              <span>{lastAction === 'inserted' ? labels.inserted : labels.insert}</span>
+            </button>
+            <button
+              type="button"
+              onPointerDown={keepFocus}
+              onClick={handleSend}
+              disabled={!hasDraft}
+              className="inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-md bg-primary px-2 text-[10px] font-semibold text-primary-foreground transition hover:bg-primary/90 active:scale-[0.98] disabled:opacity-30"
+              title={`${labels.insertAndSend} · ${sendShortcut}`}
+            >
+              {lastAction === 'sent' ? <Check size={11} /> : <Send size={11} />}
+              <span>{lastAction === 'sent' ? labels.sent : labels.send}</span>
+            </button>
+          </div>
         </div>
       </div>
     </section>
