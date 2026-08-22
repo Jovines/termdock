@@ -3,6 +3,27 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const APPDMG_VERSION = '0.6.6';
+const SAFE_ENV_KEYS = [
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'LANG',
+  'LC_ALL',
+  'ELECTRON_MIRROR',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'npm_config_cache',
+];
+
+function packagingEnvironment() {
+  return Object.fromEntries(
+    SAFE_ENV_KEYS.flatMap((key) => process.env[key] ? [[key, process.env[key]]] : []),
+  );
+}
 
 if (process.platform === 'darwin') {
   try {
@@ -16,6 +37,9 @@ if (process.platform === 'darwin') {
       '--no-save',
       '--no-package-lock',
       `appdmg@${APPDMG_VERSION}`,
-    ], { stdio: 'inherit' });
+    ], {
+      stdio: 'inherit',
+      env: packagingEnvironment(),
+    });
   }
 }
