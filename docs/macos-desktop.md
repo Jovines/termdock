@@ -94,7 +94,7 @@ Secret values must never be committed. The workflow contains only their names.
 
 Users can download `Termdock.dmg` from the GitHub Releases page. Installed,
 signed builds use Electron's native Squirrel.Mac updater and the public
-`update.electronjs.org/Jovines/termdock` feed. Termdock checks after launch and
+GitHub Releases API through a loopback Squirrel feed. Termdock checks after launch and
 periodically in the background; **Termdock → Check for Updates…** starts a
 manual check. The in-app settings panel exposes the same desktop check beside
 the independently versioned CLI/Runtime update, and offers **Restart and

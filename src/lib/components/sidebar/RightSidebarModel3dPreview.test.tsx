@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { FilePreview } from './RightSidebar';
-import { classifyModelWheelGesture, formatModelDimension, formatModelDimensions, resolveModel3dLoaderKind, resolvePickedPartName } from './ModelPreview';
+import { classifyModelWheelGesture, formatModelDimension, formatModelDimensions, resolveModel3dLoaderKind, resolvePickedPartName, scaleModelTrackpadPanDelta } from './ModelPreview';
 
 const { stlParseMock, gltfParseMock, readModel3dBlobMock, readFileContentMock } = vi.hoisted(() => ({
   stlParseMock: vi.fn(),
@@ -264,6 +264,13 @@ describe('ModelPreview pure logic', () => {
     expect(classifyModelWheelGesture({ ctrlKey: false, metaKey: false, deltaMode: 1, deltaX: 0, deltaY: 3 })).toBe('wheel-zoom');
     expect(classifyModelWheelGesture({ ctrlKey: false, metaKey: false, deltaMode: 0, deltaX: 0, deltaY: 3, wheelDeltaY: 120 })).toBe('wheel-zoom');
     expect(classifyModelWheelGesture({ ctrlKey: false, metaKey: false, deltaMode: 0, deltaX: 0, deltaY: 100 })).toBe('wheel-zoom');
+  });
+
+  it('keeps trackpad micro-pans precise and softly caps fast swipes', () => {
+    expect(scaleModelTrackpadPanDelta(1)).toBeCloseTo(0.52, 2);
+    expect(scaleModelTrackpadPanDelta(-1)).toBeCloseTo(-0.52, 2);
+    expect(scaleModelTrackpadPanDelta(100)).toBeLessThanOrEqual(18);
+    expect(scaleModelTrackpadPanDelta(100)).toBeGreaterThan(scaleModelTrackpadPanDelta(10));
   });
 
   it('uses the nearest named glTF part group instead of a mojibake leaf mesh name', () => {

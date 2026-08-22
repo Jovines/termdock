@@ -61,6 +61,8 @@ export type TranslationDictionary = {
     subscriptionQuota: string;
     pinSidebar: string;
     unpinSidebar: string;
+    runningSessionButton: string;
+    runningSessionButtonHint: string;
     updateAvailable: (params: TranslatorParams) => string;
     updateInstalling: string;
     updateReady: string;
@@ -206,6 +208,7 @@ export type TranslationDictionary = {
     downloadFailed: string;
     uploadFile: string;
     uploadFiles: string;
+    insertLocalImage: string;
     dropToUpload: string;
     uploading: string;
     uploadSuccess: (params: TranslatorParams) => string;
@@ -759,6 +762,7 @@ export type TranslationDictionary = {
     aiWaiting: string;
     copyMode: string;
     jumpToNext: string;
+    jumpToNextRunning: string;
   };
   connection: {
     reconnecting: string;

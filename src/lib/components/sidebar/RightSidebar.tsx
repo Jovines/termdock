@@ -31,6 +31,7 @@ import {
   EyeOff as RiEyeOff,
   Sparkles as RiSparkles,
   Upload as RiUpload,
+  ImagePlus as RiImagePlus,
   Trash2 as RiTrash,
   PencilLine as RiPencilLine,
   Check as RiCheck,
@@ -61,6 +62,7 @@ import {
 } from './referencePaths';
 import { ContextDraftDock } from './ContextDraftDock';
 import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
+import { uploadTemporaryImageAndInsertReference } from './temporaryImageUpload';
 import { readHtmlViewMode, writeHtmlViewMode, type HtmlViewMode } from './htmlViewMode';
 import { VideoPreviewPlayer } from './VideoPreviewPlayer';
 import './sidebarSelection.css';
@@ -5763,6 +5765,7 @@ export function RightSidebar(
   const [canOpenInFileBrowser, setCanOpenInFileBrowser] = useState(false);
   const [diffStreamScrollRequest, setDiffStreamScrollRequest] = useState<{ key: string | null; nonce: number }>({ key: null, nonce: 0 });
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const temporaryImageInputRef = useRef<HTMLInputElement>(null);
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
   const isWide = !isMobile && drawerWidthPx >= WIDE_WIDTH_THRESHOLD_PX;
   const [fileTreeWidthPx, setFileTreeWidthPx] = useState(() => readFileTreeWidth(drawerWidthPx));
@@ -6940,6 +6943,24 @@ export function RightSidebar(
     const absolutePath = resolveAbsoluteReferencePath(path, rootPath);
     routeReferenceText(buildReferenceInputText(absolutePath, rootPath), key ?? `path:${absolutePath}`);
   }, [rootPath, routeReferenceText]);
+
+  const handleTemporaryImageUpload = useCallback(async (file: File) => {
+    setUploading(true);
+    try {
+      await uploadTemporaryImageAndInsertReference(file, uploadFiles, (uploadedPath) => {
+        insertPathReference(uploadedPath, `path:${uploadedPath}`);
+      });
+      // On phones the sidebar is an overlay. Return to the terminal after the
+      // one-shot insert; when the context draft is enabled, keep it open so
+      // the user can see and continue editing the appended reference instead.
+      if (isMobile && !contextDraftEnabled) onClose();
+    } catch (err) {
+      setGitActionError(err instanceof Error ? err.message : t('rightSidebar.uploadFailed'));
+      window.setTimeout(() => setGitActionError(null), 4000);
+    } finally {
+      setUploading(false);
+    }
+  }, [contextDraftEnabled, insertPathReference, isMobile, onClose, t]);
 
   const insertReferenceText = useCallback((text: string, key: string) => {
     if (!text) return;
@@ -9977,6 +9998,17 @@ export function RightSidebar(
               e.target.value = '';
             }}
           />
+          <input
+            ref={temporaryImageInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = '';
+              if (file) void handleTemporaryImageUpload(file);
+            }}
+          />
           {onTogglePinned && (
             <button
               type="button"
@@ -10018,6 +10050,16 @@ export function RightSidebar(
                 >
                   {uploading ? <RiLoader size={14} className="animate-spin text-muted-foreground" /> : <RiUpload size={14} className="text-muted-foreground" />}
                   <span>{t('rightSidebar.uploadFiles')}</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setHeaderMenuOpen(false); temporaryImageInputRef.current?.click(); }}
+                  disabled={uploading}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2 disabled:opacity-50"
+                >
+                  {uploading ? <RiLoader size={14} className="animate-spin text-muted-foreground" /> : <RiImagePlus size={14} className="text-muted-foreground" />}
+                  <span>{t('rightSidebar.insertLocalImage')}</span>
                 </button>
                 {onTogglePinned && (
                   <button

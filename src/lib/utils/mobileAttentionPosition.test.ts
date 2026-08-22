@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MOBILE_ATTENTION_BUTTON_GAP_PX,
   MOBILE_ATTENTION_EDGE_GAP_PX,
   MOBILE_ATTENTION_SIZE_PX,
+  avoidMobileAttentionOverlap,
   clampMobileAttentionDrag,
   resolveMobileAttentionPosition,
   snapMobileAttentionPosition,
@@ -51,5 +53,34 @@ describe('mobile attention position', () => {
     );
     expect(rotated.x).toBe(MOBILE_ATTENTION_EDGE_GAP_PX);
     expect(rotated.y).toBeGreaterThanOrEqual(52);
+  });
+
+  it('can use the desktop edge gap as its bottom clearance', () => {
+    const desktopViewport = {
+      width: 1440,
+      height: 900,
+      bottomClearance: MOBILE_ATTENTION_EDGE_GAP_PX,
+    };
+    const position = resolveMobileAttentionPosition(
+      desktopViewport,
+      { side: 'right', yRatio: 1 },
+    );
+
+    expect(position.x + MOBILE_ATTENTION_SIZE_PX).toBe(
+      desktopViewport.width - MOBILE_ATTENTION_EDGE_GAP_PX,
+    );
+    expect(position.y + MOBILE_ATTENTION_SIZE_PX).toBe(
+      desktopViewport.height - MOBILE_ATTENTION_EDGE_GAP_PX,
+    );
+  });
+
+  it('moves a colliding floating control by one button plus a gap', () => {
+    const occupied = resolveMobileAttentionPosition(viewport, { side: 'right', yRatio: 0.68 });
+    const separated = avoidMobileAttentionOverlap(viewport, occupied, occupied);
+
+    expect(
+      Math.abs(separated.x - occupied.x) >= MOBILE_ATTENTION_SIZE_PX + MOBILE_ATTENTION_BUTTON_GAP_PX
+      || Math.abs(separated.y - occupied.y) >= MOBILE_ATTENTION_SIZE_PX + MOBILE_ATTENTION_BUTTON_GAP_PX,
+    ).toBe(true);
   });
 });

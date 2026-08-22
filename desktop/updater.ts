@@ -8,9 +8,9 @@ import {
   updateRuntimeFromRegistry,
   type RuntimeUpdateResult,
 } from './runtime.js';
+import { startGitHubUpdateFeedServer } from './githubUpdateFeed.js';
 import type { DesktopAppUpdateState } from './types.js';
 
-const UPDATE_REPOSITORY = 'Jovines/termdock';
 const AUTOMATIC_CHECK_DELAY_MS = 15_000;
 const AUTOMATIC_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const UPDATE_CHECK_TIMEOUT_MS = 30_000;
@@ -25,6 +25,7 @@ let showMessageBox: ShowMessageBox | null = null;
 let checkPromise: Promise<DesktopAppUpdateState> | null = null;
 let settleCheck: ((state: DesktopAppUpdateState) => void) | null = null;
 let checkTimeout: ReturnType<typeof setTimeout> | null = null;
+let updateFeedPromise: Promise<string> | null = null;
 const stateListeners = new Set<UpdateStateListener>();
 let updateState: DesktopAppUpdateState = {
   status: 'idle',
@@ -35,12 +36,16 @@ let updateState: DesktopAppUpdateState = {
   error: null,
 };
 
-export function buildUpdateFeedUrl(
-  version = app.getVersion(),
-  platform = process.platform,
-  arch = process.arch,
-): string {
-  return `https://update.electronjs.org/${UPDATE_REPOSITORY}/${platform}-${arch}/${version}`;
+async function ensureUpdateFeedConfigured(): Promise<string> {
+  updateFeedPromise ??= startGitHubUpdateFeedServer(
+    app.getVersion(),
+    process.platform,
+    process.arch,
+  ).then((feed) => {
+    autoUpdater.setFeedURL({ url: feed.url });
+    return feed.url;
+  });
+  return updateFeedPromise;
 }
 
 function supportsAutomaticUpdates(): boolean {
@@ -182,7 +187,6 @@ export function configureDesktopUpdater(displayMessageBox: ShowMessageBox): void
   configured = true;
   showMessageBox = displayMessageBox;
 
-  autoUpdater.setFeedURL({ url: buildUpdateFeedUrl() });
   configureUpdaterEvents();
 
   const initialTimer = setTimeout(() => {
@@ -228,11 +232,13 @@ export async function checkForDesktopUpdates(options: {
       void reportUpdateError(new Error('Desktop update check timed out'));
     }, UPDATE_CHECK_TIMEOUT_MS);
     checkTimeout.unref?.();
-    try {
-      autoUpdater.checkForUpdates();
-    } catch (error) {
-      void reportUpdateError(error);
-    }
+    void ensureUpdateFeedConfigured().then(() => {
+      try {
+        autoUpdater.checkForUpdates();
+      } catch (error) {
+        void reportUpdateError(error);
+      }
+    }).catch((error) => void reportUpdateError(error));
   });
   return checkPromise;
 }

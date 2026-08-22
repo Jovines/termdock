@@ -87,6 +87,18 @@ export function classifyModelWheelGesture(event: Pick<WheelEvent, 'ctrlKey' | 'm
 
 type ViewerAppearanceMode = 'light' | 'dark';
 
+// Trackpads need different gains from a mouse: pinches otherwise feel muted,
+// while raw two-axis scroll deltas move a narrow sidebar viewport too far.
+const TRACKPAD_PAN_SENSITIVITY = 0.52;
+const TRACKPAD_PAN_MAX_DELTA = 18;
+const PINCH_ZOOM_SENSITIVITY = 1.38;
+
+/** Fine movement stays proportional; fast swipes are softly capped. */
+export function scaleModelTrackpadPanDelta(delta: number): number {
+  if (!Number.isFinite(delta)) return 0;
+  return TRACKPAD_PAN_MAX_DELTA * Math.tanh((delta * TRACKPAD_PAN_SENSITIVITY) / TRACKPAD_PAN_MAX_DELTA);
+}
+
 // Self-contained viewer palette: the exact look of the standalone
 // cadquery-print viewer (render.py), independent of the app theme.
 const VIEWER_APPEARANCE: Record<ViewerAppearanceMode, { bg: string; part: string; gridLine: string; grid: string }> = {
@@ -394,7 +406,7 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
   controls.dampingFactor = 0.08;
   controls.screenSpacePanning = true;
   controls.zoomToCursor = true;
-  controls.zoomSpeed = 0.85;
+  controls.zoomSpeed = PINCH_ZOOM_SENSITIVITY;
 
   // OrbitControls treats every wheel event as zoom. On a Mac that turns the
   // trackpad's two-finger scroll into accidental zoom, so intercept smooth
@@ -409,8 +421,8 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
     const right = new Vector3().crossVectors(forward, camera.up).normalize();
     const screenUp = new Vector3().crossVectors(right, forward).normalize();
     const translation = right
-      .multiplyScalar(deltaX * worldUnitsPerPixel)
-      .add(screenUp.multiplyScalar(-deltaY * worldUnitsPerPixel));
+      .multiplyScalar(scaleModelTrackpadPanDelta(deltaX) * worldUnitsPerPixel)
+      .add(screenUp.multiplyScalar(-scaleModelTrackpadPanDelta(deltaY) * worldUnitsPerPixel));
     camera.position.add(translation);
     controls.target.add(translation);
   };
@@ -436,7 +448,8 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
   const handleGestureChange = (rawEvent: Event) => {
     const event = rawEvent as SafariGestureEvent;
     const scale = event.scale && event.scale > 0 ? event.scale : previousGestureScale;
-    const factor = Math.min(2, Math.max(0.5, scale / Math.max(previousGestureScale, 1e-6)));
+    const rawFactor = scale / Math.max(previousGestureScale, 1e-6);
+    const factor = Math.min(2, Math.max(0.5, Math.pow(rawFactor, PINCH_ZOOM_SENSITIVITY)));
     previousGestureScale = scale;
     const offset = camera.position.clone().sub(controls.target);
     const nextDistance = Math.min(controls.maxDistance, Math.max(controls.minDistance, offset.length() / factor));

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   getNextAttentionSessionId,
+  getNextRunningSessionId,
+  isAgentRunning,
   needsAgentAttention,
   type AgentAttentionSession,
 } from './agentAttention';
@@ -57,5 +59,18 @@ describe('agent attention navigation', () => {
 
   it('returns null when nothing needs attention', () => {
     expect(getNextAttentionSessionId([session('a'), session('b')], 'a')).toBeNull();
+  });
+
+  it('cycles only through running sessions', () => {
+    const sessions = [
+      session('a', { agentStatus: 'working' }),
+      session('b', { agentStatus: 'waiting' }),
+      session('c', { agentStatus: 'working' }),
+    ];
+
+    expect(isAgentRunning(sessions[0]!)).toBe(true);
+    expect(isAgentRunning(sessions[1]!)).toBe(false);
+    expect(getNextRunningSessionId(sessions, 'a')).toBe('c');
+    expect(getNextRunningSessionId(sessions, 'c')).toBe('a');
   });
 });

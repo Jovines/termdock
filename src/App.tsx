@@ -76,7 +76,7 @@ import { useI18n } from './lib/i18n';
 import { LeftSidebar } from './lib/components/sidebar/LeftSidebar';
 import { RightSidebar } from './lib/components/sidebar/RightSidebar';
 import { QuotaView } from './lib/components/sidebar/QuotaView';
-import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay } from './lib/components/AgentIndicators';
+import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay, AgentFloatingSessionButtons } from './lib/components/AgentIndicators';
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { TermdockUpdateSettings } from './lib/components/settings/TermdockUpdateSettings';
@@ -93,6 +93,7 @@ const TOOLBAR_PRESETS_CACHE_KEY = 'termdock-toolbar-presets-cache';
 const SETTINGS_CACHE_KEY = 'termdock-settings-cache';
 const COLOR_THEME_CACHE_KEY = 'termdock-color-theme';
 const RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_BY_SESSION_CACHE_KEY = 'termdock:right-sidebar:file-preview-open-by-session:v2';
+const RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY = 'termdock:running-session-button-enabled:v1';
 const MAX_RIGHT_SIDEBAR_FILE_PREVIEW_OPEN_ROOTS = 60;
 const DESKTOP_TAB_MENU_WIDTH = 320;
 const DESKTOP_TAB_MENU_MAX_HEIGHT = 420;
@@ -713,6 +714,20 @@ function App() {
   const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
   const [mobileDraggedSessionId, setMobileDraggedSessionId] = useState<string | null>(null);
   const [mobileDestroyTargetActive, setMobileDestroyTargetActive] = useState(false);
+  const [runningSessionButtonEnabled, setRunningSessionButtonEnabled] = useState(() => (
+    readCache(
+      RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY,
+      (value): value is boolean => typeof value === 'boolean',
+    ) ?? false
+  ));
+  const handleRunningSessionButtonEnabledChange = useCallback((enabled: boolean) => {
+    setRunningSessionButtonEnabled(enabled);
+    writeCache(RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY, enabled);
+  }, []);
+  const [terminalAreaElement, setTerminalAreaElement] = useState<HTMLDivElement | null>(null);
+  const terminalAreaRef = useCallback((element: HTMLDivElement | null) => {
+    setTerminalAreaElement(element);
+  }, []);
   const mobileDestroyTargetActiveRef = useRef(false);
   const [sidebarCloseChoiceSessionId, setSidebarCloseChoiceSessionId] = useState<string | null>(null);
   const [sidebarCloseAnchor, setSidebarCloseAnchor] = useState<{ x: number; y: number } | null>(null);
@@ -2726,18 +2741,6 @@ function App() {
                 className="sm:hidden"
               />
             </button>}
-            {!showPinnedLeft && attentionSessionIds.length > 0 && (
-              <button
-                type="button"
-                onClick={handleJumpToNextAttention}
-                className="relative inline-flex h-7 shrink-0 items-center gap-1 rounded-md bg-[rgb(var(--warning-rgb)_/_0.12)] px-1.5 text-[color:var(--warning)] ring-1 ring-[rgb(var(--warning-rgb)_/_0.30)] transition hover:bg-[rgb(var(--warning-rgb)_/_0.20)] sm:h-8"
-                aria-label={t('agent.jumpToNext')}
-                title={t('agent.jumpToNext')}
-              >
-                <RiBellLine size={14} className="animate-pulse" />
-                <span className="text-[11px] font-semibold leading-none">{attentionSessionIds.length}</span>
-              </button>
-            )}
             {showPinnedLeft ? (
               <div className="flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-hidden">
                 {pinnedActiveSession ? (
@@ -2941,10 +2944,9 @@ function App() {
             </DragDropContext>
             )}
             <div className="flex shrink-0 items-center gap-1.5">
-              {!showPinnedLeft && (agentTabCounts.running > 0 || agentTabCounts.review > 0) && (
+              {!showPinnedLeft && agentTabCounts.running > 0 && (
                 <span className="hidden items-center gap-1 sm:inline-flex">
                 <AgentCountBadge count={agentTabCounts.running} tone="running" title={t('agent.aiRunning')} />
-                <AgentCountBadge count={agentTabCounts.review} tone="review" title={t('agent.needsReview')} />
                 </span>
               )}
               {!showPinnedLeft && sessions.length > 0 && (
@@ -2967,7 +2969,7 @@ function App() {
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 flex overflow-hidden app-chrome-bg">
+          <div ref={terminalAreaRef} className="min-h-0 flex-1 flex overflow-hidden app-chrome-bg">
             <div className="min-h-0 flex-1 overflow-hidden">
               <MultiTerminalView
                 terminalSettings={terminalSettings}
@@ -2983,6 +2985,14 @@ function App() {
           </div>
         </div>
       </main>
+
+      <AgentFloatingSessionButtons
+        reviewCount={agentTabCounts.review}
+        runningCount={agentTabCounts.running}
+        runningButtonEnabled={runningSessionButtonEnabled}
+        isDesktopLayout={isDesktopViewport}
+        containerElement={terminalAreaElement}
+      />
 
       {/* Settings modal (single page) */}
       {isDrawerOpen && (
@@ -4735,6 +4745,8 @@ function App() {
         onRetryUpdate={handleRetryUpdate}
         tmuxAvailable={tmuxStatus.available}
         defaultSessionMode={newSessionMode}
+        runningSessionButtonEnabled={runningSessionButtonEnabled}
+        onRunningSessionButtonEnabledChange={handleRunningSessionButtonEnabledChange}
         onTogglePinned={isDesktopViewport ? handleToggleLeftPinned : undefined}
       />)}
       {!showPinnedRight && <RightSidebar
@@ -4838,6 +4850,8 @@ function App() {
             onRetryUpdate={handleRetryUpdate}
             tmuxAvailable={tmuxStatus.available}
             defaultSessionMode={newSessionMode}
+            runningSessionButtonEnabled={runningSessionButtonEnabled}
+            onRunningSessionButtonEnabledChange={handleRunningSessionButtonEnabledChange}
             pinned={true}
             onTogglePinned={handleToggleLeftPinned}
           />

@@ -32,6 +32,7 @@ import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWor
 import type { TermdockUpdateState } from '../../terminal/api';
 import { NewSessionComposer } from './NewSessionComposer';
 import { useNewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
+import { Switch } from '../ui/Switch';
 
 
 interface LeftSidebarProps {
@@ -84,6 +85,8 @@ interface LeftSidebarProps {
   defaultSessionMode?: 'shell' | 'tmux';
   push?: boolean;
   pinned?: boolean;
+  runningSessionButtonEnabled?: boolean;
+  onRunningSessionButtonEnabledChange?: (enabled: boolean) => void;
   onTogglePinned?: () => void;
 }
 
@@ -151,6 +154,8 @@ export function LeftSidebar(
     defaultSessionMode = 'shell',
     push,
     pinned,
+    runningSessionButtonEnabled = false,
+    onRunningSessionButtonEnabledChange,
     onTogglePinned,
   }: LeftSidebarProps,
 ) {
@@ -202,15 +207,13 @@ export function LeftSidebar(
   );
 
 
-  const { runningCount, reviewCount } = useMemo(() => {
+  const runningCount = useMemo(() => {
     let running = 0;
-    let review = 0;
     for (const s of sessions) {
       const ts = sessionStates.get(s.id);
       if (ts?.agentStatus === 'working') running += 1;
-      if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) review += 1;
     }
-    return { runningCount: running, reviewCount: review };
+    return running;
   }, [sessions, sessionStates]);
 
   useEffect(() => {
@@ -882,10 +885,9 @@ export function LeftSidebar(
             <div className="flex items-baseline gap-1.5">
               <span className="text-[13px] font-semibold text-foreground">{t('sidebar.sessions')}</span>
               <span className="text-[11px] text-muted-foreground">{sessions.length}</span>
-              {(runningCount > 0 || reviewCount > 0) && (
+              {runningCount > 0 && (
                 <span className="ml-1 flex items-center gap-1.5">
                   <AgentCountBadge count={runningCount} tone="running" title={t('agent.aiRunning')} />
-                  <AgentCountBadge count={reviewCount} tone="review" title={t('agent.needsReview')} />
                 </span>
               )}
             </div>
@@ -957,6 +959,25 @@ export function LeftSidebar(
                         </button>
                       )}
                     </div>
+                  )}
+                  {onRunningSessionButtonEnabledChange && (
+                    <button
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked={runningSessionButtonEnabled}
+                      onClick={() => onRunningSessionButtonEnabledChange(!runningSessionButtonEnabled)}
+                      className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2"
+                      title={t('sidebar.runningSessionButtonHint')}
+                    >
+                      <RiLoaderCircle size={14} className={runningSessionButtonEnabled ? 'text-[color:var(--success)]' : 'text-muted-foreground'} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block">{t('sidebar.runningSessionButton')}</span>
+                        <span className="mt-0.5 block text-[10px] leading-tight text-muted-foreground">
+                          {t('sidebar.runningSessionButtonHint')}
+                        </span>
+                      </span>
+                      <Switch checked={runningSessionButtonEnabled} size="sm" />
+                    </button>
                   )}
                   {onOpenQuota && (
                     <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); onOpenQuota(); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">

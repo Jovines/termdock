@@ -26,9 +26,11 @@ import { useI18n } from '../i18n';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { useViewportKeyboardState } from '../hooks/useViewportKeyboardState';
-import { getNextAttentionSessionId } from '../utils/agentAttention';
+import { getNextAttentionSessionId, getNextRunningSessionId } from '../utils/agentAttention';
 import {
+  MOBILE_ATTENTION_EDGE_GAP_PX,
   MOBILE_ATTENTION_SIZE_PX,
+  avoidMobileAttentionOverlap,
   clampMobileAttentionDrag,
   resolveMobileAttentionPosition,
   snapMobileAttentionPosition,
@@ -44,16 +46,24 @@ export const AGENT_COLOR_RUNNING = 'var(--success)';
 /** 紫色（tmux copy mode） */
 export const AGENT_COLOR_COPY_MODE = 'var(--tmux)';
 const MOBILE_ATTENTION_POSITION_KEY = 'termdock:mobile-attention-position:v1';
+const RUNNING_SESSION_POSITION_KEY = 'termdock:running-session-position:v1';
 const MOBILE_ATTENTION_DEFAULT_PREFERENCE: MobileAttentionPreference = {
   side: 'right',
   yRatio: 0.68,
 };
+const RUNNING_SESSION_DEFAULT_PREFERENCE: MobileAttentionPreference = {
+  side: 'right',
+  yRatio: 0.54,
+};
 
-function readMobileAttentionPreference(): MobileAttentionPreference {
-  if (typeof window === 'undefined') return MOBILE_ATTENTION_DEFAULT_PREFERENCE;
+function readFloatingButtonPreference(
+  storageKey: string,
+  fallback: MobileAttentionPreference,
+): MobileAttentionPreference {
+  if (typeof window === 'undefined') return fallback;
   try {
     const parsed = JSON.parse(
-      window.localStorage.getItem(MOBILE_ATTENTION_POSITION_KEY) ?? 'null',
+      window.localStorage.getItem(storageKey) ?? 'null',
     ) as Partial<MobileAttentionPreference> | null;
     if (
       parsed
@@ -69,13 +79,16 @@ function readMobileAttentionPreference(): MobileAttentionPreference {
   } catch {
     // A malformed or unavailable localStorage falls back to the ergonomic default.
   }
-  return MOBILE_ATTENTION_DEFAULT_PREFERENCE;
+  return fallback;
 }
 
-function writeMobileAttentionPreference(preference: MobileAttentionPreference): void {
+function writeFloatingButtonPreference(
+  storageKey: string,
+  preference: MobileAttentionPreference,
+): void {
   try {
     window.localStorage.setItem(
-      MOBILE_ATTENTION_POSITION_KEY,
+      storageKey,
       JSON.stringify(preference),
     );
   } catch {
@@ -91,16 +104,36 @@ function readSafeInset(name: string): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
-function getMobileAttentionViewport(): MobileAttentionViewport {
+function getMobileAttentionViewport(
+  isDesktopLayout: boolean,
+  containerElement: HTMLElement | null,
+): MobileAttentionViewport {
   if (typeof window === 'undefined') return { width: 390, height: 664 };
   const visualViewport = window.visualViewport;
+  const width = visualViewport?.width ?? window.innerWidth;
+  const height = visualViewport?.height ?? window.innerHeight;
+  const bounds = containerElement?.getBoundingClientRect();
+  const hasContainerBounds = Boolean(bounds && bounds.width > 0 && bounds.height > 0);
   return {
-    width: visualViewport?.width ?? window.innerWidth,
-    height: visualViewport?.height ?? window.innerHeight,
-    safeTop: readSafeInset('--safe-top-inset'),
-    safeRight: readSafeInset('--safe-right-inset'),
-    safeBottom: readSafeInset('--safe-bottom-inset'),
-    safeLeft: readSafeInset('--safe-left-inset'),
+    width,
+    height,
+    safeTop: Math.max(
+      readSafeInset('--safe-top-inset'),
+      hasContainerBounds ? Math.max(0, bounds!.top) : 0,
+    ),
+    safeRight: Math.max(
+      readSafeInset('--safe-right-inset'),
+      hasContainerBounds ? Math.max(0, width - bounds!.right) : 0,
+    ),
+    safeBottom: Math.max(
+      readSafeInset('--safe-bottom-inset'),
+      hasContainerBounds ? Math.max(0, height - bounds!.bottom) : 0,
+    ),
+    safeLeft: Math.max(
+      readSafeInset('--safe-left-inset'),
+      hasContainerBounds ? Math.max(0, bounds!.left) : 0,
+    ),
+    bottomClearance: isDesktopLayout ? MOBILE_ATTENTION_EDGE_GAP_PX : 72,
   };
 }
 
@@ -116,6 +149,16 @@ function jumpToNextAgentAttention(): void {
   if (active?.agentNeedsReview) {
     store.clearAgentNeedsReview(active.sessionId);
   }
+  window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: nextId }));
+}
+
+function jumpToNextRunningAgent(): void {
+  const store = useTerminalStore.getState();
+  const nextId = getNextRunningSessionId(
+    Array.from(store.sessions.values()),
+    store.activeSessionId,
+  );
+  if (!nextId) return;
   window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: nextId }));
 }
 
@@ -421,75 +464,6 @@ export function AgentCompactStatusOverlay({
   reviewCount: number;
   className?: string;
 }): React.ReactElement | null {
-  const { t } = useI18n();
-  const sidebarLeftOpen = useSidebarStore((state) => state.leftOpen);
-  const sidebarRightOpen = useSidebarStore((state) => state.rightOpen);
-  const { isOpen: keyboardOpen } = useViewportKeyboardState({ enabled: true });
-  const preferenceRef = React.useRef<MobileAttentionPreference>(
-    readMobileAttentionPreference(),
-  );
-  const [mobilePosition, setMobilePosition] = React.useState<MobileAttentionPosition>(
-    () => resolveMobileAttentionPosition(
-      getMobileAttentionViewport(),
-      preferenceRef.current,
-    ),
-  );
-  const [draggingMobileAttention, setDraggingMobileAttention] = React.useState(false);
-  const dragRef = React.useRef<{
-    pointerId: number;
-    originX: number;
-    originY: number;
-    startX: number;
-    startY: number;
-    moved: boolean;
-  } | null>(null);
-  const suppressAttentionClickRef = React.useRef(false);
-
-  React.useEffect(() => {
-    const syncPosition = () => {
-      setMobilePosition(resolveMobileAttentionPosition(
-        getMobileAttentionViewport(),
-        preferenceRef.current,
-      ));
-    };
-    window.addEventListener('resize', syncPosition);
-    window.addEventListener('orientationchange', syncPosition);
-    window.visualViewport?.addEventListener('resize', syncPosition);
-    return () => {
-      window.removeEventListener('resize', syncPosition);
-      window.removeEventListener('orientationchange', syncPosition);
-      window.visualViewport?.removeEventListener('resize', syncPosition);
-    };
-  }, []);
-
-  const finishMobileAttentionDrag = React.useCallback((
-    event: React.PointerEvent<HTMLButtonElement>,
-  ) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    dragRef.current = null;
-    setDraggingMobileAttention(false);
-    const releasePosition = drag.moved
-      ? clampMobileAttentionDrag(
-          getMobileAttentionViewport(),
-          {
-            x: drag.startX + (event.clientX - drag.originX),
-            y: drag.startY + (event.clientY - drag.originY),
-          },
-        )
-      : mobilePosition;
-    const snapped = snapMobileAttentionPosition(
-      getMobileAttentionViewport(),
-      releasePosition,
-    );
-    preferenceRef.current = snapped.preference;
-    setMobilePosition(snapped.position);
-    writeMobileAttentionPreference(snapped.preference);
-    suppressAttentionClickRef.current = drag.moved;
-    window.setTimeout(() => {
-      suppressAttentionClickRef.current = false;
-    }, 0);
-  }, [mobilePosition]);
   const items: Array<{ key: 'running' | 'review'; count: number; className: string }> = [];
   if (runningCount > 0) {
     items.push({ key: 'running', count: runningCount, className: 'bg-[var(--success)] text-[color:var(--success-foreground)]' });
@@ -499,88 +473,252 @@ export function AgentCompactStatusOverlay({
   }
   if (items.length === 0) return null;
 
-  const showMobileAttentionButton = reviewCount > 0
-    && !sidebarLeftOpen
-    && !sidebarRightOpen
-    && !keyboardOpen
-    && typeof document !== 'undefined';
-
   return (
-    <>
-      <span
-        aria-hidden="true"
-        className={`pointer-events-none absolute -right-1 ${items.length > 1 ? 'top-0.5 flex flex-col gap-0.5' : '-top-1'} ${className}`}
-      >
-        {items.map((item) => (
-          <span
-            key={item.key}
-            className={`flex h-3 min-w-3 items-center justify-center rounded-full px-0.5 text-[7px] font-bold leading-3 shadow-sm ring-1 ring-background ${item.className}`}
-          >
-            {item.count > 9 ? '9+' : item.count}
-          </span>
-        ))}
-      </span>
-      {showMobileAttentionButton && createPortal(
-        <button
-          type="button"
-          data-mobile-attention-button
-          onPointerDown={(event) => {
-            event.stopPropagation();
-            event.currentTarget.setPointerCapture(event.pointerId);
-            dragRef.current = {
-              pointerId: event.pointerId,
-              originX: event.clientX,
-              originY: event.clientY,
-              startX: mobilePosition.x,
-              startY: mobilePosition.y,
-              moved: false,
-            };
-          }}
-          onPointerMove={(event) => {
-            const drag = dragRef.current;
-            if (!drag || drag.pointerId !== event.pointerId) return;
-            const dx = event.clientX - drag.originX;
-            const dy = event.clientY - drag.originY;
-            if (!drag.moved && Math.hypot(dx, dy) < 5) return;
-            drag.moved = true;
-            setDraggingMobileAttention(true);
-            setMobilePosition(clampMobileAttentionDrag(
-              getMobileAttentionViewport(),
-              { x: drag.startX + dx, y: drag.startY + dy },
-            ));
-          }}
-          onPointerUp={finishMobileAttentionDrag}
-          onPointerCancel={finishMobileAttentionDrag}
-          onClick={(event) => {
-            // This portal is rendered from inside the Sessions button. React
-            // events still bubble through the component tree across portals,
-            // so stop here to avoid opening the left sidebar as a side effect.
-            event.stopPropagation();
-            if (suppressAttentionClickRef.current) return;
-            jumpToNextAgentAttention();
-          }}
-          className={`fixed z-chrome-hint hidden items-center justify-center rounded-full bg-[var(--warning)] text-[color:var(--warning-foreground)] shadow-[0_8px_24px_var(--app-shadow-strong)] ring-1 ring-[rgb(var(--warning-rgb)_/_0.35)] max-lg:inline-flex animate-fade-in ${
-            draggingMobileAttention
-              ? 'cursor-grabbing scale-[1.04] shadow-[0_12px_30px_var(--app-shadow-strong)]'
-              : 'cursor-grab transition-[left,top,transform,box-shadow] duration-200 active:scale-95'
-          }`}
-          style={{
-            left: mobilePosition.x,
-            top: mobilePosition.y,
-            width: MOBILE_ATTENTION_SIZE_PX,
-            height: MOBILE_ATTENTION_SIZE_PX,
-            touchAction: 'none',
-          }}
-          aria-label={`${t('agent.jumpToNext')}: ${reviewCount}`}
-          title={t('agent.jumpToNext')}
+    <span
+      aria-hidden="true"
+      className={`pointer-events-none absolute -right-1 ${items.length > 1 ? 'top-0.5 flex flex-col gap-0.5' : '-top-1'} ${className}`}
+    >
+      {items.map((item) => (
+        <span
+          key={item.key}
+          className={`flex h-3 min-w-3 items-center justify-center rounded-full px-0.5 text-[7px] font-bold leading-3 shadow-sm ring-1 ring-background ${item.className}`}
         >
-          <RiBellDot size={17} className="shrink-0" />
-          <span className="absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-surface px-1 text-[9px] font-bold tabular-nums text-[color:var(--warning)] ring-2 ring-[var(--chrome-bg)]">
-            {reviewCount > 9 ? '9+' : reviewCount}
-          </span>
-        </button>,
-        document.body,
-      )}
-    </>
+          {item.count > 9 ? '9+' : item.count}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+type FloatingSessionButtonKind = 'attention' | 'running';
+type FloatingSessionButtonPositions = Record<FloatingSessionButtonKind, MobileAttentionPosition>;
+
+/** Terminal 内的会话快捷入口：共用拖拽边界，并在移动、吸附和缩放时保持互不重叠。 */
+export function AgentFloatingSessionButtons({
+  reviewCount,
+  runningCount,
+  runningButtonEnabled,
+  isDesktopLayout,
+  containerElement,
+}: {
+  reviewCount: number;
+  runningCount: number;
+  runningButtonEnabled: boolean;
+  isDesktopLayout: boolean;
+  containerElement: HTMLElement | null;
+}): React.ReactElement | null {
+  const { t } = useI18n();
+  const sidebarLeftOpen = useSidebarStore((state) => state.leftOpen);
+  const sidebarRightOpen = useSidebarStore((state) => state.rightOpen);
+  const { isOpen: keyboardOpen } = useViewportKeyboardState({ enabled: !isDesktopLayout });
+  const floatingChromeVisible = isDesktopLayout
+    || (!sidebarLeftOpen && !sidebarRightOpen && !keyboardOpen);
+  const attentionVisible = reviewCount > 0 && floatingChromeVisible;
+  const runningVisible = runningButtonEnabled && runningCount > 0 && floatingChromeVisible;
+  const preferencesRef = React.useRef<Record<FloatingSessionButtonKind, MobileAttentionPreference>>({
+    attention: readFloatingButtonPreference(
+      MOBILE_ATTENTION_POSITION_KEY,
+      MOBILE_ATTENTION_DEFAULT_PREFERENCE,
+    ),
+    running: readFloatingButtonPreference(
+      RUNNING_SESSION_POSITION_KEY,
+      RUNNING_SESSION_DEFAULT_PREFERENCE,
+    ),
+  });
+
+  const resolvePositions = React.useCallback((): FloatingSessionButtonPositions => {
+    const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
+    const attention = resolveMobileAttentionPosition(viewport, preferencesRef.current.attention);
+    const rawRunning = resolveMobileAttentionPosition(viewport, preferencesRef.current.running);
+    return {
+      attention,
+      running: attentionVisible && runningVisible
+        ? avoidMobileAttentionOverlap(viewport, rawRunning, attention)
+        : rawRunning,
+    };
+  }, [attentionVisible, containerElement, isDesktopLayout, runningVisible]);
+  const [positions, setPositions] = React.useState<FloatingSessionButtonPositions>(
+    () => resolvePositions(),
+  );
+  const positionsRef = React.useRef(positions);
+  positionsRef.current = positions;
+  const [draggingKind, setDraggingKind] = React.useState<FloatingSessionButtonKind | null>(null);
+  const dragRef = React.useRef<{
+    kind: FloatingSessionButtonKind;
+    pointerId: number;
+    originX: number;
+    originY: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressClickRef = React.useRef<Record<FloatingSessionButtonKind, boolean>>({
+    attention: false,
+    running: false,
+  });
+
+  React.useLayoutEffect(() => {
+    const syncPositions = () => {
+      const next = resolvePositions();
+      positionsRef.current = next;
+      setPositions(next);
+    };
+    syncPositions();
+    window.addEventListener('resize', syncPositions);
+    window.addEventListener('orientationchange', syncPositions);
+    window.visualViewport?.addEventListener('resize', syncPositions);
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(syncPositions);
+    if (containerElement) resizeObserver?.observe(containerElement);
+    return () => {
+      window.removeEventListener('resize', syncPositions);
+      window.removeEventListener('orientationchange', syncPositions);
+      window.visualViewport?.removeEventListener('resize', syncPositions);
+      resizeObserver?.disconnect();
+    };
+  }, [containerElement, resolvePositions]);
+
+  const isOtherButtonVisible = React.useCallback((kind: FloatingSessionButtonKind): boolean => (
+    kind === 'attention' ? runningVisible : attentionVisible
+  ), [attentionVisible, runningVisible]);
+
+  const avoidOtherButton = React.useCallback((
+    kind: FloatingSessionButtonKind,
+    position: MobileAttentionPosition,
+  ): MobileAttentionPosition => {
+    if (!isOtherButtonVisible(kind)) return position;
+    const otherKind = kind === 'attention' ? 'running' : 'attention';
+    return avoidMobileAttentionOverlap(
+      getMobileAttentionViewport(isDesktopLayout, containerElement),
+      position,
+      positionsRef.current[otherKind],
+    );
+  }, [containerElement, isDesktopLayout, isOtherButtonVisible]);
+
+  const finishDrag = React.useCallback((
+    kind: FloatingSessionButtonKind,
+    event: React.PointerEvent<HTMLButtonElement>,
+  ) => {
+    const drag = dragRef.current;
+    if (!drag || drag.kind !== kind || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDraggingKind(null);
+    const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
+    const released = drag.moved
+      ? clampMobileAttentionDrag(viewport, {
+          x: drag.startX + (event.clientX - drag.originX),
+          y: drag.startY + (event.clientY - drag.originY),
+        })
+      : positionsRef.current[kind];
+    const snapped = snapMobileAttentionPosition(viewport, released);
+    const separated = avoidOtherButton(kind, snapped.position);
+    const finalPosition = snapMobileAttentionPosition(viewport, separated);
+    preferencesRef.current[kind] = finalPosition.preference;
+    writeFloatingButtonPreference(
+      kind === 'attention' ? MOBILE_ATTENTION_POSITION_KEY : RUNNING_SESSION_POSITION_KEY,
+      finalPosition.preference,
+    );
+    const next = { ...positionsRef.current, [kind]: finalPosition.position };
+    positionsRef.current = next;
+    setPositions(next);
+    suppressClickRef.current[kind] = drag.moved;
+    window.setTimeout(() => {
+      suppressClickRef.current[kind] = false;
+    }, 0);
+  }, [avoidOtherButton, containerElement, isDesktopLayout]);
+
+  const renderButton = (kind: FloatingSessionButtonKind): React.ReactElement => {
+    const isAttention = kind === 'attention';
+    const count = isAttention ? reviewCount : runningCount;
+    const label = isAttention ? t('agent.jumpToNext') : t('agent.jumpToNextRunning');
+    const position = positions[kind];
+    const dragging = draggingKind === kind;
+    return (
+      <button
+        key={kind}
+        type="button"
+        {...(isAttention
+          ? { 'data-attention-button': true, 'data-mobile-attention-button': true }
+          : { 'data-running-session-button': true })}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          dragRef.current = {
+            kind,
+            pointerId: event.pointerId,
+            originX: event.clientX,
+            originY: event.clientY,
+            startX: position.x,
+            startY: position.y,
+            moved: false,
+          };
+        }}
+        onPointerMove={(event) => {
+          const drag = dragRef.current;
+          if (!drag || drag.kind !== kind || drag.pointerId !== event.pointerId) return;
+          const dx = event.clientX - drag.originX;
+          const dy = event.clientY - drag.originY;
+          if (!drag.moved && Math.hypot(dx, dy) < 5) return;
+          drag.moved = true;
+          setDraggingKind(kind);
+          const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
+          const moved = avoidOtherButton(kind, clampMobileAttentionDrag(viewport, {
+            x: drag.startX + dx,
+            y: drag.startY + dy,
+          }));
+          const next = { ...positionsRef.current, [kind]: moved };
+          positionsRef.current = next;
+          setPositions(next);
+        }}
+        onPointerUp={(event) => finishDrag(kind, event)}
+        onPointerCancel={(event) => finishDrag(kind, event)}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (suppressClickRef.current[kind]) return;
+          if (isAttention) jumpToNextAgentAttention();
+          else jumpToNextRunningAgent();
+        }}
+        className={`fixed z-chrome-hint inline-flex items-center justify-center rounded-full shadow-[0_8px_24px_var(--app-shadow-strong)] ring-1 animate-fade-in ${
+          isAttention
+            ? 'bg-[var(--warning)] text-[color:var(--warning-foreground)] ring-[rgb(var(--warning-rgb)_/_0.35)]'
+            : 'bg-[var(--success)] text-[color:var(--success-foreground)] ring-[rgb(var(--success-rgb)_/_0.35)]'
+        } ${
+          dragging
+            ? 'cursor-grabbing scale-[1.04] shadow-[0_12px_30px_var(--app-shadow-strong)]'
+            : 'cursor-grab transition-[left,top,transform,box-shadow] duration-200 active:scale-95'
+        }`}
+        style={{
+          left: position.x,
+          top: position.y,
+          width: MOBILE_ATTENTION_SIZE_PX,
+          height: MOBILE_ATTENTION_SIZE_PX,
+          touchAction: 'none',
+        }}
+        aria-label={`${label}: ${count}`}
+        title={label}
+      >
+        {isAttention
+          ? <RiBellDot size={17} className="shrink-0" />
+          : <RiLoaderCircle size={18} className="shrink-0 animate-spin" />}
+        <span className={`absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-surface px-1 text-[9px] font-bold tabular-nums ring-2 ring-[var(--chrome-bg)] ${
+          isAttention ? 'text-[color:var(--warning)]' : 'text-[color:var(--success)]'
+        }`}>
+          {count > 9 ? '9+' : count}
+        </span>
+      </button>
+    );
+  };
+
+  if ((!attentionVisible && !runningVisible) || containerElement === null || typeof document === 'undefined') {
+    return null;
+  }
+
+  return createPortal(
+    <>
+      {attentionVisible && renderButton('attention')}
+      {runningVisible && renderButton('running')}
+    </>,
+    document.body,
   );
 }

@@ -38,12 +38,19 @@ const runtimeMock = vi.hoisted(() => ({
     currentVersion: '1.4.81',
   })),
 }));
+const feedMock = vi.hoisted(() => ({
+  startGitHubUpdateFeedServer: vi.fn(async () => ({
+    url: 'http://127.0.0.1:54321/feed',
+    close: vi.fn(),
+  })),
+}));
 
 vi.mock('electron', () => ({
   app: electronMock.app,
   autoUpdater: electronMock.autoUpdater,
 }));
 vi.mock('./runtime.js', () => runtimeMock);
+vi.mock('./githubUpdateFeed.js', () => feedMock);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -63,7 +70,10 @@ describe('desktop updater', () => {
     updater.configureDesktopUpdater(vi.fn(async () => ({ response: 0, checkboxChecked: false })));
 
     const check = updater.checkForDesktopUpdates();
-    expect(electronMock.autoUpdater.checkForUpdates).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(electronMock.autoUpdater.checkForUpdates).toHaveBeenCalledOnce());
+    expect(electronMock.autoUpdater.setFeedURL).toHaveBeenCalledWith({
+      url: 'http://127.0.0.1:54321/feed',
+    });
     expect(runtimeMock.updateRuntimeFromRegistry).not.toHaveBeenCalled();
 
     electronMock.emit('update-not-available');
@@ -80,6 +90,7 @@ describe('desktop updater', () => {
     updater.subscribeDesktopUpdateState((state) => states.push(state.status));
 
     const check = updater.checkForDesktopUpdates();
+    await vi.waitFor(() => expect(electronMock.autoUpdater.checkForUpdates).toHaveBeenCalledOnce());
     electronMock.emit('update-available');
     await expect(check).resolves.toMatchObject({ status: 'downloading' });
 
