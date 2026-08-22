@@ -1,80 +1,37 @@
 import { Bot, Check, Folder, LoaderCircle, RefreshCw, Terminal, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { getAgentLaunchers, getDirectorySuggestions, type AgentLauncherInfo } from '../../terminal/api';
+import { getDirectorySuggestions, type AgentLauncherInfo } from '../../terminal/api';
 import { getCwdLeafName } from '../../terminal/display';
 import { useI18n } from '../../i18n';
-
-const AGENT_PREFERENCE_KEY = 'termdock:new-session-agent:v1';
-
-interface AgentPreference {
-  slug: string | null;
-  command?: string;
-}
-
-export function readNewSessionAgentPreference(): AgentPreference {
-  try {
-    const value = JSON.parse(localStorage.getItem(AGENT_PREFERENCE_KEY) || 'null') as Partial<AgentPreference> | null;
-    if (!value || (value.slug !== null && typeof value.slug !== 'string')) return { slug: null };
-    return {
-      slug: value.slug,
-      command: typeof value.command === 'string' ? value.command : undefined,
-    };
-  } catch {
-    return { slug: null };
-  }
-}
-
-function persistAgentPreference(preference: AgentPreference) {
-  try {
-    localStorage.setItem(AGENT_PREFERENCE_KEY, JSON.stringify(preference));
-  } catch {
-    // The selection still works for this launch when storage is unavailable.
-  }
-}
+import type { NewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
 
 export function NewSessionComposer({
   directories,
   tmuxAvailable,
   options,
+  agents,
+  selectedAgent,
+  detecting,
+  onRefreshAgents,
+  onSelectAgent,
   onClose,
   onOptionsChange,
 }: {
   directories: string[];
   tmuxAvailable: boolean;
   options: { mode: 'shell' | 'tmux'; cwd?: string; command?: string };
+  agents: AgentLauncherInfo[];
+  selectedAgent: NewSessionAgentPreference;
+  detecting: boolean;
+  onRefreshAgents: () => void;
+  onSelectAgent: (agent: NewSessionAgentPreference) => void;
   onClose: () => void;
   onOptionsChange: (options: { mode: 'shell' | 'tmux'; cwd?: string; command?: string }) => void;
 }) {
   const { t } = useI18n();
-  const [agents, setAgents] = useState<AgentLauncherInfo[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(() => readNewSessionAgentPreference().slug);
-  const [detecting, setDetecting] = useState(true);
   const [directorySuggestions, setDirectorySuggestions] = useState<string[]>([]);
   const [directorySuggestionsOpen, setDirectorySuggestionsOpen] = useState(false);
   const [highlightedDirectoryIndex, setHighlightedDirectoryIndex] = useState(0);
-
-  const detectAgents = async () => {
-    setDetecting(true);
-    try {
-      const detected = await getAgentLaunchers();
-      setAgents(detected);
-      const match = selectedAgent ? detected.find((agent) => agent.slug === selectedAgent) : undefined;
-      if (match) {
-        persistAgentPreference({ slug: match.slug, command: match.command });
-        onOptionsChange({ ...options, command: match.command });
-      } else if (selectedAgent) {
-        setSelectedAgent(null);
-        persistAgentPreference({ slug: null });
-        onOptionsChange({ ...options, command: undefined });
-      }
-    } finally {
-      setDetecting(false);
-    }
-  };
-
-  useEffect(() => {
-    void detectAgents();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const uniqueDirectories = useMemo(() => [...new Set(directories.filter(Boolean))].slice(0, 5), [directories]);
   useEffect(() => {
@@ -134,7 +91,7 @@ export function NewSessionComposer({
 
       <div className="mt-3 flex items-center justify-between">
         <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">Agent</span>
-        <button type="button" onClick={() => void detectAgents()} disabled={detecting} className="inline-flex items-center gap-1 text-[10px] text-muted-foreground transition hover:text-foreground disabled:opacity-50" title={t('sidebar.detectAgents')}>
+        <button type="button" onClick={onRefreshAgents} disabled={detecting} className="inline-flex items-center gap-1 text-[10px] text-muted-foreground transition hover:text-foreground disabled:opacity-50" title={t('sidebar.detectAgents')}>
           <RefreshCw size={10} className={detecting ? 'animate-spin' : ''} />
           {t('sidebar.detectAgents')}
         </button>
@@ -143,8 +100,7 @@ export function NewSessionComposer({
         <button
           type="button"
           onClick={() => {
-            setSelectedAgent(null);
-            persistAgentPreference({ slug: null });
+            onSelectAgent(null);
             onOptionsChange({ ...options, command: undefined });
           }}
           className={`flex min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${selectedAgent === null ? 'bg-primary/15 text-primary ring-1 ring-primary/30' : 'bg-surface text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
@@ -154,14 +110,13 @@ export function NewSessionComposer({
           {selectedAgent === null && <Check size={11} className="ml-auto shrink-0" />}
         </button>
         {agents.map((agent) => {
-          const selected = selectedAgent === agent.slug;
+          const selected = selectedAgent?.slug === agent.slug;
           return (
             <button
               key={agent.slug}
               type="button"
               onClick={() => {
-                setSelectedAgent(agent.slug);
-                persistAgentPreference({ slug: agent.slug, command: agent.command });
+                onSelectAgent(agent);
                 onOptionsChange({ ...options, command: agent.command });
               }}
               title={agent.command}

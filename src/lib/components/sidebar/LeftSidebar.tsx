@@ -30,7 +30,8 @@ import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import type { TermdockUpdateState } from '../../terminal/api';
-import { NewSessionComposer, readNewSessionAgentPreference } from './NewSessionComposer';
+import { NewSessionComposer } from './NewSessionComposer';
+import { useNewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
 
 
 interface LeftSidebarProps {
@@ -163,7 +164,14 @@ export function LeftSidebar(
     mode: 'shell' | 'tmux';
     cwd?: string;
     command?: string;
-  }>({ mode: defaultSessionMode, command: readNewSessionAgentPreference().command });
+  }>({ mode: defaultSessionMode });
+  const {
+    preference: newSessionAgent,
+    agents: newSessionAgents,
+    detecting: detectingNewSessionAgents,
+    refresh: refreshNewSessionAgents,
+    selectAgent: selectNewSessionAgent,
+  } = useNewSessionAgentPreference();
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const pendingUpdate = Boolean(
     updateState?.latestVersion
@@ -265,6 +273,10 @@ export function LeftSidebar(
   }, [isOpen]);
 
   useEffect(() => {
+    setNewSessionOptions((current) => ({ ...current, command: newSessionAgent?.command }));
+  }, [newSessionAgent]);
+
+  useEffect(() => {
     if (!headerMenuOpen) return;
     const closeMenu = (event: MouseEvent | KeyboardEvent) => {
       if (event instanceof KeyboardEvent && event.key !== 'Escape') return;
@@ -287,7 +299,7 @@ export function LeftSidebar(
       ? { ...newSessionOptions, cwd: newSessionOptions.cwd?.trim() || undefined }
       : {
         mode: defaultSessionMode === 'tmux' && !tmuxAvailable ? 'shell' as const : defaultSessionMode,
-        command: readNewSessionAgentPreference().command,
+        command: newSessionAgent?.command,
       };
     onNewSession(options);
     setNewSessionComposerOpen(false);
@@ -302,7 +314,7 @@ export function LeftSidebar(
     setNewSessionOptions({
       mode: defaultSessionMode === 'tmux' && !tmuxAvailable ? 'shell' : defaultSessionMode,
       cwd: activeSessionId ? sessionStates.get(activeSessionId)?.cwd ?? undefined : undefined,
-      command: readNewSessionAgentPreference().command,
+      command: newSessionAgent?.command,
     });
     setNewSessionComposerOpen(true);
   };
@@ -1128,6 +1140,11 @@ export function LeftSidebar(
           })}
           tmuxAvailable={tmuxAvailable}
           options={newSessionOptions}
+          agents={newSessionAgents}
+          selectedAgent={newSessionAgent}
+          detecting={detectingNewSessionAgents}
+          onRefreshAgents={() => { void refreshNewSessionAgents().catch(() => undefined); }}
+          onSelectAgent={(agent) => { void selectNewSessionAgent(agent).catch(() => undefined); }}
           onClose={() => setNewSessionComposerOpen(false)}
           onOptionsChange={setNewSessionOptions}
         />
@@ -1140,11 +1157,11 @@ export function LeftSidebar(
             type="button"
             onClick={handleNewSessionClick}
             className="flex min-w-0 flex-1 items-center justify-center gap-2 px-3 py-2.5 text-[13px] font-semibold transition hover:bg-primary/90 active:scale-[0.99]"
-            title={t('sidebar.newSession')}
-            aria-label={t('sidebar.newSession')}
+            title={newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}
+            aria-label={newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}
           >
             <RiAddLine size={15} className="shrink-0" />
-            <span className="truncate">{t('sidebar.newSession')}</span>
+            <span className="truncate">{newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}</span>
           </button>
           <button
             type="button"
