@@ -10,8 +10,7 @@ describe('macOS deployment target', () => {
   it('keeps the launcher binary and Info.plist on macOS 12', () => {
     expect(forgeConfig.packagerConfig.extendInfo.LSMinimumSystemVersion).toBe('12.0');
     expect(forgeConfig.packagerConfig.extendInfo.NSUserNotificationAlertStyle).toBe('banner');
-    expect(forgeSource).toContain('`-mmacosx-version-min=${macosDeploymentTarget}`');
-    expect(forgeSource).toContain("'vtool'");
-    expect(forgeSource).toContain("'-show-build'");
+    expect(forgeSource).not.toContain('fs.renameSync(launcherPath, electronPath)');
+    expect(forgeSource).toContain('afterCopyExtraResources: [signBundledRuntime]');
   });
 });

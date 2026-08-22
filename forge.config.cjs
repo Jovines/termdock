@@ -70,43 +70,6 @@ function signBundledRuntime(buildPath, _electronVersion, platform, _arch, callba
   }
 }
 
-function installUniqueMacLauncher(buildPath, _electronVersion, platform, _arch, callback) {
-  try {
-    if (platform === 'darwin') {
-      const appPath = buildPath.endsWith('.app')
-        ? buildPath
-        : path.join(buildPath, 'Termdock.app');
-      const launcherPath = path.join(appPath, 'Contents', 'MacOS', 'Termdock');
-      const electronPath = `${launcherPath}.electron`;
-      fs.renameSync(launcherPath, electronPath);
-      execFileSync('/usr/bin/xcrun', [
-        'clang',
-        '-Os',
-        '-Wall',
-        '-Wextra',
-        `-mmacosx-version-min=${macosDeploymentTarget}`,
-        '-o',
-        launcherPath,
-        path.resolve(__dirname, 'desktop/native/launcher.c'),
-      ], { stdio: 'inherit' });
-      const buildVersion = execFileSync('/usr/bin/xcrun', [
-        'vtool',
-        '-show-build',
-        launcherPath,
-      ], { encoding: 'utf8' });
-      const minimumVersion = buildVersion.match(/\bminos\s+(\S+)/)?.[1];
-      if (minimumVersion !== macosDeploymentTarget) {
-        throw new Error(
-          `Termdock launcher requires macOS ${minimumVersion ?? 'unknown'}, expected ${macosDeploymentTarget}`,
-        );
-      }
-    }
-    callback();
-  } catch (error) {
-    callback(error);
-  }
-}
-
 function signPackagedApp(buildPath, _electronVersion, platform, _arch, callback) {
   try {
     if (platform === 'darwin') {
@@ -193,7 +156,7 @@ module.exports = {
           },
           ...(notarizeConfig ? { osxNotarize: notarizeConfig } : {}),
         }),
-    afterCopyExtraResources: [installUniqueMacLauncher, signBundledRuntime],
+    afterCopyExtraResources: [signBundledRuntime],
     // @electron/osx-sign must own Developer ID signing so every Electron
     // framework and dylib is re-signed with the same Team ID. The fallback
     // hook remains useful for local ad-hoc builds.
