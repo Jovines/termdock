@@ -24,6 +24,7 @@ import {
   clampCellToBuffer,
   getTerminalGridMetrics,
   orderSelectionEndpoints,
+  selectionCellsToClientBounds,
   type SelectionCell,
 } from '../../terminal/selectionHandles';
 import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal/imeAnchor';
@@ -72,6 +73,9 @@ const MOBILE_COPY_POPOVER_WIDTH_PX = 88;
 const MOBILE_COPY_POPOVER_HEIGHT_PX = 36;
 const MOBILE_COPY_POPOVER_MARGIN_PX = 10;
 const MOBILE_COPY_POPOVER_FINGER_GAP_PX = 14;
+// 选区 handle 的 44px 触控热区位于文字外侧；按钮再留 8px，才能真的
+// 不与继续框选的落指区竞争，而不只是避开那个 14px 的视觉圆点。
+const MOBILE_COPY_POPOVER_HANDLE_CLEARANCE_PX = 52;
 
 /**
  * 清洗用户输入，处理各种特殊字符
@@ -663,6 +667,12 @@ function getMobileCopyPopoverPosition(
   clientX: number,
   clientY: number,
   terminalRect: DOMRect,
+  selection?: {
+    terminal: Terminal;
+    anchor: SelectionCell;
+    focus: SelectionCell;
+  },
+  avoidFinger = true,
 ): { left: number; top: number } {
   if (typeof window === 'undefined') {
     return { left: 0, top: 0 };
@@ -675,6 +685,67 @@ function getMobileCopyPopoverPosition(
   const viewportHeight = visualViewport?.height ?? window.innerHeight;
   const safeTop = readDocumentCssPx('--safe-top-inset');
   const safeBottom = readDocumentCssPx('--safe-bottom-inset');
+  const selectionBounds = selection
+    ? selectionCellsToClientBounds(selection.terminal, selection.anchor, selection.focus)
+    : null;
+  const avoid: Array<{ left: number; top: number; right: number; bottom: number }> = [];
+  let preference: {
+    vertical: 'above' | 'below';
+    alignX: number;
+    focusX: number;
+    focusY: number;
+  } | undefined;
+  if (avoidFinger) {
+    // 抬手附近仍可能停着手指；给复制按钮留出比视觉按钮更大的手势净空。
+    avoid.push({ left: clientX - 32, top: clientY - 32, right: clientX + 32, bottom: clientY + 32 });
+  }
+  if (selection) {
+    const metrics = getTerminalGridMetrics(selection.terminal);
+    const { start, end } = orderSelectionEndpoints(
+      selection.anchor,
+      selection.focus,
+      selection.terminal.cols,
+    );
+    const startPoint = cellToClientPoint(selection.terminal, start);
+    const endPoint = cellToClientPoint(selection.terminal, end);
+    if (startPoint) {
+      avoid.push({
+        left: startPoint.x - 24,
+        top: startPoint.y - 48,
+        right: startPoint.x + 24,
+        bottom: startPoint.y + 4,
+      });
+    }
+    if (endPoint && metrics) {
+      const handleY = endPoint.y + metrics.cellH;
+      avoid.push({
+        left: endPoint.x - 24,
+        top: handleY - 4,
+        right: endPoint.x + 24,
+        bottom: handleY + 48,
+      });
+    }
+    if (selectionBounds) {
+      const anchorOffset = selection.anchor.row * selection.terminal.cols + selection.anchor.col;
+      const focusOffset = selection.focus.row * selection.terminal.cols + selection.focus.col;
+      const anchorIsStart = anchorOffset <= focusOffset;
+      const selectionWidth = selectionBounds.right - selectionBounds.left;
+      const sameRow = selection.anchor.row === selection.focus.row;
+      const alignX = sameRow
+        ? anchorIsStart
+          ? selectionBounds.left + selectionWidth * 0.25
+          : selectionBounds.right - selectionWidth * 0.25
+        : (selectionBounds.left + selectionBounds.right) / 2;
+      const focusPoint = cellToClientPoint(selection.terminal, selection.focus);
+      const focusY = focusPoint && metrics ? focusPoint.y + metrics.cellH / 2 : clientY;
+      preference = {
+        vertical: selection.focus.row < selection.anchor.row ? 'below' as const : 'above' as const,
+        alignX,
+        focusX: focusPoint?.x ?? clientX,
+        focusY,
+      };
+    }
+  }
   const clientPosition = clampMobileCopyPopoverPosition({
     clientX,
     clientY,
@@ -689,6 +760,10 @@ function getMobileCopyPopoverPosition(
     height: MOBILE_COPY_POPOVER_HEIGHT_PX,
     margin: MOBILE_COPY_POPOVER_MARGIN_PX,
     fingerGap: MOBILE_COPY_POPOVER_FINGER_GAP_PX,
+    selection: selectionBounds,
+    avoid,
+    preference,
+    selectionGap: MOBILE_COPY_POPOVER_HANDLE_CLEARANCE_PX,
   });
   // The terminal carousel uses transforms, which turn fixed descendants into
   // locally positioned elements. Keep the coordinates explicitly local so the
@@ -957,6 +1032,33 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       });
     }, []);
 
+    const updateMobileCopyPopoverForSelection = React.useCallback((finger?: { x: number; y: number }) => {
+      const term = terminalRef.current;
+      const container = containerRef.current;
+      const session = selectionSessionRef.current;
+      if (!term || !container || !session.active || !session.anchor || !session.focus) return;
+      // 调整过程中按钮完全退场，避免挡住手柄、手指或即将扩展到的区域。
+      if (session.dragging) {
+        dismissMobileCopyPopover();
+        return;
+      }
+      const terminalRect = container.getBoundingClientRect();
+      const fallback = {
+        x: (terminalRect.left + terminalRect.right) / 2,
+        y: (terminalRect.top + terminalRect.bottom) / 2,
+      };
+      showMobileCopyPopover(
+        getMobileCopyPopoverPosition(
+          finger?.x ?? fallback.x,
+          finger?.y ?? fallback.y,
+          terminalRect,
+          { terminal: term, anchor: session.anchor, focus: session.focus },
+          finger !== undefined,
+        ),
+        { persistent: true },
+      );
+    }, [dismissMobileCopyPopover, showMobileCopyPopover]);
+
     // 结束选区会话：隐藏 handle + 复制气泡（选区本身由调用方决定是否
     // clearSelection —— 复制场景里 xterm 已经清过了）。
     const endSelectionSession = React.useCallback(() => {
@@ -975,13 +1077,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       if (!selectionHandles) return;
       const term = terminalRef.current;
       if (!term) return;
-      const scrollSub = term.onScroll(() => updateSelectionHandles());
+      const scrollSub = term.onScroll(() => {
+        updateSelectionHandles();
+        updateMobileCopyPopoverForSelection();
+      });
       const resizeSub = term.onResize(() => endSelectionSession());
       return () => {
         scrollSub.dispose();
         resizeSub.dispose();
       };
-    }, [selectionHandles, updateSelectionHandles, endSelectionSession]);
+    }, [selectionHandles, updateSelectionHandles, updateMobileCopyPopoverForSelection, endSelectionSession]);
 
     React.useEffect(() => {
       if (enableTouchScroll) {
@@ -2348,6 +2453,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             selectionSession.anchor = side === 'start' ? ordered.end : ordered.start;
             selectionSession.focus = side === 'start' ? ordered.start : ordered.end;
             selectionSession.dragging = side;
+            dismissMobileCopyPopover();
             s.pointerId = e.pointerId;
             s.tapStartX = e.clientX;
             s.tapStartY = e.clientY;
@@ -2467,7 +2573,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }, 350);
 
       return true;
-    }, [lpSetGestureLock]);
+    }, [lpSetGestureLock, dismissMobileCopyPopover, endSelectionSession]);
 
     const lp_onPointerMove = React.useCallback((e: PointerEvent, isClaimed: boolean): GestureAction => {
       if (e.pointerType !== 'touch') return 'neutral';
@@ -2646,13 +2752,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           session.focus = finalEnd ?? s.copyStart;
           session.dragging = null;
           updateSelectionHandles();
-          const terminalRect = containerRef.current?.getBoundingClientRect();
-          if (terminalRect) {
-            showMobileCopyPopover(
-              getMobileCopyPopoverPosition(e.clientX, e.clientY, terminalRect),
-              { persistent: true },
-            );
-          }
+          updateMobileCopyPopoverForSelection({ x: e.clientX, y: e.clientY });
           suppressMobileTapFocus(1800);
           hapticVibrate(TERMINAL_HAPTIC_PATTERN_MS);
         } else {
@@ -2676,6 +2776,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // 点「复制」或点选区外结束。
         selectionSessionRef.current.dragging = null;
         updateSelectionHandles();
+        updateMobileCopyPopoverForSelection({ x: e.clientX, y: e.clientY });
         suppressMobileTapFocus(1800);
         s.pointerId = null;
         s.mode = 'idle';
@@ -2718,7 +2819,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       s.copyDidSelect = false;
       s.pointerId = null;
       s.mode = 'idle';
-    }, [lpSetGestureLock, stopAllScroll, suppressMobileTapFocus, lpStopEdgeScroll]);
+    }, [
+      lpSetGestureLock,
+      stopAllScroll,
+      suppressMobileTapFocus,
+      lpStopEdgeScroll,
+      updateSelectionHandles,
+      updateMobileCopyPopoverForSelection,
+    ]);
 
     const lp_onPointerCancel = React.useCallback(() => {
       const s = lpStateRef.current;
@@ -2731,6 +2839,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // 会话保留，仅结束本次拖动
         selectionSessionRef.current.dragging = null;
         updateSelectionHandles();
+        updateMobileCopyPopoverForSelection();
       }
       if (s.holdTimer !== null) { clearTimeout(s.holdTimer); s.holdTimer = null; }
       if (s.joystickRepeatTimer !== null) { clearTimeout(s.joystickRepeatTimer); s.joystickRepeatTimer = null; }
@@ -2741,7 +2850,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       s.pointerId = null;
       s.tapDidMove = false;
       s.mode = 'idle';
-    }, [lpSetGestureLock, lpStopEdgeScroll, updateSelectionHandles]);
+    }, [lpSetGestureLock, lpStopEdgeScroll, updateSelectionHandles, updateMobileCopyPopoverForSelection]);
 
     useGesture({
       name: `long-press:${sessionKey}`,
