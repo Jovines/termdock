@@ -166,11 +166,15 @@ module.exports = {
       : {
           osxSign: {
             identity: signingIdentity,
-            // Executables copied into the main app's Contents/Resources are
-            // signed explicitly by signBundledRuntime above. Do not ignore
-            // Resources folders inside frameworks: Squirrel's ShipIt helper
-            // lives there and must receive Developer ID, timestamp, and runtime.
-            ignore: (filePath) => filePath.includes('/Termdock.app/Contents/Resources/'),
+            // Resource trees are sealed by their owning bundle, while binaries
+            // copied into the main app's Resources are signed by
+            // signBundledRuntime above. ShipIt is the one executable hidden in
+            // a framework Resources tree and must not be skipped.
+            ignore: (filePath) => {
+              const isSquirrelShipIt = filePath.includes('/Squirrel.framework/')
+                && filePath.endsWith('/Resources/ShipIt');
+              return filePath.includes('/Resources/') && !isSquirrelShipIt;
+            },
           },
           ...(notarizeConfig ? { osxNotarize: notarizeConfig } : {}),
         }),
