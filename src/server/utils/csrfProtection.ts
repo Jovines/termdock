@@ -90,8 +90,12 @@ export class CsrfProtection {
   /**
     * Express中间件：验证CSRF令牌
     */
-   verifyMiddleware() {
+  verifyMiddleware(options?: { bypass?: (req: Request) => boolean }) {
      return (req: Request, res: Response, next: NextFunction) => {
+       if (options?.bypass?.(req)) {
+         return next();
+       }
+
        // 跳过安全检查和GET/HEAD/OPTIONS请求
        const safeMethods = ['GET', 'HEAD', 'OPTIONS'];
        if (safeMethods.includes(req.method)) {

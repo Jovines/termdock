@@ -468,13 +468,22 @@ export function createApp(options: AppOptions = {}): express.Express {
     res.json({ home: homedir() });
   });
 
+  // A locally installed Agent/plugin CLI uses the mode-0600 local API token.
+  // Keep this bypass loopback-only: possession of the token must not turn the
+  // LAN-facing terminal API into a bearer-token endpoint.
+  const isTrustedLocalCliRequest = (req: express.Request): boolean => {
+    if (!options.localApiToken || req.header('X-Termdock-Local-Token') !== options.localApiToken) return false;
+    const address = req.socket.remoteAddress ?? '';
+    return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+  };
+
   // 应用鉴权 + CSRF保护（在终端路由之前）
   // The HTML preview route authenticates itself: document requests use the
   // session cookie, then get redirected to a short-lived URL token so the
   // sandboxed iframe's subresource requests (which browsers refuse to send
   // cookies for) can still load images/css/js.
-  app.use('/api/terminal', requireAuth({ bypass: (req) => req.path.startsWith('/fs/preview') }));
-  app.use('/api/terminal', csrfProtection.verifyMiddleware());
+  app.use('/api/terminal', requireAuth({ bypass: (req) => req.path.startsWith('/fs/preview') || isTrustedLocalCliRequest(req) }));
+  app.use('/api/terminal', csrfProtection.verifyMiddleware({ bypass: isTrustedLocalCliRequest }));
 
   // 终端路由
   app.use('/api/terminal', terminalRoutes);

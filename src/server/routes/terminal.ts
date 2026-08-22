@@ -27,6 +27,8 @@ import {
   setAutoRenameNamerSetting,
   getAutoRenameModelsSetting,
   setAutoRenameModelsSetting,
+  getAutoRenameIntervalMinutesSetting,
+  setAutoRenameIntervalMinutesSetting,
 } from '../utils/settings.js';
 import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
@@ -75,6 +77,11 @@ import {
   readPluginIcon,
   validateManifest,
 } from '../agent/plugins.js';
+import {
+  checkPluginPackageUpdate,
+  commitPreparedPlugin,
+  preparePluginPackage,
+} from '../agent/pluginPackages.js';
 import { clearPluginAgents, registerPluginAgents } from '../agent/registry.js';
 import { notifyAgentTransition, notifyTerminalExit } from '../notifications/pushService.js';
 import { setClientViewingSession } from '../notifications/pushViewers.js';
@@ -90,6 +97,7 @@ import {
   cleanTerminalContext,
   generateAgentTitle,
   isNewAgentSessionId,
+  isAutoTitleReevaluationDue,
   shouldReplaceAutoTitle,
 } from '../agent/autoTitle.js';
 import { getTitleNamerCatalog, invalidateTitleNamerCatalog } from '../agent/titleNamerCatalog.js';
@@ -2691,7 +2699,6 @@ function detectSessionAgent(session: TerminalSession): AgentInfo | null {
 }
 
 const AUTO_TITLE_CONTEXT_LIMIT = 24_000;
-const AUTO_TITLE_REEVALUATE_MS = 60 * 60_000;
 const autoTitlePending = new Set<string>();
 
 function appendAutoTitleContext(session: TerminalSession, data: string): void {
@@ -2718,7 +2725,10 @@ async function maybeAutoRenameSession(sessionId: string, agent: AgentInfo, rawCo
 
   const record = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
   if (!record || (record.customName === true && !record.autoTitle)) return;
-  if (record.autoTitle && Date.now() - record.autoTitle.updatedAt < AUTO_TITLE_REEVALUATE_MS) return;
+  if (record.autoTitle && !isAutoTitleReevaluationDue(
+    record.autoTitle.updatedAt,
+    getAutoRenameIntervalMinutesSetting(),
+  )) return;
 
   const context = cleanTerminalContext(rawContext);
   // A new session gets one cheap attempt after its first real exchange. Short
@@ -3120,20 +3130,72 @@ function maybeRefreshGitStatusForAgent(sessionId: string, session: TerminalSessi
  * The command that resumes this pane's last agent conversation, or null.
  * Live state wins; falls back to the persisted last-known record.
  */
-function resolveAgentResumeCommand(sessionId: string, session: TerminalSession): string | null {
-  const liveAgent = session.agent;
-  const live = session.agentSession;
-  if (liveAgent && live?.sessionId) {
-    const cmd = buildResumeCommand(liveAgent, live.sessionId, live.launchArgv);
-    if (cmd) return cmd;
-  }
+interface AgentResumeTarget {
+  slug: string;
+  nativeSessionId: string;
+  command: string;
+}
+
+function resolveAgentResumeTarget(sessionId: string, session: TerminalSession): AgentResumeTarget | null {
+  // Resume always starts a new Agent process. Never offer it while the pane is
+  // still inside an Agent TUI, even when that Agent reports a completed turn.
   if (!isPaneAtShellPrompt(session)) return null;
   const record = globalSessionState.sessions.find((s) => s.backendSessionId === sessionId);
   const persisted = record?.agentResume;
   if (!persisted?.sessionId) return null;
   const agent = agentBySlug(persisted.slug);
   if (!agent) return null;
-  return buildResumeCommand(agent, persisted.sessionId, persisted.launchArgv);
+  const command = buildResumeCommand(agent, persisted.sessionId, persisted.launchArgv);
+  return command ? { slug: agent.slug, nativeSessionId: persisted.sessionId, command } : null;
+}
+
+function findActiveAgentResumeOwner(excludedBackendSessionId: string, target: AgentResumeTarget): string | null {
+  for (const [backendSessionId, candidate] of terminalSessions) {
+    if (backendSessionId === excludedBackendSessionId || candidate.agent?.slug !== target.slug) continue;
+    const record = globalSessionState.sessions.find((entry) => entry.backendSessionId === backendSessionId);
+    const nativeSessionId = candidate.agentSession?.sessionId ?? record?.agentResume?.sessionId ?? null;
+    if (nativeSessionId === target.nativeSessionId) return backendSessionId;
+  }
+  return null;
+}
+
+const codexSessionFileCache = new Map<string, string>();
+
+async function findCodexSessionFile(nativeSessionId: string): Promise<string | null> {
+  const cachedPath = codexSessionFileCache.get(nativeSessionId);
+  if (cachedPath && fs.existsSync(cachedPath)) return cachedPath;
+  if (!/^[a-zA-Z0-9._-]{8,160}$/.test(nativeSessionId)) return null;
+  const root = path.join(os.homedir(), '.codex', 'sessions');
+  const pending = [root];
+  let visited = 0;
+  while (pending.length > 0 && visited < 20_000) {
+    const directory = pending.pop()!;
+    let entries: fs.Dirent[];
+    try { entries = await fs.promises.readdir(directory, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      visited += 1;
+      const candidate = path.join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile() && entry.name.endsWith(`-${nativeSessionId}.jsonl`)) {
+        codexSessionFileCache.set(nativeSessionId, candidate);
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+async function findExternalCodexWriter(target: AgentResumeTarget): Promise<number | null> {
+  if (target.slug !== 'codex' || process.platform !== 'linux') return null;
+  const sessionFile = await findCodexSessionFile(target.nativeSessionId);
+  if (!sessionFile) return null;
+  try {
+    const { stdout } = await execFileAsync('lsof', ['-t', '--', sessionFile], { timeout: 2500, maxBuffer: 64 * 1024 });
+    const pid = stdout.split(/\s+/).map(Number).find((value) => Number.isInteger(value) && value > 1);
+    return pid ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -5177,6 +5239,7 @@ async function getSettingsPayload() {
     autoRenameAgents: getAutoRenameAgentsSetting(),
     autoRenameNamer: getAutoRenameNamerSetting(),
     autoRenameModels: getAutoRenameModelsSetting(),
+    autoRenameIntervalMinutes: getAutoRenameIntervalMinutesSetting(),
     localAccess: {
       ...localAccess,
       interfaces,
@@ -5239,6 +5302,7 @@ router.put('/settings', async (req, res) => {
     const requested = (body.autoRenameAgents as unknown[])
       .filter((slug): slug is string => typeof slug === 'string' && knownSlugs.has(slug));
     setAutoRenameAgentsSetting(requested);
+    invalidateTitleNamerCatalog();
   }
 
   if (typeof body.autoRenameNamer === 'string') {
@@ -5248,6 +5312,7 @@ router.put('/settings', async (req, res) => {
       return;
     }
     setAutoRenameNamerSetting(body.autoRenameNamer);
+    invalidateTitleNamerCatalog();
   }
 
   if (body.autoRenameModels && typeof body.autoRenameModels === 'object') {
@@ -5264,6 +5329,13 @@ router.put('/settings', async (req, res) => {
       models[slug] = model;
     }
     setAutoRenameModelsSetting(models);
+  }
+
+  if (typeof body.autoRenameIntervalMinutes === 'number'
+    && Number.isInteger(body.autoRenameIntervalMinutes)
+    && body.autoRenameIntervalMinutes >= 5
+    && body.autoRenameIntervalMinutes <= 1440) {
+    setAutoRenameIntervalMinutesSetting(body.autoRenameIntervalMinutes);
   }
 
   if (body.localAccess && typeof body.localAccess === 'object') {
@@ -5421,9 +5493,128 @@ router.get('/agent-plugins', (_req, res) => {
       hasResume: p.manifest.resume !== undefined,
       hasTitleNamer: p.manifest.titleNamer !== undefined,
       hasIcon: p.iconPath !== null,
+      sourceType: p.source?.type ?? 'manifest',
+      source: p.source?.source ?? null,
+      revision: p.source?.revision ?? null,
+      latestRevision: p.source?.latestRevision ?? null,
+      checkedAt: p.source?.checkedAt ?? null,
+      updatedAt: p.source?.updatedAt ?? null,
+      updateSupported: Boolean(p.source?.source && p.source.type !== 'manifest'),
+      updateAvailable: Boolean(p.source?.revision && p.source.latestRevision && p.source.revision !== p.source.latestRevision),
     })),
     errors: errors.map((e) => ({ slug: e.slug, errors: e.errors, code: e.code, migration: e.migration })),
   });
+});
+
+function reloadAgentPlugins(): void {
+  invalidateTitleNamerCatalog();
+  clearPluginAgents();
+  registerPluginAgents(loadPlugins().plugins);
+}
+
+router.post('/agent-plugins/install', async (req, res) => {
+  const source = typeof req.body?.source === 'string' ? req.body.source.trim() : '';
+  if (!source) {
+    res.status(400).json({ error: 'Plugin source is required', code: 'AGENT_PLUGIN_SOURCE_REQUIRED' });
+    return;
+  }
+  try {
+    const prepared = await preparePluginPackage(source);
+    const dir = await commitPreparedPlugin(prepared, false);
+    reloadAgentPlugins();
+    res.json({ slug: prepared.manifest.slug, dir, state: 'installed', source: prepared.metadata });
+  } catch (error) {
+    const detail = error as Error & { code?: string; migration?: unknown };
+    res.status(400).json({
+      error: detail.message,
+      code: detail.code ?? 'AGENT_PLUGIN_INSTALL_FAILED',
+      migration: detail.migration,
+    });
+  }
+});
+
+router.post('/agent-plugins/:slug/check-update', async (req, res) => {
+  const plugin = loadPlugins().plugins.find((entry) => entry.manifest.slug === req.params.slug);
+  if (!plugin) {
+    res.status(404).json({ error: `Plugin "${req.params.slug}" not found` });
+    return;
+  }
+  try {
+    res.json(await checkPluginPackageUpdate(plugin));
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message, code: 'AGENT_PLUGIN_UPDATE_CHECK_FAILED' });
+  }
+});
+
+router.post('/agent-plugins/:slug/update', async (req, res) => {
+  const slug = req.params.slug;
+  const plugin = loadPlugins().plugins.find((entry) => entry.manifest.slug === slug);
+  if (!plugin) {
+    res.status(404).json({ error: `Plugin "${slug}" not found` });
+    return;
+  }
+  if (!plugin.source?.source || plugin.source.type === 'manifest') {
+    res.status(400).json({ error: 'This plugin has no update source', code: 'AGENT_PLUGIN_UPDATE_UNSUPPORTED' });
+    return;
+  }
+
+  let prepared: Awaited<ReturnType<typeof preparePluginPackage>> | null = null;
+  let oldHooksRemoved = false;
+  let committed = false;
+  try {
+    // Download and validate the complete replacement before touching the live
+    // package or its currently installed hooks.
+    prepared = await preparePluginPackage(plugin.source.source, slug);
+    const hooksChanged = JSON.stringify(plugin.manifest.hooks ?? null) !== JSON.stringify(prepared.manifest.hooks ?? null);
+    const titleCapabilityChanged = JSON.stringify(plugin.manifest.titleNamer ?? null) !== JSON.stringify(prepared.manifest.titleNamer ?? null);
+    const hookState = (await listAllHookAgents()).find((entry) => entry.slug === slug)?.state;
+    const restoreHooks = hookState === 'installed' || hookState === 'outdated';
+    if (restoreHooks && plugin.manifest.hooks) {
+      await uninstallHooksForSlug(slug);
+      oldHooksRemoved = true;
+    }
+    const dir = await commitPreparedPlugin(prepared, true);
+    prepared = null;
+    committed = true;
+    reloadAgentPlugins();
+    let hookWarning: string | null = null;
+    if (restoreHooks && hooksChanged) {
+      hookWarning = 'Hook declarations changed during update. Review them, then install hooks again.';
+    } else if (restoreHooks) {
+      try {
+        await installHooksForSlug(slug);
+      } catch (error) {
+        hookWarning = (error as Error).message;
+      }
+    }
+    let titleWarning: string | null = null;
+    if (titleCapabilityChanged) {
+      setAutoRenameAgentsSetting(getAutoRenameAgentsSetting().filter((entry) => entry !== slug));
+      if (getAutoRenameNamerSetting() === slug) setAutoRenameNamerSetting('auto');
+      const models = getAutoRenameModelsSetting();
+      delete models[slug];
+      setAutoRenameModelsSetting(models);
+      invalidateTitleNamerCatalog();
+      titleWarning = 'Title command declarations changed during update. Automatic titles for this plugin were disabled; review and enable them again.';
+    }
+    res.json({
+      slug,
+      dir,
+      state: 'updated',
+      source: loadPlugins().plugins.find((entry) => entry.manifest.slug === slug)?.source,
+      hookWarning,
+      titleWarning,
+    });
+  } catch (error) {
+    if (prepared) await prepared.cleanup().catch(() => undefined);
+    if (oldHooksRemoved && !committed) await installHooksForSlug(slug).catch(() => undefined);
+    const detail = error as Error & { code?: string; migration?: unknown };
+    res.status(400).json({
+      error: detail.message,
+      code: detail.code ?? 'AGENT_PLUGIN_UPDATE_FAILED',
+      migration: detail.migration,
+    });
+  }
 });
 
 router.post('/agent-plugins', async (req, res) => {
@@ -5451,10 +5642,7 @@ router.post('/agent-plugins', async (req, res) => {
       return;
     }
     const dir = savePlugin(validation.manifest);
-    invalidateTitleNamerCatalog();
-    clearPluginAgents();
-    const loaded = loadPlugins();
-    registerPluginAgents(loaded.plugins);
+    reloadAgentPlugins();
     res.json({ slug: validation.manifest.slug, dir, state: 'created' });
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
@@ -5974,7 +6162,7 @@ router.post('/:sessionId/input', express.text({ type: '*/*' }), (req, res) => {
  * bracketed paste. Refused while an agent turn is in flight — pasting a
  * resume into a busy TUI would corrupt its input.
  */
-router.post('/:sessionId/agent-resume', (req, res) => {
+router.post('/:sessionId/agent-resume', async (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
 
@@ -5987,15 +6175,31 @@ router.post('/:sessionId/agent-resume', (req, res) => {
     return res.status(409).json({ error: 'agent is busy; wait for the turn to finish' });
   }
 
-  const command = resolveAgentResumeCommand(sessionId, session);
-  if (!command) {
+  const target = resolveAgentResumeTarget(sessionId, session);
+  if (!target) {
     return res.status(404).json({ error: 'no resumable agent session for this pane' });
+  }
+  const activeOwner = findActiveAgentResumeOwner(sessionId, target);
+  if (activeOwner) {
+    return res.status(409).json({
+      error: 'this agent session is already open in another terminal',
+      code: 'AGENT_SESSION_ACTIVE_ELSEWHERE',
+      activeBackendSessionId: activeOwner,
+    });
+  }
+  const activeWriterPid = await findExternalCodexWriter(target);
+  if (activeWriterPid) {
+    return res.status(409).json({
+      error: 'this Codex thread already has an active writer',
+      code: 'AGENT_SESSION_ACTIVE_ELSEWHERE',
+      activeWriterPid,
+    });
   }
 
   try {
-    session.ptyProcess.write(buildBracketedSubmitBytes(command));
+    session.ptyProcess.write(buildBracketedSubmitBytes(target.command));
     session.lastActivity = Date.now();
-    res.json({ success: true, command });
+    res.json({ success: true, command: target.command });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: errorMessage || 'Failed to write to terminal' });
@@ -6003,17 +6207,26 @@ router.post('/:sessionId/agent-resume', (req, res) => {
 });
 
 /** Whether this pane has a resumable agent conversation (for the UI affordance). */
-router.get('/:sessionId/agent-resume', (req, res) => {
+router.get('/:sessionId/agent-resume', async (req, res) => {
   const { sessionId } = req.params;
   const session = terminalSessions.get(sessionId);
 
   if (!session) {
     return res.status(404).json({ error: 'Terminal session not found' });
   }
-  const command = resolveAgentResumeCommand(sessionId, session);
+  const target = resolveAgentResumeTarget(sessionId, session);
   const busy = !!(session.agent && session.agentSession
     && (session.agentSession.status === 'working' || session.agentSession.status === 'waiting'));
-  res.json({ available: command !== null, command, busy });
+  const activeBackendSessionId = target ? findActiveAgentResumeOwner(sessionId, target) : null;
+  const activeWriterPid = target && !activeBackendSessionId ? await findExternalCodexWriter(target) : null;
+  res.json({
+    available: target !== null && activeBackendSessionId === null && activeWriterPid === null,
+    command: target?.command ?? null,
+    busy,
+    conflict: activeBackendSessionId || activeWriterPid ? 'active-elsewhere' : null,
+    activeBackendSessionId,
+    activeWriterPid,
+  });
 });
 
 router.post('/:sessionId/resize', async (req, res) => {
