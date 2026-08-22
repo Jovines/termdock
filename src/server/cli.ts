@@ -152,6 +152,7 @@ interface CliOptions {
   pluginListJson: boolean;
   pluginCheck?: string;
   pluginUpdate?: string;
+  pluginDoctor?: { slug: string; json: boolean };
   pluginHooks?: { slug: string; action: 'install' | 'uninstall' };
   pluginRemove?: string;
   agentEvent?: { slug: string; event: string; status?: string };
@@ -250,6 +251,8 @@ Options:
                      Check the installed plugin source for updates
   --plugin-update <slug>
                      Update a plugin package from its recorded source
+  --plugin-doctor <slug>
+                     Probe one plugin's title/model integration
   --plugin-hooks <slug> <install|uninstall>
                      Manage the Agent-native hook entries for a plugin
   --plugin-remove <slug>
@@ -273,6 +276,8 @@ Short commands:
                      Check one plugin for updates
   plugin-update <slug>
                      Update one plugin from its recorded source
+  plugin-doctor <slug> [--json]
+                     Validate title capability and dynamically probe models
   plugin-hooks <slug> <install|uninstall>
                      Install or uninstall only that plugin's Agent hooks
   plugin-remove <slug>
@@ -632,6 +637,7 @@ function parseArgs(argv: string[]): CliOptions {
   let pluginListJson = false;
   let pluginCheck: string | undefined;
   let pluginUpdate: string | undefined;
+  let pluginDoctor: { slug: string; json: boolean } | undefined;
   let pluginHooks: { slug: string; action: 'install' | 'uninstall' } | undefined;
   let pluginRemove: string | undefined;
   let agentEvent: { slug: string; event: string; status?: string } | undefined;
@@ -748,6 +754,9 @@ function parseArgs(argv: string[]): CliOptions {
     } else if (command === 'pupdate' || command === 'plugin-update') {
       pluginUpdate = next && !next.startsWith('-') ? next : '';
       argv = argv.slice(pluginUpdate ? 2 : 1);
+    } else if (command === 'pdoctor' || command === 'plugin-doctor') {
+      pluginDoctor = { slug: next && !next.startsWith('-') ? next : '', json: argv[2] === '--json' };
+      argv = argv.slice(pluginDoctor.slug ? (pluginDoctor.json ? 3 : 2) : 1);
     } else if (command === 'phooks' || command === 'plugin-hooks') {
       const action = argv[2];
       if (next && (action === 'install' || action === 'uninstall')) {
@@ -991,19 +1000,22 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
-    if (arg === '--plugin-install' || arg === '--plugin-check' || arg === '--plugin-update') {
+    if (arg === '--plugin-install' || arg === '--plugin-check' || arg === '--plugin-update' || arg === '--plugin-doctor') {
       const next = argv[index + 1];
       if (next && !next.startsWith('-')) {
         if (arg === '--plugin-install') pluginInstall = next;
         else if (arg === '--plugin-check') pluginCheck = next;
-        else pluginUpdate = next;
-        index += 1;
+        else if (arg === '--plugin-update') pluginUpdate = next;
+        else pluginDoctor = { slug: next, json: argv[index + 2] === '--json' };
+        index += pluginDoctor?.json && arg === '--plugin-doctor' ? 2 : 1;
       } else if (arg === '--plugin-install') {
         pluginInstall = '';
       } else if (arg === '--plugin-check') {
         pluginCheck = '';
-      } else {
+      } else if (arg === '--plugin-update') {
         pluginUpdate = '';
+      } else {
+        pluginDoctor = { slug: '', json: false };
       }
       continue;
     }
@@ -1084,6 +1096,7 @@ function parseArgs(argv: string[]): CliOptions {
     pluginListJson,
     pluginCheck,
     pluginUpdate,
+    pluginDoctor,
     pluginHooks,
     pluginRemove,
     agentEvent,
@@ -1980,7 +1993,8 @@ const AGENT_PLUGIN_EXAMPLE = {
   },
   titleNamer: {
     command: 'my-agent',
-    args: ['title', '--json', '--prompt', '{prompt}', '--model={model}'],
+    modelArgs: ['--model', '{model}'],
+    args: ['title', '--json', '--prompt', '{prompt}'],
     models: {
       command: 'my-agent',
       args: ['models', '--json'],
@@ -1999,6 +2013,7 @@ function runPluginInitJson(): void {
       installPackage: 'td plugin-install https://github.com/owner/repository',
       checkUpdate: 'td plugin-check <slug>',
       updatePackage: 'td plugin-update <slug>',
+      doctor: 'td plugin-doctor <slug> --json',
       emit: 'td agent-event <slug> <event> [status]',
       inspect: 'td plugin-list --json',
       hooks: 'td plugin-hooks <slug> <install|uninstall>',
@@ -2028,6 +2043,14 @@ function runPluginInitJson(): void {
       titleCommands: 'Installing or inspecting a plugin never executes its title/model commands. They run only after the user enables automatic titles for that plugin.',
       updates: 'Changes to hook or title command declarations revoke the corresponding prior opt-in.',
     },
+    titleModelContract: {
+      noCatalog: 'If titleNamer.models is absent or yields no recommendation, Termdock omits modelArgs and uses the Agent CLI default model.',
+      optionalArguments: 'Put every model-only flag/value in titleNamer.modelArgs. The complete group is prepended only when a model is selected.',
+      acceptedOutput: 'A JSON array or {models, recommendedModel}. Entries may use id, name, or model; optional fields: displayName/display_name, description, isDefault/is_default, isEconomical/is_economical.',
+      automaticSelection: 'Top-level recommendedModel, then the first isEconomical model, then the first isDefault model; otherwise omit modelArgs and use the CLI default. Termdock never guesses price from names or descriptions.',
+      adapters: 'Use command: node plus {pluginDir}/scripts/list-models.mjs when the native CLI output needs normalization. Never hardcode a model catalog.',
+      verify: 'Run td plugin-doctor <slug> --json. This explicit command probes models but never spends a title-generation request.',
+    },
     migrationV1: {
       errorCode: 'AGENT_PLUGIN_MANIFEST_V1_UNSUPPORTED',
       guideCommand: 'td agent-plugin --json',
@@ -2046,6 +2069,8 @@ function runPluginInitJson(): void {
       'If the Agent hook format is not a Claude-style hooks map, configure native hooks to call td agent-event directly.',
       'Map the completed-turn hook to event "stop"; this is also the automatic-title trigger when the user enables titles for the Agent.',
       'Optionally declare titleNamer so this Agent can generate titles and dynamically publish its own model catalog.',
+      'Put optional model flags in titleNamer.modelArgs; keep the always-present prompt invocation in titleNamer.args.',
+      'Run td plugin-doctor <slug> --json and fix every warning before sharing the repository.',
       'Tell the user that enabling a plugin title provider executes that plugin\'s declared CLI; installation alone never does.',
       'Run td plugin-list to verify registration.',
     ],
@@ -2159,10 +2184,12 @@ ${c.dim('───────────────────')}
   ${c.dim('// ── optional: injectable automatic-title provider ──')}
   "titleNamer": {
     ${c.dim('// No shell expansion. Commands run only after the user enables this title provider.')}
-    ${c.dim('// {prompt} is required; a bare {model} arg is omitted when automatic.')}
+    ${c.dim('// modelArgs is an all-or-nothing group and is omitted for CLI-default mode.')}
     "command": "trae",
-    "args": ["title", "--prompt", "{prompt}", "--model={model}"],
-    ${c.dim('// Must print JSON: strings or {id, displayName, description, isDefault} objects.')}
+    "modelArgs": ["--model", "{model}"],
+    "args": ["title", "--prompt", "{prompt}"],
+    ${c.dim('// JSON array or {models,recommendedModel}; id/name/model are accepted.')}
+    ${c.dim('// Use node + {pluginDir}/scripts/... when native fields need conversion.')}
     "models": { "command": "trae", "args": ["models", "--json"] }
   }
 }
@@ -2198,6 +2225,7 @@ ${c.dim('──────────────────')}
   ${c.dim('# Manage the package and its hooks independently')}
   td plugin-check trae
   td plugin-update trae
+  td plugin-doctor trae --json
   td plugin-hooks trae install
 
   ${c.dim('# Remove')}
@@ -2359,6 +2387,44 @@ async function runPluginSourceAction(slug: string, action: 'check-update' | 'upd
     console.log(`${ICON.ok} ${c.green(`Plugin "${slug}" updated.`)}`);
     if (body.hookWarning) console.log(`${ICON.warn} ${c.yellow(`Hooks need attention: ${body.hookWarning}`)}`);
     if (body.titleWarning) console.log(`${ICON.warn} ${c.yellow(`Title commands need attention: ${body.titleWarning}`)}`);
+  }
+}
+
+async function runPluginDoctor(slug: string, json = false): Promise<void> {
+  const { baseUrl, token } = requireRunningServer();
+  const response = await postLocalJson(baseUrl, token, `/api/terminal/agent-plugins/${encodeURIComponent(slug)}/doctor`, {});
+  const body = JSON.parse(response.body || '{}') as {
+    error?: string | null;
+    slug?: string;
+    displayName?: string;
+    hasTitleNamer?: boolean;
+    hasModelCommand?: boolean;
+    status?: string;
+    models?: Array<{ id: string; displayName: string; description: string; isDefault: boolean; isEconomical?: boolean }>;
+    recommendedModel?: string | null;
+    selectionBehavior?: string;
+    warnings?: string[];
+    nextSteps?: string[];
+  };
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    console.error(`${ICON.err} ${c.red(body.error ?? 'Plugin diagnosis failed')}`);
+    process.exit(1);
+  }
+  if (json) {
+    console.log(JSON.stringify(body, null, 2));
+  } else {
+    const ok = body.status === 'ok' || body.status === 'cli-default';
+    console.log(`${ok ? ICON.ok : ICON.warn} ${ok ? c.green(body.displayName ?? slug) : c.yellow(body.displayName ?? slug)} ${c.dim(`(${body.status ?? 'unknown'})`)}`);
+    console.log(`  ${c.dim('Title provider:')} ${body.hasTitleNamer ? 'yes' : 'no'}`);
+    console.log(`  ${c.dim('Model probe:')} ${body.hasModelCommand ? `${body.models?.length ?? 0} usable model(s)` : 'not declared; CLI default'}`);
+    if (body.recommendedModel) console.log(`  ${c.dim('Automatic model:')} ${c.cyan(body.recommendedModel)}`);
+    if (body.selectionBehavior) console.log(`  ${c.dim('Behavior:')} ${body.selectionBehavior}`);
+    if (body.error) console.log(`  ${c.red('Error:')} ${body.error}`);
+    for (const warning of body.warnings ?? []) console.log(`  ${ICON.warn} ${c.yellow(warning)}`);
+    for (const step of body.nextSteps ?? []) console.log(`  ${c.dim('Next:')} ${step}`);
+  }
+  if (body.status === 'missing-title-namer' || body.status === 'probe-failed' || body.status === 'no-models') {
+    process.exitCode = 1;
   }
 }
 
@@ -3478,6 +3544,15 @@ async function main(): Promise<void> {
     }
     await runPluginSourceAction(options.pluginUpdate, 'update');
     process.exit(0);
+  }
+
+  if (options.pluginDoctor) {
+    if (!options.pluginDoctor.slug) {
+      console.error(`${ICON.err} ${c.red('plugin-doctor requires a plugin slug')}`);
+      process.exit(1);
+    }
+    await runPluginDoctor(options.pluginDoctor.slug, options.pluginDoctor.json);
+    process.exit(process.exitCode ?? 0);
   }
 
   if (options.pluginHooks) {

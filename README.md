@@ -199,6 +199,7 @@ td plugin-install https://github.com/owner/my-agent-termdock-plugin
 td plugin-list --json
 td plugin-check my-agent
 td plugin-update my-agent
+td plugin-doctor my-agent --json
 td plugin-hooks my-agent install
 td plugin-hooks my-agent uninstall
 td plugin-remove my-agent
@@ -207,6 +208,28 @@ td plugin-remove my-agent
 `plugin-install/update/remove` 管理完整插件包；`plugin-hooks` 只管理写入 Agent 原生配置文件的 Termdock hook 条目，两者生命周期互相独立。设置界面提供相同操作。
 
 安全上，安装插件只会注册声明式能力，不会自动安装 hooks，也不会因打开设置页就执行插件的模型探测命令。只有用户启用该插件的自动标题后，才会调用它声明的 CLI。插件 hook 目标必须是用户目录内、不经过符号链接的 JSON 文件；实际 hook 命令由 Termdock 生成，插件不能注入任意 shell。仍应只安装你信任且审查过的仓库。
+
+自动标题插件必须区分“始终传入的参数”和“选中模型后才传入的整组参数”。例如 TraeX 使用 `-c model="..."` 时：
+
+```json
+{
+  "titleNamer": {
+    "command": "traecli",
+    "modelArgs": ["-c", "model=\"{model}\""],
+    "args": ["-p", "{prompt}"],
+    "models": {
+      "command": "node",
+      "args": ["{pluginDir}/scripts/list-models.mjs"]
+    }
+  }
+}
+```
+
+`modelArgs` 是一个原子参数组：用户或 Termdock 选中模型时整组前置，没有模型时整组省略，此时明确使用 Agent CLI 默认模型。模型命令可输出 JSON 数组，也可输出 `{ "models": [...], "recommendedModel": "..." }`；模型 ID 字段支持 `id` / `name` / `model`，并可选提供 `displayName`、`description`、`isDefault` 和 `isEconomical`。原生 CLI 字段仍无法匹配时，用 `{pluginDir}` 内的脚本实时转换，禁止硬编码模型列表。
+
+自动选择顺序是：插件顶层 `recommendedModel` → 第一个 `isEconomical: true` → 第一个 `isDefault: true` → 不传模型并使用 Agent CLI 默认值。Termdock 不再根据模型名称或说明猜测价格；用户手动选择始终优先于自动选择。
+
+`td plugin-doctor <slug> --json` 会显式运行一次模型探测，报告 `titleNamer`、可用模型数、自动选择结果、被忽略字段和修复建议；它不会调用付费的标题生成命令。
 
 开发本地插件时可直接传目录；旧的 manifest-only 命令仍可使用：
 
