@@ -63,8 +63,10 @@ export interface PluginResumeConfig {
 export interface PluginTitleNamerConfig {
   /** Executable used to generate a title (no shell expansion). */
   command: string;
-  /** Arguments; must include {prompt}. {model} is omitted when unset. */
+  /** Always-present arguments; must include {prompt}. */
   args: string[];
+  /** Argument group prepended only when a model is selected. */
+  modelArgs?: string[];
   /** Optional CLI command that prints a JSON array of model descriptors. */
   models?: {
     command: string;
@@ -446,6 +448,7 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
       const n = m.titleNamer as Record<string, unknown>;
       const command = n.command;
       const args = n.args;
+      const modelArgs = n.modelArgs;
       if (typeof command !== 'string' || command.trim().length === 0 || command.length > 1024) {
         errors.push('titleNamer.command is required');
       }
@@ -453,6 +456,15 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
         || !args.every((arg) => typeof arg === 'string' && arg.length <= 16_384)
         || !args.some((arg) => arg.includes('{prompt}'))) {
         errors.push('titleNamer.args must be a string array containing {prompt}');
+      }
+      if (modelArgs !== undefined && (!Array.isArray(modelArgs) || modelArgs.length === 0 || modelArgs.length > 32
+        || !modelArgs.every((arg) => typeof arg === 'string' && arg.length <= 4096)
+        || !modelArgs.some((arg) => arg.includes('{model}')))) {
+        errors.push('titleNamer.modelArgs must be a non-empty string array containing {model} if provided');
+      }
+      if (Array.isArray(modelArgs) && Array.isArray(args)
+        && args.some((arg) => typeof arg === 'string' && arg.includes('{model}'))) {
+        errors.push('put {model} in titleNamer.modelArgs or args, not both');
       }
       let models: PluginTitleNamerConfig['models'];
       if (n.models !== undefined) {
@@ -476,7 +488,12 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
         }
       }
       if (typeof command === 'string' && Array.isArray(args)) {
-        titleNamer = { command: command.trim(), args: args as string[], models };
+        titleNamer = {
+          command: command.trim(),
+          args: args as string[],
+          modelArgs: Array.isArray(modelArgs) ? modelArgs as string[] : undefined,
+          models,
+        };
       }
     }
   }

@@ -84,6 +84,20 @@ describe('plugin validation', () => {
       ...provider,
       titleNamer: { ...provider.titleNamer, args: ['title'] },
     }, '/tmp/test')).toHaveProperty('error');
+
+    const atomicModelArgs = {
+      ...TEST_PLUGIN,
+      titleNamer: {
+        command: 'test-agent',
+        modelArgs: ['-c', 'model="{model}"'],
+        args: ['-p', '{prompt}'],
+      },
+    };
+    expect(validateManifest(atomicModelArgs, '/tmp/test')).toHaveProperty('manifest');
+    expect(validateManifest({
+      ...atomicModelArgs,
+      titleNamer: { ...atomicModelArgs.titleNamer, args: ['-p', '{prompt}', '{model}'] },
+    }, '/tmp/test')).toHaveProperty('error');
   });
 
   it('returns an AI-ready migration diagnostic for manifest v1', () => {
