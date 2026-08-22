@@ -29,6 +29,8 @@ export interface SettingsDoc {
   autoRenameNamer: string;
   /** Per-CLI model choices. Missing means use that CLI's current default. */
   autoRenameModels: Record<string, string>;
+  /** Minimum delay before an existing automatic title may be reconsidered. */
+  autoRenameIntervalMinutes: number;
   updatedAt: number;
 }
 
@@ -86,7 +88,7 @@ function normalizeContextDraftHeight(value: unknown): { mobile: number | null; d
 
 function normalizeSettings(value: unknown): SettingsDoc {
   const raw = value && typeof value === 'object'
-    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; autoRenameAgents?: unknown; autoRenameNamer?: unknown; autoRenameModels?: unknown; updatedAt?: unknown }
+    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; autoRenameAgents?: unknown; autoRenameNamer?: unknown; autoRenameModels?: unknown; autoRenameIntervalMinutes?: unknown; updatedAt?: unknown }
     : {};
   const autoRenameAgents = Array.isArray(raw.autoRenameAgents)
     ? [...new Set(raw.autoRenameAgents
@@ -112,6 +114,12 @@ function normalizeSettings(value: unknown): SettingsDoc {
           && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(entry[1])
         )))
       : {},
+    autoRenameIntervalMinutes: typeof raw.autoRenameIntervalMinutes === 'number'
+      && Number.isInteger(raw.autoRenameIntervalMinutes)
+      && raw.autoRenameIntervalMinutes >= 5
+      && raw.autoRenameIntervalMinutes <= 1440
+      ? raw.autoRenameIntervalMinutes
+      : 10,
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -268,6 +276,16 @@ export function setAutoRenameNamerSetting(namer: string): SettingsDoc {
 
 export function getAutoRenameModelsSetting(): Record<string, string> {
   return { ...loadSettings().autoRenameModels };
+}
+
+export function getAutoRenameIntervalMinutesSetting(): number {
+  return loadSettings().autoRenameIntervalMinutes;
+}
+
+export function setAutoRenameIntervalMinutesSetting(minutes: number): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.autoRenameIntervalMinutes = Math.max(5, Math.min(1440, Math.round(minutes)));
+  });
 }
 
 export function setAutoRenameModelsSetting(models: Record<string, string>): SettingsDoc {

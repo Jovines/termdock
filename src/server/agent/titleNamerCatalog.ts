@@ -4,11 +4,24 @@ import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
 import { loadPlugins, type PluginTitleNamerConfig } from './plugins.js';
+import { getAutoRenameAgentsSetting, getAutoRenameNamerSetting } from '../utils/settings.js';
 
 const execFileAsync = promisify(execFile);
 const CACHE_FRESH_MS = 24 * 60 * 60_000;
 const PROBE_TIMEOUT_MS = 10_000;
 const CACHE_FILE = path.join(os.homedir(), '.termdock', 'title-namer-catalog.json');
+
+function pluginCommandEnv(): NodeJS.ProcessEnv {
+  const allowed = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TERM', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME'];
+  const env: NodeJS.ProcessEnv = { NO_COLOR: '1', TERM: 'dumb' };
+  for (const key of allowed) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith('LC_') && value !== undefined) env[key] = value;
+  }
+  return env;
+}
 
 export interface TitleNamerModel {
   id: string;
@@ -189,13 +202,22 @@ function normalizeDiscoveredModels(input: unknown): TitleNamerModel[] {
   });
 }
 
-async function listPluginModels(config: PluginTitleNamerConfig): Promise<TitleNamerModel[]> {
+function expandPluginPath(value: string, pluginDir: string): string {
+  return value.replaceAll('{pluginDir}', pluginDir);
+}
+
+async function listPluginModels(config: PluginTitleNamerConfig, pluginDir: string): Promise<TitleNamerModel[]> {
   if (!config.models) return [];
-  const { stdout } = await execFileAsync(config.models.command, config.models.args ?? [], {
+  const { stdout } = await execFileAsync(
+    expandPluginPath(config.models.command, pluginDir),
+    (config.models.args ?? []).map((arg) => expandPluginPath(arg, pluginDir)),
+    {
     timeout: PROBE_TIMEOUT_MS,
     maxBuffer: 256 * 1024,
-    env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
-  });
+    cwd: pluginDir,
+    env: pluginCommandEnv(),
+    },
+  );
   return normalizeDiscoveredModels(JSON.parse(stdout));
 }
 
@@ -205,13 +227,24 @@ function pluginTitleNamers() {
       slug: plugin.manifest.slug,
       displayName: plugin.manifest.displayName,
       config: plugin.manifest.titleNamer,
+      dir: plugin.dir,
     }]
     : []);
+}
+
+export function shouldRunPluginTitleCommands(slug: string, selected: string, enabledAgents: string[]): boolean {
+  return selected === slug
+    || (selected === 'auto' && enabledAgents.includes(slug));
+}
+
+function isPluginTitleExecutionEnabled(slug: string): boolean {
+  return shouldRunPluginTitleCommands(slug, getAutoRenameNamerSetting(), getAutoRenameAgentsSetting());
 }
 
 export async function runTitleNamer(slug: string, prompt: string, model?: string): Promise<string | null> {
   let command: string;
   let args: string[];
+  let cwd: string | undefined;
   if (slug === 'codex') {
     command = 'codex';
     args = ['exec', '--ephemeral', '--skip-git-repo-check', '--color', 'never', ...(model ? ['--model', model] : []), prompt];
@@ -220,18 +253,20 @@ export async function runTitleNamer(slug: string, prompt: string, model?: string
     args = [...(model ? ['--model', model] : []), '--no-session-persistence', '-p', prompt];
   } else {
     const provider = pluginTitleNamers().find((entry) => entry.slug === slug);
-    if (!provider) return null;
-    command = provider.config.command;
+    if (!provider || !isPluginTitleExecutionEnabled(slug)) return null;
+    cwd = provider.dir;
+    command = expandPluginPath(provider.config.command, provider.dir);
     args = provider.config.args.flatMap((arg) => {
       if (arg.includes('{model}') && !model) return [];
-      return [arg.replaceAll('{prompt}', prompt).replaceAll('{model}', model ?? '')];
+      return [expandPluginPath(arg, provider.dir).replaceAll('{prompt}', prompt).replaceAll('{model}', model ?? '')];
     });
   }
   try {
     const { stdout } = await execFileAsync(command, args, {
       timeout: 45_000,
       maxBuffer: 256 * 1024,
-      env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
+      cwd,
+      env: cwd ? pluginCommandEnv() : { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
     });
     return stdout;
   } catch {
@@ -246,7 +281,9 @@ async function refreshTitleNamerCatalog(): Promise<TitleNamerInfo[]> {
   const [codex, claude, ...pluginResults] = await Promise.allSettled([
     listCodexModels(),
     listClaudeModels(),
-    ...plugins.map((provider) => listPluginModels(provider.config)),
+    ...plugins.map((provider) => provider.config.models && isPluginTitleExecutionEnabled(provider.slug)
+      ? listPluginModels(provider.config, provider.dir)
+      : Promise.resolve([])),
   ]);
   const previousCodex = cached?.value.find((namer) => namer.slug === 'codex');
   const previousClaude = cached?.value.find((namer) => namer.slug === 'claude');

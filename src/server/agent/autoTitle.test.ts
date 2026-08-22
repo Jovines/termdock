@@ -4,6 +4,7 @@ import {
   buildAutoTitlePrompt,
   cleanTerminalContext,
   isNewAgentSessionId,
+  isAutoTitleReevaluationDue,
   normalizeGeneratedTitle,
   resolveTitleNamerOrder,
   shouldReplaceAutoTitle,
@@ -49,5 +50,13 @@ describe('agent auto titles', () => {
     expect(isNewAgentSessionId('old-id', 'new-id')).toBe(true);
     expect(isNewAgentSessionId('same-id', 'same-id')).toBe(false);
     expect(isNewAgentSessionId(null, 'new-id')).toBe(false);
+  });
+
+  it('uses the configurable title re-evaluation interval with a five-minute floor', () => {
+    const now = 1_000_000;
+    expect(isAutoTitleReevaluationDue(now - 9 * 60_000, 10, now)).toBe(false);
+    expect(isAutoTitleReevaluationDue(now - 10 * 60_000, 10, now)).toBe(true);
+    expect(isAutoTitleReevaluationDue(now - 4 * 60_000, 1, now)).toBe(false);
+    expect(isAutoTitleReevaluationDue(now - 5 * 60_000, 1, now)).toBe(true);
   });
 });

@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { parseClaudeSupportedModels, recommendTitleModel } from './titleNamerCatalog.js';
+import { parseClaudeSupportedModels, recommendTitleModel, shouldRunPluginTitleCommands } from './titleNamerCatalog.js';
 
 describe('title namer catalog', () => {
+  it('does not authorize plugin commands merely because the package is installed', () => {
+    expect(shouldRunPluginTitleCommands('orbit', 'auto', [])).toBe(false);
+    expect(shouldRunPluginTitleCommands('orbit', 'codex', ['orbit'])).toBe(false);
+    expect(shouldRunPluginTitleCommands('orbit', 'orbit', [])).toBe(true);
+    expect(shouldRunPluginTitleCommands('orbit', 'auto', ['orbit'])).toBe(true);
+  });
+
   it('extracts the current provider model list from Claude CLI validation', () => {
     const models = parseClaudeSupportedModels(
       'The supported API model names are small-fast, balanced.v2, and strong:latest, but you passed invalid.',

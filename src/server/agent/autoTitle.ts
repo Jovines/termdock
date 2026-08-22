@@ -84,6 +84,14 @@ export function isNewAgentSessionId(previous: string | null, next: string | null
   return Boolean(previous && next && previous !== next);
 }
 
+export function isAutoTitleReevaluationDue(
+  updatedAt: number,
+  intervalMinutes: number,
+  now = Date.now(),
+): boolean {
+  return now - updatedAt >= Math.max(5, intervalMinutes) * 60_000;
+}
+
 export async function generateAgentTitle(
   sessionAgentSlug: string,
   agentName: string,
