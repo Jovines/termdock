@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
   showConnectionCenter: (): Promise<void> => ipcRenderer.invoke('desktop:show-connection-center'),
   revealDataDirectory: (): Promise<void> => ipcRenderer.invoke('desktop:reveal-data-directory'),
   openNotificationSettings: (): Promise<void> => ipcRenderer.invoke('desktop:open-notification-settings'),
+  prepareNotificationTest: (): Promise<void> => ipcRenderer.invoke('desktop:prepare-notification-test'),
   showNotification: (payload: {
     title: string;
     body?: string;

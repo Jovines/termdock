@@ -380,6 +380,9 @@ export type TranslationDictionary = {
     pinFile: string;
     unpinFile: string;
     moreFileActions: string;
+    deleteFile: string;
+    deleteFileConfirm: (params: TranslatorParams) => string;
+    deleteFileFailed: (params: TranslatorParams) => string;
     noWorkingDir: string;
     emptyDir: string;
     noMatchingFiles: string;

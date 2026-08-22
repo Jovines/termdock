@@ -1812,19 +1812,12 @@ function App() {
     setPwaNotificationsEnabled(true);
     setStoredPwaNotificationsEnabled(true);
     await syncPwaPushSubscription(true, true);
-    setNotificationTestStatus('checking');
-    const delivered = await showPwaNotification({
-      title: 'Termdock',
-      body: t('settings.notificationsTestBody'),
-      tag: 'termdock-notifications-enabled',
-      requireHidden: false,
-      data: { url: '/' },
-    });
-    setNotificationTestStatus(delivered ? 'delivered' : 'failed');
-  }, [pwaNotificationsEnabled, t]);
+    setNotificationTestStatus('idle');
+  }, [pwaNotificationsEnabled]);
 
   const handleTestNotification = useCallback(async () => {
     setNotificationTestStatus('checking');
+    await getTermdockDesktopBridge()?.prepareNotificationTest?.();
     const delivered = await showPwaNotification({
       title: 'Termdock',
       body: t('settings.notificationsTestBody'),

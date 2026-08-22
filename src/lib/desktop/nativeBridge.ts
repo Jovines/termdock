@@ -49,6 +49,7 @@ export interface TermdockDesktopBridge {
   showConnectionCenter(): Promise<void>;
   revealDataDirectory(): Promise<void>;
   openNotificationSettings?(): Promise<void>;
+  prepareNotificationTest?(): Promise<void>;
   showNotification(payload: DesktopNotificationPayload): Promise<boolean>;
   onNativeFileDrop(
     callback: (payload: NativeFileDropPayload) => void,

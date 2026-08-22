@@ -533,7 +533,6 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         tag: `agent:${sessionId}`,
         dedupKey: `agent:${sessionId}:waiting:${nextActivity}`,
         data: { url: '/', sessionId },
-        requireHidden: false,
         deferToPush: true,
       });
       return;
@@ -546,7 +545,6 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         tag: `agent:${sessionId}`,
         dedupKey: `agent:${sessionId}:done:${nextActivity}`,
         data: { url: '/', sessionId },
-        requireHidden: false,
         deferToPush: true,
       });
       return;
@@ -559,7 +557,6 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         tag: `agent:${sessionId}`,
         dedupKey: `agent:${sessionId}:exited:${nextActivity}`,
         data: { url: '/', sessionId },
-        requireHidden: false,
         deferToPush: true,
       });
     }

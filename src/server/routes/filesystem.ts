@@ -14,6 +14,7 @@ import { clearBranchAuditRecords, clearChangeAuditRecords, listBranchAuditRecord
 import { getLanIPv4Addresses } from '../utils/localAccess.js';
 import { inspectBinaryFile } from '../utils/binaryFile.js';
 import { GitApplyError, HUNK_APPLY_MODES, runGitApply, validateHunkPatch, type HunkApplyMode } from '../utils/hunkApply.js';
+import { deleteFilesystemFile } from '../utils/deleteFilesystemFile.js';
 
 const router = Router();
 
@@ -3591,6 +3592,29 @@ router.get('/download', async (req: Request, res: Response) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     res.status(403).json({ error: message });
+  }
+});
+
+// Delete one file after an explicit client confirmation. Directories are never
+// removed by this endpoint; symbolic links are unlinked without following them.
+router.delete('/file', async (req: Request, res: Response) => {
+  try {
+    const requestedPath = req.query.path as string;
+    if (!requestedPath) {
+      res.status(400).json({ error: 'Missing path parameter' });
+      return;
+    }
+    if (req.query.confirm !== 'true') {
+      res.status(400).json({ error: 'File deletion requires confirmation', code: 'CONFIRMATION_REQUIRED' });
+      return;
+    }
+
+    const deletedPath = await deleteFilesystemFile(requestedPath);
+    res.json({ ok: true, path: deletedPath });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : undefined;
+    res.status(code === 'ENOENT' ? 404 : message === 'Path is not a file' ? 400 : 403).json({ error: message, code });
   }
 });
 

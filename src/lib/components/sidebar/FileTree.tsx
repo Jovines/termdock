@@ -15,9 +15,10 @@ import {
   Link2 as RiLink,
   Download as RiDownload,
   Check as RiCheck,
+  Trash2 as RiTrash,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
-import { cancelIoSlot, listDirectory, searchFilesStream, downloadFile, isPreviewableModel3dPath, isPreviewableVideoPath, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, listDirectory, searchFilesStream, downloadFile, deleteFile, isPreviewableModel3dPath, isPreviewableVideoPath, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 
@@ -197,6 +198,8 @@ interface FileTreeItemProps {
   selectedFilePath: string | null;
   queryLower: string;
   onDirectoryDropFiles?: (path: string, files: File[]) => void;
+  onFileDeleteRequest: (node: FileTreeNode) => void;
+  deletingFilePath: string | null;
 }
 
 const FileTreeItem = memo(function FileTreeItem({
@@ -217,6 +220,8 @@ const FileTreeItem = memo(function FileTreeItem({
   selectedFilePath,
   queryLower,
   onDirectoryDropFiles,
+  onFileDeleteRequest,
+  deletingFilePath,
 }: FileTreeItemProps) {
   const { t } = useI18n();
   // 精确订阅：每个节点只关心和自己相关的字段
@@ -243,6 +248,7 @@ const FileTreeItem = memo(function FileTreeItem({
   const referenceText = getReferenceText?.(node.path) ?? node.path;
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
   const { state: fileDownloadState, run: runFileDownload } = useFileDownloadAction();
+  const isDeleting = deletingFilePath === node.path;
 
   const visibleChildren = useMemo(() => {
     if (!children) return undefined;
@@ -322,6 +328,12 @@ const FileTreeItem = memo(function FileTreeItem({
     setActionsOpen(false);
     void runFileDownload(node.path);
   }, [node.path, runFileDownload]);
+
+  const handleFileDelete = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    setActionsOpen(false);
+    onFileDeleteRequest(node);
+  }, [node, onFileDeleteRequest]);
 
   const handleOpenInFileBrowser = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
@@ -462,10 +474,10 @@ const FileTreeItem = memo(function FileTreeItem({
         {!isDirectory && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={fileDownloadState.status === 'error' ? fileDownloadState.message ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
           >
-            {fileDownloadState.status === 'pending' ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
+            {fileDownloadState.status === 'pending' || isDeleting ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
           </span>
         )}
         {onPathReference && (
@@ -552,6 +564,16 @@ const FileTreeItem = memo(function FileTreeItem({
               <span className="min-w-0 flex-1 truncate">{isPinned ? t('fileTree.unpinFile') : t('fileTree.pinFile')}</span>
             </button>
           )}
+          <button
+            type="button"
+            onClick={handleFileDelete}
+            disabled={isDeleting}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-destructive transition hover:bg-destructive/10 active:scale-[0.99] disabled:opacity-50"
+            title={t('fileTree.deleteFile')}
+          >
+            {isDeleting ? <RiLoader size={13} className="shrink-0 animate-spin" /> : <RiTrash size={13} className="shrink-0" />}
+            <span className="min-w-0 flex-1 truncate">{t('fileTree.deleteFile')}</span>
+          </button>
         </div>
       )}
 
@@ -577,6 +599,8 @@ const FileTreeItem = memo(function FileTreeItem({
               insertedReferenceKey={insertedReferenceKey}
               copiedReferenceKey={copiedReferenceKey}
               onDirectoryDropFiles={onDirectoryDropFiles}
+              onFileDeleteRequest={onFileDeleteRequest}
+              deletingFilePath={deletingFilePath}
             />
           ))}
         </div>
@@ -599,6 +623,8 @@ interface FileSearchResultItemProps {
   onFilePinToggle?: (path: string) => void;
   pinnedPaths: Set<string>;
   selectedFilePath: string | null;
+  onFileDeleteRequest: (node: FileTreeNode) => void;
+  deletingFilePath: string | null;
 }
 
 const FileSearchResultItem = memo(function FileSearchResultItem({
@@ -615,6 +641,8 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   onFilePinToggle,
   pinnedPaths,
   selectedFilePath,
+  onFileDeleteRequest,
+  deletingFilePath,
 }: FileSearchResultItemProps) {
   const { t } = useI18n();
   const isSelected = node.path === selectedFilePath;
@@ -629,6 +657,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const { state: fileDownloadState, run: runFileDownload } = useFileDownloadAction();
   const [actionsOpen, setActionsOpen] = useState(false);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
+  const isDeleting = deletingFilePath === node.path;
 
   const handleClick = useCallback(() => {
     if (hasNativeTextSelection()) return;
@@ -658,6 +687,12 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
     setActionsOpen(false);
     void runFileDownload(node.path);
   }, [node.path, runFileDownload]);
+
+  const handleFileDelete = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    setActionsOpen(false);
+    onFileDeleteRequest(node);
+  }, [node, onFileDeleteRequest]);
 
   const handleDirectoryMoreClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
@@ -736,10 +771,10 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         {!isDirectory && (
           <span
             onClick={handleDirectoryMoreClick}
-            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
+            className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen || fileDownloadState.status === 'pending' || isDeleting || isPinned)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : isPinned ? 'bg-primary/15 text-primary' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
             title={fileDownloadState.status === 'error' ? fileDownloadState.message ?? t('rightSidebar.downloadFailed') : t('fileTree.moreFileActions')}
           >
-            {fileDownloadState.status === 'pending' ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
+            {fileDownloadState.status === 'pending' || isDeleting ? <RiLoader size={13} className="animate-spin" /> : <RiMoreHorizontal size={13} />}
           </span>
         )}
         {onPathReference && (
@@ -805,6 +840,16 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
               <span className="min-w-0 flex-1 truncate">{isPinned ? t('fileTree.unpinFile') : t('fileTree.pinFile')}</span>
             </button>
           )}
+          <button
+            type="button"
+            onClick={handleFileDelete}
+            disabled={isDeleting}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-destructive transition hover:bg-destructive/10 active:scale-[0.99] disabled:opacity-50"
+            title={t('fileTree.deleteFile')}
+          >
+            {isDeleting ? <RiLoader size={13} className="shrink-0 animate-spin" /> : <RiTrash size={13} className="shrink-0" />}
+            <span className="min-w-0 flex-1 truncate">{t('fileTree.deleteFile')}</span>
+          </button>
         </div>
       )}
     </div>
@@ -966,9 +1011,29 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
   const [searchMeta, setSearchMeta] = useState<{ truncated: boolean; total: number; engine: FileSearchEngine; limited: boolean; done: boolean } | null>(null);
   const [visibleSearchCount, setVisibleSearchCount] = useState(SEARCH_INITIAL_VISIBLE);
   const [contentEntries, setContentEntries] = useState<FileContentSearchEntry[]>([]);
+  const [deletingFilePath, setDeletingFilePath] = useState<string | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const queryLower = query.trim().toLowerCase();
   const isContentMode = searchMode === 'content';
+
+  const handleFileDeleteRequest = useCallback(async (node: FileTreeNode) => {
+    if (deletingFilePath || node.type === 'directory') return;
+    if (!window.confirm(t('fileTree.deleteFileConfirm', { name: node.name }))) return;
+
+    setDeletingFilePath(node.path);
+    try {
+      await deleteFile(node.path);
+      useSidebarStore.getState().applyFileWatchEvents([{ type: 'deleted', path: node.path }]);
+      setSearchEntries((entries) => entries.filter((entry) => entry.path !== node.path));
+      setContentEntries((entries) => entries.filter((entry) => entry.path !== node.path));
+      if (pinnedPaths.has(node.path)) onFilePinToggle?.(node.path);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      window.alert(t('fileTree.deleteFileFailed', { message }));
+    } finally {
+      setDeletingFilePath(null);
+    }
+  }, [deletingFilePath, onFilePinToggle, pinnedPaths, t]);
 
   // Load root directory
   useEffect(() => {
@@ -1247,6 +1312,8 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
                 selectedFilePath={selectedFilePath}
                 insertedReferenceKey={insertedReferenceKey}
                 copiedReferenceKey={copiedReferenceKey}
+                onFileDeleteRequest={handleFileDeleteRequest}
+                deletingFilePath={deletingFilePath}
               />
             ))}
             <div ref={loadMoreRef} className="py-2 text-center text-[11px] text-muted-foreground">
@@ -1321,6 +1388,8 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
           insertedReferenceKey={insertedReferenceKey}
           copiedReferenceKey={copiedReferenceKey}
           onDirectoryDropFiles={onDirectoryDropFiles}
+          onFileDeleteRequest={handleFileDeleteRequest}
+          deletingFilePath={deletingFilePath}
         />
       ))}
     </div>

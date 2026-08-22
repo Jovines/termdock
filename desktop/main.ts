@@ -939,6 +939,10 @@ function installIpcHandlers(): void {
       'x-apple.systempreferences:com.apple.Notifications-Settings.extension?bundleId=com.jovines.termdock',
     );
   });
+  ipcMain.handle('desktop:prepare-notification-test', (event) => {
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (sourceWindow && !sourceWindow.isDestroyed()) sourceWindow.minimize();
+  });
   ipcMain.handle('desktop:show-notification', (event, payload: {
     title?: unknown;
     body?: unknown;
@@ -948,6 +952,11 @@ function installIpcHandlers(): void {
     persistent?: unknown;
   }) => {
     if (!Notification.isSupported() || typeof payload?.title !== 'string') return false;
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    // The renderer also suppresses automatic notifications while focused, but
+    // enforce the rule in the native process as well so a focus race can never
+    // produce a foreground sound, Notification Center entry, or Dock badge.
+    if (sourceWindow?.isFocused()) return true;
     // Web Notification tag semantics: a new notification with the same tag
     // replaces the previous one instead of stacking.
     const tag = typeof payload.tag === 'string' && payload.tag ? payload.tag : null;
@@ -969,7 +978,6 @@ function installIpcHandlers(): void {
         if (activeNotifications.get(tag) === notification) activeNotifications.delete(tag);
       });
     }
-    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
     notification.on('click', () => {
       const targetWindow = sourceWindow && !sourceWindow.isDestroyed()
         ? sourceWindow

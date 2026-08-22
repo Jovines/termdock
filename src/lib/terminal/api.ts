@@ -2328,6 +2328,21 @@ export async function downloadFile(filePath: string): Promise<void> {
   }, 4000);
 }
 
+export async function deleteFile(filePath: string): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const params = new URLSearchParams({ path: filePath, confirm: 'true' });
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/file?${params}`,
+    { method: 'DELETE', headers: { 'X-XSRF-TOKEN': csrfTokenHeader } },
+    FS_REQUEST_TIMEOUT_MS,
+    'File deletion took too long.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to delete file' }));
+    throw new Error(error.error || 'Failed to delete file');
+  }
+}
+
 export async function uploadFiles(dir: string, files: File[], signal?: AbortSignal): Promise<{ files: { name: string; path: string; size: number }[] }> {
   const formData = new FormData();
   for (const file of files) {
