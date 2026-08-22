@@ -33,6 +33,8 @@ export interface SettingsDoc {
   autoRenameIntervalMinutes: number;
   /** Optional user preferences appended to Termdock's built-in title prompt. */
   autoRenamePromptPreference: string;
+  /** Total characters of raw prompt-submit payloads retained for title generation. */
+  autoRenamePromptPayloadChars: number;
   updatedAt: number;
 }
 
@@ -90,7 +92,7 @@ function normalizeContextDraftHeight(value: unknown): { mobile: number | null; d
 
 function normalizeSettings(value: unknown): SettingsDoc {
   const raw = value && typeof value === 'object'
-    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; autoRenameAgents?: unknown; autoRenameNamer?: unknown; autoRenameModels?: unknown; autoRenameIntervalMinutes?: unknown; autoRenamePromptPreference?: unknown; updatedAt?: unknown }
+    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; autoRenameAgents?: unknown; autoRenameNamer?: unknown; autoRenameModels?: unknown; autoRenameIntervalMinutes?: unknown; autoRenamePromptPreference?: unknown; autoRenamePromptPayloadChars?: unknown; updatedAt?: unknown }
     : {};
   const autoRenameAgents = Array.isArray(raw.autoRenameAgents)
     ? [...new Set(raw.autoRenameAgents
@@ -125,6 +127,12 @@ function normalizeSettings(value: unknown): SettingsDoc {
     autoRenamePromptPreference: typeof raw.autoRenamePromptPreference === 'string'
       ? raw.autoRenamePromptPreference.trim().slice(0, 2000)
       : '',
+    autoRenamePromptPayloadChars: typeof raw.autoRenamePromptPayloadChars === 'number'
+      && Number.isInteger(raw.autoRenamePromptPayloadChars)
+      && raw.autoRenamePromptPayloadChars >= 1000
+      && raw.autoRenamePromptPayloadChars <= 64_000
+      ? raw.autoRenamePromptPayloadChars
+      : 12_000,
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -300,6 +308,16 @@ export function getAutoRenamePromptPreferenceSetting(): string {
 export function setAutoRenamePromptPreferenceSetting(preference: string): SettingsDoc {
   return updateSettings((settings) => {
     settings.autoRenamePromptPreference = preference.trim().slice(0, 2000);
+  });
+}
+
+export function getAutoRenamePromptPayloadCharsSetting(): number {
+  return loadSettings().autoRenamePromptPayloadChars;
+}
+
+export function setAutoRenamePromptPayloadCharsSetting(chars: number): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.autoRenamePromptPayloadChars = Math.max(1000, Math.min(64_000, Math.round(chars)));
   });
 }
 

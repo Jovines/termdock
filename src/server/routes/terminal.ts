@@ -31,6 +31,8 @@ import {
   setAutoRenameIntervalMinutesSetting,
   getAutoRenamePromptPreferenceSetting,
   setAutoRenamePromptPreferenceSetting,
+  getAutoRenamePromptPayloadCharsSetting,
+  setAutoRenamePromptPayloadCharsSetting,
 } from '../utils/settings.js';
 import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
@@ -106,6 +108,7 @@ import {
   shouldReplaceAutoTitle,
 } from '../agent/autoTitle.js';
 import { getTitleNamerCatalog, invalidateTitleNamerCatalog, probePluginTitleNamer } from '../agent/titleNamerCatalog.js';
+import { RenderedTerminalContext } from '../agent/renderedTerminalContext.js';
 
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -251,8 +254,12 @@ interface TerminalSession {
   // only while an agent is detected in the foreground.
   agent: AgentInfo | null;
   agentSession: AgentSessionState | null;
-  /** Recent output from the current agent turn, bounded and used only when auto-title is enabled. */
+  /** Rendered terminal text from the current agent turn, including bounded scrollback. */
   autoTitleContext: string;
+  /** Headless terminal that collapses transient redraws before they reach title generation. */
+  autoTitleTerminal: RenderedTerminalContext;
+  /** Raw prompt-submit hook payloads, bounded per Agent session. */
+  autoTitlePromptPayloads: string[];
   /** One delayed first-title attempt for an agent turn that has not emitted stop yet. */
   autoTitleLongRunningTimer: ReturnType<typeof setTimeout> | null;
   /** Allows stop to refine the provisional title without waiting for the normal refresh interval. */
@@ -2711,11 +2718,43 @@ function detectSessionAgent(session: TerminalSession): AgentInfo | null {
   return null;
 }
 
-const AUTO_TITLE_CONTEXT_LIMIT = 24_000;
 const autoTitlePending = new Set<string>();
 
-function appendAutoTitleContext(session: TerminalSession, data: string): void {
-  session.autoTitleContext = (session.autoTitleContext + data).slice(-AUTO_TITLE_CONTEXT_LIMIT);
+function appendAutoTitleContext(sessionId: string, session: TerminalSession, data: string, schedule: boolean): void {
+  session.autoTitleTerminal.write(data, (rendered) => {
+    session.autoTitleContext = rendered;
+    if (schedule) maybeScheduleLongRunningAutoTitle(sessionId, session);
+  });
+}
+
+function appendAutoTitlePromptPayload(session: TerminalSession, payload: string): void {
+  const maxChars = getAutoRenamePromptPayloadCharsSetting();
+  const bounded = payload.slice(0, maxChars).trim();
+  if (!bounded || session.autoTitlePromptPayloads.at(-1) === bounded) return;
+  session.autoTitlePromptPayloads.push(bounded);
+  session.autoTitlePromptPayloads = session.autoTitlePromptPayloads.slice(-12);
+  while (session.autoTitlePromptPayloads.length > 1
+    && session.autoTitlePromptPayloads.join('\n').length > maxChars) {
+    session.autoTitlePromptPayloads.shift();
+  }
+}
+
+function getBoundedAutoTitlePromptPayloads(session: TerminalSession): string[] {
+  const maxChars = getAutoRenamePromptPayloadCharsSetting();
+  const selected: string[] = [];
+  let used = 0;
+  for (let index = session.autoTitlePromptPayloads.length - 1; index >= 0; index -= 1) {
+    const payload = session.autoTitlePromptPayloads[index]!.slice(0, maxChars);
+    const separatorChars = selected.length > 0 ? 1 : 0;
+    if (used + separatorChars + payload.length > maxChars) continue;
+    selected.unshift(payload);
+    used += separatorChars + payload.length;
+  }
+  return selected;
+}
+
+async function resolveAutoTitleContext(session: TerminalSession): Promise<string> {
+  return cleanTerminalContext(await session.autoTitleTerminal.snapshot());
 }
 
 function clearAutoTitleForNewAgentSession(sessionId: string, session: TerminalSession): void {
@@ -2724,6 +2763,8 @@ function clearAutoTitleForNewAgentSession(sessionId: string, session: TerminalSe
   const next: PersistedClientSession = { ...record, customName: undefined, autoTitle: null };
   upsertGlobalSessionRecord(next);
   session.autoTitleContext = '';
+  session.autoTitleTerminal.reset();
+  session.autoTitlePromptPayloads = [];
   if (next.mode === 'tmux' && next.tmuxSessionName) {
     void unsetTmuxOption(next.tmuxSessionName, '@termdock-friendly-name');
   }
@@ -2735,7 +2776,7 @@ function clearAutoTitleForNewAgentSession(sessionId: string, session: TerminalSe
 async function maybeAutoRenameSession(
   sessionId: string,
   agent: AgentInfo,
-  rawContext: string,
+  session: TerminalSession,
   options: { forceReevaluation?: boolean } = {},
 ): Promise<boolean> {
   if (autoTitlePending.has(sessionId)) return false;
@@ -2748,13 +2789,16 @@ async function maybeAutoRenameSession(
     getAutoRenameIntervalMinutesSetting(),
   )) return false;
 
-  const context = cleanTerminalContext(rawContext);
+  const context = await resolveAutoTitleContext(session);
+  const promptSubmitPayloads = getBoundedAutoTitlePromptPayloads(session);
   // A new session gets one cheap attempt after its first real exchange. Short
   // conversations ("hi" plus a brief reply) are still valid sessions; the
   // one-hour re-evaluation guard below keeps this from becoming noisy after a
   // title exists.
   if (context.length < AUTO_TITLE_MIN_CONTEXT_CHARS) return false;
-  const contentHash = createHash('sha256').update(context).digest('hex');
+  const contentHash = createHash('sha256')
+    .update(JSON.stringify({ context, promptSubmitPayloads }))
+    .digest('hex');
   if (record.autoTitle?.contentHash === contentHash) return false;
 
   autoTitlePending.add(sessionId);
@@ -2777,6 +2821,7 @@ async function maybeAutoRenameSession(
       models: validModels,
       currentTitle: record.autoTitle ? record.name : undefined,
       userPreference: getAutoRenamePromptPreferenceSetting(),
+      promptSubmitPayloads,
     });
     if (!title) return false;
 
@@ -2848,12 +2893,12 @@ function maybeScheduleLongRunningAutoTitle(sessionId: string, session: TerminalS
     )) return;
     const current = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
     if (!current || current.autoTitle || current.customName === true) return;
-    void maybeAutoRenameSession(sessionId, agent, liveSession.autoTitleContext).then((generated) => {
+    void maybeAutoRenameSession(sessionId, agent, liveSession).then((generated) => {
       if (!generated || terminalSessions.get(sessionId) !== liveSession) return;
       const completedWhileNaming = liveSession.agentSession?.status === 'done'
         || liveSession.agentSession?.status === 'idle';
       if (completedWhileNaming) {
-        void maybeAutoRenameSession(sessionId, agent, liveSession.autoTitleContext, { forceReevaluation: true });
+        void maybeAutoRenameSession(sessionId, agent, liveSession, { forceReevaluation: true });
         return;
       }
       liveSession.autoTitleGeneratedMidTurn = true;
@@ -3094,6 +3139,7 @@ function applyAgentSignals(
     if (event.kind === 'session-start') {
       session.autoTitleObservedPrompt = false;
       session.autoTitleTurnActive = false;
+      session.autoTitlePromptPayloads = [];
     }
     if (event.kind === 'prompt-submit') {
       // Before the first automatic title, keep accumulating short turns until
@@ -3102,11 +3148,13 @@ function applyAgentSignals(
       const persisted = globalSessionState.sessions.find((item) => item.backendSessionId === sessionId);
       if (!session.autoTitleObservedPrompt || persisted?.autoTitle) {
         session.autoTitleContext = '';
+        session.autoTitleTerminal.reset();
       }
       cancelLongRunningAutoTitle(session);
       session.autoTitleGeneratedMidTurn = false;
       session.autoTitleObservedPrompt = true;
       session.autoTitleTurnActive = true;
+      if (event.promptPayload) appendAutoTitlePromptPayload(session, event.promptPayload);
     }
     applyAgentEvent(state, event);
     if (event.kind === 'stop') {
@@ -3160,7 +3208,7 @@ function applyAgentSignals(
     session.autoTitleGeneratedMidTurn = false;
     // Let the current PTY chunk reach the rolling context before reading it.
     setTimeout(() => {
-      void maybeAutoRenameSession(sessionId, agent, session.autoTitleContext, { forceReevaluation });
+      void maybeAutoRenameSession(sessionId, agent, session, { forceReevaluation });
     }, 250).unref?.();
   }
 }
@@ -4114,6 +4162,7 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   session.dataDisposable?.dispose();
   session.exitDisposable?.dispose();
   cancelLongRunningAutoTitle(session);
+  session.autoTitleTerminal.dispose();
   lastAgentStatusSnapshots.delete(sessionId);
   lastGitStatusSnapshots.delete(sessionId);
   destroyTmuxControl(session.tmuxControl);
@@ -4218,6 +4267,7 @@ function applyPtyResize(
   }
   session.cols = cleanCols;
   session.rows = cleanRows;
+  session.autoTitleTerminal.resize(cleanCols, cleanRows);
   session.lastActivity = Date.now();
   if (changed) {
     markTmuxClientsForScreenSync(sessionId, session);
@@ -4470,9 +4520,8 @@ function processSessionOutput(sessionId: string, session: TerminalSession, data:
       }
   } catch { /* sniff failure should never block data */ }
 
+  appendAutoTitleContext(sessionId, session, data, opts.broadcast);
   if (opts.broadcast) {
-    appendAutoTitleContext(session, data);
-    maybeScheduleLongRunningAutoTitle(sessionId, session);
     broadcastEvent(sessionId, seq !== undefined ? { type: 'data', data, seq } : { type: 'data', data });
   }
 }
@@ -4664,6 +4713,8 @@ async function spawnTerminalSession(req: express.Request, input: {
     agent: null,
     agentSession: null,
     autoTitleContext: '',
+    autoTitleTerminal: new RenderedTerminalContext(cols, rows),
+    autoTitlePromptPayloads: [],
     autoTitleLongRunningTimer: null,
     autoTitleGeneratedMidTurn: false,
     autoTitleObservedPrompt: false,
@@ -4752,6 +4803,8 @@ async function adoptPtyHostSessions(): Promise<void> {
       agent: null,
       agentSession: null,
       autoTitleContext: '',
+      autoTitleTerminal: new RenderedTerminalContext(meta.cols, meta.rows),
+      autoTitlePromptPayloads: [],
       autoTitleLongRunningTimer: null,
       autoTitleGeneratedMidTurn: false,
       autoTitleObservedPrompt: false,
@@ -5336,6 +5389,7 @@ async function getSettingsPayload() {
     autoRenameModels: getAutoRenameModelsSetting(),
     autoRenameIntervalMinutes: getAutoRenameIntervalMinutesSetting(),
     autoRenamePromptPreference: getAutoRenamePromptPreferenceSetting(),
+    autoRenamePromptPayloadChars: getAutoRenamePromptPayloadCharsSetting(),
     localAccess: {
       ...localAccess,
       interfaces,
@@ -5436,6 +5490,13 @@ router.put('/settings', async (req, res) => {
 
   if (typeof body.autoRenamePromptPreference === 'string' && body.autoRenamePromptPreference.length <= 2000) {
     setAutoRenamePromptPreferenceSetting(body.autoRenamePromptPreference);
+  }
+
+  if (typeof body.autoRenamePromptPayloadChars === 'number'
+    && Number.isInteger(body.autoRenamePromptPayloadChars)
+    && body.autoRenamePromptPayloadChars >= 1000
+    && body.autoRenamePromptPayloadChars <= 64_000) {
+    setAutoRenamePromptPayloadCharsSetting(body.autoRenamePromptPayloadChars);
   }
 
   if (body.localAccess && typeof body.localAccess === 'object') {
