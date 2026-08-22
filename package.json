@@ -27,7 +27,7 @@
     "build:desktop": "node scripts/prepare-desktop-tokens.mjs && tsc -p tsconfig.desktop.json",
     "desktop:dev": "npm run build && npm run build:desktop && electron-forge start",
     "desktop:prepare": "npm run build && npm run build:desktop && node scripts/prepare-desktop-runtime.mjs",
-    "desktop:make": "npm run desktop:prepare && electron-forge make",
+    "desktop:make": "node scripts/ensure-macos-appdmg.mjs && npm run desktop:prepare && electron-forge make",
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json && node -e \"require('fs').chmodSync('dist/server/cli.js', 0o755)\"",
     "build:runtime-manifest": "node scripts/generate-runtime-manifest.mjs",
