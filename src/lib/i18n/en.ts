@@ -729,6 +729,8 @@ export const en: TranslationDictionary = {
     detachHint: 'Close this tab only and keep the tmux session running.',
     destroySession: 'Destroy',
     destroySessionHint: 'Kill the tmux session and all processes inside it.',
+    dragToDestroy: 'Drag here to destroy',
+    releaseToDestroy: 'Release to destroy',
   },
   agent: {
     aiRunning: 'AI running',

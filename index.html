@@ -122,8 +122,8 @@
     
     <!-- Preload the unified terminal font pack. First paint may wait for these,
          but PWA/cache hits keep later launches and new sessions stable. -->
-    <link rel="preload" href="/fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf" as="font" type="font/ttf" crossorigin="anonymous">
-    <link rel="preload" href="/fonts/JetBrainsMonoNLNerdFontMono-Bold.ttf" as="font" type="font/ttf" crossorigin="anonymous">
+    <link rel="preload" href="/fonts/JetBrainsMonoNLNerdFontMono-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="/fonts/JetBrainsMonoNLNerdFontMono-Bold.woff2" as="font" type="font/woff2" crossorigin="anonymous">
     <link rel="preload" href="/fonts/TermdockStarSymbol-Subset.woff2" as="font" type="font/woff2" crossorigin="anonymous">
 
     <!-- Self-hosted terminal fonts.
@@ -138,28 +138,28 @@
          fallback/tofu 跳到完整图标。 */
       @font-face {
         font-family: 'Termdock Mono';
-        src: url('/fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf') format('truetype');
+        src: url('/fonts/JetBrainsMonoNLNerdFontMono-Regular.woff2') format('woff2');
         font-weight: 400;
         font-style: normal;
         font-display: block;
       }
       @font-face {
         font-family: 'Termdock Mono';
-        src: url('/fonts/JetBrainsMonoNLNerdFontMono-Bold.ttf') format('truetype');
+        src: url('/fonts/JetBrainsMonoNLNerdFontMono-Bold.woff2') format('woff2');
         font-weight: 700;
         font-style: normal;
         font-display: block;
       }
       @font-face {
         font-family: 'Termdock Mono';
-        src: url('/fonts/JetBrainsMonoNLNerdFontMono-Italic.ttf') format('truetype');
+        src: url('/fonts/JetBrainsMonoNLNerdFontMono-Italic.woff2') format('woff2');
         font-weight: 400;
         font-style: italic;
         font-display: block;
       }
       @font-face {
         font-family: 'Termdock Mono';
-        src: url('/fonts/JetBrainsMonoNLNerdFontMono-BoldItalic.ttf') format('truetype');
+        src: url('/fonts/JetBrainsMonoNLNerdFontMono-BoldItalic.woff2') format('woff2');
         font-weight: 700;
         font-style: italic;
         font-display: block;

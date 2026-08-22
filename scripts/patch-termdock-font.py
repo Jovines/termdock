@@ -119,7 +119,7 @@ def main() -> int:
     aliases = {parse_cp(k): parse_cp(v) for k, v in config.get('aliases', {}).items()}
     total = 0
     for weight in WEIGHTS:
-        path = FONT_DIR / f'JetBrainsMonoNLNerdFontMono-{weight}.ttf'
+        path = FONT_DIR / f'JetBrainsMonoNLNerdFontMono-{weight}.woff2'
         if not path.exists():
             print(f'missing font: {path}', file=sys.stderr)
             return 1

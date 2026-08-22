@@ -746,6 +746,8 @@ export type TranslationDictionary = {
     detachHint: string;
     destroySession: string;
     destroySessionHint: string;
+    dragToDestroy: string;
+    releaseToDestroy: string;
   };
   agent: {
     aiRunning: string;

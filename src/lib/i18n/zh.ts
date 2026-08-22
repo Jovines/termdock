@@ -729,6 +729,8 @@ export const zh: TranslationDictionary = {
     detachHint: '仅关闭当前标签，保持 tmux 会话继续运行。',
     destroySession: '销毁',
     destroySessionHint: '终止 tmux 会话及其中的所有进程。',
+    dragToDestroy: '拖到此处销毁',
+    releaseToDestroy: '松手销毁',
   },
   agent: {
     aiRunning: 'AI 运行中',

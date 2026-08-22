@@ -33,7 +33,7 @@ import {
   FolderOpen as RiFolderOpenLine,
   Cable as RiLinkLine,
 } from 'lucide-react';
-import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
+import { DragDropContext, Droppable, Draggable, type DragStart, type DragUpdate, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { useTerminalSettings } from './lib/hooks/useTerminalSettings';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
@@ -84,6 +84,7 @@ import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuilti
 import type { TermdockColorTheme } from './lib/terminal/theme';
 import { getTermdockDesktopBridge, type DesktopAppUpdateState, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
 import type { SplitLayout, SplitWorkspaceSummary } from './lib/terminal/splitWorkspaces';
+import { MOBILE_SESSION_DESTROY_DROPPABLE_ID, isMobileSessionDestroyDrop } from './lib/terminal/mobileSessionDestroy';
 
 // Cache keys for app-level lazy data fetched from the server. 缓存只是"上次看到"的
 // 快照，每次启动还是会发 HTTP 校准；命中时让 UI 不再闪烁默认值 → 自定义值。
@@ -710,6 +711,9 @@ function App() {
   const [tabMenuAnchor, setTabMenuAnchor] = useState<{ x: number; y: number } | null>(null);
   const [renamePopupAnchor, setRenamePopupAnchor] = useState<{ x: number; y: number } | null>(null);
   const [tabCopiedHint, setTabCopiedHint] = useState<string | null>(null);
+  const [mobileDraggedSessionId, setMobileDraggedSessionId] = useState<string | null>(null);
+  const [mobileDestroyTargetActive, setMobileDestroyTargetActive] = useState(false);
+  const mobileDestroyTargetActiveRef = useRef(false);
   const [sidebarCloseChoiceSessionId, setSidebarCloseChoiceSessionId] = useState<string | null>(null);
   const [sidebarCloseAnchor, setSidebarCloseAnchor] = useState<{ x: number; y: number } | null>(null);
   const renameInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -1445,13 +1449,42 @@ function App() {
     }));
   }, [sessions]);
 
+  const handleSessionDragStart = useCallback((start: DragStart) => {
+    if (isDesktopViewport || start.type !== 'session') return;
+    mobileDestroyTargetActiveRef.current = false;
+    setMobileDestroyTargetActive(false);
+    setMobileDraggedSessionId(start.draggableId);
+  }, [isDesktopViewport]);
+
+  const handleSessionDragUpdate = useCallback((update: DragUpdate) => {
+    if (isDesktopViewport || update.type !== 'session') return;
+    const isOverTarget = update.destination?.droppableId === MOBILE_SESSION_DESTROY_DROPPABLE_ID;
+    if (isOverTarget === mobileDestroyTargetActiveRef.current) return;
+    mobileDestroyTargetActiveRef.current = isOverTarget;
+    setMobileDestroyTargetActive(isOverTarget);
+    if (isOverTarget) navigator.vibrate?.(20);
+  }, [isDesktopViewport]);
+
+  const finishSessionDrag = useCallback((result: DropResult): boolean => {
+    const shouldDestroy = isMobileSessionDestroyDrop(result, !isDesktopViewport);
+    mobileDestroyTargetActiveRef.current = false;
+    setMobileDestroyTargetActive(false);
+    setMobileDraggedSessionId(null);
+    if (!shouldDestroy) return false;
+    window.dispatchEvent(new CustomEvent('close-terminal-session', {
+      detail: { sessionId: result.draggableId, source: 'other', closeMode: 'destroy' } satisfies CloseSessionEventDetail,
+    }));
+    return true;
+  }, [isDesktopViewport]);
+
   const handleDragEnd = useCallback((result: DropResult) => {
+    if (finishSessionDrag(result)) return;
     if (!result.destination || result.source.index === result.destination.index) return;
     const newOrder = [...sessions];
     const [moved] = newOrder.splice(result.source.index, 1);
     newOrder.splice(result.destination.index, 0, moved);
     applySessionOrder(newOrder.map((session) => session.id));
-  }, [applySessionOrder, sessions]);
+  }, [applySessionOrder, finishSessionDrag, sessions]);
 
   const renameSession = useCallback((sessionId: string, newName: string) => {
     const trimmed = newName.trim();
@@ -1885,6 +1918,7 @@ function App() {
   //  - type 'group'：整组顺序拖动（组与组之间排序），组内顺序保持不变。
   //  - type 'session'：组内排序；禁止跨组拖动（分组依据是 cwd，跨组无意义）。
   const handleGroupedDragEnd = useCallback((result: DropResult) => {
+    if (finishSessionDrag(result)) return;
     if (!result.destination) return;
     if (result.type === 'group') {
       if (result.source.index === result.destination.index) return;
@@ -1896,7 +1930,7 @@ function App() {
     if (result.source.index === result.destination.index) return;
     const groupKey = result.source.droppableId.replace(/^group-sessions:/, '');
     applySessionOrder(reorderSessionsWithinGroup(tabGroups, groupKey, result.source.index, result.destination.index));
-  }, [tabGroups, applySessionOrder]);
+  }, [tabGroups, applySessionOrder, finishSessionDrag]);
 
   // 位置角标 N/total 按当前可见的分组后顺序算，避免分组时编号与视觉顺序不一致。
   const arrangedSessions = React.useMemo(
@@ -2604,6 +2638,45 @@ function App() {
     );
   };
 
+  const renderMobileSessionDestroyTarget = () => (
+    <Droppable
+      droppableId={MOBILE_SESSION_DESTROY_DROPPABLE_ID}
+      type="session"
+      isDropDisabled={isDesktopViewport}
+    >
+      {(provided, snapshot) => {
+        const highlighted = mobileDestroyTargetActive || snapshot.isDraggingOver;
+        return (
+          <div
+            ref={provided.innerRef}
+            {...provided.droppableProps}
+            className="pointer-events-none fixed left-1/2 top-[42%] z-toast flex h-32 w-32 -translate-x-1/2 -translate-y-1/2 items-center justify-center"
+            role="status"
+            aria-live="polite"
+            aria-hidden={!mobileDraggedSessionId}
+            data-mobile-session-destroy-target=""
+            data-active={highlighted ? 'true' : 'false'}
+          >
+            <div className={`flex h-28 w-28 flex-col items-center justify-center gap-2 rounded-full border bg-surface-elevated/95 shadow-2xl backdrop-blur transition duration-200 ${
+                mobileDraggedSessionId
+                  ? highlighted
+                    ? 'scale-110 border-destructive bg-destructive text-destructive-foreground opacity-100'
+                    : 'scale-100 border-destructive/50 text-destructive opacity-100'
+                  : 'scale-75 border-transparent opacity-0'
+              }`}
+            >
+              <RiDeleteBinLine size={28} strokeWidth={1.8} />
+              <span className="px-2 text-center text-[11px] font-semibold leading-tight">
+                {highlighted ? t('tab.releaseToDestroy') : t('tab.dragToDestroy')}
+              </span>
+            </div>
+            {provided.placeholder}
+          </div>
+        );
+      }}
+    </Droppable>
+  );
+
   const showPinnedLeft = sidebarLeftPinned && isDesktopViewport;
   const showPinnedRight = sidebarRightPinned && isDesktopViewport;
 
@@ -2701,7 +2774,8 @@ function App() {
                 )}
               </div>
             ) : groupByFolder ? (
-            <DragDropContext onDragEnd={handleGroupedDragEnd}>
+            <DragDropContext onDragStart={handleSessionDragStart} onDragUpdate={handleSessionDragUpdate} onDragEnd={handleGroupedDragEnd}>
+            {renderMobileSessionDestroyTarget()}
             <Droppable droppableId="groups" type="group" direction="horizontal">
               {(groupsProvided) => (
             <div
@@ -2813,8 +2887,9 @@ function App() {
             </Droppable>
             </DragDropContext>
             ) : (
-            <DragDropContext onDragEnd={handleDragEnd}>
-            <Droppable droppableId="tabs" direction="horizontal">
+            <DragDropContext onDragStart={handleSessionDragStart} onDragUpdate={handleSessionDragUpdate} onDragEnd={handleDragEnd}>
+            {renderMobileSessionDestroyTarget()}
+            <Droppable droppableId="tabs" type="session" direction="horizontal">
               {(provided) => (
             <div
               ref={provided.innerRef}

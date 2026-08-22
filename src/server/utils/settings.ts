@@ -6,6 +6,7 @@ import { LOCAL_ACCESS } from '../config.js';
 
 const SETTINGS_DIR = path.join(os.homedir(), '.termdock');
 const SETTINGS_FILE = path.join(SETTINGS_DIR, 'settings.json');
+const SETTINGS_BACKUP_FILE = `${SETTINGS_FILE}.bak`;
 
 export type LocalAccessNameSource = 'auto' | 'manual';
 
@@ -15,6 +16,7 @@ export interface LocalAccessSettings {
 }
 
 export interface SettingsDoc {
+  [key: string]: unknown;
   version: 1;
   preventSleep: boolean;
   localAccess: LocalAccessSettings;
@@ -99,8 +101,8 @@ export function normalizeNewSessionAgentSlug(value: unknown): string | null {
 }
 
 function normalizeSettings(value: unknown): SettingsDoc {
-  const raw = value && typeof value === 'object'
-    ? value as { preventSleep?: unknown; localAccess?: unknown; contextDraftHeight?: unknown; autoRenameAgents?: unknown; autoRenameNamer?: unknown; autoRenameModels?: unknown; autoRenameIntervalMinutes?: unknown; autoRenamePromptPreference?: unknown; autoRenamePromptPayloadChars?: unknown; newSessionAgentSlug?: unknown; updatedAt?: unknown }
+  const raw = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
     : {};
   const autoRenameAgents = Array.isArray(raw.autoRenameAgents)
     ? [...new Set(raw.autoRenameAgents
@@ -109,6 +111,9 @@ function normalizeSettings(value: unknown): SettingsDoc {
       .filter((slug) => /^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)))]
     : [];
   return {
+    // Keep fields introduced by a newer Termdock binary. During a rolling
+    // restart an older process must not erase settings it does not know yet.
+    ...raw,
     version: 1,
     preventSleep: raw.preventSleep === true,
     localAccess: normalizeLocalAccessSettings(raw.localAccess),
@@ -146,40 +151,172 @@ function normalizeSettings(value: unknown): SettingsDoc {
   };
 }
 
-export function loadSettings(): SettingsDoc {
+function serializeSettings(next: SettingsDoc): string {
+  return `${JSON.stringify(next, null, 2)}\n`;
+}
+
+function tempFileFor(target: string): string {
+  return path.join(
+    path.dirname(target),
+    `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`,
+  );
+}
+
+function atomicWriteFileSync(target: string, content: string): void {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const temp = tempFileFor(target);
   try {
-    const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
-    const doc = normalizeSettings(JSON.parse(raw));
-    // Persist migrated defaults (for example the first generated local-access name)
-    // so the advertised hostname stays stable across restarts.
-    saveSettings(doc);
+    fs.writeFileSync(temp, content, 'utf-8');
+    fs.renameSync(temp, target);
+  } finally {
+    try { fs.unlinkSync(temp); } catch { /* renamed or best-effort cleanup */ }
+  }
+}
+
+async function atomicWriteFile(target: string, content: string): Promise<void> {
+  await fs.promises.mkdir(path.dirname(target), { recursive: true });
+  const temp = tempFileFor(target);
+  try {
+    await fs.promises.writeFile(temp, content, 'utf-8');
+    await fs.promises.rename(temp, target);
+  } finally {
+    try { await fs.promises.unlink(temp); } catch { /* renamed or best-effort cleanup */ }
+  }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === 'ENOENT';
+}
+
+function validJsonOrNull(raw: string): unknown | null {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export function saveSettingsFile(
+  next: SettingsDoc,
+  settingsFile: string,
+  backupFile = `${settingsFile}.bak`,
+  backupCurrent = true,
+): void {
+  if (backupCurrent) {
+    try {
+      const current = fs.readFileSync(settingsFile, 'utf-8');
+      if (validJsonOrNull(current) !== null) atomicWriteFileSync(backupFile, current);
+    } catch (error) {
+      if (!isMissingFile(error)) throw error;
+    }
+  }
+  atomicWriteFileSync(settingsFile, serializeSettings(next));
+}
+
+export async function saveSettingsFileAsync(
+  next: SettingsDoc,
+  settingsFile: string,
+  backupFile = `${settingsFile}.bak`,
+  backupCurrent = true,
+): Promise<void> {
+  if (backupCurrent) {
+    try {
+      const current = await fs.promises.readFile(settingsFile, 'utf-8');
+      if (validJsonOrNull(current) !== null) await atomicWriteFile(backupFile, current);
+    } catch (error) {
+      if (!isMissingFile(error)) throw error;
+    }
+  }
+  await atomicWriteFile(settingsFile, serializeSettings(next));
+}
+
+export function loadSettingsFile(
+  settingsFile: string,
+  backupFile = `${settingsFile}.bak`,
+): SettingsDoc {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(settingsFile, 'utf-8');
+  } catch (error) {
+    if (!isMissingFile(error)) throw error;
+    const initial = normalizeSettings(null);
+    saveSettingsFile(initial, settingsFile, backupFile, false);
+    return initial;
+  }
+
+  const parsed = validJsonOrNull(raw);
+  if (parsed !== null) {
+    const doc = normalizeSettings(parsed);
+    // Only persist an actual migration. Ordinary reads must remain read-only.
+    if (serializeSettings(doc) !== raw) saveSettingsFile(doc, settingsFile, backupFile);
     return doc;
-  } catch { /* ignore missing/malformed settings */ }
-  const initial = normalizeSettings(null);
-  try { saveSettings(initial); } catch { /* best effort */ }
-  return initial;
+  }
+
+  try {
+    const backupRaw = fs.readFileSync(backupFile, 'utf-8');
+    const backupParsed = validJsonOrNull(backupRaw);
+    if (backupParsed === null) throw new Error('backup contains invalid JSON');
+    const recovered = normalizeSettings(backupParsed);
+    saveSettingsFile(recovered, settingsFile, backupFile, false);
+    console.warn(`[settings] recovered malformed ${settingsFile} from ${backupFile}`);
+    return recovered;
+  } catch (backupError) {
+    throw new Error(`Refusing to overwrite malformed settings file ${settingsFile}; no valid backup is available`, {
+      cause: backupError,
+    });
+  }
+}
+
+export async function loadSettingsFileAsync(
+  settingsFile: string,
+  backupFile = `${settingsFile}.bak`,
+): Promise<SettingsDoc> {
+  let raw: string;
+  try {
+    raw = await fs.promises.readFile(settingsFile, 'utf-8');
+  } catch (error) {
+    if (!isMissingFile(error)) throw error;
+    const initial = normalizeSettings(null);
+    await saveSettingsFileAsync(initial, settingsFile, backupFile, false);
+    return initial;
+  }
+
+  const parsed = validJsonOrNull(raw);
+  if (parsed !== null) {
+    const doc = normalizeSettings(parsed);
+    if (serializeSettings(doc) !== raw) await saveSettingsFileAsync(doc, settingsFile, backupFile);
+    return doc;
+  }
+
+  try {
+    const backupRaw = await fs.promises.readFile(backupFile, 'utf-8');
+    const backupParsed = validJsonOrNull(backupRaw);
+    if (backupParsed === null) throw new Error('backup contains invalid JSON');
+    const recovered = normalizeSettings(backupParsed);
+    await saveSettingsFileAsync(recovered, settingsFile, backupFile, false);
+    console.warn(`[settings] recovered malformed ${settingsFile} from ${backupFile}`);
+    return recovered;
+  } catch (backupError) {
+    throw new Error(`Refusing to overwrite malformed settings file ${settingsFile}; no valid backup is available`, {
+      cause: backupError,
+    });
+  }
+}
+
+export function loadSettings(): SettingsDoc {
+  return loadSettingsFile(SETTINGS_FILE, SETTINGS_BACKUP_FILE);
 }
 
 export async function loadSettingsAsync(): Promise<SettingsDoc> {
-  try {
-    const raw = await fs.promises.readFile(SETTINGS_FILE, 'utf-8');
-    const doc = normalizeSettings(JSON.parse(raw));
-    await saveSettingsAsync(doc);
-    return doc;
-  } catch { /* ignore missing/malformed settings */ }
-  const initial = normalizeSettings(null);
-  try { await saveSettingsAsync(initial); } catch { /* best effort */ }
-  return initial;
+  return loadSettingsFileAsync(SETTINGS_FILE, SETTINGS_BACKUP_FILE);
 }
 
 export function saveSettings(next: SettingsDoc): void {
-  fs.mkdirSync(SETTINGS_DIR, { recursive: true });
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(next, null, 2), 'utf-8');
+  saveSettingsFile(next, SETTINGS_FILE, SETTINGS_BACKUP_FILE);
 }
 
 export async function saveSettingsAsync(next: SettingsDoc): Promise<void> {
-  await fs.promises.mkdir(SETTINGS_DIR, { recursive: true });
-  await fs.promises.writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), 'utf-8');
+  await saveSettingsFileAsync(next, SETTINGS_FILE, SETTINGS_BACKUP_FILE);
 }
 
 export function updateSettings(mutator: (current: SettingsDoc) => SettingsDoc | void): SettingsDoc {
