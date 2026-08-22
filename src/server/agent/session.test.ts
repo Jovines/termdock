@@ -17,6 +17,7 @@ function ev(kind: AgentEventKind, opts: Partial<AgentEvent> = {}): AgentEvent {
     kind,
     sessionId: null,
     message: null,
+    promptPayload: null,
     cwd: null,
     status: null,
     ...opts,
@@ -33,6 +34,7 @@ describe('parseAgentEvent', () => {
     expect(parsed?.kind).toBe('permission-request');
     expect(parsed?.sessionId).toBe('abc-123');
     expect(parsed?.message).toContain('permission');
+    expect(parsed?.promptPayload).toBeNull();
   });
 
   it('rejects non-sentinel payloads, unknown events, and malformed JSON', () => {
@@ -88,6 +90,24 @@ describe('buildHookSequence ↔ parseAgentEvent round-trip', () => {
     );
     expect(grok?.agent?.slug).toBe('grok');
     expect(grok?.sessionId).toBe('g-42');
+  });
+
+  it('preserves differing prompt-submit payload shapes without interpreting them', () => {
+    const claude = parseAgentEvent(buildHookSequence(
+      'claude',
+      'prompt-submit',
+      '{"session_id":"c-1","prompt":"修复自动标题","cwd":"/repo"}',
+    ).slice(2, -1));
+    expect(claude?.promptPayload).toBe('{"session_id":"c-1","prompt":"修复自动标题","cwd":"/repo"}');
+
+    const custom = parseAgentEvent(buildHookSequence(
+      'codex',
+      'prompt-submit',
+      '{"request":{"content":[{"type":"text","text":"Keep titles stable"}]},"cwd":"/repo"}',
+    ).slice(2, -1));
+    expect(custom?.promptPayload).toBe(
+      '{"request":{"content":[{"type":"text","text":"Keep titles stable"}]},"cwd":"/repo"}',
+    );
   });
 });
 

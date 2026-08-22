@@ -62,6 +62,8 @@ export interface AgentEvent {
   kind: AgentEventKind;
   sessionId: string | null;
   message: string | null;
+  /** Raw stdin payload emitted by the Agent's prompt-submit hook. */
+  promptPayload: string | null;
   /** The agent's working directory at the moment the hook fired, when carried. */
   cwd: string | null;
   /** Optional plugin-defined presentation status resolved from its manifest. */
@@ -208,6 +210,8 @@ function nonEmpty(s: unknown): string | null {
   return typeof s === 'string' && s.trim().length > 0 ? s : null;
 }
 
+const MAX_HOOK_PROMPT_CHARS = 64_000;
+
 /**
  * Parse a complete OSC payload (identifier included, e.g.
  * `777;notify;termdock://cli-agent;{"v":1,…}`) into an AgentEvent. Returns
@@ -245,6 +249,7 @@ export function parseAgentEvent(payload: string): AgentEvent | null {
     kind: eventName as AgentEventKind,
     sessionId: nonEmpty(w.session_id),
     message: nonEmpty(w.message),
+    promptPayload: nonEmpty(w.prompt_payload),
     cwd: nonEmpty(w.cwd),
     status,
   };
@@ -272,6 +277,10 @@ export function buildHookSequence(agent: string, event: string, stdinJson: strin
   for (const [key, alias] of [['session_id', 'sessionId'], ['message', 'message'], ['cwd', 'cwd']] as const) {
     const v = nonEmpty(payload[key]) ?? nonEmpty(payload[alias]);
     if (v) body[key] = v;
+  }
+  if (event === 'prompt-submit') {
+    const promptPayload = stdinJson.trim().slice(0, MAX_HOOK_PROMPT_CHARS);
+    if (promptPayload) body.prompt_payload = promptPayload;
   }
   return `\x1b]777;notify;${AGENT_EVENT_SENTINEL};${JSON.stringify(body)}\x07`;
 }

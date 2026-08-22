@@ -2059,6 +2059,7 @@ function runPluginInitJson(): void {
     hookPayload: {
       stdin: 'Optional JSON object.',
       recognizedFields: ['session_id', 'sessionId', 'message', 'cwd'],
+      promptSubmitForwarding: 'For prompt-submit events, Termdock forwards raw stdin without assuming an Agent-specific schema. The wire cap is 64000 characters; the user-configurable title-context cap defaults to 12000.',
       example: 'printf \'%s\' \'{"session_id":"abc","message":"Indexing"}\' | td agent-event my-agent prompt-submit thinking',
     },
     integrationSteps: [
