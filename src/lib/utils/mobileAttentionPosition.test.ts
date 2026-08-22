@@ -55,6 +55,32 @@ describe('mobile attention position', () => {
     expect(rotated.y).toBeGreaterThanOrEqual(52);
   });
 
+  it('uses the terminal midpoint when a narrow terminal is offset within the window', () => {
+    const offsetTerminalViewport = {
+      width: 1440,
+      height: 900,
+      safeLeft: 640,
+      safeRight: 200,
+      bottomClearance: MOBILE_ATTENTION_EDGE_GAP_PX,
+    };
+
+    const leftHalf = snapMobileAttentionPosition(
+      offsetTerminalViewport,
+      { x: 850, y: 300 },
+    );
+    const rightHalf = snapMobileAttentionPosition(
+      offsetTerminalViewport,
+      { x: 1000, y: 300 },
+    );
+
+    expect(leftHalf.preference.side).toBe('left');
+    expect(leftHalf.position.x).toBe(640 + MOBILE_ATTENTION_EDGE_GAP_PX);
+    expect(rightHalf.preference.side).toBe('right');
+    expect(rightHalf.position.x + MOBILE_ATTENTION_SIZE_PX).toBe(
+      1440 - 200 - MOBILE_ATTENTION_EDGE_GAP_PX,
+    );
+  });
+
   it('can use the desktop edge gap as its bottom clearance', () => {
     const desktopViewport = {
       width: 1440,

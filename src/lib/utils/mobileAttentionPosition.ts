@@ -86,7 +86,10 @@ export function snapMobileAttentionPosition(
 } {
   const limits = getLimits(viewport);
   const clamped = clampMobileAttentionDrag(viewport, position);
-  const side = clamped.x + (MOBILE_ATTENTION_SIZE_PX / 2) < viewport.width / 2
+  const terminalMidpoint = (
+    limits.minX + limits.maxX + MOBILE_ATTENTION_SIZE_PX
+  ) / 2;
+  const side = clamped.x + (MOBILE_ATTENTION_SIZE_PX / 2) < terminalMidpoint
     ? 'left'
     : 'right';
   const verticalRange = limits.maxY - limits.minY;
