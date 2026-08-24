@@ -378,6 +378,13 @@ interface TerminalViewportProps {
 }
 
 type LoadingState = 'loading' | 'ready' | 'error';
+type ImeAnchorState = {
+  x: number;
+  y: number;
+  cellW: number;
+  cellH: number;
+  cursorX: number;
+};
 const FLOW_CONTROL_HIGH_WATERMARK = 500_000; // bytes — pause PTY above this
 const FLOW_CONTROL_LOW_WATERMARK = 100_000;  // bytes — resume PTY below this
 const INPUT_BLUR_GUARD_ACTIVE_MS = 260;
@@ -903,12 +910,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     } | null>(null);
     // 桌面 IME 候选窗锚点：跟随 xterm 光标的 1 cell 大小区域
     // mobile（enableTouchScroll=true）下不使用，textarea 仍然 inset:0 全覆盖
-    const [imeAnchor, setImeAnchor] = React.useState<{ x: number; y: number; cellW: number; cellH: number }>(
-      { x: 0, y: 0, cellW: 8, cellH: 17 }
+    const [imeAnchor, setImeAnchor] = React.useState<ImeAnchorState>(
+      { x: 0, y: 0, cellW: 8, cellH: 17, cursorX: 0 }
     );
+    const imeAnchorRef = React.useRef<ImeAnchorState>(imeAnchor);
+    imeAnchorRef.current = imeAnchor;
     // composition 期间锚点冻结：后台 PTY 仍可能输出导致 onRender 触发，
     // 此时若仍跟着 cursor 移动 textarea，候选窗会甩飞、文字会抖。
-    const imeFrozenAnchorRef = React.useRef<{ x: number; y: number; cellW: number; cellH: number } | null>(null);
+    const imeFrozenAnchorRef = React.useRef<ImeAnchorState | null>(null);
     // 桌面 IME 行内显示状态：composition 期间把 textarea 显形为
     // 「带下划线、不透明背景遮住下方 xterm」的可见 overlay。
     const [imeComposition, setImeComposition] = React.useState<{ active: boolean; text: string }>({
@@ -1593,13 +1602,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
      * 候选窗会跟着 textarea 的视觉位置走；textarea 是 1 cell 大小，
      * caret 在 (0,0) 即等于终端光标位置。
      */
-    const updateImeAnchor = React.useCallback(() => {
-      if (enableTouchScroll) return;
+    const updateImeAnchor = React.useCallback((): ImeAnchorState | null => {
+      if (enableTouchScroll) return null;
       // composition 中冻结：后台 PTY 输出会触发 onRender，不能让 textarea
       // 跟着 cursor 走，否则候选窗会漂、文字会抖。
-      if (imeFrozenAnchorRef.current) return;
+      if (imeFrozenAnchorRef.current) return null;
       const term = terminalRef.current;
-      if (!term || !term.element) return;
+      if (!term || !term.element) return null;
 
       // 与选区 handle 共用 xterm 的真实网格几何。不能用 firstRow.offsetHeight：
       // 它会把小数行高取整，误差乘以 cursorY 后表现为“顶部准、底部向下漂”。
@@ -1629,18 +1638,26 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const position = resolveImeAnchorOffset(anchorElement, containingBlock ?? null, localX, localY);
       const x = Math.round(position.x);
       const y = Math.round(position.y);
+      const next: ImeAnchorState = { x, y, cellW, cellH, cursorX: buf.cursorX };
+
+      // compositionstart may immediately follow focus/layout changes in the
+      // same browser task. Keep a synchronous copy so freezing never captures
+      // the previous React render's coordinates.
+      imeAnchorRef.current = next;
 
       setImeAnchor((prev) => {
         if (
           Math.abs(prev.x - x) < 0.5 &&
           Math.abs(prev.y - y) < 0.5 &&
           Math.abs(prev.cellW - cellW) < 0.5 &&
-          Math.abs(prev.cellH - cellH) < 0.5
+          Math.abs(prev.cellH - cellH) < 0.5 &&
+          prev.cursorX === buf.cursorX
         ) {
           return prev;
         }
-        return { x, y, cellW, cellH };
+        return next;
       });
+      return next;
     }, [enableTouchScroll]);
 
     const updateImeAnchorRef = React.useRef(updateImeAnchor);
@@ -1694,9 +1711,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }
         // 当前光标格子（从冻结快照取，避免 buffer 在 onRender 中变动）
         const frozen = imeFrozenAnchorRef.current;
-        const cursorX = frozen
-          ? Math.floor(frozen.x / Math.max(1, cellW))
-          : term.buffer.active.cursorX;
+        // Never derive the terminal column from anchor.x: x is expressed in
+        // the fixed containing block's coordinate system and can include
+        // sidebar/chrome offsets. Store the real buffer column when freezing.
+        const cursorX = frozen?.cursorX ?? term.buffer.active.cursorX;
         const cols = Math.max(1, term.cols);
         const estCells = Math.max(1, estimateImeTextCells(text));
         const availInline = Math.max(1, cols - cursorX);
@@ -1722,12 +1740,46 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     );
 
     const freezeImeAnchor = React.useCallback(() => {
-      imeFrozenAnchorRef.current = { ...imeAnchor };
-    }, [imeAnchor]);
+      // Pin/unpin and Swiper layout can move or replace the fixed containing
+      // block without a React render before compositionstart. Rediscover and
+      // synchronously recompute before freezing the candidate-window anchor.
+      imeFixedContainingBlockRef.current = undefined;
+      const refreshed = updateImeAnchorRef.current();
+      imeFrozenAnchorRef.current = { ...(refreshed ?? imeAnchorRef.current) };
+    }, []);
 
     const releaseImeAnchor = React.useCallback(() => {
       imeFrozenAnchorRef.current = null;
     }, []);
+
+    const cancelImeComposition = React.useCallback((input: HTMLTextAreaElement | null): boolean => {
+      // Some desktop IMEs omit compositionend when focus is moved by sidebar
+      // controls or a Swiper session switch. Without this fallback the old
+      // slide keeps isComposing=true and a frozen anchor indefinitely.
+      if (!isComposingRef.current && imeFrozenAnchorRef.current === null) return false;
+
+      isComposingRef.current = false;
+      imeFrozenAnchorRef.current = null;
+      clearPendingTextareaSync();
+      if (swallowEnterTimerRef.current !== null) {
+        clearTimeout(swallowEnterTimerRef.current);
+        swallowEnterTimerRef.current = null;
+      }
+      swallowNextEnterRef.current = false;
+
+      if (input) {
+        // Discard uncommitted phonetic text while preserving the last value
+        // already synchronized to the PTY.
+        input.value = sentValueRef.current;
+        try {
+          input.setSelectionRange(input.value.length, input.value.length);
+        } catch { /* unsupported input state */ }
+      }
+      setImeComposition((current) => (
+        current.active || current.text ? { active: false, text: '' } : current
+      ));
+      return true;
+    }, [clearPendingTextareaSync]);
 
 
     const focusHiddenInput = React.useCallback((_clientX?: number, _clientY?: number) => {
@@ -3828,6 +3880,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           };
 
           localResizeObserver = new ResizeObserver((entries) => {
+            // A pin/unpin or breakpoint transition can change which ancestor
+            // establishes position:fixed coordinates while keeping the input
+            // node connected. Force the next anchor pass to rediscover it.
+            imeFixedContainingBlockRef.current = undefined;
             if (localResizeSettleTimer === null) {
               const currentTerminal = terminalRef.current;
               localResizeCycleStartDimensions = currentTerminal
@@ -4195,6 +4251,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         },
         blur: () => {
           const input = hiddenInputRef.current;
+          cancelImeComposition(input);
           if (input && typeof document !== 'undefined' && document.activeElement === input) {
             input.blur();
           }
@@ -4248,6 +4305,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }),
       [
         enableTouchScroll,
+        cancelImeComposition,
         focusHiddenInput,
         resetWriteState,
         readClipboardIntoTerminal,
@@ -4518,10 +4576,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }}
               onFocus={() => {
                 debugTerminal('input anchor focus');
+                imeFixedContainingBlockRef.current = undefined;
+                updateImeAnchorRef.current();
                 requestRefresh('focus', { skipResizePush: true, skipScrollToBottom: true });
                 inputFocusHandlerRef.current?.(true);
               }}
-              onBlur={() => {
+              onBlur={(event) => {
+                if (!enableTouchScroll) {
+                  cancelImeComposition(event.currentTarget);
+                }
                 const guarded = shouldGuardInputBlur();
                 const activeElement = typeof document !== 'undefined'
                   ? document.activeElement as HTMLElement | null
