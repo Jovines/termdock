@@ -371,10 +371,14 @@ export function createApp(options: AppOptions = {}): express.Express {
   app.use('/api', (req, res, next) => {
     // JSON/API responses must never hit browser conditional caching. A 304 with
     // an empty body breaks fetch().json() callers and looks like random IO
-    // failures in the sidebar.
-    delete req.headers['if-none-match'];
-    delete req.headers['if-modified-since'];
-    res.setHeader('Cache-Control', 'no-store');
+    // failures in the sidebar. The KiCad preview endpoint is a binary response,
+    // so it deliberately keeps validators to avoid retransferring multi-MB GLBs.
+    const conditionalBinaryPreview = req.path === '/terminal/fs/eda-preview';
+    if (!conditionalBinaryPreview) {
+      delete req.headers['if-none-match'];
+      delete req.headers['if-modified-since'];
+      res.setHeader('Cache-Control', 'no-store');
+    }
     next();
   });
 

@@ -1926,6 +1926,28 @@ export function isPreviewableModel3dPath(filePath: string): boolean {
   return getModel3dExtForPath(filePath) !== null;
 }
 
+// KiCad source files are rendered server-side with the locally installed
+// kicad-cli. Keeping this list narrow avoids treating arbitrary s-expression
+// files as EDA projects.
+export const EDA_EXTENSIONS: readonly string[] = ['.kicad_sch', '.kicad_pcb'];
+
+export type EdaPreviewView = 'schematic' | 'pcb-front' | 'pcb-back' | 'pcb-3d';
+
+export function getEdaExtForPath(filePath: string): '.kicad_sch' | '.kicad_pcb' | null {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith('.kicad_sch')) return '.kicad_sch';
+  if (lower.endsWith('.kicad_pcb')) return '.kicad_pcb';
+  return null;
+}
+
+export function isPreviewableEdaPath(filePath: string): boolean {
+  return getEdaExtForPath(filePath) !== null;
+}
+
+export function getDefaultEdaPreviewView(filePath: string): EdaPreviewView {
+  return getEdaExtForPath(filePath) === '.kicad_pcb' ? 'pcb-front' : 'schematic';
+}
+
 // HTML files render in a sandboxed iframe through the /api/terminal/fs/preview
 // route. The route mirrors the absolute filesystem path in the URL so relative
 // css/js/image references inside the document resolve to the file's own
@@ -1960,6 +1982,29 @@ export interface ImagePreviewBlob {
   size: number | null;
   modified: string | null;
   mimeType: string;
+}
+
+export interface EdaPreviewBlob extends ImagePreviewBlob {
+  view: EdaPreviewView;
+}
+
+export interface EdaNearestObject {
+  kind: 'footprint' | 'pad' | 'track' | 'via';
+  label: string;
+  reference?: string;
+  pad?: string;
+  net?: string;
+  layer: string;
+  distanceMm: number;
+}
+
+export interface EdaPointInspection {
+  available: boolean;
+  xMm?: number;
+  yMm?: number;
+  layer?: string;
+  nearest?: EdaNearestObject;
+  reason?: string;
 }
 
 export interface FileEntry {
@@ -2200,6 +2245,63 @@ export async function readImagePreviewBlob(filePath: string, signal?: AbortSigna
     modified: response.headers.get('Last-Modified'),
     mimeType: response.headers.get('Content-Type') || blob.type || getImageMimeTypeForPath(filePath) || 'application/octet-stream',
   };
+}
+
+export async function readEdaPreviewBlob(
+  filePath: string,
+  view: EdaPreviewView,
+  signal?: AbortSignal,
+  action = 'view_file',
+  requestSlotId?: string,
+): Promise<EdaPreviewBlob> {
+  const params = new URLSearchParams({ path: filePath, view, action });
+  if (requestSlotId) params.set('requestSlotId', requestSlotId);
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/eda-preview?${params}`,
+    { signal },
+    30_000,
+    'KiCad preview rendering timed out.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to render KiCad preview' }));
+    throw new Error(error.error || 'Failed to render KiCad preview');
+  }
+  const blob = await response.blob();
+  const sizeHeader = response.headers.get('Content-Length');
+  return {
+    blob,
+    path: filePath,
+    view,
+    size: sizeHeader ? Number(sizeHeader) : null,
+    modified: response.headers.get('Last-Modified'),
+    mimeType: response.headers.get('Content-Type') || blob.type || 'image/svg+xml',
+  };
+}
+
+export async function inspectEdaPoint(
+  filePath: string,
+  view: EdaPreviewView,
+  xPercent: number,
+  yPercent: number,
+  signal?: AbortSignal,
+): Promise<EdaPointInspection> {
+  const params = new URLSearchParams({
+    path: filePath,
+    view,
+    x: String(xPercent),
+    y: String(yPercent),
+  });
+  const response = await fetchWithTimeout(
+    `/api/terminal/fs/eda-inspect?${params}`,
+    { signal },
+    8_000,
+    'KiCad point inspection timed out.',
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to inspect KiCad point' }));
+    throw new Error(error.error || 'Failed to inspect KiCad point');
+  }
+  return response.json() as Promise<EdaPointInspection>;
 }
 
 export interface Model3dPreviewBlob {

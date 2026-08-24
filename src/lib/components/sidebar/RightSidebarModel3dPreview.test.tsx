@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Mesh, MeshStandardMaterial } from 'three';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { FilePreview } from './RightSidebar';
-import { classifyModelWheelGesture, formatModelDimension, formatModelDimensions, resolveModel3dLoaderKind, resolvePickedPartName, scaleModelTrackpadPanDelta } from './ModelPreview';
+import { classifyModelWheelGesture, createSectionMaterialStabilizer, formatModelDimension, formatModelDimensions, modelControlSensitivity, resolveModel3dLoaderKind, resolvePickedPartName, scaleModelTrackpadPanDelta, stabilizePcbSilkscreenMaterials, stabilizePcbSubstrateMaterials } from './ModelPreview';
 
 const { stlParseMock, gltfParseMock, readModel3dBlobMock, readFileContentMock } = vi.hoisted(() => ({
   stlParseMock: vi.fn(),
@@ -181,6 +182,8 @@ vi.mock('three/examples/jsm/controls/OrbitControls.js', () => ({
     screenSpacePanning = false;
     zoomToCursor = false;
     zoomSpeed = 1;
+    rotateSpeed = 1;
+    panSpeed = 1;
     minDistance = 0;
     maxDistance = Infinity;
     target = new (class {
@@ -273,10 +276,109 @@ describe('ModelPreview pure logic', () => {
     expect(scaleModelTrackpadPanDelta(100)).toBeGreaterThan(scaleModelTrackpadPanDelta(10));
   });
 
+  it('uses calmer controls for touch without changing desktop gains', () => {
+    expect(modelControlSensitivity(true)).toEqual({ rotate: 0.62, pan: 0.55, zoom: 0.72 });
+    expect(modelControlSensitivity(false)).toEqual({ rotate: 1, pan: 1, zoom: 1.38 });
+  });
+
   it('uses the nearest named glTF part group instead of a mojibake leaf mesh name', () => {
     const part = { name: '罩板和门框（参照，罩板已上移）', type: 'Group', parent: null };
     const leaf = { name: 'ç½©æ¿åé¨æ¡', type: 'Mesh', parent: part };
     expect(resolvePickedPartName(leaf as never)).toBe('罩板和门框（参照，罩板已上移）');
+  });
+
+  it('makes KiCad silkscreen opaque and depth-stable without changing other PCB layers', () => {
+    const silkscreenMaterial = new MeshStandardMaterial() as MeshStandardMaterial & Record<string, unknown>;
+    Object.assign(silkscreenMaterial, { transparent: true, opacity: 0.9, depthWrite: false });
+    const soldermaskMaterial = new MeshStandardMaterial() as MeshStandardMaterial & Record<string, unknown>;
+    Object.assign(soldermaskMaterial, { transparent: true, opacity: 0.83, depthWrite: false });
+    const silkscreen = new Mesh({ dispose() {} } as never, silkscreenMaterial);
+    Object.assign(silkscreen, { name: '推拉门P0_silkscreen', parent: null, renderOrder: 0 });
+    const soldermask = new Mesh({ dispose() {} } as never, soldermaskMaterial);
+    Object.assign(soldermask, { name: '推拉门P0_soldermask', parent: null, renderOrder: 0 });
+    const root = {
+      traverse(callback: (node: unknown) => void) {
+        callback(silkscreen);
+        callback(soldermask);
+      },
+    };
+
+    expect(stabilizePcbSilkscreenMaterials(root as never)).toBe(1);
+    expect(silkscreenMaterial).toMatchObject({
+      transparent: false,
+      opacity: 1,
+      depthTest: true,
+      depthWrite: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+      needsUpdate: true,
+    });
+    expect(silkscreen.renderOrder).toBe(20);
+    expect(soldermaskMaterial).toMatchObject({ transparent: true, opacity: 0.83, depthWrite: false });
+  });
+
+  it('makes the KiCad board substrate and drilled-hole walls depth-stable', () => {
+    const substrateMaterial = new MeshStandardMaterial() as MeshStandardMaterial & Record<string, unknown>;
+    Object.assign(substrateMaterial, { transparent: true, opacity: 0.98, depthWrite: false });
+    const soldermaskMaterial = new MeshStandardMaterial() as MeshStandardMaterial & Record<string, unknown>;
+    Object.assign(soldermaskMaterial, { transparent: true, opacity: 0.83, depthWrite: false });
+    const substrate = new Mesh({ dispose() {} } as never, substrateMaterial);
+    Object.assign(substrate, { name: '推拉门P0布局验证板_PCB', parent: null });
+    const soldermask = new Mesh({ dispose() {} } as never, soldermaskMaterial);
+    Object.assign(soldermask, { name: '推拉门P0布局验证板_soldermask', parent: null });
+    const root = {
+      traverse(callback: (node: unknown) => void) {
+        callback(substrate);
+        callback(soldermask);
+      },
+    };
+
+    expect(stabilizePcbSubstrateMaterials(root as never)).toBe(1);
+    expect(substrateMaterial).toMatchObject({
+      transparent: false,
+      opacity: 1,
+      depthTest: true,
+      depthWrite: true,
+      needsUpdate: true,
+    });
+    expect(soldermaskMaterial).toMatchObject({ transparent: true, opacity: 0.83, depthWrite: false });
+  });
+
+  it('stabilizes near-opaque materials only while section view is active', () => {
+    const soldermask = new MeshStandardMaterial() as MeshStandardMaterial & Record<string, unknown>;
+    Object.assign(soldermask, { transparent: true, opacity: 0.83, depthWrite: false, forceSinglePass: false });
+    const glass = new MeshStandardMaterial() as MeshStandardMaterial & Record<string, unknown>;
+    Object.assign(glass, { transparent: true, opacity: 0.4, depthWrite: false, forceSinglePass: false });
+    const soldermaskMesh = new Mesh({ dispose() {} } as never, soldermask);
+    const glassMesh = new Mesh({ dispose() {} } as never, glass);
+    const root = {
+      traverse(callback: (node: unknown) => void) {
+        callback(soldermaskMesh);
+        callback(glassMesh);
+      },
+    };
+
+    const stabilizer = createSectionMaterialStabilizer(root as never);
+    expect(stabilizer.count).toBe(1);
+    stabilizer.setEnabled(true);
+    expect(soldermask).toMatchObject({
+      transparent: false,
+      opacity: 1,
+      depthWrite: true,
+      forceSinglePass: true,
+      needsUpdate: true,
+    });
+    expect(glass).toMatchObject({ transparent: true, opacity: 0.4, depthWrite: false });
+
+    stabilizer.setEnabled(false);
+    expect(soldermask).toMatchObject({
+      transparent: true,
+      opacity: 0.83,
+      depthWrite: false,
+      forceSinglePass: false,
+      needsUpdate: true,
+    });
   });
 });
 
@@ -333,6 +435,7 @@ describe('right sidebar 3D model preview', () => {
     const trackpadPan = new WheelEvent('wheel', { deltaX: 6, deltaY: 4, deltaMode: 0, cancelable: true });
     canvas!.dispatchEvent(trackpadPan);
     expect(trackpadPan.defaultPrevented).toBe(true);
+
   });
 
   it('falls back to the binary hint for .step files and never calls the 3D loader', async () => {

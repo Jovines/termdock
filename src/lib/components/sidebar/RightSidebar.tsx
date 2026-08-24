@@ -47,7 +47,7 @@ import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import { useDiffDisplayPrefs, type DiffContextPref, type DiffWhitespacePref } from './diffDisplayPrefs';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
-import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { subscribeClientState } from '../../utils/clientStateSync';
@@ -65,6 +65,10 @@ import { appendContextDraft, buildDraftTerminalPayload } from './contextDraft';
 import { uploadTemporaryImageAndInsertReference } from './temporaryImageUpload';
 import { readHtmlViewMode, writeHtmlViewMode, type HtmlViewMode } from './htmlViewMode';
 import { VideoPreviewPlayer } from './VideoPreviewPlayer';
+import { EdaPreview } from './EdaPreview';
+import { SvgInspectionPreview } from './SvgInspectionPreview';
+import { CsvPreview } from './CsvPreview';
+import { KicadProjectPreview } from './KicadProjectPreview';
 import './sidebarSelection.css';
 
 interface RightSidebarProps {
@@ -673,7 +677,7 @@ function getParentDirectoryPath(filePath: string): string {
   return normalized.slice(0, slashIndex);
 }
 
-function normalizeMarkdownLocalImagePath(path: string): string {
+function normalizeMarkdownLocalPath(path: string): string {
   const pathname = path.split(/[?#]/, 1)[0];
   const absolute = pathname.startsWith('/');
   const stack: string[] = [];
@@ -691,6 +695,53 @@ function normalizeMarkdownLocalImagePath(path: string): string {
   return normalizedPathname || (absolute ? '/' : '.');
 }
 
+export interface MarkdownLocalLinkTarget {
+  path: string;
+  fragment: string | null;
+  directory: boolean;
+}
+
+export function resolveMarkdownLocalLinkTarget(
+  href: string,
+  markdownFilePath: string | null,
+  rootPath: string | null,
+): MarkdownLocalLinkTarget | null {
+  const trimmed = href.trim();
+  if (!trimmed || /^(?:https?:|mailto:|javascript:|data:|#)/i.test(trimmed)) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return null;
+
+  const hashIndex = trimmed.indexOf('#');
+  const rawPathWithQuery = hashIndex >= 0 ? trimmed.slice(0, hashIndex) : trimmed;
+  const rawFragment = hashIndex >= 0 ? trimmed.slice(hashIndex + 1) : '';
+  const rawPath = rawPathWithQuery.split('?', 1)[0];
+  if (!rawPath) return null;
+
+  let decodedPath: string;
+  let decodedFragment: string | null = null;
+  try {
+    decodedPath = decodeURIComponent(rawPath);
+    decodedFragment = rawFragment ? decodeURIComponent(rawFragment) : null;
+  } catch {
+    return null;
+  }
+
+  const normalizedRoot = rootPath ? normalizeMarkdownLocalPath(rootPath) : null;
+  let absolutePath: string;
+  if (decodedPath.startsWith('/')) {
+    const isFileSystemAbsolute = normalizedRoot
+      && (decodedPath === normalizedRoot || decodedPath.startsWith(`${normalizedRoot}/`));
+    absolutePath = normalizeMarkdownLocalPath(normalizedRoot && !isFileSystemAbsolute
+      ? `${normalizedRoot}/${decodedPath.slice(1)}`
+      : decodedPath);
+  } else {
+    if (!markdownFilePath) return null;
+    absolutePath = normalizeMarkdownLocalPath(`${getParentDirectoryPath(markdownFilePath)}/${decodedPath}`);
+  }
+
+  if (normalizedRoot && absolutePath !== normalizedRoot && !absolutePath.startsWith(`${normalizedRoot}/`)) return null;
+  return { path: absolutePath, fragment: decodedFragment, directory: /\/$/.test(rawPath) };
+}
+
 function resolveMarkdownImageSrc(src: string, markdownFilePath: string | null, rootPath: string | null): string | null {
   const trimmed = src.trim();
   if (!trimmed || /^(?:javascript|data):/i.test(trimmed)) return null;
@@ -700,10 +751,10 @@ function resolveMarkdownImageSrc(src: string, markdownFilePath: string | null, r
   let absolutePath: string;
   if (trimmed.startsWith('/')) {
     const isFileSystemAbsolute = rootPath && (trimmed === rootPath || trimmed.startsWith(`${rootPath}/`));
-    absolutePath = normalizeMarkdownLocalImagePath(rootPath && !isFileSystemAbsolute ? `${rootPath}/${trimmed.slice(1)}` : trimmed);
+    absolutePath = normalizeMarkdownLocalPath(rootPath && !isFileSystemAbsolute ? `${rootPath}/${trimmed.slice(1)}` : trimmed);
   } else {
     if (!markdownFilePath) return null;
-    absolutePath = normalizeMarkdownLocalImagePath(`${getParentDirectoryPath(markdownFilePath)}/${trimmed}`);
+    absolutePath = normalizeMarkdownLocalPath(`${getParentDirectoryPath(markdownFilePath)}/${trimmed}`);
   }
 
   return `/api/terminal/fs/blob?path=${encodeURIComponent(absolutePath)}`;
@@ -2524,6 +2575,7 @@ interface MarkdownPreviewProps {
   lightboxCloseSignal?: number;
   onLightboxOpen?: () => void;
   onLightboxClose?: () => void;
+  onLocalLinkOpen?: (target: MarkdownLocalLinkTarget) => void;
 }
 
 // Lightbox variant of the versioned image: same `&v=N` cache-busting as
@@ -2799,6 +2851,7 @@ export function MarkdownPreview({
   lightboxCloseSignal,
   onLightboxOpen,
   onLightboxClose,
+  onLocalLinkOpen,
 }: MarkdownPreviewProps) {
   const { t } = useI18n();
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
@@ -3064,7 +3117,20 @@ export function MarkdownPreview({
 
   return (
     <>
-      <div ref={previewRootRef} className="relative min-w-0 max-w-full">
+      <div
+        ref={previewRootRef}
+        className="relative min-w-0 max-w-full"
+        onClickCapture={(event) => {
+          const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href]') : null;
+          if (!anchor || !onLocalLinkOpen) return;
+          const href = anchor.getAttribute('href');
+          if (!href) return;
+          const target = resolveMarkdownLocalLinkTarget(href, filePath, rootPath);
+          if (!target) return;
+          event.preventDefault();
+          onLocalLinkOpen(target);
+        }}
+      >
         {activeHeadingPath.length > 0 && (
           <div className="sticky top-0 z-10 border-b border-border/15 bg-surface px-2 py-1 shadow-sm sm:px-3" data-markdown-heading-sticky>
             <div className="flex min-w-0 items-center gap-2 overflow-hidden" title={activeHeadingPath.map((heading) => heading.text).join(' / ')}>
@@ -4723,6 +4789,7 @@ interface FilePreviewProps {
   onInsertFeature?: (text: string, key: string) => void;
   onReferenceCopied: (key: string) => void;
   onClose?: () => void;
+  onDirectoryLinkOpen?: (path: string) => void;
   isMobile: boolean;
   markdownOutlineOpen: boolean;
   markdownOutlineCloseSignal?: number;
@@ -4742,11 +4809,12 @@ interface FilePreviewProps {
 
 type FilePreviewState =
   | { kind: 'idle' }
-  | { kind: 'loading'; mode: 'text' | 'image' | 'model3d' | 'video' }
+  | { kind: 'loading'; mode: 'text' | 'image' | 'model3d' | 'video' | 'eda' }
   | { kind: 'text'; content: string; meta: { size: number; truncated?: boolean } }
   | { kind: 'image'; objectUrl: string; meta: { size: number | null; mimeType: string; modified: string | null }; dimensions?: { width: number; height: number } }
   | { kind: 'model3d'; objectUrl: string; ext: string; meta: { size: number | null; mimeType: string; modified: string | null } }
   | { kind: 'video'; url: string; meta: { size: number | null; mimeType: string; modified: string | null } }
+  | { kind: 'eda'; objectUrl: string; view: EdaPreviewView; meta: { size: number | null; mimeType: string; modified: string | null } }
   | { kind: 'binary' }
   | { kind: 'error'; message: string };
 
@@ -4838,6 +4906,7 @@ export function FilePreview({
   onInsertFeature,
   onReferenceCopied,
   onClose,
+  onDirectoryLinkOpen,
   isMobile,
   markdownOutlineOpen,
   markdownOutlineCloseSignal,
@@ -4856,7 +4925,11 @@ export function FilePreview({
 }: FilePreviewProps) {
   const { t } = useI18n();
   const rootPath = useSidebarStore((s) => s.rootPath);
+  const selectFile = useSidebarStore((s) => s.selectFile);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ kind: 'idle' });
+  const [edaView, setEdaView] = useState<EdaPreviewView>('schematic');
+  const [cachedEda3dPreview, setCachedEda3dPreview] = useState<Extract<FilePreviewState, { kind: 'eda' }> | null>(null);
+  const cachedEda3dPreviewRef = useRef<Extract<FilePreviewState, { kind: 'eda' }> | null>(null);
   const [modelFeatures, setModelFeatures] = useState<ModelFeature[] | null>(null);
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -4867,6 +4940,10 @@ export function FilePreview({
   const [htmlViewMode, setHtmlViewMode] = useState<HtmlViewMode>(() => readHtmlViewMode(rootPath, filePath));
   const [refractor, setRefractor] = useState<RefractorLike | null>(null);
   const [markdownPreviewScrollTop, setMarkdownPreviewScrollTop] = useState(0);
+  const [previewHistory, setPreviewHistory] = useState<string[]>([]);
+  const [pendingMarkdownFragment, setPendingMarkdownFragment] = useState<string | null>(null);
+  const expectedNavigationPathRef = useRef<string | null>(null);
+  const previousFilePathRef = useRef<string | null>(filePath);
   // Per-line highlighted React nodes, keyed implicitly by the current text
   // content. `null` means "render plain text" (unknown language, too large, or
   // refractor not loaded yet).
@@ -4875,6 +4952,19 @@ export function FilePreview({
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
 
   const readingStateKey = getFilePreviewReadingStateKey(rootPath, filePath);
+
+  useEffect(() => {
+    if (previousFilePathRef.current === filePath) return;
+    previousFilePathRef.current = filePath;
+    const absolutePath = filePath && rootPath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
+    if (expectedNavigationPathRef.current === absolutePath) {
+      expectedNavigationPathRef.current = null;
+      return;
+    }
+    expectedNavigationPathRef.current = null;
+    setPreviewHistory([]);
+    setPendingMarkdownFragment(null);
+  }, [filePath, rootPath]);
 
   // 把仓库相对路径解析成绝对路径，用作 watcher / version map 的查询 key。
   const versionedPath = filePath
@@ -4898,6 +4988,21 @@ export function FilePreview({
   // 刷新按钮兜底,nonce 变化与外部变更走同一条重新加载路径(不重置 UI)。
   const [manualRefreshNonce, setManualRefreshNonce] = useState(0);
   const refreshPreview = useCallback(() => setManualRefreshNonce((n) => n + 1), []);
+
+  // KiCad's GLB is expensive to generate and parse. Keep the object URL and
+  // mounted WebGL viewer across front/back/3D tab switches; invalidate it only
+  // when the source file/version changes or the user explicitly refreshes.
+  useEffect(() => {
+    const stale = cachedEda3dPreviewRef.current;
+    cachedEda3dPreviewRef.current = null;
+    setCachedEda3dPreview(null);
+    if (stale) URL.revokeObjectURL(stale.objectUrl);
+    return () => {
+      const current = cachedEda3dPreviewRef.current;
+      cachedEda3dPreviewRef.current = null;
+      if (current) URL.revokeObjectURL(current.objectUrl);
+    };
+  }, [versionedPath, externalVersion, manualRefreshNonce]);
 
   useEffect(() => {
     if (!filePath) {
@@ -4926,12 +5031,18 @@ export function FilePreview({
       });
     };
     let objectUrl: string | null = null;
-    const isImage = isPreviewableImagePath(fullPath);
-    const isModel3d = !isImage && isPreviewableModel3dPath(fullPath);
-    const isVideo = !isImage && !isModel3d && isPreviewableVideoPath(fullPath);
+    const isEda = isPreviewableEdaPath(fullPath);
+    const requestedEdaView = isEda
+      ? (fullPath.toLowerCase().endsWith('.kicad_pcb')
+        ? (edaView === 'schematic' ? 'pcb-front' : edaView)
+        : 'schematic')
+      : edaView;
+    const isImage = !isEda && isPreviewableImagePath(fullPath);
+    const isModel3d = !isEda && !isImage && isPreviewableModel3dPath(fullPath);
+    const isVideo = !isEda && !isImage && !isModel3d && isPreviewableVideoPath(fullPath);
     const isMarkdown = isMarkdownPath(fullPath);
     const isHtml = isPreviewableHtmlPath(fullPath);
-    const previewMode = isImage ? 'image' : isModel3d ? 'model3d' : isVideo ? 'video' : 'text';
+    const previewMode = isEda ? 'eda' : isImage ? 'image' : isModel3d ? 'model3d' : isVideo ? 'video' : 'text';
     const isPathChange = lastFullPathRef.current !== fullPath;
     lastFullPathRef.current = fullPath;
 
@@ -4944,6 +5055,7 @@ export function FilePreview({
       onLineRangeChange(savedReadingState?.lineRange ?? null);
       setMarkdownViewMode(isMarkdown ? readMarkdownViewMode() : 'source');
       setHtmlViewMode(isHtml ? readHtmlViewMode(rootPath, filePath) : 'source');
+      if (isEda) setEdaView(getDefaultEdaPreviewView(fullPath));
     }
     const watchdog = window.setTimeout(() => {
       if (loadingEnded || controller.signal.aborted) return;
@@ -4965,7 +5077,39 @@ export function FilePreview({
       endLoading('stuck_timeout', { error: message });
     }, FILE_PREVIEW_STUCK_TIMEOUT_MS);
 
-    if (isImage) {
+    if (isEda) {
+      const cached3d = requestedEdaView === 'pcb-3d' ? cachedEda3dPreviewRef.current : null;
+      if (cached3d) {
+        setPreviewState(cached3d);
+        endLoading('eda_3d_client_cache_hit', { bytes: cached3d.meta.size, view: cached3d.view, mimeType: cached3d.meta.mimeType });
+      } else {
+        readEdaPreviewBlob(fullPath, requestedEdaView, controller.signal, 'view_file', requestSlotId)
+          .then((result) => {
+            objectUrl = URL.createObjectURL(result.blob);
+            const nextPreview: Extract<FilePreviewState, { kind: 'eda' }> = {
+              kind: 'eda',
+              objectUrl,
+              view: result.view,
+              meta: { size: result.size, mimeType: result.mimeType, modified: result.modified },
+            };
+            if (result.view === 'pcb-3d') {
+              const previous = cachedEda3dPreviewRef.current;
+              if (previous && previous.objectUrl !== objectUrl) URL.revokeObjectURL(previous.objectUrl);
+              cachedEda3dPreviewRef.current = nextPreview;
+              setCachedEda3dPreview(nextPreview);
+              // The version-scoped cache owns this URL until invalidation/unmount.
+              objectUrl = null;
+            }
+            setPreviewState(nextPreview);
+            endLoading('eda_loaded', { bytes: result.size, view: result.view, mimeType: result.mimeType });
+          })
+          .catch((err) => {
+            if (controller.signal.aborted) return;
+            setPreviewState({ kind: 'error', message: err instanceof Error ? err.message : t('rightSidebar.edaLoadFailed') });
+            endLoading('error', { error: err instanceof Error ? err.message : String(err) });
+          });
+      }
+    } else if (isImage) {
       readImagePreviewBlob(fullPath, controller.signal, 'view_file', requestSlotId)
         .then((result) => {
           objectUrl = URL.createObjectURL(result.blob);
@@ -5036,7 +5180,7 @@ export function FilePreview({
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       endLoading('cleanup');
     };
-  }, [filePath, rootPath, externalVersion, manualRefreshNonce, onLineRangeChange, t]);
+  }, [filePath, rootPath, externalVersion, manualRefreshNonce, onLineRangeChange, t, edaView]);
 
   // 语义特征 sidecar: 约定放 <模型目录>/features/<名>.json
   useEffect(() => {
@@ -5169,6 +5313,30 @@ export function FilePreview({
     return () => cancelAnimationFrame(frame);
   }, [scrollToLine, previewState, onLineRangeChange, onScrollToLineHandled]);
 
+  const jumpToMarkdownFragment = useCallback((fragment: string) => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return false;
+    const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+      ? CSS.escape(fragment)
+      : fragment.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+    const target = scroller.querySelector<HTMLElement>(`#${escaped}`);
+    if (!target) return false;
+    target.scrollIntoView({ block: 'start' });
+    return true;
+  }, []);
+
+  useEffect(() => {
+    const readable = rootPath && filePath && !filePath.startsWith('/') ? `${rootPath}/${filePath}` : filePath;
+    const markdownReady = previewState.kind === 'text'
+      && isMarkdownPath(readable ?? '')
+      && markdownViewMode === 'preview';
+    if (!pendingMarkdownFragment || !markdownReady) return;
+    const frame = requestAnimationFrame(() => {
+      if (jumpToMarkdownFragment(pendingMarkdownFragment)) setPendingMarkdownFragment(null);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [filePath, jumpToMarkdownFragment, markdownViewMode, pendingMarkdownFragment, previewState, rootPath]);
+
   // 没有鼠标事件的场景（例如搜索结果跳转）才兜底定位到选中行右侧。
   useLayoutEffect(() => {
     const scroller = scrollerRef.current;
@@ -5215,14 +5383,18 @@ export function FilePreview({
   // so short files render numbers close to the left edge instead of leaving a
   // fixed gap sized for thousand-line files.
   const gutterWidthCh = Math.max(2, String(lines.length).length) + 1;
-  const meta = previewState.kind === 'text' || previewState.kind === 'image' || previewState.kind === 'model3d' || previewState.kind === 'video' ? previewState.meta : null;
+  const meta = previewState.kind === 'text' || previewState.kind === 'image' || previewState.kind === 'model3d' || previewState.kind === 'video' || previewState.kind === 'eda' ? previewState.meta : null;
   const isMarkdown = isMarkdownPath(readablePath);
+  const isCsv = readablePath.toLowerCase().endsWith('.csv');
+  const isKicadProject = readablePath.toLowerCase().endsWith('.kicad_pro');
+  const isKicadLocalState = readablePath.toLowerCase().endsWith('.kicad_prl');
   const showMarkdownPreview = previewState.kind === 'text' && isMarkdown && markdownViewMode === 'preview';
   const isHtml = isPreviewableHtmlPath(readablePath);
   const showHtmlPreview = previewState.kind === 'text' && isHtml && htmlViewMode === 'preview';
   const isImagePreview = previewState.kind === 'image' || (previewState.kind === 'loading' && previewState.mode === 'image');
   const isModel3dPreview = previewState.kind === 'model3d' || (previewState.kind === 'loading' && previewState.mode === 'model3d');
   const isVideoPreview = previewState.kind === 'video' || (previewState.kind === 'loading' && previewState.mode === 'video');
+  const isEdaPreview = previewState.kind === 'eda' || (previewState.kind === 'loading' && previewState.mode === 'eda');
   const lineReference = buildLineReference(readablePath, rootPath, lineRange);
   const lineReferenceText = (() => {
     if (!lineRange || previewState.kind !== 'text' || lines.length === 0) return lineReference;
@@ -5300,6 +5472,32 @@ export function FilePreview({
     });
   };
 
+  const handleMarkdownLocalLinkOpen = (target: MarkdownLocalLinkTarget) => {
+    if (target.directory) {
+      onDirectoryLinkOpen?.(target.path);
+      return;
+    }
+    if (target.path === readablePath) {
+      if (target.fragment) jumpToMarkdownFragment(target.fragment);
+      return;
+    }
+    setPreviewHistory((history) => [...history, readablePath]);
+    expectedNavigationPathRef.current = target.path;
+    setPendingMarkdownFragment(target.fragment);
+    onLineRangeChange(null);
+    selectFile(target.path);
+  };
+
+  const navigateBackInPreview = () => {
+    const previousPath = previewHistory[previewHistory.length - 1];
+    if (!previousPath) return;
+    setPreviewHistory((history) => history.slice(0, -1));
+    expectedNavigationPathRef.current = previousPath;
+    setPendingMarkdownFragment(null);
+    onLineRangeChange(null);
+    selectFile(previousPath);
+  };
+
   const handleSourcePreviewScroll = (event: UIEvent<HTMLDivElement>) => {
     const { scrollTop, scrollLeft } = event.currentTarget;
     writeFilePreviewReadingState(rootPath, filePath, {
@@ -5340,9 +5538,21 @@ export function FilePreview({
                 onClick={onClose}
                 className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
                 aria-label={t('rightSidebar.backToFileList')}
-                title={t('common.back')}
+                title={t('rightSidebar.backToFileList')}
+              >
+                <RiListTree size={16} />
+              </button>
+            )}
+            {previewHistory.length > 0 && (
+              <button
+                type="button"
+                onClick={navigateBackInPreview}
+                className="inline-flex h-9 shrink-0 items-center gap-1 rounded-full bg-primary/10 px-2.5 text-primary transition hover:bg-primary/15 active:scale-95"
+                aria-label={t('rightSidebar.backToPreviousPreview')}
+                title={t('rightSidebar.backToPreviousPreview')}
               >
                 <RiArrowLeft size={15} />
+                <span className="text-[11px] font-medium">{t('rightSidebar.backToPreviousPreview')}</span>
               </button>
             )}
             <div className="min-w-0" title={readablePath}>
@@ -5440,7 +5650,13 @@ export function FilePreview({
             file content below. */}
         {!(isMobile && (showMarkdownPreview || showHtmlPreview)) && !isModel3dPreview && previewState.kind !== 'binary' && <div className="mt-1 flex h-4 items-center gap-2 text-[10px] text-muted-foreground/75">
           <span className="truncate">
-            {isVideoPreview
+            {isEdaPreview
+              ? t('rightSidebar.edaPickHint')
+              : isCsv
+                ? t('rightSidebar.csvTablePreview')
+                : isKicadProject || isKicadLocalState
+                  ? t('rightSidebar.kicadProjectPickHint')
+              : isVideoPreview
               ? t('rightSidebar.videoPreviewHint')
               : isImagePreview
               ? t('rightSidebar.imagePreviewHint')
@@ -5458,7 +5674,7 @@ export function FilePreview({
       </div>
       {previewState.kind === 'loading' ? (
         <div className="min-h-0 flex-1 overflow-auto px-3 py-8 text-center text-sm text-muted-foreground">
-          {previewState.mode === 'image' ? t('rightSidebar.loadingImage') : previewState.mode === 'model3d' ? t('rightSidebar.model3dLoading') : previewState.mode === 'video' ? t('rightSidebar.loadingVideo') : 'Loading file…'}
+          {previewState.mode === 'eda' ? t('rightSidebar.edaLoading') : previewState.mode === 'image' ? t('rightSidebar.loadingImage') : previewState.mode === 'model3d' ? t('rightSidebar.model3dLoading') : previewState.mode === 'video' ? t('rightSidebar.loadingVideo') : 'Loading file…'}
         </div>
       ) : previewState.kind === 'error' ? (
         <div className="min-h-0 flex-1 overflow-auto">
@@ -5472,26 +5688,65 @@ export function FilePreview({
         </div>
       ) : previewState.kind === 'image' ? (
         <div className="min-h-0 flex-1 overflow-hidden bg-surface p-3">
-          <ZoomableImage
-            src={previewState.objectUrl}
-            alt={display.name}
-            vector={previewState.meta.mimeType === 'image/svg+xml'}
-            onLoad={(event) => {
-              const img = event.currentTarget;
-              setPreviewState((current) => (
-                current.kind === 'image'
-                  ? { ...current, dimensions: { width: img.naturalWidth, height: img.naturalHeight } }
-                  : current
-              ));
-            }}
-            onError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.imageLoadFailed') })}
-          />
+          {previewState.meta.mimeType === 'image/svg+xml' ? (
+            <SvgInspectionPreview
+              blobUrl={previewState.objectUrl}
+              filePath={readablePath}
+              viewLabel="SVG 文件"
+              onInsertAnnotation={onInsertFeature}
+            />
+          ) : (
+            <ZoomableImage
+              src={previewState.objectUrl}
+              alt={display.name}
+              vector={false}
+              onLoad={(event) => {
+                const img = event.currentTarget;
+                setPreviewState((current) => (
+                  current.kind === 'image'
+                    ? { ...current, dimensions: { width: img.naturalWidth, height: img.naturalHeight } }
+                    : current
+                ));
+              }}
+              onError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.imageLoadFailed') })}
+            />
+          )}
         </div>
       ) : previewState.kind === 'video' ? (
         <div className="min-h-0 flex-1 overflow-hidden bg-surface p-3">
           <VideoPreviewPlayer
             url={previewState.url}
             onLoadError={() => setPreviewState({ kind: 'error', message: t('rightSidebar.videoLoadFailed') })}
+          />
+        </div>
+      ) : previewState.kind === 'eda' ? (
+        <div className="min-h-0 flex-1 overflow-hidden bg-surface">
+          <EdaPreview
+            blobUrl={previewState.objectUrl}
+            filePath={readablePath}
+            view={previewState.view}
+            board={readablePath.toLowerCase().endsWith('.kicad_pcb')}
+            onViewChange={setEdaView}
+            onInsertAnnotation={onInsertFeature}
+            onRefresh={refreshPreview}
+            interactive3d={cachedEda3dPreview ? (
+              <Suspense fallback={<div className="min-h-0 flex-1 px-3 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.model3dLoading')}</div>}>
+                <ModelPreview
+                  blobUrl={cachedEda3dPreview.objectUrl}
+                  ext=".glb"
+                  fileName={display.name}
+                  filePath={readablePath}
+                  features={null}
+                  onInsertFeature={onInsertFeature}
+                  unitScale={1000}
+                  dimensionUnit="mm"
+                  coordinateSystemLabel="KiCad 3D 导出坐标 Y-up"
+                  annotationPrefix="PCB三维标注"
+                  normalizePickedPartName={(part) => /^[A-Za-z]{1,5}\d+[A-Za-z0-9._-]*$/.test(part) ? part : 'PCB板体/铜箔/丝印'}
+                  active={previewState.view === 'pcb-3d'}
+                />
+              </Suspense>
+            ) : undefined}
           />
         </div>
       ) : previewState.kind === 'model3d' ? (
@@ -5508,6 +5763,21 @@ export function FilePreview({
             />
           </Suspense>
         </div>
+      ) : previewState.kind === 'text' && isCsv ? (
+        <CsvPreview
+          key={readablePath}
+          content={previewState.content}
+          filePath={readablePath}
+          onInsertAnnotation={onInsertFeature}
+        />
+      ) : previewState.kind === 'text' && (isKicadProject || isKicadLocalState) ? (
+        <KicadProjectPreview
+          key={readablePath}
+          content={previewState.content}
+          filePath={readablePath}
+          localState={isKicadLocalState}
+          onInsertAnnotation={onInsertFeature}
+        />
       ) : showMarkdownPreview ? (
         <div
           ref={scrollerRef}
@@ -5532,6 +5802,7 @@ export function FilePreview({
             lightboxCloseSignal={markdownImageLightboxCloseSignal}
             onLightboxOpen={onOpenMarkdownImageLightbox}
             onLightboxClose={onCloseMarkdownImageLightbox}
+            onLocalLinkOpen={handleMarkdownLocalLinkOpen}
           />
           {lineRange && floatingInsertPos && (
             <button
@@ -5655,6 +5926,7 @@ export function RightSidebar(
 ) {
   const { t, locale } = useI18n();
   const [fileQuery, setFileQuery] = useState('');
+  const [directoryReveal, setDirectoryReveal] = useState<{ path: string; nonce: number } | null>(null);
   const searchOpen = useSidebarStore((s) => s.rightSearchOpen);
   const setRightSearchOpen = useSidebarStore((s) => s.setRightSearchOpen);
   const [searchMode, setSearchMode] = useState<FileSearchMode>(() => readFileSearchMode());
@@ -6761,6 +7033,7 @@ export function RightSidebar(
   }, [isOpen]);
 
   const handleFileSelect = useCallback((path: string) => {
+    setDirectoryReveal(null);
     selectFile(path);
     setLineRange(null);
     if (isMobile) {
@@ -6778,6 +7051,7 @@ export function RightSidebar(
   // Jump straight to a content-search match: open the file and ask the preview
   // to highlight and scroll to the matched line once its content has loaded.
   const handleContentMatchSelect = useCallback((path: string, line: number) => {
+    setDirectoryReveal(null);
     selectFile(path);
     setScrollToLine(line);
     if (isMobile) {
@@ -9600,6 +9874,23 @@ export function RightSidebar(
     setLineRange(null);
   }, [onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen]);
 
+  const handleMarkdownDirectoryOpen = useCallback((path: string) => {
+    setFileQuery('');
+    setExplorerRoot(null);
+    selectFile(null);
+    setLineRange(null);
+    setDirectoryReveal((current) => ({ path, nonce: (current?.nonce ?? 0) + 1 }));
+
+    if (isMobile) {
+      if (rightSidebarFilePreviewOpen) onCloseRightSidebarFilePreview?.();
+      setMobileFileSlideIndex(0);
+      mobileFileSwiperRef.current?.slideTo(0);
+      setMobileFilePreviewOpen(false);
+      return;
+    }
+    if (!isWide) setRightTab('files');
+  }, [isMobile, isWide, onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen, selectFile, setExplorerRoot, setRightTab]);
+
   useEffect(() => {
     if (!isOpen) {
       setHeaderMenuOpen(false);
@@ -10376,6 +10667,7 @@ export function RightSidebar(
                   searchMode={searchMode}
                   onContentMatchSelect={handleContentMatchSelect}
                   onDirectoryDropFiles={(path, files) => handleUploadFiles(files, path)}
+                  revealDirectory={directoryReveal}
                   canOpenInFileBrowser={canOpenInFileBrowser}
                   onOpenInFileBrowser={handleOpenInFileBrowser}
                 />
@@ -10405,6 +10697,7 @@ export function RightSidebar(
                   onInsertText={insertReferenceText}
                   onInsertFeature={insertReferenceText}
                   onReferenceCopied={markReferenceCopied}
+                  onDirectoryLinkOpen={handleMarkdownDirectoryOpen}
                   isMobile={false}
                   lineRange={lineRange}
                   onLineRangeChange={setLineRange}
@@ -10489,6 +10782,7 @@ export function RightSidebar(
                     searchMode={searchMode}
                     onContentMatchSelect={handleContentMatchSelect}
                     onDirectoryDropFiles={(path, files) => handleUploadFiles(files, path)}
+                    revealDirectory={directoryReveal}
                     canOpenInFileBrowser={canOpenInFileBrowser}
                     onOpenInFileBrowser={handleOpenInFileBrowser}
                   />
@@ -10503,6 +10797,7 @@ export function RightSidebar(
                     onInsertFeature={insertReferenceText}
                     onReferenceCopied={markReferenceCopied}
                     onClose={closeFilePreview}
+                    onDirectoryLinkOpen={handleMarkdownDirectoryOpen}
                     isMobile
                     lineRange={lineRange}
                     onLineRangeChange={setLineRange}
@@ -10557,6 +10852,7 @@ export function RightSidebar(
                 searchMode={searchMode}
                 onContentMatchSelect={handleContentMatchSelect}
                 onDirectoryDropFiles={(path, files) => handleUploadFiles(files, path)}
+                revealDirectory={directoryReveal}
                 canOpenInFileBrowser={canOpenInFileBrowser}
                 onOpenInFileBrowser={handleOpenInFileBrowser}
               />
@@ -10571,6 +10867,7 @@ export function RightSidebar(
             onInsertText={insertReferenceText}
             onInsertFeature={insertReferenceText}
             onReferenceCopied={markReferenceCopied}
+            onDirectoryLinkOpen={handleMarkdownDirectoryOpen}
             isMobile={false}
             lineRange={lineRange}
             onLineRangeChange={setLineRange}

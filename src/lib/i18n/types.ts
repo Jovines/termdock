@@ -201,6 +201,7 @@ export type TranslationDictionary = {
     contextDraftCharacterCount: (params: TranslatorParams) => string;
     selectFilePrompt: string;
     backToFileList: string;
+    backToPreviousPreview: string;
     insertLineRef: (params: TranslatorParams) => string;
     insertFileRef: string;
     copyFileRef: string;
@@ -244,6 +245,24 @@ export type TranslationDictionary = {
     model3dGlossaryToggle: string;
     model3dPickToggle: string;
     model3dPickHint: string;
+    edaLoading: string;
+    edaLoadFailed: string;
+    edaRefresh: string;
+    edaPickHint: string;
+    edaPickedPosition: (params: TranslatorParams) => string;
+    edaPickedBoardPosition: (params: TranslatorParams) => string;
+    edaInspecting: string;
+    edaNoNearbyObject: string;
+    edaInsertAnnotation: string;
+    csvUnnamedColumn: (params: TranslatorParams) => string;
+    csvSelectedCell: (params: TranslatorParams) => string;
+    csvPickHint: (params: TranslatorParams) => string;
+    csvInsertAnnotation: string;
+    csvTablePreview: string;
+    kicadLocalStateNotice: string;
+    kicadShowRawJson: string;
+    kicadProjectPickHint: string;
+    kicadInsertSetting: string;
     markdownPreview: string;
     markdownSource: string;
     markdownPreviewHint: string;
@@ -763,6 +782,9 @@ export type TranslationDictionary = {
     copyMode: string;
     jumpToNext: string;
     jumpToNextRunning: string;
+    selectRunningSession: string;
+    runningSessionGestureHint: string;
+    currentSession: string;
   };
   connection: {
     reconnecting: string;

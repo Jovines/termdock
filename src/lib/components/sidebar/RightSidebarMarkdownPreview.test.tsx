@@ -3,7 +3,7 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { __testParseMarkdownListBlock, MarkdownImageLightbox, MarkdownPreview, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, computeMarkdownImageDisplayBox, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, getNextMarkdownPreviewLineRange, isSvgImageSrc, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
+import { __testParseMarkdownListBlock, MarkdownImageLightbox, MarkdownPreview, buildMarkdownPreviewBlocks, buildMarkdownPreviewRenderResult, computeMarkdownImageDisplayBox, getMarkdownHeadingOutline, getMarkdownHeadingPathAtLine, getNextMarkdownPreviewLineRange, isSvgImageSrc, resolveMarkdownLocalLinkTarget, shouldCloseMarkdownImageLightboxDrag } from './RightSidebar';
 
 const mermaidRender = vi.fn(async () => ({ svg: '<svg xmlns="http://www.w3.org/2000/svg" width="100%" style="max-width: 100%;" viewBox="0 0 96 48"><text>Graph</text></svg>' }));
 const mermaidInitialize = vi.fn();
@@ -226,6 +226,45 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(container.querySelector('#hello-world')?.textContent).toBe('Hello World!');
     expect(container.querySelector('#hello-world-1')?.textContent).toBe('Hello World');
     expect(container.querySelector('#hello-world-2')?.textContent).toBe('Hello World');
+  });
+
+  it('resolves relative, root-relative, encoded, and directory Markdown links inside the workspace', () => {
+    expect(resolveMarkdownLocalLinkTarget('../mechanical/glb/%E6%A0%B7%E6%9C%BA.glb#part', '/repo/docs/REVIEW.md', '/repo')).toEqual({
+      path: '/repo/mechanical/glb/样机.glb',
+      fragment: 'part',
+      directory: false,
+    });
+    expect(resolveMarkdownLocalLinkTarget('/electronics/kicad/', '/repo/REVIEW.md', '/repo')).toEqual({
+      path: '/repo/electronics/kicad',
+      fragment: null,
+      directory: true,
+    });
+    expect(resolveMarkdownLocalLinkTarget('../../outside.md', '/repo/REVIEW.md', '/repo')).toBeNull();
+    expect(resolveMarkdownLocalLinkTarget('https://example.com/file.md', '/repo/REVIEW.md', '/repo')).toBeNull();
+  });
+
+  it('opens a local Markdown link through the file preview navigator', () => {
+    const onLocalLinkOpen = vi.fn();
+    render(
+      <MarkdownPreview
+        content="[Open PCB](../electronics/board.kicad_pcb)"
+        filePath="/repo/docs/REVIEW.md"
+        rootPath="/repo"
+        lineRange={null}
+        onLineRangeClick={() => undefined}
+        scrollTop={0}
+        outlineOpen={false}
+        lightboxOpen={false}
+        onLocalLinkOpen={onLocalLinkOpen}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('link', { name: 'Open PCB' }));
+    expect(onLocalLinkOpen).toHaveBeenCalledWith({
+      path: '/repo/electronics/board.kicad_pcb',
+      fragment: null,
+      directory: false,
+    });
   });
 
   it('tracks the active heading hierarchy for sticky Markdown preview context', () => {

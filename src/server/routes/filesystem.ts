@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
 import type { Dirent } from 'fs';
+import os from 'os';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
 import watcher from '@parcel/watcher';
@@ -15,6 +16,8 @@ import { getLanIPv4Addresses } from '../utils/localAccess.js';
 import { inspectBinaryFile } from '../utils/binaryFile.js';
 import { GitApplyError, HUNK_APPLY_MODES, runGitApply, validateHunkPatch, type HunkApplyMode } from '../utils/hunkApply.js';
 import { deleteFilesystemFile } from '../utils/deleteFilesystemFile.js';
+import { inspectKicadBoardPoint } from '../utils/kicadBoardInspection.js';
+import { EdaPreviewCache, requestAcceptsEtag } from '../utils/edaPreviewCache.js';
 
 const router = Router();
 
@@ -46,6 +49,8 @@ const MAX_NESTED_GIT_REPOS = 32;
 const NESTED_GIT_DISCOVERY_TIMEOUT_MS = 1_000;
 const NESTED_GIT_DISCOVERY_CACHE_TTL_MS = 60_000;
 const FS_ROUTE_TIMEOUT_MS = 6_000;
+const EDA_PREVIEW_TIMEOUT_MS = 30_000;
+const EDA_PREVIEW_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const GIT_ROUTE_TIMEOUT_MS = 8_000;
 const GIT_FILE_DIFF_ROUTE_TIMEOUT_MS = 45_000;
 const GIT_ACTION_TIMEOUT_MS = 10 * 60_000;
@@ -3069,6 +3074,200 @@ router.get('/git-blob', async (req: Request, res: Response) => {
     const payload = getErrorPayload(error);
     logFsIo({ id: requestId, action: 'git_blob', op: 'git.blob', startedAt, status: 'error', path: requestedPath, cwd, code: payload.code, error: payload.error });
     res.status(error instanceof OperationTimeoutError ? 504 : 200).json({ path: requestedPath ?? null, content: '', ...payload });
+  }
+});
+
+type EdaPreviewView = 'schematic' | 'pcb-front' | 'pcb-back' | 'pcb-3d';
+
+const EDA_PREVIEW_VIEWS = new Set<EdaPreviewView>(['schematic', 'pcb-front', 'pcb-back', 'pcb-3d']);
+const edaPreviewCache = new EdaPreviewCache(EDA_PREVIEW_CACHE_MAX_BYTES);
+
+function runKicadCli(args: string[], cwd: string, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const proc = execFile('kicad-cli', args, { cwd, maxBuffer: 4 * 1024 * 1024 }, (error, _stdout, stderr) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abortHandler);
+      if (error) {
+        reject(new Error(stderr.trim() || error.message));
+      } else {
+        resolve();
+      }
+    });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      proc.kill();
+      signal.removeEventListener('abort', abortHandler);
+      reject(new OperationTimeoutError('KiCad preview rendering timed out.', 'EDA_PREVIEW_TIMEOUT'));
+    }, EDA_PREVIEW_TIMEOUT_MS);
+    const abortHandler = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      proc.kill();
+      reject(signal.reason instanceof Error ? signal.reason : new SupersededRequestError('fs.eda-preview'));
+    };
+    if (signal.aborted) abortHandler();
+    else signal.addEventListener('abort', abortHandler, { once: true });
+  });
+}
+
+// Render native KiCad sources for Review. The source path is passed as an
+// execFile argument (never through a shell), and every output lives in a
+// request-scoped temporary directory which is deleted after the response.
+router.get('/eda-preview', async (req: Request, res: Response) => {
+  const requestId = ++fsIoRequestSeq;
+  const startedAt = Date.now();
+  const requestedPath = req.query.path as string;
+  const requestedView = req.query.view as EdaPreviewView;
+  const action = getRequestAction(req, 'view_file');
+  const requestSlotId = typeof req.query.requestSlotId === 'string' ? req.query.requestSlotId : undefined;
+  const controller = new AbortController();
+  const abortRequest = () => {
+    if (!res.writableEnded) controller.abort(new SupersededRequestError('fs.eda-preview'));
+  };
+  req.on('aborted', abortRequest);
+  res.on('close', abortRequest);
+  registerIoSlot({ requestId, op: 'fs.eda-preview', action, slotId: requestSlotId, controller, path: requestedPath });
+  let tempDir: string | null = null;
+  try {
+    if (!requestedPath || !EDA_PREVIEW_VIEWS.has(requestedView)) {
+      res.status(400).json({ error: 'Missing path or invalid KiCad preview view' });
+      return;
+    }
+    const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
+    const stat = await fs.promises.stat(resolvedPath);
+    if (!stat.isFile()) throw new Error('Path is not a file');
+
+    const lowerPath = resolvedPath.toLowerCase();
+    const isSchematic = lowerPath.endsWith('.kicad_sch');
+    const isBoard = lowerPath.endsWith('.kicad_pcb');
+    if (!isSchematic && !isBoard) {
+      res.status(415).json({ error: 'Only .kicad_sch and .kicad_pcb previews are supported' });
+      return;
+    }
+    if ((isSchematic && requestedView !== 'schematic') || (isBoard && requestedView === 'schematic')) {
+      res.status(400).json({ error: 'Preview view does not match the KiCad file type' });
+      return;
+    }
+
+    const versionKey = `${resolvedPath}\0${requestedView}\0${stat.size}\0${stat.mtimeMs}`;
+    const etag = `"eda-${crypto.createHash('sha256').update(versionKey).digest('base64url').slice(0, 24)}"`;
+    res.setHeader('ETag', etag);
+    res.setHeader('Last-Modified', stat.mtime.toUTCString());
+    res.setHeader('Cache-Control', 'private, no-cache');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Eda-View', requestedView);
+    if (requestAcceptsEtag(req.headers['if-none-match'], etag)) {
+      res.setHeader('X-Eda-Cache', 'revalidated');
+      res.status(304).end();
+      logFsIo({ id: requestId, action, op: 'fs.eda-preview', startedAt, status: 'ok', path: resolvedPath, bytes: 0, extra: { view: requestedView, requestSlotId, cache: 'revalidated' } });
+      return;
+    }
+
+    const cached = edaPreviewCache.get(versionKey);
+    if (cached) {
+      res.setHeader('Content-Type', cached.mimeType);
+      res.setHeader('Content-Length', String(cached.body.length));
+      res.setHeader('X-Eda-Cache', 'hit');
+      res.send(cached.body);
+      logFsIo({ id: requestId, action, op: 'fs.eda-preview', startedAt, status: 'ok', path: resolvedPath, bytes: cached.body.length, extra: { view: requestedView, requestSlotId, cache: 'hit' } });
+      return;
+    }
+
+    tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'termdock-eda-preview-'));
+    let outputPath: string;
+    let mimeType: string;
+    if (isSchematic) {
+      await runKicadCli([
+        'sch', 'export', 'svg', '--output', tempDir, '--pages', '1',
+        '--exclude-drawing-sheet', '--no-background-color', resolvedPath,
+      ], path.dirname(resolvedPath), controller.signal);
+      const svgFiles = (await fs.promises.readdir(tempDir)).filter((name) => name.toLowerCase().endsWith('.svg')).sort();
+      if (svgFiles.length === 0) throw new Error('KiCad did not produce a schematic SVG');
+      outputPath = path.join(tempDir, svgFiles[0]);
+      mimeType = 'image/svg+xml';
+    } else if (requestedView === 'pcb-3d') {
+      outputPath = path.join(tempDir, 'pcb-3d.glb');
+      await runKicadCli([
+        'pcb', 'export', 'glb', '--output', outputPath, '--force',
+        '--include-tracks', '--include-pads', '--include-silkscreen', '--include-soldermask',
+        resolvedPath,
+      ], path.dirname(resolvedPath), controller.signal);
+      mimeType = 'model/gltf-binary';
+    } else {
+      const front = requestedView === 'pcb-front';
+      outputPath = path.join(tempDir, front ? 'pcb-front.svg' : 'pcb-back.svg');
+      const layers = front
+        ? 'F.Cu,F.Mask,F.Silkscreen,Edge.Cuts'
+        : 'B.Cu,B.Mask,B.Silkscreen,Edge.Cuts';
+      const args = [
+        'pcb', 'export', 'svg', '--output', outputPath, '--mode-single', '--layers', layers,
+        '--page-size-mode', '2', '--fit-page-to-board', '--exclude-drawing-sheet',
+      ];
+      if (!front) args.push('--mirror');
+      args.push(resolvedPath);
+      await runKicadCli(args, path.dirname(resolvedPath), controller.signal);
+      mimeType = 'image/svg+xml';
+    }
+
+    const output = await fs.promises.readFile(outputPath);
+    if (output.length > MAX_IMAGE_PREVIEW_SIZE) {
+      res.status(413).json({ error: 'Rendered KiCad preview is too large' });
+      return;
+    }
+    edaPreviewCache.set(versionKey, { body: output, mimeType });
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Length', String(output.length));
+    res.setHeader('X-Eda-Cache', 'miss');
+    res.send(output);
+    logFsIo({ id: requestId, action, op: 'fs.eda-preview', startedAt, status: 'ok', path: resolvedPath, bytes: output.length, extra: { view: requestedView, requestSlotId, cache: 'miss' } });
+  } catch (error) {
+    const payload = getErrorPayload(error);
+    if (!res.headersSent) {
+      res.status(error instanceof OperationTimeoutError ? 504 : 403).json(payload);
+    }
+    logFsIo({ id: requestId, action, op: 'fs.eda-preview', startedAt, status: 'error', path: requestedPath, code: payload.code, error: payload.error, extra: { view: requestedView, requestSlotId } });
+  } finally {
+    releaseIoSlot(requestSlotId, requestId);
+    if (tempDir) await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+router.get('/eda-inspect', async (req: Request, res: Response) => {
+  const requestedPath = req.query.path as string;
+  const requestedView = req.query.view as EdaPreviewView;
+  const xPercent = Number(req.query.x);
+  const yPercent = Number(req.query.y);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new OperationTimeoutError('KiCad point inspection timed out.', 'EDA_INSPECT_TIMEOUT')), EDA_PREVIEW_TIMEOUT_MS);
+  const abortRequest = () => {
+    if (!res.writableEnded) controller.abort(new SupersededRequestError('fs.eda-inspect'));
+  };
+  req.on('aborted', abortRequest);
+  res.on('close', abortRequest);
+  try {
+    if (!requestedPath || !EDA_PREVIEW_VIEWS.has(requestedView)
+      || !Number.isFinite(xPercent) || !Number.isFinite(yPercent)
+      || xPercent < 0 || xPercent > 100 || yPercent < 0 || yPercent > 100) {
+      res.status(400).json({ error: 'Missing path, view, or valid preview coordinates' });
+      return;
+    }
+    const resolvedPath = await pathValidator.validatePathAsync(requestedPath);
+    if (!resolvedPath.toLowerCase().endsWith('.kicad_pcb')) {
+      res.json({ available: false, reason: '只有 PCB 文件支持工程坐标' });
+      return;
+    }
+    const result = await inspectKicadBoardPoint(resolvedPath, requestedView, xPercent, yPercent, controller.signal);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(result);
+  } catch (error) {
+    if (!res.headersSent) res.status(error instanceof OperationTimeoutError ? 504 : 500).json(getErrorPayload(error));
+  } finally {
+    clearTimeout(timeout);
   }
 });
 

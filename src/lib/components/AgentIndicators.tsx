@@ -26,7 +26,7 @@ import { useI18n } from '../i18n';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { useViewportKeyboardState } from '../hooks/useViewportKeyboardState';
-import { getNextAttentionSessionId, getNextRunningSessionId } from '../utils/agentAttention';
+import { getNextAttentionSessionId } from '../utils/agentAttention';
 import {
   MOBILE_ATTENTION_EDGE_GAP_PX,
   MOBILE_ATTENTION_SIZE_PX,
@@ -152,14 +152,8 @@ function jumpToNextAgentAttention(): void {
   window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: nextId }));
 }
 
-function jumpToNextRunningAgent(): void {
-  const store = useTerminalStore.getState();
-  const nextId = getNextRunningSessionId(
-    Array.from(store.sessions.values()),
-    store.activeSessionId,
-  );
-  if (!nextId) return;
-  window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: nextId }));
+function jumpToSession(sessionId: string): void {
+  window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
 }
 
 /** 给 tab 图标 / dot 共享的轻量 session 状态 */
@@ -492,20 +486,115 @@ export function AgentCompactStatusOverlay({
 
 type FloatingSessionButtonKind = 'attention' | 'running';
 type FloatingSessionButtonPositions = Record<FloatingSessionButtonKind, MobileAttentionPosition>;
+type RunningGestureMode = 'idle' | 'pressing' | 'selecting' | 'dragging';
+const RUNNING_LONG_PRESS_MS = 380;
+const RUNNING_SWIPE_THRESHOLD_PX = 10;
+const RUNNING_RAIL_GAP_PX = 10;
+const RUNNING_RAIL_HEIGHT_PX = 52;
+const RUNNING_RAIL_ITEM_WIDTH_PX = 104;
 
-/** Terminal 内的会话快捷入口：共用拖拽边界，并在移动、吸附和缩放时保持互不重叠。 */
+export interface RunningSessionShortcut {
+  id: string;
+  label: string;
+  detail?: string | null;
+}
+
+interface RunningSessionRailLayout {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  itemWidth: number;
+  side: 'left' | 'right';
+}
+
+function getRunningSessionRailLayout(
+  position: MobileAttentionPosition,
+  containerElement: HTMLElement,
+  count: number,
+): RunningSessionRailLayout {
+  const bounds = containerElement.getBoundingClientRect();
+  const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
+  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+  const hasBounds = bounds.width > 0 && bounds.height > 0;
+  const terminalLeft = hasBounds ? Math.max(0, bounds.left) : 0;
+  const terminalRight = hasBounds ? Math.min(viewportWidth, bounds.right) : viewportWidth;
+  const terminalTop = hasBounds ? Math.max(0, bounds.top) : 0;
+  const terminalBottom = hasBounds ? Math.min(viewportHeight, bounds.bottom) : viewportHeight;
+  const edgeGap = MOBILE_ATTENTION_EDGE_GAP_PX;
+  const opensLeft = position.x + (MOBILE_ATTENTION_SIZE_PX / 2)
+    >= terminalLeft + ((terminalRight - terminalLeft) / 2);
+  const availableWidth = opensLeft
+    ? position.x - RUNNING_RAIL_GAP_PX - terminalLeft - edgeGap
+    : terminalRight - edgeGap - position.x - MOBILE_ATTENTION_SIZE_PX - RUNNING_RAIL_GAP_PX;
+  const width = Math.max(1, Math.min(
+    Math.max(0, availableWidth),
+    Math.max(168, count * RUNNING_RAIL_ITEM_WIDTH_PX),
+  ));
+  const desiredLeft = opensLeft
+    ? position.x - RUNNING_RAIL_GAP_PX - width
+    : position.x + MOBILE_ATTENTION_SIZE_PX + RUNNING_RAIL_GAP_PX;
+  const left = Math.min(
+    Math.max(desiredLeft, terminalLeft + edgeGap),
+    Math.max(terminalLeft + edgeGap, terminalRight - edgeGap - width),
+  );
+  const desiredTop = position.y + (MOBILE_ATTENTION_SIZE_PX / 2) - (RUNNING_RAIL_HEIGHT_PX / 2);
+  const top = Math.min(
+    Math.max(desiredTop, terminalTop + edgeGap),
+    Math.max(terminalTop + edgeGap, terminalBottom - edgeGap - RUNNING_RAIL_HEIGHT_PX),
+  );
+  return {
+    left,
+    top,
+    width,
+    height: RUNNING_RAIL_HEIGHT_PX,
+    itemWidth: width / Math.max(1, count),
+    side: opensLeft ? 'left' : 'right',
+  };
+}
+
+function getRunningRailSelectionIndex(
+  layout: RunningSessionRailLayout,
+  clientX: number,
+  clientY: number,
+  count: number,
+): number | null {
+  const verticalTolerance = 14;
+  if (
+    clientX < layout.left
+    || clientX > layout.left + layout.width
+    || clientY < layout.top - verticalTolerance
+    || clientY > layout.top + layout.height + verticalTolerance
+  ) {
+    return null;
+  }
+  return Math.min(count - 1, Math.max(0, Math.floor((clientX - layout.left) / layout.itemWidth)));
+}
+
+function getNextRunningShortcutId(
+  sessions: readonly RunningSessionShortcut[],
+  activeSessionId: string | null,
+): string | null {
+  if (sessions.length === 0) return null;
+  const activeIndex = activeSessionId
+    ? sessions.findIndex((session) => session.id === activeSessionId)
+    : -1;
+  return sessions[(activeIndex + 1) % sessions.length]?.id ?? null;
+}
+
+/** Terminal 内的会话快捷入口：共用边界，运行中按钮额外支持轻点、横滑选择和长按拖动。 */
 export function AgentFloatingSessionButtons({
   reviewCount,
-  runningCount,
+  runningSessions,
+  activeSessionId,
   runningButtonEnabled,
-  canJumpToRunningSession,
   isDesktopLayout,
   containerElement,
 }: {
   reviewCount: number;
-  runningCount: number;
+  runningSessions: readonly RunningSessionShortcut[];
+  activeSessionId: string | null;
   runningButtonEnabled: boolean;
-  canJumpToRunningSession: boolean;
   isDesktopLayout: boolean;
   containerElement: HTMLElement | null;
 }): React.ReactElement | null {
@@ -516,8 +605,10 @@ export function AgentFloatingSessionButtons({
   const floatingChromeVisible = isDesktopLayout
     || (!sidebarLeftOpen && !sidebarRightOpen && !keyboardOpen);
   const attentionVisible = reviewCount > 0 && floatingChromeVisible;
+  const canJumpToRunningSession = runningSessions.length > 1
+    || (runningSessions.length === 1 && runningSessions[0]?.id !== activeSessionId);
   const runningVisible = runningButtonEnabled
-    && runningCount > 0
+    && runningSessions.length > 0
     && canJumpToRunningSession
     && floatingChromeVisible;
   const preferencesRef = React.useRef<Record<FloatingSessionButtonKind, MobileAttentionPreference>>({
@@ -557,10 +648,37 @@ export function AgentFloatingSessionButtons({
     startY: number;
     moved: boolean;
   } | null>(null);
+  const [runningGestureMode, setRunningGestureMode] = React.useState<RunningGestureMode>('idle');
+  const [selectedRunningIndex, setSelectedRunningIndex] = React.useState<number | null>(null);
+  const runningGestureRef = React.useRef<{
+    pointerId: number;
+    originX: number;
+    originY: number;
+    startX: number;
+    startY: number;
+    mode: Exclude<RunningGestureMode, 'idle'> | 'cancelled';
+    moved: boolean;
+    selectedIndex: number | null;
+    longPressTimer: number | null;
+  } | null>(null);
   const suppressClickRef = React.useRef<Record<FloatingSessionButtonKind, boolean>>({
     attention: false,
     running: false,
   });
+
+  React.useEffect(() => () => {
+    const timer = runningGestureRef.current?.longPressTimer;
+    if (timer !== null && timer !== undefined) window.clearTimeout(timer);
+  }, []);
+
+  React.useEffect(() => {
+    if (runningVisible) return;
+    const timer = runningGestureRef.current?.longPressTimer;
+    if (timer !== null && timer !== undefined) window.clearTimeout(timer);
+    runningGestureRef.current = null;
+    setRunningGestureMode('idle');
+    setSelectedRunningIndex(null);
+  }, [runningVisible]);
 
   React.useLayoutEffect(() => {
     const syncPositions = () => {
@@ -601,19 +719,23 @@ export function AgentFloatingSessionButtons({
     );
   }, [containerElement, isDesktopLayout, isOtherButtonVisible]);
 
-  const finishDrag = React.useCallback((
+  const persistReleasedPosition = React.useCallback((
     kind: FloatingSessionButtonKind,
-    event: React.PointerEvent<HTMLButtonElement>,
+    drag: {
+      originX: number;
+      originY: number;
+      startX: number;
+      startY: number;
+      moved: boolean;
+    },
+    clientX: number,
+    clientY: number,
   ) => {
-    const drag = dragRef.current;
-    if (!drag || drag.kind !== kind || drag.pointerId !== event.pointerId) return;
-    dragRef.current = null;
-    setDraggingKind(null);
     const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
     const released = drag.moved
       ? clampMobileAttentionDrag(viewport, {
-          x: drag.startX + (event.clientX - drag.originX),
-          y: drag.startY + (event.clientY - drag.originY),
+          x: drag.startX + (clientX - drag.originX),
+          y: drag.startY + (clientY - drag.originY),
         })
       : positionsRef.current[kind];
     const snapped = snapMobileAttentionPosition(viewport, released);
@@ -627,68 +749,214 @@ export function AgentFloatingSessionButtons({
     const next = { ...positionsRef.current, [kind]: finalPosition.position };
     positionsRef.current = next;
     setPositions(next);
-    suppressClickRef.current[kind] = drag.moved;
+  }, [avoidOtherButton, containerElement, isDesktopLayout]);
+
+  const suppressSyntheticClick = React.useCallback((kind: FloatingSessionButtonKind) => {
+    suppressClickRef.current[kind] = true;
     window.setTimeout(() => {
       suppressClickRef.current[kind] = false;
     }, 0);
-  }, [avoidOtherButton, containerElement, isDesktopLayout]);
+  }, []);
 
-  const renderButton = (kind: FloatingSessionButtonKind): React.ReactElement => {
-    const isAttention = kind === 'attention';
-    const count = isAttention ? reviewCount : runningCount;
-    const label = isAttention ? t('agent.jumpToNext') : t('agent.jumpToNextRunning');
-    const position = positions[kind];
-    const dragging = draggingKind === kind;
+  const finishAttentionDrag = React.useCallback((
+    event: React.PointerEvent<HTMLButtonElement>,
+  ) => {
+    const drag = dragRef.current;
+    if (!drag || drag.kind !== 'attention' || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDraggingKind(null);
+    persistReleasedPosition('attention', drag, event.clientX, event.clientY);
+    if (drag.moved) suppressSyntheticClick('attention');
+  }, [persistReleasedPosition, suppressSyntheticClick]);
+
+  const attentionDragHandlers: Pick<React.ButtonHTMLAttributes<HTMLButtonElement>,
+    'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel'> = {
+    onPointerDown: (event) => {
+      event.stopPropagation();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      dragRef.current = {
+        kind: 'attention',
+        pointerId: event.pointerId,
+        originX: event.clientX,
+        originY: event.clientY,
+        startX: positions.attention.x,
+        startY: positions.attention.y,
+        moved: false,
+      };
+    },
+    onPointerMove: (event) => {
+      const drag = dragRef.current;
+      if (!drag || drag.kind !== 'attention' || drag.pointerId !== event.pointerId) return;
+      const dx = event.clientX - drag.originX;
+      const dy = event.clientY - drag.originY;
+      if (!drag.moved && Math.hypot(dx, dy) < 5) return;
+      drag.moved = true;
+      setDraggingKind('attention');
+      const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
+      const moved = avoidOtherButton('attention', clampMobileAttentionDrag(viewport, {
+        x: drag.startX + dx,
+        y: drag.startY + dy,
+      }));
+      const next = { ...positionsRef.current, attention: moved };
+      positionsRef.current = next;
+      setPositions(next);
+    },
+    onPointerUp: finishAttentionDrag,
+    onPointerCancel: finishAttentionDrag,
+  };
+
+  const runningRailLayout = containerElement
+    ? getRunningSessionRailLayout(positions.running, containerElement, runningSessions.length)
+    : null;
+
+  const clearRunningLongPress = (gesture: NonNullable<typeof runningGestureRef.current>) => {
+    if (gesture.longPressTimer !== null) {
+      window.clearTimeout(gesture.longPressTimer);
+      gesture.longPressTimer = null;
+    }
+  };
+
+  const runningPointerHandlers: Pick<React.ButtonHTMLAttributes<HTMLButtonElement>,
+    'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel'> = {
+    onPointerDown: (event) => {
+      event.stopPropagation();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      const pointerId = event.pointerId;
+      const gesture: NonNullable<typeof runningGestureRef.current> = {
+        pointerId,
+        originX: event.clientX,
+        originY: event.clientY,
+        startX: positions.running.x,
+        startY: positions.running.y,
+        mode: 'pressing',
+        moved: false,
+        selectedIndex: null,
+        longPressTimer: null,
+      };
+      gesture.longPressTimer = window.setTimeout(() => {
+        const current = runningGestureRef.current;
+        if (!current || current.pointerId !== pointerId || current.mode !== 'pressing') return;
+        current.longPressTimer = null;
+        current.mode = 'dragging';
+        suppressClickRef.current.running = true;
+        setRunningGestureMode('dragging');
+      }, RUNNING_LONG_PRESS_MS);
+      runningGestureRef.current = gesture;
+      setRunningGestureMode('pressing');
+      setSelectedRunningIndex(null);
+    },
+    onPointerMove: (event) => {
+      const gesture = runningGestureRef.current;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      const dx = event.clientX - gesture.originX;
+      const dy = event.clientY - gesture.originY;
+
+      if (gesture.mode === 'pressing') {
+        if (Math.abs(dx) >= RUNNING_SWIPE_THRESHOLD_PX && Math.abs(dx) >= Math.abs(dy)) {
+          clearRunningLongPress(gesture);
+          gesture.mode = 'selecting';
+          suppressClickRef.current.running = true;
+          setRunningGestureMode('selecting');
+        } else if (Math.hypot(dx, dy) >= RUNNING_SWIPE_THRESHOLD_PX) {
+          clearRunningLongPress(gesture);
+          gesture.mode = 'cancelled';
+          suppressClickRef.current.running = true;
+          setRunningGestureMode('idle');
+          return;
+        } else {
+          return;
+        }
+      }
+
+      if (gesture.mode === 'selecting') {
+        const index = runningRailLayout
+          ? getRunningRailSelectionIndex(
+              runningRailLayout,
+              event.clientX,
+              event.clientY,
+              runningSessions.length,
+            )
+          : null;
+        gesture.selectedIndex = index;
+        setSelectedRunningIndex(index);
+        return;
+      }
+
+      if (gesture.mode !== 'dragging') return;
+      if (!gesture.moved && Math.hypot(dx, dy) < 5) return;
+      gesture.moved = true;
+      const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
+      const moved = avoidOtherButton('running', clampMobileAttentionDrag(viewport, {
+        x: gesture.startX + dx,
+        y: gesture.startY + dy,
+      }));
+      const next = { ...positionsRef.current, running: moved };
+      positionsRef.current = next;
+      setPositions(next);
+    },
+    onPointerUp: (event) => {
+      const gesture = runningGestureRef.current;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      clearRunningLongPress(gesture);
+      const mode = gesture.mode;
+      if (mode === 'selecting') {
+        const index = runningRailLayout
+          ? getRunningRailSelectionIndex(
+              runningRailLayout,
+              event.clientX,
+              event.clientY,
+              runningSessions.length,
+            )
+          : gesture.selectedIndex;
+        const sessionId = index === null ? null : runningSessions[index]?.id;
+        if (sessionId) jumpToSession(sessionId);
+      } else if (mode === 'dragging') {
+        persistReleasedPosition('running', gesture, event.clientX, event.clientY);
+      }
+      runningGestureRef.current = null;
+      setRunningGestureMode('idle');
+      setSelectedRunningIndex(null);
+      if (mode !== 'pressing') suppressSyntheticClick('running');
+    },
+    onPointerCancel: (event) => {
+      const gesture = runningGestureRef.current;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      clearRunningLongPress(gesture);
+      runningGestureRef.current = null;
+      setRunningGestureMode('idle');
+      setSelectedRunningIndex(null);
+      suppressSyntheticClick('running');
+    },
+  };
+
+  const renderCountBadge = (
+    count: number,
+    tone: 'attention' | 'running',
+  ): React.ReactElement => (
+    <span className={`pointer-events-none absolute -right-1 -top-1 z-10 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-surface px-1 text-[9px] font-bold tabular-nums ring-2 ring-[var(--chrome-bg)] ${
+      tone === 'attention' ? 'text-[color:var(--warning)]' : 'text-[color:var(--success)]'
+    }`}>
+      {count > 9 ? '9+' : count}
+    </span>
+  );
+
+  const renderAttentionButton = (): React.ReactElement => {
+    const label = t('agent.jumpToNext');
+    const position = positions.attention;
+    const dragging = draggingKind === 'attention';
     return (
       <button
-        key={kind}
+        key="attention"
         type="button"
-        {...(isAttention
-          ? { 'data-attention-button': true, 'data-mobile-attention-button': true }
-          : { 'data-running-session-button': true })}
-        onPointerDown={(event) => {
-          event.stopPropagation();
-          event.currentTarget.setPointerCapture(event.pointerId);
-          dragRef.current = {
-            kind,
-            pointerId: event.pointerId,
-            originX: event.clientX,
-            originY: event.clientY,
-            startX: position.x,
-            startY: position.y,
-            moved: false,
-          };
-        }}
-        onPointerMove={(event) => {
-          const drag = dragRef.current;
-          if (!drag || drag.kind !== kind || drag.pointerId !== event.pointerId) return;
-          const dx = event.clientX - drag.originX;
-          const dy = event.clientY - drag.originY;
-          if (!drag.moved && Math.hypot(dx, dy) < 5) return;
-          drag.moved = true;
-          setDraggingKind(kind);
-          const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
-          const moved = avoidOtherButton(kind, clampMobileAttentionDrag(viewport, {
-            x: drag.startX + dx,
-            y: drag.startY + dy,
-          }));
-          const next = { ...positionsRef.current, [kind]: moved };
-          positionsRef.current = next;
-          setPositions(next);
-        }}
-        onPointerUp={(event) => finishDrag(kind, event)}
-        onPointerCancel={(event) => finishDrag(kind, event)}
+        data-attention-button
+        data-mobile-attention-button
+        {...attentionDragHandlers}
         onClick={(event) => {
           event.stopPropagation();
-          if (suppressClickRef.current[kind]) return;
-          if (isAttention) jumpToNextAgentAttention();
-          else jumpToNextRunningAgent();
+          if (suppressClickRef.current.attention) return;
+          jumpToNextAgentAttention();
         }}
-        className={`fixed z-chrome-hint inline-flex items-center justify-center rounded-full shadow-[0_8px_24px_var(--app-shadow-strong)] ring-1 animate-fade-in ${
-          isAttention
-            ? 'bg-[var(--warning)] text-[color:var(--warning-foreground)] ring-[rgb(var(--warning-rgb)_/_0.35)]'
-            : 'bg-[var(--success)] text-[color:var(--success-foreground)] ring-[rgb(var(--success-rgb)_/_0.35)]'
-        } ${
+        className={`fixed z-chrome-hint inline-flex items-center justify-center rounded-full bg-[var(--warning)] text-[color:var(--warning-foreground)] shadow-[0_8px_24px_var(--app-shadow-strong)] ring-1 ring-[rgb(var(--warning-rgb)_/_0.35)] animate-fade-in ${
           dragging
             ? 'cursor-grabbing scale-[1.04] shadow-[0_12px_30px_var(--app-shadow-strong)]'
             : 'cursor-grab transition-[left,top,transform,box-shadow] duration-200 active:scale-95'
@@ -700,18 +968,101 @@ export function AgentFloatingSessionButtons({
           height: MOBILE_ATTENTION_SIZE_PX,
           touchAction: 'none',
         }}
-        aria-label={`${label}: ${count}`}
+        aria-label={`${label}: ${reviewCount}`}
         title={label}
       >
-        {isAttention
-          ? <RiBellDot size={17} className="shrink-0" />
-          : <RiLoaderCircle size={18} className="shrink-0 animate-spin" />}
-        <span className={`absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-surface px-1 text-[9px] font-bold tabular-nums ring-2 ring-[var(--chrome-bg)] ${
-          isAttention ? 'text-[color:var(--warning)]' : 'text-[color:var(--success)]'
-        }`}>
-          {count > 9 ? '9+' : count}
-        </span>
+        <RiBellDot size={17} className="shrink-0" />
+        {renderCountBadge(reviewCount, 'attention')}
       </button>
+    );
+  };
+
+  const renderRunningButton = (): React.ReactElement => {
+    const count = runningSessions.length;
+    const position = positions.running;
+    const selecting = runningGestureMode === 'selecting';
+    const dragging = runningGestureMode === 'dragging';
+    return (
+      <React.Fragment key="running">
+        <button
+          type="button"
+          data-running-session-button
+          data-running-session-gesture={runningGestureMode}
+          {...runningPointerHandlers}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (suppressClickRef.current.running) return;
+            const sessionId = getNextRunningShortcutId(runningSessions, activeSessionId);
+            if (sessionId) jumpToSession(sessionId);
+          }}
+          className={`fixed z-chrome-hint inline-flex select-none items-center justify-center rounded-full bg-[var(--success)] text-[color:var(--success-foreground)] shadow-[0_8px_24px_var(--app-shadow-strong)] ring-1 ring-[rgb(var(--success-rgb)_/_0.35)] animate-fade-in ${
+            dragging
+              ? 'cursor-grabbing scale-[1.04] shadow-[0_12px_30px_var(--app-shadow-strong)]'
+              : selecting
+                ? 'cursor-ew-resize scale-[1.04] ring-2 ring-[rgb(var(--success-rgb)_/_0.55)]'
+                : 'cursor-grab transition-[left,top,transform,box-shadow] duration-200 active:scale-95'
+          }`}
+          style={{
+            left: position.x,
+            top: position.y,
+            width: MOBILE_ATTENTION_SIZE_PX,
+            height: MOBILE_ATTENTION_SIZE_PX,
+            touchAction: 'none',
+          }}
+          aria-label={`${t('agent.jumpToNextRunning')}: ${count}`}
+          title={t('agent.runningSessionGestureHint')}
+        >
+          <RiLoaderCircle size={18} className="shrink-0 animate-spin" />
+          {renderCountBadge(count, 'running')}
+        </button>
+        {selecting && runningRailLayout && (
+          <div
+            role="listbox"
+            data-running-session-rail
+            data-side={runningRailLayout.side}
+            aria-label={t('agent.selectRunningSession')}
+            className="pointer-events-none fixed z-popover flex overflow-hidden rounded-full border border-border/15 bg-surface/95 p-1 shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in"
+            style={{
+              left: runningRailLayout.left,
+              top: runningRailLayout.top,
+              width: runningRailLayout.width,
+              height: runningRailLayout.height,
+            }}
+          >
+            {runningSessions.map((session, index) => {
+              const isSelected = index === selectedRunningIndex;
+              const isActive = session.id === activeSessionId;
+              const title = `${session.label}${session.detail ? ` · ${session.detail}` : ''}${
+                isActive ? ` · ${t('agent.currentSession')}` : ''
+              }`;
+              return (
+                <div
+                  key={session.id}
+                  role="option"
+                  aria-selected={isSelected}
+                  data-running-session-option={session.id}
+                  data-selected={isSelected ? 'true' : 'false'}
+                  title={title}
+                  className={`relative flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full px-2 transition-[background-color,color,transform] duration-100 ${
+                    isSelected
+                      ? 'scale-[1.02] bg-[var(--success)] text-[color:var(--success-foreground)]'
+                      : isActive
+                        ? 'bg-primary/15 text-primary ring-1 ring-primary/30'
+                        : 'text-foreground'
+                  }`}
+                >
+                  <span className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold tabular-nums ${
+                    isSelected ? 'bg-surface/25' : 'bg-surface-2 text-muted-foreground'
+                  }`}>
+                    {index + 1}
+                  </span>
+                  <span className="truncate text-[10px] font-medium">{session.label}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </React.Fragment>
     );
   };
 
@@ -721,8 +1072,8 @@ export function AgentFloatingSessionButtons({
 
   return createPortal(
     <>
-      {attentionVisible && renderButton('attention')}
-      {runningVisible && renderButton('running')}
+      {attentionVisible && renderAttentionButton()}
+      {runningVisible && renderRunningButton()}
     </>,
     document.body,
   );

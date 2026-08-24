@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, Move, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, ImagePlus, Loader2, Move, X } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { vibrate as hapticVibrate } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
@@ -60,6 +60,8 @@ interface MobileKeyboardProps {
   onKeyPress: (key: MobileKey) => void;
   onTextPress: (sequence: string) => void;
   onPastePress?: () => void;
+  onImagePress?: () => void;
+  imageUploadState?: 'idle' | 'uploading' | 'inserted' | 'failed';
   longPressMode?: 'arrows' | 'copy';
   copyFeedback?: 'idle' | 'copied' | 'failed';
   onLongPressModeToggle?: () => void;
@@ -86,6 +88,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   onKeyPress,
   onTextPress,
   onPastePress,
+  onImagePress,
+  imageUploadState = 'idle',
   longPressMode = 'arrows',
   copyFeedback = 'idle',
   onLongPressModeToggle,
@@ -125,8 +129,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         return;
       }
       const button = target.closest('button');
-      const isClipboardButton = button?.hasAttribute('data-mobile-copy-button') === true;
-      if (button && !isClipboardButton) {
+      const isNativeActionButton = button?.hasAttribute('data-mobile-native-action') === true;
+      if (button && !isNativeActionButton) {
         event.preventDefault();
         hapticVibrate(TOOLBAR_HAPTIC_PATTERN_MS);
       } else if (button) {
@@ -345,6 +349,13 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     [toolbarDisabled, triggerPastePress],
   );
 
+  const handleImageClick = React.useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    if (toolbarDisabled || imageUploadState === 'uploading' || !onImagePress) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onImagePress();
+  }, [imageUploadState, onImagePress, toolbarDisabled]);
+
   const stopToolbarButtonBubble = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement> | React.TouchEvent<HTMLButtonElement>) => {
       if (toolbarDisabled) {
@@ -464,7 +475,8 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     }
 
     if (hasPresetActions) {
-      return defaultItems.concat(extraActions.map((action) => ({ id: action.id, kind: 'text' as const, action })));
+      const presetItems: ExpandedItem[] = extraActions.map((action) => ({ id: action.id, kind: 'text', action }));
+      return defaultItems.concat(presetItems);
     }
 
     if (isDesktopActions) {
@@ -534,11 +546,11 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         /*
           移动端工具栏第一行(约定:加按钮先看这里)。
 
-          9 列网格贴底全宽,是手机上最好够的位置(拇指热区在下半屏偏右):
+          10 列网格贴底全宽,原有按钮保持原位:
           - 高频键靠右放;展开键固定最右一列,不要动;
-          - 放不下的键进下方扩展行(expandedRows),第一行保持 9 列。
+          - 本地图片按钮新增在 C-U 后面,不挪动原有按钮的相对顺序。
         */
-        <div className="grid grid-cols-9 gap-1">
+        <div data-mobile-keyboard-primary-row="true" className="grid grid-cols-10 gap-1">
         <button
           type="button"
           onPointerDown={(event) => handleSinglePointerDown(event, 'esc')}
@@ -583,6 +595,49 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         </button>
         <button
           type="button"
+          data-mobile-native-action="true"
+          onPointerDown={stopToolbarButtonBubble}
+          onTouchStart={stopToolbarButtonBubble}
+          onClick={handleImageClick}
+          tabIndex={-1}
+          disabled={buttonDisabled || !onImagePress || imageUploadState === 'uploading'}
+          title={imageUploadState === 'uploading'
+            ? t('rightSidebar.uploading')
+            : imageUploadState === 'inserted'
+              ? t('rightSidebar.inserted')
+              : imageUploadState === 'failed'
+                ? t('rightSidebar.uploadFailed')
+                : t('rightSidebar.insertLocalImage')}
+          aria-label={t('rightSidebar.insertLocalImage')}
+          className={`h-7 w-full rounded-full shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center ${
+            imageUploadState === 'inserted'
+              ? 'bg-primary/15 text-primary'
+              : imageUploadState === 'failed'
+                ? 'bg-destructive/15 text-destructive'
+                : 'bg-surface-2'
+          }`}
+        >
+          {imageUploadState === 'uploading' ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : imageUploadState === 'inserted' ? (
+            <Check size={15} />
+          ) : imageUploadState === 'failed' ? (
+            <X size={15} />
+          ) : (
+            <ImagePlus size={15} />
+          )}
+          {imageUploadState !== 'idle' && (
+            <span className="sr-only" role="status" aria-live="polite">
+              {imageUploadState === 'uploading'
+                ? t('rightSidebar.uploading')
+                : imageUploadState === 'inserted'
+                  ? t('rightSidebar.inserted')
+                  : t('rightSidebar.uploadFailed')}
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
           onPointerDown={() => onTextPress('/')}
           tabIndex={-1}
           disabled={buttonDisabled}
@@ -603,6 +658,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           ref={longPressModeButtonRef}
           type="button"
           data-mobile-copy-button="true"
+          data-mobile-native-action="true"
           onPointerDown={stopClipboardButtonPointer}
           onTouchStart={stopClipboardButtonPointer}
           onClick={handleLongPressModeClick}
@@ -667,6 +723,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
         <button
           type="button"
           data-mobile-copy-button="true"
+          data-mobile-native-action="true"
           onPointerDown={handlePastePointerDown}
           onPointerUp={stopToolbarButtonBubble}
           onTouchStart={stopToolbarButtonBubble}
@@ -767,7 +824,11 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
                     disabled={buttonDisabled}
                     className="h-7 w-full rounded-full bg-surface-2 shadow-sm text-xs active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50"
                   >
-                    {item.keyName === 'ctrl-d' ? 'Ctrl-D' : item.keyName === 'home' ? 'Home' : 'End'}
+                    {item.keyName === 'ctrl-d'
+                      ? 'Ctrl-D'
+                      : item.keyName === 'home'
+                          ? 'Home'
+                          : 'End'}
                   </button>
                 );
               })}

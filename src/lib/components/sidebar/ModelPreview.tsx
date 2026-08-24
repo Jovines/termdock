@@ -92,11 +92,149 @@ type ViewerAppearanceMode = 'light' | 'dark';
 const TRACKPAD_PAN_SENSITIVITY = 0.52;
 const TRACKPAD_PAN_MAX_DELTA = 18;
 const PINCH_ZOOM_SENSITIVITY = 1.38;
+const TOUCH_ROTATE_SENSITIVITY = 0.62;
+const TOUCH_PAN_SENSITIVITY = 0.55;
+const TOUCH_ZOOM_SENSITIVITY = 0.72;
+
+export function modelControlSensitivity(touching: boolean): { rotate: number; pan: number; zoom: number } {
+  return touching
+    ? { rotate: TOUCH_ROTATE_SENSITIVITY, pan: TOUCH_PAN_SENSITIVITY, zoom: TOUCH_ZOOM_SENSITIVITY }
+    : { rotate: 1, pan: 1, zoom: PINCH_ZOOM_SENSITIVITY };
+}
 
 /** Fine movement stays proportional; fast swipes are softly capped. */
 export function scaleModelTrackpadPanDelta(delta: number): number {
   if (!Number.isFinite(delta)) return 0;
   return TRACKPAD_PAN_MAX_DELTA * Math.tanh((delta * TRACKPAD_PAN_SENSITIVITY) / TRACKPAD_PAN_MAX_DELTA);
+}
+
+/**
+ * KiCad exports silkscreen and solder mask as overlapping BLEND materials.
+ * Transparent-object sorting then changes with the camera and can hide the
+ * silkscreen while orbiting. Silkscreen ink is visually opaque, so make only
+ * the named PCB silkscreen layer depth-stable and pull it forward by a tiny
+ * raster-space offset without moving the model geometry.
+ */
+export function stabilizePcbSilkscreenMaterials(root: Object3D): number {
+  const stabilized = new Set<Material>();
+  root.traverse((node) => {
+    if (!(node instanceof Mesh)) return;
+    let current: Object3D | null = node;
+    let isSilkscreen = false;
+    while (current) {
+      if (current.name.toLowerCase().includes('_silkscreen')) {
+        isSilkscreen = true;
+        break;
+      }
+      current = current.parent;
+    }
+    if (!isSilkscreen) return;
+
+    node.renderOrder = Math.max(node.renderOrder, 20);
+    for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
+      material.transparent = false;
+      material.opacity = 1;
+      material.depthTest = true;
+      material.depthWrite = true;
+      material.polygonOffset = true;
+      material.polygonOffsetFactor = -2;
+      material.polygonOffsetUnits = -2;
+      material.needsUpdate = true;
+      stabilized.add(material);
+    }
+  });
+  return stabilized.size;
+}
+
+/**
+ * KiCad's GLB exporter can also mark the board substrate itself as a nearly
+ * opaque BLEND material. The substrate mesh contains the board faces, edges,
+ * and drilled-hole walls in one object, so transparent triangle sorting makes
+ * hole rims flicker while the camera moves. A 0.98-alpha board is intended to
+ * look solid; rendering the named `_PCB` layer as opaque restores stable depth
+ * testing without changing the translucent solder-mask layer above it.
+ */
+export function stabilizePcbSubstrateMaterials(root: Object3D): number {
+  const stabilized = new Set<Material>();
+  root.traverse((node) => {
+    if (!(node instanceof Mesh)) return;
+    let current: Object3D | null = node;
+    let isPcbSubstrate = false;
+    while (current) {
+      if (/_pcb$/i.test(current.name)) {
+        isPcbSubstrate = true;
+        break;
+      }
+      current = current.parent;
+    }
+    if (!isPcbSubstrate) return;
+
+    for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
+      material.transparent = false;
+      material.opacity = 1;
+      material.depthTest = true;
+      material.depthWrite = true;
+      material.needsUpdate = true;
+      stabilized.add(material);
+    }
+  });
+  return stabilized.size;
+}
+
+interface SectionMaterialStabilizer {
+  count: number;
+  setEnabled: (enabled: boolean) => void;
+}
+
+/**
+ * Near-opaque BLEND materials shimmer when a moving clipping plane exposes
+ * both their front and back faces. During section inspection, temporarily
+ * render only those nearly solid materials as opaque depth-writing surfaces.
+ * Genuinely translucent materials stay untouched, and every changed property
+ * is restored when section mode is disabled.
+ */
+export function createSectionMaterialStabilizer(root: Object3D): SectionMaterialStabilizer {
+  const originals = new Map<Material, {
+    transparent: boolean;
+    opacity: number;
+    depthWrite: boolean;
+    forceSinglePass: boolean;
+  }>();
+  root.traverse((node) => {
+    if (!(node instanceof Mesh)) return;
+    for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
+      if (originals.has(material) || !material.transparent || material.opacity < 0.8) continue;
+      originals.set(material, {
+        transparent: material.transparent,
+        opacity: material.opacity,
+        depthWrite: material.depthWrite,
+        forceSinglePass: material.forceSinglePass,
+      });
+    }
+  });
+
+  let enabled = false;
+  return {
+    count: originals.size,
+    setEnabled(nextEnabled) {
+      if (nextEnabled === enabled) return;
+      enabled = nextEnabled;
+      for (const [material, original] of originals) {
+        if (enabled) {
+          material.transparent = false;
+          material.opacity = 1;
+          material.depthWrite = true;
+          material.forceSinglePass = true;
+        } else {
+          material.transparent = original.transparent;
+          material.opacity = original.opacity;
+          material.depthWrite = original.depthWrite;
+          material.forceSinglePass = original.forceSinglePass;
+        }
+        material.needsUpdate = true;
+      }
+    },
+  };
 }
 
 // Self-contained viewer palette: the exact look of the standalone
@@ -193,6 +331,8 @@ async function parseModel(buffer: ArrayBuffer, kind: Model3dLoaderKind): Promise
 
 interface ViewerResult {
   dims: string;
+  /** Pause the animation loop while a cached viewer is hidden. */
+  setActive: (active: boolean) => void;
   setAppearance: (mode: 'light' | 'dark') => void;
   setClip: (clip: ClipState | null) => void;
   /** 通用点选: 屏幕坐标 → 模型表面命中(部位名 + CAD 坐标 + 法线)。 */
@@ -228,7 +368,12 @@ interface ViewerResult {
 // neutral gray standard material, ambient + two directional lights, faint
 // ground grid, camera fitted to the bounding sphere, STL Z-up rotated to
 // three's Y-up, OrbitControls with damping.
-function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerResult {
+function mountModelViewer(
+  container: HTMLElement,
+  parsed: ParsedModel,
+  unitScale = 1,
+  dimensionUnit?: string,
+): ViewerResult {
   const initialMode = currentThemeMode();
   const scene = new Scene();
   scene.background = new Color(VIEWER_APPEARANCE[initialMode].bg);
@@ -272,6 +417,10 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
     modelObject = mesh;
   } else {
     const object = parsed.object;
+    stabilizePcbSilkscreenMaterials(object);
+    stabilizePcbSubstrateMaterials(object);
+    object.scale.setScalar(unitScale);
+    object.updateMatrixWorld(true);
     const bb = new Box3().setFromObject(object);
     size = bb.getSize(new Vector3());
     const center = bb.getCenter(new Vector3());
@@ -371,6 +520,7 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
       }
     }
   });
+  const sectionMaterialStabilizer = createSectionMaterialStabilizer(modelObject);
 
   // Fit the camera to the bounding sphere.
   const radius = Math.max(size.length() / 2, 1e-6);
@@ -407,6 +557,29 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
   controls.screenSpacePanning = true;
   controls.zoomToCursor = true;
   controls.zoomSpeed = PINCH_ZOOM_SENSITIVITY;
+
+  // OrbitControls shares one set of gains between mouse/trackpad and touch.
+  // Temporarily switch to calmer mobile gains while touch pointers are down,
+  // then restore the desktop values without changing trackpad behavior.
+  const activeTouchPointers = new Set<number>();
+  const applyTouchSensitivity = (touching: boolean) => {
+    const sensitivity = modelControlSensitivity(touching);
+    controls.rotateSpeed = sensitivity.rotate;
+    controls.panSpeed = sensitivity.pan;
+    controls.zoomSpeed = sensitivity.zoom;
+  };
+  const handleControlPointerDown = (event: PointerEvent) => {
+    if (event.pointerType !== 'touch') return;
+    activeTouchPointers.add(event.pointerId);
+    applyTouchSensitivity(true);
+  };
+  const handleControlPointerEnd = (event: PointerEvent) => {
+    if (!activeTouchPointers.delete(event.pointerId)) return;
+    if (activeTouchPointers.size === 0) applyTouchSensitivity(false);
+  };
+  renderer.domElement.addEventListener('pointerdown', handleControlPointerDown, { capture: true });
+  renderer.domElement.addEventListener('pointerup', handleControlPointerEnd, { capture: true });
+  renderer.domElement.addEventListener('pointercancel', handleControlPointerEnd, { capture: true });
 
   // OrbitControls treats every wheel event as zoom. On a Mac that turns the
   // trackpad's two-finger scroll into accidental zoom, so intercept smooth
@@ -482,7 +655,8 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
   });
   resizeObserver.observe(container);
 
-  let frameId = 0;
+  let frameId: number | null = null;
+  let active = true;
   let afterRender: (() => void) | null = null;
   let selectionEntries: Array<{ point: Vector3; meshes: Mesh[] }> = [];
   // 选中光斑保持屏幕恒定大小(~36px), 放大缩小时不跟着模型变大变小
@@ -500,11 +674,15 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
     }
   };
   const animate = () => {
-    frameId = requestAnimationFrame(animate);
+    if (!active) {
+      frameId = null;
+      return;
+    }
     controls.update();
     renderer.render(scene, camera);
     updateSelectionScale();
     afterRender?.();
+    frameId = requestAnimationFrame(animate);
   };
   animate();
 
@@ -512,7 +690,17 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
     // STL is always mm. glTF is nominally meters, but CAD/printing exports
     // (e.g. CadQuery) are usually mm — there is no reliable unit metadata, so
     // show raw bounding-box numbers without a unit rather than a wrong one.
-    dims: formatModelDimensions(size, parsed.kind === 'stl' ? 'mm' : undefined),
+    dims: formatModelDimensions(size, dimensionUnit ?? (parsed.kind === 'stl' ? 'mm' : undefined)),
+    setActive: (nextActive) => {
+      if (active === nextActive) return;
+      active = nextActive;
+      if (!active && frameId !== null) {
+        cancelAnimationFrame(frameId);
+        frameId = null;
+      } else if (active && frameId === null) {
+        animate();
+      }
+    },
     setAppearance: (mode: 'light' | 'dark') => {
       const appearance = VIEWER_APPEARANCE[mode];
       scene.background = new Color(appearance.bg);
@@ -525,10 +713,12 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
     },
     setClip: (clip) => {
       if (!clip) {
+        sectionMaterialStabilizer.setEnabled(false);
         for (const m of clipMaterials) m.clippingPlanes = null;
         if (stlMaterial) stlMaterial.side = FrontSide;
         return;
       }
+      sectionMaterialStabilizer.setEnabled(true);
       const dir = axisDirs[clip.axis];
       const half =
         (Math.abs(dir.x) * worldSize.x +
@@ -640,7 +830,9 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
       afterRender = cb;
     },
     dispose: () => {
-      cancelAnimationFrame(frameId);
+      active = false;
+      if (frameId !== null) cancelAnimationFrame(frameId);
+      frameId = null;
       for (const entry of selectionEntries) {
         for (const mesh of entry.meshes) {
         scene.remove(mesh);
@@ -650,6 +842,9 @@ function mountModelViewer(container: HTMLElement, parsed: ParsedModel): ViewerRe
       }
       selectionEntries = [];
       resizeObserver.disconnect();
+      renderer.domElement.removeEventListener('pointerdown', handleControlPointerDown, { capture: true });
+      renderer.domElement.removeEventListener('pointerup', handleControlPointerEnd, { capture: true });
+      renderer.domElement.removeEventListener('pointercancel', handleControlPointerEnd, { capture: true });
       renderer.domElement.removeEventListener('wheel', handleWheelCapture, { capture: true });
       renderer.domElement.removeEventListener('gesturestart', handleGestureStart);
       renderer.domElement.removeEventListener('gesturechange', handleGestureChange);
@@ -688,6 +883,15 @@ interface ModelPreviewProps {
   /** Re-fetch the model from the server (manual fallback when file-watch
       auto-reload misses, e.g. suspended SSE on mobile). */
   onRefresh?: () => void;
+  /** Scale glTF geometry into the display/annotation unit (KiCad GLB is metres). */
+  unitScale?: number;
+  dimensionUnit?: string;
+  coordinateSystemLabel?: string;
+  annotationPrefix?: string;
+  /** Replace exporter-internal mesh names while retaining meaningful part references. */
+  normalizePickedPartName?: (part: string) => string;
+  /** Keep a mounted viewer cached but stop rendering while its tab is hidden. */
+  active?: boolean;
 }
 
 type ModelPreviewStatus =
@@ -697,7 +901,21 @@ type ModelPreviewStatus =
 
 const BG_STORAGE_KEY = 'termdock.model3d.bg';
 
-export default function ModelPreview({ blobUrl, ext, fileName, filePath, features, onInsertFeature, onRefresh }: ModelPreviewProps) {
+export default function ModelPreview({
+  blobUrl,
+  ext,
+  fileName,
+  filePath,
+  features,
+  onInsertFeature,
+  onRefresh,
+  unitScale = 1,
+  dimensionUnit,
+  coordinateSystemLabel,
+  annotationPrefix = '模型标注',
+  normalizePickedPartName,
+  active = true,
+}: ModelPreviewProps) {
   const { t, locale } = useI18n();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -781,7 +999,7 @@ export default function ModelPreview({ blobUrl, ext, fileName, filePath, feature
     // 世界坐标(CAD (x,y,z) → (x,z,-y)); STL 无场景变换, 就是文件里的 Z-up 坐标。
     // 只给一个坐标系, Agent 直接读引用文件就能对上, 不用转换。
     const isGlb = resolveModel3dLoaderKind(ext) === 'gltf';
-    const coordLabel = isGlb ? 'GLB 世界坐标 Y-up' : 'STL 文件坐标 Z-up';
+    const coordLabel = coordinateSystemLabel ?? (isGlb ? 'GLB 世界坐标 Y-up' : 'STL 文件坐标 Z-up');
     const toFileCoords = (v: [number, number, number]) => (isGlb ? [v[0], v[2], -v[1]] : v);
     const point = toFileCoords(p.point).map((v) => v.toFixed(1)).join(',');
     const normal = p.normal
@@ -808,7 +1026,7 @@ export default function ModelPreview({ blobUrl, ext, fileName, filePath, feature
       if (nearest && best <= 8) hint = ` ≈ ${nearest.part}·${nearest.name}`;
       else if (nearest && best <= 15) hint = ` ≈ 靠近 ${nearest.part}·${nearest.name}`;
     }
-    const text = `"模型标注: ${filePath ?? fileName} / 部位: ${partLabel} / 点 (${point})mm [${coordLabel}]${normal}${hint}"`;
+    const text = `"${annotationPrefix}: ${filePath ?? fileName} / 部位: ${partLabel} / 点 (${point})mm [${coordLabel}]${normal}${hint}"`;
     onInsertFeature?.(text, `pick:${point}`);
     setPicked(null);
   };
@@ -934,7 +1152,7 @@ export default function ModelPreview({ blobUrl, ext, fileName, filePath, feature
   const insertFeatureRef = () => {
     if (selectedFeatures.length === 0) return;
     const isGlb = resolveModel3dLoaderKind(ext) === 'gltf';
-    const coordLabel = isGlb ? 'GLB 世界坐标 Y-up' : 'STL 文件坐标 Z-up';
+    const coordLabel = coordinateSystemLabel ?? (isGlb ? 'GLB 世界坐标 Y-up' : 'STL 文件坐标 Z-up');
     const toFileCoords = (v: number[]) => (isGlb ? [v[0], v[2], -v[1]] : v);
     const parts = selectedFeatures.map((ft, i) => {
       const center = toFileCoords(ft.center).map((v) => v.toFixed(1)).join(',');
@@ -945,7 +1163,7 @@ export default function ModelPreview({ blobUrl, ext, fileName, filePath, feature
       const label = selectedFeatures.length > 1 ? `面${'AB'[i]}: ` : '';
       return `${label}${ft.part}·${ft.name} (中心 ${center}) [${coordLabel}]${distText}`;
     });
-    const text = `"模型标注: ${filePath ?? fileName} / ${parts.join(' ; ')}"`;
+    const text = `"${annotationPrefix}: ${filePath ?? fileName} / ${parts.join(' ; ')}"`;
     onInsertFeature?.(text, `features:${selectedFeatures.map((ft) => ft.id).join('+')}`);
     setSelectedFeatureIds([]);
   };
@@ -994,9 +1212,10 @@ export default function ModelPreview({ blobUrl, ext, fileName, filePath, feature
       const parsed = await parseModel(buffer, kind);
       const container = containerRef.current;
       if (cancelled || !container) return;
-      const viewer = mountModelViewer(container, parsed);
+      const viewer = mountModelViewer(container, parsed, unitScale, dimensionUnit);
       disposeViewer = viewer.dispose;
       viewerRef.current = viewer;
+      viewer.setActive(active);
       // A background override survives file switches (the component is reused);
       // re-apply it over the theme default set by mountModelViewer.
       if (bgOverrideRef.current) viewer.setAppearance(bgOverrideRef.current);
@@ -1015,7 +1234,11 @@ export default function ModelPreview({ blobUrl, ext, fileName, filePath, feature
     };
     // pseudoFullscreen switches the portal target, which remounts the viewer
     // container — re-run the whole load/mount sequence for the new location.
-  }, [blobUrl, ext, pseudoFullscreen]);
+  }, [blobUrl, ext, pseudoFullscreen, unitScale, dimensionUnit]);
+
+  useEffect(() => {
+    viewerRef.current?.setActive(active);
+  }, [active]);
 
   // Apply background toggles to the live viewer.
   useEffect(() => {
@@ -1348,7 +1571,9 @@ export default function ModelPreview({ blobUrl, ext, fileName, filePath, feature
               rect.width || 1,
               rect.height || 1,
             );
-            setPicked(hit ?? null);
+            setPicked(hit
+              ? { ...hit, part: normalizePickedPartName?.(hit.part) ?? hit.part }
+              : null);
           } else {
             // 点击空白处: 取消特征选中 / 清除点选
             setSelectedFeatureIds([]);

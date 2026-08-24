@@ -22,6 +22,7 @@ const baseProps = {
   onKeyPress: vi.fn(),
   onTextPress: vi.fn(),
   onPastePress: vi.fn(),
+  onImagePress: vi.fn(),
   onModifierToggle: vi.fn(),
   onPresetSelect: vi.fn(),
 };
@@ -43,7 +44,8 @@ describe('MobileKeyboard interaction state', () => {
     const onKeyPress = vi.fn();
     const onTextPress = vi.fn();
     const onPastePress = vi.fn();
-    render(<MobileKeyboard {...baseProps} interactive={false} onKeyPress={onKeyPress} onTextPress={onTextPress} onPastePress={onPastePress} />);
+    const onImagePress = vi.fn();
+    render(<MobileKeyboard {...baseProps} interactive={false} onKeyPress={onKeyPress} onTextPress={onTextPress} onPastePress={onPastePress} onImagePress={onImagePress} />);
 
     const toolbar = screen.getByText('Esc').closest('[data-mobile-keyboard="true"]');
     expect(toolbar?.className).toContain('opacity-100');
@@ -51,10 +53,12 @@ describe('MobileKeyboard interaction state', () => {
 
     fireEvent.pointerDown(screen.getByText('Esc'));
     fireEvent.pointerDown(screen.getByText('/undo'));
+    fireEvent.click(screen.getByLabelText('Insert local image'));
 
     expect(onKeyPress).not.toHaveBeenCalled();
     expect(onTextPress).not.toHaveBeenCalled();
     expect(onPastePress).not.toHaveBeenCalled();
+    expect(onImagePress).not.toHaveBeenCalled();
   });
 
   it('fires the paste callback from the mobile toolbar', () => {
@@ -64,6 +68,37 @@ describe('MobileKeyboard interaction state', () => {
     fireEvent.pointerDown(screen.getByLabelText('Paste'));
 
     expect(onPastePress).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the local image picker directly from the primary mobile toolbar', () => {
+    const onImagePress = vi.fn();
+    render(<MobileKeyboard {...baseProps} onImagePress={onImagePress} />);
+
+    fireEvent.click(screen.getByLabelText('Insert local image'));
+
+    expect(onImagePress).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows temporary image upload feedback on the toolbar button', () => {
+    const { rerender } = render(<MobileKeyboard {...baseProps} imageUploadState="uploading" />);
+    expect((screen.getByTitle('Uploading…') as HTMLButtonElement).disabled).toBe(true);
+
+    rerender(<MobileKeyboard {...baseProps} imageUploadState="inserted" />);
+    expect(screen.getByTitle('Inserted')).toBeTruthy();
+
+    rerender(<MobileKeyboard {...baseProps} imageUploadState="failed" />);
+    expect(screen.getByTitle('Upload failed')).toBeTruthy();
+  });
+
+  it('keeps Ctrl-U in its original primary toolbar slot', () => {
+    const onKeyPress = vi.fn();
+    render(<MobileKeyboard {...baseProps} onKeyPress={onKeyPress} />);
+
+    const ctrlUButton = screen.getByText('C-U');
+    expect(ctrlUButton.closest('[data-mobile-keyboard-primary-row="true"]')).toBeTruthy();
+    fireEvent.pointerDown(ctrlUButton);
+
+    expect(onKeyPress).toHaveBeenCalledWith('ctrl-u');
   });
 
   it('closes the preset menu when it becomes non-interactive', () => {

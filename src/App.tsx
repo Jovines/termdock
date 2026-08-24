@@ -1945,6 +1945,22 @@ function App() {
     () => tabGroups.length > 0 ? tabGroups.flatMap((group) => group.sessions) : sessions,
     [tabGroups, sessions],
   );
+  const runningSessionShortcuts = React.useMemo(
+    () => arrangedSessions.flatMap((session) => {
+      const terminalSession = terminalSessions.get(session.id);
+      if (terminalSession?.agentStatus !== 'working') return [];
+      const { primary, secondary } = getSessionDisplayLines(
+        session,
+        terminalSession?.activeProgram ?? null,
+        terminalSession?.cwd ?? null,
+        SHELL_NAMES,
+        terminalSession?.shellTitle ?? null,
+        terminalSession?.promptState ?? null,
+      );
+      return [{ id: session.id, label: primary, detail: secondary }];
+    }),
+    [arrangedSessions, terminalSessions],
+  );
   const activeSessionIndex = activeSessionId
     ? arrangedSessions.findIndex((session) => session.id === activeSessionId)
     : -1;
@@ -1952,20 +1968,13 @@ function App() {
     ? `${activeSessionIndex + 1}/${arrangedSessions.length}`
     : `${arrangedSessions.length}`;
   const agentTabCounts = React.useMemo(() => {
-    let running = 0;
     let review = 0;
     for (const s of sessions) {
       const ts = terminalSessions.get(s.id);
-      if (ts?.agentStatus === 'working') running += 1;
       if (ts?.agentStatus === 'waiting' || ts?.agentNeedsReview) review += 1;
     }
-    return { running, review };
-  }, [sessions, terminalSessions]);
-  const canJumpToRunningSession = agentTabCounts.running > 1
-    || (
-      agentTabCounts.running === 1
-      && terminalSessions.get(activeSessionId ?? '')?.agentStatus !== 'working'
-    );
+    return { running: runningSessionShortcuts.length, review };
+  }, [runningSessionShortcuts.length, sessions, terminalSessions]);
   // inline 用 'nearest' 而非 'center'：激活 tab 已在可视区内时完全不滚动，
   // 只有它溢出屏幕才滚最小距离。'center' 会在 tab 多（条溢出）时每切一次
   // 整条横移去居中，切换频繁时视觉上就是横向抖动。
@@ -2993,9 +3002,9 @@ function App() {
 
       <AgentFloatingSessionButtons
         reviewCount={agentTabCounts.review}
-        runningCount={agentTabCounts.running}
+        runningSessions={runningSessionShortcuts}
+        activeSessionId={activeSessionId}
         runningButtonEnabled={runningSessionButtonEnabled}
-        canJumpToRunningSession={canJumpToRunningSession}
         isDesktopLayout={isDesktopViewport}
         containerElement={terminalAreaElement}
       />

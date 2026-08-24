@@ -41,6 +41,7 @@ interface FileTreeProps {
   searchMode?: FileSearchMode;
   onContentMatchSelect?: (path: string, line: number) => void;
   onDirectoryDropFiles?: (path: string, files: File[]) => void;
+  revealDirectory?: { path: string; nonce: number } | null;
 }
 
 const CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.rb', '.php', '.swift', '.kt', '.sh', '.css', '.scss', '.html', '.json', '.yaml', '.yml', '.toml', '.md']);
@@ -200,6 +201,7 @@ interface FileTreeItemProps {
   onDirectoryDropFiles?: (path: string, files: File[]) => void;
   onFileDeleteRequest: (node: FileTreeNode) => void;
   deletingFilePath: string | null;
+  revealedDirectoryPath?: string | null;
 }
 
 const FileTreeItem = memo(function FileTreeItem({
@@ -222,6 +224,7 @@ const FileTreeItem = memo(function FileTreeItem({
   onDirectoryDropFiles,
   onFileDeleteRequest,
   deletingFilePath,
+  revealedDirectoryPath,
 }: FileTreeItemProps) {
   const { t } = useI18n();
   // 精确订阅：每个节点只关心和自己相关的字段
@@ -236,7 +239,7 @@ const FileTreeItem = memo(function FileTreeItem({
   const dropDepthRef = useRef(0);
   const loadAbortRef = useRef<AbortController | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
-  const isSelected = node.path === selectedFilePath;
+  const isSelected = node.path === selectedFilePath || node.path === revealedDirectoryPath;
   const showChildren = node.type === 'directory' && (isExpanded || Boolean(queryLower));
   const isDirectory = node.type === 'directory';
   const isPinned = pinnedPaths.has(node.path);
@@ -409,6 +412,7 @@ const FileTreeItem = memo(function FileTreeItem({
     <div ref={actionMenuRef} className="relative">
       {getReferenceLongPressHandlers.popoverNode}
       <div
+        data-file-tree-path={node.path}
         role="button"
         tabIndex={0}
         onClick={() => {
@@ -601,6 +605,7 @@ const FileTreeItem = memo(function FileTreeItem({
               onDirectoryDropFiles={onDirectoryDropFiles}
               onFileDeleteRequest={onFileDeleteRequest}
               deletingFilePath={deletingFilePath}
+              revealedDirectoryPath={revealedDirectoryPath}
             />
           ))}
         </div>
@@ -996,7 +1001,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   );
 });
 
-export function FileTree({ rootPath, onFileSelect, onPathReference, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles }: FileTreeProps) {
+export function FileTree({ rootPath, onFileSelect, onPathReference, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles, revealDirectory }: FileTreeProps) {
   const { t } = useI18n();
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
@@ -1015,6 +1020,41 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const queryLower = query.trim().toLowerCase();
   const isContentMode = searchMode === 'content';
+
+  useEffect(() => {
+    const targetPath = revealDirectory?.path;
+    if (!targetPath || (!targetPath.startsWith(`${rootPath}/`) && targetPath !== rootPath)) return;
+
+    const relative = targetPath.slice(rootPath.length).replace(/^\/+/, '');
+    const parts = relative ? relative.split('/') : [];
+    const pathsToExpand = parts.map((_, index) => `${rootPath}/${parts.slice(0, index + 1).join('/')}`);
+    const store = useSidebarStore.getState();
+    const missingPaths = pathsToExpand.filter((path) => !store.expandedPaths.has(path));
+    if (missingPaths.length > 0) {
+      useSidebarStore.setState((state) => ({
+        expandedPaths: new Set([...state.expandedPaths, ...missingPaths]),
+      }));
+    }
+
+    let cancelled = false;
+    let attempts = 0;
+    const reveal = () => {
+      if (cancelled) return;
+      const target = Array.from(document.querySelectorAll<HTMLElement>('[data-file-tree-path]'))
+        .find((element) => element.dataset.fileTreePath === targetPath);
+      if (target) {
+        target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        return;
+      }
+      attempts += 1;
+      if (attempts < 80) window.setTimeout(reveal, 50);
+    };
+    const frame = window.requestAnimationFrame(reveal);
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frame);
+    };
+  }, [revealDirectory?.nonce, revealDirectory?.path, rootPath]);
 
   const handleFileDeleteRequest = useCallback(async (node: FileTreeNode) => {
     if (deletingFilePath || node.type === 'directory') return;
@@ -1390,6 +1430,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
           onDirectoryDropFiles={onDirectoryDropFiles}
           onFileDeleteRequest={handleFileDeleteRequest}
           deletingFilePath={deletingFilePath}
+          revealedDirectoryPath={revealDirectory?.path}
         />
       ))}
     </div>
