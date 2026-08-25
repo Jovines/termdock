@@ -1481,6 +1481,33 @@ html[data-theme='light'] .termdock-code .token.important {
     diff-hunk-jump-focus 1.4s ease-out;
 }
 
+/* DAG navigation lands on an exact file/hunk/section. The two-stage wash and
+   ring make that landing unambiguous even when the viewport barely moved. */
+.diff-walkthrough-target {
+  position: relative;
+  z-index: 10;
+  animation: diff-walkthrough-focus 1.6s ease-out;
+}
+
+@keyframes diff-walkthrough-focus {
+  0% {
+    box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0);
+    background-color: rgba(var(--primary-rgb), 0);
+  }
+  18% {
+    box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.58), 0 10px 28px rgba(var(--primary-rgb), 0.16);
+    background-color: rgba(var(--primary-rgb), 0.16);
+  }
+  55% {
+    box-shadow: 0 0 0 2px rgba(var(--primary-rgb), 0.32), 0 8px 22px rgba(var(--primary-rgb), 0.1);
+    background-color: rgba(var(--primary-rgb), 0.08);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0);
+    background-color: rgba(var(--primary-rgb), 0);
+  }
+}
+
 @keyframes diff-hunk-jump-focus {
   0% {
     box-shadow: inset 0 0 0 1px rgba(var(--diff-accent-rgb), 0.55);
@@ -1495,6 +1522,12 @@ html[data-theme='light'] .termdock-code .token.important {
 @media (prefers-reduced-motion: reduce) {
   .diff-hunk--jump-target {
     animation: none;
+  }
+
+  .diff-walkthrough-target {
+    animation: none;
+    box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.48);
+    background-color: rgba(var(--primary-rgb), 0.1);
   }
 }
 

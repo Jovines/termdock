@@ -1,5 +1,5 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { AlertTriangle, CheckCircle2, GitBranch, Link2, Sparkles } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, GitBranch, Link2, Maximize2, Minimize2, Sparkles } from 'lucide-react';
 import type { ChangeWalkthrough, ChangeWalkthroughAnchor, ChangeWalkthroughEdge, ChangeWalkthroughNode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 
@@ -7,6 +7,8 @@ interface ChangeWalkthroughPanelProps {
   walkthroughs: ChangeWalkthrough[];
   repoRoot?: string | null;
   onNavigate: (anchor: ChangeWalkthroughAnchor) => void;
+  fullscreen?: boolean;
+  onToggleFullscreen?: () => void;
 }
 
 function pickWalkthrough(walkthroughs: ChangeWalkthrough[], repoRoot?: string | null): ChangeWalkthrough | null {
@@ -44,6 +46,7 @@ function AnchorButton({
   className,
   style,
   elementRef,
+  onActivate,
 }: {
   anchor?: ChangeWalkthroughAnchor | null;
   children: ReactNode;
@@ -51,13 +54,17 @@ function AnchorButton({
   className: string;
   style?: CSSProperties;
   elementRef?: (element: HTMLElement | null) => void;
+  onActivate?: () => void;
 }) {
-  if (!anchor) return <span ref={elementRef} className={className} style={style}>{children}</span>;
+  if (!anchor && !onActivate) return <span ref={elementRef} className={className} style={style}>{children}</span>;
   return (
     <button
       ref={elementRef as (element: HTMLButtonElement | null) => void}
       type="button"
-      onClick={() => onNavigate(anchor)}
+      onClick={() => {
+        onActivate?.();
+        if (anchor) onNavigate(anchor);
+      }}
       title={anchorTitle(anchor)}
       className={`${className} text-left transition hover:border-primary/35 hover:bg-primary/15 active:scale-[0.99]`}
       style={style}
@@ -413,7 +420,13 @@ function getDagEdgeLabelPosition(edge: DagLayoutEdge): { x: number; y: number; m
   };
 }
 
-export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: ChangeWalkthroughPanelProps) {
+export function ChangeWalkthroughPanel({
+  walkthroughs,
+  repoRoot,
+  onNavigate,
+  fullscreen = false,
+  onToggleFullscreen,
+}: ChangeWalkthroughPanelProps) {
   const { t } = useI18n();
   const instanceId = useId();
   const walkthrough = pickWalkthrough(walkthroughs, repoRoot);
@@ -423,6 +436,8 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
   const [measuredLabelHeights, setMeasuredLabelHeights] = useState<Record<string, number>>({});
   const [hoveredEdgeKey, setHoveredEdgeKey] = useState<string | null>(null);
   const [selectedEdgeKey, setSelectedEdgeKey] = useState<string | null>(null);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const dag = useMemo(
     () => walkthrough ? buildDagLayout(walkthrough.nodes, walkthrough.edges, measuredHeights, measuredLabelHeights) : null,
     [measuredHeights, measuredLabelHeights, walkthrough],
@@ -456,15 +471,36 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
 
   if (!walkthrough || !dag) return null;
   const markerIdPrefix = `walkthrough-arrow-${instanceId.replace(/[^a-zA-Z0-9_-]/g, '') || 'default'}`;
-  const candidateEdgeKey = hoveredEdgeKey ?? selectedEdgeKey;
+  const candidateNodeId = hoveredNodeId ?? selectedNodeId;
+  const candidateEdgeKey = candidateNodeId ? null : hoveredEdgeKey ?? selectedEdgeKey;
   const focusedEdgeKey = dag.edges.some((edge) => edge.key === candidateEdgeKey) ? candidateEdgeKey : null;
   const focusedEdge = dag.edges.find((edge) => edge.key === focusedEdgeKey);
-  const focusedNodeIds = focusedEdge ? new Set([focusedEdge.from, focusedEdge.to]) : null;
+  const nodeEdges = candidateNodeId
+    ? dag.edges.filter((edge) => edge.from === candidateNodeId || edge.to === candidateNodeId)
+    : [];
+  const focusedEdgeKeys = candidateNodeId ? new Set(nodeEdges.map((edge) => edge.key)) : null;
+  const focusedNodeIds = candidateNodeId
+    ? new Set([candidateNodeId, ...nodeEdges.flatMap((edge) => [edge.from, edge.to])])
+    : focusedEdge ? new Set([focusedEdge.from, focusedEdge.to]) : null;
   const fallbackAnchorByNodeId = new Map(
     walkthrough.sections
       .filter((section) => section.nodeId && section.anchor)
       .map((section) => [section.nodeId as string, section.anchor]),
   );
+  const navigableNodes = walkthrough.nodes.filter((node) => node.anchor ?? fallbackAnchorByNodeId.get(node.id));
+  const selectedReviewIndex = navigableNodes.findIndex((node) => node.id === selectedNodeId);
+  const navigateReviewNode = (offset: number) => {
+    if (navigableNodes.length === 0) return;
+    const nextIndex = selectedReviewIndex < 0
+      ? (offset < 0 ? navigableNodes.length - 1 : 0)
+      : Math.min(navigableNodes.length - 1, Math.max(0, selectedReviewIndex + offset));
+    const node = navigableNodes[nextIndex];
+    const anchor = node.anchor ?? fallbackAnchorByNodeId.get(node.id);
+    if (!anchor) return;
+    setSelectedNodeId(node.id);
+    setSelectedEdgeKey(null);
+    onNavigate(anchor);
+  };
 
   return (
     <section className="mb-2 px-0 py-0">
@@ -476,6 +512,46 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
           <div className="whitespace-normal break-words text-[12px] font-semibold leading-snug text-foreground">{walkthrough.title}</div>
           {walkthrough.summary && (
             <div className="mt-0.5 text-[10px] leading-snug text-muted-foreground">{walkthrough.summary}</div>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {fullscreen && navigableNodes.length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => navigateReviewNode(-1)}
+                disabled={selectedReviewIndex === 0}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95 disabled:pointer-events-none disabled:opacity-30"
+                title="Previous change"
+                aria-label="Previous change"
+              >
+                <ChevronLeft size={15} />
+              </button>
+              <span className="min-w-8 text-center text-[10px] tabular-nums text-muted-foreground">
+                {selectedReviewIndex < 0 ? '—' : selectedReviewIndex + 1}/{navigableNodes.length}
+              </span>
+              <button
+                type="button"
+                onClick={() => navigateReviewNode(1)}
+                disabled={selectedReviewIndex === navigableNodes.length - 1}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95 disabled:pointer-events-none disabled:opacity-30"
+                title="Next change"
+                aria-label="Next change"
+              >
+                <ChevronRight size={15} />
+              </button>
+            </>
+          )}
+          {onToggleFullscreen && (
+            <button
+              type="button"
+              onClick={onToggleFullscreen}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95"
+              title={fullscreen ? 'Exit full-screen DAG review' : 'Review from DAG in full screen'}
+              aria-label={fullscreen ? 'Exit full-screen DAG review' : 'Review from DAG in full screen'}
+            >
+              {fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+            </button>
           )}
         </div>
       </div>
@@ -531,13 +607,13 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
                 {dag.edges.map((edge) => {
                   const path = getDagEdgePath(edge);
                   const color = getDagEdgeColor(edge.index);
-                  const isFocused = focusedEdgeKey === edge.key;
-                  const isDimmed = Boolean(focusedEdgeKey && !isFocused);
+                  const isFocused = focusedEdgeKey === edge.key || Boolean(focusedEdgeKeys?.has(edge.key));
+                  const isDimmed = Boolean((focusedEdgeKey || candidateNodeId) && !isFocused);
                   return (
                     <g
                       key={edge.key}
                       className="transition-opacity duration-150"
-                      style={{ opacity: isDimmed ? 0.14 : 1 }}
+                      style={{ opacity: isDimmed ? 0.3 : 1 }}
                     >
                       <path className="pointer-events-none" d={path} fill="none" stroke="var(--surface-2)" strokeWidth={isFocused ? 7 : 5} strokeLinecap="round" />
                       <path
@@ -558,7 +634,10 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
                         className="cursor-pointer"
                         onPointerEnter={() => setHoveredEdgeKey(edge.key)}
                         onPointerLeave={() => setHoveredEdgeKey((current) => current === edge.key ? null : current)}
-                        onClick={() => setSelectedEdgeKey((current) => current === edge.key ? null : edge.key)}
+                        onClick={() => {
+                          setSelectedNodeId(null);
+                          setSelectedEdgeKey((current) => current === edge.key ? null : edge.key);
+                        }}
                       />
                       <circle className="pointer-events-none" cx={edge.fromNode.x + DAG_NODE_WIDTH + 8} cy={edge.fromY} r={isFocused ? 4 : 3} fill={color} stroke="var(--surface-2)" strokeWidth="2" />
                       <circle className="pointer-events-none" cx={edge.toNode.x - 8} cy={edge.toY} r={isFocused ? 4 : 3} fill={color} stroke="var(--surface-2)" strokeWidth="2" />
@@ -571,8 +650,8 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
                 if (!label) return null;
                 const { x: labelX, y: labelY, maxWidth } = getDagEdgeLabelPosition(edge);
                 const color = getDagEdgeColor(edge.index);
-                const isFocused = focusedEdgeKey === edge.key;
-                const isDimmed = Boolean(focusedEdgeKey && !isFocused);
+                const isFocused = focusedEdgeKey === edge.key || Boolean(focusedEdgeKeys?.has(edge.key));
+                const isDimmed = Boolean((focusedEdgeKey || candidateNodeId) && !isFocused);
                 return (
                   <button
                     ref={(element) => {
@@ -590,14 +669,17 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
                       width: 'max-content',
                       borderColor: color,
                       color,
-                      opacity: isDimmed ? 0.24 : 1,
+                      opacity: isDimmed ? 0.38 : 1,
                       boxShadow: isFocused ? `0 0 0 2px ${color}, 0 6px 18px rgb(0 0 0 / 0.24)` : undefined,
                     }}
                     title={`${edge.fromNode.index + 1} ${edge.fromNode.node.title} → ${edge.toNode.index + 1} ${edge.toNode.node.title}${edge.desc ? `\n${edge.desc}` : ''}`}
                     aria-pressed={selectedEdgeKey === edge.key}
                     onPointerEnter={() => setHoveredEdgeKey(edge.key)}
                     onPointerLeave={() => setHoveredEdgeKey((current) => current === edge.key ? null : current)}
-                    onClick={() => setSelectedEdgeKey((current) => current === edge.key ? null : edge.key)}
+                    onClick={() => {
+                      setSelectedNodeId(null);
+                      setSelectedEdgeKey((current) => current === edge.key ? null : edge.key);
+                    }}
                   >
                     <span className="block font-bold tabular-nums">{edge.fromNode.index + 1} → {edge.toNode.index + 1}</span>
                     <span className="block text-muted-foreground">{label}</span>
@@ -612,6 +694,10 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
                     else nodeRefs.current.delete(node.id);
                   }}
                   anchor={node.anchor ?? fallbackAnchorByNodeId.get(node.id)}
+                  onActivate={() => {
+                    setSelectedNodeId(node.id);
+                    setSelectedEdgeKey(null);
+                  }}
                   onNavigate={onNavigate}
                   className={`absolute overflow-hidden rounded-lg border bg-surface/95 px-2.5 py-2 text-foreground shadow-[0_10px_24px_rgba(0,0,0,0.18)] transition-[opacity,border-color,box-shadow] duration-150 ${
                     focusedNodeIds?.has(node.id)
@@ -622,14 +708,19 @@ export function ChangeWalkthroughPanel({ walkthroughs, repoRoot, onNavigate }: C
                   }`}
                   style={{ left: x, top: y, width: DAG_NODE_WIDTH, minHeight: height } as CSSProperties}
                 >
-                  <span className={`absolute bottom-2 left-0 top-2 w-[3px] rounded-r-full ${getKindRailClass(node.kind)}`} />
-                  <div className="flex min-w-0 items-center gap-1.5">
+                  <span
+                    className="absolute inset-0"
+                    onPointerEnter={() => setHoveredNodeId(node.id)}
+                    onPointerLeave={() => setHoveredNodeId((current) => current === node.id ? null : current)}
+                  />
+                  <span className={`pointer-events-none absolute bottom-2 left-0 top-2 w-[3px] rounded-r-full ${getKindRailClass(node.kind)}`} />
+                  <div className="pointer-events-none relative flex min-w-0 items-center gap-1.5">
                     <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[9px] font-bold text-primary">{index + 1}</span>
                     <span className="min-w-0 flex-1 whitespace-normal break-words text-[11px] font-semibold leading-snug text-foreground">{node.title}</span>
                     {node.anchor && <Link2 size={11} className="shrink-0 opacity-70" />}
                   </div>
-                  {node.kind && <div className="mt-0.5 truncate text-[9px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/80">{node.kind}</div>}
-                  <div className="mt-0.5 whitespace-normal break-words text-[10px] leading-snug text-muted-foreground">{node.business}</div>
+                  {node.kind && <div className="pointer-events-none relative mt-0.5 truncate text-[9px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/80">{node.kind}</div>}
+                  <div className="pointer-events-none relative mt-0.5 whitespace-normal break-words text-[10px] leading-snug text-muted-foreground">{node.business}</div>
                 </AnchorButton>
               ))}
             </div>

@@ -4242,6 +4242,21 @@ function isVisibleElement(element: HTMLElement): boolean {
   return element.getClientRects().length > 0 && window.getComputedStyle(element).visibility !== 'hidden';
 }
 
+const diffWalkthroughFocusTimers = new WeakMap<HTMLElement, number>();
+
+function focusDiffWalkthroughTarget(target: HTMLElement): void {
+  const previousTimer = diffWalkthroughFocusTimers.get(target);
+  if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+  target.classList.remove('diff-walkthrough-target');
+  void target.offsetWidth;
+  target.classList.add('diff-walkthrough-target');
+  const timer = window.setTimeout(() => {
+    target.classList.remove('diff-walkthrough-target');
+    diffWalkthroughFocusTimers.delete(target);
+  }, 1_700);
+  diffWalkthroughFocusTimers.set(target, timer);
+}
+
 function scrollDiffStreamItemIntoView(path: string): void {
   const escapedPath = CSS.escape(path);
   const selector = [
@@ -4264,10 +4279,12 @@ function scrollDiffStreamItemIntoView(path: string): void {
   const scroller = findDiffStreamScroller(target);
   if (!scroller) {
     target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    focusDiffWalkthroughTarget(target);
     return;
   }
   const targetTop = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
   scroller.scrollTo({ top: Math.max(0, targetTop), behavior: 'instant' });
+  focusDiffWalkthroughTarget(target);
 }
 
 function scrollDiffAnchorIntoView(anchor: ChangeWalkthroughAnchor): void {
@@ -4318,15 +4335,15 @@ function scrollDiffAnchorIntoView(anchor: ChangeWalkthroughAnchor): void {
   const scroller = findDiffStreamScroller(target);
   if (!scroller) {
     target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    focusDiffWalkthroughTarget(target);
     return;
   }
-  const targetTop = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
-  scroller.scrollTo({ top: Math.max(0, targetTop - 48), behavior: 'instant' });
-  target.animate?.([
-    { boxShadow: '0 0 0 0 rgba(var(--primary-rgb), 0)' },
-    { boxShadow: '0 0 0 3px rgba(var(--primary-rgb), 0.35)' },
-    { boxShadow: '0 0 0 0 rgba(var(--primary-rgb), 0)' },
-  ], { duration: 900, easing: 'ease-out' });
+  const targetRect = target.getBoundingClientRect();
+  const scrollerRect = scroller.getBoundingClientRect();
+  const targetTop = targetRect.top - scrollerRect.top + scroller.scrollTop;
+  const centeredTop = targetTop - Math.max(24, (scroller.clientHeight - targetRect.height) / 2);
+  scroller.scrollTo({ top: Math.max(0, centeredTop), behavior: 'instant' });
+  focusDiffWalkthroughTarget(target);
 }
 
 const IMAGE_MIN_SCALE = 1;
@@ -9033,11 +9050,21 @@ export function RightSidebar(
     scrollDiffAnchorIntoView(anchor);
   }, [changedFiles, rootPath, selectDiffFile]);
 
-  const renderChangeWalkthroughPanel = useCallback(({ slideToDetail }: { slideToDetail?: () => void } = {}) => (
+  const renderChangeWalkthroughPanel = useCallback(({
+    slideToDetail,
+    fullscreen,
+    toggleFullscreen,
+  }: {
+    slideToDetail?: () => void;
+    fullscreen?: boolean;
+    toggleFullscreen?: () => void;
+  } = {}) => (
     changeWalkthroughs.length > 0 ? (
       <ChangeWalkthroughPanel
         walkthroughs={changeWalkthroughs}
         repoRoot={activeGitRepoRoot}
+        fullscreen={fullscreen}
+        onToggleFullscreen={toggleFullscreen}
         onNavigate={(anchor) => {
           if (isMobile) window.requestAnimationFrame(() => slideToDetail?.());
           handleWalkthroughNavigate(anchor);

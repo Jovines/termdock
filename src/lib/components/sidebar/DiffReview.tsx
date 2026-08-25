@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import type { Swiper as SwiperInstance } from 'swiper';
 import type { ChangeAuditRecord, GitDiffOptions } from '../../terminal/api';
 import { flattenDiffNavigatorTree, type DiffNavigatorFile, type DiffNavigatorGroup } from './DiffFileNavigator';
-import { DiffReviewWorkspace, type DiffReviewMode } from './DiffReviewWorkspace';
+import { DiffReviewWorkspace, type DiffReviewAiControls, type DiffReviewMode } from './DiffReviewWorkspace';
 import { DiffStreamItem, type DiffStreamFile } from './DiffStreamItem';
 import { invalidateFileDiffCached, preloadPreparedFileDiff, type DiffHunkActionRequest, type DiffInlineMode, type DiffViewType } from './DiffViewer';
 import { useSidebarStore } from '../../stores/useSidebarStore';
@@ -149,7 +149,7 @@ export interface DiffReviewProps {
   renderMobileDetailHeader?: ReactNode | ((controls: { slideToList: () => void; slideToDetail: () => void }) => ReactNode);
   emptyContent?: ReactNode;
   listPrefix?: ReactNode;
-  aiContent?: ReactNode | ((controls: { slideToDetail: () => void }) => ReactNode);
+  aiContent?: ReactNode | ((controls: DiffReviewAiControls) => ReactNode);
 
   // --- Containers ---
   listContainerClassName?: string;

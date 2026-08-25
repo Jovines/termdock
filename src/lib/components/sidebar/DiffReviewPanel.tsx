@@ -414,11 +414,13 @@ export function UniversalDiffReview({
         return group ? <span className="shrink-0 text-[10px] text-muted-foreground">+{group.additions} -{group.deletions}</span> : null;
       }}
       renderListHeader={renderHeader}
-      aiContent={({ slideToDetail }) => (
+      aiContent={({ slideToDetail, fullscreen, toggleFullscreen }) => (
         walkthroughs.length > 0 && onWalkthroughNavigate ? (
           <ChangeWalkthroughPanel
             walkthroughs={walkthroughs}
             repoRoot={walkthroughs[0]?.repoRoot}
+            fullscreen={fullscreen}
+            onToggleFullscreen={toggleFullscreen}
             onNavigate={(anchor) => {
               if (mobile) window.requestAnimationFrame(slideToDetail);
               onWalkthroughNavigate(anchor);

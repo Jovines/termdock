@@ -1,5 +1,6 @@
-import type { ReactNode } from 'react';
-import { List, ListTree, Sparkles } from 'lucide-react';
+import { useEffect, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { List, ListTree, Sparkles, X } from 'lucide-react';
 import type { Swiper as SwiperInstance } from 'swiper';
 import {
   DiffFileNavigator,
@@ -10,6 +11,12 @@ import {
 import { DiffReviewFrame } from './DiffReviewFrame';
 
 export type DiffReviewMode = DiffFileNavigatorMode | 'ai';
+
+export interface DiffReviewAiControls {
+  slideToDetail: () => void;
+  fullscreen: boolean;
+  toggleFullscreen: () => void;
+}
 
 interface DiffReviewWorkspaceProps {
   groups: DiffNavigatorGroup[];
@@ -29,7 +36,7 @@ interface DiffReviewWorkspaceProps {
   compact?: boolean;
   emptyContent?: ReactNode;
   listPrefix?: ReactNode;
-  aiContent?: ReactNode | ((controls: { slideToDetail: () => void }) => ReactNode);
+  aiContent?: ReactNode | ((controls: DiffReviewAiControls) => ReactNode);
   listContainerClassName?: string;
   detailContainerClassName?: string;
   renderListHeader?: (modeToggle: ReactNode) => ReactNode;
@@ -129,18 +136,28 @@ export function DiffReviewWorkspace({
   desktopListClassName,
   detailOwnsScroll,
 }: DiffReviewWorkspaceProps) {
+  const [fullscreen, setFullscreen] = useState(false);
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setFullscreen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [fullscreen]);
+
   const modeToggle = <DiffReviewModeToggle mode={mode} onModeChange={onModeChange} showAi={Boolean(aiContent)} />;
   const fileNavigatorMode: DiffFileNavigatorMode = mode === 'tree' ? 'tree' : 'list';
   const listHeader = renderListHeader ? renderListHeader(modeToggle) : <div className="flex justify-end">{modeToggle}</div>;
   const hasFiles = groups.some((group) => group.files.length > 0);
 
-  return (
+  const workspace = (
     <DiffReviewFrame
-      mobile={mobile}
+      mobile={fullscreen ? false : mobile}
       backLabel={backLabel}
       externalSwiperRef={externalSwiperRef}
       onMobileSlideChange={onMobileSlideChange}
-      desktopLayout={desktopLayout}
+      desktopLayout={fullscreen ? 'split' : desktopLayout}
       onDetailScroll={onDetailScroll}
       desktopSidePanel={desktopSidePanel}
       desktopListClassName={desktopListClassName}
@@ -151,7 +168,11 @@ export function DiffReviewWorkspace({
       list={({ slideToDetail }) => (
         <div className={listContainerClassName}>
           {mode === 'ai' ? (
-            typeof aiContent === 'function' ? aiContent({ slideToDetail }) : aiContent ?? emptyContent
+            typeof aiContent === 'function' ? aiContent({
+              slideToDetail,
+              fullscreen,
+              toggleFullscreen: () => setFullscreen((current) => !current),
+            }) : aiContent ?? emptyContent
           ) : (
             <>
               {listPrefix}
@@ -186,5 +207,29 @@ export function DiffReviewWorkspace({
         </div>
       )}
     />
+  );
+
+  if (!fullscreen || typeof document === 'undefined') return workspace;
+  return createPortal(
+    <div className="fixed inset-0 z-modal-panel flex min-h-0 flex-col bg-surface text-foreground">
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-border/15 bg-[var(--chrome-bg)] px-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Sparkles size={15} className="shrink-0 text-primary" />
+          <span className="truncate text-[12px] font-semibold">DAG Review</span>
+          <span className="hidden text-[10px] text-muted-foreground sm:inline">Select a step to inspect its exact change</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => setFullscreen(false)}
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground active:scale-95"
+          title="Exit full-screen DAG review (Esc)"
+          aria-label="Exit full-screen DAG review"
+        >
+          <X size={16} />
+        </button>
+      </div>
+      <div className="min-h-0 flex-1">{workspace}</div>
+    </div>,
+    document.body,
   );
 }
