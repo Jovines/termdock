@@ -79,6 +79,8 @@ export interface AgentPluginManifest {
   slug: string;
   displayName: string;
   aliases: string[];
+  /** Optional routing hints shown to collaborators (for example: review, frontend, testing). */
+  capabilities?: string[];
   accentColor: string;
   /** Icon rendering mode: 'mask' = CSS mask+accentColor (default, monochrome); 'native' = raw SVG colors. */
   iconMode?: 'mask' | 'native';
@@ -280,6 +282,13 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
   if (!Array.isArray(aliases) || aliases.length === 0 || aliases.length > 16
     || !aliases.every((a) => typeof a === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(a))) {
     errors.push('aliases must contain 1-16 safe command names');
+  }
+
+  const capabilities = m.capabilities;
+  if (capabilities !== undefined && (!Array.isArray(capabilities) || capabilities.length > 32
+    || !capabilities.every((capability) => typeof capability === 'string'
+      && /^[A-Za-z0-9\p{L}][A-Za-z0-9\p{L}\p{N}:._ -]{0,63}$/u.test(capability.trim())))) {
+    errors.push('capabilities must contain at most 32 short capability names');
   }
 
   const accentColor = m.accentColor;
@@ -517,6 +526,9 @@ export function validateManifest(raw: unknown, dir: string): { manifest: AgentPl
       slug: slug as string,
       displayName: (displayName as string).trim(),
       aliases: (aliases as string[]).map((a) => (a as string).trim().toLowerCase()),
+      capabilities: Array.isArray(capabilities)
+        ? [...new Set((capabilities as string[]).map((capability) => capability.trim()))]
+        : undefined,
       accentColor: accentColor as string,
       iconMode: iconMode as 'mask' | 'native' | undefined,
       statuses,

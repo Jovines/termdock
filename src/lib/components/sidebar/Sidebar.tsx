@@ -35,7 +35,7 @@ interface SidebarProps {
   pinned?: boolean;
 }
 
-const EDGE_ZONE_WIDTH = 15;
+const EDGE_ZONE_WIDTH = 18;
 // Horizontal dominance needed before a drag is recognized (use-gesture
 // `axis` + `axisThreshold`): the first movement callback after this slop
 // is the arbitration moment — before it the drawer stays frozen so inner

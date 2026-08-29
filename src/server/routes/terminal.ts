@@ -71,6 +71,15 @@ import {
   type AgentStatusTone,
 } from '../agent/session.js';
 import {
+  canRestoreDeadAgentShell,
+  normalizePersistedAgentResumeInfo,
+  type PersistedAgentResumeInfo,
+} from '../agent/resumePersistence.js';
+import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent/resumeHistory.js';
+import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
+import { CollaborationStore, type CollaborationMessage, type CollaborationMessageKind } from '../agent/collaborationStore.js';
+import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
+import {
   listAllHookAgents,
   refreshStaleHooksAtLaunch,
   installHooksForSlug,
@@ -115,6 +124,9 @@ import { RenderedTerminalContext } from '../agent/renderedTerminalContext.js';
 const router: express.Router = express.Router();
 const execFileAsync = promisify(execFile);
 const TERMDOCK_DIR = `${os.homedir()}/.termdock`;
+const automationStore = new AutomationStore(`${TERMDOCK_DIR}/automations.json`);
+const collaborationStore = new CollaborationStore(`${TERMDOCK_DIR}/collaboration-groups.json`);
+const sessionSearchStore = new SessionSearchStore(`${TERMDOCK_DIR}/session-search`);
 
 async function readJsonFileIfExists<T>(filePath: string): Promise<T | null> {
   try {
@@ -256,6 +268,8 @@ interface TerminalSession {
   // only while an agent is detected in the foreground.
   agent: AgentInfo | null;
   agentSession: AgentSessionState | null;
+  /** A fresh shell replaced a dead PTY and still offers its persisted Agent conversation. */
+  agentResumeRecovered: boolean;
   /** Rendered terminal text from the current agent turn, including bounded scrollback. */
   autoTitleContext: string;
   /** Headless terminal that collapses transient redraws before they reach title generation. */
@@ -328,12 +342,7 @@ interface PersistedClientSession {
   activeProgram?: string | null;
   // 最近一次的 agent 会话恢复信息（last-known）：agent 退出 / server 重启后
   // 仍可用其原生 session id + 启动参数重建 `claude --resume …` 恢复命令。
-  agentResume?: {
-    slug: string;
-    sessionId: string | null;
-    launchArgv: string[] | null;
-    updatedAt: number;
-  } | null;
+  agentResume?: PersistedAgentResumeInfo | null;
 }
 
 interface GlobalSessionState {
@@ -426,6 +435,7 @@ let globalSessionState: GlobalSessionState = { sessions: [], updatedAt: Date.now
 // ── 持久化 globalSessionState 到磁盘，防止服务重启后丢失 ──
 const GLOBAL_SESSION_STATE_FILE = `${TERMDOCK_DIR}/global-session-state.json`;
 const CLIENT_STATES_FILE = `${TERMDOCK_DIR}/client-states.json`; // 保留用于迁移
+const agentResumeHistory = new AgentResumeHistoryStore(`${TERMDOCK_DIR}/agent-resume-history.json`);
 let persistGlobalStateTimer: ReturnType<typeof setTimeout> | null = null;
 let globalSessionStateWatcher: fs.FSWatcher | null = null;
 let globalSessionStateReloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -824,21 +834,24 @@ caffeinateManager.startNetworkMonitor();
 
 // 清理磁盘恢复后后端已不存在的 session 引用。
 // 服务重启时 terminalSessions 是空的，持久化的 global state
-// 全部指向已销毁的 session。shell session 的 PTY 已死无法复用，直接删除；
-// tmux session 的 tmux 进程独立于 termdock，保留条目但清空 backendSessionId。
+// 全部指向已销毁的 session。普通 shell session 的 PTY 已死无法复用；若记录
+// 带有 Agent 原生 session id，则保留条目并清空 backendSessionId，让前端在原 cwd
+// 建一个新 shell 后继续恢复 Agent。tmux 仍由独立进程负责存活。
 function pruneOrphanSessions(): void {
   let changed = false;
   const cleaned = globalSessionState.sessions.filter((s) => {
-    // Shell sessions with no live backend: PTY is dead, can't be reattached — remove entirely
+    // A shell PTY cannot be reattached after a host reboot, but its Agent
+    // conversation can be resumed in a newly-created shell.
     if (s.mode !== 'tmux') {
       if (s.backendSessionId != null && !terminalSessions.has(s.backendSessionId)) {
         changed = true;
-        return false;
+        return canRestoreDeadAgentShell(s);
       }
-      // backendSessionId already null but no live backend either — also dead
+      // backendSessionId already null: only a resumable Agent record is useful.
       if (s.backendSessionId == null) {
-        changed = true;
-        return false;
+        const keep = canRestoreDeadAgentShell(s);
+        if (!keep) changed = true;
+        return keep;
       }
       return true;
     }
@@ -848,6 +861,9 @@ function pruneOrphanSessions(): void {
     }
     return true;
   }).map((s) => {
+    if (s.mode === 'shell' && s.backendSessionId != null && !terminalSessions.has(s.backendSessionId)) {
+      return { ...s, backendSessionId: null };
+    }
     if (s.mode === 'tmux' && s.backendSessionId != null && !terminalSessions.has(s.backendSessionId)) {
       return { ...s, backendSessionId: null };
     }
@@ -1111,6 +1127,7 @@ function normalizePersistedClientSession(input: unknown): PersistedClientSession
     activeProgram: typeof candidate.activeProgram === 'string' && candidate.activeProgram.trim().length > 0
       ? candidate.activeProgram
       : null,
+    agentResume: normalizePersistedAgentResumeInfo(candidate.agentResume),
   };
 }
 
@@ -1319,7 +1336,20 @@ function removeGlobalSessionRecord(frontendSessionId: string): boolean {
     sessions: globalSessionState.sessions.filter((session) => session.sessionId !== frontendSessionId),
     updatedAt: Date.now(),
   };
-  return globalSessionState.sessions.length !== before;
+  const changed = globalSessionState.sessions.length !== before;
+  if (changed) collaborationStore.removeSession(frontendSessionId);
+  return changed;
+}
+
+function archiveAgentResumeRecord(record: PersistedClientSession | null | undefined, reason: AgentResumeHistoryReason): boolean {
+  if (!record || record.mode !== 'shell' || !record.agentResume?.sessionId) return false;
+  return agentResumeHistory.archive({
+    title: record.name.trim() || 'Terminal',
+    titleSource: record.customName === true ? 'custom' : record.autoTitle ? 'auto' : 'default',
+    agent: record.agentResume,
+    cwd: record.cwd ?? '',
+    reason,
+  }) !== null;
 }
 
 function getTrustedCwdFromRecord(record: PersistedClientSession): string | undefined {
@@ -1366,6 +1396,9 @@ async function ensureBackendSessionForRecord(
   record: PersistedClientSession,
   options: { cwd?: string; cols?: number; rows?: number; termType?: string; allowDefaultCwd?: boolean } = {},
 ): Promise<{ backendSessionId: string; session: TerminalSession; cols: number; rows: number; changed: boolean }> {
+  const shouldOfferRecoveredAgent = record.mode === 'shell'
+    && canRestoreDeadAgentShell(record)
+    && (!record.backendSessionId || !terminalSessions.has(record.backendSessionId));
   if (record.backendSessionId) {
     const existing = terminalSessions.get(record.backendSessionId);
     if (existing) {
@@ -1438,6 +1471,7 @@ async function ensureBackendSessionForRecord(
     tmuxSessionName: record.tmuxSessionName ?? undefined,
     termType: options.termType,
   });
+  spawned.session.agentResumeRecovered = shouldOfferRecoveredAgent;
   record.backendSessionId = spawned.sessionId;
   record.mode = spawned.session.mode;
   record.tmuxSessionName = spawned.session.tmuxSessionName;
@@ -1601,6 +1635,146 @@ async function openInventorySession(
     inventory,
     reused,
   };
+}
+
+interface OrchestrationSessionSnapshot {
+  sessionId: string;
+  backendSessionId: string | null;
+  name: string;
+  cwd: string;
+  agent: { slug: string; displayName: string } | null;
+  status: AgentSessionStatus | 'shell' | 'offline';
+  capability: string;
+  currentTask: string;
+  updatedAt: number;
+}
+
+function orchestrationSessionSnapshot(record: PersistedClientSession): OrchestrationSessionSnapshot {
+  const backend = record.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
+  const agent = backend?.agent ?? (record.agentResume?.slug ? agentBySlug(record.agentResume.slug) : null);
+  const latestPrompt = backend?.autoTitlePromptPayloads.at(-1)?.trim() ?? '';
+  return {
+    sessionId: record.sessionId,
+    backendSessionId: record.backendSessionId ?? null,
+    name: record.name,
+    cwd: backend?.cwd ?? record.cwd ?? '',
+    agent: agent ? { slug: agent.slug, displayName: agent.displayName } : null,
+    status: backend?.agentSession?.status ?? (backend ? 'shell' : 'offline'),
+    capability: agent
+      ? [agent.displayName, ...(agent.capabilities ?? []), backend?.activeProgram?.command || record.activeProgram || 'Agent 会话'].join(' · ')
+      : (backend?.activeProgram?.command || record.activeProgram || 'Shell 终端'),
+    currentTask: latestPrompt || record.name,
+    updatedAt: backend?.lastActivity ?? record.lastActivity,
+  };
+}
+
+function searchMetadataForBackend(backendSessionId: string, session: TerminalSession): SessionSearchMetadata | null {
+  const record = globalSessionState.sessions.find((candidate) => candidate.backendSessionId === backendSessionId);
+  if (!record) return null;
+  return {
+    sessionId: record.sessionId,
+    backendSessionId,
+    title: record.name,
+    cwd: session.cwd ?? record.cwd ?? '',
+    agentSlug: session.agent?.slug ?? record.agentResume?.slug ?? null,
+    agentNativeSessionId: session.agentSession?.sessionId ?? record.agentResume?.sessionId ?? null,
+    updatedAt: session.lastActivity,
+  };
+}
+
+function writeTerminalInput(session: TerminalSession, value: string): void {
+  session.ptyProcess.write(value.replace(/\r?\n/g, '\r'));
+}
+
+function deliverAutomationPromptWhenReady(backendSessionId: string, prompt: string, attempt = 0): void {
+  const session = terminalSessions.get(backendSessionId);
+  if (!session) return;
+  if (session.agent || session.agentSession || attempt >= 60) {
+    writeTerminalInput(session, `${prompt}\r`);
+    return;
+  }
+  setTimeout(() => deliverAutomationPromptWhenReady(backendSessionId, prompt, attempt + 1), 250);
+}
+
+async function runAgentAutomation(automation: AgentAutomation, req?: express.Request): Promise<void> {
+  const run = automationStore.beginRun(automation);
+  let frontendSessionId: string | null = null;
+  try {
+    if (automation.targetSessionId) {
+      const record = globalSessionState.sessions.find((candidate) => candidate.sessionId === automation.targetSessionId);
+      const backend = record?.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
+      if (!record || !backend) throw new Error('目标会话当前不在线');
+      if (!backend.agentSession) throw new Error('目标会话当前没有运行中的 Agent');
+      frontendSessionId = record.sessionId;
+      const message = automation.prompt || automation.command;
+      if (!message) throw new Error('自动任务没有可发送的内容');
+      writeTerminalInput(backend, `${message}\r`);
+    } else {
+      const request = req ?? ({} as express.Request);
+      const opened = await openInventorySession(request, {
+        name: automation.name,
+        customName: true,
+        mode: 'shell',
+        cwd: automation.cwd,
+      });
+      frontendSessionId = opened.session.sessionId;
+      const backend = terminalSessions.get(opened.terminalSession.sessionId);
+      if (!backend) throw new Error('自动任务会话创建失败');
+      if (automation.command) writeTerminalInput(backend, `${automation.command}\r`);
+      if (automation.prompt) {
+        if (automation.command) deliverAutomationPromptWhenReady(opened.terminalSession.sessionId, automation.prompt);
+        else writeTerminalInput(backend, `${automation.prompt}\r`);
+      }
+    }
+    automationStore.finishRun(run.id, 'success', frontendSessionId, '任务已投递');
+  } catch (error) {
+    automationStore.finishRun(run.id, 'failed', frontendSessionId, getErrorMessage(error));
+    throw error;
+  }
+}
+
+function collaborationMessageLabel(kind: CollaborationMessageKind): string {
+  return ({ message: '消息', ask: '问题', reply: '回复', task: '任务', handoff: '交接', done: '完成' } as const)[kind];
+}
+
+function resolveFrontendSessionId(input: { sessionId?: unknown; backendSessionId?: unknown; tmuxSessionName?: unknown }): string | null {
+  const sessionId = typeof input.sessionId === 'string' ? input.sessionId.trim() : '';
+  if (sessionId && globalSessionState.sessions.some((record) => record.sessionId === sessionId)) return sessionId;
+  const backendSessionId = typeof input.backendSessionId === 'string' ? input.backendSessionId.trim() : '';
+  if (backendSessionId) {
+    const resolved = globalSessionState.sessions.find((record) => record.backendSessionId === backendSessionId)?.sessionId;
+    if (resolved) return resolved;
+  }
+  const tmuxSessionName = typeof input.tmuxSessionName === 'string' ? input.tmuxSessionName.trim() : '';
+  return globalSessionState.sessions.find((record) => record.tmuxSessionName === tmuxSessionName)?.sessionId ?? null;
+}
+
+function formatCollaborationDelivery(targetSessionId: string, messages: CollaborationMessage[]): string {
+  const targetGroups = new Map(collaborationStore.groupsForSession(targetSessionId).map((group) => [group.id, group]));
+  const lines = messages.map((message) => {
+    const from = message.fromSessionId
+      ? globalSessionState.sessions.find((record) => record.sessionId === message.fromSessionId)?.name ?? message.fromSessionId
+      : '用户';
+    const group = targetGroups.get(message.groupId)?.name ?? '协作组';
+    return `- [${collaborationMessageLabel(message.kind)} #${message.id}] ${from} → ${group}: ${message.content}`;
+  });
+  return `[Termdock 协作收件箱]\n${lines.join('\n')}\n请处理这些消息。需要回复时运行：td collab reply <消息ID> "回复内容"；查看成员和未读消息运行：td collab status / td collab inbox。`;
+}
+
+function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: string[]; pending: number } {
+  const record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
+  const session = record?.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
+  const pending = collaborationStore.inbox(frontendSessionId, { pendingOnly: true, limit: 10 });
+  // Rich hooks let us avoid interrupting an active turn. Third-party plugins
+  // without hooks still participate through the universal detected-Agent PTY
+  // path; their busy state is simply unknown, so delivery is immediate.
+  if (!session?.agent || pending.length === 0
+    || (session.agentSession?.rich && !['idle', 'done'].includes(session.agentSession.status))) {
+    return { delivered: [], pending: pending.length };
+  }
+  writeTerminalInput(session, `${formatCollaborationDelivery(frontendSessionId, pending)}\r`);
+  collaborationStore.markDelivered(pending.map((message) => message.id));
+  return { delivered: pending.map((message) => message.id), pending: 0 };
 }
 
 function getTmuxBinary(): string {
@@ -2261,7 +2435,10 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       customName: session.customName === true,
       connected: backendLive,
       live,
-      restorable: session.mode === 'tmux' && tmuxLive && !backendLive,
+      restorable: !backendLive && (
+        (session.mode === 'tmux' && tmuxLive)
+        || (session.mode === 'shell' && canRestoreDeadAgentShell(session))
+      ),
       activeProgram,
       cwd,
     };
@@ -2934,6 +3111,8 @@ export interface AgentStatusWirePayload {
   reviewed: boolean | null;
   /** The agent's native session id, for resume. */
   agentNativeSessionId: string | null;
+  /** This PTY was rebuilt after a crash and the persisted Agent is awaiting user recovery. */
+  agentResumeRecovered: boolean;
   /** Whether state comes from installed hooks (rich) vs the notification fallback. */
   agentRich: boolean;
   /** Monotonic tool-completion counter; only the *change* means anything. */
@@ -2993,6 +3172,7 @@ function buildAgentStatusPayload(sessionId: string, session: TerminalSession): A
     agentMessage: state?.message ?? null,
     reviewed: state?.reviewed ?? session.lastAgentReviewed ?? null,
     agentNativeSessionId: nativeSessionId,
+    agentResumeRecovered: session.agentResumeRecovered,
     agentRich: state?.rich ?? false,
     agentActivity: state?.activity ?? 0,
     agentCwd: state?.agentCwd ?? null,
@@ -3074,6 +3254,10 @@ function syncAgentIdentity(sessionId: string, session: TerminalSession): void {
     }
     session.agent = detected;
     broadcastAgentStatus(sessionId, session);
+    if (detected) {
+      const frontendSessionId = globalSessionState.sessions.find((record) => record.backendSessionId === sessionId)?.sessionId;
+      if (frontendSessionId) setTimeout(() => tryDeliverCollaborationInbox(frontendSessionId), 300).unref?.();
+    }
   } else if (detected && session.agentLeftAt !== null) {
     // Agent re-detected before debounce expired — false alarm, restore.
     session.agentLeftAt = null;
@@ -3139,6 +3323,7 @@ function applyAgentSignals(
       clearAutoTitleForNewAgentSession(sessionId, session);
     }
     if (event.kind === 'session-start') {
+      session.agentResumeRecovered = false;
       session.autoTitleObservedPrompt = false;
       session.autoTitleTurnActive = false;
       session.autoTitlePromptPayloads = [];
@@ -3203,6 +3388,13 @@ function applyAgentSignals(
   maybeRefreshGitStatusForAgent(sessionId, session);
 
   broadcastAgentStatus(sessionId, session, identityChanged);
+
+  if (session.agentSession && ['idle', 'done'].includes(session.agentSession.status)) {
+    const frontendSessionId = globalSessionState.sessions.find((record) => record.backendSessionId === sessionId)?.sessionId;
+    if (frontendSessionId) {
+      setTimeout(() => tryDeliverCollaborationInbox(frontendSessionId), 300).unref?.();
+    }
+  }
 
   if (completedTurnAgent) {
     const agent = completedTurnAgent;
@@ -4211,6 +4403,8 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   // exiting is normal (the user can detach/reconnect) and the tmux daemon
   // itself is independent of the wrapper.
   if (options.killProcess === false && session.mode === 'shell') {
+    const closedRecord = globalSessionState.sessions.find((s) => s.backendSessionId === sessionId) ?? null;
+    archiveAgentResumeRecord(closedRecord, 'exited');
     const beforeCount = globalSessionState.sessions.length;
     globalSessionState = {
       sessions: globalSessionState.sessions.filter((s) => s.backendSessionId !== sessionId),
@@ -4524,6 +4718,10 @@ function processSessionOutput(sessionId: string, session: TerminalSession, data:
 
   appendAutoTitleContext(sessionId, session, data, opts.broadcast);
   if (opts.broadcast) {
+    const searchMetadata = searchMetadataForBackend(sessionId, session);
+    if (searchMetadata) sessionSearchStore.append(searchMetadata, cleanTerminalContext(data));
+  }
+  if (opts.broadcast) {
     broadcastEvent(sessionId, seq !== undefined ? { type: 'data', data, seq } : { type: 'data', data });
   }
 }
@@ -4632,6 +4830,9 @@ async function spawnTerminalSession(req: express.Request, input: {
     // Gates the agent-hook emitter: hooks installed globally stay silent
     // unless the agent runs inside a termdock-spawned shell.
     TERMDOCK: '1',
+    // Lets `td collab` address this exact Termdock conversation without the
+    // user or Agent having to copy a session id.
+    TERMDOCK_BACKEND_SESSION_ID: sessionId,
   };
 
   let ptyProcess: PtyProcess | null = null;
@@ -4714,6 +4915,7 @@ async function spawnTerminalSession(req: express.Request, input: {
     activeProgram: null,
     agent: null,
     agentSession: null,
+    agentResumeRecovered: false,
     autoTitleContext: '',
     autoTitleTerminal: new RenderedTerminalContext(cols, rows),
     autoTitlePromptPayloads: [],
@@ -4804,6 +5006,7 @@ async function adoptPtyHostSessions(): Promise<void> {
       activeProgram: null,
       agent: null,
       agentSession: null,
+      agentResumeRecovered: false,
       autoTitleContext: '',
       autoTitleTerminal: new RenderedTerminalContext(meta.cols, meta.rows),
       autoTitlePromptPayloads: [],
@@ -5207,6 +5410,266 @@ router.get('/session-inventory', async (_req, res) => {
   }
 });
 
+router.get('/operations/automations', (_req, res) => {
+  res.json({ automations: automationStore.list(), runs: automationStore.listRuns() });
+});
+
+router.post('/operations/automations', async (req, res) => {
+  try {
+    const schedule = normalizeAutomationSchedule(req.body?.schedule);
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const command = typeof req.body?.command === 'string' ? req.body.command.trim() : '';
+    const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+    const targetSessionId = typeof req.body?.targetSessionId === 'string' ? req.body.targetSessionId.trim() : '';
+    if (!name || !schedule || (!command && !prompt)) {
+      return res.status(400).json({ error: '名称、有效计划以及命令或提示词不能为空' });
+    }
+    const targetRecord = targetSessionId
+      ? globalSessionState.sessions.find((candidate) => candidate.sessionId === targetSessionId)
+      : null;
+    if (targetSessionId && !targetRecord) return res.status(400).json({ error: '目标会话不存在' });
+    if (!targetSessionId && !command) return res.status(400).json({ error: '创建新会话时必须填写 Agent 启动命令' });
+    const requestedCwd = typeof req.body?.cwd === 'string' && req.body.cwd.trim()
+      ? req.body.cwd.trim()
+      : (targetRecord?.cwd || os.homedir());
+    const cwd = await resolveWorkingDirectory(req, requestedCwd);
+    const automation = automationStore.save({
+      id: typeof req.body?.id === 'string' ? req.body.id : undefined,
+      name,
+      enabled: req.body?.enabled !== false,
+      cwd,
+      command,
+      prompt,
+      targetSessionId: targetSessionId || null,
+      schedule,
+    });
+    res.json({ automation });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error) });
+  }
+});
+
+router.post('/operations/automations/:automationId/run', async (req, res) => {
+  const automation = automationStore.get(req.params.automationId);
+  if (!automation) return res.status(404).json({ error: '自动任务不存在' });
+  try {
+    await runAgentAutomation(automation, req);
+    res.json({ ok: true, automation: automationStore.get(automation.id), runs: automationStore.listRuns(automation.id) });
+  } catch (error) {
+    res.status(409).json({ error: getErrorMessage(error), automation: automationStore.get(automation.id) });
+  }
+});
+
+router.delete('/operations/automations/:automationId', (req, res) => {
+  if (!automationStore.remove(req.params.automationId)) return res.status(404).json({ error: '自动任务不存在' });
+  res.status(204).send();
+});
+
+router.get('/operations/collaboration-groups', (_req, res) => {
+  res.json({
+    groups: collaborationStore.list(),
+    sessions: globalSessionState.sessions.map(orchestrationSessionSnapshot),
+  });
+});
+
+router.post('/operations/collaboration-groups', (req, res) => {
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  const sessionIds: string[] = Array.isArray(req.body?.sessionIds)
+    ? (req.body.sessionIds as unknown[]).filter((id): id is string => typeof id === 'string')
+    : [];
+  const knownIds = new Set(globalSessionState.sessions.map((session) => session.sessionId));
+  const normalizedIds = Array.from(new Set(sessionIds.filter((id) => knownIds.has(id))));
+  if (!name || normalizedIds.length < 2) return res.status(400).json({ error: '协作组至少需要两个有效会话' });
+  const group = collaborationStore.save({
+    id: typeof req.body?.id === 'string' ? req.body.id : undefined,
+    name,
+    sessionIds: normalizedIds,
+  });
+  res.json({ group });
+});
+
+router.delete('/operations/collaboration-groups/:groupId', (req, res) => {
+  if (!collaborationStore.remove(req.params.groupId)) return res.status(404).json({ error: '协作组不存在' });
+  res.status(204).send();
+});
+
+router.get('/operations/collaboration-groups/:groupId/messages', (req, res) => {
+  const group = collaborationStore.getGroup(req.params.groupId);
+  if (!group) return res.status(404).json({ error: '协作组不存在' });
+  res.json({ messages: collaborationStore.listMessages(group.id, Number(req.query.limit) || 200) });
+});
+
+router.post('/operations/collaboration-groups/:groupId/messages', (req, res) => {
+  try {
+    const group = collaborationStore.getGroup(req.params.groupId);
+    if (!group) return res.status(404).json({ error: '协作组不存在' });
+    const fromSessionId = resolveFrontendSessionId(req.body ?? {});
+    const kind = typeof req.body?.kind === 'string' ? req.body.kind as CollaborationMessageKind : 'message';
+    const content = typeof req.body?.content === 'string' ? req.body.content.slice(0, 20_000) : '';
+    const requestedTargets: string[] = Array.isArray(req.body?.toSessionIds)
+      ? (req.body.toSessionIds as unknown[]).filter((id): id is string => typeof id === 'string')
+      : [];
+    const toSessionIds = requestedTargets.length > 0
+      ? requestedTargets
+      : group.sessionIds.filter((id) => id !== fromSessionId);
+    const messages = collaborationStore.send({
+      groupId: group.id,
+      fromSessionId,
+      toSessionIds,
+      kind,
+      content,
+      threadId: typeof req.body?.threadId === 'string' ? req.body.threadId : null,
+      replyTo: typeof req.body?.replyTo === 'string' ? req.body.replyTo : null,
+    });
+    const deliveries = Array.from(new Set(messages.map((message) => message.toSessionId))).map((sessionId) => ({
+      sessionId,
+      ...tryDeliverCollaborationInbox(sessionId),
+    }));
+    res.json({ messages, deliveries });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error) });
+  }
+});
+
+router.get('/operations/orchestration/peers', (req, res) => {
+  const sourceSessionId = resolveFrontendSessionId(req.query);
+  const source = globalSessionState.sessions.find((candidate) => candidate.sessionId === sourceSessionId);
+  if (!source) return res.status(404).json({ error: '会话不存在' });
+  const groups = collaborationStore.groupsForSession(source.sessionId);
+  const peerIds = new Set(groups.flatMap((group) => group.sessionIds).filter((id) => id !== source.sessionId));
+  res.json({ source: orchestrationSessionSnapshot(source), groups, peers: globalSessionState.sessions.filter((record) => peerIds.has(record.sessionId)).map(orchestrationSessionSnapshot) });
+});
+
+router.post('/operations/orchestration/send', (req, res) => {
+  const sourceSessionId = resolveFrontendSessionId(req.body ?? {});
+  const targetSessionId = typeof req.body?.targetSessionId === 'string' ? req.body.targetSessionId.trim() : '';
+  const content = typeof req.body?.message === 'string' ? req.body.message.trim().slice(0, 20_000) : '';
+  if (!sourceSessionId) return res.status(400).json({ error: '无法识别发送会话；请从 Termdock 会话内运行 td collab' });
+  const group = collaborationStore.groupsForSession(sourceSessionId).find((candidate) => candidate.sessionIds.includes(targetSessionId));
+  if (!group) return res.status(400).json({ error: '发送方和接收方不在同一协作组' });
+  try {
+    const messages = collaborationStore.send({
+      groupId: group.id, fromSessionId: sourceSessionId, toSessionIds: [targetSessionId],
+      kind: typeof req.body?.kind === 'string' ? req.body.kind as CollaborationMessageKind : 'message',
+      content,
+    });
+    res.json({ ok: true, messages, delivery: tryDeliverCollaborationInbox(targetSessionId) });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error) });
+  }
+});
+
+router.get('/operations/orchestration/inbox', (req, res) => {
+  const sessionId = resolveFrontendSessionId(req.query);
+  if (!sessionId) return res.status(404).json({ error: '会话不存在' });
+  const messages = collaborationStore.inbox(sessionId, { limit: Number(req.query.limit) || 50 });
+  if (req.query.markRead === 'true') collaborationStore.markRead(messages.map((message) => message.id));
+  const groups = collaborationStore.groupsForSession(sessionId);
+  const peerIds = new Set(groups.flatMap((group) => group.sessionIds).filter((id) => id !== sessionId));
+  res.json({
+    session: orchestrationSessionSnapshot(globalSessionState.sessions.find((record) => record.sessionId === sessionId)!),
+    groups,
+    peers: globalSessionState.sessions.filter((record) => peerIds.has(record.sessionId)).map(orchestrationSessionSnapshot),
+    messages,
+  });
+});
+
+router.post('/operations/orchestration/reply', (req, res) => {
+  const sourceSessionId = resolveFrontendSessionId(req.body ?? {});
+  const messageId = typeof req.body?.messageId === 'string' ? req.body.messageId.trim() : '';
+  const content = typeof req.body?.content === 'string' ? req.body.content.trim().slice(0, 20_000) : '';
+  const original = collaborationStore.getMessage(messageId);
+  if (!sourceSessionId || !original || original.toSessionId !== sourceSessionId) {
+    return res.status(404).json({ error: '协作消息不存在或不属于当前会话' });
+  }
+  if (!original.fromSessionId) return res.status(400).json({ error: '这条用户消息无需回复到其他会话' });
+  try {
+    collaborationStore.markRead([original.id]);
+    const messages = collaborationStore.send({
+      groupId: original.groupId,
+      fromSessionId: sourceSessionId,
+      toSessionIds: [original.fromSessionId],
+      kind: 'reply',
+      content,
+      threadId: original.threadId,
+      replyTo: original.id,
+    });
+    res.json({ ok: true, messages, delivery: tryDeliverCollaborationInbox(original.fromSessionId) });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error) });
+  }
+});
+
+router.get('/operations/session-search', (req, res) => {
+  const query = typeof req.query.q === 'string' ? req.query.q : '';
+  const results = sessionSearchStore.search(query, Number(req.query.limit) || 30).map((result) => {
+    const live = globalSessionState.sessions.some((candidate) => candidate.sessionId === result.sessionId);
+    const resumeEntry = result.agentNativeSessionId
+      ? agentResumeHistory.list().find((entry) => entry.agent.sessionId === result.agentNativeSessionId)
+      : null;
+    return { ...result, live, resumeHistoryId: resumeEntry?.id ?? null };
+  });
+  res.json({ query, results });
+});
+
+router.get('/agent-resume-history', (_req, res) => {
+  const entries = agentResumeHistory.list().flatMap((entry) => {
+    const agent = agentBySlug(entry.agent.slug);
+    const command = agent ? buildResumeCommand(agent, entry.agent.sessionId!, entry.agent.launchArgv) : null;
+    if (!agent || !command) return [];
+    return [{
+      id: entry.id,
+      title: entry.title,
+      titleSource: entry.titleSource,
+      agent,
+      cwd: entry.cwd,
+      closedAt: entry.closedAt,
+      reason: entry.reason,
+    }];
+  });
+  res.json({ entries });
+});
+
+router.post('/agent-resume-history/:historyId/prepare', async (req, res) => {
+  const historyId = typeof req.params.historyId === 'string' ? req.params.historyId.trim() : '';
+  const entry = historyId ? agentResumeHistory.get(historyId) : null;
+  if (!entry) return res.status(404).json({ error: 'Agent resume history entry not found' });
+  const agent = agentBySlug(entry.agent.slug);
+  const command = agent ? buildResumeCommand(agent, entry.agent.sessionId!, entry.agent.launchArgv) : null;
+  if (!agent || !command) {
+    return res.status(410).json({
+      error: 'This Agent no longer has a valid resume command',
+      code: 'AGENT_RESUME_UNAVAILABLE',
+    });
+  }
+  const target: AgentResumeTarget = {
+    slug: agent.slug,
+    nativeSessionId: entry.agent.sessionId!,
+    command,
+  };
+  const activeOwner = findActiveAgentResumeOwner('', target);
+  if (activeOwner || await findExternalCodexWriter(target)) {
+    return res.status(409).json({
+      error: 'this agent session is already open in another terminal',
+      code: 'AGENT_SESSION_ACTIVE_ELSEWHERE',
+    });
+  }
+  res.json({ command, cwd: entry.cwd, title: entry.title, agent });
+});
+
+router.delete('/agent-resume-history/:historyId', (req, res) => {
+  const historyId = typeof req.params.historyId === 'string' ? req.params.historyId.trim() : '';
+  if (!historyId || !agentResumeHistory.remove(historyId)) {
+    return res.status(404).json({ error: 'Agent resume history entry not found' });
+  }
+  res.status(204).send();
+});
+
+router.delete('/agent-resume-history', (_req, res) => {
+  agentResumeHistory.clear();
+  res.status(204).send();
+});
+
 router.post('/session-inventory/open', async (req, res) => {
   try {
     const input = req.body ?? {};
@@ -5301,6 +5764,7 @@ router.delete('/session-inventory/sessions/:frontendSessionId', async (req, res)
     return res.status(400).json({ error: 'frontendSessionId is required' });
   }
   const removedSession = globalSessionState.sessions.find((session) => session.sessionId === frontendSessionId) ?? null;
+  archiveAgentResumeRecord(removedSession, 'closed');
   const changed = removeGlobalSessionRecord(frontendSessionId);
   if (changed) {
     if (removedSession?.mode === 'tmux' && removedSession.tmuxSessionName) {
@@ -5318,7 +5782,9 @@ router.delete('/session-inventory/sessions/:frontendSessionId', async (req, res)
 
 router.delete('/session-inventory/sessions', async (_req, res) => {
   await markAllPersistedTmuxSessionsDetached();
+  for (const session of globalSessionState.sessions) archiveAgentResumeRecord(session, 'closed');
   globalSessionState = { sessions: [], updatedAt: Date.now() };
+  collaborationStore.clear();
   schedulePersistGlobalState();
   broadcastClientState();
   res.status(204).send();
@@ -5334,6 +5800,7 @@ router.put('/client-state', (_req, res) => {
 router.delete('/client-state', async (_req, res) => {
   await markAllPersistedTmuxSessionsDetached();
   globalSessionState = { sessions: [], updatedAt: Date.now() };
+  collaborationStore.clear();
   schedulePersistGlobalState();
   broadcastClientState();
   res.status(204).send();
@@ -5573,6 +6040,7 @@ router.get('/agent-launchers', async (_req, res) => {
     slug: string;
     displayName: string;
     command: string;
+    capabilities?: string[];
     accentColor: string;
     icon: string | null;
     isPlugin: boolean;
@@ -5601,6 +6069,7 @@ router.get('/agent-launchers', async (_req, res) => {
         slug: agent.slug,
         displayName: agent.displayName,
         command,
+        capabilities: agent.capabilities,
         accentColor: agent.accentColor,
         icon: agent.icon,
         isPlugin: agent.isPlugin ?? false,
@@ -5682,6 +6151,7 @@ router.get('/agent-plugins', (_req, res) => {
       slug: p.manifest.slug,
       displayName: p.manifest.displayName,
       aliases: p.manifest.aliases,
+      capabilities: p.manifest.capabilities ?? [],
       accentColor: p.manifest.accentColor,
       iconMode: p.manifest.iconMode ?? 'mask',
       hasHooks: p.manifest.hooks !== undefined,
@@ -6097,7 +6567,7 @@ router.get('/:sessionId/stream', async (req, res) => {
   });
   // Rich agent state rides its own message so the connected payload stays
   // backward compatible; force past the dedupe snapshot.
-  if (session.agent || session.agentSession) {
+  if (session.agent || session.agentSession || session.agentResumeRecovered) {
     writeSse(res, buildAgentStatusPayload(sessionId, session));
   }
   if (session.gitStatus) {
@@ -6883,7 +7353,7 @@ export function handleTerminalWebSocket(
       replayOutOfWindow,
     }));
     // Rich agent state rides its own message (see the SSE path above).
-    if (session.agent || session.agentSession) {
+    if (session.agent || session.agentSession || session.agentResumeRecovered) {
       ws.send(JSON.stringify(buildAgentStatusPayload(sessionId, session)));
     }
     if (session.gitStatus) {
@@ -7268,16 +7738,31 @@ const reconcileTimer: ReturnType<typeof setInterval> = setInterval(() => {
 // Don't keep the event loop alive for housekeeping.
 reconcileTimer.unref?.();
 
+const automationTimer: ReturnType<typeof setInterval> = setInterval(() => {
+  for (const automation of automationStore.due()) {
+    void runAgentAutomation(automation).catch((error) => {
+      console.warn(`[automation] ${automation.id} failed:`, getErrorMessage(error));
+    });
+  }
+}, 30_000);
+automationTimer.unref?.();
+
 async function reconcileClientState(): Promise<void> {
   if (globalSessionState.sessions.length === 0) return;
 
   const toRemove: string[] = [];
+  const toDetach: string[] = [];
   for (const entry of globalSessionState.sessions) {
     if (entry.mode === 'shell') {
       // Shell wrapper: backendSessionId must map to a live terminal session.
-      // No live wrapper → the shell process is gone, can't reattach.
+      // A resumable Agent record survives with a detached backend so the tab
+      // can rebuild its shell; ordinary dead shells still disappear.
       if (!entry.backendSessionId || !terminalSessions.has(entry.backendSessionId)) {
-        toRemove.push(entry.sessionId);
+        if (canRestoreDeadAgentShell(entry)) {
+          if (entry.backendSessionId) toDetach.push(entry.sessionId);
+        } else {
+          toRemove.push(entry.sessionId);
+        }
       }
     } else if (entry.mode === 'tmux' && entry.tmuxSessionName) {
       // Tmux entry: the tmux daemon (independent of termdock) must still
@@ -7294,14 +7779,22 @@ async function reconcileClientState(): Promise<void> {
     }
   }
 
-  if (toRemove.length === 0) return;
+  if (toRemove.length === 0 && toDetach.length === 0) return;
+  const detached = new Set(toDetach);
   globalSessionState = {
-    sessions: globalSessionState.sessions.filter((s) => !toRemove.includes(s.sessionId)),
+    sessions: globalSessionState.sessions
+      .filter((s) => !toRemove.includes(s.sessionId))
+      .map((s) => detached.has(s.sessionId) ? { ...s, backendSessionId: null } : s),
     updatedAt: Date.now(),
   };
   schedulePersistGlobalState();
   broadcastClientState();
-  console.log(`[reconcile] removed ${toRemove.length} orphan client-state entries: ${toRemove.join(', ')}`);
+  if (toRemove.length > 0) {
+    console.log(`[reconcile] removed ${toRemove.length} orphan client-state entries: ${toRemove.join(', ')}`);
+  }
+  if (toDetach.length > 0) {
+    console.log(`[reconcile] detached ${toDetach.length} resumable Agent shell entries: ${toDetach.join(', ')}`);
+  }
 }
 
 export default router;

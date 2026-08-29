@@ -32,6 +32,28 @@ interface IOSKeyboardHeightCorrectionInput {
   isTerminalInputFocused: boolean;
 }
 
+interface ViewportKeyboardInsetInput {
+  measuredHeight: number;
+  documentVisible: boolean;
+  editableFocused: boolean;
+}
+
+export function shouldApplyViewportKeyboardInset({
+  measuredHeight,
+  documentVisible,
+  editableFocused,
+}: ViewportKeyboardInsetInput): boolean {
+  return documentVisible && editableFocused && measuredHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
+}
+
+export function hasFocusedEditableElement(): boolean {
+  if (typeof document === 'undefined') return false;
+  const activeElement = document.activeElement;
+  return activeElement instanceof HTMLElement && activeElement.matches(
+    'input:not([type="hidden"]), textarea, select, [contenteditable]:not([contenteditable="false"])'
+  );
+}
+
 export function correctIOSKeyboardToolbarUndercount({
   measuredHeight,
   referenceHeight,
@@ -385,7 +407,13 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       const keyboardViewportHeight = Math.min(filteredHeight, rawViewportHeight);
       const visibleHeight = Math.max(0, Math.min(baseVh, visualBottom));
       const measuredKeyboardHeight = Math.max(0, Math.round(baseVh - visibleHeight - safeBottom));
-      const isMeasuredKeyboardOpen = measuredKeyboardHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
+      const editableFocused = hasFocusedEditableElement();
+      const applyKeyboardInset = shouldApplyViewportKeyboardInset({
+        measuredHeight: measuredKeyboardHeight,
+        documentVisible: document.visibilityState === 'visible',
+        editableFocused,
+      });
+      const isMeasuredKeyboardOpen = applyKeyboardInset;
       const now = performance.now();
       if (isMeasuredKeyboardOpen && keyboardOpenStartedAtRef.current === null) {
         keyboardOpenStartedAtRef.current = now;
@@ -401,13 +429,13 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       const keyboardReferenceKey = `${viewportOrientation}:${viewportWidthBucket}`;
       const referenceKeyboardHeight = iosKeyboardReferenceHeightsRef.current.get(keyboardReferenceKey) ?? 0;
       const isTerminalInputFocused = document.activeElement?.matches('[data-terminal-input-anchor="true"]') === true;
-      const keyboardHeight = correctIOSKeyboardToolbarUndercount({
+      const keyboardHeight = applyKeyboardInset ? correctIOSKeyboardToolbarUndercount({
         measuredHeight: measuredKeyboardHeight,
         referenceHeight: referenceKeyboardHeight,
         keyboardOpenAgeMs,
         isIOS: isIOSLike(),
         isTerminalInputFocused,
-      });
+      }) : 0;
       const isKeyboardOpen = keyboardHeight >= KEYBOARD_OPEN_THRESHOLD_PX;
 
       // Keep a high-water reference for this orientation. A later opening that
@@ -461,6 +489,8 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
           appliedHeight: filteredHeight,
           keyboardViewportHeight,
           measuredKeyboardHeight,
+          editableFocused,
+          applyKeyboardInset,
           referenceKeyboardHeight,
           keyboardOpenAgeMs: Math.round(keyboardOpenAgeMs),
           correctedKeyboardToolbar: keyboardHeight !== measuredKeyboardHeight,
@@ -518,12 +548,41 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
     const handleVisualViewportResize = () => scheduleSync('visualViewport.resize');
     const handleVisualViewportScroll = () => scheduleSync('visualViewport.scroll');
     const handleFocusIn = () => scheduleSettledSync('focusin');
+    const handleFocusOut = () => scheduleSettledSync('focusout');
+
+    const resetKeyboardSession = (source: string) => {
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement && hasFocusedEditableElement()) {
+        activeElement.blur();
+      }
+
+      keyboardOpenStartedAtRef.current = null;
+      lastKeyboardHeightRef.current = 0;
+      lastKeyboardOpenRef.current = false;
+      heightBufRef.current = [];
+
+      const baseHeight = Math.max(
+        baseHeightRef.current,
+        getBestKnownViewportHeight(),
+        MIN_BOOTSTRAP_VIEWPORT_HEIGHT_PX,
+      );
+      const style = document.documentElement.style;
+      style.setProperty(cssVarName, `${baseHeight}px`);
+      style.setProperty('--app-visible-vh', `${baseHeight}px`);
+      style.setProperty('--app-vv-offset-top', '0px');
+      style.setProperty('--kb-translate-y', '0px');
+      style.setProperty('--kb-margin-top', '0px');
+      style.setProperty('--kb-height', '0px');
+      setViewportHeight((current) => current === baseHeight ? current : baseHeight);
+      debugViewport('keyboard session reset', { source, baseHeight });
+    };
 
     window.addEventListener('resize', handleResize);
     window.addEventListener('orientationchange', handleOrientationChange);
     window.visualViewport?.addEventListener('resize', handleVisualViewportResize);
     window.visualViewport?.addEventListener('scroll', handleVisualViewportScroll);
     document.addEventListener('focusin', handleFocusIn);
+    document.addEventListener('focusout', handleFocusOut);
 
     // 从后台返回时，visualViewport.height 可能还是"软键盘打开"时的旧值，
     // 而 resize 事件不会 fire（值未变），导致 --app-vh 维持半高，xterm fit
@@ -548,11 +607,17 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       scheduleSettledSync(source);
     };
     const handleVisibilityChange = () => {
-      if (!document.hidden) handleResume('visibilitychange');
+      if (document.hidden) {
+        resetKeyboardSession('visibilitychange:hidden');
+      } else {
+        handleResume('visibilitychange');
+      }
     };
     const handlePageShow = () => handleResume('pageshow');
+    const handlePageHide = () => resetKeyboardSession('pagehide');
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('pagehide', handlePageHide);
 
     return () => {
       window.removeEventListener('resize', handleResize);
@@ -560,8 +625,10 @@ export function useViewportHeight(options: UseViewportHeightOptions = {}): numbe
       window.visualViewport?.removeEventListener('resize', handleVisualViewportResize);
       window.visualViewport?.removeEventListener('scroll', handleVisualViewportScroll);
       document.removeEventListener('focusin', handleFocusIn);
+      document.removeEventListener('focusout', handleFocusOut);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('pagehide', handlePageHide);
 
       if (rafId !== null) {
         window.cancelAnimationFrame(rafId);

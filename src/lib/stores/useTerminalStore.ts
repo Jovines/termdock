@@ -55,6 +55,7 @@ export interface TerminalStore {
   setSessionGitStatus: (sessionId: string, gitStatus: import('../terminal/types').GitStatusReport | null) => void;
   setSessionCopyMode: (sessionId: string, inCopyMode: boolean) => void;
   setSessionAgentStatus: (sessionId: string, payload: AgentStatusPayload) => void;
+  setAgentResumeRecovered: (sessionId: string, recovered: boolean) => void;
   clearAgentNeedsReview: (sessionId: string) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string, options?: { markActivity?: boolean }) => void;
@@ -107,6 +108,7 @@ function createEmptySessionState(sessionId: string): TerminalSessionState {
     agent: null,
     agentMessage: null,
     agentNativeSessionId: null,
+    agentResumeRecovered: false,
     agentRich: false,
     agentActivity: 0,
     agentCwd: null,
@@ -339,6 +341,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         activeProgramRaw: terminalSession.activeProgramRaw ?? existing?.activeProgramRaw ?? baseState.activeProgramRaw,
         activeProgramSource: terminalSession.activeProgramSource ?? existing?.activeProgramSource ?? baseState.activeProgramSource,
         cwd: terminalSession.cwd ?? existing?.cwd ?? baseState.cwd,
+        agentResumeRecovered: existing?.agentResumeRecovered ?? baseState.agentResumeRecovered,
         shellTitle: existing?.shellTitle ?? readCachedShellTitles()[sessionId] ?? baseState.shellTitle,
         sessionId,
         isConnecting: false,
@@ -467,6 +470,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     const nextAgent = payload.agent !== undefined ? payload.agent : existing.agent;
     const nextMessage = payload.agentMessage !== undefined ? payload.agentMessage : (agentStatus ? existing.agentMessage : null);
     const nextNativeId = payload.agentNativeSessionId !== undefined ? payload.agentNativeSessionId : existing.agentNativeSessionId;
+    const nextResumeRecovered = payload.agentResumeRecovered !== undefined
+      ? payload.agentResumeRecovered
+      : existing.agentResumeRecovered;
     const nextRich = payload.agentRich ?? existing.agentRich;
     const nextActivity = payload.agentActivity ?? existing.agentActivity;
     const nextAgentCwd = payload.agentCwd !== undefined ? payload.agentCwd : existing.agentCwd;
@@ -489,6 +495,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       existing.agent === nextAgent &&
       existing.agentMessage === nextMessage &&
       existing.agentNativeSessionId === nextNativeId &&
+      existing.agentResumeRecovered === nextResumeRecovered &&
       existing.agentRich === nextRich &&
       existing.agentActivity === nextActivity &&
       existing.agentCwd === nextAgentCwd &&
@@ -504,6 +511,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       agent: nextAgent,
       agentMessage: nextMessage,
       agentNativeSessionId: nextNativeId,
+      agentResumeRecovered: nextResumeRecovered,
       agentRich: nextRich,
       agentActivity: nextActivity,
       agentCwd: nextAgentCwd,
@@ -560,6 +568,20 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         deferToPush: true,
       });
     }
+  },
+
+  setAgentResumeRecovered: (sessionId: string, recovered: boolean) => {
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
+      if (existing.agentResumeRecovered === recovered) return state;
+      newSessions.set(sessionId, {
+        ...existing,
+        agentResumeRecovered: recovered,
+        updatedAt: Date.now(),
+      });
+      return { sessions: newSessions };
+    });
   },
 
   clearAgentNeedsReview: (sessionId: string) => {

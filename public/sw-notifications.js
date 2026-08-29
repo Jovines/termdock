@@ -220,10 +220,14 @@ self.addEventListener('notificationclick', (event) => {
     for (const client of clients) {
       const clientUrl = new URL(client.url);
       if (clientUrl.origin === self.location.origin && 'focus' in client) {
+        // Queue the requested session before focus emits the page's resume
+        // event. This lets the connection scheduler promote the notification
+        // target instead of briefly reconnecting the previously active tab.
+        const acknowledgement = data.sessionId && 'postMessage' in client
+          ? requestFocusAcknowledgement(client, data.sessionId)
+          : Promise.resolve(false);
         await client.focus();
-        const acknowledged = data.sessionId && 'postMessage' in client
-          ? await requestFocusAcknowledgement(client, data.sessionId)
-          : false;
+        const acknowledged = await acknowledgement;
         await reportNotificationClick('sw-focus-ack-result', traceId, {
           acknowledged,
           clientUrl: client.url,

@@ -1,5 +1,6 @@
 import React from 'react';
 import { createDebugLogger } from '../utils/debug';
+import { hasFocusedEditableElement } from './useViewportHeight';
 
 interface UseViewportKeyboardStateOptions {
   enabled: boolean;
@@ -20,6 +21,13 @@ const DEFAULT_SETTLE_DELAY_MS = 400;
 
 function getKeyboardHeightPx(): number {
   if (typeof window === 'undefined') {
+    return 0;
+  }
+
+  // iOS standalone PWAs can restore the visual viewport dimensions captured
+  // while the keyboard was open. Without a focused editable element that
+  // inset is stale viewport state, not an open keyboard.
+  if (document.visibilityState !== 'visible' || !hasFocusedEditableElement()) {
     return 0;
   }
 

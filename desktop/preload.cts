@@ -1,5 +1,18 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { DesktopAppUpdateState, DesktopSnapshot, ServiceProbe } from './types.js';
+import { shouldUploadDroppedFiles, uploadDroppedFiles } from './fileDropUpload.js';
+
+type NativeDropState = 'local' | 'remote' | 'uploading' | 'error';
+
+function setNativeDropState(target: HTMLElement, state: NativeDropState): void {
+  target.dataset.nativeFileDrag = 'true';
+  target.dataset.nativeFileDropState = state;
+}
+
+function clearNativeDropState(target: HTMLElement): void {
+  delete target.dataset.nativeFileDrag;
+  delete target.dataset.nativeFileDropState;
+}
 
 contextBridge.exposeInMainWorld('termdockDesktop', {
   platform: process.platform,
@@ -41,30 +54,52 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
       if (!target || !event.dataTransfer?.types.includes('Files')) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = 'copy';
-      target.dataset.nativeFileDrag = 'true';
+      setNativeDropState(
+        target,
+        shouldUploadDroppedFiles(window.location.hostname) ? 'remote' : 'local',
+      );
     };
     const clearDragState = (event: DragEvent) => {
       const target = event.target instanceof Element
         ? event.target.closest<HTMLElement>('[data-termdock-terminal-dropzone]')
         : null;
-      if (target) delete target.dataset.nativeFileDrag;
+      if (target) clearNativeDropState(target);
     };
-    const handleDrop = (event: DragEvent) => {
+    const handleDrop = async (event: DragEvent) => {
       const target = event.target instanceof Element
         ? event.target.closest<HTMLElement>('[data-termdock-terminal-dropzone]')
         : null;
       if (!target || !event.dataTransfer) return;
-      const paths = Array.from(event.dataTransfer.files)
-        .map((file) => webUtils.getPathForFile(file))
-        .filter((filePath) => filePath.length > 0);
-      delete target.dataset.nativeFileDrag;
-      if (paths.length === 0) return;
+      const files = Array.from(event.dataTransfer.files);
+      if (files.length === 0) {
+        clearNativeDropState(target);
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
-      callback({
-        sessionKey: target.dataset.termdockTerminalDropzone ?? '',
-        paths,
-      });
+      const sessionKey = target.dataset.termdockTerminalDropzone ?? '';
+
+      if (!shouldUploadDroppedFiles(window.location.hostname)) {
+        const paths = files
+          .map((file) => webUtils.getPathForFile(file))
+          .filter((filePath) => filePath.length > 0);
+        clearNativeDropState(target);
+        if (paths.length > 0) callback({ sessionKey, paths });
+        return;
+      }
+
+      setNativeDropState(target, 'uploading');
+      try {
+        const paths = await uploadDroppedFiles(files);
+        clearNativeDropState(target);
+        if (paths.length > 0) callback({ sessionKey, paths });
+      } catch (error) {
+        console.error('[desktop-file-drop] Failed to upload files to the current service', error);
+        setNativeDropState(target, 'error');
+        window.setTimeout(() => {
+          if (target.dataset.nativeFileDropState === 'error') clearNativeDropState(target);
+        }, 3000);
+      }
     };
     document.addEventListener('dragover', handleDragOver, true);
     document.addEventListener('dragleave', clearDragState, true);

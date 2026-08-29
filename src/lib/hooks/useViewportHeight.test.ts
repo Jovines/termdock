@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { correctIOSKeyboardToolbarUndercount } from './useViewportHeight';
+import {
+  correctIOSKeyboardToolbarUndercount,
+  shouldApplyViewportKeyboardInset,
+} from './useViewportHeight';
 
 describe('correctIOSKeyboardToolbarUndercount', () => {
   const baseInput = {
@@ -38,5 +41,31 @@ describe('correctIOSKeyboardToolbarUndercount', () => {
       ...baseInput,
       referenceHeight: 380,
     })).toBe(292);
+  });
+});
+
+describe('shouldApplyViewportKeyboardInset', () => {
+  it('accepts a keyboard-sized inset only while an editable element owns focus', () => {
+    expect(shouldApplyViewportKeyboardInset({
+      measuredHeight: 320,
+      documentVisible: true,
+      editableFocused: true,
+    })).toBe(true);
+  });
+
+  it('rejects a stale PWA viewport inset after relaunch without keyboard focus', () => {
+    expect(shouldApplyViewportKeyboardInset({
+      measuredHeight: 320,
+      documentVisible: true,
+      editableFocused: false,
+    })).toBe(false);
+  });
+
+  it('rejects viewport insets while the app is backgrounded', () => {
+    expect(shouldApplyViewportKeyboardInset({
+      measuredHeight: 320,
+      documentVisible: false,
+      editableFocused: true,
+    })).toBe(false);
   });
 });

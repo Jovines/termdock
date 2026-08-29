@@ -19,6 +19,9 @@ export function readNewSessionAgentPreference(): NewSessionAgentPreference {
       slug: value.slug,
       command: value.command,
       displayName: typeof value.displayName === 'string' ? value.displayName : value.slug,
+      capabilities: Array.isArray(value.capabilities)
+        ? value.capabilities.filter((capability): capability is string => typeof capability === 'string')
+        : undefined,
       accentColor: typeof value.accentColor === 'string' ? value.accentColor : 'var(--muted-foreground)',
       icon: typeof value.icon === 'string' ? value.icon : null,
       isPlugin: value.isPlugin === true,

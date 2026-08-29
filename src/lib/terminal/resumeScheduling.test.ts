@@ -6,8 +6,97 @@ import {
   VISIBLE_RECONNECT_WATCHDOG_MS,
   buildResumeDelayBySessionId,
   getVisibleReconnectWatchdogDelayMs,
+  resolvePrioritySessionId,
+  selectConnectionForegroundSessionId,
   shouldScheduleForegroundResume,
+  shouldRunResumeRequest,
+  shouldStartInitialConnection,
 } from './resumeScheduling';
+
+describe('resolvePrioritySessionId', () => {
+  const sessions = [
+    { id: 'frontend-a', backendSessionId: 'backend-a' },
+    { id: 'frontend-b', backendSessionId: 'backend-b' },
+  ];
+
+  it('accepts both frontend and backend notification ids', () => {
+    expect(resolvePrioritySessionId(sessions, 'frontend-b')).toBe('frontend-b');
+    expect(resolvePrioritySessionId(sessions, 'backend-b')).toBe('frontend-b');
+  });
+
+  it('does not redirect an unknown notification to the wrong session', () => {
+    expect(resolvePrioritySessionId(sessions, 'missing')).toBeNull();
+    expect(resolvePrioritySessionId(sessions, null)).toBeNull();
+  });
+});
+
+describe('selectConnectionForegroundSessionId', () => {
+  it('uses notification priority ahead of the current and persisted session', () => {
+    expect(selectConnectionForegroundSessionId({
+      prioritySessionId: 'notification',
+      activeSessionId: 'current',
+      persistedActiveSessionId: 'persisted',
+      firstSessionId: 'first',
+    })).toBe('notification');
+  });
+
+  it('restores the persisted selection instead of falling back to the first tab', () => {
+    expect(selectConnectionForegroundSessionId({
+      prioritySessionId: null,
+      activeSessionId: null,
+      persistedActiveSessionId: 'persisted',
+      firstSessionId: 'first',
+    })).toBe('persisted');
+  });
+});
+
+describe('shouldStartInitialConnection', () => {
+  it('keeps background sessions out of the cold-start critical path', () => {
+    expect(shouldStartInitialConnection({
+      sessionId: 'selected',
+      foregroundSessionId: 'selected',
+      foregroundReady: false,
+    })).toBe(true);
+    expect(shouldStartInitialConnection({
+      sessionId: 'background',
+      foregroundSessionId: 'selected',
+      foregroundReady: false,
+    })).toBe(false);
+  });
+
+  it('releases background sessions after the selected session is ready', () => {
+    expect(shouldStartInitialConnection({
+      sessionId: 'background',
+      foregroundSessionId: 'selected',
+      foregroundReady: true,
+    })).toBe(true);
+  });
+
+  it('does not deadlock startup when there is no selected session', () => {
+    expect(shouldStartInitialConnection({
+      sessionId: 'first',
+      foregroundSessionId: null,
+      foregroundReady: false,
+    })).toBe(true);
+  });
+});
+
+describe('shouldRunResumeRequest', () => {
+  it('runs the selected session first and holds the background wave', () => {
+    expect(shouldRunResumeRequest({
+      sessionId: 'selected', foregroundSessionId: 'selected', requestToken: 4, foregroundCompletedToken: 3,
+    })).toBe(true);
+    expect(shouldRunResumeRequest({
+      sessionId: 'background', foregroundSessionId: 'selected', requestToken: 4, foregroundCompletedToken: 3,
+    })).toBe(false);
+  });
+
+  it('releases the background wave only after foreground connected', () => {
+    expect(shouldRunResumeRequest({
+      sessionId: 'background', foregroundSessionId: 'selected', requestToken: 4, foregroundCompletedToken: 4,
+    })).toBe(true);
+  });
+});
 
 describe('shouldScheduleForegroundResume', () => {
   it('coalesces the focus and visibility events emitted by one foreground transition', () => {

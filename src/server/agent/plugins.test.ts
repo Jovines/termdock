@@ -15,6 +15,7 @@ const TEST_PLUGIN: AgentPluginManifest = {
   slug: 'test-agent',
   displayName: 'Test Agent',
   aliases: ['test-agent', 'tai'],
+  capabilities: ['代码审查', 'testing'],
   accentColor: '#FF6600',
   statuses: [
     { id: 'thinking', phase: 'working', label: 'Thinking', indicator: 'spinner', tone: 'info' },
@@ -57,6 +58,17 @@ describe('plugin validation', () => {
       hooks: { ...TEST_PLUGIN.hooks, events: [{ hook: 'Stop', event: 'stop', status: 'missing' }] },
     }, '/tmp/test');
     expect(invalid).toHaveProperty('error');
+  });
+
+  it('validates collaboration capabilities and keeps them in the Agent registry', () => {
+    expect(validateManifest({ ...TEST_PLUGIN, capabilities: ['review', 'review'] }, '/tmp/test')).toMatchObject({
+      manifest: { capabilities: ['review'] },
+    });
+    expect(validateManifest({ ...TEST_PLUGIN, capabilities: ['review', 'bad/slash'] }, '/tmp/test')).toHaveProperty('error');
+    clearPluginAgents();
+    registerPluginAgents([makePlugin(TEST_PLUGIN)]);
+    expect(agentBySlug(TEST_PLUGIN.slug)?.capabilities).toEqual(TEST_PLUGIN.capabilities);
+    clearPluginAgents();
   });
 
   it('confines plugin hook targets to non-symlinked JSON paths under home', () => {

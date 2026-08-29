@@ -323,6 +323,18 @@ body {
   pointer-events: none;
 }
 
+.terminal-viewport-container[data-native-file-drag='true'][data-native-file-drop-state='remote']::after {
+  content: '释放以上传到当前服务';
+}
+
+.terminal-viewport-container[data-native-file-drag='true'][data-native-file-drop-state='uploading']::after {
+  content: '正在上传到当前服务…';
+}
+
+.terminal-viewport-container[data-native-file-drag='true'][data-native-file-drop-state='error']::after {
+  content: '上传失败，请重试';
+}
+
 .terminal-viewport-container {
   cursor: text;
   /* 触摸滚动优化 */

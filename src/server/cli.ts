@@ -156,6 +156,12 @@ interface CliOptions {
   pluginHooks?: { slug: string; action: 'install' | 'uninstall' };
   pluginRemove?: string;
   agentEvent?: { slug: string; event: string; status?: string };
+  collab?: {
+    action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply';
+    target?: string;
+    message?: string;
+    json: boolean;
+  };
 }
 
 interface ServerState {
@@ -266,6 +272,14 @@ Short commands:
   agent-event <slug> <event> [status]
                      Emit one lifecycle/status event from an Agent hook.
   pi                 Same as agent-plugin
+  collab status      Show this Session's collaboration groups and peers
+  collab inbox       Read and acknowledge collaboration messages
+  collab send <session-id> <message>
+                     Send a durable message to a related Session
+  collab handoff <session-id> <summary>
+                     Hand off work and context to another Session
+  collab reply <message-id> <message>
+                     Reply in the original collaboration thread
   plugin-create <file>
                      Same as --plugin-create <file>
   plugin-install <source>
@@ -641,6 +655,7 @@ function parseArgs(argv: string[]): CliOptions {
   let pluginHooks: { slug: string; action: 'install' | 'uninstall' } | undefined;
   let pluginRemove: string | undefined;
   let agentEvent: { slug: string; event: string; status?: string } | undefined;
+  let collab: CliOptions['collab'];
 
   // Short command aliases for the common path. Keep these positional-only so
   // long-form flags remain the single source of truth for option semantics.
@@ -733,6 +748,24 @@ function parseArgs(argv: string[]): CliOptions {
         console.error(`${ICON.err} ${c.red('Usage: td agent-event <slug> <event> [status]')}`);
         process.exit(1);
       }
+    } else if (command === 'collab') {
+      const action = (next || 'status') as NonNullable<CliOptions['collab']>['action'];
+      const json = argv.includes('--json');
+      if (action === 'status' || action === 'inbox') {
+        collab = { action, json };
+      } else if (action === 'send' || action === 'handoff' || action === 'reply') {
+        const target = argv[2];
+        const message = argv.slice(3).filter((part) => part !== '--json').join(' ').trim();
+        if (!target || !message) {
+          console.error(`${ICON.err} ${c.red(`Usage: td collab ${action} <${action === 'reply' ? 'message-id' : 'session-id'}> <message>`)}`);
+          process.exit(1);
+        }
+        collab = { action, target, message, json };
+      } else {
+        console.error(`${ICON.err} ${c.red('Usage: td collab <status|inbox|send|handoff|reply>')}`);
+        process.exit(1);
+      }
+      argv = [];
     } else if (command === 'pcreate' || command === 'plugin-create') {
       if (next && !next.startsWith('-')) {
         pluginCreate = next;
@@ -1100,6 +1133,7 @@ function parseArgs(argv: string[]): CliOptions {
     pluginHooks,
     pluginRemove,
     agentEvent,
+    collab,
   };
 }
 
@@ -1304,6 +1338,94 @@ async function getLocalJson(baseUrl: string, token: string, endpoint: string): P
     req.on('error', reject);
     req.end();
   });
+}
+
+async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<void> {
+  const runningState = getRunningState();
+  if (!runningState?.localApiToken) {
+    console.error(`${ICON.err} ${c.red('Termdock is not running or its local API token is unavailable.')}`);
+    process.exit(1);
+  }
+  const backendSessionId = process.env.TERMDOCK_BACKEND_SESSION_ID?.trim() || null;
+  let tmuxSessionName: string | null = null;
+  if (!backendSessionId && process.env.TMUX) {
+    try {
+      const { stdout } = await execFileAsync(process.env.TMUX_BIN || 'tmux', ['display-message', '-p', '#S'], {
+        timeout: 2_000,
+        maxBuffer: 16 * 1024,
+      });
+      const detected = stdout.trim();
+      if (detected && !detected.includes('\n') && detected.length <= 128) tmuxSessionName = detected;
+    } catch {
+      // The explicit backend id remains the primary path; tmux is a fallback
+      // for managed panes whose inner shell predates the attach wrapper env.
+    }
+  }
+  if (!backendSessionId && !tmuxSessionName) {
+    console.error(`${ICON.err} ${c.red('td collab must run inside a Termdock-managed Session.')}`);
+    process.exit(1);
+  }
+  const context = backendSessionId ? { backendSessionId } : { tmuxSessionName };
+  const contextQuery = new URLSearchParams(
+    Object.entries(context).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+  ).toString();
+  const baseUrl = runningState.localUrl
+    ?? `${runningState.scheme ?? 'http'}://${runningState.host === '0.0.0.0' ? 'localhost' : runningState.host}:${runningState.port}`;
+  let response: { statusCode: number; body: string };
+  if (command.action === 'status') {
+    response = await getLocalJson(baseUrl, runningState.localApiToken,
+      `/api/terminal/operations/orchestration/peers?${contextQuery}`);
+  } else if (command.action === 'inbox') {
+    response = await getLocalJson(baseUrl, runningState.localApiToken,
+      `/api/terminal/operations/orchestration/inbox?${contextQuery}&markRead=true`);
+  } else if (command.action === 'reply') {
+    response = await postLocalJson(baseUrl, runningState.localApiToken, '/api/terminal/operations/orchestration/reply', {
+      ...context,
+      messageId: command.target,
+      content: command.message,
+    });
+  } else {
+    response = await postLocalJson(baseUrl, runningState.localApiToken, '/api/terminal/operations/orchestration/send', {
+      ...context,
+      targetSessionId: command.target,
+      message: command.message,
+      kind: command.action === 'handoff' ? 'handoff' : 'message',
+    });
+  }
+  let body: Record<string, unknown> = {};
+  try { body = JSON.parse(response.body || '{}') as Record<string, unknown>; } catch { /* handled below */ }
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    console.error(`${ICON.err} ${c.red(typeof body.error === 'string' ? body.error : 'Collaboration request failed')}`);
+    process.exit(1);
+  }
+  if (command.json) {
+    console.log(JSON.stringify(body, null, 2));
+    return;
+  }
+  if (command.action === 'status') {
+    const groups = Array.isArray(body.groups) ? body.groups as Array<{ name?: string }> : [];
+    const peers = Array.isArray(body.peers) ? body.peers as Array<{ sessionId?: string; name?: string; status?: string; currentTask?: string; capability?: string }> : [];
+    console.log(`${ICON.ok} ${c.green(`Collaboration: ${groups.length} group(s), ${peers.length} peer(s)`)}`);
+    for (const peer of peers) {
+      console.log(`  ${c.cyan(peer.name ?? peer.sessionId ?? 'Session')} ${c.dim(`[${peer.sessionId ?? ''}]`)}`);
+      console.log(`    ${peer.status ?? 'offline'} · ${peer.capability ?? ''}`);
+      if (peer.currentTask) console.log(`    ${c.dim(peer.currentTask)}`);
+    }
+    return;
+  }
+  if (command.action === 'inbox') {
+    const messages = Array.isArray(body.messages) ? body.messages as Array<{ id?: string; kind?: string; content?: string; fromSessionId?: string; createdAt?: number }> : [];
+    if (messages.length === 0) {
+      console.log(`${ICON.ok} ${c.dim('Collaboration inbox is empty.')}`);
+      return;
+    }
+    for (const message of messages) {
+      console.log(`${c.cyan(message.kind ?? 'message')} ${c.dim(`#${message.id ?? ''}`)} from ${message.fromSessionId ?? 'user'}`);
+      console.log(`  ${message.content ?? ''}`);
+    }
+    return;
+  }
+  console.log(`${ICON.ok} ${c.green(command.action === 'reply' ? 'Reply sent.' : command.action === 'handoff' ? 'Handoff sent.' : 'Message sent.')}`);
 }
 
 async function runInjectChangeAudit(source: string | true): Promise<void> {
@@ -1972,6 +2094,7 @@ const AGENT_PLUGIN_EXAMPLE = {
   slug: 'my-agent',
   displayName: 'My Agent',
   aliases: ['my-agent'],
+  capabilities: ['code-review', 'testing'],
   accentColor: '#4385BE',
   iconMode: 'mask',
   statuses: [
@@ -2036,6 +2159,11 @@ function runPluginInitJson(): void {
       indicator: 'Theme-safe visual indicator.',
       tone: 'Theme token; arbitrary status colors are not accepted.',
     },
+    collaboration: {
+      capabilities: 'Optional routing hints shown beside this Agent in collaboration groups.',
+      universalTransport: 'Every detected Agent receives durable inbox messages through its PTY and can use td collab when it has shell access.',
+      hooks: 'Hooks add busy/idle awareness so Termdock can defer delivery until a turn finishes; they are not required for collaboration.',
+    },
     security: {
       source: 'Only public HTTPS repository roots on approved Git hosts or explicit local paths are accepted; URL credentials are rejected.',
       package: 'Symlinks, active/external SVG content, oversized files, submodules, and excessive unpacked size are rejected.',
@@ -2070,6 +2198,7 @@ function runPluginInitJson(): void {
       'If the Agent hook format is not a Claude-style hooks map, configure native hooks to call td agent-event directly.',
       'Map the completed-turn hook to event "stop"; this is also the automatic-title trigger when the user enables titles for the Agent.',
       'Optionally declare titleNamer so this Agent can generate titles and dynamically publish its own model catalog.',
+      'Optionally declare capabilities so users and peer Agents can see what this Agent is suited for.',
       'Put optional model flags in titleNamer.modelArgs; keep the always-present prompt invocation in titleNamer.args.',
       'Run td plugin-doctor <slug> --json and fix every warning before sharing the repository.',
       'Tell the user that enabling a plugin title provider executes that plugin\'s declared CLI; installation alone never does.',
@@ -2138,6 +2267,9 @@ ${c.dim('───────────────────')}
   ${c.dim('// Command names that identify this agent at runtime.')}
   ${c.dim('// First alias is the primary binary name; extras match npm/pip wrappers.')}
   "aliases": ["trae", "traecli"],
+
+  ${c.dim('// Optional collaboration routing hints (max 32 short names).')}
+  "capabilities": ["code-review", "frontend", "testing"],
 
   ${c.dim('// Brand accent color as 6-digit hex. Used for avatar background in mask mode,')}
   ${c.dim('// and as the status-dot color. Must be Flexoki-family or brand theme-safe.')}
@@ -2325,7 +2457,7 @@ async function runPluginList(json = false): Promise<void> {
   const { baseUrl, token } = requireRunningServer();
   const response = await getLocalJson(baseUrl, token, '/api/terminal/agent-plugins');
   const body = JSON.parse(response.body || '{}') as {
-    plugins?: Array<{ slug: string; displayName: string; aliases: string[]; accentColor: string; iconMode: string; hasHooks: boolean; hasResume: boolean; hasIcon: boolean; sourceType?: string; source?: string | null; revision?: string | null; updateAvailable?: boolean }>;
+    plugins?: Array<{ slug: string; displayName: string; aliases: string[]; capabilities?: string[]; accentColor: string; iconMode: string; hasHooks: boolean; hasResume: boolean; hasIcon: boolean; sourceType?: string; source?: string | null; revision?: string | null; updateAvailable?: boolean }>;
     errors?: Array<{
       slug: string;
       errors: string[];
@@ -2356,6 +2488,7 @@ async function runPluginList(json = false): Promise<void> {
       if (p.iconMode !== 'mask') flags.push(p.iconMode);
       if (p.updateAvailable) flags.push('update');
       console.log(`  ${c.cyan(p.slug)}  ${c.dim(p.displayName)}  ${c.gray(p.accentColor)}  ${c.dim(flags.length > 0 ? `[${flags.join(', ')}]` : '')}`);
+      if (p.capabilities?.length) console.log(`    ${c.dim(`capabilities: ${p.capabilities.join(', ')}`)}`);
       if (p.source) console.log(`    ${c.dim(`${p.sourceType ?? 'source'}: ${p.source}${p.revision ? ` @ ${p.revision.slice(0, 8)}` : ''}`)}`);
     }
   }
@@ -3498,6 +3631,11 @@ async function main(): Promise<void> {
 
   if (options.agentEvent) {
     runAgentEvent(options.agentEvent);
+  }
+
+  if (options.collab) {
+    await runCollab(options.collab);
+    process.exit(0);
   }
 
   if (options.pluginInit) {

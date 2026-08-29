@@ -44,10 +44,28 @@ export interface AgentStatusPayload {
   agent?: import('./types').AgentIdentity | null;
   agentMessage?: string | null;
   agentNativeSessionId?: string | null;
+  agentResumeRecovered?: boolean;
   agentRich?: boolean;
   agentActivity?: number;
   agentCwd?: string | null;
   reviewed?: boolean | null;
+}
+
+export interface AgentResumeHistoryEntry {
+  id: string;
+  title: string;
+  titleSource: 'custom' | 'auto' | 'default';
+  agent: import('./types').AgentIdentity;
+  cwd: string;
+  closedAt: number;
+  reason: 'closed' | 'exited';
+}
+
+export interface PreparedAgentResume {
+  command: string;
+  cwd: string;
+  title: string;
+  agent: import('./types').AgentIdentity;
 }
 
 // ── Subscription quota types ──
@@ -650,6 +668,7 @@ export function connectTerminalStream(
             agent: msg.agent ?? null,
             agentMessage: msg.agentMessage ?? null,
             agentNativeSessionId: msg.agentNativeSessionId ?? null,
+            agentResumeRecovered: msg.agentResumeRecovered === true,
             agentRich: msg.agentRich === true,
             agentActivity: typeof msg.agentActivity === 'number' ? msg.agentActivity : 0,
             agentCwd: msg.agentCwd ?? null,
@@ -1644,6 +1663,7 @@ export interface AgentPluginInfo {
   slug: string;
   displayName: string;
   aliases: string[];
+  capabilities: string[];
   accentColor: string;
   iconMode: 'mask' | 'native';
   hasHooks: boolean;
@@ -1787,8 +1807,47 @@ export async function resumeAgentSession(terminalSessionId: string): Promise<{ c
     headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || 'Failed to resume agent session');
+  if (!response.ok) {
+    throw new TerminalApiError(
+      data.error || 'Failed to resume agent session',
+      response.status,
+      typeof data.code === 'string' ? data.code : undefined,
+    );
+  }
   return { command: data.command ?? '' };
+}
+
+export async function listAgentResumeHistory(): Promise<AgentResumeHistoryEntry[]> {
+  const response = await fetch('/api/terminal/agent-resume-history', { method: 'GET' });
+  if (!response.ok) throw new Error('Failed to load Agent resume history');
+  const data = await response.json().catch(() => ({ entries: [] }));
+  return Array.isArray(data.entries) ? data.entries : [];
+}
+
+export async function prepareAgentResumeHistory(historyId: string): Promise<PreparedAgentResume> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/agent-resume-history/${encodeURIComponent(historyId)}/prepare`, {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new TerminalApiError(
+      data.error || 'Failed to prepare Agent session resume',
+      response.status,
+      typeof data.code === 'string' ? data.code : undefined,
+    );
+  }
+  return data as PreparedAgentResume;
+}
+
+export async function removeAgentResumeHistory(historyId: string): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch(`/api/terminal/agent-resume-history/${encodeURIComponent(historyId)}`, {
+    method: 'DELETE',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok && response.status !== 404) throw new Error('Failed to remove Agent resume history');
 }
 
 export async function getProgramRules(): Promise<ProgramLabelRule[]> {
@@ -3250,4 +3309,142 @@ export async function applyDiffHunk(request: ApplyDiffHunkRequest): Promise<Appl
     throw new Error(error.error || 'Failed to apply diff hunk');
   }
   return response.json();
+}
+
+export type AutomationSchedule =
+  | { kind: 'interval'; everyMinutes: number }
+  | { kind: 'daily'; time: string; weekdays: number[] };
+
+export interface AgentAutomation {
+  id: string;
+  name: string;
+  enabled: boolean;
+  cwd: string;
+  command: string;
+  prompt: string;
+  targetSessionId: string | null;
+  schedule: AutomationSchedule;
+  nextRunAt: number | null;
+  lastRunAt: number | null;
+  lastRunStatus: 'running' | 'success' | 'failed' | null;
+  lastRunMessage: string | null;
+}
+
+export interface AutomationRun {
+  id: string;
+  automationId: string;
+  startedAt: number;
+  finishedAt: number | null;
+  status: 'running' | 'success' | 'failed';
+  frontendSessionId: string | null;
+  message: string | null;
+}
+
+export interface CollaborationGroup {
+  id: string;
+  name: string;
+  sessionIds: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type CollaborationMessageKind = 'message' | 'ask' | 'reply' | 'task' | 'handoff' | 'done';
+
+export interface CollaborationMessage {
+  id: string;
+  groupId: string;
+  fromSessionId: string | null;
+  toSessionId: string;
+  kind: CollaborationMessageKind;
+  content: string;
+  threadId: string;
+  replyTo: string | null;
+  status: 'pending' | 'delivered' | 'read';
+  createdAt: number;
+  deliveredAt: number | null;
+  readAt: number | null;
+}
+
+export interface OrchestrationSession {
+  sessionId: string;
+  backendSessionId: string | null;
+  name: string;
+  cwd: string;
+  agent: { slug: string; displayName: string } | null;
+  status: string;
+  capability: string;
+  currentTask: string;
+  updatedAt: number;
+}
+
+export interface SessionSearchResult {
+  sessionId: string;
+  title: string;
+  cwd: string;
+  agentSlug: string | null;
+  updatedAt: number;
+  snippet: string;
+  matchCount: number;
+  live: boolean;
+  resumeHistoryId: string | null;
+}
+
+async function operationsRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = init?.method?.toUpperCase() ?? 'GET';
+  const headers = new Headers(init?.headers);
+  if (method !== 'GET' && method !== 'HEAD') headers.set('X-XSRF-TOKEN', await getCsrfToken());
+  if (init?.body) headers.set('Content-Type', 'application/json');
+  const response = await fetch(`/api/terminal/operations${path}`, { ...init, headers });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: '操作失败' }));
+    throw new TerminalApiError(body.error || '操作失败', response.status);
+  }
+  return (response.status === 204 ? undefined : await response.json()) as T;
+}
+
+export function listAgentAutomations(): Promise<{ automations: AgentAutomation[]; runs: AutomationRun[] }> {
+  return operationsRequest('/automations');
+}
+
+export function saveAgentAutomation(input: Partial<AgentAutomation> & { name: string; cwd: string; command: string; prompt: string; schedule: AutomationSchedule }): Promise<{ automation: AgentAutomation }> {
+  return operationsRequest('/automations', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function runAgentAutomation(automationId: string): Promise<{ ok: true; automation: AgentAutomation }> {
+  return operationsRequest(`/automations/${encodeURIComponent(automationId)}/run`, { method: 'POST' });
+}
+
+export function removeAgentAutomation(automationId: string): Promise<void> {
+  return operationsRequest(`/automations/${encodeURIComponent(automationId)}`, { method: 'DELETE' });
+}
+
+export function listCollaborationGroups(): Promise<{ groups: CollaborationGroup[]; sessions: OrchestrationSession[] }> {
+  return operationsRequest('/collaboration-groups');
+}
+
+export function saveCollaborationGroup(input: { id?: string; name: string; sessionIds: string[] }): Promise<{ group: CollaborationGroup }> {
+  return operationsRequest('/collaboration-groups', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function removeCollaborationGroup(groupId: string): Promise<void> {
+  return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' });
+}
+
+export function listCollaborationMessages(groupId: string): Promise<{ messages: CollaborationMessage[] }> {
+  return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}/messages`);
+}
+
+export function sendCollaborationMessage(groupId: string, input: {
+  fromSessionId?: string | null;
+  toSessionIds?: string[];
+  kind: CollaborationMessageKind;
+  content: string;
+  threadId?: string;
+  replyTo?: string;
+}): Promise<{ messages: CollaborationMessage[]; deliveries: Array<{ sessionId: string; delivered: string[]; pending: number }> }> {
+  return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}/messages`, { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function searchTerminalSessions(query: string): Promise<{ results: SessionSearchResult[] }> {
+  return operationsRequest(`/session-search?q=${encodeURIComponent(query)}`);
 }

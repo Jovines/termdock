@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { Pause as RiPause, Play as RiPlay } from 'lucide-react';
+import { Maximize as RiMaximize, Minimize as RiMinimize, Pause as RiPause, Play as RiPlay, RotateCw as RiRotateCw } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { SIDEBAR_GESTURE_IGNORE_ATTR, SWIPER_NO_SWIPING_CLASS } from './gestureArbiter';
 
@@ -25,6 +25,14 @@ interface VideoPreviewPlayerProps {
   onLoadError?: () => void;
 }
 
+interface VideoWithWebkitFullscreen extends HTMLVideoElement {
+  webkitEnterFullscreen?: () => void;
+}
+
+const LONG_PRESS_DELAY_MS = 350;
+const LONG_PRESS_MOVE_TOLERANCE_PX = 12;
+const SCRUB_EXACT_SETTLE_MS = 90;
+
 /**
  * 右侧边栏视频预览播放器。
  *
@@ -34,27 +42,101 @@ interface VideoPreviewPlayerProps {
  */
 export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps) {
   const { t } = useI18n();
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
   const wasPlayingRef = useRef(false);
   const rafRef = useRef<number | null>(null);
+  const scrubSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestScrubRef = useRef(0);
+  const scrubbingRef = useRef(false);
+  const scrubSeekInFlightRef = useRef(false);
+  const scrubExactPendingRef = useRef(false);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressPointerRef = useRef<{ id: number; x: number; y: number } | null>(null);
+  const longPressActiveRef = useRef(false);
+  const playbackRateBeforeLongPressRef = useRef(1);
+  const suppressClickRef = useRef(false);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [scrubTime, setScrubTime] = useState<number | null>(null);
+  const [longPressActive, setLongPressActive] = useState(false);
+  const [rotation, setRotation] = useState(0);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+
+  const clearLongPressTimer = useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
+
+  const restorePlaybackRate = useCallback(() => {
+    clearLongPressTimer();
+    longPressPointerRef.current = null;
+    if (!longPressActiveRef.current) return false;
+    const video = videoRef.current;
+    if (video) video.playbackRate = playbackRateBeforeLongPressRef.current;
+    longPressActiveRef.current = false;
+    setLongPressActive(false);
+    return true;
+  }, [clearLongPressTimer]);
 
   useEffect(() => () => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    if (scrubSettleRef.current !== null) clearTimeout(scrubSettleRef.current);
+    clearLongPressTimer();
+    const video = videoRef.current;
+    if (video && longPressActiveRef.current) video.playbackRate = playbackRateBeforeLongPressRef.current;
+  }, [clearLongPressTimer]);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      setStageSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    observer.observe(stage);
+    return () => observer.disconnect();
   }, []);
 
-  const seekTo = useCallback((time: number) => {
-    const video = videoRef.current;
-    if (!video) return;
-    const end = Number.isFinite(video.duration) ? video.duration : time;
-    video.currentTime = Math.min(Math.max(time, 0), end);
+  useEffect(() => {
+    const handleFullscreenChange = () => setFullscreen(document.fullscreenElement === rootRef.current);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
+
+  const seekTo = useCallback((time: number, fast = false): boolean => {
+    const video = videoRef.current;
+    if (!video) return false;
+    const end = Number.isFinite(video.duration) ? video.duration : time;
+    const next = Math.min(Math.max(time, 0), end);
+    setCurrentTime(next);
+    if (Math.abs(video.currentTime - next) < 1 / 120) return false;
+    const fastSeek = (video as unknown as { fastSeek?: (nextTime: number) => void }).fastSeek;
+    if (fast && typeof fastSeek === 'function') fastSeek.call(video, next);
+    else video.currentTime = next;
+    return true;
+  }, []);
+
+  const scheduleScrubSeek = useCallback(() => {
+    if (rafRef.current !== null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      const video = videoRef.current;
+      if (!video || !scrubbingRef.current || scrubSeekInFlightRef.current || video.seeking) return;
+      const exact = scrubExactPendingRef.current;
+      scrubExactPendingRef.current = false;
+      // 一次只解码一个目标；上一帧完成后直接取手指的最新位置，跳过已经
+      // 过期的中间点，避免连续 currentTime 写入反复取消正在进行的解码。
+      scrubSeekInFlightRef.current = seekTo(latestScrubRef.current, !exact);
+    });
+  }, [seekTo]);
 
   const handleScrubMove = useCallback((clientX: number) => {
     const track = trackRef.current;
@@ -64,20 +146,27 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
     const time = computeScrubTime(clientX, rect, video.duration);
     latestScrubRef.current = time;
     setScrubTime(time);
-    // rAF 节流：每帧只发最后一次 seek，避免拖动过程产生 seek 风暴。
-    if (rafRef.current === null) {
-      rafRef.current = requestAnimationFrame(() => {
-        rafRef.current = null;
-        seekTo(latestScrubRef.current);
-      });
-    }
-  }, [seekTo]);
+    scrubExactPendingRef.current = false;
+    scheduleScrubSeek();
+    if (scrubSettleRef.current !== null) clearTimeout(scrubSettleRef.current);
+    scrubSettleRef.current = setTimeout(() => {
+      scrubSettleRef.current = null;
+      scrubExactPendingRef.current = true;
+      scheduleScrubSeek();
+    }, SCRUB_EXACT_SETTLE_MS);
+  }, [scheduleScrubSeek]);
 
   const flushScrub = useCallback(() => {
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
+    if (scrubSettleRef.current !== null) {
+      clearTimeout(scrubSettleRef.current);
+      scrubSettleRef.current = null;
+    }
+    scrubExactPendingRef.current = false;
+    scrubSeekInFlightRef.current = false;
     seekTo(latestScrubRef.current);
   }, [seekTo]);
 
@@ -86,6 +175,7 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
     if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
     wasPlayingRef.current = !video.paused;
     video.pause();
+    scrubbingRef.current = true;
     setDragging(true);
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -96,6 +186,7 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
   }, [handleScrubMove]);
 
   const endScrub = useCallback(() => {
+    scrubbingRef.current = false;
     flushScrub();
     setDragging(false);
     setScrubTime(null);
@@ -109,9 +200,67 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
     if (video.paused) void video.play().catch(() => undefined);
     else video.pause();
   }, []);
+
+  const startLongPress = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
+    const video = videoRef.current;
+    if (!video || video.paused || event.button !== 0) return;
+    clearLongPressTimer();
+    longPressPointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null;
+      playbackRateBeforeLongPressRef.current = video.playbackRate;
+      video.playbackRate = 2;
+      longPressActiveRef.current = true;
+      setLongPressActive(true);
+    }, LONG_PRESS_DELAY_MS);
+  }, [clearLongPressTimer]);
+
+  const moveLongPress = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
+    const start = longPressPointerRef.current;
+    if (!start || start.id !== event.pointerId || longPressActiveRef.current) return;
+    if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > LONG_PRESS_MOVE_TOLERANCE_PX) {
+      clearLongPressTimer();
+      longPressPointerRef.current = null;
+    }
+  }, [clearLongPressTimer]);
+
+  const endLongPress = useCallback(() => {
+    const wasActive = restorePlaybackRate();
+    if (wasActive) suppressClickRef.current = true;
+  }, [restorePlaybackRate]);
+
+  useEffect(() => {
+    window.addEventListener('pointerup', endLongPress);
+    window.addEventListener('pointercancel', endLongPress);
+    window.addEventListener('blur', endLongPress);
+    return () => {
+      window.removeEventListener('pointerup', endLongPress);
+      window.removeEventListener('pointercancel', endLongPress);
+      window.removeEventListener('blur', endLongPress);
+    };
+  }, [endLongPress]);
+
+  const toggleFullscreen = useCallback(async () => {
+    const root = rootRef.current;
+    const video = videoRef.current as VideoWithWebkitFullscreen | null;
+    if (!root || !video) return;
+    try {
+      if (document.fullscreenElement === root) await document.exitFullscreen();
+      else if (root.requestFullscreen) await root.requestFullscreen();
+      else video.webkitEnterFullscreen?.();
+    } catch {
+      video.webkitEnterFullscreen?.();
+    }
+  }, []);
+
+  const rotateVideo = useCallback(() => setRotation((value) => (value + 90) % 360), []);
 
   const handleTrackKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     const video = videoRef.current;
@@ -129,27 +278,69 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
 
   const displayTime = dragging && scrubTime !== null ? scrubTime : currentTime;
   const progress = duration > 0 ? Math.min(1, Math.max(0, displayTime / duration)) : 0;
+  const sideways = rotation === 90 || rotation === 270;
+  const measuredRotatedStyle = sideways && stageSize.width > 0 && stageSize.height > 0
+    ? { width: `${stageSize.height}px`, height: `${stageSize.width}px` }
+    : { width: '100%', height: '100%' };
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg bg-background" data-testid="file-preview-video-player">
-      <div className="relative min-h-0 flex-1">
+    <div
+      ref={rootRef}
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg bg-background fullscreen:h-screen fullscreen:w-screen fullscreen:rounded-none"
+      data-testid="file-preview-video-player"
+      data-rotation={rotation}
+    >
+      <div ref={stageRef} className="relative min-h-0 flex-1 overflow-hidden bg-background">
         <video
           ref={videoRef}
           data-testid="file-preview-video"
-          className="h-full w-full object-contain"
+          className="absolute left-1/2 top-1/2 max-w-none object-contain transition-transform duration-200"
+          style={{ ...measuredRotatedStyle, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
           src={url}
-          preload="metadata"
+          preload="auto"
           playsInline
           onClick={togglePlay}
+          onPointerDown={startLongPress}
+          onPointerMove={moveLongPress}
+          onPointerUp={endLongPress}
+          onPointerCancel={endLongPress}
+          onContextMenu={(event) => {
+            if (longPressActiveRef.current) event.preventDefault();
+          }}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+          onSeeked={(event) => {
+            const video = event.currentTarget;
+            setCurrentTime(video.currentTime);
+            scrubSeekInFlightRef.current = false;
+            if (!scrubbingRef.current) return;
+            const requestPresentedFrame = (video as unknown as {
+              requestVideoFrameCallback?: (callback: () => void) => number;
+            }).requestVideoFrameCallback;
+            if (typeof requestPresentedFrame === 'function') {
+              requestPresentedFrame.call(video, () => {
+                if (scrubbingRef.current) scheduleScrubSeek();
+              });
+            } else {
+              // 下一次 rAF 先让刚解码的帧完成绘制，随后 scheduleScrubSeek
+              // 再排入下一帧，避免在同一轮 paint 前立刻把它取消掉。
+              requestAnimationFrame(() => {
+                if (scrubbingRef.current) scheduleScrubSeek();
+              });
+            }
+          }}
           onLoadedMetadata={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
           onDurationChange={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
           onError={onLoadError}
         >
           {t('rightSidebar.videoUnsupported')}
         </video>
+        {longPressActive && (
+          <div className="pointer-events-none absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-full bg-surface-elevated px-3 py-1 text-xs font-semibold tabular-nums text-foreground shadow-md">
+            {t('rightSidebar.videoLongPressSpeed')}
+          </div>
+        )}
         {dragging && scrubTime !== null && (
           <div
             className="pointer-events-none absolute bottom-1 z-10 -translate-x-1/2 rounded-md bg-surface-elevated px-2 py-1 text-[11px] font-medium text-foreground shadow-md"
@@ -206,6 +397,26 @@ export function VideoPreviewPlayer({ url, onLoadError }: VideoPreviewPlayerProps
           <div className="shrink-0 text-[11px] tabular-nums text-muted-foreground" data-testid="file-preview-video-time">
             {formatVideoTime(displayTime)} / {formatVideoTime(duration)}
           </div>
+          <button
+            type="button"
+            onClick={rotateVideo}
+            aria-label={t('rightSidebar.videoRotate')}
+            title={t('rightSidebar.videoRotate')}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-foreground transition hover:bg-surface-elevated active:scale-95"
+            data-testid="file-preview-video-rotate"
+          >
+            <RiRotateCw size={14} />
+          </button>
+          <button
+            type="button"
+            onClick={() => void toggleFullscreen()}
+            aria-label={fullscreen ? t('rightSidebar.videoFullscreenExit') : t('rightSidebar.videoFullscreenEnter')}
+            title={fullscreen ? t('rightSidebar.videoFullscreenExit') : t('rightSidebar.videoFullscreenEnter')}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-foreground transition hover:bg-surface-elevated active:scale-95"
+            data-testid="file-preview-video-fullscreen"
+          >
+            {fullscreen ? <RiMinimize size={14} /> : <RiMaximize size={14} />}
+          </button>
         </div>
       </div>
     </div>

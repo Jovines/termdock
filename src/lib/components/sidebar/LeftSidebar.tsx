@@ -17,6 +17,7 @@ import {
   MoreHorizontal as RiMoreHorizontal,
   RefreshCw as RiRefreshLine,
   ChevronDown as RiChevronDownLine,
+  Workflow as RiWorkflowLine,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
@@ -29,10 +30,17 @@ import { useI18n } from '../../i18n';
 import { useSidebarStore } from '../../stores/useSidebarStore';
 import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
-import type { TermdockUpdateState } from '../../terminal/api';
+import {
+  listAgentResumeHistory,
+  prepareAgentResumeHistory,
+  removeAgentResumeHistory,
+  type AgentResumeHistoryEntry,
+  type TermdockUpdateState,
+} from '../../terminal/api';
 import { NewSessionComposer } from './NewSessionComposer';
 import { useNewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
 import { Switch } from '../ui/Switch';
+import { AgentOperationsPanel } from './AgentOperationsPanel';
 
 
 interface LeftSidebarProps {
@@ -165,6 +173,11 @@ export function LeftSidebar(
   const [draggedSplitMember, setDraggedSplitMember] = useState<{ workspaceId: string; sessionId: string } | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
+  const [agentOperationsOpen, setAgentOperationsOpen] = useState(false);
+  const [agentResumeHistory, setAgentResumeHistory] = useState<AgentResumeHistoryEntry[]>([]);
+  const [agentResumeHistoryLoading, setAgentResumeHistoryLoading] = useState(false);
+  const [agentResumeHistoryPendingId, setAgentResumeHistoryPendingId] = useState<string | null>(null);
+  const [agentResumeHistoryError, setAgentResumeHistoryError] = useState<string | null>(null);
   const [newSessionOptions, setNewSessionOptions] = useState<{
     mode: 'shell' | 'tmux';
     cwd?: string;
@@ -280,6 +293,18 @@ export function LeftSidebar(
   }, [newSessionAgent]);
 
   useEffect(() => {
+    if (!newSessionComposerOpen) return;
+    let cancelled = false;
+    setAgentResumeHistoryLoading(true);
+    setAgentResumeHistoryError(null);
+    void listAgentResumeHistory()
+      .then((entries) => { if (!cancelled) setAgentResumeHistory(entries); })
+      .catch(() => { if (!cancelled) setAgentResumeHistoryError(t('sidebar.resumeHistoryLoadFailed')); })
+      .finally(() => { if (!cancelled) setAgentResumeHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [newSessionComposerOpen, t]);
+
+  useEffect(() => {
     if (!headerMenuOpen) return;
     const closeMenu = (event: MouseEvent | KeyboardEvent) => {
       if (event instanceof KeyboardEvent && event.key !== 'Escape') return;
@@ -317,6 +342,36 @@ export function LeftSidebar(
     });
     setNewSessionComposerOpen(false);
     closeIfOverlay();
+  };
+
+  const handleResumeHistory = async (entry: AgentResumeHistoryEntry) => {
+    setAgentResumeHistoryPendingId(entry.id);
+    setAgentResumeHistoryError(null);
+    try {
+      const prepared = await prepareAgentResumeHistory(entry.id);
+      onNewSession({ mode: 'shell', cwd: prepared.cwd, command: prepared.command });
+      setNewSessionComposerOpen(false);
+      closeIfOverlay();
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code ?? '')
+        : '';
+      setAgentResumeHistoryError(code === 'AGENT_SESSION_ACTIVE_ELSEWHERE'
+        ? t('tab.resumeAgentConflict')
+        : t('sidebar.resumeHistoryFailed'));
+    } finally {
+      setAgentResumeHistoryPendingId(null);
+    }
+  };
+
+  const handleRemoveResumeHistory = async (entryId: string) => {
+    setAgentResumeHistory((current) => current.filter((entry) => entry.id !== entryId));
+    try {
+      await removeAgentResumeHistory(entryId);
+    } catch {
+      setAgentResumeHistoryError(t('sidebar.resumeHistoryRemoveFailed'));
+      void listAgentResumeHistory().then(setAgentResumeHistory).catch(() => undefined);
+    }
   };
 
   const toggleNewSessionComposer = () => {
@@ -995,6 +1050,10 @@ export function LeftSidebar(
                       <span>{t('sidebar.subscriptionQuota')}</span>
                     </button>
                   )}
+                  <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); setAgentOperationsOpen(true); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
+                    <RiWorkflowLine size={14} className="text-muted-foreground" />
+                    <span>Agent 工作台</span>
+                  </button>
                   <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); onOpenSettings(); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
                     <RiSettings4Line size={14} className="text-muted-foreground" />
                     <span>{t('sidebar.settings')}</span>
@@ -1174,16 +1233,30 @@ export function LeftSidebar(
           agents={newSessionAgents}
           selectedAgent={newSessionAgent}
           detecting={detectingNewSessionAgents}
+          resumeHistory={agentResumeHistory}
+          resumeHistoryLoading={agentResumeHistoryLoading}
+          resumeHistoryPendingId={agentResumeHistoryPendingId}
+          resumeHistoryError={agentResumeHistoryError}
           onRefreshAgents={() => { void refreshNewSessionAgents().catch(() => undefined); }}
           onSelectAgent={(agent) => { void selectNewSessionAgent(agent).catch(() => undefined); }}
           onLaunchAgent={handleQuickLaunchAgent}
+          onResumeHistory={(entry) => { void handleResumeHistory(entry); }}
+          onRemoveResumeHistory={(entryId) => { void handleRemoveResumeHistory(entryId); }}
           onClose={() => setNewSessionComposerOpen(false)}
           onOptionsChange={setNewSessionOptions}
         />
       )}
 
+      {agentOperationsOpen && (
+        <AgentOperationsPanel
+          activeSessionId={activeSessionId}
+          onClose={() => setAgentOperationsOpen(false)}
+          onNewSession={(options) => onNewSession(options)}
+        />
+      )}
+
       {/* Footer — one primary action, with optional launch details behind the chevron. */}
-      <div className="shrink-0 border-t border-border/15 p-2">
+      <div className="relative z-10 shrink-0 border-t border-border/15 bg-[var(--chrome-bg)] p-2">
         <div className="flex overflow-hidden rounded-lg bg-primary text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25">
           <button
             type="button"

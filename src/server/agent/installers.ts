@@ -404,7 +404,7 @@ function grokHooksJson(): string {
  *  from that directory — so the plugin bridges its events onto the same
  *  emitter. Inert outside termdock (both the JS guard and the emitter check
  *  TERMDOCK). */
-function opencodePluginJs(): string {
+export function opencodePluginJs(): string {
   const prefix = JSON.stringify(
     `"${process.execPath}" "${resolveHookScript().script}" agent-hook opencode `,
   );
@@ -414,26 +414,64 @@ function opencodePluginJs(): string {
 export const TermdockPresence = async ({ $ }) => {
   if (!process.env["TERMDOCK"]) return {}
   const cmd = ${prefix}
-  const emit = (event) => $\`sh -c \${cmd + event}\`.quiet().nothrow()
-
-  // Plugin load = the agent is running in this pane.
-  await emit("session-start")
+  const announced = new Set()
+  const childSessions = new Set()
+  const emit = (event, sessionID) => {
+    const payload = JSON.stringify(sessionID ? { session_id: sessionID } : {})
+    return $\`printf "%s" \${payload} | sh -c \${cmd + event}\`.quiet().nothrow()
+  }
+  const ensureSession = async (sessionID) => {
+    if (!sessionID || childSessions.has(sessionID) || announced.has(sessionID)) return false
+    announced.add(sessionID)
+    await emit("session-start", sessionID)
+    return true
+  }
+  const observeSessionInfo = async (info) => {
+    const sessionID = info?.id
+    if (!sessionID) return
+    if (info.parentID) {
+      childSessions.add(sessionID)
+      announced.delete(sessionID)
+      return
+    }
+    await ensureSession(sessionID)
+  }
 
   return {
     dispose: async () => {
-      await emit("session-end")
+      await Promise.all([...announced].map((sessionID) => emit("session-end", sessionID)))
     },
-    "tool.execute.before": async () => {
-      await emit("prompt-submit")
+    "chat.message": async ({ sessionID }) => {
+      await ensureSession(sessionID)
+      if (!childSessions.has(sessionID)) await emit("prompt-submit", sessionID)
     },
-    "permission.ask": async () => {
-      await emit("permission-request")
+    "tool.execute.before": async ({ sessionID }) => {
+      await ensureSession(sessionID)
+      if (!childSessions.has(sessionID)) await emit("prompt-submit", sessionID)
+    },
+    "permission.ask": async ({ sessionID }) => {
+      await ensureSession(sessionID)
+      if (!childSessions.has(sessionID)) await emit("permission-request", sessionID)
     },
     event: async ({ event }) => {
+      if (event.type === "session.created" || event.type === "session.updated") {
+        await observeSessionInfo(event.properties?.info)
+        return
+      }
+      if (event.type === "session.deleted") {
+        const deletedSessionID = event.properties?.info?.id
+        if (announced.has(deletedSessionID)) await emit("session-end", deletedSessionID)
+        announced.delete(deletedSessionID)
+        childSessions.delete(deletedSessionID)
+        return
+      }
+      const sessionID = event.properties?.sessionID
+      await ensureSession(sessionID)
+      if (!sessionID || childSessions.has(sessionID)) return
       if (event.type === "session.idle") {
-        await emit("stop")
+        await emit("stop", sessionID)
       } else if (event.type === "permission.replied") {
-        await emit("prompt-submit")
+        await emit("prompt-submit", sessionID)
       }
     },
   }

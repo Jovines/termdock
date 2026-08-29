@@ -369,6 +369,7 @@ interface TerminalViewportProps {
   onInputFocusChange?: (isFocused: boolean) => void;
   onMobileLongPressCopyResult?: (ok: boolean) => void;
   onMobilePasteResult?: (ok: boolean) => void;
+  onReadyChange?: (ready: boolean) => void;
   terminalSettings: TerminalSettings;
   theme: TerminalTheme;
   className?: string;
@@ -795,6 +796,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       onInputFocusChange,
       onMobileLongPressCopyResult,
       onMobilePasteResult,
+      onReadyChange,
       terminalSettings,
       theme,
       className,
@@ -813,6 +815,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const resizeHandlerRef = React.useRef<(cols: number, rows: number) => void>(onResize);
     const inputFocusHandlerRef = React.useRef<typeof onInputFocusChange>(onInputFocusChange);
     const flowControlHandlerRef = React.useRef<typeof onFlowControl>(onFlowControl);
+    const onReadyChangeRef = React.useRef(onReadyChange);
+    onReadyChangeRef.current = onReadyChange;
     const rendererModeRef = React.useRef(terminalSettings.rendererMode);
     const pendingWriteRef = React.useRef('');
     const pendingBytesRef = React.useRef(0);
@@ -883,6 +887,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     // Early initialization loading indicator
     const [isInitializing, setIsInitializing] = React.useState(true);
+    const [showLoadingIndicator, setShowLoadingIndicator] = React.useState(false);
+
+    React.useEffect(() => {
+      if (!isInitializing && loadingState !== 'loading') {
+        setShowLoadingIndicator(false);
+        return;
+      }
+      const timer = window.setTimeout(() => setShowLoadingIndicator(true), 160);
+      return () => window.clearTimeout(timer);
+    }, [isInitializing, loadingState]);
 
     // Gesture feedback indicators
     const [tabIndicator, setTabIndicator] = React.useState(false);
@@ -3546,6 +3560,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       container.tabIndex = enableTouchScroll ? -1 : 0;
 
       const initialize = async () => {
+        onReadyChangeRef.current?.(false);
         setLoadingState('loading');
         setErrorMessage(null);
         setIsInitializing(true);
@@ -3981,6 +3996,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
 
           setLoadingState('ready');
+          onReadyChangeRef.current?.(true);
         } catch (error) {
           console.error('Failed to initialize terminal:', error);
           setIsInitializing(false);
@@ -3992,6 +4008,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       initialize();
 
       return () => {
+        onReadyChangeRef.current?.(false);
         disposed = true;
         void disposed;
         inputFocusHandlerRef.current?.(false);
@@ -4456,10 +4473,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           </div>
         )}
         {/* Early initialization loading - shows before xterm.js loads */}
-        {isInitializing && <TerminalInitializing />}
+        {showLoadingIndicator && isInitializing && <TerminalInitializing />}
 
         {/* Loading state */}
-        {loadingState === 'loading' && !isInitializing && <TerminalLoading />}
+        {showLoadingIndicator && loadingState === 'loading' && !isInitializing && <TerminalLoading />}
 
         {/* Error state */}
         {loadingState === 'error' && (

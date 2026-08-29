@@ -29,6 +29,8 @@ export interface AgentInfo {
   displayName: string;
   /** command names: launcher binary + npm/pip package-dir aliases, lowercase */
   aliases: string[];
+  /** Optional collaboration routing hints declared by a third-party plugin. */
+  capabilities?: string[];
   /** brand accent for the tab dot / avatar background */
   accentColor: string;
   /** icon asset name under /icons/agents, or abs path for plugin SVG (null → generic bot glyph) */
@@ -327,6 +329,7 @@ export function registerPluginAgents(plugins: LoadedPlugin[]): { registered: num
       slug: manifest.slug,
       displayName: manifest.displayName,
       aliases: manifest.aliases,
+      capabilities: manifest.capabilities,
       accentColor: manifest.accentColor,
       // Plugins use their slug as the frontend icon key only when icon.svg exists.
       // Otherwise AgentBrandAvatar must receive null so it can render its Bot fallback.

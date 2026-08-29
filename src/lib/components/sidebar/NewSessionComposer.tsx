@@ -1,6 +1,6 @@
-import { Check, Folder, LoaderCircle, Pin, RefreshCw, Terminal, X } from 'lucide-react';
+import { Check, Folder, History, LoaderCircle, Pin, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { getDirectorySuggestions, type AgentLauncherInfo } from '../../terminal/api';
+import { getDirectorySuggestions, type AgentLauncherInfo, type AgentResumeHistoryEntry } from '../../terminal/api';
 import { getCwdLeafName } from '../../terminal/display';
 import { useI18n } from '../../i18n';
 import type { NewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
@@ -13,9 +13,15 @@ export function NewSessionComposer({
   agents,
   selectedAgent,
   detecting,
+  resumeHistory,
+  resumeHistoryLoading,
+  resumeHistoryPendingId,
+  resumeHistoryError,
   onRefreshAgents,
   onSelectAgent,
   onLaunchAgent,
+  onResumeHistory,
+  onRemoveResumeHistory,
   onClose,
   onOptionsChange,
 }: {
@@ -25,13 +31,19 @@ export function NewSessionComposer({
   agents: AgentLauncherInfo[];
   selectedAgent: NewSessionAgentPreference;
   detecting: boolean;
+  resumeHistory: AgentResumeHistoryEntry[];
+  resumeHistoryLoading: boolean;
+  resumeHistoryPendingId: string | null;
+  resumeHistoryError: string | null;
   onRefreshAgents: () => void;
   onSelectAgent: (agent: NewSessionAgentPreference) => void;
   onLaunchAgent: (agent: NewSessionAgentPreference) => void;
+  onResumeHistory: (entry: AgentResumeHistoryEntry) => void;
+  onRemoveResumeHistory: (entryId: string) => void;
   onClose: () => void;
   onOptionsChange: (options: { mode: 'shell' | 'tmux'; cwd?: string; command?: string }) => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [directorySuggestions, setDirectorySuggestions] = useState<string[]>([]);
   const [directorySuggestionsOpen, setDirectorySuggestionsOpen] = useState(false);
   const [highlightedDirectoryIndex, setHighlightedDirectoryIndex] = useState(0);
@@ -61,8 +73,15 @@ export function NewSessionComposer({
     setDirectorySuggestionsOpen(false);
   };
 
+  const formatClosedAt = (timestamp: number) => new Intl.DateTimeFormat(locale === 'zh' ? 'zh-CN' : 'en', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp));
+
   return (
-    <section className="shrink-0 border-t border-border/15 bg-surface-2/35 px-3 py-3 animate-slide-down" aria-label={t('sidebar.newSession')}>
+    <section className="relative z-20 max-h-[min(72svh,42rem)] shrink-0 overflow-y-auto overscroll-contain border-t border-border/25 bg-surface-elevated px-3 py-3 shadow-[0_-18px_42px_var(--app-shadow-soft)] animate-slide-down" aria-label={t('sidebar.newSession')}>
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
@@ -107,7 +126,7 @@ export function NewSessionComposer({
           return (
             <div
               key={agent?.slug ?? 'terminal'}
-              className={`flex min-w-0 overflow-hidden rounded-lg transition ${selected ? 'bg-primary/15 text-primary ring-1 ring-primary/30' : 'bg-surface text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+              className={`flex min-w-0 overflow-hidden rounded-lg border transition ${selected ? 'border-primary bg-primary/15 text-primary' : 'border-border bg-surface text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
             >
               <button
                 type="button"
@@ -125,8 +144,9 @@ export function NewSessionComposer({
                 title={selected ? t('sidebar.currentNewSessionDefault', { name }) : t('sidebar.setNewSessionDefault', { name })}
                 aria-label={selected ? t('sidebar.currentNewSessionDefault', { name }) : t('sidebar.setNewSessionDefault', { name })}
                 aria-pressed={selected}
-                className={`inline-flex w-8 shrink-0 items-center justify-center border-l border-border/10 transition ${selected ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+                className={`relative inline-flex w-8 shrink-0 items-center justify-center transition ${selected ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
               >
+                <span aria-hidden="true" className="pointer-events-none absolute inset-y-2 left-0 w-px bg-border opacity-30" />
                 {selected ? <Check size={11} /> : <Pin size={10} />}
               </button>
             </div>
@@ -197,6 +217,65 @@ export function NewSessionComposer({
               {getCwdLeafName(directory) || directory}
             </button>
           ))}
+        </div>
+      )}
+
+      {(resumeHistory.length > 0 || resumeHistoryError) && (
+        <div className="mt-3 border-t border-border/15 pt-3">
+          <div className="flex items-center justify-between gap-2 px-0.5">
+            <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+              <History size={11} />
+              {t('sidebar.resumeHistory')}
+            </span>
+            {resumeHistory.length > 0 && (
+              <span className="inline-flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                {resumeHistoryLoading && <LoaderCircle size={10} className="animate-spin" />}
+                {t('sidebar.resumeHistoryCount', { n: resumeHistory.length })}
+              </span>
+            )}
+          </div>
+          {resumeHistory.length > 0 && (
+            <div className="mt-1.5 divide-y divide-border/10 overflow-hidden rounded-lg border border-border/15 bg-surface">
+              {resumeHistory.slice(0, 6).map((entry) => {
+                const pending = resumeHistoryPendingId === entry.id;
+                return (
+                  <div key={entry.id} className="group flex min-w-0 items-stretch transition hover:bg-surface-2">
+                    <button
+                      type="button"
+                      disabled={resumeHistoryPendingId !== null}
+                      onClick={() => onResumeHistory(entry)}
+                      className="flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-2 text-left disabled:cursor-wait disabled:opacity-60"
+                      aria-label={t('sidebar.resumeHistoryAction', { title: entry.title })}
+                    >
+                      <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                        {pending ? <LoaderCircle size={13} className="animate-spin" /> : <AgentBrandAvatar agent={entry.agent} size={14} />}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[11px] font-semibold text-foreground">{entry.title}</span>
+                        <span className="block truncate text-[9.5px] text-muted-foreground">
+                          {entry.agent.displayName} · {formatClosedAt(entry.closedAt)}
+                        </span>
+                      </span>
+                      <RotateCcw size={12} className="shrink-0 text-muted-foreground transition group-hover:text-primary" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={resumeHistoryPendingId !== null}
+                      onClick={() => onRemoveResumeHistory(entry.id)}
+                      className="relative inline-flex w-9 shrink-0 items-center justify-center text-muted-foreground transition hover:text-destructive disabled:opacity-40"
+                      aria-label={t('sidebar.resumeHistoryRemove', { title: entry.title })}
+                    >
+                      <span aria-hidden="true" className="pointer-events-none absolute inset-y-2 left-0 w-px bg-border opacity-30" />
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {resumeHistoryError && (
+            <div role="alert" className="mt-1.5 px-1 text-[10px] text-destructive">{resumeHistoryError}</div>
+          )}
         </div>
       )}
     </section>

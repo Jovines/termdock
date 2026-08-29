@@ -12,12 +12,17 @@ import type { TermdockColorTheme } from '../terminal/theme';
 import {
   BACKGROUND_RESUME_INITIAL_DELAY_MS,
   buildResumeDelayBySessionId,
+  resolvePrioritySessionId,
+  selectConnectionForegroundSessionId,
   shouldScheduleForegroundResume,
+  shouldRunResumeRequest,
+  shouldStartInitialConnection,
 } from '../terminal/resumeScheduling';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { deriveGroupedOrder, getCwdLeafName, getSessionDisplayLines } from '../terminal/display';
 import { createDebugLogger } from '../utils/debug';
+import { markStartupMilestone } from '../utils/startupPerformance';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
 import { Check, Columns2, Folder, Plus, X } from 'lucide-react';
 import { useI18n } from '../i18n';
@@ -71,6 +76,8 @@ interface CloseSessionEventDetail {
 const SWIPE_ANIMATION_SPEED_MS = 320;
 const SWIPER_TRANSLATE_EPSILON_PX = 1;
 const TOUCH_SWIPE_RELEASE_GUARD_MS = SWIPE_ANIMATION_SPEED_MS + 120;
+const BACKGROUND_VIEWPORT_INITIAL_DELAY_MS = 48;
+const BACKGROUND_VIEWPORT_STAGGER_MS = 72;
 
 type SyncSwiperOptions = {
   immediate?: boolean;
@@ -336,6 +343,8 @@ interface MultiTerminalViewProps {
   terminalFocusAvailable?: boolean;
   defaultSessionMode?: TerminalMode;
   defaultTmuxSessionName?: string;
+  connectionPrioritySessionId?: string | null;
+  connectionPriorityReady?: boolean;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
   onSessionDataUpdate?: (data: {
     sessions: TerminalSessionInfo[];
@@ -378,6 +387,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   terminalFocusAvailable = true,
   defaultSessionMode = 'shell',
   defaultTmuxSessionName = '',
+  connectionPrioritySessionId = null,
+  connectionPriorityReady = true,
   onStatusChange,
   onSessionDataUpdate,
 }) => {
@@ -388,6 +399,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
   const [resumeRequest, setResumeRequest] = useState<ResumeRequest>({ token: 0, reason: 'visibility' });
+  const [readySessionIds, setReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [foregroundResumeCompletedToken, setForegroundResumeCompletedToken] = useState(0);
+  const [viewportReadySessionIds, setViewportReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [deferredViewportSessionIds, setDeferredViewportSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const restoredRef = useRef(false);
   const swiperRef = useRef<SwiperInstance | null>(null);
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
@@ -406,6 +421,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const swiperDrivenActiveSessionIdRef = useRef<string | null>(null);
   const isMobileRef = useRef(isMobileLayout);
   const activeSessionIdRef = useRef<string | null>(null);
+  const resumeRequestTokenRef = useRef(0);
   const sessionsRef = useRef<TerminalSession[]>([]);
   const activeSessionIndexRef = useRef(0);
   const persistedActiveIdRef = useRef<string | null>(null);
@@ -485,12 +501,75 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     );
     return new Set(activeSlide?.sessions.map((session) => session.id) ?? []);
   }, [activeSessionId, workspaceSlides]);
+  const priorityForegroundSessionId = useMemo(() => resolvePrioritySessionId(
+    sessions.map((session) => ({ id: session.id, backendSessionId: session.sessionId })),
+    connectionPrioritySessionId,
+  ), [connectionPrioritySessionId, sessions]);
+  const persistedForegroundSessionId = useMemo(
+    () => getValidPersistedActiveSessionId(persistedSessions, persistedActiveId),
+    [persistedActiveId, persistedSessions],
+  );
+  const foregroundSessionId = selectConnectionForegroundSessionId({
+    prioritySessionId: priorityForegroundSessionId,
+    activeSessionId,
+    persistedActiveSessionId: persistedForegroundSessionId,
+    firstSessionId: sessions[0]?.id ?? null,
+  });
   const backgroundResumeDelayBySessionId = useMemo(() => {
     return buildResumeDelayBySessionId(
       workspaceSlides.flatMap((slide) => slide.sessions.map((session) => session.id)),
       visibleSessionIds,
     );
   }, [visibleSessionIds, workspaceSlides]);
+  const foregroundConnectionReady = foregroundSessionId !== null && readySessionIds.has(foregroundSessionId);
+  const handleStreamReadyChange = useCallback((sessionId: string, ready: boolean) => {
+    setReadySessionIds((current) => {
+      const alreadyReady = current.has(sessionId);
+      if (alreadyReady === ready) return current;
+      const next = new Set(current);
+      if (ready) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+  const handleStreamConnected = useCallback((sessionId: string) => {
+    const expectedForeground = priorityForegroundSessionId ?? activeSessionIdRef.current;
+    if (sessionId !== expectedForeground) return;
+    markStartupMilestone('foreground-stream-connected');
+    setForegroundResumeCompletedToken(resumeRequestTokenRef.current);
+  }, [priorityForegroundSessionId]);
+  const handleViewportReadyChange = useCallback((sessionId: string, ready: boolean) => {
+    setViewportReadySessionIds((current) => {
+      if (current.has(sessionId) === ready) return current;
+      const next = new Set(current);
+      if (ready) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+  const foregroundViewportReady = foregroundSessionId !== null
+    && viewportReadySessionIds.has(foregroundSessionId);
+
+  useEffect(() => {
+    if (foregroundViewportReady) markStartupMilestone('foreground-viewport-ready');
+  }, [foregroundViewportReady]);
+
+  useEffect(() => {
+    if (!foregroundViewportReady) return;
+    const backgroundSessionIds = workspaceSlides
+      .flatMap((slide) => slide.sessions.map((session) => session.id))
+      .filter((sessionId) => sessionId !== foregroundSessionId);
+    const timers = backgroundSessionIds.map((sessionId, index) => window.setTimeout(() => {
+      setDeferredViewportSessionIds((current) => {
+        if (current.has(sessionId)) return current;
+        const next = new Set(current);
+        next.add(sessionId);
+        if (index === 0) markStartupMilestone('background-viewports-started');
+        return next;
+      });
+    }, BACKGROUND_VIEWPORT_INITIAL_DELAY_MS + index * BACKGROUND_VIEWPORT_STAGGER_MS));
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [foregroundSessionId, foregroundViewportReady, workspaceSlides]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -516,6 +595,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   useEffect(() => () => splitDragCleanupRef.current?.(), []);
 
   activeSessionIdRef.current = activeSessionId;
+  resumeRequestTokenRef.current = resumeRequest.token;
   sessionsRef.current = sessions;
   persistedActiveIdRef.current = persistedActiveId;
   isLoadingRef.current = isLoading;
@@ -697,7 +777,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }
 
     if (!activeSessionId) {
-      setActiveSessionId(sessions[0].id);
+      if (!connectionPriorityReady) return;
+      setActiveSessionId(selectConnectionForegroundSessionId({
+        prioritySessionId: priorityForegroundSessionId,
+        activeSessionId: null,
+        persistedActiveSessionId: persistedForegroundSessionId,
+        firstSessionId: sessions[0]?.id ?? null,
+      }));
       return;
     }
 
@@ -705,7 +791,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (!exists) {
       setActiveSessionId(sessions[0].id);
     }
-  }, [sessions, activeSessionId]);
+  }, [sessions, activeSessionId, connectionPriorityReady, priorityForegroundSessionId, persistedForegroundSessionId]);
 
   const handleKeyboardVisibilityChange = useCallback((sessionId: string, isOpen: boolean) => {
     if (isOpen && Date.now() < suppressMobileKeyboardOpenUntilRef.current) {
@@ -720,6 +806,19 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, []);
 
   const handleSwiperChange = useCallback((instance: SwiperInstance) => {
+    // Swiper may emit slideChange while it is mounting or recalculating widths.
+    // That is not user intent: accepting its temporary index (usually zero)
+    // would overwrite the restored selection after the page already looked
+    // correct. Programmatic tab changes use slideTo(..., false), while a real
+    // swipe holds the touch guard, so only the latter may drive persistence.
+    if (!isTouchSwipeRef.current && instance.activeIndex !== activeSessionIndexRef.current) {
+      logSwiperState('[swiper:slide-change-ignored-layout]', {
+        instanceActiveIndex: instance.activeIndex,
+        expectedActiveIndex: activeSessionIndexRef.current,
+      });
+      requestAnimationFrame(() => syncSwiperToActiveIndex('ignored-layout-slide-change', { immediate: true }));
+      return;
+    }
     // instance.activeIndex 与 arranged（slide 渲染顺序）对应。
     const nextSlide = workspaceSlidesRef.current[instance.activeIndex];
     const nextSessionId = nextSlide?.sessions.some((session) => session.id === activeSessionId)
@@ -754,7 +853,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       return;
     }
     setFocusTransferRequest(null);
-  }, [sessions, activeSessionId, logSwiperState]);
+  }, [sessions, activeSessionId, logSwiperState, syncSwiperToActiveIndex]);
 
   useEffect(() => {
     if (swiperDrivenActiveSessionIdRef.current === activeSessionId) {
@@ -947,7 +1046,20 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (restoredRef.current) return;  // 防止重复执行
     restoredRef.current = true;
 
-    const nextActiveSessionId = getValidPersistedActiveSessionId(persistedSessions, persistedActiveId);
+    const requestedActiveSessionId = resolvePrioritySessionId(
+      persistedSessions.map((session) => ({
+        id: session.sessionId,
+        backendSessionId: session.backendSessionId ?? null,
+      })),
+      connectionPrioritySessionId,
+    );
+    const persistedSelection = getValidPersistedActiveSessionId(persistedSessions, persistedActiveId);
+    const nextActiveSessionId = selectConnectionForegroundSessionId({
+      prioritySessionId: connectionPriorityReady ? requestedActiveSessionId : null,
+      activeSessionId: null,
+      persistedActiveSessionId: persistedSelection,
+      firstSessionId: persistedSessions[0]?.sessionId ?? null,
+    });
 
     // 方案 A：一次性把所有 tab 渲染出来。
     // tab UI 不依赖后端 PTY attach 完成，每个 TerminalView 挂载后会各自跑
@@ -993,10 +1105,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       });
 
       setSessions(runtimeSessions);
-      setActiveSessionId(nextActiveSessionId || runtimeSessions[0]?.id || null);
+      const restoredActiveSessionId = nextActiveSessionId || runtimeSessions[0]?.id || null;
+      setActiveSessionId(restoredActiveSessionId);
       logSwiperState('[swiper:restore-complete]', {
         restoredSessionIds: runtimeSessions.map((session) => session.id),
-        nextActiveSessionId: nextActiveSessionId || runtimeSessions[0]?.id || null,
+        nextActiveSessionId: restoredActiveSessionId,
       });
     }
 
@@ -1018,7 +1131,29 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     debugSession,
     logSwiperState,
     syncSwiperToActiveIndex,
+    connectionPriorityReady,
+    connectionPrioritySessionId,
   ]);
+
+  // Notification priority may arrive asynchronously from the service worker's
+  // Cache Storage fallback. Tabs can already be painted, but connection startup
+  // stays gated until this effect selects the requested session.
+  useEffect(() => {
+    if (!connectionPriorityReady || isRestoring || sessions.length === 0) return;
+    const requestedSessionId = resolvePrioritySessionId(
+      sessions.map((session) => ({ id: session.id, backendSessionId: session.sessionId })),
+      connectionPrioritySessionId,
+    );
+    const nextSessionId = selectConnectionForegroundSessionId({
+      prioritySessionId: requestedSessionId,
+      activeSessionId: activeSessionIdRef.current,
+      persistedActiveSessionId: persistedForegroundSessionId,
+      firstSessionId: sessions[0]?.id ?? null,
+    });
+    if (nextSessionId && nextSessionId !== activeSessionIdRef.current) {
+      setActiveSessionId(nextSessionId);
+    }
+  }, [connectionPriorityReady, connectionPrioritySessionId, isRestoring, persistedForegroundSessionId, sessions]);
 
   // 增量同步：轮询检测到 persistedSessions 变化时，处理新增/移除/重命名的 session
   const prevPersistedRef = useRef<PersistedSession[]>([]);
@@ -1662,6 +1797,23 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     } = {},
   ) => {
     const isActive = session.id === activeSessionId;
+    const shouldMountViewport = connectionPriorityReady && (
+      session.id === foregroundSessionId || deferredViewportSessionIds.has(session.id)
+    );
+    const initialConnectEnabled = shouldStartInitialConnection({
+      sessionId: session.id,
+      foregroundSessionId,
+      foregroundReady: foregroundConnectionReady,
+    }) && connectionPriorityReady;
+    const resumeRequestEnabled = shouldRunResumeRequest({
+      sessionId: session.id,
+      foregroundSessionId,
+      requestToken: resumeRequest.token,
+      foregroundCompletedToken: foregroundResumeCompletedToken,
+    }) && connectionPriorityReady;
+    const initialConnectDelayMs = session.id === foregroundSessionId
+      ? 0
+      : backgroundResumeDelayBySessionId.get(session.id) ?? BACKGROUND_RESUME_INITIAL_DELAY_MS;
     return (
       <div
         key={session.id}
@@ -1674,8 +1826,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           if (!isActive) activateSplitPane(session.id);
         }}
       >
-        <div className="min-h-0 flex-1">
-          <TerminalView
+        <div className="min-h-0 flex-1 app-chrome-bg">
+          {shouldMountViewport && <TerminalView
             sessionId={session.id}
             mode={session.mode}
             tmuxSessionName={session.tmuxSessionName}
@@ -1683,6 +1835,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             colorTheme={colorTheme}
             toolbarPresets={toolbarPresets}
             isActive={isActive}
+            initialConnectEnabled={initialConnectEnabled}
+            resumeRequestEnabled={resumeRequestEnabled}
             suppressKeyboard={options.suppressKeyboard}
             keyboardPortalTarget={options.keyboardPortalTarget}
             sharedMobileKeyboardLayout={options.sharedMobileKeyboardLayout}
@@ -1690,14 +1844,19 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
             resumeRequestToken={resumeRequest.token}
             resumeRequestReason={resumeRequest.reason}
-            resumeRequestDelayMs={options.hidden
-              ? BACKGROUND_RESUME_INITIAL_DELAY_MS
-              : backgroundResumeDelayBySessionId.get(session.id) ?? BACKGROUND_RESUME_INITIAL_DELAY_MS}
-            initialConnectDelayMs={backgroundResumeDelayBySessionId.get(session.id) ?? BACKGROUND_RESUME_INITIAL_DELAY_MS}
+            resumeRequestDelayMs={session.id === foregroundSessionId
+              ? 0
+              : options.hidden
+                ? BACKGROUND_RESUME_INITIAL_DELAY_MS
+                : backgroundResumeDelayBySessionId.get(session.id) ?? BACKGROUND_RESUME_INITIAL_DELAY_MS}
+            initialConnectDelayMs={initialConnectDelayMs}
+            onStreamReadyChange={handleStreamReadyChange}
+            onStreamConnected={handleStreamConnected}
+            onViewportReadyChange={handleViewportReadyChange}
             onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
             showDebug={showDebug}
             onStatusChange={isActive ? onStatusChange : undefined}
-          />
+          />}
         </div>
       </div>
     );

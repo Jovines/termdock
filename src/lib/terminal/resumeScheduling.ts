@@ -3,6 +3,50 @@ export const BACKGROUND_RESUME_STAGGER_MS = 120;
 export const FOREGROUND_RESUME_COALESCE_MS = 250;
 export const VISIBLE_RECONNECT_WATCHDOG_MS = 60_000;
 
+export function resolvePrioritySessionId(
+  sessions: readonly { id: string; backendSessionId: string | null }[],
+  requestedSessionId: string | null,
+): string | null {
+  if (!requestedSessionId) return null;
+  return sessions.find((session) => (
+    session.id === requestedSessionId || session.backendSessionId === requestedSessionId
+  ))?.id ?? null;
+}
+
+export function selectConnectionForegroundSessionId(options: {
+  prioritySessionId: string | null;
+  activeSessionId: string | null;
+  persistedActiveSessionId: string | null;
+  firstSessionId: string | null;
+}): string | null {
+  return options.prioritySessionId
+    ?? options.activeSessionId
+    ?? options.persistedActiveSessionId
+    ?? options.firstSessionId;
+}
+
+export function shouldStartInitialConnection(options: {
+  sessionId: string;
+  foregroundSessionId: string | null;
+  foregroundReady: boolean;
+}): boolean {
+  return options.foregroundSessionId === null
+    || options.sessionId === options.foregroundSessionId
+    || options.foregroundReady;
+}
+
+export function shouldRunResumeRequest(options: {
+  sessionId: string;
+  foregroundSessionId: string | null;
+  requestToken: number;
+  foregroundCompletedToken: number;
+}): boolean {
+  return options.requestToken === 0
+    || options.foregroundSessionId === null
+    || options.sessionId === options.foregroundSessionId
+    || options.foregroundCompletedToken === options.requestToken;
+}
+
 export function shouldScheduleForegroundResume(
   lastScheduledAt: number | null,
   now: number,

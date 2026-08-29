@@ -74,6 +74,11 @@ interface TerminalViewProps {
   resumeRequestReason?: Extract<RefreshReason, 'visibility' | 'bfcache' | 'online'>;
   resumeRequestDelayMs?: number;
   initialConnectDelayMs?: number;
+  initialConnectEnabled?: boolean;
+  resumeRequestEnabled?: boolean;
+  onStreamReadyChange?: (sessionId: string, ready: boolean) => void;
+  onStreamConnected?: (sessionId: string) => void;
+  onViewportReadyChange?: (sessionId: string, ready: boolean) => void;
   onKeyboardVisibilityChange?: (sessionId: string, isOpen: boolean) => void;
   suppressKeyboard?: boolean;
   keyboardPortalTarget?: HTMLElement | null;
@@ -96,6 +101,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   resumeRequestReason = 'visibility',
   resumeRequestDelayMs = 0,
   initialConnectDelayMs = 0,
+  initialConnectEnabled = true,
+  resumeRequestEnabled = true,
+  onStreamReadyChange,
+  onStreamConnected,
+  onViewportReadyChange,
   onKeyboardVisibilityChange,
   suppressKeyboard = false,
   keyboardPortalTarget = null,
@@ -594,6 +604,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // 卸载时会清掉，避免旧一轮恢复请求晚到后干扰新状态。
   React.useEffect(() => {
     if (!resumeRequestToken) return;
+    if (!resumeRequestEnabled) return;
+    // A cold background session is already queued by the initial-connection
+    // scheduler. Do not start a second resume/restart path for the same tab.
+    if (!hasStartedInitialConnectRef.current) return;
     const delayMs = resumeRequestDelayRef.current;
     const resume = () => {
       terminalControllerRef.current?.requestRefresh(resumeRequestReason);
@@ -605,7 +619,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
     const timer = window.setTimeout(resume, delayMs);
     return () => window.clearTimeout(timer);
-  }, [resumeRequestToken, resumeRequestReason, probeOrRestartSession]);
+  }, [resumeRequestToken, resumeRequestReason, resumeRequestEnabled, probeOrRestartSession]);
 
   // ensureSession 自愈：HTTP 建连失败等发生在 WebSocket 之前的错误也必须持续恢复。
   // 普通网络错误始终显示 Reconnecting，并按封顶退避重跑；只有明确的鉴权失败
@@ -666,6 +680,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     lastSentViewingRef.current = null;
     lastSentFlowPausedRef.current = null;
   }, [terminalSessionId]);
+
+  React.useEffect(() => {
+    onStreamReadyChange?.(sessionId, isStreamReady);
+  }, [isStreamReady, onStreamReadyChange, sessionId]);
 
   React.useEffect(() => {
     if (!isTmuxMode) {
@@ -825,6 +843,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
             switch (event.type) {
               case 'connected': {
+                onStreamConnected?.(storeSessionId);
                 if (event.runtime || event.ptyBackend) {
                   debugSession(
                     `[Terminal] connected frontendSessionId=${storeSessionId} backendSessionId=${terminalIdRef.current} runtime=${event.runtime ?? 'unknown'} pty=${event.ptyBackend ?? 'unknown'} cwd=${event.cwd ?? 'unknown'}`
@@ -1041,6 +1060,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   agent: event.agent ?? null,
                   agentMessage: event.agentMessage ?? null,
                   agentNativeSessionId: event.agentNativeSessionId ?? null,
+                  agentResumeRecovered: event.agentResumeRecovered === true,
                   agentRich: event.agentRich === true,
                   agentActivity: event.agentActivity ?? 0,
                   agentCwd: event.agentCwd ?? null,
@@ -1179,7 +1199,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, reportFlowControl, restartEnsureSession, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
+    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, onStreamConnected, reportFlowControl, restartEnsureSession, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
   );
 
   // 后台会话允许长时间退避，覆盖锁屏和系统冻结；可见会话连续重连超过 60 秒时，
@@ -1288,7 +1308,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         terminalId = null;
       }
 
-      if (terminalId && terminal.checkHealth) {
+      // The selected terminal is latency-sensitive. Open its WebSocket
+      // optimistically instead of paying an extra HTTP RTT first; a stale
+      // backend id is still recovered by the existing WS 4001 path.
+      if (terminalId && terminal.checkHealth && !isActiveRef.current) {
         debugSession(`[ensureSession] Checking health of existing session ${terminalId}`);
         try {
           const health = await terminal.checkHealth(terminalId);
@@ -1427,6 +1450,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       void ensureSession(scheduledRunId);
     };
 
+    if (!initialConnectEnabled && !hasStartedInitialConnectRef.current) {
+      debugSession(`[useEffect] Holding background connection until the selected session is ready: ${sessionId}`);
+      return;
+    }
+
     const connectDelayMs = hasStartedInitialConnectRef.current
       ? 0
       : Math.max(0, initialConnectDelayMs);
@@ -1443,7 +1471,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       debugSession(`[useEffect] Cleanup for sessionId=${sessionId}, runId=${scheduledRunId ?? 'pending'}`);
     };
-  }, [sessionId, restartTrigger, startStream, disconnectStream, terminal, debugSession, desiredSessionMode, desiredTmuxSessionName, fallbackTmuxSessionName, initialConnectDelayMs]);
+  }, [sessionId, restartTrigger, startStream, disconnectStream, terminal, debugSession, desiredSessionMode, desiredTmuxSessionName, fallbackTmuxSessionName, initialConnectDelayMs, initialConnectEnabled]);
 
   const handleHardRestart = React.useCallback(async () => {
     if (!sessionId) return;
@@ -1835,6 +1863,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const handleTerminalControllerRef = React.useCallback((controller: TerminalController | null) => {
     terminalControllerRef.current = controller;
   }, []);
+  const handleViewportReadyChange = React.useCallback((ready: boolean) => {
+    onViewportReadyChange?.(sessionId, ready);
+  }, [onViewportReadyChange, sessionId]);
 
   const handleMobileKeyPress = React.useCallback(
     (key: 'esc' | 'enter' | 'home' | 'end' | 'ctrl-c' | 'ctrl-d' | 'ctrl-w' | 'ctrl-u') => {
@@ -2153,6 +2184,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               } : undefined}
               onInputFocusChange={handleInputFocusChange}
               onMobileLongPressCopyResult={handleMobileLongPressCopyResult}
+              onReadyChange={handleViewportReadyChange}
               terminalSettings={effectiveTerminalSettings}
               theme={xtermTheme}
               enableTouchScroll={isMobile}

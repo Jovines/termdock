@@ -16,6 +16,8 @@ export interface AgentStatusDetail {
 export interface AgentIdentity {
   slug: string;
   displayName: string;
+  /** Optional collaboration routing hints declared by an Agent plugin. */
+  capabilities?: string[];
   accentColor: string;
   icon: string | null;
   isPlugin?: boolean;
@@ -198,6 +200,7 @@ export interface TerminalStreamEvent {
   agent?: AgentIdentity | null;
   agentMessage?: string | null;
   agentNativeSessionId?: string | null;
+  agentResumeRecovered?: boolean;
   agentRich?: boolean;
   agentActivity?: number;
   agentCwd?: string | null;
@@ -351,6 +354,7 @@ export interface TerminalSessionState {
   agent: AgentIdentity | null;         // 识别到的 agent 身份（品牌）
   agentMessage: string | null;         // waiting/done 的上下文（如"需要 Bash 权限"）
   agentNativeSessionId: string | null; // agent 原生会话 id（resume 用）
+  agentResumeRecovered: boolean;       // PTY 重建后，旧 Agent 对话等待用户确认恢复
   agentRich: boolean;                  // 状态来自 hooks（rich）还是通知兜底
   agentActivity: number;               // 工具完成计数（只比较变化）
   agentCwd: string | null;             // agent 自己上报的工作目录（worktree 跟踪）

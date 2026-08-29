@@ -37,7 +37,9 @@ import { DragDropContext, Droppable, Draggable, type DragStart, type DragUpdate,
 import { useTerminalSettings } from './lib/hooks/useTerminalSettings';
 import { useViewportHeight } from './lib/hooks/useViewportHeight';
 import { useNewSessionDefaults } from './lib/hooks/useNewSessionDefaults';
+import { readCachedSessionPersistenceSnapshot } from './lib/hooks/useSessionPersistence';
 import { useSuperLongPress } from './lib/hooks/useSuperLongPress';
+import { markStartupMilestone } from './lib/utils/startupPerformance';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
 import { shouldDestroySessionDirectly } from './lib/terminal/sessionClose';
@@ -402,6 +404,7 @@ type TabTerminalSessionState = Pick<
   | 'agent'
   | 'agentMessage'
   | 'agentNativeSessionId'
+  | 'agentResumeRecovered'
   | 'terminalSessionId'
   | 'agentNeedsReview'
   | 'gitStatus'
@@ -427,6 +430,7 @@ function pickTabTerminalSessions(
       agent: state.agent,
       agentMessage: state.agentMessage,
       agentNativeSessionId: state.agentNativeSessionId,
+      agentResumeRecovered: state.agentResumeRecovered,
       terminalSessionId: state.terminalSessionId,
       agentNeedsReview: state.agentNeedsReview,
       gitStatus: state.gitStatus,
@@ -459,6 +463,7 @@ function areTabTerminalSessionsEqual(
       currentState.agent !== nextState.agent ||
       currentState.agentMessage !== nextState.agentMessage ||
       currentState.agentNativeSessionId !== nextState.agentNativeSessionId ||
+      currentState.agentResumeRecovered !== nextState.agentResumeRecovered ||
       currentState.terminalSessionId !== nextState.terminalSessionId ||
       currentState.agentNeedsReview !== nextState.agentNeedsReview ||
       currentState.gitStatus !== nextState.gitStatus ||
@@ -486,6 +491,17 @@ interface CloseSessionEventDetail {
   source?: 'sidebar' | 'tab-menu' | 'other';
   closeMode?: 'auto' | 'detach' | 'destroy';
 }
+
+type AgentResumeActionStatus = 'submitting' | 'waiting';
+type AgentResumeActionState = {
+  sessionId: string;
+  status: AgentResumeActionStatus;
+  error: string | null;
+};
+type AgentResumeNotice = {
+  tone: 'success' | 'error';
+  message: string;
+};
 
 function reorderSessionsByIds<T extends { id: string }>(items: T[], orderedIds: string[]): T[] {
   const idToItem = new Map(items.map((item) => [item.id, item]));
@@ -558,13 +574,44 @@ function App() {
   const fontSize = terminalSettings.fontSize;
   const rendererMode = terminalSettings.rendererMode;
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
-  const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
-  const [activeSessionId, setActiveSessionId] = React.useState<string | null>(null);
+  const initialSessionChrome = React.useRef(readCachedSessionPersistenceSnapshot()).current;
+  const [sessions, setSessions] = useState<TerminalSessionInfo[]>(() => initialSessionChrome.sessions.map((session) => ({
+    id: session.sessionId,
+    name: session.name,
+    customName: session.customName,
+    mode: session.mode,
+    tmuxSessionName: session.tmuxSessionName,
+  })));
+  const [activeSessionId, setActiveSessionId] = React.useState<string | null>(initialSessionChrome.activeSessionId);
+  const [agentResumeAction, setAgentResumeAction] = React.useState<AgentResumeActionState | null>(null);
+  const [agentResumeNotice, setAgentResumeNotice] = React.useState<AgentResumeNotice | null>(null);
   const [splitWorkspaces, setSplitWorkspaces] = React.useState<SplitWorkspaceSummary[]>([]);
   // Only re-render the chrome when tab metadata changes, not on every terminal output chunk.
-  const [terminalSessions, setTerminalSessions] = useState(() =>
-    pickTabTerminalSessions(useTerminalStore.getState().sessions),
-  );
+  const [terminalSessions, setTerminalSessions] = useState(() => {
+    const store = useTerminalStore.getState();
+    // Preheat the chrome-facing store from the same cache as the tab list. This
+    // keeps folder grouping and display names stable on the very first paint;
+    // MultiTerminalView will reconcile the authoritative inventory afterward.
+    initialSessionChrome.sessions.forEach((session) => {
+      if (session.backendSessionId) {
+        store.setTerminalSession(session.sessionId, {
+          sessionId: session.backendSessionId,
+          cols: 80,
+          rows: 24,
+          mode: session.mode,
+          tmuxSessionName: session.tmuxSessionName,
+        });
+      }
+      if (session.activeProgram != null) {
+        store.setSessionActiveProgram(session.sessionId, session.activeProgram);
+      }
+      if (session.cwd != null) {
+        store.setSessionCwd(session.sessionId, session.cwd);
+      }
+    });
+    markStartupMilestone('session-chrome-hydrated');
+    return pickTabTerminalSessions(store.sessions);
+  });
 
   useEffect(() => {
     if (!desktopBridge || !isDrawerOpen) return;
@@ -592,6 +639,58 @@ function App() {
       ));
     });
   }, []);
+
+  const handleResumeAgent = useCallback(async (frontendSessionId: string, backendSessionId: string) => {
+    setAgentResumeNotice(null);
+    setAgentResumeAction({ sessionId: frontendSessionId, status: 'submitting', error: null });
+    try {
+      await resumeAgentSession(backendSessionId);
+      setAgentResumeAction((current) => current?.sessionId === frontendSessionId
+        ? { ...current, status: 'waiting', error: null }
+        : current);
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code ?? '')
+        : '';
+      const message = code === 'AGENT_SESSION_ACTIVE_ELSEWHERE'
+        ? t('tab.resumeAgentConflict')
+        : error instanceof Error && /busy/i.test(error.message)
+          ? t('tab.resumeAgentBusy')
+          : t('tab.resumeAgentFailed');
+      setAgentResumeAction((current) => current?.sessionId === frontendSessionId
+        ? { ...current, error: message }
+        : current);
+      setAgentResumeNotice({ tone: 'error', message });
+    }
+  }, [t]);
+
+  useEffect(() => {
+    if (!agentResumeAction || agentResumeAction.status !== 'waiting') return;
+    const session = terminalSessions.get(agentResumeAction.sessionId);
+    if (!session || session.agentResumeRecovered || session.agentStatus === null) return;
+    const agentName = session.agent?.displayName ?? 'Agent';
+    setAgentResumeAction(null);
+    setAgentResumeNotice({ tone: 'success', message: t('tab.resumeAgentSuccess', { agent: agentName }) });
+  }, [agentResumeAction, terminalSessions, t]);
+
+  useEffect(() => {
+    if (!agentResumeAction || agentResumeAction.status !== 'waiting' || agentResumeAction.error) return;
+    const sessionId = agentResumeAction.sessionId;
+    const timer = window.setTimeout(() => {
+      const message = t('tab.resumeAgentTimeout');
+      setAgentResumeAction((current) => current?.sessionId === sessionId && current.status === 'waiting'
+        ? { ...current, error: message }
+        : current);
+      setAgentResumeNotice({ tone: 'error', message });
+    }, 15_000);
+    return () => window.clearTimeout(timer);
+  }, [agentResumeAction, t]);
+
+  useEffect(() => {
+    if (agentResumeNotice?.tone !== 'success') return;
+    const timer = window.setTimeout(() => setAgentResumeNotice(null), 3200);
+    return () => window.clearTimeout(timer);
+  }, [agentResumeNotice]);
 
   useEffect(() => {
     let cancelled = false;
@@ -736,15 +835,23 @@ function App() {
   // 回调 ref 不设防的话会反复 focus/select，把用户正在输入的内容全选掉。
   const renameSheetFocusedRef = React.useRef(false);
   const activeSessionTabRef = React.useRef<HTMLDivElement | null>(null);
+  const hasPositionedInitialActiveTabRef = React.useRef(false);
   const closeTabMenu = useCallback(() => {
     setTabMenuSessionId(null);
     setTabMenuAnchor(null);
   }, []);
   // 通知点击 / SW postMessage 请求聚焦的目标 session。会话列表可能还没恢复完，
   // 先记在 ref 里，等对应 session 出现在列表里再 dispatch 切换。
-  const pendingFocusSessionRef = React.useRef<string | null>(
+  const initialConnectionPriorityRef = React.useRef<string | null>(
     typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('session'),
   );
+  const [connectionPrioritySessionId, setConnectionPrioritySessionId] = React.useState<string | null>(
+    initialConnectionPriorityRef.current,
+  );
+  const [connectionPriorityReady, setConnectionPriorityReady] = React.useState(
+    initialConnectionPriorityRef.current !== null || typeof caches === 'undefined',
+  );
+  const pendingFocusSessionRef = React.useRef<string | null>(initialConnectionPriorityRef.current);
   const notificationTraceRef = React.useRef<string | null>(
     typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('_notifTrace'),
   );
@@ -1975,16 +2082,39 @@ function App() {
     }
     return { running: runningSessionShortcuts.length, review };
   }, [runningSessionShortcuts.length, sessions, terminalSessions]);
+  const activeResumeSession = activeSessionId
+    ? sessions.find((session) => session.id === activeSessionId) ?? null
+    : null;
+  const activeResumeTs = activeResumeSession
+    ? terminalSessions.get(activeResumeSession.id)
+    : undefined;
+  const showRecoveredAgentResume = Boolean(
+    activeResumeSession
+    && activeResumeTs?.agentResumeRecovered
+    && activeResumeTs.agentNativeSessionId
+    && activeResumeTs.terminalSessionId,
+  );
+  const activeResumeAction = activeResumeSession && agentResumeAction?.sessionId === activeResumeSession.id
+    ? agentResumeAction
+    : null;
   // inline 用 'nearest' 而非 'center'：激活 tab 已在可视区内时完全不滚动，
   // 只有它溢出屏幕才滚最小距离。'center' 会在 tab 多（条溢出）时每切一次
   // 整条横移去居中，切换频繁时视觉上就是横向抖动。
-  useEffect(() => {
-    activeSessionTabRef.current?.scrollIntoView({
+  React.useLayoutEffect(() => {
+    if (!connectionPriorityReady) return;
+    const activeTab = activeSessionTabRef.current;
+    if (!activeTab) return;
+    const isInitialPosition = !hasPositionedInitialActiveTabRef.current;
+    activeTab.scrollIntoView({
       inline: 'nearest',
       block: 'nearest',
-      behavior: 'smooth',
+      // 首次恢复必须在浏览器绘制前直接落到正确位置，不能让用户先看到
+      // Tab 条起点再播放一段横向滚动；之后主动切换仍保留平滑反馈。
+      behavior: isInitialPosition ? 'auto' : 'smooth',
     });
-  }, [activeSessionId]);
+    hasPositionedInitialActiveTabRef.current = true;
+    if (isInitialPosition) markStartupMilestone('active-tab-positioned');
+  }, [activeSessionId, connectionPriorityReady]);
 
   useEffect(() => {
     if (editingSessionId && renameInputRef.current) {
@@ -2015,6 +2145,7 @@ function App() {
   // 等会话恢复 / inventory 同步后由下面的 effect 补发。
   const requestFocusSession = useCallback((sessionId: string | null) => {
     if (!sessionId) return;
+    setConnectionPrioritySessionId(sessionId);
     if (notificationTraceRef.current) {
       clientLog('info', 'PWA_NOTIFICATION_CLICK app-focus-request', {
         traceId: notificationTraceRef.current,
@@ -2091,6 +2222,8 @@ function App() {
         clientLog('warn', 'PWA_NOTIFICATION_CLICK app-cache-failed', {
           error: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        if (!disposed) setConnectionPriorityReady(true);
       }
     };
 
@@ -2320,6 +2453,19 @@ function App() {
     setSplitWorkspaces(data.splitWorkspaces);
     useTerminalStore.getState().setActiveSessionId(data.activeSessionId);
   }, []);
+
+  // Priority is a one-shot handoff. Once its target is the active session,
+  // normal user selection becomes the source of truth for future reconnects.
+  useEffect(() => {
+    if (!connectionPrioritySessionId || !activeSessionId) return;
+    const target = sessions.find((session) => (
+      session.id === connectionPrioritySessionId
+      || terminalSessions.get(session.id)?.terminalSessionId === connectionPrioritySessionId
+    ));
+    if (target?.id === activeSessionId) {
+      setConnectionPrioritySessionId(null);
+    }
+  }, [activeSessionId, connectionPrioritySessionId, sessions, terminalSessions]);
 
   const dispatchNewSession = useCallback((overrides?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string }) => {
     const mode = overrides?.mode ?? newSessionMode;
@@ -2640,6 +2786,13 @@ function App() {
           <span className="inline-flex min-w-0 items-center gap-1 overflow-hidden">
             <span className="inline-flex shrink-0 items-center">
               {renderTabIcon(session.mode, ts)}
+              {ts?.agentResumeRecovered && (
+                <RiHistoryLine
+                  size={compact ? 9 : 10}
+                  className="-ml-0.5 shrink-0 text-[color:var(--warning)]"
+                  aria-label={t('tab.resumeAgentAvailable')}
+                />
+              )}
               {tuiProgressActive && !ts?.agentStatus && (
                 <RiLoaderCircle size={compact ? 9 : 10} className="-ml-0.5 shrink-0 animate-spin text-[color:var(--success)]" />
               )}
@@ -2983,6 +3136,53 @@ function App() {
             </div>
           </div>
 
+          {showRecoveredAgentResume && activeResumeSession && activeResumeTs?.terminalSessionId && (
+            <div
+              className="flex shrink-0 items-center gap-2 border-b border-border/15 bg-surface/80 px-3 py-2 animate-fade-in sm:px-4"
+              role="status"
+              data-testid="agent-resume-recovery-banner"
+            >
+              <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[rgb(var(--warning-rgb)_/_0.14)] text-[color:var(--warning)]">
+                {!activeResumeAction?.error && (activeResumeAction?.status === 'submitting' || activeResumeAction?.status === 'waiting')
+                  ? <RiLoaderCircle size={14} className="animate-spin" />
+                  : <RiHistoryLine size={14} />}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[12px] font-medium text-foreground">
+                  {t('tab.resumeAgentRecoveredTitle', { agent: activeResumeTs.agent?.displayName ?? 'Agent' })}
+                </div>
+                <div className={`truncate text-[10px] sm:text-[11px] ${activeResumeAction?.error ? 'text-destructive' : 'text-muted-foreground'}`}>
+                  {activeResumeAction?.error
+                    ?? (activeResumeAction?.status === 'submitting'
+                      ? t('tab.resumeAgentSubmitting')
+                      : activeResumeAction?.status === 'waiting'
+                        ? t('tab.resumeAgentWaiting')
+                        : t('tab.resumeAgentRecoveredHint'))}
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={!activeResumeAction?.error && (activeResumeAction?.status === 'submitting' || activeResumeAction?.status === 'waiting')}
+                onClick={() => void handleResumeAgent(activeResumeSession.id, activeResumeTs.terminalSessionId!)}
+                className="shrink-0 rounded-full bg-primary px-3 py-1.5 text-[11px] font-semibold text-primary-foreground transition hover:opacity-90 active:scale-95 disabled:cursor-wait disabled:opacity-60 sm:text-[12px]"
+              >
+                {activeResumeAction?.error ? t('common.retry') : t('tab.resumeAgentNow')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  useTerminalStore.getState().setAgentResumeRecovered(activeResumeSession.id, false);
+                  setAgentResumeAction((current) => current?.sessionId === activeResumeSession.id ? null : current);
+                }}
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-2 hover:text-foreground"
+                aria-label={t('tab.resumeAgentLater')}
+                title={t('tab.resumeAgentLater')}
+              >
+                <RiCloseLine size={13} />
+              </button>
+            </div>
+          )}
+
           <div ref={terminalAreaRef} className="min-h-0 flex-1 flex overflow-hidden app-chrome-bg">
             <div className="min-h-0 flex-1 overflow-hidden">
               <MultiTerminalView
@@ -2993,6 +3193,8 @@ function App() {
                 terminalFocusAvailable={terminalFocusAvailable}
                 defaultSessionMode={newSessionMode}
                 defaultTmuxSessionName={newSessionTmuxName}
+                connectionPrioritySessionId={connectionPrioritySessionId}
+                connectionPriorityReady={connectionPriorityReady}
                 onSessionDataUpdate={handleSessionDataUpdate}
               />
             </div>
@@ -3905,9 +4107,7 @@ function App() {
                       const backendId = ts.terminalSessionId;
                       if (!backendId) return;
                       closeTabMenu();
-                      void resumeAgentSession(backendId).catch((error) => {
-                        console.warn('[agent-resume] failed:', error);
-                      });
+                      void handleResumeAgent(menuSession.id, backendId);
                     }}
                     className={`${menuItemClassName} text-foreground hover:bg-surface-2`}
                   >
@@ -4809,6 +5009,30 @@ function App() {
             </div>
           </div>
         </button>
+      )}
+
+      {agentResumeNotice && (
+        <div
+          className={`fixed inset-x-3 bottom-4 z-toast mx-auto flex max-w-md items-center gap-2 rounded-xl border px-4 py-3 text-[12px] shadow-lg animate-fade-in ${
+            agentResumeNotice.tone === 'success'
+              ? 'border-[rgb(var(--success-rgb)_/_0.24)] bg-surface-elevated text-foreground'
+              : 'border-destructive/30 bg-surface-elevated text-destructive'
+          }`}
+          role={agentResumeNotice.tone === 'error' ? 'alert' : 'status'}
+        >
+          {agentResumeNotice.tone === 'success'
+            ? <RiHistoryLine size={14} className="shrink-0 text-[color:var(--success)]" />
+            : <RiCircleHelp size={14} className="shrink-0" />}
+          <span className="min-w-0 flex-1">{agentResumeNotice.message}</span>
+          <button
+            type="button"
+            onClick={() => setAgentResumeNotice(null)}
+            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-2 hover:text-foreground"
+            aria-label={t('common.close')}
+          >
+            <RiCloseLine size={12} />
+          </button>
+        </div>
       )}
 
       {/* Debug Info Panel */}

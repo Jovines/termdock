@@ -5,11 +5,24 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   KIMI_HOOK_EVENTS,
   installPluginHooks,
+  opencodePluginJs,
   pluginHooksState,
   tomlHooksInstall,
   tomlHooksState,
   tomlHooksUninstall,
 } from './installers.js';
+
+describe('OpenCode plugin bridge', () => {
+  it('forwards the native session id and ignores known child sessions', () => {
+    const plugin = opencodePluginJs();
+
+    expect(plugin).toContain('{ session_id: sessionID }');
+    expect(plugin).toContain('"chat.message": async ({ sessionID })');
+    expect(plugin).toContain('event.type === "session.created" || event.type === "session.updated"');
+    expect(plugin).toContain('if (info.parentID)');
+    expect(plugin).not.toContain('await emit("session-start")');
+  });
+});
 
 const USER_CONFIG = `# my kimi config
 default_model = "k2"
