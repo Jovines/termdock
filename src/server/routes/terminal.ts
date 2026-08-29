@@ -77,6 +77,7 @@ import {
 } from '../agent/resumePersistence.js';
 import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent/resumeHistory.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
+import { buildBracketedSubmitBytes } from '../agent/promptDelivery.js';
 import { CollaborationStore, type CollaborationMessage, type CollaborationMessageKind } from '../agent/collaborationStore.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
 import {
@@ -1706,7 +1707,7 @@ function deliverAutomationPromptWhenReady(backendSessionId: string, prompt: stri
   const session = terminalSessions.get(backendSessionId);
   if (!session) return;
   if (session.agent || session.agentSession || attempt >= 60) {
-    writeTerminalInput(session, `${prompt}\r`);
+    session.ptyProcess.write(buildBracketedSubmitBytes(prompt));
     return;
   }
   setTimeout(() => deliverAutomationPromptWhenReady(backendSessionId, prompt, attempt + 1), 250);
@@ -1724,7 +1725,7 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
       frontendSessionId = record.sessionId;
       const message = automation.prompt || automation.command;
       if (!message) throw new Error('自动任务没有可发送的内容');
-      writeTerminalInput(backend, `${message}\r`);
+      backend.ptyProcess.write(buildBracketedSubmitBytes(message));
     } else {
       const request = req ?? ({} as express.Request);
       const opened = await openInventorySession(request, {
@@ -1739,7 +1740,7 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
       if (automation.command) writeTerminalInput(backend, `${automation.command}\r`);
       if (automation.prompt) {
         if (automation.command) deliverAutomationPromptWhenReady(opened.terminalSession.sessionId, automation.prompt);
-        else writeTerminalInput(backend, `${automation.prompt}\r`);
+        else backend.ptyProcess.write(buildBracketedSubmitBytes(automation.prompt));
       }
     }
     automationStore.finishRun(run.id, 'success', frontendSessionId, '任务已投递');
@@ -3539,16 +3540,6 @@ async function findExternalCodexWriter(target: AgentResumeTarget): Promise<numbe
   } catch {
     return null;
   }
-}
-
-/**
- * Deliver a prompt into an agent's PTY: bracketed paste (so multi-line
- * prompts insert as one block instead of submitting line by line — every
- * recognized agent's TUI enables bracketed paste), followed by CR to submit.
- * ESC bytes are stripped so embedded content can't fake the paste terminator.
- */
-function buildBracketedSubmitBytes(prompt: string): string {
-  return `\x1b[200~${prompt.replace(/\x1b/g, '')}\x1b[201~\r`;
 }
 
 // ── end Rich agent session tracking ──
