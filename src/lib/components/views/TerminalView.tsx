@@ -480,7 +480,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const probeOrRestartSession = React.useCallback((reason: string) => {
     const tid = terminalIdRef.current;
-    if (tid && probeTerminalConnection(tid)) {
+    if (tid && probeTerminalConnection(tid, () => {
+      // A still-open socket answers with pong instead of emitting a fresh
+      // `connected` event. Treat that health confirmation as foreground
+      // completion so the orchestrator can release the background wave.
+      onStreamConnected?.(sessionId);
+    })) {
       debugSession('[Terminal] resume probe sent', { reason, backendSessionId: tid, active: isActiveRef.current });
       return;
     }
@@ -490,7 +495,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       active: isActiveRef.current,
     });
     restartEnsureSession();
-  }, [debugSession, restartEnsureSession]);
+  }, [debugSession, onStreamConnected, restartEnsureSession, sessionId]);
 
   const reportFlowControl = React.useCallback((paused: boolean, reason: string) => {
     const backendSessionId = terminalIdRef.current;

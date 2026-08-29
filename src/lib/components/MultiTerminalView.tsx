@@ -5,7 +5,12 @@ import 'swiper/css';
 import { TerminalView } from './views/TerminalView';
 import { useSessionPersistence, type PersistedSession } from '../hooks/useSessionPersistence';
 import { VIEWPORT_LAYOUT_CHANGE_EVENT } from '../hooks/useViewportHeight';
-import { closeTerminal, killTmuxSession, sendTerminalInput } from '../terminal/api';
+import {
+  closeTerminal,
+  killTmuxSession,
+  sendTerminalInput,
+  suspendTerminalConnectionReconnects,
+} from '../terminal/api';
 import type { TerminalMode } from '../terminal';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../terminal/settings';
 import type { TermdockColorTheme } from '../terminal/theme';
@@ -990,8 +995,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     };
 
     const handleVisibility = () => {
-      if (!document.hidden) scheduleResume('visibility');
+      if (document.hidden) {
+        suspendTerminalConnectionReconnects();
+        return;
+      }
+      scheduleResume('visibility');
     };
+    const handlePageHide = () => suspendTerminalConnectionReconnects();
     const handlePageShow = (event: PageTransitionEvent) => {
       scheduleResume(event.persisted ? 'bfcache' : 'pageshow');
     };
@@ -999,11 +1009,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const handleWindowFocus = () => scheduleResume('focus');
 
     document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('pagehide', handlePageHide);
     window.addEventListener('pageshow', handlePageShow);
     window.addEventListener('online', handleOnline);
     window.addEventListener('focus', handleWindowFocus);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('pagehide', handlePageHide);
       window.removeEventListener('pageshow', handlePageShow);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('focus', handleWindowFocus);

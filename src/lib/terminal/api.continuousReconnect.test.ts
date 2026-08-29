@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { connectTerminalStream } from './api';
+import {
+  connectTerminalStream,
+  probeTerminalConnection,
+  suspendTerminalConnectionReconnects,
+} from './api';
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -110,5 +114,45 @@ describe('connectTerminalStream reconnect policy', () => {
     vi.advanceTimersByTime(10);
 
     expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it('parks background retry timers until the session is explicitly resumed', () => {
+    const disconnect = connectTerminalStream('background-retry', vi.fn(), vi.fn(), {
+      initialRetryDelay: 10,
+      connectionTimeout: 1_000,
+    });
+
+    FakeWebSocket.instances[0].fail();
+    suspendTerminalConnectionReconnects();
+    vi.advanceTimersByTime(100);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    expect(probeTerminalConnection('background-retry')).toBe(true);
+    vi.runOnlyPendingTimers();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    disconnect();
+  });
+
+  it('reports an open connection responsive after its wake probe receives data', () => {
+    const onResponsive = vi.fn();
+    const disconnect = connectTerminalStream('responsive-probe', vi.fn(), vi.fn());
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    suspendTerminalConnectionReconnects();
+
+    expect(probeTerminalConnection('responsive-probe', onResponsive)).toBe(true);
+    vi.advanceTimersByTime(1);
+    socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'pong' }) }));
+    vi.advanceTimersByTime(1_499);
+
+    expect(onResponsive).toHaveBeenCalledTimes(1);
+
+    // The explicit foreground probe also unfreezes normal retry behavior.
+    socket.fail();
+    vi.advanceTimersByTime(1_000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    disconnect();
   });
 });

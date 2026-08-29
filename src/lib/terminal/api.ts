@@ -320,6 +320,7 @@ interface WsConnection {
   onEvent: (event: TerminalStreamEvent) => void;
   onError?: (error: Error, fatal?: boolean) => void;
   reconnectNow: () => void;
+  suspendReconnect: () => void;
   retryState: {
     maxRetries: number;
     initialDelayMs: number;
@@ -329,6 +330,7 @@ interface WsConnection {
     retryTimeout: ReturnType<typeof setTimeout> | null;
     connectionTimeoutId: ReturnType<typeof setTimeout> | null;
     isClosed: boolean;
+    isSuspended: boolean;
   };
   // 重连补帧基线：connected.replayLastSeq 到来时记录服务端 replay 后的基线，
   // live data 携带 seq 时再随已处理输出单调推进；下一次重连用它作为 since 参数。
@@ -341,6 +343,9 @@ interface WsConnection {
   pongTimer: ReturnType<typeof setTimeout> | null;
   // 上次收到任意服务端消息的时间戳，用于判断半开连接。
   lastInboundAt: number;
+  // Monotonic probe marker. A pong can arrive in the same millisecond as the
+  // ping, so timestamps alone cannot reliably prove that a new frame arrived.
+  inboundSequence: number;
 }
 
 const wsConnections = new Map<string, WsConnection>();
@@ -477,6 +482,7 @@ export function connectTerminalStream(
     retryTimeout: null as ReturnType<typeof setTimeout> | null,
     connectionTimeoutId: null as ReturnType<typeof setTimeout> | null,
     isClosed: false,
+    isSuspended: false,
   };
 
   let conn: WsConnection | null = null;
@@ -564,6 +570,7 @@ export function connectTerminalStream(
       onError,
       reconnectNow: () => {
         if (retryState.isClosed) return;
+        retryState.isSuspended = false;
         if (manualReconnectTimer) return;
         clearTimeouts();
         if (conn) {
@@ -586,6 +593,14 @@ export function connectTerminalStream(
           connect();
         }, 0);
       },
+      suspendReconnect: () => {
+        if (retryState.isClosed) return;
+        retryState.isSuspended = true;
+        if (retryState.retryTimeout) {
+          clearTimeout(retryState.retryTimeout);
+          retryState.retryTimeout = null;
+        }
+      },
       retryState,
       lastSeq,
       pendingInputs,
@@ -593,12 +608,14 @@ export function connectTerminalStream(
       heartbeatTimer: null,
       pongTimer: null,
       lastInboundAt: Date.now(),
+      inboundSequence: 0,
     };
 
     ws.onopen = () => {
       clearTimeouts();
       retryState.retryCount = 0;
       newConn.lastInboundAt = Date.now();
+      newConn.inboundSequence += 1;
       startHeartbeat(newConn);
       // WS 重新打开后优先按当前链路质量 flush 输入。
       scheduleInputFlush(newConn);
@@ -606,6 +623,7 @@ export function connectTerminalStream(
 
     ws.onmessage = (event) => {
       newConn.lastInboundAt = Date.now();
+      newConn.inboundSequence += 1;
       try {
         const msg = JSON.parse(event.data as string);
 
@@ -842,6 +860,11 @@ export function connectTerminalStream(
         maxAttempts: maxRetries,
       });
 
+      // A hidden PWA can leave every session with an expired retry timer.
+      // Keep those chains parked until the foreground scheduler explicitly
+      // probes them in visible-session-first order.
+      if (retryState.isSuspended) return;
+
       retryState.retryTimeout = setTimeout(() => {
         if (!retryState.isClosed) connect();
       }, delay);
@@ -899,24 +922,34 @@ export async function sendTerminalInput(
 //   要立即替换为新连接。
 // - WS OPEN：发 ping，等 WAKEUP_PROBE_TIMEOUT_MS 内有任何消息就算活着；
 //   超时则主动替换连接，走重连补帧路径。
-export function probeTerminalConnection(sessionId: string): boolean {
+export function probeTerminalConnection(sessionId: string, onResponsive?: () => void): boolean {
   const conn = wsConnections.get(sessionId);
   if (!conn) return false;
+  conn.retryState.isSuspended = false;
   if (conn.ws.readyState !== WebSocket.OPEN) {
     // 卡死的握手 / 僵尸连接：不要只依赖 close/onclose（iOS PWA 唤醒时
     // onclose 可能延迟或已在后台被吞），直接替换为一条新的连接。
     conn.reconnectNow();
     return true;
   }
-  const baseline = conn.lastInboundAt;
+  const baselineSequence = conn.inboundSequence;
   try { conn.ws.send(JSON.stringify({ type: 'ping' })); } catch { /* ignore */ }
   setTimeout(() => {
-    // 如果在窗口期内 lastInboundAt 没有更新，就视为半开连接，强行 close。
-    if (conn.lastInboundAt <= baseline) {
+    if (wsConnections.get(sessionId) !== conn || conn.retryState.isClosed) return;
+    // 如果在窗口期内没有收到新帧，就视为半开连接。
+    if (conn.inboundSequence <= baselineSequence) {
       conn.reconnectNow();
+    } else {
+      onResponsive?.();
     }
   }, WAKEUP_PROBE_TIMEOUT_MS);
   return true;
+}
+
+/** Freeze retry timers while the app is hidden. The foreground resume
+ * scheduler will unfreeze each session by probing it in priority order. */
+export function suspendTerminalConnectionReconnects(): void {
+  for (const conn of wsConnections.values()) conn.suspendReconnect();
 }
 
 // ---- Terminal focus / flow-control state (WebSocket)
