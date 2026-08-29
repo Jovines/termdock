@@ -77,7 +77,7 @@ import {
 } from '../agent/resumePersistence.js';
 import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent/resumeHistory.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
-import { buildBracketedSubmitBytes } from '../agent/promptDelivery.js';
+import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
 import { CollaborationStore, type CollaborationMessage, type CollaborationMessageKind } from '../agent/collaborationStore.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
 import {
@@ -1706,7 +1706,7 @@ function writeTerminalInput(session: TerminalSession, value: string): void {
 function deliverAutomationPromptWhenReady(backendSessionId: string, prompt: string, attempt = 0): void {
   const session = terminalSessions.get(backendSessionId);
   if (!session) return;
-  if (session.agent || session.agentSession || attempt >= 60) {
+  if (canDeliverPromptToAgent(session) || attempt >= 60) {
     session.ptyProcess.write(buildBracketedSubmitBytes(prompt));
     return;
   }
@@ -1721,7 +1721,7 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
       const record = globalSessionState.sessions.find((candidate) => candidate.sessionId === automation.targetSessionId);
       const backend = record?.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
       if (!record || !backend) throw new Error('目标会话当前不在线');
-      if (!backend.agentSession) throw new Error('目标会话当前没有运行中的 Agent');
+      if (!canDeliverPromptToAgent(backend)) throw new Error('目标会话当前没有运行中的 Agent');
       frontendSessionId = record.sessionId;
       const message = automation.prompt || automation.command;
       if (!message) throw new Error('自动任务没有可发送的内容');

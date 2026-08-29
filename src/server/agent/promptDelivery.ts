@@ -8,3 +8,14 @@ export function buildBracketedSubmitBytes(prompt: string): string {
   const escaped = normalized.replace(/\x1b/g, '␛');
   return `\x1b[200~${escaped}\x1b[201~\r`;
 }
+
+/**
+ * Process detection and hook events are independent Agent signals. A target is
+ * ready as soon as either signal proves that an Agent owns the foreground PTY.
+ */
+export function canDeliverPromptToAgent(target: {
+  agent: unknown;
+  agentSession: unknown;
+}): boolean {
+  return Boolean(target.agent || target.agentSession);
+}
