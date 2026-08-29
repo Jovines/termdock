@@ -127,6 +127,7 @@ const TERMDOCK_DIR = `${os.homedir()}/.termdock`;
 const automationStore = new AutomationStore(`${TERMDOCK_DIR}/automations.json`);
 const collaborationStore = new CollaborationStore(`${TERMDOCK_DIR}/collaboration-groups.json`);
 const sessionSearchStore = new SessionSearchStore(`${TERMDOCK_DIR}/session-search`);
+let atomicJsonWriteSequence = 0;
 
 async function readJsonFileIfExists<T>(filePath: string): Promise<T | null> {
   try {
@@ -140,7 +141,20 @@ async function readJsonFileIfExists<T>(filePath: string): Promise<T | null> {
 
 async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.promises.writeFile(filePath, JSON.stringify(value, null, 2), 'utf-8');
+  const temporaryPath = `${filePath}.${process.pid}.${++atomicJsonWriteSequence}.tmp`;
+  let handle: fs.promises.FileHandle | null = null;
+  try {
+    handle = await fs.promises.open(temporaryPath, 'w');
+    await handle.writeFile(JSON.stringify(value, null, 2), 'utf-8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.promises.rename(temporaryPath, filePath);
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 // Termdock metadata constants used to populate tmux user options
@@ -996,6 +1010,8 @@ const CLEANUP_INTERVAL = TERMINAL.cleanupInterval;
 const RECONNECT_SCROLLBACK = TERMINAL.reconnectScrollback;
 const TMUX_POLL_INTERVAL = parseInt(process.env.TMUX_POLL_INTERVAL || '500', 10);
 const ACTIVE_PROGRAM_POLL_INTERVAL = parseInt(process.env.TERMINAL_ACTIVE_PROGRAM_POLL_INTERVAL || '1200', 10);
+const TMUX_LAYOUT_CACHE_TTL_MS = Math.max(TMUX_POLL_INTERVAL, 1000);
+const PROCESS_SNAPSHOT_CACHE_TTL_MS = Math.max(ACTIVE_PROGRAM_POLL_INTERVAL, 2500);
 const FLOW_CONTROL_PAUSE_LEASE_MS = TERMINAL.flowControlPauseLeaseMs;
 const TMUX_DELIMITER = '\x1f';
 const TERMDOCK_TMUX_HISTORY_LIMIT = TMUX.historyLimit;
@@ -3629,6 +3645,57 @@ try {
   }
 } catch { /* plugin loading must never block startup */ }
 
+interface TmuxProcessSnapshotRow extends TmuxProcessRow {
+  tty: string;
+}
+
+let processSnapshot: { rows: TmuxProcessSnapshotRow[]; fetchedAt: number } | null = null;
+let processSnapshotPromise: Promise<TmuxProcessSnapshotRow[]> | null = null;
+
+function parseProcessSnapshot(stdout: string): TmuxProcessSnapshotRow[] {
+  return stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line): TmuxProcessSnapshotRow | null => {
+      // ps -o format: TTY PID PPID PGID TPGID STAT COMM ARGS
+      const match = line.match(/^(\S+)\s+(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
+      if (!match) return null;
+      return {
+        tty: match[1] || '',
+        pid: Number.parseInt(match[2] || '0', 10),
+        ppid: Number.parseInt(match[3] || '0', 10),
+        pgid: Number.parseInt(match[4] || '0', 10),
+        tpgid: Number.parseInt(match[5] || '0', 10),
+        stat: match[6] || '',
+        comm: match[7] || '',
+        args: match[8]?.trim() || '',
+      };
+    })
+    .filter((row): row is TmuxProcessSnapshotRow => row !== null);
+}
+
+async function getProcessSnapshot(): Promise<TmuxProcessSnapshotRow[]> {
+  const now = Date.now();
+  if (processSnapshot && now - processSnapshot.fetchedAt < PROCESS_SNAPSHOT_CACHE_TTL_MS) {
+    return processSnapshot.rows;
+  }
+  if (processSnapshotPromise) return processSnapshotPromise;
+
+  processSnapshotPromise = execFileAsync('ps', [
+    '-e',
+    '-o',
+    'tty=,pid=,ppid=,pgid=,tpgid=,stat=,comm=,args=',
+  ], { timeout: 3000, maxBuffer: 4 * 1024 * 1024 }).then(({ stdout }) => {
+    const rows = parseProcessSnapshot(stdout);
+    processSnapshot = { rows, fetchedAt: Date.now() };
+    return rows;
+  }).finally(() => {
+    processSnapshotPromise = null;
+  });
+  return processSnapshotPromise;
+}
+
 async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
   command: string | null;
   source: 'tmux-pane' | 'tmux-tty';
@@ -3651,31 +3718,34 @@ async function resolveTmuxPaneProgram(pane: TmuxPane): Promise<{
   }
 
   try {
-    const psArgs = pane.tty
-      ? ['-t', pane.tty.replace(/^\/dev\//, ''), '-o', 'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args=']
-      : ['-o', 'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args='];
-    const { stdout } = await execFileAsync('ps', psArgs, { timeout: 3000, maxBuffer: 512 * 1024 });
-
-    const rows = stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line): TmuxProcessRow | null => {
-        // ps -o format: PID PPID PGID TPGID STAT COMM ARGS
-        // COMM is a single token; ARGS is the rest of the line
-        const match = line.match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
-        if (!match) return null;
-        return {
-          pid: Number.parseInt(match[1] || '0', 10),
-          ppid: Number.parseInt(match[2] || '0', 10),
-          pgid: Number.parseInt(match[3] || '0', 10),
-          tpgid: Number.parseInt(match[4] || '0', 10),
-          stat: match[5] || '',
-          comm: match[6] || '',
-          args: match[7]?.trim() || '',
-        };
-      })
-      .filter((row): row is TmuxProcessRow => row !== null);
+    let rows: TmuxProcessRow[];
+    if (process.platform === 'linux' && pane.tty) {
+      const paneTty = pane.tty.replace(/^\/dev\//, '');
+      rows = (await getProcessSnapshot()).filter((row) => row.tty === paneTty);
+    } else {
+      const psArgs = pane.tty
+        ? ['-t', pane.tty.replace(/^\/dev\//, ''), '-o', 'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args=']
+        : ['-o', 'pid=,ppid=,pgid=,tpgid=,stat=,comm=,args='];
+      const { stdout } = await execFileAsync('ps', psArgs, { timeout: 3000, maxBuffer: 512 * 1024 });
+      rows = stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line): TmuxProcessRow | null => {
+          const match = line.match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
+          if (!match) return null;
+          return {
+            pid: Number.parseInt(match[1] || '0', 10),
+            ppid: Number.parseInt(match[2] || '0', 10),
+            pgid: Number.parseInt(match[3] || '0', 10),
+            tpgid: Number.parseInt(match[4] || '0', 10),
+            stat: match[5] || '',
+            comm: match[6] || '',
+            args: match[7]?.trim() || '',
+          };
+        })
+        .filter((row): row is TmuxProcessRow => row !== null);
+    }
 
     const selected = selectTmuxForegroundProgram({
       panePid: pane.pid,
@@ -4207,6 +4277,115 @@ async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
     activePaneId,
     inCopyMode: paneInMode === '1',
   };
+}
+
+let tmuxLayoutsSnapshot: { layouts: Map<string, TmuxLayout>; fetchedAt: number } | null = null;
+let tmuxLayoutsSnapshotPromise: Promise<Map<string, TmuxLayout>> | null = null;
+
+async function buildTmuxLayoutsSnapshot(): Promise<Map<string, TmuxLayout>> {
+  const [sessionsRaw, windowsRaw, panesRaw] = await Promise.all([
+    runTmux([
+      'list-sessions',
+      '-F',
+      `#{session_id}${TMUX_DELIMITER}#{session_name}${TMUX_DELIMITER}#{window_id}${TMUX_DELIMITER}#{pane_id}${TMUX_DELIMITER}#{pane_in_mode}`,
+    ]),
+    runTmux([
+      'list-windows',
+      '-a',
+      '-F',
+      `#{session_name}${TMUX_DELIMITER}#{window_id}${TMUX_DELIMITER}#{window_name}${TMUX_DELIMITER}#{window_index}${TMUX_DELIMITER}#{window_active}`,
+    ]),
+    runTmux([
+      'list-panes',
+      '-a',
+      '-F',
+      `#{session_name}${TMUX_DELIMITER}#{window_id}${TMUX_DELIMITER}#{pane_id}${TMUX_DELIMITER}#{pane_index}${TMUX_DELIMITER}#{pane_active}${TMUX_DELIMITER}#{pane_width}${TMUX_DELIMITER}#{pane_height}${TMUX_DELIMITER}#{pane_top}${TMUX_DELIMITER}#{pane_left}${TMUX_DELIMITER}#{pane_current_command}${TMUX_DELIMITER}#{pane_pid}${TMUX_DELIMITER}#{pane_tty}${TMUX_DELIMITER}#{pane_title}${TMUX_DELIMITER}#{pane_current_path}`,
+    ]),
+  ]);
+
+  const layouts = new Map<string, TmuxLayout>();
+  for (const line of sessionsRaw.trim().split('\n')) {
+    if (!line) continue;
+    const row = parseDelimitedRow(line, 5);
+    if (!row) continue;
+    const [sessionId, sessionName, activeWindowId, activePaneId, paneInMode] = row;
+    layouts.set(sessionName, {
+      sessionId,
+      sessionName,
+      windows: [],
+      activeWindowId,
+      activePaneId,
+      inCopyMode: paneInMode === '1',
+    });
+  }
+
+  const windowsById = new Map<string, TmuxWindow>();
+  for (const line of windowsRaw.trim().split('\n')) {
+    if (!line) continue;
+    const row = parseDelimitedRow(line, 5);
+    if (!row) continue;
+    const [sessionName, windowId, windowName, windowIndexRaw, windowActiveRaw] = row;
+    const layout = layouts.get(sessionName);
+    if (!layout) continue;
+    const window: TmuxWindow = {
+      id: windowId,
+      name: windowName || '',
+      index: parseInt(windowIndexRaw || '0', 10),
+      active: windowActiveRaw === '1',
+      panes: [],
+    };
+    layout.windows.push(window);
+    windowsById.set(`${sessionName}\0${windowId}`, window);
+  }
+
+  for (const line of panesRaw.trim().split('\n')) {
+    if (!line) continue;
+    const row = parseDelimitedRow(line, 14);
+    if (!row) continue;
+    const [sessionName, windowId, paneId, paneIndexRaw, paneActiveRaw, widthRaw, heightRaw, topRaw, leftRaw, command, pidRaw, tty, title, currentPath] = row;
+    const window = windowsById.get(`${sessionName}\0${windowId}`);
+    if (!window) continue;
+    window.panes.push({
+      id: paneId,
+      index: parseInt(paneIndexRaw || '0', 10),
+      active: paneActiveRaw === '1',
+      width: parseInt(widthRaw || '0', 10),
+      height: parseInt(heightRaw || '0', 10),
+      top: parseInt(topRaw || '0', 10),
+      left: parseInt(leftRaw || '0', 10),
+      command: command || '',
+      pid: parseInt(pidRaw || '0', 10) || 0,
+      tty: tty || '',
+      title: title || '',
+      currentPath: currentPath || '',
+    });
+  }
+
+  return layouts;
+}
+
+async function getCachedTmuxLayout(sessionName: string): Promise<TmuxLayout> {
+  if (tmuxLayoutsSnapshot && Date.now() - tmuxLayoutsSnapshot.fetchedAt < TMUX_LAYOUT_CACHE_TTL_MS) {
+    const cached = tmuxLayoutsSnapshot.layouts.get(sessionName);
+    if (cached) return cached;
+  }
+
+  if (!tmuxLayoutsSnapshotPromise) {
+    tmuxLayoutsSnapshotPromise = buildTmuxLayoutsSnapshot().then((layouts) => {
+      tmuxLayoutsSnapshot = { layouts, fetchedAt: Date.now() };
+      return layouts;
+    }).finally(() => {
+      tmuxLayoutsSnapshotPromise = null;
+    });
+  }
+
+  const layouts = await tmuxLayoutsSnapshotPromise;
+  const layout = layouts.get(sessionName);
+  if (layout) return layout;
+
+  // A just-created session can race the global snapshot. Keep that rare path
+  // correct without returning stale metadata for the new terminal.
+  return getTmuxLayout(sessionName);
 }
 
 async function getRestoreHistory(sessionId: string, session: TerminalSession): Promise<string[]> {
@@ -6524,7 +6703,7 @@ router.get('/:sessionId/stream', async (req, res) => {
       const ap = await detectShellActiveProgram(session);
       if (ap) session.activeProgram = ap;
     } else if (session.mode === 'tmux' && session.tmuxSessionName) {
-      const layout = await getTmuxLayout(session.tmuxSessionName);
+      const layout = await getCachedTmuxLayout(session.tmuxSessionName);
       const activePane = getActivePaneFromLayout(layout);
       const ap = activePane
         ? await resolveTmuxPaneProgram(activePane)
@@ -6611,7 +6790,7 @@ router.get('/:sessionId/stream', async (req, res) => {
     }
 
     try {
-      const layout = await getTmuxLayout(session.tmuxSessionName);
+      const layout = await getCachedTmuxLayout(session.tmuxSessionName);
 
       // Resolve the active program — try ps-based detection for generic commands
       const activePane = getActivePaneFromLayout(layout);
@@ -7291,7 +7470,7 @@ export function handleTerminalWebSocket(
         const ap = await detectShellActiveProgram(session);
         if (ap) session.activeProgram = ap;
       } else if (session.mode === 'tmux' && session.tmuxSessionName) {
-        const layout = await getTmuxLayout(session.tmuxSessionName);
+        const layout = await getCachedTmuxLayout(session.tmuxSessionName);
         const ap = getActiveProgramFromTmuxLayout(layout);
         if (ap) session.activeProgram = ap;
       }
@@ -7374,7 +7553,7 @@ export function handleTerminalWebSocket(
     const sendTmuxLayout = async () => {
       if (ws.readyState !== ws.OPEN) return;
       try {
-        const layout = await getTmuxLayout(session.tmuxSessionName!);
+        const layout = await getCachedTmuxLayout(session.tmuxSessionName!);
         // Update active program — try ps-based detection for generic commands
         const activePane = getActivePaneFromLayout(layout);
         let ap: TerminalSession['activeProgram'] = null;

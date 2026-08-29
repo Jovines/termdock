@@ -17,6 +17,7 @@ export interface SessionSearchResult extends SessionSearchMetadata {
 }
 
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
+const LOG_SEGMENT_BYTES = MAX_LOG_BYTES / 2;
 const ANSI_PATTERN = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
 
 function clean(value: string): string {
@@ -54,8 +55,7 @@ export class SessionSearchStore {
     if (!needle) return [];
     const results: SessionSearchResult[] = [];
     for (const metadata of this.metadata.values()) {
-      let text = '';
-      try { text = fs.readFileSync(this.logPath(metadata.sessionId), 'utf8'); } catch { /* no output yet */ }
+      const text = this.readLog(metadata.sessionId);
       const searchable = `${metadata.title}\n${metadata.cwd}\n${metadata.agentSlug ?? ''}\n${text}`;
       const lower = searchable.toLocaleLowerCase();
       const first = lower.indexOf(needle);
@@ -77,12 +77,20 @@ export class SessionSearchStore {
     fs.mkdirSync(this.directory, { recursive: true });
     for (const [sessionId, chunks] of this.pending) {
       const logPath = this.logPath(sessionId);
-      fs.appendFileSync(logPath, chunks.join(''), { mode: 0o600 });
-      const stats = fs.statSync(logPath);
-      if (stats.size > MAX_LOG_BYTES) {
-        const buffer = fs.readFileSync(logPath);
-        fs.writeFileSync(logPath, buffer.subarray(buffer.length - MAX_LOG_BYTES), { mode: 0o600 });
+      const chunk = Buffer.from(chunks.join(''));
+      const currentSize = this.fileSize(logPath);
+      if (currentSize > 0 && currentSize + chunk.length > LOG_SEGMENT_BYTES) {
+        const previousPath = this.previousLogPath(sessionId);
+        try { fs.rmSync(previousPath, { force: true }); } catch { /* best effort */ }
+        fs.renameSync(logPath, previousPath);
       }
+
+      // A single pathological TUI frame must not defeat the bounded log. Keep
+      // its newest bytes; normal output remains append-only until rotation.
+      const boundedChunk = chunk.length > LOG_SEGMENT_BYTES
+        ? chunk.subarray(chunk.length - LOG_SEGMENT_BYTES)
+        : chunk;
+      fs.appendFileSync(logPath, boundedChunk, { mode: 0o600 });
     }
     this.pending.clear();
     const temporaryPath = `${this.metadataPath()}.${process.pid}.tmp`;
@@ -99,6 +107,18 @@ export class SessionSearchStore {
     } catch { /* first run */ }
   }
 
+  private readLog(sessionId: string): string {
+    let text = '';
+    try { text += fs.readFileSync(this.previousLogPath(sessionId), 'utf8'); } catch { /* no previous segment */ }
+    try { text += fs.readFileSync(this.logPath(sessionId), 'utf8'); } catch { /* no current segment */ }
+    return text;
+  }
+
+  private fileSize(filePath: string): number {
+    try { return fs.statSync(filePath).size; } catch { return 0; }
+  }
+
   private metadataPath(): string { return path.join(this.directory, 'sessions.json'); }
   private logPath(sessionId: string): string { return path.join(this.directory, `${encodeURIComponent(sessionId)}.log`); }
+  private previousLogPath(sessionId: string): string { return `${this.logPath(sessionId)}.1`; }
 }

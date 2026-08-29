@@ -31,4 +31,23 @@ describe('SessionSearchStore', () => {
     });
     expect(store.search('migration')[0]?.sessionId).toBe('session-2');
   });
+
+  it('rotates capped output instead of rewriting the full log on each append', () => {
+    const store = new SessionSearchStore(directory);
+    const metadata = {
+      sessionId: 'session-3', backendSessionId: 'backend-3', title: 'Long session', cwd: '/repo',
+      agentSlug: 'codex', agentNativeSessionId: 'native-3', updatedAt: 1,
+    };
+    const logPath = path.join(directory, 'session-3.log');
+    const oldOutput = `${'a'.repeat(1024 * 1024 - 16)}old-search-term\n`;
+    fs.writeFileSync(logPath, oldOutput);
+
+    store.append(metadata, 'new-search-term\n');
+    store.flush();
+
+    expect(fs.readFileSync(`${logPath}.1`, 'utf8')).toBe(oldOutput);
+    expect(fs.readFileSync(logPath, 'utf8')).toBe('new-search-term\n');
+    expect(store.search('old-search-term')[0]?.sessionId).toBe('session-3');
+    expect(store.search('new-search-term')[0]?.sessionId).toBe('session-3');
+  });
 });

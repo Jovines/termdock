@@ -10,11 +10,13 @@ import {
   shell,
   type MenuItemConstructorOptions,
   type MessageBoxOptions,
+  type Session,
 } from 'electron';
 import { execFile, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import dgram from 'node:dgram';
 import fs from 'node:fs';
+import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -27,6 +29,7 @@ import type {
   LocalServiceStatus,
   SavedConnection,
   ServiceProbe,
+  TrustedCertificateAuthority,
 } from './types.js';
 import {
   checkForDesktopUpdates,
@@ -43,6 +46,13 @@ import {
 } from './runtime.js';
 import { isExternalLinkStagingUrl, isSafeExternalUrl } from './externalLinks.js';
 import { shouldThrottleDesktopRenderer } from './windowPolicy.js';
+import {
+  canOfferCertificateTrust,
+  downloadCertificateAuthority,
+  isCertificateTrustError,
+  isLocalNetworkHostname,
+  type DownloadedCertificateAuthority,
+} from './certificateTrust.js';
 
 const execFileAsync = promisify(execFile);
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -55,6 +65,9 @@ const PROTOCOL_VERSION = 1;
 const HEALTH_TIMEOUT_MS = 3_500;
 const START_TIMEOUT_MS = 90_000;
 const localServiceCertificatePath = path.join(termdockDir, 'certs', 'termdock-local.pem');
+const sessionTrustedCertificateTargets = new Set<string>();
+const sessionTrustedCertificateAuthorities = new Map<string, string>();
+let managedLocalCertificateFingerprint: string | null = null;
 
 /** Delivered-but-unseen desktop notifications, mirrored into the Dock badge. */
 const activeNotifications = new Map<string, Notification>();
@@ -123,18 +136,12 @@ function openExternalLink(url: string): void {
   void shell.openExternal(url);
 }
 
-function configureLocalServiceCertificateTrust(): void {
-  let localFingerprint: string | null = null;
-  try {
-    localFingerprint = new crypto.X509Certificate(
-      fs.readFileSync(localServiceCertificatePath),
-    ).fingerprint256;
-  } catch {
-    // The certificate is created when the local service first enables HTTPS.
-  }
-  if (!localFingerprint) return;
+function certificateTrustKey(hostname: string, fingerprint: string): string {
+  return `${hostname.toLowerCase().replace(/^\[|\]$/g, '')}\0${fingerprint}`;
+}
 
-  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+function installCertificateVerifyProcedure(targetSession: Session = session.defaultSession): void {
+  targetSession.setCertificateVerifyProc((request, callback) => {
     let isLocalTarget = false;
     try {
       isLocalTarget = isLocalNetworkTarget(new URL(`https://${request.hostname}`));
@@ -147,12 +154,33 @@ function configureLocalServiceCertificateTrust(): void {
     } catch {
       // Keep Chromium's default verification if the certificate cannot be parsed.
     }
-    callback(isLocalTarget && presentedFingerprint === localFingerprint ? 0 : -3);
+    const explicitlyTrustedTarget = presentedFingerprint
+      ? sessionTrustedCertificateTargets.has(certificateTrustKey(request.hostname, presentedFingerprint))
+      : false;
+    const managedLocalCertificate = isLocalTarget
+      && presentedFingerprint === managedLocalCertificateFingerprint;
+    callback(explicitlyTrustedTarget || managedLocalCertificate ? 0 : -3);
   });
 }
 
+function configureLocalServiceCertificateTrust(): void {
+  try {
+    managedLocalCertificateFingerprint = new crypto.X509Certificate(
+      fs.readFileSync(localServiceCertificatePath),
+    ).fingerprint256;
+  } catch {
+    // The certificate is created when the local service first enables HTTPS.
+  }
+  installCertificateVerifyProcedure();
+}
+
 function defaultConfig(): DesktopConfig {
-  return { version: 1, connections: [], lastConnectionUrl: null };
+  return {
+    version: 1,
+    connections: [],
+    lastConnectionUrl: null,
+    trustedCertificateAuthorities: [],
+  };
 }
 
 function normalizeServiceUrl(raw: string): string {
@@ -171,26 +199,7 @@ function normalizeServiceUrl(raw: string): string {
 }
 
 function isLocalNetworkTarget(url: URL): boolean {
-  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (
-    hostname === 'localhost'
-    || hostname.endsWith('.local')
-    || !hostname.includes('.')
-  ) {
-    return true;
-  }
-  if (/^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname)) {
-    return true;
-  }
-  const ipv4 = hostname.match(/^172\.(\d{1,3})\./);
-  if (ipv4) {
-    const secondOctet = Number(ipv4[1]);
-    if (secondOctet >= 16 && secondOctet <= 31) return true;
-  }
-  return hostname === '::1'
-    || hostname.startsWith('fe80:')
-    || hostname.startsWith('fc')
-    || hostname.startsWith('fd');
+  return isLocalNetworkHostname(url.hostname);
 }
 
 function networkErrorDetails(error: unknown): string {
@@ -201,6 +210,82 @@ function networkErrorDetails(error: unknown): string {
 
 function looksLikeLocalNetworkPermissionError(error: unknown): boolean {
   return /ERR_ADDRESS_UNREACHABLE|ERR_NETWORK_ACCESS_DENIED/i.test(networkErrorDetails(error));
+}
+
+function certificateDetail(target: string, certificate: DownloadedCertificateAuthority): string {
+  return [
+    `目标：${target}`,
+    `CA：${certificate.subject.replace(/\n/g, ', ')}`,
+    `CA SHA-256：${certificate.fingerprint256}`,
+    `服务证书 SHA-256：${certificate.leafFingerprint256}`,
+    `有效期：${certificate.validFrom} — ${certificate.validTo}`,
+    '',
+    '继续后仅 Termdock 会信任该目标使用的这张 CA，不会修改 macOS 系统钥匙串。请只信任你确认属于该服务的证书。',
+  ].join('\n');
+}
+
+function trustedCertificateAuthorityFor(target: string): TrustedCertificateAuthority | undefined {
+  const origin = new URL(target).origin;
+  return readDesktopConfig().trustedCertificateAuthorities.find((entry) => entry.origin === origin);
+}
+
+async function requestCertificateTrust(
+  target: string,
+): Promise<DownloadedCertificateAuthority | null> {
+  let certificate: DownloadedCertificateAuthority;
+  try {
+    certificate = await downloadCertificateAuthority(target);
+  } catch (error) {
+    await showDesktopMessageBox({
+      type: 'error',
+      title: '无法获取可信的 CA 证书',
+      message: `无法为 ${target} 准备证书信任`,
+      detail: networkErrorDetails(error),
+    });
+    return null;
+  }
+
+  const existingTrust = trustedCertificateAuthorityFor(target);
+  if (existingTrust?.fingerprint256 === certificate.fingerprint256) {
+    sessionTrustedCertificateAuthorities.set(new URL(target).origin, certificate.certificatePem);
+    sessionTrustedCertificateTargets.add(
+      certificateTrustKey(new URL(target).hostname, certificate.leafFingerprint256),
+    );
+    return certificate;
+  }
+
+  const confirmation = await showDesktopMessageBox({
+    type: 'warning',
+    title: '信任 HTTPS 服务证书',
+    message: existingTrust
+      ? '此服务的 CA 证书已发生变化'
+      : '此服务使用了 Termdock 尚未信任的 HTTPS 证书',
+    detail: `${certificateDetail(target, certificate)}${existingTrust
+      ? `\n\n此前信任的 CA SHA-256：${existingTrust.fingerprint256}`
+      : ''}`,
+    buttons: ['信任并连接', '取消'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  });
+  if (confirmation.response !== 0) return null;
+
+  const config = readDesktopConfig();
+  const origin = new URL(target).origin;
+  config.trustedCertificateAuthorities = config.trustedCertificateAuthorities
+    .filter((entry) => entry.origin !== origin);
+  config.trustedCertificateAuthorities.push({
+    origin,
+    fingerprint256: certificate.fingerprint256,
+    subject: certificate.subject,
+    trustedAt: Date.now(),
+  });
+  writeDesktopConfig(config);
+  sessionTrustedCertificateAuthorities.set(origin, certificate.certificatePem);
+  sessionTrustedCertificateTargets.add(
+    certificateTrustKey(new URL(target).hostname, certificate.leafFingerprint256),
+  );
+  return certificate;
 }
 
 async function requestLocalNetworkPermissionRetry(target: string): Promise<boolean> {
@@ -233,6 +318,14 @@ function readDesktopConfig(): DesktopConfig {
         && typeof entry.label === 'string'
         && typeof entry.url === 'string'),
       lastConnectionUrl: typeof parsed.lastConnectionUrl === 'string' ? parsed.lastConnectionUrl : null,
+      trustedCertificateAuthorities: Array.isArray(parsed.trustedCertificateAuthorities)
+        ? parsed.trustedCertificateAuthorities.filter((entry): entry is TrustedCertificateAuthority =>
+          Boolean(entry)
+          && typeof entry.origin === 'string'
+          && typeof entry.fingerprint256 === 'string'
+          && typeof entry.subject === 'string'
+          && typeof entry.trustedAt === 'number')
+        : [],
     };
   } catch {
     return defaultConfig();
@@ -296,6 +389,94 @@ async function fetchWithTimeout(url: string): Promise<Response> {
   }
 }
 
+async function fetchJsonWithCertificateAuthority(
+  rawUrl: string,
+  certificateAuthority?: string,
+): Promise<{ status: number; json: unknown }> {
+  return await new Promise((resolve, reject) => {
+    const request = https.get(rawUrl, {
+      agent: false,
+      ca: certificateAuthority,
+      rejectUnauthorized: true,
+      headers: { Accept: 'application/json' },
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      response.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > 256 * 1024) {
+          request.destroy(new Error('服务响应过大'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on('end', () => {
+        try {
+          const body = Buffer.concat(chunks).toString('utf8');
+          resolve({
+            status: response.statusCode ?? 0,
+            json: body ? JSON.parse(body) as unknown : null,
+          });
+        } catch {
+          reject(new Error('服务返回了无效的 JSON'));
+        }
+      });
+    });
+    request.setTimeout(HEALTH_TIMEOUT_MS, () => request.destroy(new Error('连接超时')));
+    request.on('error', reject);
+  });
+}
+
+async function probeServiceWithCertificateAuthority(
+  rawUrl: string,
+  certificateAuthority?: string,
+): Promise<ServiceProbe> {
+  const url = normalizeServiceUrl(rawUrl);
+  try {
+    const healthResponse = await fetchJsonWithCertificateAuthority(
+      `${url}/health`,
+      certificateAuthority,
+    );
+    if (healthResponse.status < 200 || healthResponse.status >= 300) {
+      return { ok: false, url, error: `健康检查返回 HTTP ${healthResponse.status}` };
+    }
+    const health = healthResponse.json as { status?: unknown } | null;
+    if (health?.status !== 'ok') {
+      return { ok: false, url, error: '目标地址不是可识别的 Termdock 服务' };
+    }
+
+    try {
+      const metadataResponse = await fetchJsonWithCertificateAuthority(
+        `${url}/api/meta`,
+        certificateAuthority,
+      );
+      if (metadataResponse.status >= 200 && metadataResponse.status < 300) {
+        const metadata = metadataResponse.json as {
+          product?: unknown;
+          version?: unknown;
+          protocolVersion?: unknown;
+        } | null;
+        if (metadata?.product && metadata.product !== 'termdock') {
+          return { ok: false, url, error: '目标服务的产品标识不是 Termdock' };
+        }
+        return {
+          ok: true,
+          url,
+          version: typeof metadata?.version === 'string' ? metadata.version : undefined,
+          protocolVersion: typeof metadata?.protocolVersion === 'number'
+            ? metadata.protocolVersion
+            : undefined,
+        };
+      }
+    } catch {
+      // Older Termdock releases do not expose /api/meta.
+    }
+    return { ok: true, url };
+  } catch (error) {
+    return { ok: false, url, error: networkErrorDetails(error) };
+  }
+}
+
 async function probeService(rawUrl: string): Promise<ServiceProbe> {
   let url: string;
   try {
@@ -342,13 +523,28 @@ async function probeService(rawUrl: string): Promise<ServiceProbe> {
   } catch (error) {
     const message = error instanceof Error && error.name === 'AbortError'
       ? '连接超时'
-      : (error instanceof Error ? error.message : String(error));
+      : networkErrorDetails(error);
     return { ok: false, url, error: message };
   }
 }
 
 async function probeServiceWithLocalNetworkPermission(rawUrl: string): Promise<ServiceProbe> {
-  let probe = await probeService(rawUrl);
+  let normalizedUrl: string;
+  try {
+    normalizedUrl = normalizeServiceUrl(rawUrl);
+  } catch {
+    return await probeService(rawUrl);
+  }
+
+  // Do the first macOS HTTPS probe with Node TLS. Sending an untrusted
+  // certificate through Chromium first permanently caches that rejection for
+  // the process and prevents an immediate retry after the user approves it.
+  const approvedAuthority = sessionTrustedCertificateAuthorities.get(new URL(normalizedUrl).origin);
+  let probe = approvedAuthority
+    ? await probeServiceWithCertificateAuthority(normalizedUrl, approvedAuthority)
+    : canOfferCertificateTrust(normalizedUrl)
+      ? await probeServiceWithCertificateAuthority(normalizedUrl)
+    : await probeService(normalizedUrl);
   if (probe.ok) return probe;
 
   let parsedProbeUrl: URL;
@@ -356,6 +552,13 @@ async function probeServiceWithLocalNetworkPermission(rawUrl: string): Promise<S
     parsedProbeUrl = new URL(probe.url);
   } catch {
     return probe;
+  }
+  if (canOfferCertificateTrust(probe.url) && isCertificateTrustError(probe.error)) {
+    const certificate = await requestCertificateTrust(probe.url);
+    if (!certificate) {
+      return { ...probe, error: 'HTTPS 证书尚未受信任' };
+    }
+    return await probeServiceWithCertificateAuthority(rawUrl, certificate.certificatePem);
   }
   if (!isLocalNetworkTarget(parsedProbeUrl) || !looksLikeLocalNetworkPermissionError(probe.error)) {
     return probe;
@@ -742,6 +945,14 @@ async function showConnectionCenter(): Promise<void> {
 }
 
 function createDesktopWindow(options?: { serviceOrigin: string; label: string }): BrowserWindow {
+  const serviceSession = options
+    ? session.fromPartition(`persist:termdock-service-${crypto
+      .createHash('sha256')
+      .update(options.serviceOrigin)
+      .digest('hex')
+      .slice(0, 24)}`)
+    : null;
+  if (serviceSession) installCertificateVerifyProcedure(serviceSession);
   const window = new BrowserWindow({
     title: options ? `Termdock — ${options.label}` : 'Termdock — 连接中心',
     show: false,
@@ -756,6 +967,7 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
     webPreferences: {
+      ...(serviceSession ? { session: serviceSession } : {}),
       preload: path.join(currentDir, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true,

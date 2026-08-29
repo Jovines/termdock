@@ -69,4 +69,12 @@ export interface DesktopConfig {
   version: 1;
   connections: SavedConnection[];
   lastConnectionUrl: string | null;
+  trustedCertificateAuthorities: TrustedCertificateAuthority[];
+}
+
+export interface TrustedCertificateAuthority {
+  origin: string;
+  fingerprint256: string;
+  subject: string;
+  trustedAt: number;
 }
