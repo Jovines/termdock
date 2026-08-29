@@ -114,6 +114,9 @@ function scheduleLogBudgetMaintenance(): void {
 }
 
 export function startTermdockLogMaintenance(): () => void {
+  // Integration tests may start a real HTTP server while still using the
+  // developer's HOME. Never let a test process prune production diagnostics.
+  if (process.env.NODE_ENV === 'test') return () => {};
   enforceTermdockLogBudget();
   if (!maintenanceTimer) {
     maintenanceTimer = setInterval(enforceTermdockLogBudget, LOG_MAINTENANCE_INTERVAL_MS);
