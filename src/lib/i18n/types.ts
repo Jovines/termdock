@@ -89,6 +89,9 @@ export type TranslationDictionary = {
     newSessionWithAgent: (params: TranslatorParams) => string;
     newSessionAdvanced: string;
     newSessionHint: string;
+    launchSessionWith: (params: TranslatorParams) => string;
+    setNewSessionDefault: (params: TranslatorParams) => string;
+    currentNewSessionDefault: (params: TranslatorParams) => string;
     workingDirectory: string;
     directoryPlaceholder: string;
     startCommand: string;
@@ -178,7 +181,6 @@ export type TranslationDictionary = {
     tabChanges: string;
     tabGit: string;
     tabFiles: string;
-    tabPreview: string;
     inserted: string;
     copied: string;
     toggleContextDraft: string;

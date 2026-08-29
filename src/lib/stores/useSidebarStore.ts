@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import type { FileWatchEvent, GitChangedFile } from '../terminal/api';
 import { readCache, writeCache } from '../utils/localStorageCache';
 
-export type RightSidebarTab = 'git' | 'files' | 'diff' | 'file';
+export type RightSidebarTab = 'git' | 'files' | 'diff';
 
 const RIGHT_SIDEBAR_TABS_BY_CONTEXT_CACHE_KEY = 'termdock:right-sidebar:tabs-by-session:v2';
 const EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:explorer-roots-by-session:v2';
@@ -141,7 +141,7 @@ interface ProjectSidebarState {
 }
 
 function isRightSidebarTab(value: unknown): value is RightSidebarTab {
-  return value === 'git' || value === 'files' || value === 'diff' || value === 'file';
+  return value === 'git' || value === 'files' || value === 'diff';
 }
 
 function isRightSidebarTabCache(value: unknown): value is Record<string, RightSidebarTab> {

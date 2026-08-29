@@ -77,7 +77,7 @@ describe('useSidebarStore session-scoped right sidebar state', () => {
 
   it('keeps open file, explorer root, expansion, and tab separate for sessions in the same directory', () => {
     useSidebarStore.getState().setRootPath('/workspace/shared', 'session-a');
-    useSidebarStore.getState().setRightTab('file');
+    useSidebarStore.getState().setRightTab('diff');
     useSidebarStore.getState().setExplorerRoot('/workspace/shared/docs');
     useSidebarStore.getState().toggleExpanded('/workspace/shared/docs');
     useSidebarStore.getState().selectFile('/workspace/shared/docs/a.md');
@@ -92,7 +92,7 @@ describe('useSidebarStore session-scoped right sidebar state', () => {
     useSidebarStore.getState().selectFile('/workspace/shared/src/b.ts');
     useSidebarStore.getState().setRootPath('/workspace/shared', 'session-a');
 
-    expect(useSidebarStore.getState().rightTab).toBe('file');
+    expect(useSidebarStore.getState().rightTab).toBe('diff');
     expect(useSidebarStore.getState().explorerRoot).toBe('/workspace/shared/docs');
     expect(useSidebarStore.getState().expandedPaths).toEqual(new Set(['/workspace/shared/docs']));
     expect(useSidebarStore.getState().selectedFilePath).toBe('/workspace/shared/docs/a.md');

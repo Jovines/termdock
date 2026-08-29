@@ -1,4 +1,4 @@
-import { Check, Folder, LoaderCircle, RefreshCw, Terminal, X } from 'lucide-react';
+import { Check, Folder, LoaderCircle, Pin, RefreshCw, Terminal, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { getDirectorySuggestions, type AgentLauncherInfo } from '../../terminal/api';
 import { getCwdLeafName } from '../../terminal/display';
@@ -15,6 +15,7 @@ export function NewSessionComposer({
   detecting,
   onRefreshAgents,
   onSelectAgent,
+  onLaunchAgent,
   onClose,
   onOptionsChange,
 }: {
@@ -26,6 +27,7 @@ export function NewSessionComposer({
   detecting: boolean;
   onRefreshAgents: () => void;
   onSelectAgent: (agent: NewSessionAgentPreference) => void;
+  onLaunchAgent: (agent: NewSessionAgentPreference) => void;
   onClose: () => void;
   onOptionsChange: (options: { mode: 'shell' | 'tmux'; cwd?: string; command?: string }) => void;
 }) {
@@ -68,7 +70,7 @@ export function NewSessionComposer({
           </span>
           <div className="min-w-0">
             <div className="text-[12px] font-semibold text-foreground">{t('sidebar.newSession')}</div>
-            <div className="truncate text-[10.5px] text-muted-foreground">Agent · {t('sidebar.workingDirectory')}</div>
+            <div className="truncate text-[10.5px] text-muted-foreground">{t('sidebar.newSessionHint')}</div>
           </div>
         </div>
         <button type="button" onClick={onClose} className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground" aria-label={t('common.close')}>
@@ -98,35 +100,36 @@ export function NewSessionComposer({
         </button>
       </div>
       <div className="mt-1.5 grid grid-cols-2 gap-1">
-        <button
-          type="button"
-          onClick={() => {
-            onSelectAgent(null);
-            onOptionsChange({ ...options, command: undefined });
-          }}
-          className={`flex min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${selectedAgent === null ? 'bg-primary/15 text-primary ring-1 ring-primary/30' : 'bg-surface text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
-        >
-          <Terminal size={12} className="shrink-0" />
-          <span className="truncate text-[11px] font-semibold">Terminal</span>
-          {selectedAgent === null && <Check size={11} className="ml-auto shrink-0" />}
-        </button>
-        {agents.map((agent) => {
-          const selected = selectedAgent?.slug === agent.slug;
+        {[null, ...agents].map((agent) => {
+          const isTerminal = agent === null;
+          const selected = isTerminal ? selectedAgent === null : selectedAgent?.slug === agent.slug;
+          const name = isTerminal ? 'Terminal' : agent.displayName;
           return (
-            <button
-              key={agent.slug}
-              type="button"
-              onClick={() => {
-                onSelectAgent(agent);
-                onOptionsChange({ ...options, command: agent.command });
-              }}
-              title={agent.command}
-              className={`flex min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${selected ? 'bg-primary/15 text-primary ring-1 ring-primary/30' : 'bg-surface text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+            <div
+              key={agent?.slug ?? 'terminal'}
+              className={`flex min-w-0 overflow-hidden rounded-lg transition ${selected ? 'bg-primary/15 text-primary ring-1 ring-primary/30' : 'bg-surface text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
             >
-              <AgentBrandAvatar agent={agent} size={14} />
-              <span className="truncate text-[11px] font-semibold">{agent.displayName}</span>
-              {selected && <Check size={11} className="ml-auto shrink-0" />}
-            </button>
+              <button
+                type="button"
+                onClick={() => onLaunchAgent(agent)}
+                title={t('sidebar.launchSessionWith', { name })}
+                aria-label={t('sidebar.launchSessionWith', { name })}
+                className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2 text-left"
+              >
+                {isTerminal ? <Terminal size={12} className="shrink-0" /> : <AgentBrandAvatar agent={agent} size={14} />}
+                <span className="truncate text-[11px] font-semibold">{name}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onSelectAgent(agent)}
+                title={selected ? t('sidebar.currentNewSessionDefault', { name }) : t('sidebar.setNewSessionDefault', { name })}
+                aria-label={selected ? t('sidebar.currentNewSessionDefault', { name }) : t('sidebar.setNewSessionDefault', { name })}
+                aria-pressed={selected}
+                className={`inline-flex w-8 shrink-0 items-center justify-center border-l border-border/10 transition ${selected ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                {selected ? <Check size={11} /> : <Pin size={10} />}
+              </button>
+            </div>
           );
         })}
         {detecting && agents.length === 0 && (

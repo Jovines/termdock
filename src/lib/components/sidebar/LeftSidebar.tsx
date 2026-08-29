@@ -309,6 +309,16 @@ export function LeftSidebar(
     closeIfOverlay();
   };
 
+  const handleQuickLaunchAgent = (agent: import('../../hooks/useNewSessionAgentPreference').NewSessionAgentPreference) => {
+    onNewSession({
+      ...newSessionOptions,
+      cwd: newSessionOptions.cwd?.trim() || undefined,
+      command: agent?.command,
+    });
+    setNewSessionComposerOpen(false);
+    closeIfOverlay();
+  };
+
   const toggleNewSessionComposer = () => {
     if (newSessionComposerOpen) {
       setNewSessionComposerOpen(false);
@@ -1166,6 +1176,7 @@ export function LeftSidebar(
           detecting={detectingNewSessionAgents}
           onRefreshAgents={() => { void refreshNewSessionAgents().catch(() => undefined); }}
           onSelectAgent={(agent) => { void selectNewSessionAgent(agent).catch(() => undefined); }}
+          onLaunchAgent={handleQuickLaunchAgent}
           onClose={() => setNewSessionComposerOpen(false)}
           onOptionsChange={setNewSessionOptions}
         />

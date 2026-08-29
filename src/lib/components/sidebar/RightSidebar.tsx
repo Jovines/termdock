@@ -13,7 +13,6 @@ import {
   ChevronDown as RiChevronDown,
   Folder as RiFolder,
   Home as RiHome,
-  List as RiList,
   GitCompare as RiGitCompare,
   Search as RiSearch,
   MoreHorizontal as RiMoreHorizontal,
@@ -44,9 +43,9 @@ import { DiffReview, type DiffReviewFile, ChangeBadge, nextDiffStreamScrollReque
 import { ChangeStatusWithAuditBadge, getFileAuditStatus } from './AuditStatusBadge';
 import { ChangeWalkthroughPanel } from './ChangeWalkthroughPanel';
 import type { DiffInlineMode, DiffViewType } from './DiffViewer';
-import { useDiffDisplayPrefs, type DiffContextPref, type DiffWhitespacePref } from './diffDisplayPrefs';
+import { useDiffDisplayPrefs } from './diffDisplayPrefs';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
-import { useSidebarStore, type RightSidebarTab } from '../../stores/useSidebarStore';
+import { useSidebarStore } from '../../stores/useSidebarStore';
 import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
@@ -142,9 +141,6 @@ const MAX_FILE_TREE_WIDTH_PX = 560;
 // mode collapses to a single column with back-navigation, and the third
 // "File" tab is hidden (its content is reachable via the Files tab).
 const MOBILE_WIDTH_THRESHOLD_PX = 600;
-// Wide mode keeps the dual-pane workspace; below this width the panel falls
-// back to stacked tabs even on desktop.
-const WIDE_WIDTH_THRESHOLD_PX = 720;
 const MARKDOWN_TABLE_CELL_CLASS = 'border-r px-2 py-1.5 sm:px-3 sm:py-2';
 const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'max-w-[18rem] whitespace-normal break-words sm:max-w-[27rem]';
 const MARKDOWN_TABLE_HEADER_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-b border-border/15 font-semibold last:border-r-0`;
@@ -6035,7 +6031,6 @@ export function RightSidebar(
   const [hasMountedDiffPane, setHasMountedDiffPane] = useState(
     () => useSidebarStore.getState().rightTab === 'diff',
   );
-  const [hasMountedPreviewPane, setHasMountedPreviewPane] = useState(false);
   const [runningGitAction, setRunningGitAction] = useState<{ action: GitActionKey; path?: string } | null>(null);
   const [completedGitAction, setCompletedGitAction] = useState<{ action: GitActionKey; path?: string; label: string } | null>(null);
   const [confirmGitAction, setConfirmGitAction] = useState<ConfirmGitAction | null>(null);
@@ -6056,7 +6051,6 @@ export function RightSidebar(
   const fileInputRef = useRef<HTMLInputElement>(null);
   const temporaryImageInputRef = useRef<HTMLInputElement>(null);
   const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
-  const isWide = !isMobile && drawerWidthPx >= WIDE_WIDTH_THRESHOLD_PX;
   const [fileTreeWidthPx, setFileTreeWidthPx] = useState(() => readFileTreeWidth(drawerWidthPx));
   const rightTab = useSidebarStore((s) => s.rightTab);
   const setRightTab = useSidebarStore((s) => s.setRightTab);
@@ -6893,7 +6887,7 @@ export function RightSidebar(
   }, [drawerWidthPx]);
 
   const startFileTreeResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    if (!isWide) return;
+    if (isMobile) return;
     event.preventDefault();
     fileTreeResizeRef.current = {
       startX: event.clientX,
@@ -6901,7 +6895,7 @@ export function RightSidebar(
       pointerId: event.pointerId,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
-  }, [fileTreeWidthPx, isWide]);
+  }, [fileTreeWidthPx, isMobile]);
 
   const handleFileTreeResizeMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
     const resize = fileTreeResizeRef.current;
@@ -6924,16 +6918,12 @@ export function RightSidebar(
   }, []);
 
   const gitKnownUnavailable = Boolean(rootPath && gitBundleLastLoadedAt !== null && isConfirmedNonGitContext(gitContext));
-  // Non-Git workspaces have no Git/Changes tabs. Only the medium-width desktop
-  // layout keeps a separate "Preview" tab; mobile (overlay) and wide (side-by-
-  // side) layouts render the preview without a dedicated tab.
-  const effectiveRightTab: RightSidebarTab = gitKnownUnavailable
-    ? (!isMobile && !isWide && rightTab === 'file' ? 'file' : 'files')
-    : (isMobile || isWide) && rightTab === 'file' ? 'files' : rightTab;
+  // Non-Git workspaces have no Git/Changes tabs. File preview is reached from
+  // the Files pane on mobile and remains alongside the tree on desktop.
+  const effectiveRightTab = gitKnownUnavailable ? 'files' : rightTab;
   const gitPaneActive = effectiveRightTab === 'git';
   const filesPaneActive = effectiveRightTab === 'files';
   const diffPaneActive = effectiveRightTab === 'diff';
-  const previewPaneActive = effectiveRightTab === 'file' && !isMobile && !isWide;
   useEffect(() => {
     if (!isMobile) {
       setMobileSidebarSettled(true);
@@ -7008,10 +6998,6 @@ export function RightSidebar(
     setHasMountedDiffPane(true);
   }, [diffPaneActive]);
 
-  useEffect(() => {
-    if (previewPaneActive) setHasMountedPreviewPane(true);
-  }, [previewPaneActive]);
-
   const handleFileTreeScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     if (!fileTreeRoot) return;
     writeFileTreeScrollPosition(fileTreeRoot, event.currentTarget.scrollTop);
@@ -7060,10 +7046,9 @@ export function RightSidebar(
       onOpenRightSidebarFilePreview?.();
       return;
     }
-    // In wide mode the preview is already visible alongside the tree, so we
-    // don't need to switch tabs and steal focus from the user's browse flow.
-    if (!isWide) setRightTab(isMobile ? 'files' : 'file');
-  }, [isMobile, isWide, onOpenRightSidebarFilePreview, selectFile, setRightTab]);
+    // On desktop the preview is already visible alongside the tree, so we
+    // don't switch tabs and steal focus from the browse flow.
+  }, [isMobile, onOpenRightSidebarFilePreview, selectFile]);
 
   // Jump straight to a content-search match: open the file and ask the preview
   // to highlight and scroll to the matched line once its content has loaded.
@@ -7078,8 +7063,7 @@ export function RightSidebar(
       onOpenRightSidebarFilePreview?.();
       return;
     }
-    if (!isWide) setRightTab('file');
-  }, [isMobile, isWide, onOpenRightSidebarFilePreview, selectFile, setRightTab]);
+  }, [isMobile, onOpenRightSidebarFilePreview, selectFile]);
 
   const handleUploadFiles = useCallback(async (files: File[], directoryPath?: string) => {
     const targetDir = directoryPath || explorerRoot || rootPath;
@@ -7384,7 +7368,7 @@ export function RightSidebar(
     // The previewed file can live outside the explorer root (e.g. browsing a
     // subdirectory while a project file is open); keep its parent watched so
     // external edits still reload the preview.
-    if ((filesPaneActive || previewPaneActive) && rootPath && selectedFilePath) {
+    if (filesPaneActive && rootPath && selectedFilePath) {
       const selectedAbsolutePath = selectedFilePath.startsWith('/') ? selectedFilePath : `${rootPath}/${selectedFilePath}`;
       const selectedParent = getParentPath(selectedAbsolutePath);
       // A file directly inside the explorer root needs no extra watcher — the
@@ -7392,7 +7376,7 @@ export function RightSidebar(
       if (selectedParent && selectedParent !== fileTreeRoot) roots.add(selectedParent);
     }
     return [...roots].sort().join('\n');
-  }, [expandedPaths, filesPaneActive, previewPaneActive, fileTreeRoot, rootPath, selectedFilePath]);
+  }, [expandedPaths, filesPaneActive, fileTreeRoot, rootPath, selectedFilePath]);
 
   useEffect(() => {
     const watchedFileRoots = watchedFileRootsKey ? watchedFileRootsKey.split('\n') : [];
@@ -8116,66 +8100,16 @@ export function RightSidebar(
     return renderChangeNavigatorReference(absolutePath, t('fileTree.insertRefTitle'));
   }
 
-  function renderDiffChangeModeToggle() {
-    return (
-      <div className="inline-flex h-7 shrink-0 overflow-hidden rounded-full bg-surface-2 p-0.5" aria-label={t('rightSidebar.diffViewMode')}>
-        <button
-          type="button"
-          onClick={() => setDiffChangeMode('list')}
-          aria-pressed={diffChangeListMode === 'list'}
-          title={t('rightSidebar.diffViewModeList')}
-          className={`inline-flex h-6 w-7 items-center justify-center rounded-full transition active:scale-95 ${
-            diffChangeListMode === 'list'
-              ? 'bg-surface-elevated text-foreground shadow-sm'
-              : 'text-muted-foreground hover:text-foreground'
-          }`}
-        >
-          <RiList size={13} />
-        </button>
-        <button
-          type="button"
-          onClick={() => setDiffChangeMode('tree')}
-          aria-pressed={diffChangeListMode === 'tree'}
-          title={t('rightSidebar.diffViewModeTree')}
-          className={`inline-flex h-6 w-7 items-center justify-center rounded-full transition active:scale-95 ${
-            diffChangeListMode === 'tree'
-              ? 'bg-surface-elevated text-foreground shadow-sm'
-              : 'text-muted-foreground hover:text-foreground'
-          }`}
-        >
-          <RiListTree size={13} />
-        </button>
-        {showChangeAiMode && (
-          <button
-            type="button"
-            onClick={() => setDiffChangeMode('ai')}
-            aria-pressed={diffChangeListMode === 'ai'}
-            title={t('rightSidebar.diffViewModeAi')}
-            className={`inline-flex h-6 w-7 items-center justify-center rounded-full transition active:scale-95 ${
-              diffChangeListMode === 'ai'
-                ? 'bg-surface-elevated text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <RiSparkles size={13} />
-          </button>
-        )}
-      </div>
-    );
-  }
-
   function renderDiffViewTypeToggle() {
-    const splitEnabled = isWide;
-    const effectiveMode: DiffViewType = splitEnabled ? diffViewType : 'unified';
     return (
       <div className="inline-flex h-7 shrink-0 overflow-hidden rounded-full bg-surface-2 p-0.5" aria-label={t('diffViewer.view')}>
         <button
           type="button"
           onClick={() => setDiffViewMode('unified')}
-          aria-pressed={effectiveMode === 'unified'}
+          aria-pressed={diffViewType === 'unified'}
           title={t('diffViewer.unifiedMode')}
           className={`inline-flex h-6 items-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 ${
-            effectiveMode === 'unified'
+            diffViewType === 'unified'
               ? 'bg-surface-elevated text-foreground shadow-sm'
               : 'text-muted-foreground hover:text-foreground'
           }`}
@@ -8185,11 +8119,10 @@ export function RightSidebar(
         <button
           type="button"
           onClick={() => setDiffViewMode('split')}
-          disabled={!splitEnabled}
-          aria-pressed={effectiveMode === 'split'}
-          title={splitEnabled ? t('diffViewer.splitMode') : t('diffViewer.unifiedMode')}
-          className={`inline-flex h-6 items-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 ${
-            effectiveMode === 'split'
+          aria-pressed={diffViewType === 'split'}
+          title={t('diffViewer.splitMode')}
+          className={`inline-flex h-6 items-center rounded-full px-2 text-[10px] font-semibold transition active:scale-95 ${
+            diffViewType === 'split'
               ? 'bg-surface-elevated text-foreground shadow-sm'
               : 'text-muted-foreground hover:text-foreground'
           }`}
@@ -9128,8 +9061,6 @@ export function RightSidebar(
   const {
     whitespace: diffWhitespacePref,
     context: diffContextPref,
-    setWhitespace: setDiffWhitespacePref,
-    setContext: setDiffContextPref,
   } = useDiffDisplayPrefs();
   const diffOptions = useMemo<GitDiffOptions>(() => ({
     algorithm: 'histogram',
@@ -9915,8 +9846,7 @@ export function RightSidebar(
       setMobileFilePreviewOpen(false);
       return;
     }
-    if (!isWide) setRightTab('files');
-  }, [isMobile, isWide, onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen, selectFile, setExplorerRoot, setRightTab]);
+  }, [isMobile, onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen, selectFile, setExplorerRoot]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -10454,41 +10384,12 @@ export function RightSidebar(
           </div>
         )}
 
-        {/* Tab bar — non-Git workspaces drop the Git/Changes tabs. On mobile
-            (overlay preview) and wide (side-by-side preview) layouts the file
-            browser fills the panel with no tab bar at all; only the medium
-            desktop layout keeps a Files/Preview switch. */}
+        {/* Non-Git workspaces need no tab bar: mobile reaches preview from the
+            file list, while desktop keeps it alongside the tree. */}
         {gitKnownUnavailable ? (
-          !isMobile && !isWide ? (
-            <div className="mt-2 grid grid-cols-2 gap-0.5 rounded-md bg-surface-2 p-0.5">
-              <button
-                type="button"
-                onClick={() => setRightTab('files')}
-                className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-                  effectiveRightTab === 'files'
-                    ? 'bg-surface-elevated text-foreground'
-                    : 'text-muted-foreground hover:bg-surface-2'
-                }`}
-              >
-                <RiFolder size={12} />
-                {t('rightSidebar.tabFiles')}
-              </button>
-              <button
-                type="button"
-                onClick={() => setRightTab('file')}
-                className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-                  effectiveRightTab === 'file'
-                    ? 'bg-surface-elevated text-foreground'
-                    : 'text-muted-foreground hover:bg-surface-2'
-                }`}
-              >
-                <RiFileText size={12} />
-                {t('rightSidebar.tabPreview')}
-              </button>
-            </div>
-          ) : null
+          null
         ) : (
-          <div className={`mt-2 grid gap-0.5 rounded-md bg-surface-2 p-0.5 ${isMobile ? 'grid-cols-3' : isWide ? 'grid-cols-3' : 'grid-cols-4'}`}>
+          <div className="mt-2 grid grid-cols-3 gap-0.5 rounded-md bg-surface-2 p-0.5">
             <button
               type="button"
               onClick={() => setRightTab('git')}
@@ -10531,20 +10432,6 @@ export function RightSidebar(
               <RiFolder size={12} />
               {t('rightSidebar.tabFiles')}
             </button>
-            {!isMobile && !isWide && (
-              <button
-                type="button"
-                onClick={() => setRightTab('file')}
-                className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11px] font-medium transition active:scale-[0.98] ${
-                  effectiveRightTab === 'file'
-                    ? 'bg-surface-elevated text-foreground'
-                    : 'text-muted-foreground hover:bg-surface-2'
-                }`}
-              >
-                <RiFileText size={12} />
-                {t('rightSidebar.tabPreview')}
-              </button>
-            )}
           </div>
         )}
         <div className="h-2" />
@@ -10582,11 +10469,11 @@ export function RightSidebar(
                 }}
                 closeLabel={t('common.back')}
                 wrap={diffWrap}
-                onToggleWrap={isWide ? undefined : toggleDiffWrap}
+                onToggleWrap={isMobile ? toggleDiffWrap : undefined}
                 wrapTitle={t('rightSidebar.wrapLongLines')}
                 wrapOnLabel={t('rightSidebar.wrapOn')}
                 wrapOffLabel={t('rightSidebar.wrapOff')}
-                desktopLayout={isWide ? 'split' : 'stacked'}
+                desktopLayout={isMobile ? 'stacked' : 'split'}
                 onInsertDiffReference={insertContextText}
                 onReferenceCopied={markReferenceCopied}
                 insertedReferenceKey={insertedReferenceKey}
@@ -10613,11 +10500,11 @@ export function RightSidebar(
                 }}
                 closeLabel={t('common.back')}
                 wrap={diffWrap}
-                onToggleWrap={isWide ? undefined : toggleDiffWrap}
+                onToggleWrap={isMobile ? toggleDiffWrap : undefined}
                 wrapTitle={t('rightSidebar.wrapLongLines')}
                 wrapOnLabel={t('rightSidebar.wrapOn')}
                 wrapOffLabel={t('rightSidebar.wrapOff')}
-                desktopLayout={isWide ? 'split' : 'stacked'}
+                desktopLayout={isMobile ? 'stacked' : 'split'}
                 onInsertDiffReference={insertContextText}
                 onReferenceCopied={markReferenceCopied}
                 insertedReferenceKey={insertedReferenceKey}
@@ -10657,7 +10544,7 @@ export function RightSidebar(
         </Pane>
 
         <Pane active={filesPaneActive}>
-          {isWide ? (
+          {!isMobile ? (
             <div className="flex h-full min-h-0">
               <div
                 ref={fileTreeScrollRef}
@@ -10743,7 +10630,7 @@ export function RightSidebar(
                 />
               </div>
             </div>
-          ) : isMobile ? (
+          ) : (
             <Swiper
               className="h-full min-h-0 w-full"
               slidesPerView={1}
@@ -10844,77 +10731,11 @@ export function RightSidebar(
                 </div>
               </SwiperSlide>
             </Swiper>
-          ) : (
-            <div
-              ref={fileTreeScrollRef}
-              onScroll={handleFileTreeScroll}
-              onDragOver={handleFileTreeDragOver}
-              onDragEnter={handleFileTreeDragOver}
-              onDragLeave={handleFileTreeDragLeave}
-              onDrop={handleFileTreeDrop}
-              className="h-full overflow-y-auto overscroll-contain relative"
-            >
-              {dragOver && (
-                <div className="pointer-events-none absolute left-3 right-3 top-3 z-10 flex justify-center">
-                  <div className="rounded-xl bg-surface-elevated px-4 py-2 text-sm font-semibold text-foreground shadow-lg">
-                    {t('rightSidebar.dropToUpload')}
-                  </div>
-                </div>
-              )}
-              {fileExplorerNavigation}
-              <FileTree
-                rootPath={fileTreeRoot ?? ''}
-                onFileSelect={handleFileSelect}
-                onPathReference={insertPathReference}
-                getReferenceText={getPathReferenceText}
-                onReferenceCopied={markReferenceCopied}
-                insertedReferenceKey={insertedReferenceKey}
-                copiedReferenceKey={copiedReferenceKey}
-                onDirectoryRoot={openDirectoryAsExplorerRoot}
-                onDirectoryPinToggle={togglePinnedDirectory}
-                onFilePinToggle={togglePinnedFile}
-                pinnedPaths={pinnedExplorerRootSet}
-                selectedFilePath={selectedFilePath}
-                query={deferredFileQuery}
-                searchMode={searchMode}
-                onContentMatchSelect={handleContentMatchSelect}
-                onDirectoryDropFiles={(path, files) => handleUploadFiles(files, path)}
-                revealDirectory={directoryReveal}
-                canOpenInFileBrowser={canOpenInFileBrowser}
-                onOpenInFileBrowser={handleOpenInFileBrowser}
-              />
-            </div>
           )}
         </Pane>
 
-        <Pane active={previewPaneActive} mounted={hasMountedPreviewPane}>
-          <FilePreview
-            filePath={previewPaneActive ? selectedFilePath : null}
-            onInsertReference={insertPathReference}
-            onInsertText={insertReferenceText}
-            onInsertFeature={insertReferenceText}
-            onReferenceCopied={markReferenceCopied}
-            onDirectoryLinkOpen={handleMarkdownDirectoryOpen}
-            isMobile={false}
-            lineRange={lineRange}
-            onLineRangeChange={setLineRange}
-            insertedReferenceKey={insertedReferenceKey}
-            copiedReferenceKey={copiedReferenceKey}
-            scrollToLine={scrollToLine}
-            onScrollToLineHandled={() => setScrollToLine(null)}
-            markdownOutlineOpen={markdownOutlineOpen}
-            markdownOutlineCloseSignal={markdownOutlineCloseSignal}
-            onOpenMarkdownOutline={onOpenMarkdownOutline}
-            onCloseMarkdownOutline={onCloseMarkdownOutline}
-            markdownImageLightboxOpen={markdownImageLightboxOpen}
-            markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
-            onOpenMarkdownImageLightbox={onOpenMarkdownImageLightbox}
-            onCloseMarkdownImageLightbox={onCloseMarkdownImageLightbox}
-          />
-        </Pane>
-
         <Pane active={diffPaneActive} mounted={hasMountedDiffPane || diffPaneActive}>
-          {() => (isWide ? (
+          {() => (!isMobile ? (
             <DiffReview
               mobile={false}
               desktopLayout="split"
@@ -11019,7 +10840,7 @@ export function RightSidebar(
               activePane={diffPaneActive}
               wrap={diffWrap}
               showScrollHint={!diffWrap}
-              diffViewType={isWide ? diffViewType : 'unified'}
+              diffViewType={diffViewType}
               inlineMode={diffInlineMode}
               diffOptions={diffOptions}
               reloadKey={diffRefreshKey}
@@ -11033,101 +10854,7 @@ export function RightSidebar(
               onDetailScroll={syncSelectionFromDiffStream}
             />
           ) : (
-            <div className="flex h-full min-h-0 flex-col overflow-hidden">
-              {rootPath && !isMobile && (
-                <div className="shrink-0 border-b border-border/15">
-                  <div className="px-3 py-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                        {t('rightSidebar.allChanges')}
-                      </div>
-                      <div className="mt-0.5 text-[11px] text-muted-foreground">
-                        {filteredChangedFiles.length}/{changedFiles.size}
-                      </div>
-                    </div>
-                    <span className="shrink-0 text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
-                  </div>
-                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-                    {renderRepoSwitcherButton()}
-                    {renderDiffChangeModeToggle()}
-                    {renderDiffViewTypeToggle()}
-                    {changeAuditButton}
-                    {diffRefreshButton}
-                    <button
-                      type="button"
-                      onClick={toggleDiffWrap}
-                      aria-pressed={diffWrap}
-                      title={t('rightSidebar.wrapLongLines')}
-                      className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
-                        diffWrap
-                          ? 'bg-primary/15 text-primary'
-                          : 'bg-surface-2 text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      <span className="font-mono text-[12px] leading-none">Aa</span>
-                      <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
-                    </button>
-                    <select
-                      value={diffWhitespacePref}
-                      onChange={(event) => setDiffWhitespacePref(event.target.value as DiffWhitespacePref)}
-                      aria-label={t('diffViewer.whitespace')}
-                      className="h-7 shrink-0 rounded-full border border-border/20 bg-surface-2 px-2 text-[11px] font-medium text-muted-foreground outline-none transition hover:text-foreground"
-                      title={t('diffViewer.whitespace')}
-                    >
-                      <option value="default">{t('diffViewer.whitespaceDefault')}</option>
-                      <option value="trim">{t('diffViewer.whitespaceTrim')}</option>
-                      <option value="ignore">{t('diffViewer.whitespaceIgnore')}</option>
-                      <option value="ignore-blank-lines">{t('diffViewer.whitespaceIgnoreBlankLines')}</option>
-                    </select>
-                    <select
-                      value={String(diffContextPref)}
-                      onChange={(event) => setDiffContextPref(event.target.value === 'all' ? 'all' : Number(event.target.value) as DiffContextPref)}
-                      aria-label={t('diffViewer.context')}
-                      className="h-7 shrink-0 rounded-full border border-border/20 bg-surface-2 px-2 text-[11px] font-medium text-muted-foreground outline-none transition hover:text-foreground"
-                      title={t('diffViewer.context')}
-                    >
-                      {([3, 10, 25] as const).map((count) => (
-                        <option key={count} value={String(count)}>{t('diffViewer.contextLines', { count })}</option>
-                      ))}
-                      <option value="all">{t('diffViewer.contextAll')}</option>
-                    </select>
-                  </div>
-                  {activeGitRepoSummary && (
-                    <div className="mt-2 flex items-center gap-1.5">
-                      <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
-                      {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
-                      <button
-                        type="button"
-                        onClick={() => runRepoGitAction('stage-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
-                        disabled={Boolean(runningGitAction)}
-                        className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
-                        title={t('rightSidebar.stageAll')}
-                      >
-                        {t('rightSidebar.stageAll')}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => runRepoGitAction('stash-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
-                        disabled={Boolean(runningGitAction)}
-                        className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
-                        title={t('rightSidebar.stashAll')}
-                      >
-                        {t('rightSidebar.stashAll')}
-                      </button>
-                    </div>
-                  )}
-                  {!activeGitRepoSummary && showGitRepoFilter && (
-                    <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
-                      <RiGitBranch size={12} className="shrink-0" />
-                      <span className="min-w-0 flex-1 truncate">{t('rightSidebar.selectRepositoryForDiff')}</span>
-                    </div>
-                  )}
-                  </div>
-                </div>
-              )}
-              {isMobile ? (
-                <DiffReview
+            <DiffReview
                   mobile
                   backLabel={t('rightSidebar.backToChangeList')}
                   externalSwiperRef={mobileDiffSwiperRef}
@@ -11252,142 +10979,7 @@ export function RightSidebar(
                   copiedReferenceKey={copiedReferenceKey}
                   onClearAuditRecord={handleClearAuditRecord}
                   onDetailScroll={syncSelectionFromDiffStream}
-                />
-              ) : (
-                <DiffReview
-                  mobile={false}
-                  desktopLayout="stacked"
-                  backLabel={t('rightSidebar.backToChangeList')}
-                  groups={filteredChangedFiles.length > 0 ? buildDiffNavigatorGroups() : []}
-                  mode={diffChangeListMode}
-                  onModeChange={setDiffChangeMode}
-                  selectedKey={selectedFilePath}
-                  scrollToKey={effectiveDiffStreamScrollKey}
-                  scrollToKeyNonce={diffStreamScrollRequest.nonce}
-                  compact={false}
-                  collapsedDirectoryKeys={collapsedDiffDirectories}
-                  onToggleDirectory={toggleDiffDirectory}
-                  onSelectFile={(navigatorFile) => {
-                    const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
-                    if (!file) return;
-                    selectDiffFile(getChangedFileSelectionPath(file));
-                  }}
-                  renderLeading={renderChangeNavigatorLeading}
-                  renderTrailing={(navigatorFile) => {
-                    const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
-                    return file ? renderChangeNavigatorTrailing(file) : null;
-                  }}
-                  renderDirectoryTrailing={renderChangeNavigatorDirectoryTrailing}
-                  renderSubtitle={(navigatorFile) => {
-                    const file = Array.from(changedFiles.values()).find((candidate) => getChangedFileSelectionPath(candidate) === navigatorFile.key);
-                    return file ? renderChangeNavigatorSubtitle(file) : null;
-                  }}
-                  aiContent={showChangeAiMode ? ((controls) => renderChangeWalkthroughPanel(controls)) : undefined}
-                  emptyContent={(
-                    gitBundleLoading && changedFiles.size === 0 && gitBundleLastLoadedAt === null ? (
-                      <GitChangesLoadingState slow={gitBundleSlow} />
-                    ) : gitBundleError && changedFiles.size === 0 ? (
-                      <GitChangesErrorState message={gitBundleError} onRetry={() => void refreshGitState()} />
-                    ) : changedFiles.size === 0 ? (
-                      <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-                        {t('rightSidebar.noChanges')}
-                      </div>
-                    ) : filteredChangedFiles.length === 0 ? (
-                      <div className="bg-surface-2 px-3 py-4 text-center text-xs text-muted-foreground">
-                        {t('rightSidebar.noMatchingChanges')}
-                      </div>
-                    ) : null
-                  )}
-                  renderListHeader={(modeToggle) => rootPath && (
-                    <div className="px-0 py-0">
-                      {gitSummaryChips && (
-                        <div className="mb-2">
-                          {gitSummaryChips}
-                        </div>
-                      )}
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                            {t('rightSidebar.allChanges')}
-                          </div>
-                          <div className="mt-0.5 text-[11px] text-muted-foreground">
-                            {filteredChangedFiles.length}/{changedFiles.size}
-                          </div>
-                        </div>
-                        <span className="shrink-0 text-[10px] text-muted-foreground">{filteredChangedFiles.length}/{changedFiles.size}</span>
-                      </div>
-                      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-                        {renderRepoSwitcherButton()}
-                        {modeToggle}
-                        {renderDiffViewTypeToggle()}
-                        {changeAuditButton}
-                        {diffRefreshButton}
-                        <button
-                          type="button"
-                          onClick={toggleDiffWrap}
-                          aria-pressed={diffWrap}
-                          title={t('rightSidebar.wrapLongLines')}
-                          className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] font-medium transition active:scale-95 ${
-                            diffWrap
-                              ? 'bg-primary/15 text-primary'
-                              : 'bg-surface-2 text-muted-foreground hover:text-foreground'
-                          }`}
-                        >
-                          <span className="font-mono text-[12px] leading-none">Aa</span>
-                          <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
-                        </button>
-                      </div>
-                      {activeGitRepoSummary && (
-                        <div className="mt-2 flex items-center gap-1.5">
-                          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{activeGitRepoSummary.label}</span>
-                          {activeGitRepoSummary.branch && <span className="max-w-[7rem] truncate rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{activeGitRepoSummary.branch}</span>}
-                          <button
-                            type="button"
-                            onClick={() => runRepoGitAction('stage-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
-                            disabled={Boolean(runningGitAction)}
-                            className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20 disabled:opacity-50"
-                            title={t('rightSidebar.stageAll')}
-                          >
-                            {t('rightSidebar.stageAll')}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => runRepoGitAction('stash-all', activeGitRepoSummary.root, activeGitRepoSummary.label)}
-                            disabled={Boolean(runningGitAction)}
-                            className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-surface-elevated disabled:opacity-50"
-                            title={t('rightSidebar.stashAll')}
-                          >
-                            {t('rightSidebar.stashAll')}
-                          </button>
-                        </div>
-                      )}
-                      {!activeGitRepoSummary && showGitRepoFilter && (
-                        <div className="mt-2 flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-[11px] text-muted-foreground">
-                          <RiGitBranch size={12} className="shrink-0" />
-                          <span className="min-w-0 flex-1 truncate">{t('rightSidebar.selectRepositoryForDiff')}</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  files={buildDiffReviewFiles()}
-                  activePane={diffPaneActive}
-                  wrap={diffWrap}
-                  showScrollHint={!diffWrap}
-                  diffViewType={isWide ? diffViewType : 'unified'}
-                  inlineMode={diffInlineMode}
-                  diffOptions={diffOptions}
-                  reloadKey={diffRefreshKey}
-                  renderStreamBadge={(status) => <ChangeBadge status={status} />}
-                  onHunkGitAction={runDiffHunkAction}
-                  onInsertDiffReference={insertContextText}
-                  onReferenceCopied={markReferenceCopied}
-                  insertedReferenceKey={insertedReferenceKey}
-                  copiedReferenceKey={copiedReferenceKey}
-                  onClearAuditRecord={handleClearAuditRecord}
-                  onDetailScroll={syncSelectionFromDiffStream}
-                />
-              )}
-            </div>
+            />
           ))}
         </Pane>
       </div>
