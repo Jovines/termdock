@@ -31,7 +31,13 @@ import { getCookieSecurityOptions, setSecureCookieMode } from './utils/cookieSec
 import { requestDeadlineMiddleware } from './utils/requestDeadline.js';
 import { startOnboardingServer, stopOnboardingServer, getOnboardingServerUrl } from './onboardingServer.js';
 import { CertificateWatcher } from './certificateWatcher.js';
-import { writeDiffTraceLog, writeErrorLog, writeJsonLog, writeTextLog } from './utils/serverLogger.js';
+import {
+  startTermdockLogMaintenance,
+  writeDiffTraceLog,
+  writeErrorLog,
+  writeJsonLog,
+  writeTextLog,
+} from './utils/serverLogger.js';
 import { resolveRuntimeClientDist } from './utils/runtimeClient.js';
 import {
   getTermdockVersion,
@@ -550,6 +556,7 @@ function reloadHttpsCertificate(server: HttpServer, options: ServerOptions): boo
 }
 
 export function startServer(options: ServerOptions = {}): StartServerResult {
+  const stopLogMaintenance = startTermdockLogMaintenance();
   const port = options.port ?? Number(process.env.PORT || DEFAULT_PORT);
   const host = options.host ?? (process.env.HOST || DEFAULT_HOST);
   const app = createApp({ port: options.onboardingPort ?? port, httpsCaPath: options.httpsCaPath, localApiToken: options.localApiToken });
@@ -701,6 +708,7 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   });
 
   server.on('close', () => {
+    stopLogMaintenance();
     certWatcher.stop();
     stopOnboardingServer();
     void localAccessManager.stop();
