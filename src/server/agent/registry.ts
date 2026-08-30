@@ -266,6 +266,47 @@ function replayFlags(agent: AgentInfo, argv: string[]): string[] | null {
 }
 
 /**
+ * Recover a native session id from an already-resumed Agent process. Hooks
+ * are authoritative, but after a tmux/server interruption the session-start
+ * hook may have happened before Termdock reattached. The live argv is then
+ * the only durable source available for a future recovery.
+ */
+export function inferResumeSessionId(agent: AgentInfo, argv: string[]): string | null {
+  const safeId = (value: string | undefined): string | null =>
+    value && /^[A-Za-z0-9._-]+$/.test(value) ? value : null;
+  let named = -1;
+  for (let index = 0; index < argv.length; index += 1) {
+    if (tokenNamesAgent(argv[index], agent)) {
+      named = index;
+      break;
+    }
+  }
+  if (named < 0) return null;
+  const tail = argv.slice(named + 1);
+
+  if (agent.slug === 'codex') {
+    const resume = tail.indexOf('resume');
+    return resume >= 0 ? safeId(tail[resume + 1]) : null;
+  }
+  if (agent.slug === 'amp') {
+    const threads = tail.findIndex((value, index) => value === 'threads' && tail[index + 1] === 'continue');
+    return threads >= 0 ? safeId(tail[threads + 2]) : null;
+  }
+
+  const flags = agent.slug === 'opencode' || agent.slug === 'kimi'
+    ? ['--session', '-s', '-S']
+    : ['--resume', '-r'];
+  for (let index = 0; index < tail.length; index += 1) {
+    const token = tail[index];
+    if (flags.includes(token)) return safeId(tail[index + 1]);
+    for (const flag of flags.filter((value) => value.length > 2)) {
+      if (token.startsWith(`${flag}=`)) return safeId(token.slice(flag.length + 1));
+    }
+  }
+  return null;
+}
+
+/**
  * The shell command resuming a session, or null when the agent has no known
  * resume flag or the id/flags aren't shell-safe. Ids come from the agent's own
  * hook events but still land on a shell command line — refuse anything that

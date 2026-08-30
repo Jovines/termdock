@@ -7,7 +7,9 @@ import { useSessionPersistence, type PersistedSession } from '../hooks/useSessio
 import { VIEWPORT_LAYOUT_CHANGE_EVENT } from '../hooks/useViewportHeight';
 import {
   closeTerminal,
+  dismissTmuxRecovery,
   killTmuxSession,
+  restoreAllTmuxAgentSessions,
   sendTerminalInput,
   suspendTerminalConnectionReconnects,
 } from '../terminal/api';
@@ -32,7 +34,7 @@ import { clientLog } from '../utils/clientLog';
 import { markStartupMilestone } from '../utils/startupPerformance';
 import { pickSessionAfterClose } from '../utils/sessionSelection';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
-import { Check, Columns2, Folder, Plus, X } from 'lucide-react';
+import { AlertTriangle, Check, Columns2, Folder, Plus, RotateCcw, X } from 'lucide-react';
 import { useI18n } from '../i18n';
 import {
   combineSplitWorkspaces,
@@ -423,6 +425,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [splitWorkspaces, setSplitWorkspaces] = useState<SplitWorkspace[]>(() => readSplitWorkspaces());
   const [splitChooserOpen, setSplitChooserOpen] = useState(false);
   const [splitNotice, setSplitNotice] = useState<string | null>(null);
+  const [tmuxRecoveryPending, setTmuxRecoveryPending] = useState<'restore' | 'dismiss' | null>(null);
+  const [tmuxRecoveryError, setTmuxRecoveryError] = useState<string | null>(null);
   const [isCreatingSplitSession, setIsCreatingSplitSession] = useState(false);
   const [isMobileLayout, setIsMobileLayout] = useState(() => detectMobileSplitLayout().mobile);
   const [isMobileLandscape, setIsMobileLandscape] = useState(() => detectMobileSplitLayout().landscape);
@@ -459,6 +463,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, []);
   const {
     sessions: persistedSessions,
+    inventory,
     activeSessionId: persistedActiveId,
     isLoading,
     openSession,
@@ -467,7 +472,43 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     renameSession,
     resetSessionCustomName,
     reorderSessions,
+    restoreSessions,
   } = useSessionPersistence();
+
+  const tmuxRecovery = inventory?.tmuxRecovery ?? null;
+  useEffect(() => {
+    setTmuxRecoveryError(null);
+    setTmuxRecoveryPending(null);
+  }, [tmuxRecovery?.id]);
+
+  const handleRestoreAllTmuxAgents = useCallback(async () => {
+    setTmuxRecoveryPending('restore');
+    setTmuxRecoveryError(null);
+    try {
+      const result = await restoreAllTmuxAgentSessions();
+      await restoreSessions();
+      if (result.failed > 0) {
+        setTmuxRecoveryError(t('tab.tmuxRecoveryPartial', { restored: result.restored, failed: result.failed }));
+      }
+    } catch {
+      setTmuxRecoveryError(t('tab.tmuxRecoveryFailed'));
+    } finally {
+      setTmuxRecoveryPending(null);
+    }
+  }, [restoreSessions, t]);
+
+  const handleDismissTmuxRecovery = useCallback(async () => {
+    setTmuxRecoveryPending('dismiss');
+    setTmuxRecoveryError(null);
+    try {
+      await dismissTmuxRecovery();
+      await restoreSessions();
+    } catch {
+      setTmuxRecoveryError(t('tab.tmuxRecoveryDismissFailed'));
+    } finally {
+      setTmuxRecoveryPending(null);
+    }
+  }, [restoreSessions, t]);
 
   // 分组状态（与顶栏 tab / 侧边栏共享同一份）。
   const groupByFolder = useSidebarStore((s) => s.groupByFolder);
@@ -1901,6 +1942,54 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   return (
     <div className="relative h-full flex flex-col">
+      {tmuxRecovery && (
+        <section
+          className="fixed inset-x-3 top-[calc(var(--safe-top-inset)+0.75rem)] z-toast mx-auto max-w-lg rounded-2xl border border-warning/30 bg-surface-elevated px-4 py-3.5 shadow-[0_20px_60px_var(--app-shadow-strong)]"
+          role="alert"
+          aria-live="assertive"
+        >
+          <div className="flex items-start gap-3">
+            <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-warning/15 text-warning">
+              <AlertTriangle size={18} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h2 className="text-[13px] font-semibold text-foreground">
+                {t('tab.tmuxRecoveryTitle', { count: tmuxRecovery.sessions.length })}
+              </h2>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                {t('tab.tmuxRecoveryHint')}
+              </p>
+              <p className="mt-1.5 truncate text-[10px] text-foreground/70">
+                {tmuxRecovery.sessions.map((session) => session.name).join(' · ')}
+              </p>
+              {tmuxRecoveryError && (
+                <p className="mt-2 text-[10px] text-destructive">{tmuxRecoveryError}</p>
+              )}
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={tmuxRecoveryPending !== null}
+                  onClick={() => void handleRestoreAllTmuxAgents()}
+                  className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-primary px-3 text-[11px] font-medium text-primary-foreground transition active:opacity-80 disabled:opacity-50"
+                >
+                  <RotateCcw size={13} className={tmuxRecoveryPending === 'restore' ? 'animate-spin' : ''} />
+                  {tmuxRecoveryPending === 'restore'
+                    ? t('tab.tmuxRecoveryRestoring')
+                    : t('tab.tmuxRecoveryRestoreAll')}
+                </button>
+                <button
+                  type="button"
+                  disabled={tmuxRecoveryPending !== null}
+                  onClick={() => void handleDismissTmuxRecovery()}
+                  className="inline-flex min-h-9 items-center rounded-lg px-3 text-[11px] text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
+                >
+                  {t('tab.tmuxRecoveryDismiss')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
       <div className="flex-1 overflow-hidden">
         <Swiper
           onSwiper={(instance) => {

@@ -59,6 +59,7 @@ import {
   agentBySlug,
   buildResumeCommand,
   detectAgentFromCommand,
+  inferResumeSessionId,
   listAgents,
   type AgentInfo,
 } from '../agent/registry.js';
@@ -95,6 +96,12 @@ import {
   readPluginIcon,
   validateManifest,
 } from '../agent/plugins.js';
+import { TmuxLifecycleCoordinator } from '../utils/tmuxLifecycle.js';
+import {
+  detectTmuxRecoveryIncident,
+  normalizeTmuxRecoveryIncident,
+  type TmuxRecoveryIncident,
+} from '../utils/tmuxRecovery.js';
 import {
   checkPluginPackageUpdate,
   commitPreparedPlugin,
@@ -420,6 +427,18 @@ interface SessionInventory {
   clientSessions: SessionInventoryClientSession[];
   tmuxSessions: SessionInventoryTmuxSession[];
   tmuxStatus: { available: boolean; version: string | null; reason: string | null };
+  tmuxRecovery: {
+    id: string;
+    detectedAt: number;
+    sessions: Array<{
+      sessionId: string;
+      name: string;
+      tmuxSessionName: string;
+      cwd: string;
+      agentSlug: string;
+      agentDisplayName: string;
+    }>;
+  } | null;
   updatedAt: number;
 }
 
@@ -453,6 +472,13 @@ let globalSessionState: GlobalSessionState = { sessions: [], updatedAt: Date.now
 const GLOBAL_SESSION_STATE_FILE = `${TERMDOCK_DIR}/global-session-state.json`;
 const CLIENT_STATES_FILE = `${TERMDOCK_DIR}/client-states.json`; // 保留用于迁移
 const agentResumeHistory = new AgentResumeHistoryStore(`${TERMDOCK_DIR}/agent-resume-history.json`);
+const TMUX_RECOVERY_STATE_FILE = `${TERMDOCK_DIR}/tmux-recovery-state.json`;
+const tmuxLifecycle = new TmuxLifecycleCoordinator();
+const intentionallyDeletingTmuxSessions = new Set<string>();
+let tmuxRecoveryState: {
+  lastServerPid: number | null;
+  incident: TmuxRecoveryIncident | null;
+} = { lastServerPid: null, incident: null };
 let persistGlobalStateTimer: ReturnType<typeof setTimeout> | null = null;
 let globalSessionStateWatcher: fs.FSWatcher | null = null;
 let globalSessionStateReloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -541,6 +567,7 @@ function getClientStateSemanticSignature(state: GlobalSessionState, inventory: S
         clientCount: session.clientCount,
       })),
       tmuxStatus: inventory.tmuxStatus,
+      tmuxRecovery: inventory.tmuxRecovery,
     } : null,
   });
 }
@@ -750,6 +777,32 @@ async function loadGlobalSessionStateFromDisk(): Promise<void> {
   }
 }
 
+async function loadTmuxRecoveryStateFromDisk(): Promise<void> {
+  try {
+    const data = await readJsonFileIfExists<{
+      lastServerPid?: unknown;
+      incident?: unknown;
+    }>(TMUX_RECOVERY_STATE_FILE);
+    if (!data) return;
+    tmuxRecoveryState = {
+      lastServerPid: typeof data.lastServerPid === 'number' && Number.isInteger(data.lastServerPid)
+        ? data.lastServerPid
+        : null,
+      incident: normalizeTmuxRecoveryIncident(data.incident),
+    };
+  } catch (error) {
+    console.warn('[tmux-recovery] Failed to load recovery state:', getErrorMessage(error));
+  }
+}
+
+async function persistTmuxRecoveryState(): Promise<void> {
+  try {
+    await writeJsonFile(TMUX_RECOVERY_STATE_FILE, tmuxRecoveryState);
+  } catch (error) {
+    console.warn('[tmux-recovery] Failed to persist recovery state:', getErrorMessage(error));
+  }
+}
+
 async function reloadGlobalSessionStateFromDisk(source: 'watch' | 'manual'): Promise<void> {
   try {
     const previous = JSON.stringify(globalSessionState);
@@ -829,6 +882,7 @@ function flushPersistAndExit(): void {
   try {
     fs.mkdirSync(TERMDOCK_DIR, { recursive: true });
     fs.writeFileSync(GLOBAL_SESSION_STATE_FILE, JSON.stringify(globalSessionState, null, 2), 'utf-8');
+    fs.writeFileSync(TMUX_RECOVERY_STATE_FILE, JSON.stringify(tmuxRecoveryState, null, 2), 'utf-8');
   } catch { /* best effort */ }
 }
 process.on('SIGTERM', () => { flushPersistAndExit(); void persistToolbarPresetsNow(); caffeinateManager.shutdown(); process.exit(0); });
@@ -836,7 +890,7 @@ process.on('SIGINT', () => { flushPersistAndExit(); void persistToolbarPresetsNo
 
 // 服务启动时从磁盘加载（带去重，防止历史累积的重复条目复活）
 void (async () => {
-  await loadGlobalSessionStateFromDisk();
+  await Promise.all([loadGlobalSessionStateFromDisk(), loadTmuxRecoveryStateFromDisk()]);
   await watchGlobalSessionStateFile();
   // pty-host adoption runs after the state load (its record upserts must not
   // be clobbered) and before pruning (surviving shell records' backends are
@@ -1174,6 +1228,7 @@ interface TmuxRuntimeMetadata {
   program: string | null;
   cwd: string | null;
   label: string;
+  rawArgs: string | null;
 }
 
 function isTermdockManagedTmuxSession(session: TmuxInventoryMeta): boolean {
@@ -1193,6 +1248,7 @@ function buildRuntimeTmuxMetadata(input: {
   tmuxSessionName: string;
   program: string | null;
   cwd: string | null;
+  rawArgs?: string | null;
 }): TmuxRuntimeMetadata {
   const program = normalizeMetadataProgram(input.program);
   const cwd = input.cwd ?? null;
@@ -1203,7 +1259,7 @@ function buildRuntimeTmuxMetadata(input: {
     cwd,
     sessionName: input.tmuxSessionName,
   });
-  return { program, cwd, label };
+  return { program, cwd, label, rawArgs: input.rawArgs ?? null };
 }
 
 function maybeRepairTmuxOptions(sessionName: string, current: {
@@ -1415,9 +1471,12 @@ async function ensureBackendSessionForRecord(
   record: PersistedClientSession,
   options: { cwd?: string; cols?: number; rows?: number; termType?: string; allowDefaultCwd?: boolean } = {},
 ): Promise<{ backendSessionId: string; session: TerminalSession; cols: number; rows: number; changed: boolean }> {
-  const shouldOfferRecoveredAgent = record.mode === 'shell'
-    && canRestoreDeadAgentShell(record)
-    && (!record.backendSessionId || !terminalSessions.has(record.backendSessionId));
+  const shouldOfferRecoveredAgent = Boolean(record.cwd && record.agentResume?.sessionId) && (
+    (record.mode === 'shell' && (!record.backendSessionId || !terminalSessions.has(record.backendSessionId)))
+    || (record.mode === 'tmux' && Boolean(
+      tmuxRecoveryState.incident?.affectedSessionIds.includes(record.sessionId)
+    ))
+  );
   if (record.backendSessionId) {
     const existing = terminalSessions.get(record.backendSessionId);
     if (existing) {
@@ -2331,6 +2390,80 @@ async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
   }
 }
 
+async function getTmuxServerPid(): Promise<number | null> {
+  try {
+    const raw = (await runTmux(['display-message', '-p', '#{pid}'])).trim();
+    const pid = Number.parseInt(raw, 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch (error) {
+    if (isTmuxServerMissingMessage(getErrorMessage(error))) return null;
+    throw error;
+  }
+}
+
+function getTmuxRecoveryView(): SessionInventory['tmuxRecovery'] {
+  const incident = tmuxRecoveryState.incident;
+  if (!incident) return null;
+  const affected = new Set(incident.affectedSessionIds);
+  const sessions = globalSessionState.sessions.flatMap((record) => {
+    if (!affected.has(record.sessionId) || record.mode !== 'tmux' || !record.tmuxSessionName
+      || !record.cwd || !record.agentResume?.sessionId) return [];
+    const agent = agentBySlug(record.agentResume.slug);
+    if (!agent) return [];
+    return [{
+      sessionId: record.sessionId,
+      name: record.name,
+      tmuxSessionName: record.tmuxSessionName,
+      cwd: record.cwd,
+      agentSlug: agent.slug,
+      agentDisplayName: agent.displayName,
+    }];
+  });
+  return sessions.length > 0
+    ? { id: incident.id, detectedAt: incident.detectedAt, sessions }
+    : null;
+}
+
+async function observeTmuxServerGeneration(liveTmuxSessions: TmuxInventoryMeta[]): Promise<void> {
+  let currentServerPid: number | null = null;
+  try {
+    currentServerPid = await getTmuxServerPid();
+  } catch (error) {
+    console.warn('[tmux-recovery] Failed to read tmux server pid:', getErrorMessage(error));
+  }
+  const liveSessionNames = new Set(liveTmuxSessions.map((session) => session.name));
+  const candidates = globalSessionState.sessions.flatMap((record) => {
+    if (record.mode !== 'tmux' || !record.tmuxSessionName) return [];
+    const backend = record.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
+    return [{
+      sessionId: record.sessionId,
+      tmuxSessionName: record.tmuxSessionName,
+      resumable: Boolean(record.cwd && record.agentResume?.sessionId && !backend?.agent),
+    }];
+  });
+  const incident = detectTmuxRecoveryIncident({
+    previousServerPid: tmuxRecoveryState.lastServerPid,
+    currentServerPid,
+    candidates,
+    liveSessionNames,
+    intentionallyDeleting: intentionallyDeletingTmuxSessions,
+    existingIncident: tmuxRecoveryState.incident,
+  });
+  let changed = false;
+  if (incident !== tmuxRecoveryState.incident) {
+    tmuxRecoveryState.incident = incident;
+    changed = true;
+    if (incident) {
+      console.error(`[tmux-recovery] shared server loss detected; ${incident.affectedSessionIds.length} Agent session(s) can be restored`);
+    }
+  }
+  if (currentServerPid !== null && currentServerPid !== tmuxRecoveryState.lastServerPid) {
+    tmuxRecoveryState.lastServerPid = currentServerPid;
+    changed = true;
+  }
+  if (changed) await persistTmuxRecoveryState();
+}
+
 async function buildSessionInventory(): Promise<SessionInventory> {
   const tmuxStatus = await getTmuxStatus();
   let liveTmuxSessions: TmuxInventoryMeta[] = [];
@@ -2345,6 +2478,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       liveTmuxSessions = [];
     }
   }
+  await observeTmuxServerGeneration(liveTmuxSessions);
 
   const refreshedTmuxSessions = await Promise.all(liveTmuxSessions.map(async (tmux): Promise<TmuxInventoryMeta> => {
     if (!isTermdockManagedTmuxSession(tmux)) {
@@ -2356,6 +2490,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       if (!metadata) {
         return tmux;
       }
+      backfillAgentResumeFromTmuxProcess(tmux.name, metadata.rawArgs);
       maybeRepairTmuxOptions(tmux.name, tmux, metadata);
       return {
         ...tmux,
@@ -2456,6 +2591,11 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       live,
       restorable: !backendLive && (
         (session.mode === 'tmux' && tmuxLive)
+        || (session.mode === 'tmux' && Boolean(
+          tmuxRecoveryState.incident?.affectedSessionIds.includes(session.sessionId)
+          && session.cwd
+          && session.agentResume?.sessionId
+        ))
         || (session.mode === 'shell' && canRestoreDeadAgentShell(session))
       ),
       activeProgram,
@@ -2513,6 +2653,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     clientSessions,
     tmuxSessions,
     tmuxStatus,
+    tmuxRecovery: getTmuxRecoveryView(),
     updatedAt: Date.now(),
   };
 }
@@ -2901,6 +3042,41 @@ function splitCommandToArgv(command: string): string[] {
     .filter((t) => t.length > 0);
 }
 
+/**
+ * Persist native resume metadata even when no browser PTY is currently
+ * attached. The tmux pane remains authoritative in that state, and its
+ * foreground argv is enough to recover an already-resumed Agent session.
+ */
+function backfillAgentResumeFromTmuxProcess(tmuxSessionName: string, rawArgs: string | null): void {
+  if (!rawArgs) return;
+  const agent = detectAgentFromCommand(rawArgs, agentCustomCommands());
+  if (!agent) return;
+  const argv = splitCommandToArgv(rawArgs);
+  const sessionId = inferResumeSessionId(agent, argv);
+  if (!sessionId) return;
+  const record = globalSessionState.sessions.find((candidate) =>
+    candidate.mode === 'tmux' && candidate.tmuxSessionName === tmuxSessionName,
+  );
+  if (!record) return;
+  if (
+    record.agentResume?.slug === agent.slug
+    && record.agentResume.sessionId === sessionId
+    && JSON.stringify(record.agentResume.launchArgv ?? null) === JSON.stringify(argv)
+  ) {
+    return;
+  }
+  upsertGlobalSessionRecord({
+    ...record,
+    agentResume: {
+      slug: agent.slug,
+      sessionId,
+      launchArgv: argv,
+      updatedAt: Date.now(),
+    },
+  });
+  schedulePersistGlobalState();
+}
+
 /** The coding agent running in this session's foreground, per activeProgram. */
 function detectSessionAgent(session: TerminalSession): AgentInfo | null {
   const ap = session.activeProgram;
@@ -3287,17 +3463,30 @@ function syncAgentIdentity(sessionId: string, session: TerminalSession): void {
     const argv = splitCommandToArgv(session.activeProgram.rawArgs);
     if (argv.length > 0) {
       const sess = session.agentSession;
+      const inferredSessionId = inferResumeSessionId(detected, argv);
+      if (sess && !sess.sessionId && inferredSessionId) {
+        sess.sessionId = inferredSessionId;
+      }
       if (sess && sess.launchArgv === null) {
         sess.launchArgv = argv;
         persistAgentResumeBinding(sessionId, session);
         broadcastAgentStatus(sessionId, session);
-      } else if (!sess) {
-        // No session state yet (no hook events seen): remember the argv on a
-        // pending field via the resume record so an exited agent can still be
-        // resumed with its flags even if hooks never fired.
+      } else if (!sess && inferredSessionId) {
+        // The session-start hook may predate a server/tmux reattach. Recover
+        // both the native id and flags from a live `agent resume <id>` argv.
         const record = globalSessionState.sessions.find((s) => s.backendSessionId === sessionId);
-        if (record?.agentResume && record.agentResume.slug === detected.slug && !record.agentResume.launchArgv) {
-          upsertGlobalSessionRecord({ ...record, agentResume: { ...record.agentResume, launchArgv: argv } });
+        const nextResume = {
+          slug: detected.slug,
+          sessionId: inferredSessionId,
+          launchArgv: argv,
+          updatedAt: Date.now(),
+        };
+        if (record && (
+          record.agentResume?.slug !== nextResume.slug
+          || record.agentResume?.sessionId !== nextResume.sessionId
+          || JSON.stringify(record.agentResume?.launchArgv ?? null) !== JSON.stringify(nextResume.launchArgv)
+        )) {
+          upsertGlobalSessionRecord({ ...record, agentResume: nextResume });
           schedulePersistGlobalState();
         }
       }
@@ -3812,7 +4001,12 @@ async function resolveLiveTmuxMetadata(tmuxSessionName: string): Promise<TmuxRun
   const fallback = getActiveProgramFromTmuxLayout(layout);
   const program = resolved?.command ?? fallback?.command ?? null;
   const cwd = getCwdFromTmuxLayout(layout);
-  return buildRuntimeTmuxMetadata({ tmuxSessionName, program, cwd });
+  return buildRuntimeTmuxMetadata({
+    tmuxSessionName,
+    program,
+    cwd,
+    rawArgs: resolved?.rawArgs ?? null,
+  });
 }
 
 // ── label builder (mirrors the frontend `getSessionDisplayLines` semantics) ──
@@ -4183,10 +4377,15 @@ async function ensureManagedTmuxSessionReady(sessionName: string): Promise<void>
   }
 }
 
-async function prepareManagedTmuxSession(sessionName: string, cwd?: string): Promise<void> {
+async function prepareManagedTmuxSessionUnlocked(sessionName: string, cwd?: string): Promise<void> {
   await ensureTmuxSessionExists(sessionName, cwd);
   await ensureSharedTmuxServerReady();
   await ensureManagedTmuxSessionReady(sessionName);
+}
+
+async function prepareManagedTmuxSession(sessionName: string, cwd?: string): Promise<void> {
+  await tmuxLifecycle.run(`prepare:${sessionName}`, () =>
+    prepareManagedTmuxSessionUnlocked(sessionName, cwd));
 }
 
 async function getTmuxLayout(sessionName: string): Promise<TmuxLayout> {
@@ -5485,6 +5684,169 @@ router.get('/tmux/status', async (_req, res) => {
   res.json(status);
 });
 
+router.post('/tmux/recovery/restore-all', async (_req, res) => {
+  const incident = tmuxRecoveryState.incident;
+  if (!incident) return res.status(404).json({ error: 'no tmux recovery is pending' });
+
+  const outcomes: Array<{ sessionId: string; restored: boolean; error?: string }> = [];
+  for (const frontendSessionId of incident.affectedSessionIds) {
+    const record = globalSessionState.sessions.find((session) => session.sessionId === frontendSessionId);
+    if (!record || record.mode !== 'tmux' || !record.tmuxSessionName || !record.cwd
+      || !record.agentResume?.sessionId) {
+      outcomes.push({ sessionId: frontendSessionId, restored: false, error: 'recovery metadata is incomplete' });
+      continue;
+    }
+    const agent = agentBySlug(record.agentResume.slug);
+    const command = agent
+      ? buildResumeCommand(agent, record.agentResume.sessionId, record.agentResume.launchArgv)
+      : null;
+    if (!agent || !command) {
+      outcomes.push({ sessionId: frontendSessionId, restored: false, error: 'Agent does not support resume' });
+      continue;
+    }
+
+    const target: AgentResumeTarget = {
+      slug: agent.slug,
+      nativeSessionId: record.agentResume.sessionId,
+      command,
+    };
+    const activeBackend = findActiveAgentResumeOwner('', target);
+    const activeWriterPid = activeBackend ? null : await findExternalCodexWriter(target);
+    if (activeBackend || activeWriterPid) {
+      outcomes.push({ sessionId: frontendSessionId, restored: true });
+      continue;
+    }
+
+    try {
+      await tmuxLifecycle.run(`restore:${record.tmuxSessionName}`, async () => {
+        await prepareManagedTmuxSessionUnlocked(record.tmuxSessionName!, record.cwd!);
+        const metadata = await resolveLiveTmuxMetadata(record.tmuxSessionName!);
+        const foreground = metadata?.program?.toLowerCase() ?? null;
+        if (foreground && !shellNamesBackend.has(foreground)) {
+          throw new Error(`pane is busy with ${foreground}`);
+        }
+        await runTmux(['send-keys', '-t', record.tmuxSessionName!, '-l', '--', command]);
+        await runTmux(['send-keys', '-t', record.tmuxSessionName!, 'Enter']);
+      });
+      outcomes.push({ sessionId: frontendSessionId, restored: true });
+    } catch (error) {
+      outcomes.push({ sessionId: frontendSessionId, restored: false, error: getErrorMessage(error) });
+    }
+  }
+
+  const restoredIds = new Set(outcomes.filter((outcome) => outcome.restored).map((outcome) => outcome.sessionId));
+  const remaining = incident.affectedSessionIds.filter((sessionId) => !restoredIds.has(sessionId));
+  tmuxRecoveryState.incident = remaining.length > 0
+    ? { ...incident, affectedSessionIds: remaining }
+    : null;
+  await persistTmuxRecoveryState();
+  latestSessionInventoryAt = 0;
+  broadcastClientState();
+  res.status(remaining.length > 0 ? 207 : 200).json({
+    restored: restoredIds.size,
+    failed: remaining.length,
+    outcomes,
+  });
+});
+
+router.delete('/tmux/recovery', async (_req, res) => {
+  tmuxRecoveryState.incident = null;
+  await persistTmuxRecoveryState();
+  latestSessionInventoryAt = 0;
+  broadcastClientState();
+  res.status(204).send();
+});
+
+async function destroyTmuxSessionSafely(rawName: string): Promise<{
+  success: true;
+  alreadyGone?: boolean;
+  cleanedSessions: string[];
+}> {
+  return tmuxLifecycle.run(`destroy:${rawName}`, async () => {
+    intentionallyDeletingTmuxSessions.add(rawName);
+    try {
+      const affectedSessionIds: string[] = [];
+      for (const [sessionId, session] of terminalSessions.entries()) {
+        if (session.mode === 'tmux' && session.tmuxSessionName === rawName) {
+          session.focusTrackingRequested = false;
+          session.focusAggregation.focusedClients.clear();
+          session.focusAggregation.effectiveFocused = false;
+          affectedSessionIds.push(sessionId);
+        }
+      }
+
+      let alreadyGone = false;
+      try {
+        // Reassert the safe global setting immediately before teardown in case
+        // a user tmux command or config reload turned it back on at runtime.
+        await disableTmuxFocusEventsForSafety();
+        await runTmux(['detach-client', '-s', rawName]);
+      } catch (error) {
+        const errorMessage = getErrorMessage(error);
+        if (isTmuxSessionMissingMessage(errorMessage) || isTmuxServerMissingMessage(errorMessage)) {
+          alreadyGone = true;
+        } else if (isTmuxUnavailableMessage(errorMessage)) {
+          throw new HttpStatusError(503, 'tmux is not installed or not available in PATH.');
+        } else {
+          throw new HttpStatusError(500, errorMessage || 'Failed to detach tmux session clients');
+        }
+      }
+
+      for (const id of affectedSessionIds) {
+        try { cleanupSession(id, { killProcess: true }); } catch (error) {
+          console.error(`[tmux] cleanup attached session ${id} failed:`, getErrorMessage(error));
+        }
+      }
+
+      if (!alreadyGone) {
+        try {
+          await runTmux(['kill-session', '-t', rawName]);
+        } catch (error) {
+          const errorMessage = getErrorMessage(error);
+          if (isTmuxSessionMissingMessage(errorMessage) || isTmuxServerMissingMessage(errorMessage)) {
+            alreadyGone = true;
+          } else if (isTmuxUnavailableMessage(errorMessage)) {
+            throw new HttpStatusError(503, 'tmux is not installed or not available in PATH.');
+          } else {
+            throw new HttpStatusError(500, errorMessage || 'Failed to kill tmux session');
+          }
+        }
+      }
+
+      const removedFrontendIds = globalSessionState.sessions
+        .filter((session) => session.mode === 'tmux' && session.tmuxSessionName === rawName)
+        .map((session) => session.sessionId);
+      const removedSet = new Set(removedFrontendIds);
+      const beforeCount = globalSessionState.sessions.length;
+      globalSessionState = {
+        sessions: globalSessionState.sessions.filter((session) => !removedSet.has(session.sessionId)),
+        updatedAt: Date.now(),
+      };
+      if (tmuxRecoveryState.incident && removedSet.size > 0) {
+        const remaining = tmuxRecoveryState.incident.affectedSessionIds
+          .filter((sessionId) => !removedSet.has(sessionId));
+        tmuxRecoveryState.incident = remaining.length > 0
+          ? { ...tmuxRecoveryState.incident, affectedSessionIds: remaining }
+          : null;
+        await persistTmuxRecoveryState();
+      }
+      if (globalSessionState.sessions.length !== beforeCount) {
+        await persistGlobalStateNow();
+        broadcastClientState();
+      }
+
+      console.log(`[tmux] ${alreadyGone ? 'removed stale' : 'killed'} session: ${rawName} (cleaned ${affectedSessionIds.length} attached pty, dropped ${beforeCount - globalSessionState.sessions.length} client-state entries)`);
+      return {
+        success: true,
+        ...(alreadyGone ? { alreadyGone: true } : {}),
+        cleanedSessions: affectedSessionIds,
+      };
+    } finally {
+      intentionallyDeletingTmuxSessions.delete(rawName);
+    }
+  });
+}
+
 router.delete('/tmux/sessions/:name', async (req, res) => {
   const rawName = typeof req.params.name === 'string' ? req.params.name.trim() : '';
   if (!rawName) {
@@ -5495,72 +5857,13 @@ router.delete('/tmux/sessions/:name', async (req, res) => {
     return res.status(400).json({ error: 'invalid tmux session name' });
   }
 
-  // Find local terminal sessions wired to this tmux session. They must be
-  // detached before kill-session: tmux can otherwise process a queued focus
-  // event after clearing the client's session pointer and crash the whole
-  // shared server (tmux/tmux#5022), taking every unrelated pane with it.
-  const affectedSessionIds: string[] = [];
-  for (const [sessionId, session] of terminalSessions.entries()) {
-    if (session.mode === 'tmux' && session.tmuxSessionName === rawName) {
-      session.focusTrackingRequested = false;
-      session.focusAggregation.focusedClients.clear();
-      session.focusAggregation.effectiveFocused = false;
-      affectedSessionIds.push(sessionId);
-    }
-  }
-
   try {
-    // detach-client -s completes only after tmux has removed clients from the
-    // live session, closing the NULL-session focus race before teardown.
-    await runTmux(['detach-client', '-s', rawName]);
+    res.json(await destroyTmuxSessionSafely(rawName));
   } catch (error) {
     const errorMessage = getErrorMessage(error);
-    if (isTmuxSessionMissingMessage(errorMessage)) {
-      for (const id of affectedSessionIds) {
-        try { cleanupSession(id, { killProcess: true }); } catch {}
-      }
-      return res.json({ success: true, alreadyGone: true, cleanedSessions: affectedSessionIds });
-    }
-    if (isTmuxUnavailableMessage(errorMessage)) {
-      return res.status(503).json({ error: 'tmux is not installed or not available in PATH.' });
-    }
-    return res.status(500).json({ error: errorMessage || 'Failed to detach tmux session clients' });
+    const status = error instanceof HttpStatusError ? error.statusCode : 500;
+    res.status(status).json({ error: errorMessage || 'Failed to kill tmux session' });
   }
-
-  for (const id of affectedSessionIds) {
-    try { cleanupSession(id, { killProcess: true }); } catch (error) {
-      console.error(`[tmux] cleanup attached session ${id} failed:`, getErrorMessage(error));
-    }
-  }
-
-  try {
-    await runTmux(['kill-session', '-t', rawName]);
-  } catch (error) {
-    const errorMessage = getErrorMessage(error);
-    if (!isTmuxSessionMissingMessage(errorMessage)) {
-      if (isTmuxUnavailableMessage(errorMessage)) {
-        return res.status(503).json({ error: 'tmux is not installed or not available in PATH.' });
-      }
-      return res.status(500).json({ error: errorMessage || 'Failed to kill tmux session' });
-    }
-  }
-
-  // Also drop any persisted client-state entries that pointed at this tmux
-  // session. Without this, every connected browser would still see a tab
-  // whose backing tmux server is gone, and only the 30s reconciler would
-  // notice. Doing it inline + broadcasting keeps cross-device UX instant.
-  const beforeCount = globalSessionState.sessions.length;
-  globalSessionState = {
-    sessions: globalSessionState.sessions.filter((s) => !(s.mode === 'tmux' && s.tmuxSessionName === rawName)),
-    updatedAt: Date.now(),
-  };
-  if (globalSessionState.sessions.length !== beforeCount) {
-    schedulePersistGlobalState();
-    broadcastClientState();
-  }
-
-  console.log(`[tmux] killed session: ${rawName} (cleaned ${affectedSessionIds.length} attached pty, dropped ${beforeCount - globalSessionState.sessions.length} client-state entries)`);
-  res.json({ success: true, cleanedSessions: affectedSessionIds });
 });
 
 router.post('/serialize-state', async (req, res) => {
@@ -6869,7 +7172,7 @@ router.get('/:sessionId/stream', async (req, res) => {
         previousMetadata: lastTmuxMetadata,
         lastActiveWriteAt: lastTmuxMetaWriteAt,
       });
-      lastTmuxMetadata = { program: meta.program, cwd: meta.cwd, label: meta.label };
+      lastTmuxMetadata = { program: meta.program, cwd: meta.cwd, label: meta.label, rawArgs: null };
       lastTmuxMetaWriteAt = meta.lastActiveWriteAt;
 
       const snapshot = JSON.stringify(layout);
@@ -7647,7 +7950,7 @@ export function handleTerminalWebSocket(
           previousMetadata: lastTmuxMetadata,
           lastActiveWriteAt: lastTmuxMetaWriteAt,
         });
-        lastTmuxMetadata = { program: meta.program, cwd: meta.cwd, label: meta.label };
+        lastTmuxMetadata = { program: meta.program, cwd: meta.cwd, label: meta.label, rawArgs: null };
         lastTmuxMetaWriteAt = meta.lastActiveWriteAt;
 
         const snapshot = JSON.stringify(layout);
@@ -7949,6 +8252,12 @@ automationTimer.unref?.();
 async function reconcileClientState(): Promise<void> {
   if (globalSessionState.sessions.length === 0) return;
 
+  // Refresh first so a shared tmux crash is recorded before orphan cleanup
+  // can discard the metadata needed to recover Agent conversations.
+  await getSessionInventorySnapshot({ refresh: true }).catch((error) => {
+    console.warn('[tmux-recovery] reconcile observation failed:', getErrorMessage(error));
+  });
+
   const toRemove: string[] = [];
   const toDetach: string[] = [];
   for (const entry of globalSessionState.sessions) {
@@ -7970,7 +8279,13 @@ async function reconcileClientState(): Promise<void> {
       // the tmux session.
       try {
         const alive = await tmuxSessionExists(entry.tmuxSessionName);
-        if (!alive) toRemove.push(entry.sessionId);
+        if (!alive) {
+          if (entry.cwd && entry.agentResume?.sessionId) {
+            if (entry.backendSessionId) toDetach.push(entry.sessionId);
+          } else {
+            toRemove.push(entry.sessionId);
+          }
+        }
       } catch {
         // tmux itself is down — leave the entry alone; the next tick (or
         // boot-time prune) will clean it up once tmux is back.
@@ -7992,7 +8307,7 @@ async function reconcileClientState(): Promise<void> {
     console.log(`[reconcile] removed ${toRemove.length} orphan client-state entries: ${toRemove.join(', ')}`);
   }
   if (toDetach.length > 0) {
-    console.log(`[reconcile] detached ${toDetach.length} resumable Agent shell entries: ${toDetach.join(', ')}`);
+    console.log(`[reconcile] detached ${toDetach.length} resumable Agent entries: ${toDetach.join(', ')}`);
   }
 }
 

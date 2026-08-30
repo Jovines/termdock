@@ -134,6 +134,18 @@ export interface SessionInventory {
   clientSessions: SessionInventoryClientSession[];
   tmuxSessions: SessionInventoryTmuxSession[];
   tmuxStatus: TmuxStatus;
+  tmuxRecovery?: {
+    id: string;
+    detectedAt: number;
+    sessions: Array<{
+      sessionId: string;
+      name: string;
+      tmuxSessionName: string;
+      cwd: string;
+      agentSlug: string;
+      agentDisplayName: string;
+    }>;
+  } | null;
   updatedAt: number;
 }
 

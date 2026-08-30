@@ -165,6 +165,14 @@ type GitActionKey = GitActionRequest['action'];
 type LineRange = { start: number; end: number };
 type DiffChangeListMode = DiffReviewMode;
 
+export function resolveRightSidebarDiffViewType(
+  narrowLayout: boolean,
+  pinned: boolean,
+  preferredViewType: DiffViewType,
+): DiffViewType {
+  return narrowLayout && !pinned ? 'unified' : preferredViewType;
+}
+
 interface BranchAuditPreviewEntry {
   key: string;
   diff: BranchDiffResponse;
@@ -4035,6 +4043,69 @@ function buildRepoFiltersFromBundles(repositories: GitRepositoryBundle[], rootPa
     });
 }
 
+export function replaceGitRepositorySnapshot(
+  currentFiles: Iterable<GitChangedFile>,
+  currentRepositories: GitRepositoryBundle[],
+  refreshedBundle: GitBundleResponse,
+  repoRoot: string,
+  workspaceRoot: string | null,
+): { files: GitChangedFile[]; repositories: GitRepositoryBundle[]; repoFilters: GitRepositoryFilter[] } {
+  const refreshedRepositories = getRepositoriesFromGitBundle(refreshedBundle);
+  const refreshedRepo = refreshedRepositories.find((repo) => repo.root === repoRoot) ?? refreshedRepositories[0] ?? null;
+  const currentRepo = currentRepositories.find((repo) => repo.root === repoRoot) ?? null;
+  const relativeRoot = currentRepo?.relativeRoot ?? refreshedRepo?.relativeRoot ?? '.';
+  const repoName = currentRepo?.name ?? refreshedRepo?.name ?? (getPathBasename(repoRoot) || repoRoot);
+  const refreshedFiles = (refreshedRepo?.files ?? refreshedBundle.files).map((file) => ({
+    ...file,
+    repoRoot,
+    repoRelativeRoot: relativeRoot,
+    repoName,
+  }));
+  const refreshedContext = refreshedRepo?.context ?? refreshedBundle.context;
+  const nextRepo: GitRepositoryBundle = {
+    ...(currentRepo ?? refreshedRepo ?? {
+      id: repoRoot,
+      root: repoRoot,
+      relativeRoot,
+      name: repoName,
+      depth: 0,
+      nested: Boolean(workspaceRoot && repoRoot !== workspaceRoot),
+      available: refreshedBundle.available,
+      files: [],
+      context: null,
+    }),
+    ...(refreshedRepo ?? {}),
+    id: currentRepo?.id ?? refreshedRepo?.id ?? repoRoot,
+    root: repoRoot,
+    displayRoot: currentRepo?.displayRoot ?? refreshedRepo?.displayRoot,
+    relativeRoot,
+    name: repoName,
+    depth: currentRepo?.depth ?? refreshedRepo?.depth ?? 0,
+    nested: currentRepo?.nested ?? refreshedRepo?.nested ?? Boolean(workspaceRoot && repoRoot !== workspaceRoot),
+    available: refreshedRepo?.available ?? refreshedBundle.available,
+    files: refreshedFiles,
+    context: refreshedContext ? {
+      ...refreshedContext,
+      root: repoRoot,
+      changedFiles: refreshedFiles.map((file) => ({ path: file.path, absolutePath: file.absolutePath, status: file.status })),
+    } : null,
+    untrackedDeferred: refreshedRepo?.untrackedDeferred ?? refreshedBundle.untrackedDeferred,
+    error: refreshedRepo?.error ?? refreshedBundle.error,
+  };
+
+  const repositories = currentRepo
+    ? currentRepositories.map((repo) => (repo.root === repoRoot ? nextRepo : repo))
+    : [...currentRepositories, nextRepo];
+  const files = Array.from(currentFiles)
+    .filter((file) => getChangedFileRepoRoot(file, workspaceRoot) !== repoRoot)
+    .concat(refreshedFiles);
+  return {
+    files,
+    repositories,
+    repoFilters: buildRepoFiltersFromBundles(repositories, workspaceRoot),
+  };
+}
+
 function getChangedFileRepoRoot(file: GitChangedFile, fallbackRoot: string | null): string | null {
   return file.repoRoot ?? fallbackRoot;
 }
@@ -6190,6 +6261,7 @@ export function RightSidebar(
   const fileInputRef = useRef<HTMLInputElement>(null);
   const temporaryImageInputRef = useRef<HTMLInputElement>(null);
   const isMobile = resolveRightSidebarNarrowLayout(drawerWidthPx, pinned, rightSidebarLayoutPreference);
+  const effectiveDiffViewType = resolveRightSidebarDiffViewType(isMobile, pinned, diffViewType);
   const [fileTreeWidthPx, setFileTreeWidthPx] = useState(() => readFileTreeWidth(drawerWidthPx));
   const rightTab = useSidebarStore((s) => s.rightTab);
   const setRightTab = useSidebarStore((s) => s.setRightTab);
@@ -6499,6 +6571,7 @@ export function RightSidebar(
     loadAudit?: boolean;
     background?: boolean;
     cacheOnly?: boolean;
+    replaceRepoRoot?: string;
   } = {}) => {
     if (!isCurrentSidebarRoot(rootPath)) {
       logGitBundleClientEvent('apply_skipped_root_changed', {
@@ -6531,8 +6604,9 @@ export function RightSidebar(
       untrackedDeferred: bundle.untrackedDeferred,
       error: bundle.error,
     });
-    const repositories = getRepositoriesFromGitBundle(bundle);
-    const repoFilters = bundle.repoFilters ?? [];
+    let repositories = getRepositoriesFromGitBundle(bundle);
+    let repoFilters = bundle.repoFilters ?? [];
+    let files = bundle.files;
     const currentChangedFiles = useSidebarStore.getState().changedFiles;
     const cacheOnlyMiss = Boolean(options.cacheOnly && !bundle.cached && bundle.files.length === 0 && repositories.length === 0);
     if (cacheOnlyMiss && (currentChangedFiles.size > 0 || gitRepositories.length > 0 || gitContext)) {
@@ -6572,7 +6646,19 @@ export function RightSidebar(
       });
       return;
     }
-    setChangedFiles(toChangedFileMap(bundle.files));
+    if (options.replaceRepoRoot) {
+      const replacement = replaceGitRepositorySnapshot(
+        currentChangedFiles.values(),
+        gitRepositories,
+        bundle,
+        options.replaceRepoRoot,
+        rootPath,
+      );
+      files = replacement.files;
+      repositories = replacement.repositories;
+      repoFilters = replacement.repoFilters;
+    }
+    setChangedFiles(toChangedFileMap(files));
     setGitRepositories(repositories);
     setGitRepoFilters(repoFilters);
     if (options.syncActiveRepo !== false) {
@@ -6585,6 +6671,7 @@ export function RightSidebar(
     }
     if (typeof bundle.cacheUpdatedAt === 'number') setGitCacheUpdatedAt(bundle.cacheUpdatedAt);
     setGitContext((current) => {
+      if (options.replaceRepoRoot && options.replaceRepoRoot !== rootPath) return current;
       if (!bundle.context) return null;
       const currentRoot = current?.root ?? rootPath;
       if (!current?.available || currentRoot !== (bundle.context.root ?? rootPath)) return bundle.context;
@@ -6592,11 +6679,11 @@ export function RightSidebar(
     });
     if (options.reloadDiff) setDiffRefreshKey((key) => key + 1);
     const current = useSidebarStore.getState().selectedFilePath;
-    if (current && !current.startsWith('/') && !bundle.files.some((file) => file.path === current || file.absolutePath === current)) {
+    if (current && !current.startsWith('/') && !files.some((file) => file.path === current || file.absolutePath === current)) {
       selectFile(null);
     }
     setCollapsedGitRepoGroups((collapsed) => {
-      const valid = new Set(bundle.files.map((file) => getChangedFileRepoRoot(file, rootPath)).filter(Boolean) as string[]);
+      const valid = new Set(files.map((file) => getChangedFileRepoRoot(file, rootPath)).filter(Boolean) as string[]);
       const next = new Set<string>();
       for (const root of collapsed) {
         if (valid.has(root)) next.add(root);
@@ -6708,7 +6795,7 @@ export function RightSidebar(
     lastAutoRefreshRootRef.current = null;
   }, [rootPath]);
 
-  const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; includeNested?: boolean; background?: boolean; refresh?: boolean; cacheOnly?: boolean } = {}) => {
+  const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; includeNested?: boolean; background?: boolean; refresh?: boolean; cacheOnly?: boolean; replaceRepoRoot?: string } = {}) => {
     if (!cwd) return null;
     const expectedRootPath = rootPath;
     const includeNested = options.includeNested ?? true;
@@ -6787,6 +6874,7 @@ export function RightSidebar(
         syncActiveRepo: includeNested,
         background,
         cacheOnly,
+        replaceRepoRoot: options.replaceRepoRoot,
       });
       return bundle;
     })();
@@ -6844,8 +6932,14 @@ export function RightSidebar(
 
   const refreshGitState = useCallback(async () => {
     if (!rootPath) return;
-    await loadGitBundle(rootPath, { reloadDiff: true, includeNested: true, refresh: true });
-  }, [loadGitBundle, rootPath]);
+    const repoRoot = activeGitRepoRoot ?? rootPath;
+    await loadGitBundle(repoRoot, {
+      reloadDiff: true,
+      includeNested: !activeGitRepoRoot,
+      refresh: true,
+      replaceRepoRoot: activeGitRepoRoot ?? undefined,
+    });
+  }, [activeGitRepoRoot, loadGitBundle, rootPath]);
 
   const loadGitDetails = useCallback(async (cwd: string | undefined = rootPath ?? undefined) => {
     if (!cwd) return null;
@@ -11072,6 +11166,7 @@ export function RightSidebar(
                       <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
                         {renderRepoSwitcherButton()}
                         {modeToggle}
+                        {pinned && renderDiffViewTypeToggle()}
                         {changeAuditButton}
                         {diffRefreshButton}
                       </div>
@@ -11116,20 +11211,23 @@ export function RightSidebar(
                         <RiArrowLeft size={14} />
                         {t('rightSidebar.backToChangeList')}
                       </button>
-                      <button
-                        type="button"
-                        onClick={toggleDiffWrap}
-                        aria-pressed={diffWrap}
-                        title={t('rightSidebar.wrapLongLines')}
-                        className={`inline-flex h-9 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-medium transition active:scale-95 ${
-                          diffWrap
-                            ? 'bg-primary/15 text-primary'
-                            : 'bg-surface-2 text-muted-foreground hover:text-foreground'
-                        }`}
-                      >
-                        <span className="font-mono text-[12px] leading-none">Aa</span>
-                        <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
-                      </button>
+                      <div className="flex min-w-0 items-center justify-end gap-1.5">
+                        {pinned && renderDiffViewTypeToggle()}
+                        <button
+                          type="button"
+                          onClick={toggleDiffWrap}
+                          aria-pressed={diffWrap}
+                          title={t('rightSidebar.wrapLongLines')}
+                          className={`inline-flex h-9 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-medium transition active:scale-95 ${
+                            diffWrap
+                              ? 'bg-primary/15 text-primary'
+                              : 'bg-surface-2 text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          <span className="font-mono text-[12px] leading-none">Aa</span>
+                          <span>{diffWrap ? t('rightSidebar.wrapOn') : t('rightSidebar.wrapOff')}</span>
+                        </button>
+                      </div>
                     </div>
                   )}
                   detailContainerClassName="termdock-native-select termdock-diff-stream-scroller min-h-0"
@@ -11137,7 +11235,7 @@ export function RightSidebar(
                   activePane={diffPaneActive}
                   wrap={diffWrap}
                   showScrollHint={!diffWrap}
-                  diffViewType="unified"
+                  diffViewType={effectiveDiffViewType}
                   inlineMode={diffInlineMode}
                   diffOptions={diffOptions}
                   reloadKey={diffRefreshKey}

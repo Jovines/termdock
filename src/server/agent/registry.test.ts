@@ -4,6 +4,7 @@ import {
   buildResumeCommand,
   detectAgentFromArgv,
   detectAgentFromCommand,
+  inferResumeSessionId,
 } from './registry.js';
 
 describe('detectAgentFromArgv', () => {
@@ -83,6 +84,25 @@ describe('detectAgentFromArgv', () => {
     expect(detectAgentFromCommand('notepad claude.txt')).toBeNull();
     expect(detectAgentFromCommand('cat codex.md')).toBeNull();
     expect(detectAgentFromCommand('')).toBeNull();
+  });
+});
+
+describe('inferResumeSessionId', () => {
+  it('recovers ids from resumed Agent argv after Termdock reattaches', () => {
+    expect(inferResumeSessionId(agentBySlug('codex')!, [
+      'node', '/opt/codex/bin/codex', '--dangerously-bypass-approvals-and-sandbox',
+      'resume', '01a0531c-7ddb-7b51-9821-213b9b6bd735',
+    ])).toBe('01a0531c-7ddb-7b51-9821-213b9b6bd735');
+    expect(inferResumeSessionId(agentBySlug('claude')!, ['claude', '--model', 'opus', '--resume', 'abc-123']))
+      .toBe('abc-123');
+    expect(inferResumeSessionId(agentBySlug('kimi')!, ['kimi', '--session=session_1']))
+      .toBe('session_1');
+  });
+
+  it('rejects unsafe, missing, and fresh-session ids', () => {
+    expect(inferResumeSessionId(agentBySlug('codex')!, ['codex'])).toBeNull();
+    expect(inferResumeSessionId(agentBySlug('codex')!, ['codex', 'resume', '$(bad)'])).toBeNull();
+    expect(inferResumeSessionId(agentBySlug('claude')!, ['wrapper', '--resume', 'abc'])).toBeNull();
   });
 });
 

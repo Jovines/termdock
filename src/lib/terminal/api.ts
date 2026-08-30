@@ -1253,6 +1253,34 @@ export async function killTmuxSession(name: string): Promise<{ cleanedSessions: 
   };
 }
 
+export async function restoreAllTmuxAgentSessions(): Promise<{
+  restored: number;
+  failed: number;
+  outcomes: Array<{ sessionId: string; restored: boolean; error?: string }>;
+}> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/tmux/recovery/restore-all', {
+    method: 'POST',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new TerminalApiError(data.error || 'Failed to restore tmux Agent sessions', response.status);
+  }
+  return data;
+}
+
+export async function dismissTmuxRecovery(): Promise<void> {
+  const csrfTokenHeader = await getCsrfToken();
+  const response = await fetch('/api/terminal/tmux/recovery', {
+    method: 'DELETE',
+    headers: { 'X-XSRF-TOKEN': csrfTokenHeader },
+  });
+  if (!response.ok) {
+    throw new TerminalApiError('Failed to dismiss tmux recovery', response.status);
+  }
+}
+
 export interface PersistedTerminalClientSession {
   sessionId: string; name: string; customName?: boolean; backendSessionId: string | null;
   mode: 'shell' | 'tmux'; tmuxSessionName: string | null;

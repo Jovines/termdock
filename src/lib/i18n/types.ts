@@ -786,6 +786,14 @@ export type TranslationDictionary = {
     resumeAgentConflict: string;
     resumeAgentBusy: string;
     resumeAgentTimeout: string;
+    tmuxRecoveryTitle: (params: TranslatorParams) => string;
+    tmuxRecoveryHint: string;
+    tmuxRecoveryRestoreAll: string;
+    tmuxRecoveryRestoring: string;
+    tmuxRecoveryDismiss: string;
+    tmuxRecoveryPartial: (params: TranslatorParams) => string;
+    tmuxRecoveryFailed: string;
+    tmuxRecoveryDismissFailed: string;
     copied: string;
     close: string;
     closeHint: string;
