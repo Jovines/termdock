@@ -6,7 +6,7 @@ import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout }
 import { TerminalViewport, type RefreshReason, type TerminalController } from '../terminal/TerminalViewport';
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
-import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, sendTerminalFlowControlState, sendTerminalFocusState, sendTerminalViewingState, updateSessionInventoryEntry, uploadFiles } from '../../terminal/api';
+import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, reconnectTerminalConnectionNow, sendTerminalFlowControlState, sendTerminalFocusState, sendTerminalViewingState, updateSessionInventoryEntry, uploadFiles } from '../../terminal/api';
 import {
   computeTerminalLogicalFocus,
   computeTerminalLogicalViewing,
@@ -21,6 +21,7 @@ import { buildDesktopToolbarPresetOptions, buildToolbarPresetOptions, decodeTool
 import { DebugPanel } from '../terminal/DebugPanel';
 import { ConnectionStatus } from '../terminal/ConnectionStatus';
 import { createDebugLogger } from '../../utils/debug';
+import { clientLog } from '../../utils/clientLog';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../../terminal/settings';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 import { useI18n } from '../../i18n';
@@ -73,6 +74,7 @@ interface TerminalViewProps {
   resumeRequestToken?: number;
   resumeRequestReason?: Extract<RefreshReason, 'visibility' | 'bfcache' | 'online'>;
   resumeRequestDelayMs?: number;
+  forceResumeReconnect?: boolean;
   initialConnectDelayMs?: number;
   initialConnectEnabled?: boolean;
   resumeRequestEnabled?: boolean;
@@ -100,6 +102,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   resumeRequestToken = 0,
   resumeRequestReason = 'visibility',
   resumeRequestDelayMs = 0,
+  forceResumeReconnect = false,
   initialConnectDelayMs = 0,
   initialConnectEnabled = true,
   resumeRequestEnabled = true,
@@ -122,6 +125,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const debugKeyboard = React.useMemo(() => createDebugLogger('keyboard'), []);
   const resumeRequestDelayRef = React.useRef(resumeRequestDelayMs);
   resumeRequestDelayRef.current = resumeRequestDelayMs;
+  const resumeAttemptRef = React.useRef<{ startedAt: number; strategy: 'reconnect' | 'probe'; reason: string } | null>(null);
 
   // Sync with external fontSize changes while allowing local pinch-to-zoom overrides
   React.useEffect(() => {
@@ -478,14 +482,43 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     setRestartTrigger((token) => token + 1);
   }, []);
 
-  const probeOrRestartSession = React.useCallback((reason: string) => {
+  const probeOrRestartSession = React.useCallback((reason: string, forceReconnect: boolean) => {
     const tid = terminalIdRef.current;
+    const startedAt = Date.now();
+    if (tid && forceReconnect && reconnectTerminalConnectionNow(tid)) {
+      resumeAttemptRef.current = { startedAt, strategy: 'reconnect', reason };
+      clientLog('info', 'PWA_RESUME terminal-start', {
+        frontendSessionId: sessionId,
+        backendSessionId: tid,
+        strategy: 'reconnect',
+        reason,
+        active: isActiveRef.current,
+      });
+      return;
+    }
     if (tid && probeTerminalConnection(tid, () => {
       // A still-open socket answers with pong instead of emitting a fresh
       // `connected` event. Treat that health confirmation as foreground
       // completion so the orchestrator can release the background wave.
+      const attempt = resumeAttemptRef.current;
+      clientLog('info', 'PWA_RESUME terminal-responsive', {
+        frontendSessionId: sessionId,
+        backendSessionId: tid,
+        durationMs: attempt ? Date.now() - attempt.startedAt : null,
+        strategy: attempt?.strategy ?? 'probe',
+        reason: attempt?.reason ?? reason,
+      });
+      resumeAttemptRef.current = null;
       onStreamConnected?.(sessionId);
     })) {
+      resumeAttemptRef.current = { startedAt, strategy: 'probe', reason };
+      clientLog('info', 'PWA_RESUME terminal-start', {
+        frontendSessionId: sessionId,
+        backendSessionId: tid,
+        strategy: 'probe',
+        reason,
+        active: isActiveRef.current,
+      });
       debugSession('[Terminal] resume probe sent', { reason, backendSessionId: tid, active: isActiveRef.current });
       return;
     }
@@ -616,7 +649,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const delayMs = resumeRequestDelayRef.current;
     const resume = () => {
       terminalControllerRef.current?.requestRefresh(resumeRequestReason);
-      probeOrRestartSession(delayMs > 0 ? 'global-resume-background' : 'global-resume-visible');
+      probeOrRestartSession(
+        delayMs > 0 ? 'global-resume-background' : 'global-resume-visible',
+        delayMs <= 0 && forceResumeReconnect,
+      );
     };
     if (delayMs <= 0) {
       resume();
@@ -624,7 +660,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
     const timer = window.setTimeout(resume, delayMs);
     return () => window.clearTimeout(timer);
-  }, [resumeRequestToken, resumeRequestReason, resumeRequestEnabled, probeOrRestartSession]);
+  }, [resumeRequestToken, resumeRequestReason, resumeRequestEnabled, forceResumeReconnect, probeOrRestartSession]);
 
   // ensureSession 自愈：HTTP 建连失败等发生在 WebSocket 之前的错误也必须持续恢复。
   // 普通网络错误始终显示 Reconnecting，并按封顶退避重跑；只有明确的鉴权失败
@@ -848,6 +884,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
             switch (event.type) {
               case 'connected': {
+                const resumeAttempt = resumeAttemptRef.current;
+                if (resumeAttempt) {
+                  clientLog('info', 'PWA_RESUME terminal-connected', {
+                    frontendSessionId: storeSessionId,
+                    backendSessionId: terminalIdRef.current,
+                    durationMs: Date.now() - resumeAttempt.startedAt,
+                    strategy: resumeAttempt.strategy,
+                    reason: resumeAttempt.reason,
+                  });
+                  resumeAttemptRef.current = null;
+                }
                 onStreamConnected?.(storeSessionId);
                 if (event.runtime || event.ptyBackend) {
                   debugSession(

@@ -21,12 +21,14 @@ import {
   selectConnectionForegroundSessionId,
   shouldScheduleForegroundResume,
   shouldRunResumeRequest,
+  shouldForceForegroundReconnect,
   shouldStartInitialConnection,
 } from '../terminal/resumeScheduling';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSidebarStore } from '../stores/useSidebarStore';
 import { deriveGroupedOrder, getCwdLeafName, getSessionDisplayLines } from '../terminal/display';
 import { createDebugLogger } from '../utils/debug';
+import { clientLog } from '../utils/clientLog';
 import { markStartupMilestone } from '../utils/startupPerformance';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
 import { Check, Columns2, Folder, Plus, X } from 'lucide-react';
@@ -91,6 +93,7 @@ type SyncSwiperOptions = {
 type ResumeRequest = {
   token: number;
   reason: 'visibility' | 'bfcache' | 'online';
+  forceForegroundReconnect: boolean;
 };
 
 type WorkspaceSlide = {
@@ -403,7 +406,11 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
-  const [resumeRequest, setResumeRequest] = useState<ResumeRequest>({ token: 0, reason: 'visibility' });
+  const [resumeRequest, setResumeRequest] = useState<ResumeRequest>({
+    token: 0,
+    reason: 'visibility',
+    forceForegroundReconnect: false,
+  });
   const [readySessionIds, setReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [foregroundResumeCompletedToken, setForegroundResumeCompletedToken] = useState(0);
   const [viewportReadySessionIds, setViewportReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -976,13 +983,25 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
     let lastResumeScheduledAt: number | null = null;
+    let wasPageHidden = document.hidden;
     const scheduleResume = (reason: string) => {
       if (reason !== 'online' && document.hidden) return;
       const now = performance.now();
       if (!shouldScheduleForegroundResume(lastResumeScheduledAt, now)) return;
       lastResumeScheduledAt = now;
       const refreshReason = reason === 'bfcache' || reason === 'online' ? reason : 'visibility';
-      setResumeRequest((request) => ({ token: request.token + 1, reason: refreshReason }));
+      const forceForegroundReconnect = shouldForceForegroundReconnect({ wasPageHidden, reason });
+      wasPageHidden = false;
+      clientLog('info', 'PWA_RESUME scheduled', {
+        source: reason,
+        forceForegroundReconnect,
+        activeSessionId: activeSessionIdRef.current,
+      });
+      setResumeRequest((request) => ({
+        token: request.token + 1,
+        reason: refreshReason,
+        forceForegroundReconnect,
+      }));
 
       // 刚回前台时 visualViewport / Swiper translate 经常还没稳定，立即 +
       // 延迟各 update 一次，避免重连后 active slide 宽高/translate 短暂错位。
@@ -996,12 +1015,16 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
     const handleVisibility = () => {
       if (document.hidden) {
+        wasPageHidden = true;
         suspendTerminalConnectionReconnects();
         return;
       }
       scheduleResume('visibility');
     };
-    const handlePageHide = () => suspendTerminalConnectionReconnects();
+    const handlePageHide = () => {
+      wasPageHidden = true;
+      suspendTerminalConnectionReconnects();
+    };
     const handlePageShow = (event: PageTransitionEvent) => {
       scheduleResume(event.persisted ? 'bfcache' : 'pageshow');
     };
@@ -1856,6 +1879,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             focusRequestToken={focusTransferRequest?.sessionId === session.id ? focusTransferRequest.token : 0}
             resumeRequestToken={resumeRequest.token}
             resumeRequestReason={resumeRequest.reason}
+            forceResumeReconnect={resumeRequest.forceForegroundReconnect && session.id === foregroundSessionId}
             resumeRequestDelayMs={session.id === foregroundSessionId
               ? 0
               : options.hidden

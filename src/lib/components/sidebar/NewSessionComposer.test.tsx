@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 describe('NewSessionComposer launcher choices', () => {
-  it('keeps one-off launches separate from changing the default', () => {
+  it('lets people review an agent choice before launching it', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
       json: async () => ({ locale: 'en' }),
@@ -51,16 +51,50 @@ describe('NewSessionComposer launcher choices', () => {
       </I18nProvider>,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Launch Codex now' }));
-    expect(onLaunchAgent).toHaveBeenCalledWith(codex);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Agent' }), { target: { value: 'codex' } });
+    expect(onLaunchAgent).not.toHaveBeenCalled();
     expect(onSelectAgent).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Set Codex as default' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Make default' }));
     expect(onSelectAgent).toHaveBeenCalledWith(codex);
-    expect(onLaunchAgent).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Launch Terminal now' }));
-    expect(onLaunchAgent).toHaveBeenLastCalledWith(null);
+    fireEvent.click(screen.getByRole('button', { name: 'Start Codex' }));
+    expect(onLaunchAgent).toHaveBeenCalledOnce();
+    expect(onLaunchAgent).toHaveBeenCalledWith(codex);
+  });
+
+  it('reuses the directory browser and confirms the current folder explicitly', () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ locale: 'en' }) })));
+    const onOptionsChange = vi.fn();
+
+    render(
+      <I18nProvider>
+        <NewSessionComposer
+          directories={['/workspace']}
+          tmuxAvailable
+          options={{ mode: 'shell', cwd: '/workspace' }}
+          agents={[codex]}
+          selectedAgent={codex}
+          detecting={false}
+          resumeHistory={[]}
+          resumeHistoryLoading={false}
+          resumeHistoryPendingId={null}
+          resumeHistoryError={null}
+          onRefreshAgents={vi.fn()}
+          onSelectAgent={vi.fn()}
+          onLaunchAgent={vi.fn()}
+          onResumeHistory={vi.fn()}
+          onRemoveResumeHistory={vi.fn()}
+          onClose={vi.fn()}
+          onOptionsChange={onOptionsChange}
+        />
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Browse' }));
+    expect(screen.getByText('/workspace')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Use folder' }));
+    expect(onOptionsChange).toHaveBeenCalledWith({ mode: 'shell', cwd: '/workspace' });
   });
 
   it('renders recent conversations as direct resume actions', () => {
@@ -101,6 +135,7 @@ describe('NewSessionComposer launcher choices', () => {
       </I18nProvider>,
     );
 
+    fireEvent.click(screen.getByText('Recent conversations'));
     fireEvent.click(screen.getByRole('button', { name: 'Resume Fix reconnect races' }));
     expect(onResumeHistory).toHaveBeenCalledWith(entry);
     fireEvent.click(screen.getByRole('button', { name: 'Remove Fix reconnect races from recent conversations' }));

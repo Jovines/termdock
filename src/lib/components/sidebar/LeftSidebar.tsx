@@ -1242,33 +1242,35 @@ export function LeftSidebar(
         />
       )}
 
-      {/* Footer — one primary action, with optional launch details behind the chevron. */}
-      <div className="relative z-10 shrink-0 border-t border-border/15 bg-[var(--chrome-bg)] p-2">
-        <div className="flex overflow-hidden rounded-lg bg-primary text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25">
-          <button
-            type="button"
-            onClick={handleNewSessionClick}
-            className="flex min-w-0 flex-1 items-center justify-center gap-2 px-3 py-2.5 text-[13px] font-semibold transition hover:bg-primary/90 active:scale-[0.99]"
-            title={newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}
-            aria-label={newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}
-          >
-            {newSessionAgent
-              ? <AgentBrandAvatar agent={newSessionAgent} size={16} />
-              : <RiAddLine size={15} className="shrink-0" />}
-            <span className="truncate">{newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}</span>
-          </button>
-          <button
-            type="button"
-            onClick={toggleNewSessionComposer}
-            className={`inline-flex w-10 shrink-0 items-center justify-center border-l border-primary-foreground/20 transition hover:bg-primary/90 active:bg-primary/80 ${newSessionComposerOpen ? 'bg-primary/80' : ''}`}
-            title={t('sidebar.newSession')}
-            aria-label={t('sidebar.newSession')}
-            aria-expanded={newSessionComposerOpen}
-          >
-            <RiChevronDownLine size={15} className={`transition-transform duration-200 ${newSessionComposerOpen ? 'rotate-180' : ''}`} />
-          </button>
+      {/* The composer owns the single primary action while it is open. */}
+      {!newSessionComposerOpen && (
+        <div className="relative z-10 shrink-0 border-t border-border/15 bg-[var(--chrome-bg)] p-2">
+          <div className="flex overflow-hidden rounded-lg bg-primary text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25">
+            <button
+              type="button"
+              onClick={handleNewSessionClick}
+              className="flex min-w-0 flex-1 items-center justify-center gap-2 px-3 py-2.5 text-[13px] font-semibold transition hover:bg-primary/90 active:scale-[0.99]"
+              title={newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}
+              aria-label={newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}
+            >
+              {newSessionAgent
+                ? <AgentBrandAvatar agent={newSessionAgent} size={16} />
+                : <RiAddLine size={15} className="shrink-0" />}
+              <span className="truncate">{newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}</span>
+            </button>
+            <button
+              type="button"
+              onClick={toggleNewSessionComposer}
+              className="inline-flex w-10 shrink-0 items-center justify-center border-l border-primary-foreground/20 transition hover:bg-primary/90 active:bg-primary/80"
+              title={t('sidebar.newSession')}
+              aria-label={t('sidebar.newSession')}
+              aria-expanded={false}
+            >
+              <RiChevronDownLine size={15} className="transition-transform duration-200" />
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </>
   );
 

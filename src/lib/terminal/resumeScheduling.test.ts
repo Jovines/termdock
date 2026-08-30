@@ -10,6 +10,7 @@ import {
   selectConnectionForegroundSessionId,
   shouldScheduleForegroundResume,
   shouldRunResumeRequest,
+  shouldForceForegroundReconnect,
   shouldStartInitialConnection,
 } from './resumeScheduling';
 
@@ -103,6 +104,19 @@ describe('shouldScheduleForegroundResume', () => {
     expect(shouldScheduleForegroundResume(null, 1_000)).toBe(true);
     expect(shouldScheduleForegroundResume(1_000, 1_000 + FOREGROUND_RESUME_COALESCE_MS - 1)).toBe(false);
     expect(shouldScheduleForegroundResume(1_000, 1_000 + FOREGROUND_RESUME_COALESCE_MS)).toBe(true);
+  });
+});
+
+describe('shouldForceForegroundReconnect', () => {
+  it('replaces the foreground socket after a real background or network resume', () => {
+    expect(shouldForceForegroundReconnect({ wasPageHidden: true, reason: 'visibility' })).toBe(true);
+    expect(shouldForceForegroundReconnect({ wasPageHidden: false, reason: 'bfcache' })).toBe(true);
+    expect(shouldForceForegroundReconnect({ wasPageHidden: false, reason: 'online' })).toBe(true);
+  });
+
+  it('keeps an ordinary window focus on the lightweight probe path', () => {
+    expect(shouldForceForegroundReconnect({ wasPageHidden: false, reason: 'focus' })).toBe(false);
+    expect(shouldForceForegroundReconnect({ wasPageHidden: false, reason: 'pageshow' })).toBe(false);
   });
 });
 

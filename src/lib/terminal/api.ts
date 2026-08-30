@@ -946,6 +946,15 @@ export function probeTerminalConnection(sessionId: string, onResponsive?: () => 
   return true;
 }
 
+/** Replace the current socket immediately. Foreground PWA resumes use this
+ * instead of spending the critical path on the zombie-socket probe timeout. */
+export function reconnectTerminalConnectionNow(sessionId: string): boolean {
+  const conn = wsConnections.get(sessionId);
+  if (!conn) return false;
+  conn.reconnectNow();
+  return true;
+}
+
 /** Freeze retry timers while the app is hidden. The foreground resume
  * scheduler will unfreeze each session by probing it in priority order. */
 export function suspendTerminalConnectionReconnects(): void {

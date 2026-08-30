@@ -25,6 +25,8 @@ import { useReferenceLongPressCopy } from './referenceLongPress';
 interface FileTreeProps {
   rootPath: string;
   onFileSelect: (path: string) => void;
+  /** Reuses the explorer tree as a directory picker without exposing file actions. */
+  directoriesOnly?: boolean;
   onPathReference?: (path: string, key?: string) => void;
   getReferenceText?: (path: string) => string;
   onReferenceCopied?: (key: string) => void;
@@ -185,6 +187,7 @@ interface FileTreeItemProps {
   node: FileTreeNode;
   depth: number;
   onFileSelect: (path: string) => void;
+  directoriesOnly?: boolean;
   onPathReference?: (path: string, key?: string) => void;
   getReferenceText?: (path: string) => string;
   onReferenceCopied?: (key: string) => void;
@@ -208,6 +211,7 @@ const FileTreeItem = memo(function FileTreeItem({
   node,
   depth,
   onFileSelect,
+  directoriesOnly = false,
   onPathReference,
   getReferenceText,
   onReferenceCopied,
@@ -259,8 +263,8 @@ const FileTreeItem = memo(function FileTreeItem({
     // 搜索过滤需要查 directoryCache 的孙节点 — 这里读一次就够，
     // 不会触发额外订阅（getState 不订阅）。
     const cache = useSidebarStore.getState().directoryCache;
-    return children.filter((child) => hasMatchingDescendant(child, queryLower, cache));
-  }, [children, queryLower]);
+    return children.filter((child) => (!directoriesOnly || child.type === 'directory') && hasMatchingDescendant(child, queryLower, cache));
+  }, [children, directoriesOnly, queryLower]);
 
   const loadChildren = useCallback(async () => {
     const cached = useSidebarStore.getState().directoryCache.has(node.path);
@@ -291,11 +295,15 @@ const FileTreeItem = memo(function FileTreeItem({
       onFileSelect(node.path);
       return;
     }
+    if (directoriesOnly && onDirectoryRoot) {
+      onDirectoryRoot(node.path);
+      return;
+    }
 
     const willExpand = !useSidebarStore.getState().expandedPaths.has(node.path);
     toggleExpanded(node.path);
     if (willExpand) await loadChildren();
-  }, [node.path, node.type, loadChildren, toggleExpanded, onFileSelect]);
+  }, [directoriesOnly, node.path, node.type, loadChildren, onDirectoryRoot, toggleExpanded, onFileSelect]);
 
   useEffect(() => {
     if (node.type === 'directory' && isExpanded && !children && !loading) {
@@ -466,7 +474,7 @@ const FileTreeItem = memo(function FileTreeItem({
         </span>
         {loading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
         <ChangeBadge path={node.path} />
-        {node.type === 'directory' && (onDirectoryRoot || onDirectoryPinToggle || canOpenLocal) && (
+        {node.type === 'directory' && !directoriesOnly && (onDirectoryRoot || onDirectoryPinToggle || canOpenLocal) && (
           <span
             onClick={handleDirectoryMoreClick}
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
@@ -497,7 +505,7 @@ const FileTreeItem = memo(function FileTreeItem({
         )}
       </div>
 
-      {node.type === 'directory' && actionsOpen && (onDirectoryRoot || onDirectoryPinToggle || canOpenLocal) && (
+      {node.type === 'directory' && !directoriesOnly && actionsOpen && (onDirectoryRoot || onDirectoryPinToggle || canOpenLocal) && (
         <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {canOpenLocal && (
             <button
@@ -589,6 +597,7 @@ const FileTreeItem = memo(function FileTreeItem({
               node={child}
               depth={depth + 1}
               onFileSelect={onFileSelect}
+              directoriesOnly={directoriesOnly}
               onPathReference={onPathReference}
               getReferenceText={getReferenceText}
               onReferenceCopied={onReferenceCopied}
@@ -1001,7 +1010,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   );
 });
 
-export function FileTree({ rootPath, onFileSelect, onPathReference, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles, revealDirectory }: FileTreeProps) {
+export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPathReference, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles, revealDirectory }: FileTreeProps) {
   const { t } = useI18n();
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
@@ -1212,10 +1221,10 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
 
   const visibleRootEntries = useMemo(() => {
     if (!rootEntries) return undefined;
-    if (!queryLower) return rootEntries;
+    if (!queryLower) return directoriesOnly ? rootEntries.filter((node) => node.type === 'directory') : rootEntries;
     const cache = useSidebarStore.getState().directoryCache;
-    return rootEntries.filter((node) => hasMatchingDescendant(node, queryLower, cache));
-  }, [queryLower, rootEntries]);
+    return rootEntries.filter((node) => (!directoriesOnly || node.type === 'directory') && hasMatchingDescendant(node, queryLower, cache));
+  }, [directoriesOnly, queryLower, rootEntries]);
 
   if (!rootPath) {
     return (
@@ -1414,6 +1423,7 @@ export function FileTree({ rootPath, onFileSelect, onPathReference, getReference
           node={node}
           depth={0}
           onFileSelect={onFileSelect}
+          directoriesOnly={directoriesOnly}
           onPathReference={onPathReference}
           getReferenceText={getReferenceText}
           onReferenceCopied={onReferenceCopied}

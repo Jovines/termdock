@@ -54,6 +54,13 @@ export function shouldScheduleForegroundResume(
   return lastScheduledAt === null || now - lastScheduledAt >= FOREGROUND_RESUME_COALESCE_MS;
 }
 
+export function shouldForceForegroundReconnect(options: {
+  wasPageHidden: boolean;
+  reason: string;
+}): boolean {
+  return options.wasPageHidden || options.reason === 'bfcache' || options.reason === 'online';
+}
+
 export function getVisibleReconnectWatchdogDelayMs(options: {
   isActive: boolean;
   isStreamReady: boolean;

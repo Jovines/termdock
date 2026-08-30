@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   connectTerminalStream,
   probeTerminalConnection,
+  reconnectTerminalConnectionNow,
   suspendTerminalConnectionReconnects,
 } from './api';
 
@@ -152,6 +153,20 @@ describe('connectTerminalStream reconnect policy', () => {
     // The explicit foreground probe also unfreezes normal retry behavior.
     socket.fail();
     vi.advanceTimersByTime(1_000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    disconnect();
+  });
+
+  it('replaces the foreground socket immediately without waiting for the probe timeout', () => {
+    const disconnect = connectTerminalStream('foreground-resume', vi.fn(), vi.fn());
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    suspendTerminalConnectionReconnects();
+
+    expect(reconnectTerminalConnectionNow('foreground-resume')).toBe(true);
+    vi.advanceTimersByTime(0);
+
     expect(FakeWebSocket.instances).toHaveLength(2);
     disconnect();
   });

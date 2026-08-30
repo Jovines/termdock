@@ -110,4 +110,33 @@ describe('FileTree file deletion', () => {
       '/workspace/mechanical/preview',
     ]));
   });
+
+  it('reuses the explorer as a safe directory-only browser', async () => {
+    const user = userEvent.setup();
+    const onDirectoryRoot = vi.fn();
+    useSidebarStore.setState({
+      selectedFilePath: null,
+      expandedPaths: new Set(),
+      directoryCache: new Map([['/workspace', [
+        { name: 'project', path: '/workspace/project', type: 'directory', expanded: false, loaded: true, children: [] },
+        { name: 'notes.txt', path: '/workspace/notes.txt', type: 'file', expanded: false, loaded: true },
+      ]]]),
+    });
+
+    render(
+      <I18nProvider>
+        <FileTree
+          rootPath="/workspace"
+          directoriesOnly
+          selectedFilePath={null}
+          onFileSelect={vi.fn()}
+          onDirectoryRoot={onDirectoryRoot}
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.queryByText('notes.txt')).toBeNull();
+    await user.click(screen.getByText('project'));
+    expect(onDirectoryRoot).toHaveBeenCalledWith('/workspace/project');
+  });
 });
