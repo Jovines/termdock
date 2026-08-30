@@ -8,7 +8,7 @@ import {
   updateRuntimeFromRegistry,
   type RuntimeUpdateResult,
 } from './runtime.js';
-import { startGitHubUpdateFeedServer } from './githubUpdateFeed.js';
+import { buildGitHubUpdateFeed, startGitHubUpdateFeedServer } from './githubUpdateFeed.js';
 import type { DesktopAppUpdateState } from './types.js';
 
 const AUTOMATIC_CHECK_DELAY_MS = 15_000;
@@ -125,21 +125,7 @@ function configureUpdaterEvents(): void {
     });
   });
   autoUpdater.on('update-not-available', () => {
-    const state = publishUpdateState({
-      status: 'current',
-      latestVersion: null,
-      releaseName: null,
-      checkedAt: Date.now(),
-      error: null,
-    });
-    finishPendingCheck(state);
-    if (!nativeCheckDialogPending || !showMessageBox) return;
-    nativeCheckDialogPending = false;
-    void showMessageBox({
-      type: 'info',
-      title: '桌面版已是最新版本',
-      message: `当前 Termdock Desktop ${app.getVersion()} 已是最新版本。`,
-    });
+    reportCurrentVersion();
   });
   autoUpdater.on(
     'update-downloaded',
@@ -168,6 +154,25 @@ function configureUpdaterEvents(): void {
       });
     },
   );
+}
+
+function reportCurrentVersion(): DesktopAppUpdateState {
+  const state = publishUpdateState({
+    status: 'current',
+    latestVersion: null,
+    releaseName: null,
+    checkedAt: Date.now(),
+    error: null,
+  });
+  finishPendingCheck(state);
+  if (!nativeCheckDialogPending || !showMessageBox) return state;
+  nativeCheckDialogPending = false;
+  void showMessageBox({
+    type: 'info',
+    title: '桌面版已是最新版本',
+    message: `当前 Termdock Desktop ${app.getVersion()} 已是最新版本。`,
+  });
+  return state;
 }
 
 async function runAutomaticChecks(): Promise<void> {
@@ -232,7 +237,17 @@ export async function checkForDesktopUpdates(options: {
       void reportUpdateError(new Error('Desktop update check timed out'));
     }, UPDATE_CHECK_TIMEOUT_MS);
     checkTimeout.unref?.();
-    void ensureUpdateFeedConfigured().then(() => {
+    // Squirrel.Mac can treat a local proxy's standards-compliant 204 as an
+    // invalid response on some Electron releases. Resolve the current-version
+    // case from GitHub metadata before handing an actual update to it.
+    void buildGitHubUpdateFeed(app.getVersion(), process.platform, process.arch).then((feed) => {
+      if (feed.status === 204) {
+        reportCurrentVersion();
+        return undefined;
+      }
+      return ensureUpdateFeedConfigured();
+    }).then((feedUrl) => {
+      if (!feedUrl) return;
       try {
         autoUpdater.checkForUpdates();
       } catch (error) {

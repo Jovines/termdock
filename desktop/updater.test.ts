@@ -39,6 +39,14 @@ const runtimeMock = vi.hoisted(() => ({
   })),
 }));
 const feedMock = vi.hoisted(() => ({
+  buildGitHubUpdateFeed: vi.fn(async (): Promise<
+    { status: 200; body: string } | { status: 204 }
+  > => ({
+    status: 200 as const,
+    body: JSON.stringify({
+      url: 'https://github.com/Jovines/termdock/releases/download/v1.4.82/update.zip',
+    }),
+  })),
   startGitHubUpdateFeedServer: vi.fn(async () => ({
     url: 'http://127.0.0.1:54321/feed',
     close: vi.fn(),
@@ -56,6 +64,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.resetModules();
   electronMock.reset();
+  feedMock.buildGitHubUpdateFeed.mockClear();
+  feedMock.startGitHubUpdateFeedServer.mockClear();
   vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
 });
 
@@ -81,6 +91,20 @@ describe('desktop updater', () => {
       status: 'current',
       currentVersion: '1.4.81',
     });
+  });
+
+  it('reports current directly when GitHub has no newer desktop release', async () => {
+    feedMock.buildGitHubUpdateFeed.mockResolvedValueOnce({ status: 204 as const });
+    const updater = await import('./updater.js');
+    updater.configureDesktopUpdater(vi.fn(async () => ({ response: 0, checkboxChecked: false })));
+
+    await expect(updater.checkForDesktopUpdates()).resolves.toMatchObject({
+      status: 'current',
+      currentVersion: '1.4.81',
+      error: null,
+    });
+    expect(electronMock.autoUpdater.checkForUpdates).not.toHaveBeenCalled();
+    expect(feedMock.startGitHubUpdateFeedServer).not.toHaveBeenCalled();
   });
 
   it('publishes download state and installs only after the desktop update is ready', async () => {
