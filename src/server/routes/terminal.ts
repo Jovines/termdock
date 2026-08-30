@@ -4102,11 +4102,15 @@ async function injectTmuxShellIntegration(sessionName: string): Promise<void> {
 
 }
 
-async function enableTmuxFocusEvents(): Promise<void> {
+async function disableTmuxFocusEventsForSafety(): Promise<void> {
   const current = (await runTmux(['show-options', '-gqv', 'focus-events'])).trim();
-  if (current === 'on') return;
-  await runTmux(['set-option', '-g', 'focus-events', 'on']);
-  console.log('[tmux-focus] enabled global focus-events');
+  if (current === 'off') return;
+  // tmux/tmux#5022: a queued focus event can dereference a NULL client
+  // session during teardown and crash the shared tmux server. Until tmux
+  // ships a confirmed fix, losing pane focus notifications is preferable to
+  // losing every Termdock session and Agent on that server.
+  await runTmux(['set-option', '-g', 'focus-events', 'off']);
+  console.log('[tmux-focus] disabled global focus-events for crash safety');
 }
 
 // Let tmux forward modified Enter keys (Ctrl/Shift/Alt+Enter) to pane apps.
@@ -4126,7 +4130,7 @@ async function enableTmuxExtendedKeys(): Promise<void> {
 async function ensureSharedTmuxServerReady(): Promise<void> {
   await ensureTmuxColorEnvironment();
   await applyTmuxScrollbackProfile();
-  await enableTmuxFocusEvents();
+  await disableTmuxFocusEventsForSafety();
   await enableTmuxExtendedKeys();
   await configureTmuxWheelBindings();
 }
@@ -5491,21 +5495,27 @@ router.delete('/tmux/sessions/:name', async (req, res) => {
     return res.status(400).json({ error: 'invalid tmux session name' });
   }
 
-  // Detach any local terminal sessions still wired to this tmux session so that
-  // their pty (the tmux client) is cleaned up alongside the kill-session call.
+  // Find local terminal sessions wired to this tmux session. They must be
+  // detached before kill-session: tmux can otherwise process a queued focus
+  // event after clearing the client's session pointer and crash the whole
+  // shared server (tmux/tmux#5022), taking every unrelated pane with it.
   const affectedSessionIds: string[] = [];
   for (const [sessionId, session] of terminalSessions.entries()) {
     if (session.mode === 'tmux' && session.tmuxSessionName === rawName) {
+      session.focusTrackingRequested = false;
+      session.focusAggregation.focusedClients.clear();
+      session.focusAggregation.effectiveFocused = false;
       affectedSessionIds.push(sessionId);
     }
   }
 
   try {
-    await runTmux(['kill-session', '-t', rawName]);
+    // detach-client -s completes only after tmux has removed clients from the
+    // live session, closing the NULL-session focus race before teardown.
+    await runTmux(['detach-client', '-s', rawName]);
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     if (isTmuxSessionMissingMessage(errorMessage)) {
-      // Already gone; treat as success and still clean up any orphan ptys.
       for (const id of affectedSessionIds) {
         try { cleanupSession(id, { killProcess: true }); } catch {}
       }
@@ -5514,12 +5524,24 @@ router.delete('/tmux/sessions/:name', async (req, res) => {
     if (isTmuxUnavailableMessage(errorMessage)) {
       return res.status(503).json({ error: 'tmux is not installed or not available in PATH.' });
     }
-    return res.status(500).json({ error: errorMessage || 'Failed to kill tmux session' });
+    return res.status(500).json({ error: errorMessage || 'Failed to detach tmux session clients' });
   }
 
   for (const id of affectedSessionIds) {
     try { cleanupSession(id, { killProcess: true }); } catch (error) {
       console.error(`[tmux] cleanup attached session ${id} failed:`, getErrorMessage(error));
+    }
+  }
+
+  try {
+    await runTmux(['kill-session', '-t', rawName]);
+  } catch (error) {
+    const errorMessage = getErrorMessage(error);
+    if (!isTmuxSessionMissingMessage(errorMessage)) {
+      if (isTmuxUnavailableMessage(errorMessage)) {
+        return res.status(503).json({ error: 'tmux is not installed or not available in PATH.' });
+      }
+      return res.status(500).json({ error: errorMessage || 'Failed to kill tmux session' });
     }
   }
 

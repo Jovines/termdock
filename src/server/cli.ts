@@ -2683,13 +2683,16 @@ async function setTmuxOption(sessionName: string, key: string, value: string): P
   });
 }
 
-async function ensureTmuxFocusEvents(): Promise<void> {
+async function disableTmuxFocusEventsForSafety(): Promise<void> {
   const { stdout } = await execFileAsync('tmux', ['show-options', '-gqv', 'focus-events'], {
     timeout: 5000,
     maxBuffer: 64 * 1024,
   });
-  if (stdout.trim() === 'on') return;
-  await execFileAsync('tmux', ['set-option', '-g', 'focus-events', 'on'], {
+  if (stdout.trim() === 'off') return;
+  // tmux/tmux#5022 can crash the entire shared server when a focus event
+  // races session teardown. Keep the vulnerable global option disabled until
+  // upstream ships a confirmed fix.
+  await execFileAsync('tmux', ['set-option', '-g', 'focus-events', 'off'], {
     timeout: 5000,
     maxBuffer: 64 * 1024,
   });
@@ -2864,7 +2867,7 @@ async function ensureStampedTmuxSession(
     });
   }
 
-  await ensureTmuxFocusEvents();
+  await disableTmuxFocusEventsForSafety();
   await ensureTmuxExtendedKeys();
   await ensureTmuxColorEnvironment(sessionName);
   await ensureTmuxCliSessionOptions(sessionName);
@@ -3413,7 +3416,7 @@ async function runAttachTmux(opts: { name?: string; all?: boolean }): Promise<vo
       }
       process.exit(1);
     }
-    await ensureTmuxFocusEvents();
+    await disableTmuxFocusEventsForSafety();
     if (target.version.length > 0) {
       registerGuiTmuxSession(target.name);
     }
@@ -3435,7 +3438,7 @@ async function runAttachTmux(opts: { name?: string; all?: boolean }): Promise<vo
     process.exit(0);
   }
 
-  await ensureTmuxFocusEvents();
+  await disableTmuxFocusEventsForSafety();
   const pickedRow = candidates.find((row) => row.name === picked);
   if (pickedRow?.version) {
     registerGuiTmuxSession(pickedRow.name);
