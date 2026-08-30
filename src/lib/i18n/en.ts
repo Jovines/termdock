@@ -70,6 +70,7 @@ export const en: TranslationDictionary = {
     confirmNewTmux: 'Create Tmux?',
     newSession: 'New terminal',
     newSessionWithAgent: ({ agent }) => `New ${agent}`,
+    moreLaunchOptions: 'More launch options',
     newSessionAdvanced: 'Quick-launch agent',
     newSessionComposerTitle: 'Start a session',
     newSessionHint: 'Choose how and where it starts',

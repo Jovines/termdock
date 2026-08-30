@@ -70,6 +70,7 @@ export const zh: TranslationDictionary = {
     confirmNewTmux: '创建 Tmux？',
     newSession: '新建 Terminal',
     newSessionWithAgent: ({ agent }) => `新建 ${agent}`,
+    moreLaunchOptions: '更多启动选项',
     newSessionAdvanced: '快速启动 Agent',
     newSessionComposerTitle: '开始新会话',
     newSessionHint: '选好运行方式和目录后再启动',

@@ -322,15 +322,14 @@ export function LeftSidebar(
   const closeIfOverlay = () => {
     if (!push && !pinned) onClose();
   };
-  const handleNewSessionClick = () => {
-    const options = newSessionComposerOpen
-      ? { ...newSessionOptions, cwd: newSessionOptions.cwd?.trim() || undefined }
-      : {
-        mode: defaultSessionMode === 'tmux' && !tmuxAvailable ? 'shell' as const : defaultSessionMode,
-        command: newSessionAgent?.command,
-      };
-    onNewSession(options);
-    setNewSessionComposerOpen(false);
+  const quickLaunchMode = defaultSessionMode === 'tmux' && !tmuxAvailable ? 'shell' as const : defaultSessionMode;
+  const handleQuickLaunchTerminal = () => {
+    onNewSession({ mode: quickLaunchMode });
+    closeIfOverlay();
+  };
+  const handleQuickLaunchDefaultAgent = () => {
+    if (!newSessionAgent) return;
+    onNewSession({ mode: quickLaunchMode, command: newSessionAgent.command });
     closeIfOverlay();
   };
 
@@ -1245,25 +1244,35 @@ export function LeftSidebar(
       {/* The composer owns the single primary action while it is open. */}
       {!newSessionComposerOpen && (
         <div className="relative z-10 shrink-0 border-t border-border/15 bg-[var(--chrome-bg)] p-2">
-          <div className="flex overflow-hidden rounded-lg bg-primary text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25">
+          <div className={`grid gap-1.5 ${newSessionAgent ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.5rem]' : 'grid-cols-[minmax(0,1fr)_2.5rem]'}`}>
             <button
               type="button"
-              onClick={handleNewSessionClick}
-              className="flex min-w-0 flex-1 items-center justify-center gap-2 px-3 py-2.5 text-[13px] font-semibold transition hover:bg-primary/90 active:scale-[0.99]"
-              title={newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}
-              aria-label={newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}
+              onClick={handleQuickLaunchTerminal}
+              className={`flex min-w-0 items-center justify-center gap-2 rounded-lg px-2 py-2.5 text-[12px] font-semibold transition active:scale-[0.99] ${newSessionAgent ? 'bg-surface-elevated text-foreground ring-1 ring-border/30 hover:bg-surface-2' : 'bg-primary text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25 hover:bg-primary/90'}`}
+              title={t('sidebar.newSession')}
+              aria-label={t('sidebar.newSession')}
             >
-              {newSessionAgent
-                ? <AgentBrandAvatar agent={newSessionAgent} size={16} />
-                : <RiAddLine size={15} className="shrink-0" />}
-              <span className="truncate">{newSessionAgent ? t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName }) : t('sidebar.newSession')}</span>
+              <RiTerminalLine size={15} className="shrink-0" />
+              <span className="truncate">Terminal</span>
             </button>
+            {newSessionAgent && (
+              <button
+                type="button"
+                onClick={handleQuickLaunchDefaultAgent}
+                className="flex min-w-0 items-center justify-center gap-2 rounded-lg bg-primary px-2 py-2.5 text-[12px] font-semibold text-primary-foreground ring-1 ring-primary/40 shadow-md shadow-primary/25 transition hover:bg-primary/90 active:scale-[0.99]"
+                title={t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName })}
+                aria-label={t('sidebar.newSessionWithAgent', { agent: newSessionAgent.displayName })}
+              >
+                <AgentBrandAvatar agent={newSessionAgent} size={15} />
+                <span className="truncate">{newSessionAgent.displayName}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={toggleNewSessionComposer}
-              className="inline-flex w-10 shrink-0 items-center justify-center border-l border-primary-foreground/20 transition hover:bg-primary/90 active:bg-primary/80"
-              title={t('sidebar.newSession')}
-              aria-label={t('sidebar.newSession')}
+              className="inline-flex w-10 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground ring-1 ring-border/20 transition hover:bg-surface-elevated hover:text-foreground active:scale-[0.97]"
+              title={t('sidebar.moreLaunchOptions')}
+              aria-label={t('sidebar.moreLaunchOptions')}
               aria-expanded={false}
             >
               <RiChevronDownLine size={15} className="transition-transform duration-200" />
