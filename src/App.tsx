@@ -2579,6 +2579,31 @@ function App() {
     }));
   }, []);
 
+  const handleSidebarCloseSession = useCallback((
+    sessionId: string,
+    event?: Pick<React.MouseEvent, 'clientX' | 'clientY'>,
+  ) => {
+    const session = sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    const terminalState = terminalSessions.get(sessionId);
+    if (shouldDestroySessionDirectly({
+      mode: session.mode,
+      activeProgram: terminalState?.activeProgram ?? null,
+      promptState: terminalState?.promptState ?? null,
+      shellNames: SHELL_NAMES,
+    })) {
+      dispatchCloseSession({
+        sessionId,
+        source: 'sidebar',
+        closeMode: session.mode === 'tmux' ? 'destroy' : 'auto',
+      });
+      return;
+    }
+    setSidebarCloseAnchor(event ? { x: event.clientX, y: event.clientY } : null);
+    setSidebarCloseChoiceSessionId(sessionId);
+    setTmuxKillError(null);
+  }, [sessions, terminalSessions, dispatchCloseSession]);
+
   useEffect(() => {
     if (!desktopBridge) return;
     const handleNativeCommand = (event: Event) => {
@@ -2586,7 +2611,7 @@ function App() {
       if (command === 'new-session') {
         dispatchNewSession();
       } else if (command === 'close-session') {
-        if (activeSessionId) dispatchCloseSession({ sessionId: activeSessionId, source: 'other' });
+        if (activeSessionId) handleSidebarCloseSession(activeSessionId);
       } else if (command === 'previous-session' || command === 'next-session') {
         window.dispatchEvent(new CustomEvent('cycle-terminal-session', {
           detail: { direction: command === 'next-session' ? 'next' : 'prev' },
@@ -2606,40 +2631,30 @@ function App() {
   }, [
     activeSessionId,
     desktopBridge,
-    dispatchCloseSession,
     dispatchNewSession,
+    handleSidebarCloseSession,
     handleToggleLeftSidebar,
     handleToggleRightSidebar,
     handleJumpToNextAttention,
     handleJumpToPreviousAttention,
   ]);
 
-  const handleSidebarCloseSession = useCallback((sessionId: string, event: React.MouseEvent) => {
-    const session = sessions.find((s) => s.id === sessionId);
-    if (!session) return;
-    const terminalState = terminalSessions.get(sessionId);
-    if (shouldDestroySessionDirectly({
-      mode: session.mode,
-      activeProgram: terminalState?.activeProgram ?? null,
-      promptState: terminalState?.promptState ?? null,
-      shellNames: SHELL_NAMES,
-    })) {
-      dispatchCloseSession({
-        sessionId,
-        source: 'sidebar',
-        closeMode: session.mode === 'tmux' ? 'destroy' : 'auto',
-      });
-      return;
-    }
-    setSidebarCloseAnchor({ x: event.clientX, y: event.clientY });
-    setSidebarCloseChoiceSessionId(sessionId);
-    setTmuxKillError(null);
-  }, [sessions, terminalSessions, dispatchCloseSession]);
-
   const sidebarCloseChoiceSession = React.useMemo(
     () => sessions.find((s) => s.id === sidebarCloseChoiceSessionId) ?? null,
     [sessions, sidebarCloseChoiceSessionId],
   );
+  const sidebarCloseChoiceDisplayName = React.useMemo(() => {
+    if (!sidebarCloseChoiceSession) return '';
+    const terminalState = terminalSessions.get(sidebarCloseChoiceSession.id);
+    return getSessionDisplayLines(
+      sidebarCloseChoiceSession,
+      terminalState?.activeProgram ?? null,
+      terminalState?.cwd ?? null,
+      SHELL_NAMES,
+      terminalState?.shellTitle ?? null,
+      terminalState?.promptState ?? null,
+    ).primary;
+  }, [sidebarCloseChoiceSession, terminalSessions]);
 
   // Auto-refresh tmux sessions when drawer is open
   useEffect(() => {
@@ -3971,7 +3986,7 @@ function App() {
           >
             <div className="border-b border-border/15 px-4 py-3">
               <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{t('tab.closeChooserTitle')}</div>
-              <div className="mt-0.5 truncate text-[14px] font-medium text-foreground">{sidebarCloseChoiceSession.tmuxSessionName ?? sidebarCloseChoiceSession.name}</div>
+              <div className="mt-0.5 truncate text-[14px] font-medium text-foreground">{sidebarCloseChoiceDisplayName}</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground/80">{t('tab.closeChooserDescription')}</div>
             </div>
             <div className="flex flex-col py-1">

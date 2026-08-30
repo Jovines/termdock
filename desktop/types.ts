@@ -100,6 +100,7 @@ export interface DesktopConfig {
   version: 1;
   connections: SavedConnection[];
   lastConnectionUrl: string | null;
+  openConnectionUrls: string[];
   trustedCertificateAuthorities: TrustedCertificateAuthority[];
   desktopPreferences: DesktopPreferences;
 }

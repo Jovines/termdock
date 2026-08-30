@@ -34,6 +34,7 @@ import {
   Trash2 as RiTrash,
   PencilLine as RiPencilLine,
   Check as RiCheck,
+  Maximize2 as RiFullscreen,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
@@ -68,7 +69,7 @@ import { EdaPreview } from './EdaPreview';
 import { SvgInspectionPreview } from './SvgInspectionPreview';
 import { CsvPreview } from './CsvPreview';
 import { KicadProjectPreview } from './KicadProjectPreview';
-import { HtmlPreviewFrame } from './HtmlPreviewFrame';
+import { HtmlPreviewFrame, type HtmlPreviewFrameHandle } from './HtmlPreviewFrame';
 import './sidebarSelection.css';
 
 interface RightSidebarProps {
@@ -4951,6 +4952,8 @@ export function FilePreview({
   const [floatingInsertPos, setFloatingInsertPos] = useState<{ top: number; left: number } | null>(null);
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>(() => readMarkdownViewMode());
   const [htmlViewMode, setHtmlViewMode] = useState<HtmlViewMode>(() => readHtmlViewMode(rootPath, filePath));
+  const htmlPreviewRef = useRef<HtmlPreviewFrameHandle | null>(null);
+  const [htmlPreviewFullscreen, setHtmlPreviewFullscreen] = useState(false);
   const [refractor, setRefractor] = useState<RefractorLike | null>(null);
   const [markdownPreviewScrollTop, setMarkdownPreviewScrollTop] = useState(0);
   const [previewHistory, setPreviewHistory] = useState<string[]>([]);
@@ -5615,6 +5618,17 @@ export function FilePreview({
                   : htmlViewMode === 'preview' ? t('rightSidebar.htmlSource') : t('rightSidebar.htmlPreview')}
               </button>
             )}
+            {showHtmlPreview && (
+              <button
+                type="button"
+                onClick={() => void htmlPreviewRef.current?.toggleFullscreen()}
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+                aria-label={htmlPreviewFullscreen ? t('rightSidebar.htmlFullscreenExit') : t('rightSidebar.htmlFullscreenEnter')}
+                title={htmlPreviewFullscreen ? t('rightSidebar.htmlFullscreenExit') : t('rightSidebar.htmlFullscreenEnter')}
+              >
+                <RiFullscreen size={15} />
+              </button>
+            )}
             {!isMobile && (
               <button
                 type="button"
@@ -5834,11 +5848,12 @@ export function FilePreview({
       ) : showHtmlPreview ? (
         <div className="min-h-0 flex-1 overflow-hidden bg-surface">
           <HtmlPreviewFrame
+            ref={htmlPreviewRef}
             key={`${readablePath}:${externalVersion}:${manualRefreshNonce}`}
             src={buildHtmlPreviewUrl(readablePath)}
             title={`${display.name} preview`}
-            enterFullscreenLabel={t('rightSidebar.htmlFullscreenEnter')}
             exitFullscreenLabel={t('rightSidebar.htmlFullscreenExit')}
+            onFullscreenChange={setHtmlPreviewFullscreen}
           />
         </div>
       ) : previewState.kind === 'text' ? (

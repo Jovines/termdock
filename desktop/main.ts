@@ -111,13 +111,17 @@ function triggerLocalNetworkPermission(): void {
 let mainWindow: BrowserWindow | null = null;
 const serviceWindows = new Map<string, BrowserWindow>();
 const windowServiceOrigins = new WeakMap<BrowserWindow, string>();
+const restorableServiceWindows = new WeakSet<BrowserWindow>();
 const reportedServiceActivity = new Map<string, ServiceActivityCount>();
 const observedServiceActivity = new Map<string, ServiceActivityCount>();
 let lastFocusedServiceWindow: BrowserWindow | null = null;
 let menuBarStatus: Tray | null = null;
+let menuBarStatusWidth = 0;
 let floatingWidgetWindow: BrowserWindow | null = null;
 let floatingPositionTimer: ReturnType<typeof setTimeout> | null = null;
 let isQuitting = false;
+const FLOATING_WIDGET_WIDTHS = [64, 108, 152] as const;
+const FLOATING_WIDGET_HEIGHT = 40;
 
 function focusedWorkspaceWindow(): BrowserWindow | null {
   const focused = BrowserWindow.getFocusedWindow();
@@ -249,26 +253,92 @@ function menuBarContextMenu(): Menu {
   ]);
 }
 
+function menuBarStatusImage(status: DesktopStatusSnapshot): Electron.NativeImage {
+  const size = 18;
+  const scale = 2;
+  const bitmap = Buffer.alloc(size * scale * size * scale * 4);
+  const glyphs: Record<string, string[]> = {
+    '0': ['111', '101', '101', '101', '111'],
+    '1': ['010', '110', '010', '010', '111'],
+    '2': ['111', '001', '111', '100', '111'],
+    '3': ['111', '001', '111', '001', '111'],
+    '4': ['101', '101', '111', '001', '001'],
+    '5': ['111', '100', '111', '001', '111'],
+    '6': ['111', '100', '111', '101', '111'],
+    '7': ['111', '001', '010', '010', '010'],
+    '8': ['111', '101', '111', '101', '111'],
+    '9': ['111', '101', '111', '001', '111'],
+    '+': ['000', '010', '111', '010', '000'],
+  };
+  const drawPixel = (x: number, y: number, alpha = 255) => {
+    for (let offsetY = 0; offsetY < scale; offsetY += 1) {
+      for (let offsetX = 0; offsetX < scale; offsetX += 1) {
+        const pixelX = x * scale + offsetX;
+        const pixelY = y * scale + offsetY;
+        if (pixelX < 0 || pixelX >= size * scale || pixelY < 0 || pixelY >= size * scale) continue;
+        bitmap[(pixelY * size * scale + pixelX) * 4 + 3] = alpha;
+      }
+    }
+  };
+  const drawGlyph = (value: number, x: number, y: number, alpha: number) => {
+    const glyph = glyphs[value > 9 ? '+' : String(value)] ?? glyphs['0'];
+    glyph.forEach((row, rowIndex) => {
+      [...row].forEach((cell, columnIndex) => {
+        if (cell === '1') drawPixel(x + columnIndex, y + rowIndex, alpha);
+      });
+    });
+  };
+  // Three quiet, consistently aligned rows read much better at menu-bar size
+  // than squeezing two metrics beside each other. The ordering mirrors the
+  // floating widget: running, review, then connected services.
+  const rows = [
+    { value: status.runningCount, y: 0, icon: [[0, 0], [0, 1], [1, 1], [0, 2], [1, 2], [2, 2], [3, 2], [0, 3], [1, 3], [0, 4]] },
+    { value: status.reviewCount, y: 6, icon: [[2, 0], [1, 1], [3, 1], [0, 2], [4, 2], [1, 3], [3, 3], [2, 4]] },
+    { value: status.serviceCount, y: 12, icon: [[0, 0], [1, 0], [3, 0], [4, 0], [1, 1], [3, 1], [2, 2], [2, 3], [1, 4], [2, 4], [3, 4]] },
+  ];
+  rows.forEach(({ value, y, icon }) => {
+    const alpha = value > 0 ? 255 : 96;
+    icon.forEach(([offsetX, offsetY]) => drawPixel(1 + offsetX, y + offsetY, alpha));
+    drawGlyph(value, 11, y, alpha);
+  });
+  // Template images are intentionally monochrome; macOS supplies the correct
+  // menu-bar color for the active appearance and accessibility state.
+  const image = nativeImage.createFromBitmap(bitmap, {
+    width: size * scale,
+    height: size * scale,
+    scaleFactor: scale,
+  });
+  image.setTemplateImage(true);
+  return image;
+}
+
 function refreshMenuBarStatus(status: DesktopStatusSnapshot): void {
   if (process.platform !== 'darwin' || !status.preferences.menuBarStatusEnabled) {
     menuBarStatus?.destroy();
     menuBarStatus = null;
+    menuBarStatusWidth = 0;
     return;
   }
-  if (!menuBarStatus || menuBarStatus.isDestroyed()) {
-    // An empty NativeImage creates a title-only NSStatusItem: no app icon and
-    // no icon-width spacer, which is the compact mode requested by users.
-    menuBarStatus = new Tray(nativeImage.createEmpty());
+  const image = menuBarStatusImage(status);
+  const imageWidth = image.getSize().width;
+  if (!menuBarStatus || menuBarStatus.isDestroyed() || menuBarStatusWidth !== imageWidth) {
+    menuBarStatus?.destroy();
+    menuBarStatus = new Tray(image);
+    menuBarStatusWidth = imageWidth;
     menuBarStatus.on('click', () => focusNextService('attention'));
     menuBarStatus.on('right-click', () => menuBarStatus?.popUpContextMenu(menuBarContextMenu()));
+  } else {
+    menuBarStatus.setImage(image);
   }
-  menuBarStatus.setTitle(status.text);
+  menuBarStatus.setTitle('');
   menuBarStatus.setToolTip(`${status.tooltip}\n点击循环切换需关注的服务`);
 }
 
-function constrainFloatingPosition(position: { x: number; y: number } | null): { x: number; y: number } {
-  const width = 212;
-  const height = 50;
+function constrainFloatingPosition(
+  position: { x: number; y: number } | null,
+  width: number = FLOATING_WIDGET_WIDTHS[2],
+): { x: number; y: number } {
+  const height = FLOATING_WIDGET_HEIGHT;
   const display = position
     ? screen.getDisplayMatching({ x: position.x, y: position.y, width, height })
     : screen.getPrimaryDisplay();
@@ -288,20 +358,21 @@ function createFloatingWidget(position: { x: number; y: number } | null): Browse
   const window = new BrowserWindow({
     title: 'Termdock Status',
     type: 'panel',
-    width: 212,
-    height: 50,
+    width: FLOATING_WIDGET_WIDTHS[2],
+    height: FLOATING_WIDGET_HEIGHT,
     x: bounds.x,
     y: bounds.y,
     show: false,
     frame: false,
     transparent: true,
     backgroundColor: 'rgba(0, 0, 0, 0)',
-    vibrancy: 'hud',
+    vibrancy: 'popover',
     visualEffectState: 'active',
     resizable: false,
     maximizable: false,
     minimizable: false,
     fullscreenable: false,
+    focusable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
     acceptFirstMouse: true,
@@ -315,7 +386,13 @@ function createFloatingWidget(position: { x: number; y: number } | null): Browse
     },
   });
   window.setAlwaysOnTop(true, 'floating');
-  window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  window.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+    // Electron otherwise temporarily transforms the whole process into a UI
+    // element, which can hide the app menu and remove normal windows from App
+    // Expose while this panel exists.
+    skipTransformProcessType: true,
+  });
   // Keep the auxiliary status panel out of App Expose / Mission Control so it
   // cannot disrupt macOS's three-finger application-window gesture.
   window.setHiddenInMissionControl(true);
@@ -323,7 +400,8 @@ function createFloatingWidget(position: { x: number; y: number } | null): Browse
   window.on('move', () => {
     if (constrainingMove || window.isDestroyed()) return;
     const [x, y] = window.getPosition();
-    const constrained = constrainFloatingPosition({ x, y });
+    const [width] = window.getSize();
+    const constrained = constrainFloatingPosition({ x, y }, width);
     if (constrained.x === x && constrained.y === y) return;
     constrainingMove = true;
     window.setPosition(constrained.x, constrained.y, false);
@@ -350,6 +428,19 @@ function createFloatingWidget(position: { x: number; y: number } | null): Browse
   return window;
 }
 
+function resizeFloatingWidget(metricCount: number): void {
+  const window = floatingWidgetWindow;
+  if (!window || window.isDestroyed()) return;
+  const safeCount = Math.min(3, Math.max(1, Math.round(metricCount)));
+  const width = FLOATING_WIDGET_WIDTHS[safeCount - 1];
+  const [currentWidth] = window.getSize();
+  if (currentWidth === width) return;
+  const [x, y] = window.getPosition();
+  window.setSize(width, FLOATING_WIDGET_HEIGHT, false);
+  const constrained = constrainFloatingPosition({ x: x + currentWidth - width, y }, width);
+  window.setPosition(constrained.x, constrained.y, false);
+}
+
 function refreshFloatingWidget(status: DesktopStatusSnapshot): void {
   if (process.platform !== 'darwin' || !status.preferences.floatingWidgetEnabled) {
     if (floatingWidgetWindow && !floatingWidgetWindow.isDestroyed()) floatingWidgetWindow.destroy();
@@ -364,7 +455,8 @@ function refreshFloatingWidget(status: DesktopStatusSnapshot): void {
 function keepFloatingWidgetOnScreen(): void {
   if (!floatingWidgetWindow || floatingWidgetWindow.isDestroyed()) return;
   const [x, y] = floatingWidgetWindow.getPosition();
-  const constrained = constrainFloatingPosition({ x, y });
+  const [width] = floatingWidgetWindow.getSize();
+  const constrained = constrainFloatingPosition({ x, y }, width);
   if (constrained.x !== x || constrained.y !== y) {
     floatingWidgetWindow.setPosition(constrained.x, constrained.y, false);
   }
@@ -449,6 +541,7 @@ function defaultConfig(): DesktopConfig {
     version: 1,
     connections: [],
     lastConnectionUrl: null,
+    openConnectionUrls: [],
     trustedCertificateAuthorities: [],
     desktopPreferences: {
       menuBarStatusEnabled: true,
@@ -603,6 +696,7 @@ function readDesktopConfig(): DesktopConfig {
   try {
     const parsed = JSON.parse(fs.readFileSync(desktopConfigPath, 'utf8')) as Partial<DesktopConfig>;
     if (parsed.version !== 1 || !Array.isArray(parsed.connections)) return defaultConfig();
+    const lastConnectionUrl = typeof parsed.lastConnectionUrl === 'string' ? parsed.lastConnectionUrl : null;
     return {
       version: 1,
       connections: parsed.connections.filter((entry): entry is SavedConnection =>
@@ -610,7 +704,13 @@ function readDesktopConfig(): DesktopConfig {
         && typeof entry.id === 'string'
         && typeof entry.label === 'string'
         && typeof entry.url === 'string'),
-      lastConnectionUrl: typeof parsed.lastConnectionUrl === 'string' ? parsed.lastConnectionUrl : null,
+      lastConnectionUrl,
+      // Older desktop.json files only remembered the most recent window. Use
+      // that value once as their restore list, while preserving an explicit
+      // empty list when the user intentionally closed every service window.
+      openConnectionUrls: Array.isArray(parsed.openConnectionUrls)
+        ? parsed.openConnectionUrls.filter((url): url is string => typeof url === 'string')
+        : lastConnectionUrl ? [lastConnectionUrl] : [],
       trustedCertificateAuthorities: Array.isArray(parsed.trustedCertificateAuthorities)
         ? parsed.trustedCertificateAuthorities.filter((entry): entry is TrustedCertificateAuthority =>
           Boolean(entry)
@@ -1178,7 +1278,10 @@ async function installCli(): Promise<DesktopSnapshot> {
   return snapshot();
 }
 
-async function connectWindow(rawUrl: string): Promise<ServiceProbe> {
+async function connectWindow(
+  rawUrl: string,
+  options: { focus?: boolean; updateLastConnection?: boolean } = {},
+): Promise<ServiceProbe> {
   let probe = await probeServiceWithLocalNetworkPermission(rawUrl);
   if (!probe.ok) return probe;
   const parsed = new URL(probe.url);
@@ -1186,12 +1289,22 @@ async function connectWindow(rawUrl: string): Promise<ServiceProbe> {
   const existingWindow = serviceWindows.get(key);
   if (existingWindow && !existingWindow.isDestroyed()) {
     const config = readDesktopConfig();
-    config.lastConnectionUrl = probe.url;
+    if (options.updateLastConnection !== false) config.lastConnectionUrl = probe.url;
+    config.openConnectionUrls = [
+      ...config.openConnectionUrls.filter((url) => {
+        try { return new URL(url).origin !== key; } catch { return false; }
+      }),
+      probe.url,
+    ];
     const existing = config.connections.find((entry) => entry.url === probe.url);
     if (existing) existing.lastConnectedAt = Date.now();
     writeDesktopConfig(config);
-    mainWindow?.hide();
-    showAndFocusWindow(existingWindow);
+    if (options.focus !== false) {
+      mainWindow?.hide();
+      showAndFocusWindow(existingWindow);
+    } else {
+      existingWindow.showInactive();
+    }
     return probe;
   }
 
@@ -1202,12 +1315,26 @@ async function connectWindow(rawUrl: string): Promise<ServiceProbe> {
     try {
       await workspaceWindow.loadURL(probe.url);
       const config = readDesktopConfig();
-      config.lastConnectionUrl = probe.url;
+      if (options.updateLastConnection !== false) config.lastConnectionUrl = probe.url;
+      config.openConnectionUrls = [
+        ...config.openConnectionUrls.filter((url) => {
+          try { return new URL(url).origin !== key; } catch { return false; }
+        }),
+        probe.url,
+      ];
       const existing = config.connections.find((entry) => entry.url === probe.url);
       if (existing) existing.lastConnectedAt = Date.now();
       writeDesktopConfig(config);
-      mainWindow?.hide();
-      showAndFocusWindow(workspaceWindow);
+      restorableServiceWindows.add(workspaceWindow);
+      if (options.focus !== false) {
+        mainWindow?.hide();
+        showAndFocusWindow(workspaceWindow);
+      } else {
+        // Restored workspaces must be real visible macOS windows so App Expose
+        // can select them, but opening several at launch must not steal focus
+        // from each other.
+        workspaceWindow.showInactive();
+      }
       return probe;
     } catch (error) {
       const message = networkErrorDetails(error);
@@ -1399,6 +1526,14 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
     clearUnreadNotifications();
   });
   window.on('close', (event) => {
+    const serviceOrigin = windowServiceOrigins.get(window);
+    if (serviceOrigin && !isQuitting && restorableServiceWindows.has(window)) {
+      const config = readDesktopConfig();
+      config.openConnectionUrls = config.openConnectionUrls.filter((url) => {
+        try { return new URL(url).origin !== serviceOrigin; } catch { return false; }
+      });
+      writeDesktopConfig(config);
+    }
     if (window === mainWindow && process.platform === 'darwin' && !isQuitting) {
       event.preventDefault();
       window.hide();
@@ -1499,6 +1634,11 @@ function installIpcHandlers(): void {
       ? scope
       : 'attention';
     focusNextService(normalized);
+  });
+  ipcMain.handle('desktop:set-floating-metric-count', (event, count: unknown) => {
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (sourceWindow !== floatingWidgetWindow || typeof count !== 'number' || !Number.isFinite(count)) return;
+    resizeFloatingWidget(count);
   });
   ipcMain.handle('desktop:disable-floating-widget', async () => {
     updateDesktopPreferences({ floatingWidgetEnabled: false });
@@ -1794,10 +1934,25 @@ app.whenReady().then(async () => {
       if (!window.isDestroyed()) window.webContents.send('desktop:update-state-changed', state);
     }
   });
-  const lastConnectionUrl = readDesktopConfig().lastConnectionUrl;
-  if (lastConnectionUrl) {
-    const probe = await connectWindow(lastConnectionUrl);
-    if (!probe.ok) await showConnectionCenter();
+  const startupConfig = readDesktopConfig();
+  const restoreUrls = startupConfig.openConnectionUrls;
+  let restoredWindowCount = 0;
+  for (const url of restoreUrls) {
+    const probe = await connectWindow(url, { focus: false, updateLastConnection: false });
+    if (probe.ok) restoredWindowCount += 1;
+  }
+  if (restoredWindowCount > 0) {
+    let preferredOrigin: string | null = null;
+    try {
+      preferredOrigin = startupConfig.lastConnectionUrl
+        ? new URL(startupConfig.lastConnectionUrl).origin
+        : null;
+    } catch {
+      // A malformed legacy value must not prevent the other saved windows
+      // from being restored.
+    }
+    const preferredWindow = preferredOrigin ? serviceWindows.get(preferredOrigin) : null;
+    showAndFocusWindow(preferredWindow ?? [...serviceWindows.values()][0]);
   } else {
     await showConnectionCenter();
   }

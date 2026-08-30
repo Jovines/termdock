@@ -44,20 +44,17 @@ button:focus-visible {
 
 .widget {
   position: relative;
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) 24px;
-  align-items: center;
   width: calc(100% - 6px);
   height: calc(100% - 6px);
   margin: 3px;
-  border: 1px solid color-mix(in srgb, var(--overlay-foreground) 14%, transparent);
-  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--overlay-foreground) 22%, transparent);
+  border-radius: 11px;
   overflow: hidden;
-  background: color-mix(in srgb, var(--background-subtle) 54%, transparent);
+  background: color-mix(in srgb, var(--background-subtle) 52%, transparent);
   box-shadow:
-    inset 0 1px color-mix(in srgb, var(--overlay-foreground) 11%, transparent),
-    0 12px 34px color-mix(in srgb, var(--background) 38%, transparent);
-  backdrop-filter: blur(28px) saturate(1.35);
+    inset 0 1px color-mix(in srgb, var(--overlay-foreground) 15%, transparent),
+    0 6px 18px color-mix(in srgb, var(--background) 30%, transparent);
+  backdrop-filter: blur(18px) saturate(1.18);
 }
 
 .widget::before {
@@ -65,28 +62,12 @@ button:focus-visible {
   inset: 0;
   background: linear-gradient(
     112deg,
-    color-mix(in srgb, var(--overlay-foreground) 8%, transparent),
-    transparent 35%,
-    color-mix(in srgb, var(--primary) 5%, transparent)
+    color-mix(in srgb, var(--overlay-foreground) 10%, transparent),
+    transparent 42%,
+    color-mix(in srgb, var(--primary) 4%, transparent)
   );
   content: "";
   pointer-events: none;
-}
-
-.drag-handle {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  gap: 3px;
-  justify-content: center;
-  -webkit-app-region: drag;
-}
-
-.drag-handle i {
-  width: 2px;
-  height: 2px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--muted-foreground) 58%, transparent);
 }
 
 .status-group,
@@ -99,25 +80,29 @@ button:focus-visible {
 }
 
 .status-group {
-  display: flex;
+  display: grid;
+  grid-auto-columns: minmax(38px, 1fr);
+  grid-auto-flow: column;
   align-items: center;
-  justify-content: center;
-  gap: 11px;
-  min-width: 0;
+  gap: 2px;
+  width: 100%;
+  padding: 2px 7px;
 }
 
 .metric {
   position: relative;
-  display: inline-flex;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 4px;
-  height: 30px;
-  padding: 0 4px;
-  border-radius: 9px;
+  justify-content: center;
+  gap: 1px;
+  height: 28px;
+  padding: 1px 4px;
+  border-radius: 7px;
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 9px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.015em;
   white-space: nowrap;
@@ -128,29 +113,29 @@ button:focus-visible {
   display: none;
 }
 
-.metric + .metric::before {
-  position: absolute;
-  left: -6px;
-  width: 1px;
-  height: 11px;
-  background: color-mix(in srgb, var(--overlay-foreground) 10%, transparent);
-  content: "";
+.metric:hover {
+  background: color-mix(in srgb, var(--overlay-foreground) 9%, transparent);
+  color: var(--overlay-foreground);
 }
 
-.metric:hover {
-  background: color-mix(in srgb, var(--overlay-foreground) 7%, transparent);
-  color: var(--overlay-foreground);
+.metric-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: color-mix(in srgb, var(--overlay-foreground) 78%, transparent);
+  line-height: 11px;
 }
 
 .metric strong {
   color: var(--overlay-foreground);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 650;
+  line-height: 14px;
 }
 
 .metric-dot {
-  width: 5px;
-  height: 5px;
+  width: 4px;
+  height: 4px;
   border-radius: 50%;
 }
 
@@ -165,12 +150,23 @@ button:focus-visible {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 10%, transparent);
 }
 
+.metric-services .metric-dot {
+  background: color-mix(in srgb, var(--muted-foreground) 70%, transparent);
+}
+
 .close-button {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
   opacity: 0;
-  color: color-mix(in srgb, var(--muted-foreground) 78%, transparent);
+  color: var(--muted-foreground);
   font-family: var(--font-sans);
-  font-size: 13px;
-  transition: opacity 140ms ease, color 140ms ease;
+  font-size: 10px;
+  line-height: 13px;
+  transition: opacity 140ms ease, color 140ms ease, background 140ms ease;
 }
 
 .widget:hover .close-button,
@@ -179,6 +175,7 @@ button:focus-visible {
 }
 
 .close-button:hover {
+  background: color-mix(in srgb, var(--overlay-foreground) 10%, transparent);
   color: var(--overlay-foreground);
 }
 

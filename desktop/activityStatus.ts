@@ -45,10 +45,10 @@ export function summarizeServiceActivity(
 
 export function formatCompactDesktopStatus(summary: DesktopStatusSummary): string {
   const parts: string[] = [];
-  if (summary.runningCount > 0) parts.push(`运行${summary.runningCount}`);
-  if (summary.reviewCount > 0) parts.push(`待办${summary.reviewCount}`);
-  parts.push(`服务${summary.serviceCount}`);
-  return parts.join('  ');
+  if (summary.runningCount > 0) parts.push(`运${summary.runningCount}`);
+  if (summary.reviewCount > 0) parts.push(`待${summary.reviewCount}`);
+  parts.push(`服${summary.serviceCount}`);
+  return parts.join(' ');
 }
 
 export function desktopStatusTooltip(summary: DesktopStatusSummary): string {
@@ -72,10 +72,9 @@ export function nextServiceOrigin(
   } else if (scope === 'running') {
     candidates = running;
   } else if (scope === 'attention') {
-    candidates = [
-      ...review,
-      ...running.filter((service) => service.reviewCount === 0),
-    ];
+    // A general status click is an attention action, not a flat carousel:
+    // exhaust windows requiring review before visiting merely running work.
+    candidates = review.length > 0 ? review : running;
   } else {
     candidates = services;
   }

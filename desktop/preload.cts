@@ -61,6 +61,8 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
   },
   focusNextService: (scope: 'attention' | 'running' | 'review' | 'all' = 'attention'): Promise<void> =>
     ipcRenderer.invoke('desktop:focus-next-service', scope),
+  setFloatingMetricCount: (count: number): Promise<void> =>
+    ipcRenderer.invoke('desktop:set-floating-metric-count', count),
   disableFloatingWidget: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:disable-floating-widget'),
   startLocal: (): Promise<ServiceProbe> => ipcRenderer.invoke('desktop:start-local'),
   installCli: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:install-cli'),

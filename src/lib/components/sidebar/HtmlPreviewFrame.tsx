@@ -1,24 +1,32 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Maximize2 as RiFullscreen, Minimize2 as RiFullscreenExit } from 'lucide-react';
+import { Minimize2 as RiFullscreenExit } from 'lucide-react';
+
+export interface HtmlPreviewFrameHandle {
+  toggleFullscreen: () => Promise<void>;
+}
 
 interface HtmlPreviewFrameProps {
   src: string;
   title: string;
-  enterFullscreenLabel: string;
   exitFullscreenLabel: string;
+  onFullscreenChange?: (fullscreen: boolean) => void;
 }
 
-export function HtmlPreviewFrame({
+export const HtmlPreviewFrame = forwardRef<HtmlPreviewFrameHandle, HtmlPreviewFrameProps>(function HtmlPreviewFrame({
   src,
   title,
-  enterFullscreenLabel,
   exitFullscreenLabel,
-}: HtmlPreviewFrameProps) {
+  onFullscreenChange,
+}, ref) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const [pseudoFullscreen, setPseudoFullscreen] = useState(false);
   const expanded = nativeFullscreen || pseudoFullscreen;
+
+  useEffect(() => {
+    onFullscreenChange?.(expanded);
+  }, [expanded, onFullscreenChange]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -60,31 +68,38 @@ export function HtmlPreviewFrame({
     setPseudoFullscreen(true);
   }, [pseudoFullscreen]);
 
+  useImperativeHandle(ref, () => ({ toggleFullscreen }), [toggleFullscreen]);
+
   const preview = (
     <div
       ref={rootRef}
       data-html-preview-frame
       className={expanded
-        ? 'fixed inset-0 z-modal-panel min-h-0 overflow-hidden bg-surface pt-[env(safe-area-inset-top,0px)]'
-        : 'relative h-full min-h-0 overflow-hidden bg-surface'}
+        ? 'fixed inset-0 z-modal-panel flex min-h-0 flex-col overflow-hidden bg-surface pt-[env(safe-area-inset-top,0px)] text-foreground'
+        : 'flex h-full min-h-0 flex-col overflow-hidden bg-surface'}
     >
+      {expanded && (
+        <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border/15 bg-[var(--chrome-bg)] px-3">
+          <span className="min-w-0 truncate text-[12px] font-semibold">{title}</span>
+          <button
+            type="button"
+            onClick={() => void toggleFullscreen()}
+            aria-label={exitFullscreenLabel}
+            title={`${exitFullscreenLabel} (Esc)`}
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
+          >
+            <RiFullscreenExit size={15} />
+          </button>
+        </div>
+      )}
       <iframe
         src={src}
         title={title}
         sandbox="allow-scripts"
-        className="block h-full w-full border-0 bg-white"
+        className="block min-h-0 w-full flex-1 border-0 bg-white"
       />
-      <button
-        type="button"
-        onClick={() => void toggleFullscreen()}
-        aria-label={expanded ? exitFullscreenLabel : enterFullscreenLabel}
-        title={expanded ? `${exitFullscreenLabel} (Esc)` : enterFullscreenLabel}
-        className="absolute right-[max(0.5rem,env(safe-area-inset-right,0px))] top-[max(0.5rem,env(safe-area-inset-top,0px))] z-20 inline-flex h-9 w-9 items-center justify-center rounded-full border border-border/20 bg-surface/95 text-muted-foreground shadow-lg backdrop-blur transition hover:bg-surface-elevated hover:text-foreground active:scale-95"
-      >
-        {expanded ? <RiFullscreenExit size={15} /> : <RiFullscreen size={15} />}
-      </button>
     </div>
   );
 
   return pseudoFullscreen ? createPortal(preview, document.body) : preview;
-}
+});

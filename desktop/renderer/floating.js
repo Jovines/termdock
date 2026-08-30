@@ -7,6 +7,7 @@ const services = document.querySelector('#services');
 const runningCount = document.querySelector('#running-count');
 const reviewCount = document.querySelector('#review-count');
 const serviceCount = document.querySelector('#service-count');
+let renderedMetricCount = 0;
 
 function render(status) {
   running.hidden = status.runningCount === 0;
@@ -14,6 +15,11 @@ function render(status) {
   runningCount.textContent = String(status.runningCount);
   reviewCount.textContent = String(status.reviewCount);
   serviceCount.textContent = String(status.serviceCount);
+  const metricCount = 1 + Number(status.runningCount > 0) + Number(status.reviewCount > 0);
+  if (metricCount !== renderedMetricCount) {
+    renderedMetricCount = metricCount;
+    void api.setFloatingMetricCount(metricCount);
+  }
   statusGroup.setAttribute('aria-label', status.tooltip);
   running.title = `循环切换到运行中的服务（${status.runningCount}）`;
   running.setAttribute('aria-label', running.title);
