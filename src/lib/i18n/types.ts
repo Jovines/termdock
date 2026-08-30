@@ -228,6 +228,11 @@ export type TranslationDictionary = {
     insertLineRef: (params: TranslatorParams) => string;
     insertFileRef: string;
     copyFileRef: string;
+    findInFile: string;
+    findInFilePlaceholder: string;
+    previousSearchMatch: string;
+    nextSearchMatch: string;
+    closeFileSearch: string;
     downloadFile: string;
     downloadFailed: string;
     uploadFile: string;

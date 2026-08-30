@@ -9,6 +9,7 @@ import {
   ArrowLeft as RiArrowLeft,
   ArrowRight as RiArrowRight,
   ArrowUp as RiArrowUp,
+  ArrowDown as RiArrowDown,
   ChevronRight as RiChevronRight,
   ChevronDown as RiChevronDown,
   Folder as RiFolder,
@@ -70,6 +71,7 @@ import { SvgInspectionPreview } from './SvgInspectionPreview';
 import { CsvPreview } from './CsvPreview';
 import { KicadProjectPreview } from './KicadProjectPreview';
 import { HtmlPreviewFrame, type HtmlPreviewFrameHandle } from './HtmlPreviewFrame';
+import { clearFilePreviewSearchHighlights, collectFilePreviewSearchRanges, paintFilePreviewSearchHighlights, resolveFilePreviewSearchShortcut, scrollFilePreviewSearchRangeIntoView } from './filePreviewSearch';
 import './sidebarSelection.css';
 
 interface RightSidebarProps {
@@ -4965,6 +4967,11 @@ export function FilePreview({
   // refractor not loaded yet).
   const [highlightedLines, setHighlightedLines] = useState<ReactNode[][] | null>(null);
   const [downloadState, setDownloadState] = useState<{ status: 'idle' | 'pending' | 'error'; message?: string }>({ status: 'idle' });
+  const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  const [fileSearchQuery, setFileSearchQuery] = useState('');
+  const [fileSearchMatches, setFileSearchMatches] = useState<Range[]>([]);
+  const [fileSearchIndex, setFileSearchIndex] = useState(0);
+  const fileSearchInputRef = useRef<HTMLInputElement | null>(null);
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
 
   const readingStateKey = getFilePreviewReadingStateKey(rootPath, filePath);
@@ -4980,6 +4987,8 @@ export function FilePreview({
     expectedNavigationPathRef.current = null;
     setPreviewHistory([]);
     setPendingMarkdownFragment(null);
+    setFileSearchOpen(false);
+    setFileSearchQuery('');
   }, [filePath, rootPath]);
 
   // 把仓库相对路径解析成绝对路径，用作 watcher / version map 的查询 key。
@@ -5387,6 +5396,80 @@ export function FilePreview({
     return () => ro.disconnect();
   }, [lineRange, floatingInsertPos, previewState, markdownViewMode, htmlViewMode, filePath, rootPath, highlightedLines]);
 
+  const searchableFilePreview = previewState.kind === 'text'
+    && !(isPreviewableHtmlPath(versionedPath ?? '') && htmlViewMode === 'preview')
+    && !versionedPath?.toLowerCase().endsWith('.csv')
+    && !versionedPath?.toLowerCase().endsWith('.kicad_pro')
+    && !versionedPath?.toLowerCase().endsWith('.kicad_prl');
+
+  const closeFileSearch = useCallback(() => {
+    setFileSearchOpen(false);
+    setFileSearchQuery('');
+    setFileSearchMatches([]);
+    setFileSearchIndex(0);
+    clearFilePreviewSearchHighlights();
+  }, []);
+
+  const openFileSearch = useCallback(() => {
+    if (!searchableFilePreview) return;
+    setFileSearchOpen(true);
+    requestAnimationFrame(() => {
+      fileSearchInputRef.current?.focus();
+      fileSearchInputRef.current?.select();
+    });
+  }, [searchableFilePreview]);
+
+  const moveFileSearch = useCallback((direction: 1 | -1) => {
+    setFileSearchIndex((current) => {
+      if (fileSearchMatches.length === 0) return 0;
+      return (current + direction + fileSearchMatches.length) % fileSearchMatches.length;
+    });
+  }, [fileSearchMatches.length]);
+
+  useEffect(() => {
+    const handleFileSearchShortcut = (event: globalThis.KeyboardEvent) => {
+      const action = resolveFilePreviewSearchShortcut(event);
+      if (action === 'open' && searchableFilePreview) {
+        event.preventDefault();
+        openFileSearch();
+        return;
+      }
+      if (!fileSearchOpen) return;
+      if (action === 'close') {
+        event.preventDefault();
+        closeFileSearch();
+      } else if (action === 'next' || action === 'previous') {
+        event.preventDefault();
+        moveFileSearch(action === 'previous' ? -1 : 1);
+      }
+    };
+    document.addEventListener('keydown', handleFileSearchShortcut);
+    return () => document.removeEventListener('keydown', handleFileSearchShortcut);
+  }, [closeFileSearch, fileSearchOpen, moveFileSearch, openFileSearch, searchableFilePreview]);
+
+  useLayoutEffect(() => {
+    clearFilePreviewSearchHighlights();
+    if (!fileSearchOpen || !fileSearchQuery.trim() || !scrollerRef.current) {
+      setFileSearchMatches([]);
+      setFileSearchIndex(0);
+      return;
+    }
+    const ranges = collectFilePreviewSearchRanges(scrollerRef.current, fileSearchQuery);
+    setFileSearchMatches(ranges);
+    setFileSearchIndex(0);
+    paintFilePreviewSearchHighlights(ranges, 0);
+    scrollFilePreviewSearchRangeIntoView(ranges[0]);
+    return clearFilePreviewSearchHighlights;
+  }, [fileSearchOpen, fileSearchQuery, highlightedLines, markdownViewMode, previewState]);
+
+  useEffect(() => {
+    if (!fileSearchOpen) return;
+    paintFilePreviewSearchHighlights(fileSearchMatches, fileSearchIndex);
+    scrollFilePreviewSearchRangeIntoView(fileSearchMatches[fileSearchIndex]);
+  }, [fileSearchIndex, fileSearchMatches, fileSearchOpen]);
+
+  useEffect(() => clearFilePreviewSearchHighlights, []);
+
   if (!filePath) {
     return <div className="mx-3 mt-3 overflow-hidden rounded-xl border border-border/15 bg-surface-2 px-4 py-8 text-center text-sm text-muted-foreground">{t('rightSidebar.selectFilePrompt')}</div>;
   }
@@ -5577,6 +5660,17 @@ export function FilePreview({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
+            {searchableFilePreview && (
+              <button
+                type="button"
+                onClick={fileSearchOpen ? closeFileSearch : openFileSearch}
+                className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground active:scale-95 ${fileSearchOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2'}`}
+                aria-label={t('rightSidebar.findInFile')}
+                title={`${t('rightSidebar.findInFile')} (⌘/Ctrl+F)`}
+              >
+                <RiSearch size={14} />
+              </button>
+            )}
             {isMarkdown && previewState.kind === 'text' && (
               <button
                 type="button"
@@ -5665,6 +5759,33 @@ export function FilePreview({
             </button>
           </div>
         </div>
+        {fileSearchOpen && searchableFilePreview && (
+          <div className="mt-2 flex min-w-0 items-center gap-1.5" data-file-preview-search>
+            <div className="flex min-w-0 flex-1 items-center rounded-lg bg-surface-2 px-2 focus-within:bg-surface-elevated">
+              <RiSearch size={13} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+              <input
+                ref={fileSearchInputRef}
+                type="search"
+                value={fileSearchQuery}
+                onChange={(event) => setFileSearchQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return;
+                  event.preventDefault();
+                  moveFileSearch(event.shiftKey ? -1 : 1);
+                }}
+                className="h-8 min-w-0 flex-1 bg-transparent px-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/70"
+                placeholder={t('rightSidebar.findInFilePlaceholder')}
+                aria-label={t('rightSidebar.findInFile')}
+              />
+              <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" aria-live="polite">
+                {fileSearchMatches.length > 0 ? `${fileSearchIndex + 1}/${fileSearchMatches.length}` : '0/0'}
+              </span>
+            </div>
+            <button type="button" onClick={() => moveFileSearch(-1)} disabled={fileSearchMatches.length === 0} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-35" aria-label={t('rightSidebar.previousSearchMatch')} title={`${t('rightSidebar.previousSearchMatch')} (Shift+Enter)`}><RiArrowUp size={13} /></button>
+            <button type="button" onClick={() => moveFileSearch(1)} disabled={fileSearchMatches.length === 0} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-35" aria-label={t('rightSidebar.nextSearchMatch')} title={`${t('rightSidebar.nextSearchMatch')} (Enter)`}><RiArrowDown size={13} /></button>
+            <button type="button" onClick={closeFileSearch} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground" aria-label={t('rightSidebar.closeFileSearch')} title={`${t('rightSidebar.closeFileSearch')} (Esc)`}><RiCloseLine size={13} /></button>
+          </div>
+        )}
         {meta && !(isMobile && (showMarkdownPreview || showHtmlPreview)) && (
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
             {meta.size !== null && <span>{t('rightSidebar.byteCount', { count: meta.size.toLocaleString() })}</span>}
@@ -5879,6 +6000,7 @@ export function FilePreview({
                       else lineRefs.current.delete(lineNumber);
                     }}
                     role="button"
+                    data-file-preview-line={lineNumber}
                     tabIndex={0}
                     onClick={(event) => handleLineClick(event, lineNumber)}
                     onKeyDown={(event) => {

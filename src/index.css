@@ -449,6 +449,16 @@ select {
   accent-color: var(--primary);
 }
 
+::highlight(termdock-file-search-match) {
+  background-color: rgba(var(--warning-rgb), 0.24);
+  color: var(--foreground);
+}
+
+::highlight(termdock-file-search-current) {
+  background-color: var(--warning);
+  color: var(--warning-foreground);
+}
+
 /* iOS 在密码自动填充 / Strong Password 提示后，会给 input 残留一层
    淡蓝色背景 + 蓝色 outline。下面这组 -webkit-autofill 规则把它换成
    我们的主题底色，并强制清掉 outline / box-shadow 残影。 */
