@@ -73,8 +73,9 @@ export function nextServiceOrigin(
     candidates = running;
   } else if (scope === 'attention') {
     // A general status click is an attention action, not a flat carousel:
-    // exhaust windows requiring review before visiting merely running work.
-    candidates = review.length > 0 ? review : running;
+    // cycle review windows while any exist, then return to the predictable
+    // all-window carousel instead of getting stuck on one running service.
+    candidates = review.length > 0 ? review : services;
   } else {
     candidates = services;
   }

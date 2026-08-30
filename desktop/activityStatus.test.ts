@@ -51,6 +51,8 @@ describe('desktop activity status', () => {
     expect(nextServiceOrigin(services, 'b', 'review')).toBe('b');
     expect(nextServiceOrigin(services, 'd', 'running')).toBe('a');
     expect(nextServiceOrigin(services, 'd', 'all')).toBe('a');
-    expect(nextServiceOrigin(services.map((service) => ({ ...service, reviewCount: 0 })), 'a', 'attention')).toBe('b');
+    const withoutReview = services.map((service) => ({ ...service, reviewCount: 0 }));
+    expect(nextServiceOrigin(withoutReview, 'a', 'attention')).toBe('b');
+    expect(nextServiceOrigin(withoutReview, 'c', 'attention')).toBe('d');
   });
 });
