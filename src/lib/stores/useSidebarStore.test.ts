@@ -1,11 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { readLeftPinnedPreference, readRightSidebarWidth, useSidebarStore } from './useSidebarStore';
+import {
+  readLeftPinnedPreference,
+  readRightSidebarLayoutPreference,
+  readRightSidebarWidth,
+  resolveRightSidebarNarrowLayout,
+  useSidebarStore,
+} from './useSidebarStore';
 
 function resetSidebarStore(): void {
   useSidebarStore.setState({
     leftOpen: false,
     rightOpen: false,
+    rightSidebarLayoutPreference: readRightSidebarLayoutPreference(),
     rightTab: 'files',
     rightSearchOpen: false,
     rootPath: null,
@@ -156,6 +163,34 @@ describe('useSidebarStore right sidebar width', () => {
   it('preserves a user-resized narrow width for responsive sidebar layout', () => {
     window.localStorage.setItem('termdock-right-sidebar-width', '520');
     expect(readRightSidebarWidth()).toBe(520);
+  });
+});
+
+describe('useSidebarStore right sidebar layout preference', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  it('defaults to automatic layout and persists explicit choices', () => {
+    expect(readRightSidebarLayoutPreference()).toBe('auto');
+
+    useSidebarStore.getState().setRightSidebarLayoutPreference('narrow');
+
+    expect(readRightSidebarLayoutPreference()).toBe('narrow');
+    expect(window.localStorage.getItem('termdock-right-sidebar-layout-preference')).toBe('narrow');
+  });
+
+  it('only overrides the width breakpoint for pinned desktop sidebars', () => {
+    expect(resolveRightSidebarNarrowLayout(520, true, 'auto')).toBe(true);
+    expect(resolveRightSidebarNarrowLayout(760, true, 'narrow')).toBe(true);
+    expect(resolveRightSidebarNarrowLayout(520, true, 'wide')).toBe(false);
+    expect(resolveRightSidebarNarrowLayout(520, false, 'wide')).toBe(true);
   });
 });
 

@@ -156,6 +156,7 @@ export async function refreshQuota(): Promise<QuotaStatus> {
 
 
 const FS_REQUEST_TIMEOUT_MS = 8_000;
+const HEIC_PREVIEW_REQUEST_TIMEOUT_MS = 32_000;
 const GIT_REQUEST_TIMEOUT_MS = 10_000;
 const GIT_FILE_DIFF_REQUEST_TIMEOUT_MS = 45_000;
 export const TERMINAL_CSRF_REQUEST_TIMEOUT_MS = 8_000;
@@ -1969,6 +1970,8 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
   '.bmp': 'image/bmp',
   '.ico': 'image/x-icon',
   '.svg': 'image/svg+xml',
+  '.heic': 'image/heic',
+  '.heif': 'image/heif',
 };
 
 export function getImageMimeTypeForPath(filePath: string): string | null {
@@ -1979,6 +1982,11 @@ export function getImageMimeTypeForPath(filePath: string): string | null {
 
 export function isPreviewableImagePath(filePath: string): boolean {
   return getImageMimeTypeForPath(filePath) !== null;
+}
+
+export function isHeicImagePath(filePath: string): boolean {
+  const mimeType = getImageMimeTypeForPath(filePath);
+  return mimeType === 'image/heic' || mimeType === 'image/heif';
 }
 
 // Video files play in the right sidebar with a native <video> element. The
@@ -2329,7 +2337,7 @@ export async function readImagePreviewBlob(filePath: string, signal?: AbortSigna
   const response = await fetchWithTimeout(
     `/api/terminal/fs/blob?${params}`,
     { signal },
-    FS_REQUEST_TIMEOUT_MS,
+    isHeicImagePath(filePath) ? HEIC_PREVIEW_REQUEST_TIMEOUT_MS : FS_REQUEST_TIMEOUT_MS,
     'Image preview took too long. The file may be on slow storage or blocked by another process.',
   );
   if (!response.ok) {

@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { DesktopAppUpdateState, DesktopSnapshot, ServiceProbe } from './types.js';
+import type {
+  DesktopAppUpdateState,
+  DesktopServiceActivity,
+  DesktopSnapshot,
+  ServiceProbe,
+} from './types.js';
 import { shouldUploadDroppedFiles, uploadDroppedFiles } from './fileDropUpload.js';
 
 type NativeDropState = 'local' | 'remote' | 'uploading' | 'error';
@@ -31,6 +36,15 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
   installDesktopUpdate: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:install-update'),
   onDesktopUpdateState: (callback: (state: DesktopAppUpdateState) => void): void => {
     ipcRenderer.on('desktop:update-state-changed', (_event, state: DesktopAppUpdateState) => callback(state));
+  },
+  reportServiceActivity: (activity: { runningCount: number; reviewCount: number }): void => {
+    ipcRenderer.send('desktop:report-service-activity', activity);
+  },
+  focusService: (origin: string): Promise<boolean> => ipcRenderer.invoke('desktop:focus-service', origin),
+  onServiceActivity: (callback: (services: DesktopServiceActivity[]) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, services: DesktopServiceActivity[]) => callback(services);
+    ipcRenderer.on('desktop:service-activity-changed', listener);
+    return () => ipcRenderer.removeListener('desktop:service-activity-changed', listener);
   },
   showConnectionCenter: (): Promise<void> => ipcRenderer.invoke('desktop:show-connection-center'),
   revealDataDirectory: (): Promise<void> => ipcRenderer.invoke('desktop:reveal-data-directory'),

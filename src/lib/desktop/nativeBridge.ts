@@ -17,6 +17,15 @@ export interface DesktopNativeSnapshot {
   };
 }
 
+export interface DesktopServiceActivity {
+  origin: string;
+  label: string;
+  current: boolean;
+  focused: boolean;
+  runningCount: number;
+  reviewCount: number;
+}
+
 export type DesktopAppUpdateStatus =
   | 'unsupported'
   | 'idle'
@@ -46,6 +55,9 @@ export interface TermdockDesktopBridge {
   checkDesktopUpdate?(): Promise<DesktopAppUpdateState>;
   installDesktopUpdate?(): Promise<DesktopAppUpdateState>;
   onDesktopUpdateState?(callback: (state: DesktopAppUpdateState) => void): void;
+  reportServiceActivity?(activity: { runningCount: number; reviewCount: number }): void;
+  focusService?(origin: string): Promise<boolean>;
+  onServiceActivity?(callback: (services: DesktopServiceActivity[]) => void): () => void;
   showConnectionCenter(): Promise<void>;
   revealDataDirectory(): Promise<void>;
   openNotificationSettings?(): Promise<void>;
@@ -81,6 +93,19 @@ declare global {
 export function getTermdockDesktopBridge(): TermdockDesktopBridge | null {
   if (typeof window === 'undefined') return null;
   return window.termdockDesktop ?? null;
+}
+
+export type DesktopServiceActivityBridge = TermdockDesktopBridge & Required<Pick<
+  TermdockDesktopBridge,
+  'reportServiceActivity' | 'focusService' | 'onServiceActivity'
+>>;
+
+export function supportsDesktopServiceActivity(
+  bridge: TermdockDesktopBridge | null,
+): bridge is DesktopServiceActivityBridge {
+  return typeof bridge?.reportServiceActivity === 'function'
+    && typeof bridge.focusService === 'function'
+    && typeof bridge.onServiceActivity === 'function';
 }
 
 const nativeFileDropListeners = new Set<(payload: NativeFileDropPayload) => void>();

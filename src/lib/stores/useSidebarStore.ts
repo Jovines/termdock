@@ -3,6 +3,9 @@ import type { FileWatchEvent, GitChangedFile } from '../terminal/api';
 import { readCache, writeCache } from '../utils/localStorageCache';
 
 export type RightSidebarTab = 'git' | 'files' | 'diff';
+export type RightSidebarLayoutPreference = 'auto' | 'narrow' | 'wide';
+
+export const RIGHT_SIDEBAR_NARROW_THRESHOLD_PX = 600;
 
 const RIGHT_SIDEBAR_TABS_BY_CONTEXT_CACHE_KEY = 'termdock:right-sidebar:tabs-by-session:v2';
 const EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:explorer-roots-by-session:v2';
@@ -18,6 +21,7 @@ const LEFT_PINNED_KEY = 'termdock-left-sidebar-pinned';
 const LEFT_SIDEBAR_WIDTH_KEY = 'termdock-left-sidebar-width';
 const RIGHT_PINNED_KEY = 'termdock-right-sidebar-pinned';
 const RIGHT_SIDEBAR_WIDTH_KEY = 'termdock-right-sidebar-width';
+const RIGHT_SIDEBAR_LAYOUT_PREFERENCE_KEY = 'termdock-right-sidebar-layout-preference';
 
 export function readLeftPinnedPreference(): boolean {
   // Desktop is the multi-task surface: keep the session navigator visible on
@@ -91,6 +95,34 @@ function writeRightSidebarWidth(width: number): void {
   try {
     window.localStorage.setItem(RIGHT_SIDEBAR_WIDTH_KEY, String(width));
   } catch { /* best-effort */ }
+}
+
+export function readRightSidebarLayoutPreference(): RightSidebarLayoutPreference {
+  if (typeof window === 'undefined') return 'auto';
+  try {
+    const stored = window.localStorage.getItem(RIGHT_SIDEBAR_LAYOUT_PREFERENCE_KEY);
+    return stored === 'narrow' || stored === 'wide' ? stored : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+function writeRightSidebarLayoutPreference(preference: RightSidebarLayoutPreference): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(RIGHT_SIDEBAR_LAYOUT_PREFERENCE_KEY, preference);
+  } catch { /* best-effort */ }
+}
+
+export function resolveRightSidebarNarrowLayout(
+  drawerWidthPx: number,
+  pinned: boolean,
+  preference: RightSidebarLayoutPreference,
+): boolean {
+  if (!pinned || preference === 'auto') {
+    return drawerWidthPx < RIGHT_SIDEBAR_NARROW_THRESHOLD_PX;
+  }
+  return preference === 'narrow';
 }
 
 function readGroupByFolder(): boolean {
@@ -307,6 +339,7 @@ interface SidebarState {
   leftSidebarWidth: number;
   rightPinned: boolean;
   rightSidebarWidth: number;
+  rightSidebarLayoutPreference: RightSidebarLayoutPreference;
 
   // Right sidebar tab
   rightTab: RightSidebarTab;
@@ -363,6 +396,7 @@ interface SidebarState {
   toggleRightPinned: () => void;
   setRightPinned: (pinned: boolean) => void;
   setRightSidebarWidth: (width: number) => void;
+  setRightSidebarLayoutPreference: (preference: RightSidebarLayoutPreference) => void;
   openRight: () => void;
   closeRight: () => void;
   toggleRight: () => void;
@@ -400,6 +434,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   leftSidebarWidth: readLeftSidebarWidth(),
   rightPinned: readRightPinnedPreference(),
   rightSidebarWidth: readRightSidebarWidth(),
+  rightSidebarLayoutPreference: readRightSidebarLayoutPreference(),
   rightTab: 'files',
   rightSearchOpen: false,
   rootPath: null,
@@ -461,6 +496,12 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       if (s.rightSidebarWidth === clamped) return s;
       writeRightSidebarWidth(clamped);
       return { rightSidebarWidth: clamped };
+    }),
+  setRightSidebarLayoutPreference: (preference) =>
+    set((s) => {
+      if (s.rightSidebarLayoutPreference === preference) return s;
+      writeRightSidebarLayoutPreference(preference);
+      return { rightSidebarLayoutPreference: preference };
     }),
   openRight: () => set({ rightOpen: true }),
   closeRight: () => set({ rightOpen: false, rightSearchOpen: false }),

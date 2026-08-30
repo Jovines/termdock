@@ -417,9 +417,10 @@ const FileTreeItem = memo(function FileTreeItem({
   }, []);
 
   return (
-    <div ref={actionMenuRef} className="relative">
-      {getReferenceLongPressHandlers.popoverNode}
-      <div
+    <div>
+      <div ref={actionMenuRef} className="relative">
+        {getReferenceLongPressHandlers.popoverNode}
+        <div
         data-file-tree-path={node.path}
         role="button"
         tabIndex={0}
@@ -503,10 +504,10 @@ const FileTreeItem = memo(function FileTreeItem({
             {referenceCopied || referenceInserted ? <RiCheck size={12} /> : <RiLink size={12} />}
           </span>
         )}
-      </div>
+        </div>
 
-      {node.type === 'directory' && !directoriesOnly && actionsOpen && (onDirectoryRoot || onDirectoryPinToggle || canOpenLocal) && (
-        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+        {node.type === 'directory' && !directoriesOnly && actionsOpen && (onDirectoryRoot || onDirectoryPinToggle || canOpenLocal) && (
+          <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {canOpenLocal && (
             <button
               type="button"
@@ -540,11 +541,11 @@ const FileTreeItem = memo(function FileTreeItem({
               <span className="min-w-0 flex-1 truncate">{isPinned ? t('fileTree.unpinDir') : t('fileTree.pinDir')}</span>
             </button>
           )}
-        </div>
-      )}
+          </div>
+        )}
 
-      {!isDirectory && actionsOpen && (
-        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+        {!isDirectory && actionsOpen && (
+          <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {canOpenLocal && (
             <button
               type="button"
@@ -586,8 +587,9 @@ const FileTreeItem = memo(function FileTreeItem({
             {isDeleting ? <RiLoader size={13} className="shrink-0 animate-spin" /> : <RiTrash size={13} className="shrink-0" />}
             <span className="min-w-0 flex-1 truncate">{t('fileTree.deleteFile')}</span>
           </button>
-        </div>
-      )}
+          </div>
+        )}
+      </div>
 
       {showChildren && visibleChildren && visibleChildren.length > 0 && (
         <div className={depth === 0 ? 'mt-0.5' : ''}>

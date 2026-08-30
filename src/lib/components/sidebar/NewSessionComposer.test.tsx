@@ -91,8 +91,9 @@ describe('NewSessionComposer launcher choices', () => {
       </I18nProvider>,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Browse' }));
-    expect(screen.getByText('/workspace')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Browse' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Working directory' }));
+    expect(screen.getByRole('dialog', { name: 'Choose working directory' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Use folder' }));
     expect(onOptionsChange).toHaveBeenCalledWith({ mode: 'shell', cwd: '/workspace' });
   });

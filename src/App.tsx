@@ -82,9 +82,10 @@ import { AgentTabIcon, AgentCountBadge, AgentCompactStatusOverlay, AgentFloating
 import { ToolbarPresetSettings } from './lib/components/settings/ToolbarPresetSettings';
 import AgentHooksSettings from './lib/components/settings/AgentHooksSettings';
 import { TermdockUpdateSettings } from './lib/components/settings/TermdockUpdateSettings';
+import { DesktopServiceSwitcher } from './lib/components/DesktopServiceSwitcher';
 import { BUILTIN_TOOLBAR_PRESETS_VERSION, createDefaultToolbarPresets, getBuiltinToolbarPresetIds, sanitizeToolbarPresets, type ToolbarPresetDefinition } from './lib/components/terminal/mobileKeyboardPresets';
 import type { TermdockColorTheme } from './lib/terminal/theme';
-import { getTermdockDesktopBridge, type DesktopAppUpdateState, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
+import { getTermdockDesktopBridge, supportsDesktopServiceActivity, type DesktopAppUpdateState, type DesktopNativeSnapshot } from './lib/desktop/nativeBridge';
 import type { SplitLayout, SplitWorkspaceSummary } from './lib/terminal/splitWorkspaces';
 import { MOBILE_SESSION_DESTROY_DROPPABLE_ID, isMobileSessionDestroyDrop } from './lib/terminal/mobileSessionDestroy';
 
@@ -2890,7 +2891,11 @@ function App() {
       <main className="relative min-h-0 flex-1 overflow-visible px-0 pb-0 pt-0">
         <div className="flex h-full w-full min-h-0 flex-col overflow-visible app-chrome-bg">
           <div
-            className={`flex shrink-0 items-center justify-between gap-1 app-chrome-bg px-1 sm:px-1.5 transition-colors duration-500 ${
+            className={`shrink-0 items-center gap-1 app-chrome-bg px-1 sm:px-1.5 transition-colors duration-500 ${
+              showPinnedLeft
+                ? 'relative flex justify-end'
+                : 'flex justify-between'
+            } ${
               groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'
             } ${topBarAgentBg}`}
           >
@@ -2909,7 +2914,7 @@ function App() {
               />
             </button>}
             {showPinnedLeft ? (
-              <div className="flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-hidden">
+              <div className="absolute left-1/2 flex max-w-[40%] min-w-0 -translate-x-1/2 items-center justify-center gap-1.5 overflow-hidden">
                 {pinnedActiveSession ? (
                   <>
                     {renderTabIcon(pinnedActiveSession.mode, pinnedActiveTs)}
@@ -3111,6 +3116,22 @@ function App() {
             </DragDropContext>
             )}
             <div className="flex shrink-0 items-center gap-1.5">
+              {supportsDesktopServiceActivity(desktopBridge) && (
+                <DesktopServiceSwitcher
+                  bridge={desktopBridge}
+                  runningCount={agentTabCounts.running}
+                  reviewCount={agentTabCounts.review}
+                  labels={{
+                    switchService: t('desktopServices.switchService'),
+                    openServices: t('desktopServices.openServices'),
+                    current: t('agent.currentSession'),
+                    running: t('agent.aiRunning'),
+                    review: t('agent.needsReview'),
+                    idle: t('desktopServices.idle'),
+                    manageServices: t('desktopServices.manageServices'),
+                  }}
+                />
+              )}
               {!showPinnedLeft && agentTabCounts.running > 0 && (
                 <span className="hidden items-center gap-1 sm:inline-flex">
                 <AgentCountBadge count={agentTabCounts.running} tone="running" title={t('agent.aiRunning')} />

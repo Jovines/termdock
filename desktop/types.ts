@@ -46,6 +46,15 @@ export interface DesktopSnapshot {
   lastConnectionUrl: string | null;
 }
 
+export interface DesktopServiceActivity {
+  origin: string;
+  label: string;
+  current: boolean;
+  focused: boolean;
+  runningCount: number;
+  reviewCount: number;
+}
+
 export type DesktopAppUpdateStatus =
   | 'unsupported'
   | 'idle'

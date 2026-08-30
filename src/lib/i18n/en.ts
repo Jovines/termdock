@@ -216,6 +216,10 @@ export const en: TranslationDictionary = {
     uploadFile: 'Upload file',
     uploadFiles: 'Upload files',
     insertLocalImage: 'Insert local image',
+    layoutMode: 'Display mode',
+    layoutModeAuto: 'Auto (follow width)',
+    layoutModeNarrow: 'Always compact',
+    layoutModeWide: 'Always wide',
     dropToUpload: 'Drop files to upload',
     uploading: 'Uploading…',
     uploadSuccess: ({ count }) => `${count} file${count === 1 ? '' : 's'} uploaded`,
@@ -811,6 +815,12 @@ export const en: TranslationDictionary = {
   connection: {
     reconnecting: 'Reconnecting…',
   },
+  desktopServices: {
+    switchService: 'Switch Termdock service',
+    openServices: 'Open services',
+    idle: 'Idle',
+    manageServices: 'Manage services and names',
+  },
   terminal: {
     input: 'Terminal input',
     error: 'Error',
@@ -842,6 +852,9 @@ export const en: TranslationDictionary = {
     title: 'Something went wrong',
     unexpected: 'An unexpected error occurred',
     retry: 'Try Again',
+    copyDetails: 'Copy error details',
+    copied: 'Copied',
+    copyFailed: 'Copy failed',
   },
   error: {
     type: {

@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import type {
   CliInstallation,
   DesktopConfig,
+  DesktopServiceActivity,
   DesktopSnapshot,
   LocalServerState,
   LocalServiceStatus,
@@ -95,6 +96,7 @@ function triggerLocalNetworkPermission(): void {
 let mainWindow: BrowserWindow | null = null;
 const serviceWindows = new Map<string, BrowserWindow>();
 const windowServiceOrigins = new WeakMap<BrowserWindow, string>();
+const serviceActivity = new Map<string, { runningCount: number; reviewCount: number }>();
 let lastFocusedServiceWindow: BrowserWindow | null = null;
 let isQuitting = false;
 
@@ -112,6 +114,28 @@ function showAndFocusWindow(window: BrowserWindow): void {
   if (window.isMinimized()) window.restore();
   window.show();
   window.focus();
+}
+
+function serviceActivitySnapshot(targetWindow: BrowserWindow): DesktopServiceActivity[] {
+  const currentOrigin = windowServiceOrigins.get(targetWindow);
+  return [...serviceWindows.entries()].flatMap(([origin, window]) => {
+    if (window.isDestroyed()) return [];
+    const activity = serviceActivity.get(origin) ?? { runningCount: 0, reviewCount: 0 };
+    return [{
+      origin,
+      label: serviceLabel(origin),
+      current: origin === currentOrigin,
+      focused: window.isFocused(),
+      ...activity,
+    }];
+  });
+}
+
+function broadcastServiceActivity(): void {
+  for (const window of serviceWindows.values()) {
+    if (window.isDestroyed()) continue;
+    window.webContents.send('desktop:service-activity-changed', serviceActivitySnapshot(window));
+  }
 }
 
 function serviceLabel(url: string): string {
@@ -1091,10 +1115,13 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
     const serviceOrigin = windowServiceOrigins.get(window);
     if (serviceOrigin && serviceWindows.get(serviceOrigin) === window) {
       serviceWindows.delete(serviceOrigin);
+      serviceActivity.delete(serviceOrigin);
+      broadcastServiceActivity();
     }
   });
   window.on('focus', () => {
     if (windowServiceOrigins.has(window)) lastFocusedServiceWindow = window;
+    broadcastServiceActivity();
     // User is looking at the app — the Dock badge has served its purpose.
     clearUnreadNotifications();
   });
@@ -1135,6 +1162,39 @@ function installIpcHandlers(): void {
     return snapshot();
   });
   ipcMain.handle('desktop:connect', (_event, url: string) => connectWindow(url));
+  ipcMain.on('desktop:report-service-activity', (event, activity: {
+    runningCount?: unknown;
+    reviewCount?: unknown;
+  }) => {
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!sourceWindow) return;
+    const origin = windowServiceOrigins.get(sourceWindow);
+    if (!origin) return;
+    const normalizeCount = (value: unknown) => Math.min(999, Math.max(0,
+      typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : 0,
+    ));
+    const next = {
+      runningCount: normalizeCount(activity?.runningCount),
+      reviewCount: normalizeCount(activity?.reviewCount),
+    };
+    const current = serviceActivity.get(origin);
+    if (current?.runningCount === next.runningCount && current.reviewCount === next.reviewCount) {
+      // The sender may have just reloaded and still needs the complete roster.
+      sourceWindow.webContents.send('desktop:service-activity-changed', serviceActivitySnapshot(sourceWindow));
+      return;
+    }
+    serviceActivity.set(origin, next);
+    broadcastServiceActivity();
+  });
+  ipcMain.handle('desktop:focus-service', (event, origin: string) => {
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!sourceWindow || !windowServiceOrigins.has(sourceWindow)) return false;
+    const targetWindow = serviceWindows.get(origin);
+    if (!targetWindow || targetWindow.isDestroyed()) return false;
+    showAndFocusWindow(targetWindow);
+    broadcastServiceActivity();
+    return true;
+  });
   ipcMain.handle('desktop:start-local', () => startLocalService());
   ipcMain.handle('desktop:install-cli', () => installCli());
   ipcMain.handle('desktop:update-state', () => getDesktopUpdateState());

@@ -216,6 +216,10 @@ export const zh: TranslationDictionary = {
     uploadFile: '上传文件',
     uploadFiles: '上传文件',
     insertLocalImage: '插入本地图片',
+    layoutMode: '显示模式',
+    layoutModeAuto: '自动（随宽度）',
+    layoutModeNarrow: '固定窄版',
+    layoutModeWide: '固定宽版',
     dropToUpload: '拖放文件以上传',
     uploading: '上传中…',
     uploadSuccess: ({ count }) => `已上传 ${count} 个文件`,
@@ -811,6 +815,12 @@ export const zh: TranslationDictionary = {
   connection: {
     reconnecting: '正在重连…',
   },
+  desktopServices: {
+    switchService: '切换 Termdock 服务',
+    openServices: '已打开的服务',
+    idle: '空闲',
+    manageServices: '管理服务与名称',
+  },
   terminal: {
     input: '终端输入',
     error: '错误',
@@ -842,6 +852,9 @@ export const zh: TranslationDictionary = {
     title: '出现了一些问题',
     unexpected: '发生意外错误',
     retry: '重试',
+    copyDetails: '复制错误信息',
+    copied: '已复制',
+    copyFailed: '复制失败',
   },
   error: {
     type: {

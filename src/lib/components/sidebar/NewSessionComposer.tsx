@@ -1,6 +1,6 @@
-import { ChevronDown, Folder, FolderTree, History, LoaderCircle, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react';
+import { ChevronDown, Folder, History, LoaderCircle, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { getDirectorySuggestions, type AgentLauncherInfo, type AgentResumeHistoryEntry } from '../../terminal/api';
+import type { AgentLauncherInfo, AgentResumeHistoryEntry } from '../../terminal/api';
 import { getCwdLeafName } from '../../terminal/display';
 import { useI18n } from '../../i18n';
 import type { NewSessionAgentPreference } from '../../hooks/useNewSessionAgentPreference';
@@ -46,9 +46,6 @@ export function NewSessionComposer({
 }) {
   const { t, locale } = useI18n();
   const [launchAgent, setLaunchAgent] = useState<NewSessionAgentPreference>(selectedAgent);
-  const [directorySuggestions, setDirectorySuggestions] = useState<string[]>([]);
-  const [directorySuggestionsOpen, setDirectorySuggestionsOpen] = useState(false);
-  const [highlightedDirectoryIndex, setHighlightedDirectoryIndex] = useState(0);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
 
   const uniqueDirectories = useMemo(() => [...new Set(directories.filter(Boolean))].slice(0, 5), [directories]);
@@ -59,39 +56,15 @@ export function NewSessionComposer({
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      if (directorySuggestionsOpen) {
-        setDirectorySuggestionsOpen(false);
-        return;
-      }
       if (directoryPickerOpen) return;
       onClose();
     };
     document.addEventListener('keydown', closeOnEscape);
     return () => document.removeEventListener('keydown', closeOnEscape);
-  }, [directoryPickerOpen, directorySuggestionsOpen, onClose]);
-
-  useEffect(() => {
-    if (!directorySuggestionsOpen) return;
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => {
-      void getDirectorySuggestions(options.cwd ?? '', controller.signal).then((remote) => {
-        const query = (options.cwd ?? '').trim().toLowerCase();
-        const recent = uniqueDirectories.filter((directory) => !query || directory.toLowerCase().includes(query));
-        setDirectorySuggestions([...new Set([...recent, ...remote])].slice(0, 10));
-        setHighlightedDirectoryIndex(0);
-      }).catch((error) => {
-        if ((error as Error).name !== 'AbortError') setDirectorySuggestions([]);
-      });
-    }, 140);
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, [options.cwd, directorySuggestionsOpen, uniqueDirectories]);
+  }, [directoryPickerOpen, onClose]);
 
   const chooseDirectory = (directory: string) => {
     onOptionsChange({ ...options, cwd: directory });
-    setDirectorySuggestionsOpen(false);
     setDirectoryPickerOpen(false);
   };
 
@@ -167,70 +140,19 @@ export function NewSessionComposer({
           </div>
         )}
 
-        <div className="mt-2.5 flex items-center justify-between gap-2">
-          <label htmlFor="new-session-directory" className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">{t('sidebar.workingDirectory')}</label>
-          <button
-            type="button"
-            onClick={() => {
-              setDirectoryPickerOpen(true);
-              setDirectorySuggestionsOpen(false);
-            }}
-            aria-haspopup="dialog"
-            className="inline-flex min-h-8 items-center gap-1 px-1 text-[10px] font-medium text-primary transition hover:text-foreground"
-          >
-            <FolderTree size={11} />{t('sidebar.browseDirectories')}
-          </button>
-        </div>
-        <div className="relative mt-1">
-          <Folder size={12} className="pointer-events-none absolute left-2.5 top-3 text-muted-foreground" />
-          <input
-            id="new-session-directory"
-            value={options.cwd ?? ''}
-            onFocus={() => setDirectorySuggestionsOpen(true)}
-            onBlur={() => window.setTimeout(() => setDirectorySuggestionsOpen(false), 120)}
-            onChange={(event) => { onOptionsChange({ ...options, cwd: event.target.value }); setDirectorySuggestionsOpen(true); }}
-            onKeyDown={(event) => {
-              if (!directorySuggestionsOpen || directorySuggestions.length === 0) return;
-              if (event.key === 'ArrowDown') {
-                event.preventDefault();
-                setHighlightedDirectoryIndex((index) => (index + 1) % directorySuggestions.length);
-              } else if (event.key === 'ArrowUp') {
-                event.preventDefault();
-                setHighlightedDirectoryIndex((index) => (index - 1 + directorySuggestions.length) % directorySuggestions.length);
-              } else if (event.key === 'Enter') {
-                event.preventDefault();
-                chooseDirectory(directorySuggestions[highlightedDirectoryIndex]!);
-              } else if (event.key === 'Escape') {
-                event.stopPropagation();
-                setDirectorySuggestionsOpen(false);
-              }
-            }}
-            placeholder={t('sidebar.directoryPlaceholder')}
-            role="combobox"
-            aria-autocomplete="list"
-            aria-expanded={directorySuggestionsOpen && directorySuggestions.length > 0}
-            aria-controls="new-session-directory-suggestions"
-            className="h-9 w-full rounded-lg border border-border/25 bg-surface pl-8 pr-2 font-mono text-[11px] text-foreground outline-none transition focus:border-primary/50"
-          />
-          {directorySuggestionsOpen && directorySuggestions.length > 0 && (
-            <div id="new-session-directory-suggestions" role="listbox" className="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-44 overflow-y-auto rounded-lg border border-border/15 bg-surface p-1 shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] animate-fade-in">
-              {directorySuggestions.map((directory, index) => (
-                <button
-                  key={directory}
-                  type="button"
-                  role="option"
-                  aria-selected={index === highlightedDirectoryIndex}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onMouseEnter={() => setHighlightedDirectoryIndex(index)}
-                  onClick={() => chooseDirectory(directory)}
-                  className={`flex min-h-9 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${index === highlightedDirectoryIndex ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}`}
-                >
-                  <Folder size={11} className="shrink-0" /><span className="min-w-0 flex-1 truncate font-mono text-[10.5px]">{directory}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <label htmlFor="new-session-directory" className="mt-2.5 block text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">{t('sidebar.workingDirectory')}</label>
+        <button
+          id="new-session-directory"
+          type="button"
+          aria-haspopup="dialog"
+          onClick={() => setDirectoryPickerOpen(true)}
+          className="mt-1 flex h-9 w-full items-center gap-2 rounded-lg border border-border/25 bg-surface px-2.5 font-mono text-[11px] text-foreground outline-none transition hover:bg-surface-2 focus-visible:border-primary/50"
+        >
+          <Folder size={12} className="shrink-0 text-muted-foreground" />
+          <span className={`min-w-0 flex-1 truncate text-left ${options.cwd ? '' : 'text-muted-foreground'}`}>
+            {options.cwd || t('sidebar.directoryPlaceholder')}
+          </span>
+        </button>
 
         {uniqueDirectories.length > 0 && (
           <div className="mt-1.5 flex gap-1 overflow-x-auto pb-0.5" aria-label={t('sidebar.recentDirectories')}>

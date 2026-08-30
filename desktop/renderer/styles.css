@@ -624,6 +624,16 @@ p {
   background: color-mix(in srgb, var(--surface) 55%, transparent);
 }
 
+.connection-row.is-editing {
+  padding-inline: 10px;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.connection-form input[readonly] {
+  color: var(--muted-foreground);
+  cursor: not-allowed;
+}
+
 .connection-copy {
   min-width: 0;
 }

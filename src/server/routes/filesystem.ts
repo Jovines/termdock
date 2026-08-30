@@ -9,7 +9,7 @@ import watcher from '@parcel/watcher';
 import busboy from 'busboy';
 import { pathValidator } from '../utils/pathValidator.js';
 import { isAuthEnabled, isRequestAuthenticated } from '../utils/authProtection.js';
-import { getImageDimensions } from '../utils/imageDimensions.js';
+import { getImageDimensions, parseImageDimensions } from '../utils/imageDimensions.js';
 import { writeDiffTraceLog, writeErrorLog, writeJsonLog } from '../utils/serverLogger.js';
 import { clearBranchAuditRecords, clearChangeAuditRecords, listBranchAuditRecords, listChangeAuditRecords, buildChangeAuditFingerprint } from '../utils/changeAuditStore.js';
 import { getLanIPv4Addresses } from '../utils/localAccess.js';
@@ -18,6 +18,7 @@ import { GitApplyError, HUNK_APPLY_MODES, runGitApply, validateHunkPatch, type H
 import { deleteFilesystemFile } from '../utils/deleteFilesystemFile.js';
 import { inspectKicadBoardPoint } from '../utils/kicadBoardInspection.js';
 import { EdaPreviewCache, requestAcceptsEtag } from '../utils/edaPreviewCache.js';
+import { convertHeicPreview, HEIC_PREVIEW_MIME_TYPES, isHeicPreviewPath } from '../utils/heicPreview.js';
 
 const router = Router();
 
@@ -49,6 +50,7 @@ const MAX_NESTED_GIT_REPOS = 32;
 const NESTED_GIT_DISCOVERY_TIMEOUT_MS = 1_000;
 const NESTED_GIT_DISCOVERY_CACHE_TTL_MS = 60_000;
 const FS_ROUTE_TIMEOUT_MS = 6_000;
+const HEIC_PREVIEW_TIMEOUT_MS = 30_000;
 const EDA_PREVIEW_TIMEOUT_MS = 30_000;
 const EDA_PREVIEW_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const GIT_ROUTE_TIMEOUT_MS = 8_000;
@@ -710,6 +712,7 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
   '.bmp': 'image/bmp',
   '.ico': 'image/x-icon',
   '.svg': 'image/svg+xml',
+  ...HEIC_PREVIEW_MIME_TYPES,
 };
 
 function getImageMimeType(filePath: string): string | null {
@@ -3333,25 +3336,55 @@ router.get('/blob', async (req: Request, res: Response) => {
       return { resolvedPath, stat, mimeType };
     })(), FS_ROUTE_TIMEOUT_MS, 'Image preview took too long. The file may be on slow storage or currently blocked by another process.', 'FS_BLOB_TIMEOUT');
 
-    res.setHeader('Content-Type', mimeType);
-    res.setHeader('Content-Length', stat.size.toString());
+    let responseBody: Buffer | null = null;
+    let responseMimeType = mimeType;
+    let responseFilename = path.basename(resolvedPath);
+    if (isHeicPreviewPath(resolvedPath)) {
+      responseBody = await withTimeout(
+        convertHeicPreview(resolvedPath, controller.signal),
+        HEIC_PREVIEW_TIMEOUT_MS,
+        'HEIC preview conversion took too long.',
+        'HEIC_PREVIEW_TIMEOUT',
+        () => controller.abort(new OperationTimeoutError('HEIC preview conversion took too long.', 'HEIC_PREVIEW_TIMEOUT')),
+      );
+      if (responseBody.length > MAX_IMAGE_PREVIEW_SIZE) {
+        const error = new Error('Converted image is too large to preview');
+        (error as Error & { code?: string; status?: number }).code = 'IMAGE_TOO_LARGE';
+        (error as Error & { status?: number }).status = 413;
+        throw error;
+      }
+      responseMimeType = 'image/jpeg';
+      responseFilename = `${path.basename(resolvedPath, path.extname(resolvedPath))}.jpg`;
+    }
+
+    const responseSize = responseBody?.length ?? stat.size;
+    res.setHeader('Content-Type', responseMimeType);
+    res.setHeader('Content-Length', responseSize.toString());
     res.setHeader('Last-Modified', stat.mtime.toUTCString());
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Disposition', buildContentDisposition('inline', path.basename(resolvedPath)));
+    res.setHeader('Content-Disposition', buildContentDisposition('inline', responseFilename));
 
     // Expose dimensions so markdown image previews can reserve the final
     // display box before downloading (loading placeholder without a jump).
     // Best-effort: parsing failure just omits the headers.
-    const dimensions = await getImageDimensions(resolvedPath, mimeType).catch(() => null);
+    const dimensions = responseBody
+      ? parseImageDimensions(responseBody, responseMimeType)
+      : await getImageDimensions(resolvedPath, responseMimeType).catch(() => null);
     if (dimensions) {
       res.setHeader('X-Image-Width', String(dimensions.width));
       res.setHeader('X-Image-Height', String(dimensions.height));
     }
 
+    if (responseBody) {
+      logOnce('ok', { path: resolvedPath, bytes: responseSize, extra: { mimeType: responseMimeType, sourceMimeType: mimeType } });
+      res.end(responseBody);
+      return;
+    }
+
     const stream = fs.createReadStream(resolvedPath);
     controller.signal.addEventListener('abort', () => stream.destroy(controller.signal.reason instanceof Error ? controller.signal.reason : undefined), { once: true });
-    res.on('finish', () => logOnce('ok', { path: resolvedPath, bytes: stat.size, extra: { mimeType } }));
+    res.on('finish', () => logOnce('ok', { path: resolvedPath, bytes: stat.size, extra: { mimeType: responseMimeType } }));
     res.on('close', () => {
       if (!res.writableEnded) logOnce('error', { path: resolvedPath, bytes: stat.size, code: 'CLIENT_CLOSED', error: 'Client closed image preview request' });
     });

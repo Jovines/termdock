@@ -45,8 +45,8 @@ import { ChangeWalkthroughPanel } from './ChangeWalkthroughPanel';
 import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import { useDiffDisplayPrefs } from './diffDisplayPrefs';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
-import { useSidebarStore } from '../../stores/useSidebarStore';
-import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { resolveRightSidebarNarrowLayout, useSidebarStore, type RightSidebarLayoutPreference } from '../../stores/useSidebarStore';
+import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { subscribeClientState } from '../../utils/clientStateSync';
@@ -140,7 +140,6 @@ const MAX_FILE_TREE_WIDTH_PX = 560;
 // Below this width we treat the panel as a phone-sized overlay: dual-pane
 // mode collapses to a single column with back-navigation, and the third
 // "File" tab is hidden (its content is reachable via the Files tab).
-const MOBILE_WIDTH_THRESHOLD_PX = 600;
 const MARKDOWN_TABLE_CELL_CLASS = 'border-r px-2 py-1.5 sm:px-3 sm:py-2';
 const MARKDOWN_TABLE_CELL_CONTENT_CLASS = 'max-w-[18rem] whitespace-normal break-words sm:max-w-[27rem]';
 const MARKDOWN_TABLE_HEADER_CLASS = `${MARKDOWN_TABLE_CELL_CLASS} border-b border-border/15 font-semibold last:border-r-0`;
@@ -5088,7 +5087,7 @@ export function FilePreview({
       controller.abort(new DOMException(message, 'TimeoutError'));
       setPreviewState({ kind: 'error', message });
       endLoading('stuck_timeout', { error: message });
-    }, FILE_PREVIEW_STUCK_TIMEOUT_MS);
+    }, isHeicImagePath(fullPath) ? 35_000 : FILE_PREVIEW_STUCK_TIMEOUT_MS);
 
     if (isEda) {
       const cached3d = requestedEdaView === 'pcb-3d' ? cachedEda3dPreviewRef.current : null;
@@ -5942,6 +5941,8 @@ export function RightSidebar(
   const [directoryReveal, setDirectoryReveal] = useState<{ path: string; nonce: number } | null>(null);
   const searchOpen = useSidebarStore((s) => s.rightSearchOpen);
   const setRightSearchOpen = useSidebarStore((s) => s.setRightSearchOpen);
+  const rightSidebarLayoutPreference = useSidebarStore((s) => s.rightSidebarLayoutPreference);
+  const setRightSidebarLayoutPreference = useSidebarStore((s) => s.setRightSidebarLayoutPreference);
   const [searchMode, setSearchMode] = useState<FileSearchMode>(() => readFileSearchMode());
   const deferredFileQuery = useDeferredValue(fileQuery);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
@@ -6050,7 +6051,7 @@ export function RightSidebar(
   const [diffStreamScrollRequest, setDiffStreamScrollRequest] = useState<{ key: string | null; nonce: number }>({ key: null, nonce: 0 });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const temporaryImageInputRef = useRef<HTMLInputElement>(null);
-  const isMobile = drawerWidthPx < MOBILE_WIDTH_THRESHOLD_PX;
+  const isMobile = resolveRightSidebarNarrowLayout(drawerWidthPx, pinned, rightSidebarLayoutPreference);
   const [fileTreeWidthPx, setFileTreeWidthPx] = useState(() => readFileTreeWidth(drawerWidthPx));
   const rightTab = useSidebarStore((s) => s.rightTab);
   const setRightTab = useSidebarStore((s) => s.setRightTab);
@@ -10288,7 +10289,7 @@ export function RightSidebar(
               <RiMoreHorizontal size={15} />
             </button>
             {headerMenuOpen && (
-              <div role="menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-48 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+              <div role="menu" className="absolute right-0 top-[calc(100%+4px)] z-30 w-56 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
                 <button
                   type="button"
                   role="menuitem"
@@ -10319,6 +10320,38 @@ export function RightSidebar(
                     {pinned ? <RiPinOff size={14} /> : <RiPin size={14} className="text-muted-foreground" />}
                     <span>{pinned ? t('sidebar.unpinSidebar') : t('sidebar.pinSidebar')}</span>
                   </button>
+                )}
+                {pinned && (
+                  <div className="mt-1 border-t border-border/15 pt-1" role="group" aria-label={t('rightSidebar.layoutMode')}>
+                    <div className="px-2.5 pb-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                      {t('rightSidebar.layoutMode')}
+                    </div>
+                    {([
+                      ['auto', t('rightSidebar.layoutModeAuto')],
+                      ['narrow', t('rightSidebar.layoutModeNarrow')],
+                      ['wide', t('rightSidebar.layoutModeWide')],
+                    ] as Array<[RightSidebarLayoutPreference, string]>).map(([preference, label]) => {
+                      const selected = rightSidebarLayoutPreference === preference;
+                      return (
+                        <button
+                          key={preference}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={selected}
+                          onClick={() => {
+                            setRightSidebarLayoutPreference(preference);
+                            setHeaderMenuOpen(false);
+                          }}
+                          className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${selected ? 'bg-primary/10 text-primary' : 'text-foreground hover:bg-surface-2'}`}
+                        >
+                          <span className="flex h-4 w-4 shrink-0 items-center justify-center" aria-hidden="true">
+                            {selected ? <RiCheck size={13} /> : null}
+                          </span>
+                          <span>{label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
             )}

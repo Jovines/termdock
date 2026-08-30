@@ -233,6 +233,10 @@ export type TranslationDictionary = {
     uploadFile: string;
     uploadFiles: string;
     insertLocalImage: string;
+    layoutMode: string;
+    layoutModeAuto: string;
+    layoutModeNarrow: string;
+    layoutModeWide: string;
     dropToUpload: string;
     uploading: string;
     uploadSuccess: (params: TranslatorParams) => string;
@@ -828,6 +832,12 @@ export type TranslationDictionary = {
   connection: {
     reconnecting: string;
   };
+  desktopServices: {
+    switchService: string;
+    openServices: string;
+    idle: string;
+    manageServices: string;
+  };
   terminal: {
     input: string;
     error: string;
@@ -859,6 +869,9 @@ export type TranslationDictionary = {
     title: string;
     unexpected: string;
     retry: string;
+    copyDetails: string;
+    copied: string;
+    copyFailed: string;
   };
   error: {
     type: {

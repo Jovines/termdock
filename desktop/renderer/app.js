@@ -17,12 +17,31 @@ const elements = {
   url: document.querySelector('#connection-url'),
   label: document.querySelector('#connection-label'),
   save: document.querySelector('#save-connection'),
+  cancelEdit: document.querySelector('#cancel-connection-edit'),
   connections: document.querySelector('#connections'),
   connectionCount: document.querySelector('#connection-count'),
   version: document.querySelector('#version'),
 };
 
 let currentSnapshot = null;
+let editingConnectionId = null;
+
+function setEditingConnection(connection = null) {
+  editingConnectionId = connection?.id || null;
+  elements.url.readOnly = Boolean(connection);
+  elements.save.textContent = connection ? '保存名称' : '仅保存';
+  elements.cancelEdit.hidden = !connection;
+  if (!connection) {
+    elements.url.value = '';
+    elements.label.value = '';
+    return;
+  }
+  elements.url.value = connection.url;
+  elements.label.value = connection.label;
+  elements.form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  elements.label.focus();
+  elements.label.select();
+}
 
 function showNotice(message, error = false) {
   elements.notice.textContent = message;
@@ -63,6 +82,7 @@ function renderConnections(connections) {
   for (const connection of connections) {
     const row = document.createElement('div');
     row.className = 'connection-row';
+    row.classList.toggle('is-editing', connection.id === editingConnectionId);
 
     const copy = document.createElement('div');
     copy.className = 'connection-copy';
@@ -83,6 +103,14 @@ function renderConnections(connections) {
         if (!result.ok) showNotice(result.error || '连接失败', true);
       });
     });
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'quiet';
+    edit.textContent = '编辑名称';
+    edit.addEventListener('click', () => {
+      setEditingConnection(connection);
+      renderConnections(connections);
+    });
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'quiet';
@@ -93,7 +121,7 @@ function renderConnections(connections) {
         render(currentSnapshot);
       });
     });
-    actions.append(connect, remove);
+    actions.append(connect, edit, remove);
     row.append(copy, actions);
     elements.connections.append(row);
   }
@@ -179,6 +207,7 @@ elements.form.addEventListener('submit', (event) => {
       return;
     }
     currentSnapshot = await api.saveConnection(result.url, elements.label.value);
+    setEditingConnection();
     render(currentSnapshot);
     await api.connect(result.url);
   });
@@ -186,10 +215,17 @@ elements.form.addEventListener('submit', (event) => {
 
 elements.save.addEventListener('click', () => {
   void busy(elements.save, async () => {
+    const wasEditing = Boolean(editingConnectionId);
     currentSnapshot = await api.saveConnection(elements.url.value, elements.label.value);
+    setEditingConnection();
     render(currentSnapshot);
-    showNotice('连接已保存。');
+    showNotice(wasEditing ? '服务名称已更新。' : '连接已保存。');
   });
+});
+
+elements.cancelEdit.addEventListener('click', () => {
+  setEditingConnection();
+  renderConnections(currentSnapshot?.connections || []);
 });
 
 void refresh().catch((error) => {

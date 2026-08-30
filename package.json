@@ -1,6 +1,6 @@
 {
   "name": "termdock",
-  "version": "1.4.107",
+  "version": "1.4.108",
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
   "main": ".desktop-dist/main.js",
@@ -71,6 +71,7 @@
     "dompurify": "^3.4.11",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "heic-convert": "^2.1.0",
     "katex": "^0.17.0",
     "lucide-react": "^1.17.0",
     "mermaid": "^11.16.0",
@@ -98,6 +99,7 @@
     "@testing-library/user-event": "^14.5.0",
     "@types/busboy": "^1.5.4",
     "@types/express": "^4.17.21",
+    "@types/heic-convert": "^2.1.1",
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",

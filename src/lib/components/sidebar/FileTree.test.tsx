@@ -139,4 +139,35 @@ describe('FileTree file deletion', () => {
     await user.click(screen.getByText('project'));
     expect(onDirectoryRoot).toHaveBeenCalledWith('/workspace/project');
   });
+
+  it('anchors an expanded directory action menu to its own row', async () => {
+    const user = userEvent.setup();
+    useSidebarStore.setState({
+      selectedFilePath: null,
+      expandedPaths: new Set(['/workspace/project']),
+      directoryCache: new Map([
+        ['/workspace', [{ name: 'project', path: '/workspace/project', type: 'directory', expanded: true, loaded: true, children: [] }]],
+        ['/workspace/project', [{ name: 'child.txt', path: '/workspace/project/child.txt', type: 'file', expanded: false, loaded: true }]],
+      ]),
+    });
+
+    render(
+      <I18nProvider>
+        <FileTree
+          rootPath="/workspace"
+          selectedFilePath={null}
+          onFileSelect={vi.fn()}
+          onDirectoryPinToggle={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+
+    const directoryRow = screen.getByTitle('/workspace/project');
+    const childRow = screen.getByTitle('/workspace/project/child.txt');
+    await user.click(screen.getByTitle('More folder actions'));
+
+    const menu = screen.getByRole('button', { name: 'Pin' }).parentElement;
+    expect(menu?.parentElement).toBe(directoryRow.parentElement);
+    expect(directoryRow.parentElement?.contains(childRow)).toBe(false);
+  });
 });
