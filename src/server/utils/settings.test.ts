@@ -35,6 +35,17 @@ describe('normalizeNewSessionAgentSlug', () => {
 });
 
 describe('settings persistence', () => {
+  it('defaults the running-session button to disabled and preserves an enabled preference', () => {
+    const settingsFile = tempSettingsPath();
+
+    const defaults = loadSettingsFile(settingsFile);
+    expect(defaults.runningSessionButtonEnabled).toBe(false);
+
+    defaults.runningSessionButtonEnabled = true;
+    saveSettingsFile(defaults, settingsFile);
+    expect(loadSettingsFile(settingsFile).runningSessionButtonEnabled).toBe(true);
+  });
+
   it('preserves fields introduced by newer binaries', () => {
     const settingsFile = tempSettingsPath();
     fs.writeFileSync(settingsFile, JSON.stringify({

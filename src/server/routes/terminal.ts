@@ -35,6 +35,8 @@ import {
   setAutoRenamePromptPayloadCharsSetting,
   getNewSessionAgentSlugSetting,
   setNewSessionAgentSlugSetting,
+  getRunningSessionButtonEnabledSetting,
+  setRunningSessionButtonEnabledSetting,
 } from '../utils/settings.js';
 import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
@@ -1789,7 +1791,7 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
     || (session.agentSession?.rich && !['idle', 'done'].includes(session.agentSession.status))) {
     return { delivered: [], pending: pending.length };
   }
-  writeTerminalInput(session, `${formatCollaborationDelivery(frontendSessionId, pending)}\r`);
+  session.ptyProcess.write(buildBracketedSubmitBytes(formatCollaborationDelivery(frontendSessionId, pending)));
   collaborationStore.markDelivered(pending.map((message) => message.id));
   return { delivered: pending.map((message) => message.id), pending: 0 };
 }
@@ -6030,6 +6032,7 @@ async function getSettingsPayload() {
     autoRenamePromptPreference: getAutoRenamePromptPreferenceSetting(),
     autoRenamePromptPayloadChars: getAutoRenamePromptPayloadCharsSetting(),
     newSessionAgentSlug: getNewSessionAgentSlugSetting(),
+    runningSessionButtonEnabled: getRunningSessionButtonEnabledSetting(),
     localAccess: {
       ...localAccess,
       interfaces,
@@ -6148,6 +6151,10 @@ router.put('/settings', async (req, res) => {
       return;
     }
     setNewSessionAgentSlugSetting(slug);
+  }
+
+  if (typeof body.runningSessionButtonEnabled === 'boolean') {
+    setRunningSessionButtonEnabledSetting(body.runningSessionButtonEnabled);
   }
 
   if (body.localAccess && typeof body.localAccess === 'object') {

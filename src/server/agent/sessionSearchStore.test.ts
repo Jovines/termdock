@@ -50,4 +50,54 @@ describe('SessionSearchStore', () => {
     expect(store.search('old-search-term')[0]?.sessionId).toBe('session-3');
     expect(store.search('new-search-term')[0]?.sessionId).toBe('session-3');
   });
+
+  it('removes old sessions and orphaned logs during budget maintenance', () => {
+    fs.writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({ version: 1, sessions: [
+      { sessionId: 'old', backendSessionId: null, title: 'Old', cwd: '/old', agentSlug: null, agentNativeSessionId: null, updatedAt: 1 },
+      { sessionId: 'new', backendSessionId: null, title: 'New', cwd: '/new', agentSlug: null, agentNativeSessionId: null, updatedAt: 2 },
+    ] }));
+    fs.writeFileSync(path.join(directory, 'old.log'), 'old output');
+    fs.writeFileSync(path.join(directory, 'new.log'), 'new output');
+    fs.writeFileSync(path.join(directory, 'orphan.log'), 'orphan output');
+
+    const store = new SessionSearchStore(directory, { maxSessions: 1, maxAgeMs: Number.MAX_SAFE_INTEGER });
+
+    expect(store.search('new output')[0]?.sessionId).toBe('new');
+    expect(store.search('old output')).toEqual([]);
+    expect(fs.existsSync(path.join(directory, 'old.log'))).toBe(false);
+    expect(fs.existsSync(path.join(directory, 'orphan.log'))).toBe(false);
+  });
+
+  it('drops rotated segments before current output when the global budget is exceeded', () => {
+    fs.writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({ version: 1, sessions: [
+      { sessionId: 'session', backendSessionId: null, title: 'Session', cwd: '/repo', agentSlug: null, agentNativeSessionId: null, updatedAt: Date.now() },
+    ] }));
+    fs.writeFileSync(path.join(directory, 'session.log.1'), 'previous-output');
+    fs.writeFileSync(path.join(directory, 'session.log'), 'current-output');
+
+    new SessionSearchStore(directory, {
+      maxTotalBytes: Buffer.byteLength('current-output'),
+      maxAgeMs: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(fs.existsSync(path.join(directory, 'session.log.1'))).toBe(false);
+    expect(fs.readFileSync(path.join(directory, 'session.log'), 'utf8')).toBe('current-output');
+  });
+
+  it('does not rewrite metadata for every output flush when identity is unchanged', () => {
+    const metadata = {
+      sessionId: 'session', backendSessionId: 'backend', title: 'Session', cwd: '/repo',
+      agentSlug: 'codex', agentNativeSessionId: 'native', updatedAt: Date.now(),
+    };
+    const metadataPath = path.join(directory, 'sessions.json');
+    fs.writeFileSync(metadataPath, JSON.stringify({ version: 1, sessions: [metadata] }));
+    const before = fs.readFileSync(metadataPath, 'utf8');
+    const store = new SessionSearchStore(directory);
+
+    store.append(metadata, 'fresh output');
+    store.flush();
+
+    expect(fs.readFileSync(metadataPath, 'utf8')).toBe(before);
+    expect(fs.readFileSync(path.join(directory, 'session.log'), 'utf8')).toBe('fresh output');
+  });
 });

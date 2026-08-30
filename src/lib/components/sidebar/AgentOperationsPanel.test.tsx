@@ -71,6 +71,14 @@ describe('AgentOperationsPanel', () => {
     await user.click(screen.getByRole('button', { name: '指定日期与时间' }));
     expect(screen.getByRole('button', { name: '星期一' }).getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByRole('button', { name: '星期日' }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByLabelText('小时')).toHaveProperty('value', '09');
+    expect(screen.getByLabelText('分钟')).toHaveProperty('value', '00');
+    expect(document.querySelector('input[type="time"]')).toBeNull();
+
+    await user.selectOptions(screen.getByLabelText('小时'), '18');
+    await user.selectOptions(screen.getByLabelText('分钟'), '45');
+    expect(screen.getByLabelText('小时')).toHaveProperty('value', '18');
+    expect(screen.getByLabelText('分钟')).toHaveProperty('value', '45');
   });
 
   it('opens directory browsing as a focused dialog and Escape keeps the task form open', async () => {
@@ -100,6 +108,8 @@ describe('AgentOperationsPanel', () => {
     render(<AgentOperationsPanel activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
 
     await user.click(screen.getByRole('button', { name: '会话协作' }));
+    expect(screen.getByText(/一个 Agent 会话可以把任务直接交给另一个会话/)).toBeTruthy();
+    expect(screen.getByText(/“开发”写完代码后通知“测试”检查，测试结果再回复回来/)).toBeTruthy();
     expect(await screen.findByText(/检查发布产物/)).toBeTruthy();
     expect(screen.getByText('处理中')).toBeTruthy();
     expect(screen.getByText('还需选择 1 个会话')).toBeTruthy();

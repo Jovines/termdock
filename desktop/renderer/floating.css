@@ -1,0 +1,200 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  -webkit-font-smoothing: antialiased;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+button {
+  border: 0;
+  color: inherit;
+  font: inherit;
+  -webkit-app-region: no-drag;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.widget {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 24px;
+  align-items: center;
+  width: calc(100% - 6px);
+  height: calc(100% - 6px);
+  margin: 3px;
+  border: 1px solid color-mix(in srgb, var(--overlay-foreground) 14%, transparent);
+  border-radius: 16px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--background-subtle) 54%, transparent);
+  box-shadow:
+    inset 0 1px color-mix(in srgb, var(--overlay-foreground) 11%, transparent),
+    0 12px 34px color-mix(in srgb, var(--background) 38%, transparent);
+  backdrop-filter: blur(28px) saturate(1.35);
+}
+
+.widget::before {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    112deg,
+    color-mix(in srgb, var(--overlay-foreground) 8%, transparent),
+    transparent 35%,
+    color-mix(in srgb, var(--primary) 5%, transparent)
+  );
+  content: "";
+  pointer-events: none;
+}
+
+.drag-handle {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 3px;
+  justify-content: center;
+  -webkit-app-region: drag;
+}
+
+.drag-handle i {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted-foreground) 58%, transparent);
+}
+
+.status-group,
+.close-button {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.status-group {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.metric {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.015em;
+  white-space: nowrap;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.metric[hidden] {
+  display: none;
+}
+
+.metric + .metric::before {
+  position: absolute;
+  left: -6px;
+  width: 1px;
+  height: 11px;
+  background: color-mix(in srgb, var(--overlay-foreground) 10%, transparent);
+  content: "";
+}
+
+.metric:hover {
+  background: color-mix(in srgb, var(--overlay-foreground) 7%, transparent);
+  color: var(--overlay-foreground);
+}
+
+.metric strong {
+  color: var(--overlay-foreground);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.metric-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+}
+
+.metric-running .metric-dot {
+  background: var(--success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 10%, transparent);
+  animation: activity-breathe 2.4s ease-in-out infinite;
+}
+
+.metric-review .metric-dot {
+  background: var(--warning);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+.close-button {
+  opacity: 0;
+  color: color-mix(in srgb, var(--muted-foreground) 78%, transparent);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  transition: opacity 140ms ease, color 140ms ease;
+}
+
+.widget:hover .close-button,
+.close-button:focus-visible {
+  opacity: 1;
+}
+
+.close-button:hover {
+  color: var(--overlay-foreground);
+}
+
+@keyframes activity-breathe {
+  0%, 100% { opacity: 0.72; transform: scale(0.92); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .metric strong {
+    transition: color 140ms ease, opacity 140ms ease;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .metric-running .metric-dot {
+    animation: none;
+  }
+}

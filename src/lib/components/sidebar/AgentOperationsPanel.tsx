@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Bot, CalendarClock, Check, Clock3, ExternalLink, FolderOpen, Link2, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { Bot, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, FolderOpen, Link2, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
   getAgentLaunchers,
   listAgentAutomations,
@@ -218,6 +218,8 @@ function AutomationForm({ agents, sessions, activeSessionId, initial, onCancel, 
     finally { setSaving(false); }
   };
   const schedule = kind === 'interval' ? { kind, everyMinutes } as const : { kind, time, weekdays } as const;
+  const [hours, minutes] = time.split(':');
+  const setTimePart = (nextHours: string, nextMinutes: string) => setTime(`${nextHours}:${nextMinutes}`);
   const canSave = Boolean(name.trim() && prompt.trim() && (targetMode === 'existing' ? targetSessionId : command) && (kind === 'interval' ? everyMinutes >= 1 : weekdays.length > 0));
   return <div className="overflow-hidden rounded-xl border border-primary/25 bg-primary/5">
     <div className="flex items-center justify-between border-b border-primary/15 px-4 py-3"><div><p className="text-[13px] font-medium text-foreground">{initial ? '编辑自动任务' : '创建自动任务'}</p><p className="mt-0.5 text-[10px] text-muted-foreground">三步完成，保存后可立即试跑</p></div><button className="rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={onCancel} aria-label="关闭任务表单"><X size={14} /></button></div>
@@ -236,11 +238,11 @@ function AutomationForm({ agents, sessions, activeSessionId, initial, onCancel, 
       </fieldset>
       <fieldset className="space-y-3 border-t border-border/10 pt-4"><legend className="text-[11px] font-medium text-foreground"><span className="mr-2 text-primary">3</span>什么时候运行</legend>
         <div className="grid grid-cols-2 gap-2"><button type="button" aria-pressed={kind === 'interval'} className={`${buttonClass} border ${kind === 'interval' ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/15 bg-surface-2 text-muted-foreground'}`} onClick={() => setKind('interval')}>固定间隔</button><button type="button" aria-pressed={kind === 'daily'} className={`${buttonClass} border ${kind === 'daily' ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/15 bg-surface-2 text-muted-foreground'}`} onClick={() => setKind('daily')}>指定日期与时间</button></div>
-        {kind === 'interval' ? <label className="block space-y-1 text-[10px] text-muted-foreground">每隔多少分钟<input className={inputClass} type="number" min={1} max={43200} value={everyMinutes} onChange={(event) => setEveryMinutes(Number(event.target.value))} /><span className="block">例如 60 = 每小时，1440 = 每天。</span></label> : <div className="space-y-2"><label className="block space-y-1 text-[10px] text-muted-foreground">运行时间<input className={inputClass} type="time" value={time} onChange={(event) => setTime(event.target.value)} /></label><div><span className="text-[10px] text-muted-foreground">运行日期</span><div className="mt-1 grid grid-cols-7 gap-1">{['日', '一', '二', '三', '四', '五', '六'].map((label, day) => { const selected = weekdays.includes(day); return <button key={day} type="button" aria-pressed={selected} aria-label={`星期${label}`} className={`rounded-lg py-2 text-[10px] transition ${selected ? 'bg-primary text-primary-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated'}`} onClick={() => setWeekdays((current) => selected ? current.filter((value) => value !== day) : [...current, day].sort())}>{label}</button>; })}</div>{weekdays.length === 0 && <p className="mt-1 text-[10px] text-destructive">至少选择一天</p>}</div></div>}
+        {kind === 'interval' ? <label className="block space-y-1 text-[10px] text-muted-foreground">每隔多少分钟<input className={inputClass} type="number" min={1} max={43200} value={everyMinutes} onChange={(event) => setEveryMinutes(Number(event.target.value))} /><span className="block">例如 60 = 每小时，1440 = 每天。始终按任务创建时间计算，之后编辑不会重置节奏。</span></label> : <div className="space-y-3"><div><span className="text-[10px] text-muted-foreground">运行时间</span><div className="mt-1 flex items-center rounded-xl border border-border/20 bg-surface-2 px-3 py-2.5 focus-within:border-primary/60"><Clock3 size={15} className="mr-3 shrink-0 text-primary" /><TimePartSelect label="小时" value={hours} options={24} onChange={(value) => setTimePart(value, minutes)} /><span aria-hidden="true" className="px-2 text-[18px] font-medium text-muted-foreground">:</span><TimePartSelect label="分钟" value={minutes} options={60} onChange={(value) => setTimePart(hours, value)} /><span className="ml-3 shrink-0 rounded-md bg-surface-elevated px-2 py-1 text-[9px] font-medium text-muted-foreground">24 小时制</span></div></div><div><span className="text-[10px] text-muted-foreground">运行日期</span><div className="mt-1 grid grid-cols-7 gap-1">{['日', '一', '二', '三', '四', '五', '六'].map((label, day) => { const selected = weekdays.includes(day); return <button key={day} type="button" aria-pressed={selected} aria-label={`星期${label}`} className={`rounded-lg py-2.5 text-[10px] transition ${selected ? 'bg-primary text-primary-foreground' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated'}`} onClick={() => setWeekdays((current) => selected ? current.filter((value) => value !== day) : [...current, day].sort())}>{label}</button>; })}</div>{weekdays.length === 0 && <p className="mt-1 text-[10px] text-destructive">至少选择一天</p>}</div></div>}
       </fieldset>
     </div>
     <div className="flex flex-col gap-3 border-t border-primary/15 bg-surface/50 px-4 py-3 sm:flex-row sm:items-center">
-      <div className="min-w-0 flex-1"><label className="flex items-center gap-2 text-[11px] text-foreground"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />保存后启用</label><p className="mt-1 truncate text-[10px] text-muted-foreground">{enabled && canSave ? `首次运行：${formatDateTime(nextScheduledAt(schedule))}` : enabled ? '填写完整后显示首次运行时间' : '任务会保存，但不会自动运行'}</p></div>
+      <div className="min-w-0 flex-1"><label className="flex items-center gap-2 text-[11px] text-foreground"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />保存后启用</label><p className="mt-1 truncate text-[10px] text-muted-foreground">{enabled && canSave ? `${initial ? '下次运行' : '首次运行'}：${formatDateTime(nextScheduledAt(schedule, Date.now(), initial?.createdAt))}` : enabled ? '填写完整后显示首次运行时间' : '任务会保存，但不会自动运行'}</p></div>
       <div className="flex justify-end gap-2"><button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={onCancel}>取消</button><button disabled={saving || !canSave} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void submit()}>{saving ? '保存中…' : initial ? '保存修改' : '创建任务'}</button></div>
     </div>
     <DirectoryPickerDialog
@@ -252,6 +254,10 @@ function AutomationForm({ agents, sessions, activeSessionId, initial, onCancel, 
       onConfirm={(path) => { setCwd(path); setDirectoryPickerOpen(false); }}
     />
   </div>;
+}
+
+function TimePartSelect({ label, value, options, onChange }: { label: string; value: string; options: number; onChange: (value: string) => void }) {
+  return <label className="relative min-w-0 flex-1"><span className="sr-only">{label}</span><select aria-label={label} className="w-full appearance-none bg-transparent py-1 pl-1 pr-7 text-center text-[18px] font-semibold tabular-nums text-foreground outline-none" value={value} onChange={(event) => onChange(event.target.value)}>{Array.from({ length: options }, (_, index) => { const option = String(index).padStart(2, '0'); return <option key={option} value={option}>{option}</option>; })}</select><ChevronDown aria-hidden="true" size={13} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground" /></label>;
 }
 
 function CollaborationTab({ groups, sessions, activeSessionId, busy, setBusy, setError, setNotice, refresh }: {
@@ -329,7 +335,7 @@ function CollaborationTab({ groups, sessions, activeSessionId, busy, setBusy, se
 
   return <div className="space-y-5">
     <div className="flex items-start justify-between gap-4">
-      <div><h3 className="text-[13px] font-medium text-foreground">会话协作</h3><p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted-foreground">把正在处理同一件事的会话放在一起，集中交接任务、提问和查看进展。</p></div>
+      <div><h3 className="text-[13px] font-medium text-foreground">会话协作</h3><p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted-foreground">创建协作组后，一个 Agent 会话可以把任务直接交给另一个会话。比如“开发”写完代码后通知“测试”检查，测试结果再回复回来；你也可以给单个会话或全组发任务，所有交接和进展都记录在这里。</p></div>
       {selectedGroup && <button className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} onClick={() => { setSelectedGroupId('new'); setConfirmDelete(false); setNotice(null); }}><Plus size={13} />新建组</button>}
     </div>
     {groups.length > 0 && <div className="flex gap-2 overflow-x-auto border-b border-border/15 pb-3">
@@ -491,8 +497,12 @@ function scheduleLabel(automation: AgentAutomation): string {
   return `${days} ${automation.schedule.time}`;
 }
 
-function nextScheduledAt(schedule: AutomationSchedule, now = Date.now()): number {
-  if (schedule.kind === 'interval') return now + schedule.everyMinutes * 60_000;
+function nextScheduledAt(schedule: AutomationSchedule, now = Date.now(), createdAt = now): number {
+  if (schedule.kind === 'interval') {
+    const intervalMs = schedule.everyMinutes * 60_000;
+    const elapsed = Math.max(0, now - createdAt);
+    return createdAt + (Math.floor(elapsed / intervalMs) + 1) * intervalMs;
+  }
   const [hours, minutes] = schedule.time.split(':').map(Number);
   for (let offset = 0; offset <= 7; offset += 1) {
     const candidate = new Date(now);

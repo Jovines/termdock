@@ -1493,6 +1493,7 @@ export interface SettingsState {
   autoRenamePromptPreference: string;
   autoRenamePromptPayloadChars: number;
   newSessionAgentSlug: string | null;
+  runningSessionButtonEnabled: boolean;
 }
 
 export async function getSettings(): Promise<SettingsState> {
@@ -1504,7 +1505,7 @@ export async function getSettings(): Promise<SettingsState> {
   return response.json();
 }
 
-export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null }): Promise<SettingsState> {
+export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -3374,6 +3375,8 @@ export interface AgentAutomation {
   prompt: string;
   targetSessionId: string | null;
   schedule: AutomationSchedule;
+  createdAt: number;
+  updatedAt: number;
   nextRunAt: number | null;
   lastRunAt: number | null;
   lastRunStatus: 'running' | 'success' | 'failed' | null;

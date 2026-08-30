@@ -62,8 +62,12 @@ export function normalizeAutomationSchedule(value: unknown): AutomationSchedule 
   return null;
 }
 
-export function nextAutomationRunAt(schedule: AutomationSchedule, now = Date.now()): number {
-  if (schedule.kind === 'interval') return now + schedule.everyMinutes * 60_000;
+export function nextAutomationRunAt(schedule: AutomationSchedule, now = Date.now(), createdAt = now): number {
+  if (schedule.kind === 'interval') {
+    const intervalMs = schedule.everyMinutes * 60_000;
+    const elapsed = Math.max(0, now - createdAt);
+    return createdAt + (Math.floor(elapsed / intervalMs) + 1) * intervalMs;
+  }
   const [hours, minutes] = schedule.time.split(':').map(Number);
   const candidate = new Date(now);
   candidate.setSeconds(0, 0);
@@ -109,6 +113,7 @@ export class AutomationStore {
   }): AgentAutomation {
     const now = Date.now();
     const existing = input.id ? this.get(input.id) : null;
+    const createdAt = existing?.createdAt ?? now;
     const item: AgentAutomation = {
       id: existing?.id ?? crypto.randomUUID(),
       name: input.name.trim(),
@@ -118,9 +123,9 @@ export class AutomationStore {
       prompt: input.prompt?.trim() ?? '',
       targetSessionId: input.targetSessionId?.trim() || null,
       schedule: input.schedule,
-      createdAt: existing?.createdAt ?? now,
+      createdAt,
       updatedAt: now,
-      nextRunAt: input.enabled ? nextAutomationRunAt(input.schedule, now) : null,
+      nextRunAt: input.enabled ? nextAutomationRunAt(input.schedule, now, createdAt) : null,
       lastRunAt: existing?.lastRunAt ?? null,
       lastRunStatus: existing?.lastRunStatus ?? null,
       lastRunMessage: existing?.lastRunMessage ?? null,
@@ -152,7 +157,7 @@ export class AutomationStore {
     automation.lastRunAt = run.startedAt;
     automation.lastRunStatus = 'running';
     automation.lastRunMessage = null;
-    automation.nextRunAt = automation.enabled ? nextAutomationRunAt(automation.schedule, run.startedAt) : null;
+    automation.nextRunAt = automation.enabled ? nextAutomationRunAt(automation.schedule, run.startedAt, automation.createdAt) : null;
     this.document.runs = [run, ...this.document.runs].slice(0, MAX_RUNS);
     this.persist();
     return run;
@@ -185,7 +190,8 @@ export class AutomationStore {
           const candidate = item as AgentAutomation;
           const schedule = normalizeAutomationSchedule(candidate.schedule);
           if (!schedule || typeof candidate.id !== 'string' || typeof candidate.name !== 'string' || typeof candidate.command !== 'string') return [];
-          return [{ ...candidate, schedule, nextRunAt: candidate.enabled ? nextAutomationRunAt(schedule) : null }];
+          const createdAt = Number.isFinite(candidate.createdAt) ? candidate.createdAt : Date.now();
+          return [{ ...candidate, createdAt, schedule, nextRunAt: candidate.enabled ? nextAutomationRunAt(schedule, Date.now(), createdAt) : null }];
         }),
         runs: Array.isArray(raw.runs) ? raw.runs.slice(0, MAX_RUNS) as AutomationRun[] : [],
       };

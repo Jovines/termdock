@@ -99,4 +99,25 @@ describe('useSessionPersistence deletion races', () => {
 
     expect(result.current.sessions).toEqual([]);
   });
+
+  it('keeps the caller-selected adjacent session active after deletion', async () => {
+    const cachedSessions = ['frontend-1', 'frontend-2', 'frontend-3'].map((sessionId, index) => ({
+      ...cachedSession,
+      sessionId,
+      name: `Session ${index + 1}`,
+    }));
+    window.localStorage.setItem('termdock-sessions-cache', JSON.stringify(cachedSessions));
+    window.localStorage.setItem('termdock-active-session', 'frontend-2');
+    terminalMocks.getSessionInventory.mockReturnValue(new Promise<SessionInventory>(() => undefined));
+
+    const { result } = renderHook(() => useSessionPersistence());
+    expect(result.current.activeSessionId).toBe('frontend-2');
+
+    await act(async () => {
+      await result.current.removeSession('frontend-2', 'frontend-1');
+    });
+
+    expect(result.current.activeSessionId).toBe('frontend-1');
+    expect(window.localStorage.getItem('termdock-active-session')).toBe('frontend-1');
+  });
 });

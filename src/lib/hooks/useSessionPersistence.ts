@@ -12,6 +12,7 @@ import {
   type SessionInventoryClientSession,
 } from '../terminal';
 import { subscribeClientState } from '../utils/clientStateSync';
+import { pickSessionAfterClose } from '../utils/sessionSelection';
 
 const LEGACY_STORAGE_KEY = 'termdock-sessions';
 const ACTIVE_SESSION_STORAGE_KEY = 'termdock-active-session';
@@ -90,7 +91,7 @@ interface UseSessionPersistenceReturn {
   activeSessionId: string | null;
   isLoading: boolean;
   openSession: (options: OpenSessionInventoryOptions) => Promise<OpenSessionInventoryResult>;
-  removeSession: (sessionId: string) => Promise<void>;
+  removeSession: (sessionId: string, preferredActiveSessionId?: string | null) => Promise<void>;
   updateSessionActivity: (sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
   updateSessionBackendId: (sessionId: string, backendSessionId: string) => Promise<void>;
@@ -279,13 +280,17 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
     return result;
   }, [applyInventory]);
 
-  const removeSession = useCallback(async (sessionId: string) => {
+  const removeSession = useCallback(async (sessionId: string, preferredActiveSessionId?: string | null) => {
     ++localMutationRevisionRef.current;
     removedSessionIdsRef.current.add(sessionId);
     setSessions(prev => {
       const updated = prev.filter(s => s.sessionId !== sessionId);
+      const preferredSessionStillExists = preferredActiveSessionId != null
+        && updated.some((session) => session.sessionId === preferredActiveSessionId);
       const nextActiveSessionId = activeSessionIdRef.current === sessionId
-        ? (updated[0]?.sessionId ?? null)
+        ? (preferredSessionStillExists
+            ? preferredActiveSessionId
+            : pickSessionAfterClose(prev, sessionId, (session) => session.sessionId))
         : activeSessionIdRef.current;
       setActiveSessionIdState(nextActiveSessionId);
       writeActiveSessionId(nextActiveSessionId);

@@ -68,6 +68,7 @@ import { EdaPreview } from './EdaPreview';
 import { SvgInspectionPreview } from './SvgInspectionPreview';
 import { CsvPreview } from './CsvPreview';
 import { KicadProjectPreview } from './KicadProjectPreview';
+import { HtmlPreviewFrame } from './HtmlPreviewFrame';
 import './sidebarSelection.css';
 
 interface RightSidebarProps {
@@ -5832,12 +5833,12 @@ export function FilePreview({
         </div>
       ) : showHtmlPreview ? (
         <div className="min-h-0 flex-1 overflow-hidden bg-surface">
-          <iframe
+          <HtmlPreviewFrame
             key={`${readablePath}:${externalVersion}:${manualRefreshNonce}`}
             src={buildHtmlPreviewUrl(readablePath)}
             title={`${display.name} preview`}
-            sandbox="allow-scripts"
-            className="block h-full w-full border-0 bg-white"
+            enterFullscreenLabel={t('rightSidebar.htmlFullscreenEnter')}
+            exitFullscreenLabel={t('rightSidebar.htmlFullscreenExit')}
           />
         </div>
       ) : previewState.kind === 'text' ? (
@@ -10322,35 +10323,34 @@ export function RightSidebar(
                   </button>
                 )}
                 {pinned && (
-                  <div className="mt-1 border-t border-border/15 pt-1" role="group" aria-label={t('rightSidebar.layoutMode')}>
-                    <div className="px-2.5 pb-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  <div className="mt-1 flex items-center gap-2 border-t border-border/15 px-1.5 pt-1.5" role="group" aria-label={t('rightSidebar.layoutMode')}>
+                    <div className="shrink-0 pl-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                       {t('rightSidebar.layoutMode')}
                     </div>
-                    {([
-                      ['auto', t('rightSidebar.layoutModeAuto')],
-                      ['narrow', t('rightSidebar.layoutModeNarrow')],
-                      ['wide', t('rightSidebar.layoutModeWide')],
-                    ] as Array<[RightSidebarLayoutPreference, string]>).map(([preference, label]) => {
-                      const selected = rightSidebarLayoutPreference === preference;
-                      return (
-                        <button
-                          key={preference}
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={selected}
-                          onClick={() => {
-                            setRightSidebarLayoutPreference(preference);
-                            setHeaderMenuOpen(false);
-                          }}
-                          className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${selected ? 'bg-primary/10 text-primary' : 'text-foreground hover:bg-surface-2'}`}
-                        >
-                          <span className="flex h-4 w-4 shrink-0 items-center justify-center" aria-hidden="true">
-                            {selected ? <RiCheck size={13} /> : null}
-                          </span>
-                          <span>{label}</span>
-                        </button>
-                      );
-                    })}
+                    <div className="grid min-w-0 flex-1 grid-cols-3 gap-0.5 rounded-lg bg-surface-2 p-0.5">
+                      {([
+                        ['auto', t('rightSidebar.layoutModeAuto')],
+                        ['narrow', t('rightSidebar.layoutModeNarrow')],
+                        ['wide', t('rightSidebar.layoutModeWide')],
+                      ] as Array<[RightSidebarLayoutPreference, string]>).map(([preference, label]) => {
+                        const selected = rightSidebarLayoutPreference === preference;
+                        return (
+                          <button
+                            key={preference}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={selected}
+                            onClick={() => {
+                              setRightSidebarLayoutPreference(preference);
+                              setHeaderMenuOpen(false);
+                            }}
+                            className={`rounded-md px-1 py-1.5 text-center text-[11px] font-medium transition active:scale-95 ${selected ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
               </div>

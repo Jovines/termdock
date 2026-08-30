@@ -1,11 +1,32 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   DesktopAppUpdateState,
+  DesktopPreferences,
   DesktopServiceActivity,
   DesktopSnapshot,
+  DesktopStatusSnapshot,
   ServiceProbe,
 } from './types.js';
 import { shouldUploadDroppedFiles, uploadDroppedFiles } from './fileDropUpload.js';
+import { installServiceActivityObserver } from './serviceActivityObserver.js';
+
+if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+  try {
+    contextBridge.executeInMainWorld({ func: installServiceActivityObserver });
+  } catch (error) {
+    console.warn('[desktop-activity] Could not install the compatibility observer', error);
+  }
+}
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window || event.origin !== window.location.origin) return;
+  const data = event.data as {
+    source?: unknown;
+    activity?: { runningCount?: unknown; reviewCount?: unknown };
+  } | null;
+  if (data?.source !== 'termdock-desktop-activity-v1') return;
+  ipcRenderer.send('desktop:observe-service-activity', data.activity ?? {});
+});
 
 type NativeDropState = 'local' | 'remote' | 'uploading' | 'error';
 
@@ -29,6 +50,18 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
   removeConnection: (id: string): Promise<DesktopSnapshot> =>
     ipcRenderer.invoke('desktop:remove-connection', id),
   connect: (url: string): Promise<ServiceProbe> => ipcRenderer.invoke('desktop:connect', url),
+  updateDesktopPreferences: (preferences: Partial<Pick<DesktopPreferences,
+    'menuBarStatusEnabled' | 'floatingWidgetEnabled'>>): Promise<DesktopSnapshot> =>
+    ipcRenderer.invoke('desktop:update-preferences', preferences),
+  desktopStatus: (): Promise<DesktopStatusSnapshot> => ipcRenderer.invoke('desktop:status-snapshot'),
+  onDesktopStatus: (callback: (status: DesktopStatusSnapshot) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, status: DesktopStatusSnapshot) => callback(status);
+    ipcRenderer.on('desktop:status-changed', listener);
+    return () => ipcRenderer.removeListener('desktop:status-changed', listener);
+  },
+  focusNextService: (scope: 'attention' | 'running' | 'review' | 'all' = 'attention'): Promise<void> =>
+    ipcRenderer.invoke('desktop:focus-next-service', scope),
+  disableFloatingWidget: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:disable-floating-widget'),
   startLocal: (): Promise<ServiceProbe> => ipcRenderer.invoke('desktop:start-local'),
   installCli: (): Promise<DesktopSnapshot> => ipcRenderer.invoke('desktop:install-cli'),
   desktopUpdateState: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:update-state'),

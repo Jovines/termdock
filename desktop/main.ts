@@ -5,9 +5,12 @@ import {
   ipcMain,
   Menu,
   net,
+  nativeImage,
   Notification,
+  screen,
   session,
   shell,
+  Tray,
   type MenuItemConstructorOptions,
   type MessageBoxOptions,
   type Session,
@@ -24,14 +27,26 @@ import { fileURLToPath } from 'node:url';
 import type {
   CliInstallation,
   DesktopConfig,
+  DesktopPreferences,
   DesktopServiceActivity,
   DesktopSnapshot,
+  DesktopStatusSnapshot,
   LocalServerState,
   LocalServiceStatus,
   SavedConnection,
   ServiceProbe,
   TrustedCertificateAuthority,
 } from './types.js';
+import {
+  desktopStatusTooltip,
+  formatCompactDesktopStatus,
+  mergeServiceActivity,
+  nextServiceOrigin,
+  normalizeServiceActivity,
+  summarizeServiceActivity,
+  type ServiceActivityCount,
+  type ActivityFocusScope,
+} from './activityStatus.js';
 import {
   checkForDesktopUpdates,
   configureDesktopUpdater,
@@ -96,8 +111,12 @@ function triggerLocalNetworkPermission(): void {
 let mainWindow: BrowserWindow | null = null;
 const serviceWindows = new Map<string, BrowserWindow>();
 const windowServiceOrigins = new WeakMap<BrowserWindow, string>();
-const serviceActivity = new Map<string, { runningCount: number; reviewCount: number }>();
+const reportedServiceActivity = new Map<string, ServiceActivityCount>();
+const observedServiceActivity = new Map<string, ServiceActivityCount>();
 let lastFocusedServiceWindow: BrowserWindow | null = null;
+let menuBarStatus: Tray | null = null;
+let floatingWidgetWindow: BrowserWindow | null = null;
+let floatingPositionTimer: ReturnType<typeof setTimeout> | null = null;
 let isQuitting = false;
 
 function focusedWorkspaceWindow(): BrowserWindow | null {
@@ -120,7 +139,10 @@ function serviceActivitySnapshot(targetWindow: BrowserWindow): DesktopServiceAct
   const currentOrigin = windowServiceOrigins.get(targetWindow);
   return [...serviceWindows.entries()].flatMap(([origin, window]) => {
     if (window.isDestroyed()) return [];
-    const activity = serviceActivity.get(origin) ?? { runningCount: 0, reviewCount: 0 };
+    const activity = mergeServiceActivity(
+      reportedServiceActivity.get(origin),
+      observedServiceActivity.get(origin),
+    );
     return [{
       origin,
       label: serviceLabel(origin),
@@ -136,6 +158,7 @@ function broadcastServiceActivity(): void {
     if (window.isDestroyed()) continue;
     window.webContents.send('desktop:service-activity-changed', serviceActivitySnapshot(window));
   }
+  refreshDesktopStatusSurfaces();
 }
 
 function serviceLabel(url: string): string {
@@ -146,6 +169,229 @@ function serviceLabel(url: string): string {
   return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'
     ? '本机'
     : parsed.host;
+}
+
+function allServiceActivity(): DesktopServiceActivity[] {
+  const focused = BrowserWindow.getFocusedWindow();
+  return [...serviceWindows.entries()].flatMap(([origin, window]) => {
+    if (window.isDestroyed()) return [];
+    return [{
+      origin,
+      label: serviceLabel(origin),
+      current: window === lastFocusedServiceWindow,
+      focused: window === focused,
+      ...mergeServiceActivity(
+        reportedServiceActivity.get(origin),
+        observedServiceActivity.get(origin),
+      ),
+    }];
+  });
+}
+
+function desktopStatusSnapshot(): DesktopStatusSnapshot {
+  const services = allServiceActivity();
+  const summary = summarizeServiceActivity(services);
+  return {
+    ...summary,
+    text: formatCompactDesktopStatus(summary),
+    tooltip: desktopStatusTooltip(summary),
+    services,
+    preferences: readDesktopConfig().desktopPreferences,
+  };
+}
+
+function nextServiceWindow(scope: ActivityFocusScope): BrowserWindow | null {
+  const currentOrigin = lastFocusedServiceWindow && !lastFocusedServiceWindow.isDestroyed()
+    ? windowServiceOrigins.get(lastFocusedServiceWindow) ?? null
+    : null;
+  const origin = nextServiceOrigin(allServiceActivity(), currentOrigin, scope);
+  return origin ? serviceWindows.get(origin) ?? null : focusedWorkspaceWindow();
+}
+
+function focusNextService(scope: ActivityFocusScope = 'attention'): void {
+  const target = nextServiceWindow(scope);
+  if (target && !target.isDestroyed()) {
+    showAndFocusWindow(target);
+    return;
+  }
+  void showConnectionCenter();
+}
+
+function menuBarContextMenu(): Menu {
+  const status = desktopStatusSnapshot();
+  const serviceItems: MenuItemConstructorOptions[] = status.services.length > 0
+    ? status.services
+      .sort((left, right) => right.reviewCount - left.reviewCount
+        || right.runningCount - left.runningCount
+        || left.label.localeCompare(right.label))
+      .map((service) => ({
+        label: `${service.label}${service.runningCount > 0 ? `  运行 ${service.runningCount}` : ''}${service.reviewCount > 0 ? `  待办 ${service.reviewCount}` : ''}`,
+        click: () => {
+          const target = serviceWindows.get(service.origin);
+          if (target && !target.isDestroyed()) showAndFocusWindow(target);
+        },
+      }))
+    : [{ label: '暂无已打开服务', enabled: false }];
+  return Menu.buildFromTemplate([
+    { label: status.tooltip, enabled: false },
+    { type: 'separator' },
+    ...serviceItems,
+    { type: 'separator' },
+    { label: '连接中心…', click: () => void showConnectionCenter() },
+    {
+      label: '显示悬浮状态',
+      type: 'checkbox',
+      checked: status.preferences.floatingWidgetEnabled,
+      click: (item) => updateDesktopPreferences({ floatingWidgetEnabled: item.checked }),
+    },
+    { type: 'separator' },
+    { role: 'quit' },
+  ]);
+}
+
+function refreshMenuBarStatus(status: DesktopStatusSnapshot): void {
+  if (process.platform !== 'darwin' || !status.preferences.menuBarStatusEnabled) {
+    menuBarStatus?.destroy();
+    menuBarStatus = null;
+    return;
+  }
+  if (!menuBarStatus || menuBarStatus.isDestroyed()) {
+    // An empty NativeImage creates a title-only NSStatusItem: no app icon and
+    // no icon-width spacer, which is the compact mode requested by users.
+    menuBarStatus = new Tray(nativeImage.createEmpty());
+    menuBarStatus.on('click', () => focusNextService('attention'));
+    menuBarStatus.on('right-click', () => menuBarStatus?.popUpContextMenu(menuBarContextMenu()));
+  }
+  menuBarStatus.setTitle(status.text);
+  menuBarStatus.setToolTip(`${status.tooltip}\n点击循环切换需关注的服务`);
+}
+
+function constrainFloatingPosition(position: { x: number; y: number } | null): { x: number; y: number } {
+  const width = 212;
+  const height = 50;
+  const display = position
+    ? screen.getDisplayMatching({ x: position.x, y: position.y, width, height })
+    : screen.getPrimaryDisplay();
+  const area = display.workArea;
+  const preferred = position ?? {
+    x: area.x + area.width - width - 18,
+    y: area.y + 18,
+  };
+  return {
+    x: Math.min(area.x + area.width - width, Math.max(area.x, Math.round(preferred.x))),
+    y: Math.min(area.y + area.height - height, Math.max(area.y, Math.round(preferred.y))),
+  };
+}
+
+function createFloatingWidget(position: { x: number; y: number } | null): BrowserWindow {
+  const bounds = constrainFloatingPosition(position);
+  const window = new BrowserWindow({
+    title: 'Termdock Status',
+    type: 'panel',
+    width: 212,
+    height: 50,
+    x: bounds.x,
+    y: bounds.y,
+    show: false,
+    frame: false,
+    transparent: true,
+    backgroundColor: 'rgba(0, 0, 0, 0)',
+    vibrancy: 'hud',
+    visualEffectState: 'active',
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    acceptFirstMouse: true,
+    hasShadow: true,
+    webPreferences: {
+      preload: path.join(currentDir, 'preload.cjs'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      backgroundThrottling: false,
+    },
+  });
+  window.setAlwaysOnTop(true, 'floating');
+  window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // Keep the auxiliary status panel out of App Expose / Mission Control so it
+  // cannot disrupt macOS's three-finger application-window gesture.
+  window.setHiddenInMissionControl(true);
+  let constrainingMove = false;
+  window.on('move', () => {
+    if (constrainingMove || window.isDestroyed()) return;
+    const [x, y] = window.getPosition();
+    const constrained = constrainFloatingPosition({ x, y });
+    if (constrained.x === x && constrained.y === y) return;
+    constrainingMove = true;
+    window.setPosition(constrained.x, constrained.y, false);
+    constrainingMove = false;
+  });
+  window.on('moved', () => {
+    if (floatingPositionTimer) clearTimeout(floatingPositionTimer);
+    floatingPositionTimer = setTimeout(() => {
+      floatingPositionTimer = null;
+      if (window.isDestroyed()) return;
+      const [x, y] = window.getPosition();
+      const config = readDesktopConfig();
+      config.desktopPreferences.floatingWidgetPosition = { x, y };
+      writeDesktopConfig(config);
+    }, 250);
+  });
+  window.on('closed', () => {
+    if (floatingWidgetWindow === window) floatingWidgetWindow = null;
+  });
+  const rendererPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'renderer', 'floating.html')
+    : path.join(projectRoot, 'desktop', 'renderer', 'floating.html');
+  void window.loadFile(rendererPath).then(() => window.showInactive());
+  return window;
+}
+
+function refreshFloatingWidget(status: DesktopStatusSnapshot): void {
+  if (process.platform !== 'darwin' || !status.preferences.floatingWidgetEnabled) {
+    if (floatingWidgetWindow && !floatingWidgetWindow.isDestroyed()) floatingWidgetWindow.destroy();
+    floatingWidgetWindow = null;
+    return;
+  }
+  if (!floatingWidgetWindow || floatingWidgetWindow.isDestroyed()) {
+    floatingWidgetWindow = createFloatingWidget(status.preferences.floatingWidgetPosition);
+  }
+}
+
+function keepFloatingWidgetOnScreen(): void {
+  if (!floatingWidgetWindow || floatingWidgetWindow.isDestroyed()) return;
+  const [x, y] = floatingWidgetWindow.getPosition();
+  const constrained = constrainFloatingPosition({ x, y });
+  if (constrained.x !== x || constrained.y !== y) {
+    floatingWidgetWindow.setPosition(constrained.x, constrained.y, false);
+  }
+}
+
+function refreshDesktopStatusSurfaces(): void {
+  if (!app.isReady()) return;
+  const status = desktopStatusSnapshot();
+  refreshMenuBarStatus(status);
+  refreshFloatingWidget(status);
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send('desktop:status-changed', status);
+  }
+}
+
+function updateDesktopPreferences(
+  patch: Partial<Pick<DesktopPreferences, 'menuBarStatusEnabled' | 'floatingWidgetEnabled'>>,
+): void {
+  const config = readDesktopConfig();
+  if (typeof patch.menuBarStatusEnabled === 'boolean') {
+    config.desktopPreferences.menuBarStatusEnabled = patch.menuBarStatusEnabled;
+  }
+  if (typeof patch.floatingWidgetEnabled === 'boolean') {
+    config.desktopPreferences.floatingWidgetEnabled = patch.floatingWidgetEnabled;
+  }
+  writeDesktopConfig(config);
+  refreshDesktopStatusSurfaces();
 }
 
 function showDesktopMessageBox(options: MessageBoxOptions) {
@@ -204,6 +450,29 @@ function defaultConfig(): DesktopConfig {
     connections: [],
     lastConnectionUrl: null,
     trustedCertificateAuthorities: [],
+    desktopPreferences: {
+      menuBarStatusEnabled: true,
+      floatingWidgetEnabled: false,
+      floatingWidgetPosition: null,
+    },
+  };
+}
+
+function normalizeDesktopPreferences(value: unknown): DesktopPreferences {
+  const input = value && typeof value === 'object'
+    ? value as Partial<DesktopPreferences>
+    : {};
+  const position = input.floatingWidgetPosition;
+  return {
+    // The compact, text-only status is the useful default on macOS. Existing
+    // desktop.json files therefore gain the feature without a migration step.
+    menuBarStatusEnabled: input.menuBarStatusEnabled !== false,
+    floatingWidgetEnabled: input.floatingWidgetEnabled === true,
+    floatingWidgetPosition: position
+      && Number.isFinite(position.x)
+      && Number.isFinite(position.y)
+      ? { x: Math.round(position.x), y: Math.round(position.y) }
+      : null,
   };
 }
 
@@ -350,6 +619,7 @@ function readDesktopConfig(): DesktopConfig {
           && typeof entry.subject === 'string'
           && typeof entry.trustedAt === 'number')
         : [],
+      desktopPreferences: normalizeDesktopPreferences(parsed.desktopPreferences),
     };
   } catch {
     return defaultConfig();
@@ -710,6 +980,7 @@ async function snapshot(): Promise<DesktopSnapshot> {
     localService,
     connections: config.connections,
     lastConnectionUrl: config.lastConnectionUrl,
+    desktopPreferences: config.desktopPreferences,
   };
 }
 
@@ -926,6 +1197,7 @@ async function connectWindow(rawUrl: string): Promise<ServiceProbe> {
 
   const workspaceWindow = createDesktopWindow({ serviceOrigin: key, label: serviceLabel(probe.url) });
   serviceWindows.set(key, workspaceWindow);
+  broadcastServiceActivity();
   while (!workspaceWindow.isDestroyed()) {
     try {
       await workspaceWindow.loadURL(probe.url);
@@ -1115,7 +1387,8 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
     const serviceOrigin = windowServiceOrigins.get(window);
     if (serviceOrigin && serviceWindows.get(serviceOrigin) === window) {
       serviceWindows.delete(serviceOrigin);
-      serviceActivity.delete(serviceOrigin);
+      reportedServiceActivity.delete(serviceOrigin);
+      observedServiceActivity.delete(serviceOrigin);
       broadcastServiceActivity();
     }
   });
@@ -1170,20 +1443,28 @@ function installIpcHandlers(): void {
     if (!sourceWindow) return;
     const origin = windowServiceOrigins.get(sourceWindow);
     if (!origin) return;
-    const normalizeCount = (value: unknown) => Math.min(999, Math.max(0,
-      typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : 0,
-    ));
-    const next = {
-      runningCount: normalizeCount(activity?.runningCount),
-      reviewCount: normalizeCount(activity?.reviewCount),
-    };
-    const current = serviceActivity.get(origin);
+    const next = normalizeServiceActivity(activity);
+    const current = reportedServiceActivity.get(origin);
     if (current?.runningCount === next.runningCount && current.reviewCount === next.reviewCount) {
       // The sender may have just reloaded and still needs the complete roster.
       sourceWindow.webContents.send('desktop:service-activity-changed', serviceActivitySnapshot(sourceWindow));
       return;
     }
-    serviceActivity.set(origin, next);
+    reportedServiceActivity.set(origin, next);
+    broadcastServiceActivity();
+  });
+  ipcMain.on('desktop:observe-service-activity', (event, activity: {
+    runningCount?: unknown;
+    reviewCount?: unknown;
+  }) => {
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!sourceWindow) return;
+    const origin = windowServiceOrigins.get(sourceWindow);
+    if (!origin) return;
+    const next = normalizeServiceActivity(activity);
+    const current = observedServiceActivity.get(origin);
+    if (current?.runningCount === next.runningCount && current.reviewCount === next.reviewCount) return;
+    observedServiceActivity.set(origin, next);
     broadcastServiceActivity();
   });
   ipcMain.handle('desktop:focus-service', (event, origin: string) => {
@@ -1196,6 +1477,33 @@ function installIpcHandlers(): void {
     return true;
   });
   ipcMain.handle('desktop:start-local', () => startLocalService());
+  ipcMain.handle('desktop:update-preferences', async (_event, preferences: {
+    menuBarStatusEnabled?: unknown;
+    floatingWidgetEnabled?: unknown;
+  }) => {
+    updateDesktopPreferences({
+      ...(typeof preferences?.menuBarStatusEnabled === 'boolean'
+        ? { menuBarStatusEnabled: preferences.menuBarStatusEnabled }
+        : {}),
+      ...(typeof preferences?.floatingWidgetEnabled === 'boolean'
+        ? { floatingWidgetEnabled: preferences.floatingWidgetEnabled }
+        : {}),
+    });
+    return snapshot();
+  });
+  ipcMain.handle('desktop:status-snapshot', () => desktopStatusSnapshot());
+  ipcMain.handle('desktop:focus-next-service', (_event, scope: unknown) => {
+    const normalized: ActivityFocusScope = scope === 'running'
+      || scope === 'review'
+      || scope === 'all'
+      ? scope
+      : 'attention';
+    focusNextService(normalized);
+  });
+  ipcMain.handle('desktop:disable-floating-widget', async () => {
+    updateDesktopPreferences({ floatingWidgetEnabled: false });
+    return snapshot();
+  });
   ipcMain.handle('desktop:install-cli', () => installCli());
   ipcMain.handle('desktop:update-state', () => getDesktopUpdateState());
   ipcMain.handle('desktop:check-update', () => checkForDesktopUpdates());
@@ -1477,6 +1785,9 @@ app.whenReady().then(async () => {
   configureLocalServiceCertificateTrust();
   installIpcHandlers();
   installMenu();
+  refreshDesktopStatusSurfaces();
+  screen.on('display-removed', keepFloatingWidgetOnScreen);
+  screen.on('display-metrics-changed', keepFloatingWidgetOnScreen);
   configureDesktopUpdater(showDesktopMessageBox);
   subscribeDesktopUpdateState((state) => {
     for (const window of BrowserWindow.getAllWindows()) {

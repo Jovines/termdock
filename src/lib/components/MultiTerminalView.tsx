@@ -30,6 +30,7 @@ import { deriveGroupedOrder, getCwdLeafName, getSessionDisplayLines } from '../t
 import { createDebugLogger } from '../utils/debug';
 import { clientLog } from '../utils/clientLog';
 import { markStartupMilestone } from '../utils/startupPerformance';
+import { pickSessionAfterClose } from '../utils/sessionSelection';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
 import { Check, Columns2, Folder, Plus, X } from 'lucide-react';
 import { useI18n } from '../i18n';
@@ -1543,6 +1544,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const closeMode = typeof detail === 'string' ? 'auto' : (detail.closeMode ?? 'auto');
     const session = sessions.find(s => s.id === sessionId);
     if (!session) return;
+    const nextActiveSessionId = pickSessionAfterClose(arranged, sessionId, (candidate) => candidate.id);
 
     try {
       // tmux destroy: kill the tmux server session itself.
@@ -1569,17 +1571,16 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     // Remove from local state
     setSessions(prev => {
       const updated = prev.filter(s => s.id !== sessionId);
-      const newActiveId = updated.length > 0 ? updated[0].id : null;
-      setActiveSessionId(newActiveId);
+      setActiveSessionId(nextActiveSessionId);
       return updated;
     });
 
     // Remove from persistence
-    void removePersistedSession(sessionId);
+    void removePersistedSession(sessionId, nextActiveSessionId);
     delete keyboardOpenBySessionRef.current[sessionId];
 
     debugSession('[Session] Closed session:', { sessionId, closeMode });
-  }, [sessions, removePersistedSession, debugSession]);
+  }, [sessions, arranged, removePersistedSession, debugSession]);
 
   // Drop a frontend session whose backend pty was already cleaned up server-side
   // (e.g. after `tmux kill-session`). Skip the DELETE call to avoid 404s.

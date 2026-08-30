@@ -32,6 +32,10 @@
             <span class="nav-glyph">›_</span>
             <span>命令行</span>
           </a>
+          <a class="nav-item" href="#desktop-status">
+            <span class="nav-glyph">▶</span>
+            <span>桌面状态</span>
+          </a>
           <a class="nav-item" href="#remote">
             <span class="nav-glyph">↗</span>
             <span>其他服务</span>
@@ -107,6 +111,35 @@
             </div>
           </div>
           <button id="install-cli" class="secondary compact" type="button">安装 / 修复</button>
+        </section>
+
+        <section id="desktop-status" class="desktop-status-section" aria-labelledby="desktop-status-title">
+          <div class="section-intro">
+            <div>
+              <p class="section-label">MACOS STATUS</p>
+              <h2 id="desktop-status-title">随时看到运行状态</h2>
+            </div>
+            <output id="desktop-status-preview" class="status-preview">服务0</output>
+          </div>
+          <p class="desktop-status-hint">状态聚合所有已打开服务，例如“运行3　待办1　服务3”。旧版服务也可由桌面端识别。</p>
+          <div class="preference-list">
+            <label class="preference-row" for="menu-bar-status-enabled">
+              <span>
+                <strong>菜单栏纯文本状态</strong>
+                <small>不显示应用图标，为 0 的运行与待处理数会自动省略。</small>
+              </span>
+              <input id="menu-bar-status-enabled" type="checkbox" role="switch" />
+              <i class="switch-track" aria-hidden="true"></i>
+            </label>
+            <label class="preference-row" for="floating-widget-enabled">
+              <span>
+                <strong>常驻悬浮状态</strong>
+                <small>始终置顶、可拖动；点击“运行 / 待办 / 服务”可分别循环切换。</small>
+              </span>
+              <input id="floating-widget-enabled" type="checkbox" role="switch" />
+              <i class="switch-track" aria-hidden="true"></i>
+            </label>
+          </div>
         </section>
 
         <section id="remote" class="remote-section" aria-labelledby="remote-title">

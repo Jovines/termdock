@@ -820,10 +820,19 @@ function App() {
       (value): value is boolean => typeof value === 'boolean',
     ) ?? false
   ));
-  const handleRunningSessionButtonEnabledChange = useCallback((enabled: boolean) => {
+  const handleRunningSessionButtonEnabledChange = useCallback(async (enabled: boolean) => {
+    const previous = runningSessionButtonEnabled;
     setRunningSessionButtonEnabled(enabled);
     writeCache(RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY, enabled);
-  }, []);
+    try {
+      const result = await updateSettings({ runningSessionButtonEnabled: enabled });
+      setRunningSessionButtonEnabled(result.runningSessionButtonEnabled);
+      writeCache(RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY, result.runningSessionButtonEnabled);
+    } catch {
+      setRunningSessionButtonEnabled(previous);
+      writeCache(RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY, previous);
+    }
+  }, [runningSessionButtonEnabled]);
   const [terminalAreaElement, setTerminalAreaElement] = useState<HTMLDivElement | null>(null);
   const terminalAreaRef = useCallback((element: HTMLDivElement | null) => {
     setTerminalAreaElement(element);
@@ -1876,6 +1885,8 @@ function App() {
         setNetworkAvailable((cur) => (cur === s.networkAvailable ? cur : s.networkAvailable));
         setLocalAccess(s.localAccess);
         setLocalAccessNameInput(s.localAccess.name);
+        setRunningSessionButtonEnabled(s.runningSessionButtonEnabled);
+        writeCache(RUNNING_SESSION_BUTTON_ENABLED_CACHE_KEY, s.runningSessionButtonEnabled);
         writeCache(SETTINGS_CACHE_KEY, {
           preventSleep: s.preventSleep,
           networkAvailable: s.networkAvailable,

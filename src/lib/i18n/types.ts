@@ -300,6 +300,8 @@ export type TranslationDictionary = {
     htmlPreview: string;
     htmlSource: string;
     htmlPreviewHint: string;
+    htmlFullscreenEnter: string;
+    htmlFullscreenExit: string;
     markdownOutline: string;
     markdownOutlineShort: string;
     closeMarkdownOutline: string;

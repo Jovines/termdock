@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Termdock Status</title>
+    <link rel="stylesheet" href="./tokens.css" />
+    <link rel="stylesheet" href="./floating.css" />
+  </head>
+  <body>
+    <main class="widget" aria-labelledby="widget-title">
+      <h1 id="widget-title" class="sr-only">Termdock 桌面状态</h1>
+      <span class="drag-handle" aria-hidden="true"><i></i><i></i><i></i></span>
+      <div id="status" class="status-group" role="group" aria-label="Termdock 服务状态">
+        <button id="running" class="metric metric-running" type="button" hidden>
+          <i class="metric-dot"></i><span>运行</span><strong id="running-count">0</strong>
+        </button>
+        <button id="review" class="metric metric-review" type="button" hidden>
+          <i class="metric-dot"></i><span>待办</span><strong id="review-count">0</strong>
+        </button>
+        <button id="services" class="metric metric-services" type="button">
+          <span>服务</span><strong id="service-count">0</strong>
+        </button>
+      </div>
+      <button id="close" class="close-button" type="button" aria-label="关闭悬浮状态">×</button>
+    </main>
+    <script src="./floating.js"></script>
+  </body>
+</html>

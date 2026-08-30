@@ -44,6 +44,7 @@ export interface DesktopSnapshot {
   localService: LocalServiceStatus;
   connections: SavedConnection[];
   lastConnectionUrl: string | null;
+  desktopPreferences: DesktopPreferences;
 }
 
 export interface DesktopServiceActivity {
@@ -53,6 +54,27 @@ export interface DesktopServiceActivity {
   focused: boolean;
   runningCount: number;
   reviewCount: number;
+}
+
+export interface DesktopStatusSummary {
+  runningCount: number;
+  reviewCount: number;
+  serviceCount: number;
+}
+
+export interface DesktopPreferences {
+  /** A compact, text-only status item in the macOS menu bar. */
+  menuBarStatusEnabled: boolean;
+  /** An always-on-top, draggable status shortcut. */
+  floatingWidgetEnabled: boolean;
+  floatingWidgetPosition: { x: number; y: number } | null;
+}
+
+export interface DesktopStatusSnapshot extends DesktopStatusSummary {
+  text: string;
+  tooltip: string;
+  services: DesktopServiceActivity[];
+  preferences: DesktopPreferences;
 }
 
 export type DesktopAppUpdateStatus =
@@ -79,6 +101,7 @@ export interface DesktopConfig {
   connections: SavedConnection[];
   lastConnectionUrl: string | null;
   trustedCertificateAuthorities: TrustedCertificateAuthority[];
+  desktopPreferences: DesktopPreferences;
 }
 
 export interface TrustedCertificateAuthority {

@@ -29,6 +29,7 @@ import {
 } from './utils/requestSecurity.js';
 import { getCookieSecurityOptions, setSecureCookieMode } from './utils/cookieSecurity.js';
 import { requestDeadlineMiddleware } from './utils/requestDeadline.js';
+import { RuntimeMonitor } from './utils/runtimeMonitor.js';
 import { startOnboardingServer, stopOnboardingServer, getOnboardingServerUrl } from './onboardingServer.js';
 import { CertificateWatcher } from './certificateWatcher.js';
 import {
@@ -82,6 +83,7 @@ function getRouteFamily(pathname: string): string {
   if (pathname.startsWith('/api/terminal/')) return 'terminal';
   if (pathname.startsWith('/api/auth')) return 'auth';
   if (pathname.startsWith('/api/client-log')) return 'client-log';
+  if (pathname.startsWith('/api/diagnostics')) return 'diagnostics';
   if (pathname === '/health') return 'health';
   if (pathname.startsWith('/assets/')) return 'asset';
   return 'page';
@@ -114,6 +116,7 @@ export interface AppOptions {
   port?: number;
   httpsCaPath?: string;
   localApiToken?: string;
+  runtimeMonitor?: RuntimeMonitor;
 }
 
 function shouldWriteClientLog(level: unknown, message: unknown): boolean {
@@ -338,6 +341,7 @@ export function createApp(options: AppOptions = {}): express.Express {
       if (logged) return;
       logged = true;
       const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      options.runtimeMonitor?.recordRequest(res.statusCode, durationMs);
       writeJsonLog('access.log', {
         event,
         method: req.method,
@@ -487,6 +491,14 @@ export function createApp(options: AppOptions = {}): express.Express {
     return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
   };
 
+  app.get('/api/diagnostics/runtime', requireAuth({ bypass: isTrustedLocalCliRequest }), async (_req, res) => {
+    if (!options.runtimeMonitor) {
+      res.status(503).json({ error: 'Runtime monitor is not active', code: 'RUNTIME_MONITOR_INACTIVE' });
+      return;
+    }
+    res.json(await options.runtimeMonitor.diagnostics());
+  });
+
   // 应用鉴权 + CSRF保护（在终端路由之前）
   // The HTML preview route authenticates itself: document requests use the
   // session cookie, then get redirected to a short-lived URL token so the
@@ -559,8 +571,20 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   const stopLogMaintenance = startTermdockLogMaintenance();
   const port = options.port ?? Number(process.env.PORT || DEFAULT_PORT);
   const host = options.host ?? (process.env.HOST || DEFAULT_HOST);
-  const app = createApp({ port: options.onboardingPort ?? port, httpsCaPath: options.httpsCaPath, localApiToken: options.localApiToken });
+  const runtimeMonitor = new RuntimeMonitor({
+    stateDirectory: path.join(homedir(), '.termdock'),
+    historyPath: path.join(homedir(), '.termdock', 'runtime-metrics.log'),
+  });
+  runtimeMonitor.start();
+  const app = createApp({
+    port: options.onboardingPort ?? port,
+    httpsCaPath: options.httpsCaPath,
+    localApiToken: options.localApiToken,
+    runtimeMonitor,
+  });
   const { server, scheme } = createServerForApp(app, options);
+  server.on('connection', (socket) => runtimeMonitor.trackSocket(socket));
+  server.once('close', () => runtimeMonitor.stop());
   setSecureCookieMode(scheme === 'https');
   const certWatcher = new CertificateWatcher({
     enabled: scheme === 'https' && Boolean(options.httpsCertPath && options.httpsKeyPath),

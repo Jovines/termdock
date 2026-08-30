@@ -39,6 +39,8 @@ export interface SettingsDoc {
   autoRenamePromptPayloadChars: number;
   /** Agent launched by default from the left-sidebar new-session action. */
   newSessionAgentSlug: string | null;
+  /** Show the floating shortcut used to cycle through running agent sessions. */
+  runningSessionButtonEnabled: boolean;
   updatedAt: number;
 }
 
@@ -147,6 +149,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
       ? raw.autoRenamePromptPayloadChars
       : 12_000,
     newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
+    runningSessionButtonEnabled: raw.runningSessionButtonEnabled === true,
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -484,5 +487,15 @@ export function getNewSessionAgentSlugSetting(): string | null {
 export function setNewSessionAgentSlugSetting(slug: string | null): SettingsDoc {
   return updateSettings((settings) => {
     settings.newSessionAgentSlug = normalizeNewSessionAgentSlug(slug);
+  });
+}
+
+export function getRunningSessionButtonEnabledSetting(): boolean {
+  return loadSettings().runningSessionButtonEnabled;
+}
+
+export function setRunningSessionButtonEnabledSetting(enabled: boolean): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.runningSessionButtonEnabled = enabled;
   });
 }

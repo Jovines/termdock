@@ -13,6 +13,9 @@ const elements = {
   cliState: document.querySelector('#cli-state'),
   cliDetail: document.querySelector('#cli-detail'),
   installCli: document.querySelector('#install-cli'),
+  menuBarStatusEnabled: document.querySelector('#menu-bar-status-enabled'),
+  floatingWidgetEnabled: document.querySelector('#floating-widget-enabled'),
+  desktopStatusPreview: document.querySelector('#desktop-status-preview'),
   form: document.querySelector('#connection-form'),
   url: document.querySelector('#connection-url'),
   label: document.querySelector('#connection-label'),
@@ -160,8 +163,25 @@ function render(snapshot) {
     ? cli.map((entry) => `${entry.path} · ${entry.version || '版本未知'}${entry.bundled ? ' · 桌面内嵌' : ''}`).join('\n')
     : `桌面内嵌版本 ${snapshot.bundledCliVersion}，尚未安装命令入口。`;
   elements.installCli.hidden = !snapshot.packaged;
+  elements.menuBarStatusEnabled.checked = snapshot.desktopPreferences.menuBarStatusEnabled;
+  elements.floatingWidgetEnabled.checked = snapshot.desktopPreferences.floatingWidgetEnabled;
 
   renderConnections(snapshot.connections);
+}
+
+async function saveDesktopPreference(input, key) {
+  const previous = !input.checked;
+  input.disabled = true;
+  clearNotice();
+  try {
+    currentSnapshot = await api.updateDesktopPreferences({ [key]: input.checked });
+    render(currentSnapshot);
+  } catch (error) {
+    input.checked = previous;
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    input.disabled = false;
+  }
 }
 
 async function refresh() {
@@ -197,6 +217,14 @@ elements.installCli.addEventListener('click', () => {
   });
 });
 
+elements.menuBarStatusEnabled.addEventListener('change', () => {
+  void saveDesktopPreference(elements.menuBarStatusEnabled, 'menuBarStatusEnabled');
+});
+
+elements.floatingWidgetEnabled.addEventListener('change', () => {
+  void saveDesktopPreference(elements.floatingWidgetEnabled, 'floatingWidgetEnabled');
+});
+
 elements.form.addEventListener('submit', (event) => {
   event.preventDefault();
   const button = document.querySelector('#probe-connection');
@@ -230,4 +258,13 @@ elements.cancelEdit.addEventListener('click', () => {
 
 void refresh().catch((error) => {
   showNotice(error instanceof Error ? error.message : String(error), true);
+});
+
+api.onDesktopStatus((status) => {
+  elements.desktopStatusPreview.textContent = status.text;
+  elements.desktopStatusPreview.title = status.tooltip;
+});
+void api.desktopStatus().then((status) => {
+  elements.desktopStatusPreview.textContent = status.text;
+  elements.desktopStatusPreview.title = status.tooltip;
 });
