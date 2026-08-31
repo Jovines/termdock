@@ -7,6 +7,12 @@ export interface ServiceActivityCount {
 
 export type ActivityFocusScope = 'attention' | 'running' | 'review' | 'all';
 
+export interface MenuBarStatusRow {
+  metric: 'running' | 'review' | 'services';
+  value: number;
+  y: number;
+}
+
 export function normalizeActivityCount(value: unknown): number {
   return Math.min(999, Math.max(0,
     typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : 0,
@@ -57,6 +63,19 @@ export function desktopStatusTooltip(summary: DesktopStatusSummary): string {
     `${summary.reviewCount} 个待处理`,
     `${summary.serviceCount} 个服务已连接`,
   ].join(' · ');
+}
+
+export function menuBarStatusRows(summary: DesktopStatusSummary): MenuBarStatusRow[] {
+  const activityRows: MenuBarStatusRow[] = [
+    { metric: 'running', value: summary.runningCount, y: 2 },
+    { metric: 'review', value: summary.reviewCount, y: 11 },
+  ];
+  if (summary.serviceCount === 1) return activityRows;
+  return [
+    { metric: 'running', value: summary.runningCount, y: 0 },
+    { metric: 'review', value: summary.reviewCount, y: 6 },
+    { metric: 'services', value: summary.serviceCount, y: 12 },
+  ];
 }
 
 export function nextServiceOrigin(

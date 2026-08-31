@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   desktopStatusTooltip,
   formatCompactDesktopStatus,
+  menuBarStatusRows,
   mergeServiceActivity,
   nextServiceOrigin,
   normalizeServiceActivity,
@@ -37,6 +38,24 @@ describe('desktop activity status', () => {
     expect(formatCompactDesktopStatus(summary)).toBe('运2 待1 服2');
     expect(formatCompactDesktopStatus({ runningCount: 0, reviewCount: 0, serviceCount: 3 })).toBe('服3');
     expect(desktopStatusTooltip(summary)).toContain('2 个 Agent 运行中');
+  });
+
+  it('removes a redundant single-service row and recenters activity', () => {
+    expect(menuBarStatusRows({ runningCount: 2, reviewCount: 0, serviceCount: 1 })).toEqual([
+      { metric: 'running', value: 2, y: 2 },
+      { metric: 'review', value: 0, y: 11 },
+    ]);
+  });
+
+  it('keeps the service row for disconnected and multi-service states', () => {
+    expect(menuBarStatusRows({ runningCount: 0, reviewCount: 0, serviceCount: 0 }))
+      .toEqual([
+        { metric: 'running', value: 0, y: 0 },
+        { metric: 'review', value: 0, y: 6 },
+        { metric: 'services', value: 0, y: 12 },
+      ]);
+    expect(menuBarStatusRows({ runningCount: 1, reviewCount: 3, serviceCount: 2 }).at(-1))
+      .toEqual({ metric: 'services', value: 2, y: 12 });
   });
 
   it('keeps general attention clicks on review windows before running services', () => {

@@ -40,6 +40,7 @@ import type {
 import {
   desktopStatusTooltip,
   formatCompactDesktopStatus,
+  menuBarStatusRows,
   mergeServiceActivity,
   nextServiceOrigin,
   normalizeServiceActivity,
@@ -288,17 +289,17 @@ function menuBarStatusImage(status: DesktopStatusSnapshot): Electron.NativeImage
       });
     });
   };
-  // Three quiet, consistently aligned rows read much better at menu-bar size
-  // than squeezing two metrics beside each other. The ordering mirrors the
-  // floating widget: running, review, then connected services.
-  const rows = [
-    { value: status.runningCount, y: 0, icon: [[0, 0], [0, 1], [1, 1], [0, 2], [1, 2], [2, 2], [3, 2], [0, 3], [1, 3], [0, 4]] },
-    { value: status.reviewCount, y: 6, icon: [[2, 0], [1, 1], [3, 1], [0, 2], [4, 2], [1, 3], [3, 3], [2, 4]] },
-    { value: status.serviceCount, y: 12, icon: [[0, 0], [1, 0], [3, 0], [4, 0], [1, 1], [3, 1], [2, 2], [2, 3], [1, 4], [2, 4], [3, 4]] },
-  ];
-  rows.forEach(({ value, y, icon }) => {
+  const icons = {
+    running: [[0, 0], [0, 1], [1, 1], [0, 2], [1, 2], [2, 2], [3, 2], [0, 3], [1, 3], [0, 4]],
+    review: [[2, 0], [1, 1], [3, 1], [0, 2], [4, 2], [1, 3], [3, 3], [2, 4]],
+    services: [[0, 0], [1, 0], [3, 0], [4, 0], [1, 1], [3, 1], [2, 2], [2, 3], [1, 4], [2, 4], [3, 4]],
+  } satisfies Record<string, number[][]>;
+  // A single connection is the normal case, so its count is redundant. Give
+  // the two actionable activity rows more breathing room instead. Zero and
+  // multiple connections keep the service row because those states matter.
+  menuBarStatusRows(status).forEach(({ metric, value, y }) => {
     const alpha = value > 0 ? 255 : 96;
-    icon.forEach(([offsetX, offsetY]) => drawPixel(1 + offsetX, y + offsetY, alpha));
+    icons[metric].forEach(([offsetX, offsetY]) => drawPixel(1 + offsetX, y + offsetY, alpha));
     drawGlyph(value, 11, y, alpha);
   });
   // Template images are intentionally monochrome; macOS supplies the correct
