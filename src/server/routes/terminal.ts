@@ -81,7 +81,8 @@ import {
 import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent/resumeHistory.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
-import { CollaborationStore, type CollaborationMessage, type CollaborationMessageKind } from '../agent/collaborationStore.js';
+import { CollaborationStore, type CollaborationMessageKind } from '../agent/collaborationStore.js';
+import { formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
 import {
   listAllHookAgents,
@@ -1815,10 +1816,6 @@ async function runAgentAutomation(automation: AgentAutomation, req?: express.Req
   }
 }
 
-function collaborationMessageLabel(kind: CollaborationMessageKind): string {
-  return ({ message: '消息', ask: '问题', reply: '回复', task: '任务', handoff: '交接', done: '完成' } as const)[kind];
-}
-
 function resolveFrontendSessionId(input: { sessionId?: unknown; backendSessionId?: unknown; tmuxSessionName?: unknown }): string | null {
   const sessionId = typeof input.sessionId === 'string' ? input.sessionId.trim() : '';
   if (sessionId && globalSessionState.sessions.some((record) => record.sessionId === sessionId)) return sessionId;
@@ -1831,18 +1828,6 @@ function resolveFrontendSessionId(input: { sessionId?: unknown; backendSessionId
   return globalSessionState.sessions.find((record) => record.tmuxSessionName === tmuxSessionName)?.sessionId ?? null;
 }
 
-function formatCollaborationDelivery(targetSessionId: string, messages: CollaborationMessage[]): string {
-  const targetGroups = new Map(collaborationStore.groupsForSession(targetSessionId).map((group) => [group.id, group]));
-  const lines = messages.map((message) => {
-    const from = message.fromSessionId
-      ? globalSessionState.sessions.find((record) => record.sessionId === message.fromSessionId)?.name ?? message.fromSessionId
-      : '用户';
-    const group = targetGroups.get(message.groupId)?.name ?? '协作组';
-    return `- [${collaborationMessageLabel(message.kind)} #${message.id}] ${from} → ${group}: ${message.content}`;
-  });
-  return `[Termdock 协作收件箱]\n${lines.join('\n')}\n请处理这些消息。需要回复时运行：td collab reply <消息ID> "回复内容"；查看成员和未读消息运行：td collab status / td collab inbox。`;
-}
-
 function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: string[]; pending: number } {
   const record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
   const session = record?.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
@@ -1852,7 +1837,16 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
   if (!session || !canDeliverPromptToAgent(session) || pending.length === 0) {
     return { delivered: [], pending: pending.length };
   }
-  session.ptyProcess.write(buildBracketedSubmitBytes(formatCollaborationDelivery(frontendSessionId, pending)));
+  const prompt = formatCollaborationDelivery({
+    targetSessionId: frontendSessionId,
+    messages: pending,
+    groups: collaborationStore.groupsForSession(frontendSessionId),
+    sessions: globalSessionState.sessions.map((candidate) => {
+      const snapshot = orchestrationSessionSnapshot(candidate);
+      return { sessionId: snapshot.sessionId, name: snapshot.name, status: snapshot.status };
+    }),
+  });
+  session.ptyProcess.write(buildBracketedSubmitBytes(prompt));
   collaborationStore.markDelivered(pending.map((message) => message.id));
   return { delivered: pending.map((message) => message.id), pending: 0 };
 }
