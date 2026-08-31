@@ -20,9 +20,6 @@ const DIFF_PRELOAD_CONCURRENCY = 2;
 // rendered window is generous: the viewport must never scroll past painted
 // slots into bare canvas, even when a fling outruns a React commit.
 const DIFF_CANVAS_OVERSCAN = 1_600;
-// How much of a still-loading card peeks into the viewport when the scroll
-// gate stops the user at it: header plus a slice of the loading cover.
-const DIFF_SCROLL_GATE_PEEK = 120;
 const DEFAULT_DIFF_ITEM_HEIGHT = 104;
 const MAX_CACHED_DIFF_ITEM_HEIGHTS = 1_000;
 const cachedDiffItemHeights = new Map<string, number>();
@@ -47,6 +44,31 @@ interface DiffCanvasLayout {
 interface DiffCanvasViewport {
   top: number;
   height: number;
+}
+
+interface DiffReadyVersion {
+  diffOverride: string | null | undefined;
+  reloadKey: number;
+  wrap: boolean;
+  showScrollHint: boolean;
+  viewType: DiffViewType | undefined;
+  inlineMode: DiffInlineMode | undefined;
+  algorithm: GitDiffOptions['algorithm'] | undefined;
+  whitespace: GitDiffOptions['whitespace'] | undefined;
+  context: GitDiffOptions['context'] | undefined;
+}
+
+function matchesDiffReadyVersion(left: DiffReadyVersion | undefined, right: DiffReadyVersion): boolean {
+  return Boolean(left
+    && left.diffOverride === right.diffOverride
+    && left.reloadKey === right.reloadKey
+    && left.wrap === right.wrap
+    && left.showScrollHint === right.showScrollHint
+    && left.viewType === right.viewType
+    && left.inlineMode === right.inlineMode
+    && left.algorithm === right.algorithm
+    && left.whitespace === right.whitespace
+    && left.context === right.context);
 }
 
 export const CHANGE_BADGE_STYLES: Record<string, { label: string; className: string; title: string }> = {
@@ -256,9 +278,9 @@ export function DiffReview({
   // (estimated heights until measured). There is no loading frontier: every
   // region is always scrollable and always paints at least a skeleton.
   // Mounting the expensive DiffViewer is the only scheduled work, and it
-  // expands outward from the anchor card by distance. The single UX gate:
-  // scrolling into a card that is still loading stops at a peek into its
-  // loading cover until it is ready (skeletons never gate).
+  // expands outward from the anchor card by distance. Loading never writes
+  // scrollTop: native touch/trackpad momentum stays entirely user-owned while
+  // skeleton slots and cached heights keep the virtual canvas continuous.
   const detailScrollerRef = useRef<HTMLDivElement | null>(null);
   const handledScrollRequestNonceRef = useRef<number | null>(null);
   const appliedInitialDetailScrollKeyRef = useRef<string | null>(null);
@@ -270,7 +292,10 @@ export function DiffReview({
   // above it are (re)measured and every top below shifts.
   const scrollAnchorRef = useRef<{ key: string | null; top: number }>({ key: null, top: 0 });
   const mountedKeysRef = useRef<Set<string>>(new Set());
-  const readyKeysRef = useRef<Set<string>>(new Set());
+  // Keep readiness separate from mounted DOM. Recycling a card must not make
+  // cached content look cold when the same content version scrolls back in.
+  const readyVersionsRef = useRef<Map<string, DiffReadyVersion>>(new Map());
+  const currentVersionsRef = useRef<Map<string, DiffReadyVersion>>(new Map());
   const loadingKeyRef = useRef<string | null>(null);
   const pumpLoadQueueRef = useRef<() => void>(() => undefined);
   const orderedFileKeysRef = useRef<string[]>([]);
@@ -281,6 +306,17 @@ export function DiffReview({
   const [canvasViewport, setCanvasViewport] = useState<DiffCanvasViewport>({ top: 0, height: 0 });
   const orderedFileKeys = useMemo(() => allOrderedFiles.map((file) => file.key), [allOrderedFiles]);
   const orderedFileKeysSignature = orderedFileKeys.join('');
+  currentVersionsRef.current = new Map(allOrderedFiles.map((file) => [file.key, {
+    diffOverride: file.diffOverride,
+    reloadKey,
+    wrap,
+    showScrollHint,
+    viewType: diffViewType,
+    inlineMode,
+    algorithm: diffOptions?.algorithm,
+    whitespace: diffOptions?.whitespace,
+    context: diffOptions?.context,
+  }]));
   orderedFileKeysRef.current = orderedFileKeys;
   orderedFileIndexRef.current = new Map(orderedFileKeys.map((key, index) => [key, index]));
   const canvasLayout = useMemo<DiffCanvasLayout>(() => {
@@ -432,7 +468,6 @@ export function DiffReview({
       if (!removable || distanceOf(removable) <= nextDistance) return;
       const next = new Set(mountedKeysRef.current);
       next.delete(removable);
-      readyKeysRef.current.delete(removable);
       replaceMountedKeys(next);
     }
     loadingKeyRef.current = nextKey;
@@ -446,7 +481,6 @@ export function DiffReview({
     if (currentLoading && currentLoading !== key) {
       const next = new Set(mountedKeysRef.current);
       next.delete(currentLoading);
-      readyKeysRef.current.delete(currentLoading);
       replaceMountedKeys(next);
       loadingKeyRef.current = null;
     }
@@ -456,7 +490,8 @@ export function DiffReview({
 
   const handleItemContentReady = useCallback((key: string) => {
     if (!mountedKeysRef.current.has(key)) return;
-    readyKeysRef.current.add(key);
+    const currentVersion = currentVersionsRef.current.get(key);
+    if (currentVersion) readyVersionsRef.current.set(key, currentVersion);
     if (loadingKeyRef.current === key) loadingKeyRef.current = null;
     window.requestAnimationFrame(() => pumpLoadQueueRef.current());
   }, []);
@@ -514,9 +549,11 @@ export function DiffReview({
       if (!validKeys.has(key)) {
         const next = new Set(mountedKeysRef.current);
         next.delete(key);
-        readyKeysRef.current.delete(key);
         replaceMountedKeys(next);
       }
+    }
+    for (const key of Array.from(readyVersionsRef.current.keys())) {
+      if (!validKeys.has(key)) readyVersionsRef.current.delete(key);
     }
     // Only a disappearing file releases the in-flight slot here; a card that
     // merely left the skeleton window still finishes loading, so a stale
@@ -526,7 +563,7 @@ export function DiffReview({
     }
     if (allOrderedFiles.length === 0) {
       loadingKeyRef.current = null;
-      readyKeysRef.current.clear();
+      readyVersionsRef.current.clear();
       replaceMountedKeys(new Set());
       return;
     }
@@ -536,38 +573,27 @@ export function DiffReview({
   const handleDetailScroll = useCallback((container: HTMLDivElement) => {
     detailScrollerRef.current = container;
     const previousTop = lastDetailScrollTopRef.current;
-    let top = container.scrollTop;
-    const delta = top - previousTop;
-    // Loading gate: a card that is mounted but not content-ready yet blocks
-    // the leading edge — scrolling down stops at a peek into its loading
-    // cover, scrolling up at a peek from its bottom. Only gates AHEAD of the
-    // previous position apply, so the clamp can never drag the user backwards
-    // (e.g. the entry card must not gate the entry scroll itself). Assigning
-    // scrollTop here also cancels native fling momentum, which is the point.
-    if (delta !== 0) {
-      const layout = canvasLayoutRef.current;
-      const viewportHeight = container.clientHeight;
-      let gatedTop = top;
-      for (const key of Array.from(mountedKeysRef.current)) {
-        if (readyKeysRef.current.has(key)) continue;
-        const index = orderedFileIndexRef.current.get(key);
-        if (index === undefined) continue;
-        const cardTop = layout.tops[index] ?? 0;
-        if (delta > 0) {
-          const gate = cardTop + DIFF_SCROLL_GATE_PEEK - viewportHeight;
-          if (gate >= previousTop - 1 && gatedTop > gate) gatedTop = Math.max(0, gate);
-        } else {
-          const cardBottom = cardTop + (layout.heights[index] ?? DEFAULT_DIFF_ITEM_HEIGHT);
-          const gate = cardBottom - DIFF_SCROLL_GATE_PEEK;
-          if (gate <= previousTop + 1 && gatedTop < gate) gatedTop = gate;
-        }
-      }
-      if (gatedTop !== top) {
-        container.scrollTop = gatedTop;
-        top = gatedTop;
-      }
-    }
+    const top = container.scrollTop;
     lastDetailScrollTopRef.current = top;
+    // Capture the new visible anchor synchronously. A ResizeObserver callback
+    // can land before React's next commit during a fast fling; leaving the old
+    // anchor in place for that window makes height compensation pull the
+    // viewport back toward a card the user has already left.
+    const captureVisibleAnchor = (anchorTop: number) => {
+      const layout = canvasLayoutRef.current;
+      const keys = orderedFileKeysRef.current;
+      let low = 0;
+      let high = layout.tops.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (layout.tops[middle] <= anchorTop + 1) low = middle + 1;
+        else high = middle;
+      }
+      const index = Math.min(keys.length - 1, Math.max(0, low - 1));
+      const key = keys[index] ?? null;
+      scrollAnchorRef.current = { key, top: layout.tops[index] ?? 0 };
+      if (key) prioritizeLoad(key);
+    };
     if (Math.abs(top - previousTop) >= DIFF_CANVAS_OVERSCAN) {
       // A jump bigger than the rendered window's runway (scrollbar thumb
       // drags, trackpad flicks on a cold cache) would paint bare canvas for a
@@ -575,15 +601,20 @@ export function DiffReview({
       flushSync(() => {
         setCanvasViewport({ top, height: container.clientHeight });
       });
+      captureVisibleAnchor(top);
     } else if (scrollFrameRef.current === null) {
       scrollFrameRef.current = window.requestAnimationFrame(() => {
         scrollFrameRef.current = null;
         const active = detailScrollerRef.current;
-        if (active) setCanvasViewport({ top: active.scrollTop, height: active.clientHeight });
+        if (active) {
+          const activeTop = active.scrollTop;
+          setCanvasViewport({ top: activeTop, height: active.clientHeight });
+          captureVisibleAnchor(activeTop);
+        }
       });
     }
     onDetailScroll?.(container);
-  }, [onDetailScroll]);
+  }, [onDetailScroll, prioritizeLoad]);
 
   useEffect(() => () => {
     if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current);
@@ -703,6 +734,9 @@ export function DiffReview({
 
   const renderStreamItem = useCallback((item: DiffReviewFile, estimatedHeight: number) => {
     const isSelected = matchesSelectedKey(item);
+    const currentVersion = currentVersionsRef.current.get(item.key);
+    const reusableContent = currentVersion !== undefined
+      && matchesDiffReadyVersion(readyVersionsRef.current.get(item.key), currentVersion);
     return (
       <DiffStreamItem
         file={toStreamFile(item)}
@@ -713,6 +747,7 @@ export function DiffReview({
         selected={isSelected}
         activePane={activePane}
         visible={mountedKeys.has(item.key)}
+        reusableContent={reusableContent}
         estimatedHeight={estimatedHeight}
         lightweight={false}
         wrap={wrap}

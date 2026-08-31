@@ -56,4 +56,22 @@ describe('AutomationStore', () => {
     expect(restored.list()[0]).toMatchObject({ id: task.id, name: 'Review', lastRunStatus: 'success' });
     expect(restored.listRuns(task.id)[0]).toMatchObject({ frontendSessionId: 'frontend-1', status: 'success' });
   });
+
+  it('pauses scheduled runs and resumes from the next anchored interval', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const store = new AutomationStore(filePath);
+    const task = store.save({
+      name: 'Review', enabled: true, cwd: '/repo', command: 'codex', prompt: 'review',
+      schedule: { kind: 'interval', everyMinutes: 5 },
+    });
+
+    vi.setSystemTime(310_000);
+    expect(store.setEnabled(task.id, false)).toMatchObject({ enabled: false, nextRunAt: null });
+    expect(store.due()).toEqual([]);
+
+    vi.setSystemTime(430_000);
+    expect(store.setEnabled(task.id, true)).toMatchObject({ enabled: true, nextRunAt: 610_000 });
+    expect(new AutomationStore(filePath).get(task.id)).toMatchObject({ enabled: true, nextRunAt: 610_000 });
+  });
 });

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Bot, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, FolderOpen, Link2, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { Bot, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, FolderOpen, Link2, Pause, Pencil, Play, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
   getAgentLaunchers,
   listAgentAutomations,
@@ -14,6 +14,7 @@ import {
   saveCollaborationGroup,
   searchTerminalSessions,
   sendCollaborationMessage,
+  setAgentAutomationEnabled,
   type AgentAutomation,
   type AgentLauncherInfo,
   type AutomationSchedule,
@@ -175,6 +176,18 @@ function AutomationTab({ automations, runs, agents, sessions, activeSessionId, b
               <button disabled={busy !== null} className={`${buttonClass} bg-destructive text-destructive-foreground`} onClick={() => void runAction(`delete:${automation.id}`, () => removeAgentAutomation(automation.id), `“${automation.name}”已删除`).then(() => setConfirmDeleteId(null))}>{busy === `delete:${automation.id}` ? <RefreshCw size={13} className="animate-spin" /> : <Trash2 size={13} />}确认删除</button>
             </> : <>
               <button className={`${buttonClass} mr-auto px-2 text-destructive hover:bg-destructive/10`} onClick={() => setConfirmDeleteId(automation.id)}><Trash2 size={13} />删除</button>
+              <button
+                disabled={busy !== null}
+                className={`${buttonClass} ${automation.enabled ? 'bg-surface-elevated text-foreground' : 'bg-primary/15 text-primary'}`}
+                onClick={() => void runAction(
+                  `toggle:${automation.id}`,
+                  () => setAgentAutomationEnabled(automation.id, !automation.enabled),
+                  automation.enabled ? `“${automation.name}”已暂停，不会自动运行` : `“${automation.name}”已恢复，将按原计划运行`,
+                )}
+              >
+                {busy === `toggle:${automation.id}` ? <RefreshCw size={13} className="animate-spin" /> : automation.enabled ? <Pause size={13} /> : <Play size={13} />}
+                {automation.enabled ? '暂停' : '恢复'}
+              </button>
               {latestRun?.frontendSessionId && <button className={`${buttonClass} bg-surface-elevated text-foreground`} onClick={() => { window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: latestRun.frontendSessionId })); onClose(); }}><ExternalLink size={13} />打开上次会话</button>}
               <button disabled={busy !== null} className={`${buttonClass} bg-primary/15 text-primary`} onClick={() => void runAction(`run:${automation.id}`, () => runAgentAutomation(automation.id), `“${automation.name}”已投递，可打开会话查看进度`)}>{busy === `run:${automation.id}` ? <RefreshCw size={13} className="animate-spin" /> : <Play size={13} />}立即运行</button>
             </>}

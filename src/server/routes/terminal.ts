@@ -98,6 +98,10 @@ import {
 } from '../agent/plugins.js';
 import { TmuxLifecycleCoordinator } from '../utils/tmuxLifecycle.js';
 import {
+  buildInteractiveColorEnvironment,
+  buildTmuxColorEnvironmentCommands,
+} from '../utils/terminalColorEnvironment.js';
+import {
   detectTmuxRecoveryIncident,
   normalizeTmuxRecoveryIncident,
   type TmuxRecoveryIncident,
@@ -1878,6 +1882,7 @@ async function runTmux(args: string[]): Promise<string> {
   const { stdout } = await execFileAsync(getTmuxBinary(), args, {
     timeout: 5000,
     maxBuffer: 2 * 1024 * 1024,
+    env: buildInteractiveColorEnvironment(process.env),
   });
   return stdout;
 }
@@ -2299,22 +2304,8 @@ async function tmuxSessionExists(sessionName: string): Promise<boolean> {
 
 async function ensureTmuxColorEnvironment(sessionName?: string): Promise<void> {
   const forceColor = process.env.TERMDOCK_FORCE_COLOR === '1';
-  await runTmux(['set-environment', '-g', 'COLORTERM', 'truecolor']);
-  if (forceColor) {
-    await runTmux(['set-environment', '-g', 'FORCE_COLOR', '1']);
-    await runTmux(['set-environment', '-g', '-u', 'NO_COLOR']);
-  } else {
-    // Clear the legacy Termdock override so tmux sessions can respect user color prefs.
-    await runTmux(['set-environment', '-g', '-u', 'FORCE_COLOR']);
-  }
-  if (sessionName) {
-    await runTmux(['set-environment', '-t', sessionName, 'COLORTERM', 'truecolor']);
-    if (forceColor) {
-      await runTmux(['set-environment', '-t', sessionName, 'FORCE_COLOR', '1']);
-      await runTmux(['set-environment', '-t', sessionName, '-u', 'NO_COLOR']);
-    } else {
-      await runTmux(['set-environment', '-t', sessionName, '-u', 'FORCE_COLOR']);
-    }
+  for (const args of buildTmuxColorEnvironmentCommands(sessionName, forceColor)) {
+    await runTmux(args);
   }
 }
 
@@ -5189,7 +5180,10 @@ async function spawnTerminalSession(req: express.Request, input: {
     : (process.platform === 'win32' ? buildPowerShellCwdHookArgs() : []);
 
   const envPath = buildAugmentedPath();
-  const resolvedEnv: Record<string, string | undefined> = { ...process.env, PATH: envPath };
+  const resolvedEnv: Record<string, string | undefined> = buildInteractiveColorEnvironment({
+    ...process.env,
+    PATH: envPath,
+  });
   // The server itself may run under tmux; spawned shells are NOT tmux panes.
   // Inheriting TMUX/TMUX_PANE makes tmux-aware programs (incl. our own
   // agent-hook emitter's passthrough decision) misdetect their context.
@@ -5955,6 +5949,13 @@ router.post('/operations/automations/:automationId/run', async (req, res) => {
   } catch (error) {
     res.status(409).json({ error: getErrorMessage(error), automation: automationStore.get(automation.id) });
   }
+});
+
+router.post('/operations/automations/:automationId/enabled', (req, res) => {
+  if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ error: '启用状态无效' });
+  const automation = automationStore.setEnabled(req.params.automationId, req.body.enabled);
+  if (!automation) return res.status(404).json({ error: '自动任务不存在' });
+  res.json({ automation });
 });
 
 router.delete('/operations/automations/:automationId', (req, res) => {

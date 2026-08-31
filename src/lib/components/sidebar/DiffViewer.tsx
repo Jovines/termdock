@@ -39,6 +39,7 @@ interface ParsedDiffPromiseEntry {
 interface ParsedDiffInput {
   cacheKey: string;
   diffContent: string;
+  oldSource?: string;
 }
 const parsedDiffResultCache = new Map<string, ParsedDiffCacheEntry>();
 const parsedDiffPromiseCache = new Map<string, ParsedDiffPromiseEntry>();
@@ -201,7 +202,16 @@ function requestFileDiffCached(key: string, filePath: string | undefined, cwd: s
 }
 
 function getCachedDiffResult(filePath: string | undefined, cwd: string | undefined, options?: GitDiffOptions): DiffLoadResult | undefined {
-  return diffResultCache.get(buildDiffCacheKey(filePath, cwd, options));
+  const key = buildDiffCacheKey(filePath, cwd, options);
+  const cached = diffResultCache.get(key);
+  if (cached) {
+    // A file the user comes back to is hot again. Refreshing its LRU position
+    // keeps a distant jump from evicting the content they are most likely to
+    // encounter while scrolling back through the canvas.
+    diffResultCache.delete(key);
+    diffResultCache.set(key, cached);
+  }
+  return cached;
 }
 
 export function loadFileDiffCached(filePath: string | undefined, cwd: string | undefined, force = false, options?: GitDiffOptions): Promise<DiffLoadResult> {
@@ -216,7 +226,7 @@ export function loadFileDiffCached(filePath: string | undefined, cwd: string | u
   }
   const version = diffCacheVersions.get(key) ?? 0;
 
-  const cached = diffResultCache.get(key);
+  const cached = getCachedDiffResult(filePath, cwd, options);
   if (cached) return Promise.resolve(cached);
 
   return requestFileDiffCached(key, filePath, cwd, version, undefined, options);
@@ -248,15 +258,18 @@ export function loadVisibleFileDiff(filePath: string | undefined, cwd: string | 
     diffPromiseCache.delete(key);
     diffCacheVersions.set(key, (diffCacheVersions.get(key) ?? 0) + 1);
   }
-  const cached = diffResultCache.get(key);
+  const cached = getCachedDiffResult(filePath, cwd, options);
   if (cached && !force) {
     logDiffViewerEvent('visible_cache_hit', { traceId, key, filePath, cwd, bytes: cached.diff?.length ?? 0, error: cached.error ?? null });
     return Promise.resolve(cached);
   }
   const version = diffCacheVersions.get(key) ?? 0;
   const pending = diffPromiseCache.get(key);
-  if (pending && !force && !diffPreloadControllers.has(key)) {
-    logDiffViewerEvent('visible_reuse_pending', { traceId, key, filePath, cwd });
+  if (pending && !force) {
+    // Visibility upgrades the priority of a preload, but it must not cancel
+    // and restart identical work. The preload owns its independent abort
+    // controller, so recycling this viewer cannot kill the shared request.
+    logDiffViewerEvent(diffPreloadControllers.has(key) ? 'visible_reuse_preload' : 'visible_reuse_pending', { traceId, key, filePath, cwd });
     return pending;
   }
   cancelPreloadDiff(key);
@@ -918,19 +931,88 @@ function DiffScrollHint() {
 
 export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionId, requestSlotId, changedFile, onInsertDiffReference, onHunkGitAction, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, wrap = false, showScrollHint = false, reloadKey = 0, embedded = false, active = true, lightweight = false, auditRecords, diffOverride, preparedDiff, viewType: controlledViewType, inlineMode = 'words', diffOptions, oldSourceOverride, onClearAuditRecord, onContentReady, onSummaryChange }: DiffViewerProps) {
   const { t, locale } = useI18n();
+  const rootPath = useSidebarStore((s) => s.rootPath);
+  const initialCacheRef = useRef<{
+    diffContent: string | null;
+    diffNotice: string | null;
+    diffError: string | null;
+    diffLoading: boolean;
+    parsedFiles: FileData[];
+    workerTokens: Map<string, HunkTokens>;
+    parsedDiffInput: ParsedDiffInput | null;
+    oldSourceContent: string | null;
+    oldSourceResolvedFromCache: boolean;
+  } | null>(null);
+  if (initialCacheRef.current === null) {
+    const initialGitRoot = changedFile?.repoRoot
+      ?? repoRoot
+      ?? (filePath?.startsWith('/') ? null : rootPath);
+    const initialRequestPath = toDiffRequestPath(filePath, initialGitRoot);
+    const cachedDiff = diffOverride === undefined && preparedDiff === undefined
+      ? getCachedDiffResult(initialRequestPath, initialGitRoot ?? undefined, diffOptions)
+      : undefined;
+    const initialDiffContent = diffOverride !== undefined ? diffOverride : cachedDiff?.diff ?? null;
+    const parseInlineMode = lightweight ? 'none' : inlineMode;
+    const parseLanguage = resolveLanguage(filePath) ?? undefined;
+    const parseCacheKey = buildParsedDiffCacheKey(
+      initialRequestPath,
+      initialGitRoot ?? undefined,
+      diffOptions,
+      parseInlineMode,
+      parseLanguage,
+    );
+    const cachedParsed = initialDiffContent
+      ? parsedDiffResultCache.get(parseCacheKey)
+      : undefined;
+    const reusableParsed = cachedParsed?.diffContent === initialDiffContent
+      ? cachedParsed
+      : undefined;
+    if (reusableParsed) {
+      parsedDiffResultCache.delete(parseCacheKey);
+      parsedDiffResultCache.set(parseCacheKey, reusableParsed);
+    }
+    initialCacheRef.current = {
+      diffContent: initialDiffContent,
+      diffNotice: cachedDiff ? formatDiffLimitMessage(cachedDiff) : null,
+      diffError: cachedDiff?.error ?? null,
+      diffLoading: Boolean(active && diffOverride === undefined && preparedDiff === undefined && !cachedDiff),
+      parsedFiles: reusableParsed?.result.files ?? [],
+      workerTokens: reusableParsed?.result.tokens ?? new Map(),
+      parsedDiffInput: reusableParsed ? {
+        cacheKey: parseCacheKey,
+        diffContent: initialDiffContent as string,
+        oldSource: reusableParsed.oldSource,
+      } : null,
+      oldSourceContent: reusableParsed?.oldSource ?? null,
+      oldSourceResolvedFromCache: reusableParsed?.oldSource !== undefined,
+    };
+  }
+  const initialCache = initialCacheRef.current;
   // Each viewer owns its request state. This is important for the mobile
   // accordion: multiple files can stay expanded without fighting over one
   // global diff slot in the sidebar store.
   const [preferredViewType, setPreferredViewType] = useState<DiffViewType>(() => readDiffViewType());
   const [splitViewAvailable, setSplitViewAvailable] = useState(() => canUseSplitDiffView());
-  const [diffContent, setDiffContent] = useState<string | null>(null);
-  const [diffNotice, setDiffNotice] = useState<string | null>(null);
-  const [diffLoading, setDiffLoading] = useState(false);
-  const [diffError, setDiffError] = useState<string | null>(null);
-  const [parsedFiles, setParsedFiles] = useState<FileData[]>([]);
-  const [workerTokens, setWorkerTokens] = useState<Map<string, HunkTokens>>(() => new Map());
-  const [parsedDiffInput, setParsedDiffInput] = useState<ParsedDiffInput | null>(null);
-  const [oldSourceContent, setOldSourceContent] = useState<string | null>(null);
+  const [diffContent, setDiffContent] = useState<string | null>(initialCache.diffContent);
+  const [diffNotice, setDiffNotice] = useState<string | null>(initialCache.diffNotice);
+  const [diffLoading, setDiffLoading] = useState(initialCache.diffLoading);
+  const [diffError, setDiffError] = useState<string | null>(initialCache.diffError);
+  const [parsedFiles, setParsedFiles] = useState<FileData[]>(initialCache.parsedFiles);
+  const [workerTokens, setWorkerTokens] = useState<Map<string, HunkTokens>>(initialCache.workerTokens);
+  const [parsedDiffInput, setParsedDiffInput] = useState<ParsedDiffInput | null>(initialCache.parsedDiffInput);
+  const [oldSourceContent, setOldSourceContent] = useState<string | null>(initialCache.oldSourceContent);
+  const [oldSourceLoading, setOldSourceLoading] = useState(() => Boolean(
+    active
+    && preparedDiff === undefined
+    && oldSourceOverride === undefined
+    && diffOverride === undefined
+    && (changedFile?.repoRoot ?? repoRoot ?? rootPath)
+    && filePath
+    && !changedFile?.untracked
+    && changedFile?.status !== 'added'
+    && !initialCache.oldSourceResolvedFromCache
+  ));
+  const initialOldSourceCacheRef = useRef(initialCache.oldSourceResolvedFromCache ? reloadKey : null);
   const [expandedImportHunks, setExpandedImportHunks] = useState<Set<string>>(() => new Set());
   const [imagePreview, setImagePreview] = useState<{
     objectUrl: string;
@@ -938,7 +1020,6 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     mimeType: string;
     dimensions?: { width: number; height: number };
   } | null>(null);
-  const rootPath = useSidebarStore((s) => s.rootPath);
   const previousReloadKeyRef = useRef(reloadKey);
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
   const viewType: DiffViewType = (controlledViewType ?? preferredViewType) === 'split' && splitViewAvailable ? 'split' : 'unified';
@@ -1016,29 +1097,43 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   useEffect(() => {
     if (preparedDiff !== undefined) {
       setOldSourceContent(null);
+      setOldSourceLoading(false);
       return;
     }
     if (oldSourceOverride !== undefined) {
       setOldSourceContent(oldSourceOverride);
+      setOldSourceLoading(false);
       return;
     }
     const gitRoot = changedFileRepoRoot ?? repoRoot ?? rootPath;
-    if (!active || diffOverride || !gitRoot || !filePath || changedFile?.untracked || changedFileStatus === 'added') {
+    if (!active || diffOverride !== undefined || !gitRoot || !filePath || changedFile?.untracked || changedFileStatus === 'added') {
       setOldSourceContent(null);
+      setOldSourceLoading(false);
+      return;
+    }
+    if (initialOldSourceCacheRef.current === reloadKey) {
+      setOldSourceLoading(false);
       return;
     }
     setOldSourceContent(null);
+    setOldSourceLoading(true);
     const controller = new AbortController();
     const source = 'ref';
     getGitBlobContent(filePath, gitRoot, 'HEAD', controller.signal, source)
       .then((result) => {
-        if (!controller.signal.aborted) setOldSourceContent(result.truncated || result.error ? null : result.content);
+        if (!controller.signal.aborted) {
+          setOldSourceContent(result.truncated || result.error ? null : result.content);
+          setOldSourceLoading(false);
+        }
       })
       .catch(() => {
-        if (!controller.signal.aborted) setOldSourceContent(null);
+        if (!controller.signal.aborted) {
+          setOldSourceContent(null);
+          setOldSourceLoading(false);
+        }
       });
     return () => controller.abort();
-  }, [active, changedFile?.untracked, changedFileRepoRoot, changedFileStatus, diffOverride, filePath, oldSourceOverride, preparedDiff, repoRoot, rootPath]);
+  }, [active, changedFile?.untracked, changedFileRepoRoot, changedFileStatus, diffOverride, filePath, oldSourceOverride, preparedDiff, reloadKey, repoRoot, rootPath]);
 
   useEffect(() => {
     if (preparedDiff !== undefined) return;
@@ -1303,7 +1398,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         if (cancelled) return;
         setParsedFiles(result.files);
         setWorkerTokens(result.tokens);
-        setParsedDiffInput({ cacheKey: parseCacheKey, diffContent });
+        setParsedDiffInput({ cacheKey: parseCacheKey, diffContent, oldSource: oldSourceContent ?? undefined });
         logDiffViewerEvent('worker_parse_done', {
           filePath,
           bytes: diffContent.length,
@@ -1317,7 +1412,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         if (cancelled) return;
         setParsedFiles([]);
         setWorkerTokens(new Map());
-        setParsedDiffInput({ cacheKey: parseCacheKey, diffContent });
+        setParsedDiffInput({ cacheKey: parseCacheKey, diffContent, oldSource: oldSourceContent ?? undefined });
         setDiffError(error instanceof Error ? error.message : String(error));
         logDiffViewerEvent('worker_parse_error', {
           filePath,
@@ -1347,8 +1442,9 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   const parsedContentReady = !diffContent || (
     parsedDiffInput?.cacheKey === currentParseCacheKey
     && parsedDiffInput.diffContent === diffContent
+    && parsedDiffInput.oldSource === (oldSourceContent ?? undefined)
   );
-  const effectiveDiffLoading = preparedDiff !== undefined ? false : diffLoading || !parsedContentReady;
+  const effectiveDiffLoading = preparedDiff !== undefined ? false : diffLoading || oldSourceLoading || !parsedContentReady;
   const files = preparedDiff !== undefined ? preparedDiff?.files ?? [] : parsedFiles;
 
   useEffect(() => {

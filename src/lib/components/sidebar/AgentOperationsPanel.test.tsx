@@ -6,8 +6,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentOperationsPanel, cleanSessionSnippet } from './AgentOperationsPanel';
 
 const apiMocks = vi.hoisted(() => ({
+  listAgentAutomations: vi.fn().mockResolvedValue({ automations: [], runs: [] }),
   listCollaborationGroups: vi.fn().mockResolvedValue({ groups: [], sessions: [] }),
   searchTerminalSessions: vi.fn().mockResolvedValue({ results: [] }),
+  setAgentAutomationEnabled: vi.fn().mockResolvedValue({ automation: {} }),
 }));
 
 vi.mock('../../terminal/api', () => ({
@@ -17,7 +19,7 @@ vi.mock('../../terminal/api', () => ({
   ]),
   cancelIoSlot: vi.fn(),
   listDirectory: vi.fn().mockResolvedValue({ path: '/repo', entries: [] }),
-  listAgentAutomations: vi.fn().mockResolvedValue({ automations: [], runs: [] }),
+  listAgentAutomations: apiMocks.listAgentAutomations,
   listCollaborationGroups: apiMocks.listCollaborationGroups,
   listCollaborationMessages: vi.fn().mockResolvedValue({ messages: [] }),
   prepareAgentResumeHistory: vi.fn(),
@@ -27,10 +29,17 @@ vi.mock('../../terminal/api', () => ({
   saveAgentAutomation: vi.fn(),
   saveCollaborationGroup: vi.fn(),
   sendCollaborationMessage: vi.fn(),
+  setAgentAutomationEnabled: apiMocks.setAgentAutomationEnabled,
   searchTerminalSessions: apiMocks.searchTerminalSessions,
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  apiMocks.listAgentAutomations.mockReset().mockResolvedValue({ automations: [], runs: [] });
+  apiMocks.listCollaborationGroups.mockReset().mockResolvedValue({ groups: [], sessions: [] });
+  apiMocks.searchTerminalSessions.mockReset().mockResolvedValue({ results: [] });
+  apiMocks.setAgentAutomationEnabled.mockReset().mockResolvedValue({ automation: {} });
+});
 
 describe('AgentOperationsPanel', () => {
   it('cleans terminal control noise from user-facing snippets', () => {
@@ -79,6 +88,27 @@ describe('AgentOperationsPanel', () => {
     await user.selectOptions(screen.getByLabelText('分钟'), '45');
     expect(screen.getByLabelText('小时')).toHaveProperty('value', '18');
     expect(screen.getByLabelText('分钟')).toHaveProperty('value', '45');
+  });
+
+  it('pauses and resumes an automation directly from its task card', async () => {
+    const automation = {
+      id: 'review', name: 'Review zeris', enabled: true, cwd: '/repo', command: 'codex', prompt: 'review',
+      targetSessionId: null, schedule: { kind: 'interval' as const, everyMinutes: 60 }, createdAt: 10_000,
+      updatedAt: 10_000, nextRunAt: 3_610_000, lastRunAt: null, lastRunStatus: null, lastRunMessage: null,
+    };
+    apiMocks.listAgentAutomations.mockResolvedValue({ automations: [automation], runs: [] });
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId={null} onClose={() => undefined} onNewSession={() => undefined} />);
+
+    await user.click(await screen.findByRole('button', { name: '暂停' }));
+    expect(apiMocks.setAgentAutomationEnabled).toHaveBeenCalledWith('review', false);
+    expect(await screen.findByText('“Review zeris”已暂停，不会自动运行')).toBeTruthy();
+
+    apiMocks.listAgentAutomations.mockResolvedValue({ automations: [{ ...automation, enabled: false, nextRunAt: null }], runs: [] });
+    await user.click(screen.getByRole('button', { name: '暂停' }));
+    expect(await screen.findByRole('button', { name: '恢复' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '恢复' }));
+    expect(apiMocks.setAgentAutomationEnabled).toHaveBeenLastCalledWith('review', true);
   });
 
   it('opens directory browsing as a focused dialog and Escape keeps the task form open', async () => {

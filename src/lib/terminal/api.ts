@@ -3495,6 +3495,13 @@ export function runAgentAutomation(automationId: string): Promise<{ ok: true; au
   return operationsRequest(`/automations/${encodeURIComponent(automationId)}/run`, { method: 'POST' });
 }
 
+export function setAgentAutomationEnabled(automationId: string, enabled: boolean): Promise<{ automation: AgentAutomation }> {
+  return operationsRequest(`/automations/${encodeURIComponent(automationId)}/enabled`, {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  });
+}
+
 export function removeAgentAutomation(automationId: string): Promise<void> {
   return operationsRequest(`/automations/${encodeURIComponent(automationId)}`, { method: 'DELETE' });
 }

@@ -145,6 +145,20 @@ export class AutomationStore {
     return true;
   }
 
+  setEnabled(id: string, enabled: boolean): AgentAutomation | null {
+    const automation = this.get(id);
+    if (!automation) return null;
+    if (automation.enabled === enabled) return automation;
+    const now = Date.now();
+    automation.enabled = enabled;
+    automation.updatedAt = now;
+    automation.nextRunAt = enabled
+      ? nextAutomationRunAt(automation.schedule, now, automation.createdAt)
+      : null;
+    this.persist();
+    return automation;
+  }
+
   due(now = Date.now()): AgentAutomation[] {
     return this.document.automations.filter((item) => item.enabled && item.nextRunAt !== null && item.nextRunAt <= now);
   }

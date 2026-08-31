@@ -22,6 +22,10 @@ import readline from 'readline';
 import { createHash, randomUUID } from 'crypto';
 import { spawn, spawnSync, execFile } from 'child_process';
 import { promisify } from 'util';
+import {
+  buildInteractiveColorEnvironment,
+  buildTmuxColorEnvironmentCommands,
+} from './utils/terminalColorEnvironment.js';
 import { Writable } from 'stream';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
@@ -2761,41 +2765,8 @@ async function ensureTmuxCliSessionOptions(sessionName: string): Promise<void> {
 
 async function ensureTmuxColorEnvironment(sessionName?: string): Promise<void> {
   const forceColor = process.env.TERMDOCK_FORCE_COLOR === '1';
-  await execFileAsync('tmux', ['set-environment', '-g', 'COLORTERM', 'truecolor'], {
-    timeout: 5000,
-    maxBuffer: 64 * 1024,
-  });
-  if (forceColor) {
-    await execFileAsync('tmux', ['set-environment', '-g', 'FORCE_COLOR', '1'], {
-      timeout: 5000,
-      maxBuffer: 64 * 1024,
-    });
-    await execFileAsync('tmux', ['set-environment', '-g', '-u', 'NO_COLOR'], {
-      timeout: 5000,
-      maxBuffer: 64 * 1024,
-    });
-  } else {
-    await execFileAsync('tmux', ['set-environment', '-g', '-u', 'FORCE_COLOR'], {
-      timeout: 5000,
-      maxBuffer: 64 * 1024,
-    });
-  }
-  if (!sessionName) return;
-  await execFileAsync('tmux', ['set-environment', '-t', sessionName, 'COLORTERM', 'truecolor'], {
-    timeout: 5000,
-    maxBuffer: 64 * 1024,
-  });
-  if (forceColor) {
-    await execFileAsync('tmux', ['set-environment', '-t', sessionName, 'FORCE_COLOR', '1'], {
-      timeout: 5000,
-      maxBuffer: 64 * 1024,
-    });
-    await execFileAsync('tmux', ['set-environment', '-t', sessionName, '-u', 'NO_COLOR'], {
-      timeout: 5000,
-      maxBuffer: 64 * 1024,
-    });
-  } else {
-    await execFileAsync('tmux', ['set-environment', '-t', sessionName, '-u', 'FORCE_COLOR'], {
+  for (const args of buildTmuxColorEnvironmentCommands(sessionName, forceColor)) {
+    await execFileAsync('tmux', args, {
       timeout: 5000,
       maxBuffer: 64 * 1024,
     });
@@ -2851,6 +2822,14 @@ async function ensureStampedTmuxSession(
 ): Promise<{ sessionName: string; created: boolean }> {
   const exists = await tmuxSessionExists(sessionName);
   if (!exists) {
+    // If another session already owns the shared server, scrub its inherited
+    // environment before tmux forks the new pane. A missing server is fine:
+    // the sanitized exec environment below will seed it without NO_COLOR.
+    try {
+      await ensureTmuxColorEnvironment();
+    } catch {
+      // No tmux server yet.
+    }
     const args = ['new-session', '-d', '-s', sessionName, '-e', 'COLORTERM=truecolor'];
     if (process.env.TERMDOCK_FORCE_COLOR === '1') {
       args.push('-e', 'FORCE_COLOR=1');
@@ -2864,6 +2843,7 @@ async function ensureStampedTmuxSession(
     await execFileAsync('tmux', args, {
       timeout: 5000,
       maxBuffer: 256 * 1024,
+      env: buildInteractiveColorEnvironment(process.env),
     });
   }
 

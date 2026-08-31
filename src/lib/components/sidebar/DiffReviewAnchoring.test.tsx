@@ -182,7 +182,7 @@ describe('DiffReview click anchoring', () => {
     expect(files.map((file) => streamItems.get(file.key)?.visible)).toEqual([true, true, false]);
   });
 
-  it('gates scrolling at a still-loading card and releases once it is ready', () => {
+  it('never clamps native scrolling while visible cards are still loading', () => {
     // Distinct keys: measured heights are cached module-level per key, and
     // earlier tests in this file have already recorded real heights for the
     // shared fixture.
@@ -232,25 +232,82 @@ describe('DiffReview click anchoring', () => {
       scroller.scrollTop = top;
       scroller.dispatchEvent(new Event('scroll'));
     };
-    // File0 mounts first and is still loading: the gate sits at
-    // tops[0] + PEEK - clientHeight = 0 + 120 - 0.
-    act(() => scrollTo(300));
-    expect(scroller.scrollTop).toBe(120);
-
-    // Once File0 is ready the pipeline mounts File1 (loading): the gate moves
-    // to tops[1] + PEEK = 104 + 120.
-    act(() => streamItems.get(gateFiles[0].key)?.onContentReady?.(gateFiles[0].key));
-    act(flushAnimationFrames);
-    expect(streamItems.get(gateFiles[1].key)?.visible).toBe(true);
-    act(() => scrollTo(300));
-    expect(scroller.scrollTop).toBe(224);
-
-    // File1 ready too: File2 mounts and its gate (104*2 + 120 = 328) lies
-    // beyond the requested position, so scrolling proceeds unclamped.
-    act(() => streamItems.get(gateFiles[1].key)?.onContentReady?.(gateFiles[1].key));
-    act(flushAnimationFrames);
     act(() => scrollTo(300));
     expect(scroller.scrollTop).toBe(300);
+    act(flushAnimationFrames);
+    expect(streamItems.get(gateFiles[2].key)?.visible).toBe(true);
+
+    act(() => scrollTo(900));
+    expect(scroller.scrollTop).toBe(900);
+
+    act(() => scrollTo(0));
+    expect(scroller.scrollTop).toBe(0);
+    act(flushAnimationFrames);
+    expect(streamItems.get(gateFiles[0].key)?.visible).toBe(true);
+  });
+
+  it('recaptures the visible anchor before late measurements during a fast scroll', () => {
+    const fastRepo = '/repo-fast-scroll';
+    const fastFiles: DiffReviewFile[] = ['a.ts', 'b.ts', 'c.ts'].map((name) => ({
+      key: `${fastRepo}/${name}`,
+      path: name,
+      absolutePath: `${fastRepo}/${name}`,
+      status: 'modified',
+      repoRoot: fastRepo,
+      displayName: name,
+      auditRecords: [],
+    }));
+    const fastGroups = [{
+      key: fastRepo,
+      root: fastRepo,
+      label: 'repo',
+      files: fastFiles.map((file) => ({
+        key: file.key,
+        path: file.path,
+        absolutePath: file.absolutePath,
+        displayName: file.displayName,
+        status: file.status,
+      })),
+    }];
+    const scrollTo = vi.fn(function (this: HTMLElement, { top }: ScrollToOptions) {
+      this.scrollTop = Number(top);
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      writable: true,
+      value: scrollTo,
+    });
+    const { container } = render(
+      <DiffReview
+        files={fastFiles}
+        groups={fastGroups}
+        selectedKey={null}
+        onSelectFile={() => undefined}
+        mode="list"
+        onModeChange={() => undefined}
+        collapsedDirectoryKeys={new Set()}
+        onToggleDirectory={() => undefined}
+        renderLeading={() => null}
+        renderStreamBadge={() => null}
+        mobile={false}
+        backLabel="Back"
+        wrap
+        showScrollHint={false}
+        activePane
+      />,
+    );
+    const scroller = container.querySelector('.termdock-diff-stream-scroller') as HTMLElement;
+
+    act(() => {
+      scroller.scrollTop = 208;
+      scroller.dispatchEvent(new Event('scroll'));
+      flushAnimationFrames();
+    });
+    act(() => streamItems.get(fastFiles[0].key)?.onHeightChange?.(fastFiles[0].key, 104, 274));
+
+    // File C remains pinned: the 170px growth above it is added once, instead
+    // of leaving the stale File A anchor to make the viewport visibly jump.
+    expect(scroller.scrollTop).toBe(378);
   });
 
   it('creates a fresh positioning request for every file tap, including repeated mobile taps', () => {
