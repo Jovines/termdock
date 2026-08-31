@@ -220,6 +220,7 @@ export const en: TranslationDictionary = {
     downloadFailed: 'Download failed',
     uploadFile: 'Upload file',
     uploadFiles: 'Upload files',
+    insertLocalFile: 'Insert local file',
     insertLocalImage: 'Insert local image',
     layoutMode: 'Display mode',
     layoutModeAuto: 'Auto',
@@ -443,6 +444,9 @@ export const en: TranslationDictionary = {
     truncatedHint: 'Showing first 1000 entries. Use search or open a smaller folder for better performance.',
     dropToUploadHere: 'Upload here',
     symbolicLink: 'Symbolic link',
+    sortByModified: 'Sort by recent changes',
+    sortByName: 'Sort by name',
+    sortedByModified: 'Sorted by recent changes',
   },
   diffViewer: {
     noFileChanges: 'No changes in this file.',

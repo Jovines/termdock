@@ -36,6 +36,8 @@ import {
   PencilLine as RiPencilLine,
   Check as RiCheck,
   Maximize2 as RiFullscreen,
+  Clock3 as RiClock,
+  ArrowDownAZ as RiSortName,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
@@ -6279,6 +6281,7 @@ export function RightSidebar(
   const changedFiles = useSidebarStore((s) => s.changedFiles);
   const setChangedFiles = useSidebarStore((s) => s.setChangedFiles);
   const invalidateDirectoryCache = useSidebarStore((s) => s.invalidateDirectoryCache);
+  const setDirectorySortMode = useSidebarStore((s) => s.setDirectorySortMode);
   const applyFileWatchEvents = useSidebarStore((s) => s.applyFileWatchEvents);
   const bumpFileWatchEpoch = useSidebarStore((s) => s.bumpFileWatchEpoch);
   const gitBundleLoading = useSidebarStore((s) => s.gitBundleLoading);
@@ -6290,6 +6293,7 @@ export function RightSidebar(
   const setGitBundleError = useSidebarStore((s) => s.setGitBundleError);
   const markGitBundleLoaded = useSidebarStore((s) => s.markGitBundleLoaded);
   const fileTreeRoot = explorerRoot ?? rootPath;
+  const fileTreeSortMode = useSidebarStore((s) => fileTreeRoot ? s.fileSortModes[fileTreeRoot] ?? 'name' : 'name');
   const rootEntriesLoaded = useSidebarStore((s) => Boolean(fileTreeRoot && s.directoryCache.has(fileTreeRoot)));
   const fileTreeScrollRef = useRef<HTMLDivElement | null>(null);
   const gitBundleRequestIdRef = useRef(0);
@@ -7638,6 +7642,12 @@ export function RightSidebar(
           setFileWatchError(null);
           await watchFileSystem(watchedFileRoots, (events) => {
             applyFileWatchEvents(events);
+            const degraded = events.find((event) => (
+              event.type === 'rescan-required'
+              && event.reason !== 'event-storm'
+              && event.reason !== 'reconnected'
+            ));
+            if (degraded?.reason) setFileWatchError(degraded.reason);
           }, controller.signal);
           // A clean resolve means the server closed the stream (deploy,
           // restart) — treat it as a disconnect and reconnect as well.
@@ -10133,14 +10143,21 @@ export function RightSidebar(
           type="button"
           onClick={refreshExplorerRoot}
           disabled={!fileTreeRoot}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
+          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95 ${fileWatchError ? 'text-destructive' : 'text-muted-foreground'}`}
           aria-label={t('rightSidebar.refreshFiles')}
           title={fileWatchError ? t('rightSidebar.fileWatchUnavailable', { message: fileWatchError }) : t('rightSidebar.refreshFiles')}
         >
           <RiRefresh size={13} />
         </button>
         <div className="min-w-0 flex-1 px-1" title={fileTreeRoot ?? undefined}>
-          <div className="truncate text-[12px] font-medium text-foreground">{explorerName}</div>
+          <div className="flex min-w-0 items-center gap-1 text-[12px] font-medium text-foreground">
+            <span className="truncate">{explorerName}</span>
+            {fileTreeSortMode === 'modified' && (
+              <span className="inline-flex shrink-0 text-primary" title={t('fileTree.sortedByModified')} aria-label={t('fileTree.sortedByModified')}>
+                <RiClock size={11} />
+              </span>
+            )}
+          </div>
         </div>
         <button
           type="button"
@@ -10198,6 +10215,20 @@ export function RightSidebar(
               >
                 {showHiddenFiles ? <RiEyeOff size={14} /> : <RiEye size={14} className="text-muted-foreground" />}
                 <span>{showHiddenFiles ? t('rightSidebar.hideHiddenFiles') : t('rightSidebar.showHiddenFiles')}</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!fileTreeRoot}
+                onClick={() => {
+                  if (!fileTreeRoot) return;
+                  setExplorerMenuOpen(false);
+                  void setDirectorySortMode(fileTreeRoot, fileTreeSortMode === 'modified' ? 'name' : 'modified');
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2 disabled:opacity-40"
+              >
+                {fileTreeSortMode === 'modified' ? <RiSortName size={14} /> : <RiClock size={14} className="text-muted-foreground" />}
+                <span>{fileTreeSortMode === 'modified' ? t('fileTree.sortByName') : t('fileTree.sortByModified')}</span>
               </button>
             </div>
           )}

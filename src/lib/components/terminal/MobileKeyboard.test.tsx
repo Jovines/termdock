@@ -22,7 +22,7 @@ const baseProps = {
   onKeyPress: vi.fn(),
   onTextPress: vi.fn(),
   onPastePress: vi.fn(),
-  onImagePress: vi.fn(),
+  onFilePress: vi.fn(),
   onModifierToggle: vi.fn(),
   onPresetSelect: vi.fn(),
 };
@@ -44,8 +44,8 @@ describe('MobileKeyboard interaction state', () => {
     const onKeyPress = vi.fn();
     const onTextPress = vi.fn();
     const onPastePress = vi.fn();
-    const onImagePress = vi.fn();
-    render(<MobileKeyboard {...baseProps} interactive={false} onKeyPress={onKeyPress} onTextPress={onTextPress} onPastePress={onPastePress} onImagePress={onImagePress} />);
+    const onFilePress = vi.fn();
+    render(<MobileKeyboard {...baseProps} interactive={false} onKeyPress={onKeyPress} onTextPress={onTextPress} onPastePress={onPastePress} onFilePress={onFilePress} />);
 
     const toolbar = screen.getByText('Esc').closest('[data-mobile-keyboard="true"]');
     expect(toolbar?.className).toContain('opacity-100');
@@ -53,12 +53,12 @@ describe('MobileKeyboard interaction state', () => {
 
     fireEvent.pointerDown(screen.getByText('Esc'));
     fireEvent.pointerDown(screen.getByText('/undo'));
-    fireEvent.click(screen.getByLabelText('Insert local image'));
+    fireEvent.click(screen.getByLabelText('Insert local file'));
 
     expect(onKeyPress).not.toHaveBeenCalled();
     expect(onTextPress).not.toHaveBeenCalled();
     expect(onPastePress).not.toHaveBeenCalled();
-    expect(onImagePress).not.toHaveBeenCalled();
+    expect(onFilePress).not.toHaveBeenCalled();
   });
 
   it('fires the paste callback from the mobile toolbar', () => {
@@ -70,23 +70,25 @@ describe('MobileKeyboard interaction state', () => {
     expect(onPastePress).toHaveBeenCalledTimes(1);
   });
 
-  it('opens the local image picker directly from the primary mobile toolbar', () => {
-    const onImagePress = vi.fn();
-    render(<MobileKeyboard {...baseProps} onImagePress={onImagePress} />);
+  it('opens the local file picker directly from the primary mobile toolbar', () => {
+    const onFilePress = vi.fn();
+    render(<MobileKeyboard {...baseProps} onFilePress={onFilePress} />);
 
-    fireEvent.click(screen.getByLabelText('Insert local image'));
+    fireEvent.click(screen.getByLabelText('Insert local file'));
 
-    expect(onImagePress).toHaveBeenCalledTimes(1);
+    expect(onFilePress).toHaveBeenCalledTimes(1);
   });
 
-  it('shows temporary image upload feedback on the toolbar button', () => {
-    const { rerender } = render(<MobileKeyboard {...baseProps} imageUploadState="uploading" />);
-    expect((screen.getByTitle('Uploading…') as HTMLButtonElement).disabled).toBe(true);
+  it('shows temporary file upload feedback on the toolbar button', () => {
+    const { rerender } = render(<MobileKeyboard {...baseProps} fileUploadState="uploading" fileUploadProgress={42} />);
+    const uploadingButton = screen.getByTitle('Uploading… 42%') as HTMLButtonElement;
+    expect(uploadingButton.disabled).toBe(true);
+    expect((uploadingButton.querySelector('[data-file-upload-progress="true"]') as HTMLElement).style.width).toBe('42%');
 
-    rerender(<MobileKeyboard {...baseProps} imageUploadState="inserted" />);
+    rerender(<MobileKeyboard {...baseProps} fileUploadState="inserted" />);
     expect(screen.getByTitle('Inserted')).toBeTruthy();
 
-    rerender(<MobileKeyboard {...baseProps} imageUploadState="failed" />);
+    rerender(<MobileKeyboard {...baseProps} fileUploadState="failed" />);
     expect(screen.getByTitle('Upload failed')).toBeTruthy();
   });
 

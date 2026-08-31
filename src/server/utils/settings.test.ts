@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   loadSettingsFile,
   loadSettingsFileAsync,
+  normalizeFileSortModes,
   normalizeNewSessionAgentSlug,
   saveSettingsFile,
 } from './settings.js';
@@ -34,6 +35,20 @@ describe('normalizeNewSessionAgentSlug', () => {
   });
 });
 
+describe('normalizeFileSortModes', () => {
+  it('keeps bounded absolute paths using the supported non-default mode', () => {
+    expect(normalizeFileSortModes({
+      '/workspace/logs': 'modified',
+      '/workspace/src': 'name',
+      relative: 'modified',
+      'C:\\projects\\logs': 'modified',
+    })).toEqual({
+      '/workspace/logs': 'modified',
+      'C:\\projects\\logs': 'modified',
+    });
+  });
+});
+
 describe('settings persistence', () => {
   it('defaults the running-session button to disabled and preserves an enabled preference', () => {
     const settingsFile = tempSettingsPath();
@@ -44,6 +59,17 @@ describe('settings persistence', () => {
     defaults.runningSessionButtonEnabled = true;
     saveSettingsFile(defaults, settingsFile);
     expect(loadSettingsFile(settingsFile).runningSessionButtonEnabled).toBe(true);
+  });
+
+  it('persists per-directory explorer sort preferences', () => {
+    const settingsFile = tempSettingsPath();
+    const settings = loadSettingsFile(settingsFile);
+    expect(settings.fileSortModes).toEqual({});
+
+    settings.fileSortModes = { '/workspace/logs': 'modified' };
+    saveSettingsFile(settings, settingsFile);
+
+    expect(loadSettingsFile(settingsFile).fileSortModes).toEqual({ '/workspace/logs': 'modified' });
   });
 
   it('preserves fields introduced by newer binaries', () => {

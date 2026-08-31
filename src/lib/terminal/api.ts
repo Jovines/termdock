@@ -1522,6 +1522,7 @@ export interface SettingsState {
   autoRenamePromptPayloadChars: number;
   newSessionAgentSlug: string | null;
   runningSessionButtonEnabled: boolean;
+  fileSortModes: Record<string, 'modified'>;
 }
 
 export async function getSettings(): Promise<SettingsState> {
@@ -1533,7 +1534,7 @@ export async function getSettings(): Promise<SettingsState> {
   return response.json();
 }
 
-export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean }): Promise<SettingsState> {
+export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode } }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -2154,6 +2155,8 @@ export interface FileEntry {
   modified?: string;
 }
 
+export type FileSortMode = 'name' | 'modified';
+
 export interface FileSearchResponse {
   path: string;
   query: string;
@@ -2200,9 +2203,10 @@ export interface FileWatchEvent {
   reason?: string;
 }
 
-export async function listDirectory(dirPath: string, signal?: AbortSignal, showHidden?: boolean, action = 'list_directory', requestSlotId?: string): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
+export async function listDirectory(dirPath: string, signal?: AbortSignal, showHidden?: boolean, action = 'list_directory', requestSlotId?: string, sortMode: FileSortMode = 'name'): Promise<{ path: string; entries: FileEntry[]; truncated?: boolean; total?: number }> {
   const params = new URLSearchParams({ path: dirPath });
   if (showHidden) params.set('showHidden', 'true');
+  if (sortMode !== 'name') params.set('sort', sortMode);
   params.set('action', action);
   if (requestSlotId) params.set('requestSlotId', requestSlotId);
   const response = await fetchWithTimeout(
@@ -2297,10 +2301,19 @@ export async function watchFileSystem(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let unavailableReason: string | null = null;
   const consumeLine = (line: string) => {
     if (!line.trim()) return;
     const event = JSON.parse(line) as { type?: string; events?: FileWatchEvent[] };
-    if (event.type === 'events' && event.events?.length) onEvents(event.events);
+    if (event.type === 'events' && event.events?.length) {
+      onEvents(event.events);
+      const unavailable = event.events.find((item) => (
+        item.type === 'rescan-required'
+        && item.reason !== 'event-storm'
+        && item.reason !== 'reconnected'
+      ));
+      if (unavailable?.reason) unavailableReason = unavailable.reason;
+    }
   };
 
   while (true) {
@@ -2316,6 +2329,7 @@ export async function watchFileSystem(
   }
   buffer += decoder.decode();
   consumeLine(buffer);
+  if (unavailableReason) throw new Error(unavailableReason);
 }
 
 export function cancelIoSlot(requestSlotId: string | null | undefined): void {
@@ -2583,13 +2597,80 @@ export async function deleteFile(filePath: string): Promise<void> {
   }
 }
 
-export async function uploadFiles(dir: string, files: File[], signal?: AbortSignal): Promise<{ files: { name: string; path: string; size: number }[] }> {
+export async function uploadFiles(
+  dir: string,
+  files: File[],
+  signal?: AbortSignal,
+  onProgress?: (percent: number) => void,
+): Promise<{ files: { name: string; path: string; size: number }[] }> {
   const formData = new FormData();
   for (const file of files) {
     formData.append('files', file);
   }
   const url = `/api/terminal/fs/upload?dir=${encodeURIComponent(dir)}`;
   const csrfTokenHeader = await getCsrfToken();
+  if (onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const handleSignalAbort = () => xhr.abort();
+      const cleanup = () => signal?.removeEventListener('abort', handleSignalAbort);
+      const rejectWithResponseError = () => {
+        let message = 'Upload failed';
+        try {
+          const payload = JSON.parse(xhr.responseText) as { error?: string };
+          message = payload.error || message;
+        } catch {
+          // Keep the generic error when the response is not JSON.
+        }
+        reject(new Error(message));
+      };
+
+      xhr.open('POST', url);
+      xhr.setRequestHeader('X-XSRF-TOKEN', csrfTokenHeader);
+      xhr.timeout = 120_000;
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+        }
+      };
+      xhr.onload = () => {
+        cleanup();
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            onProgress(100);
+            resolve(JSON.parse(xhr.responseText) as { files: { name: string; path: string; size: number }[] });
+          } catch {
+            reject(new Error('Upload returned an invalid response'));
+          }
+          return;
+        }
+        if (xhr.status === 401) {
+          csrfToken = null;
+          window.dispatchEvent(new CustomEvent(AUTH_UNAUTHORIZED_EVENT));
+        }
+        rejectWithResponseError();
+      };
+      xhr.onerror = () => {
+        cleanup();
+        reject(new Error('Upload failed'));
+      };
+      xhr.ontimeout = () => {
+        cleanup();
+        reject(new Error('Upload timed out'));
+      };
+      xhr.onabort = () => {
+        cleanup();
+        reject(new DOMException('Upload aborted', 'AbortError'));
+      };
+      signal?.addEventListener('abort', handleSignalAbort, { once: true });
+      if (signal?.aborted) {
+        xhr.abort();
+        return;
+      }
+      onProgress(0);
+      xhr.send(formData);
+    });
+  }
   const response = await fetchWithTimeout(
     url,
     { method: 'POST', headers: { 'X-XSRF-TOKEN': csrfTokenHeader }, body: formData, signal },

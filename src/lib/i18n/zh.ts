@@ -220,6 +220,7 @@ export const zh: TranslationDictionary = {
     downloadFailed: '下载失败',
     uploadFile: '上传文件',
     uploadFiles: '上传文件',
+    insertLocalFile: '插入本地文件',
     insertLocalImage: '插入本地图片',
     layoutMode: '显示模式',
     layoutModeAuto: '自动',
@@ -443,6 +444,9 @@ export const zh: TranslationDictionary = {
     truncatedHint: '仅展示前 1000 项。使用搜索或打开更小的文件夹以获得更好性能。',
     dropToUploadHere: '上传到这里',
     symbolicLink: '符号链接',
+    sortByModified: '按最近修改排序',
+    sortByName: '按名称排序',
+    sortedByModified: '已按最近修改排序',
   },
   diffViewer: {
     noFileChanges: '此文件无改动。',

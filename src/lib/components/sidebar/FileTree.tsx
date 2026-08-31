@@ -16,6 +16,8 @@ import {
   Download as RiDownload,
   Check as RiCheck,
   Trash2 as RiTrash,
+  Clock3 as RiClock,
+  ArrowDownAZ as RiSortName,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
 import { cancelIoSlot, listDirectory, searchFilesStream, downloadFile, deleteFile, isPreviewableModel3dPath, isPreviewableVideoPath, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
@@ -172,6 +174,7 @@ function toTreeNodes(entries: FileEntry[]): FileTreeNode[] {
     path: e.path,
     type: e.type,
     isSymlink: e.isSymlink,
+    modified: e.modified,
     expanded: false,
     loaded: false,
     children: e.type === 'directory' ? [] : undefined,
@@ -237,6 +240,8 @@ const FileTreeItem = memo(function FileTreeItem({
   const showHiddenFiles = useSidebarStore((s) => s.showHiddenFiles);
   const toggleExpanded = useSidebarStore((s) => s.toggleExpanded);
   const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
+  const sortMode = useSidebarStore((s) => s.fileSortModes[node.path] ?? 'name');
+  const setDirectorySortMode = useSidebarStore((s) => s.setDirectorySortMode);
   const [loading, setLoading] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [dropTarget, setDropTarget] = useState(false);
@@ -276,7 +281,7 @@ const FileTreeItem = memo(function FileTreeItem({
       loadAbortRef.current = controller;
       setLoading(true);
       try {
-        const result = await listDirectory(node.path, controller.signal, showHiddenFiles, 'expand_directory', requestSlotId);
+        const result = await listDirectory(node.path, controller.signal, showHiddenFiles, 'expand_directory', requestSlotId, sortMode);
         const treeNodes = toTreeNodes(result.entries);
         setDirectoryCache(node.path, treeNodes);
       } catch (error) {
@@ -288,7 +293,7 @@ const FileTreeItem = memo(function FileTreeItem({
         setLoading(false);
       }
     }
-  }, [node.path, loading, setDirectoryCache, showHiddenFiles]);
+  }, [node.path, loading, setDirectoryCache, showHiddenFiles, sortMode]);
 
   const handleToggle = useCallback(async () => {
     if (node.type !== 'directory') {
@@ -327,6 +332,12 @@ const FileTreeItem = memo(function FileTreeItem({
     onDirectoryPinToggle?.(node.path);
     setActionsOpen(false);
   }, [node.path, onDirectoryPinToggle]);
+
+  const handleDirectorySortClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    void setDirectorySortMode(node.path, sortMode === 'modified' ? 'name' : 'modified');
+    setActionsOpen(false);
+  }, [node.path, setDirectorySortMode, sortMode]);
 
   const handleFilePinClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
@@ -422,6 +433,7 @@ const FileTreeItem = memo(function FileTreeItem({
         {getReferenceLongPressHandlers.popoverNode}
         <div
         data-file-tree-path={node.path}
+        data-sort-mode={sortMode}
         role="button"
         tabIndex={0}
         onClick={() => {
@@ -467,6 +479,11 @@ const FileTreeItem = memo(function FileTreeItem({
         )}
         <span className={`min-w-0 flex-1 select-text whitespace-normal break-all text-left leading-snug ${isSelected ? 'font-medium' : ''}`}>
           {node.name}
+          {sortMode === 'modified' && (
+            <span className="ml-1 inline-flex align-middle text-primary" title={t('fileTree.sortedByModified')} aria-label={t('fileTree.sortedByModified')}>
+              <RiClock size={11} />
+            </span>
+          )}
           {node.isSymlink && (
             <span className="ml-1 inline-flex align-middle text-muted-foreground/70" title={t('fileTree.symbolicLink')}>
               <RiLink size={11} />
@@ -541,6 +558,14 @@ const FileTreeItem = memo(function FileTreeItem({
               <span className="min-w-0 flex-1 truncate">{isPinned ? t('fileTree.unpinDir') : t('fileTree.pinDir')}</span>
             </button>
           )}
+          <button
+            type="button"
+            onClick={handleDirectorySortClick}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
+          >
+            {sortMode === 'modified' ? <RiSortName size={13} className="shrink-0" /> : <RiClock size={13} className="shrink-0" />}
+            <span className="min-w-0 flex-1 truncate">{sortMode === 'modified' ? t('fileTree.sortByName') : t('fileTree.sortByModified')}</span>
+          </button>
           </div>
         )}
 
@@ -1018,11 +1043,17 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
   const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
   const showHiddenFiles = useSidebarStore((s) => s.showHiddenFiles);
+  const rootSortMode = useSidebarStore((s) => s.fileSortModes[rootPath] ?? 'name');
+  const hydrateFileSortModes = useSidebarStore((s) => s.hydrateFileSortModes);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rootTruncated, setRootTruncated] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void hydrateFileSortModes().catch(() => undefined);
+  }, [hydrateFileSortModes]);
   const [searchEntries, setSearchEntries] = useState<FileTreeNode[]>([]);
   const [searchMeta, setSearchMeta] = useState<{ truncated: boolean; total: number; engine: FileSearchEngine; limited: boolean; done: boolean } | null>(null);
   const [visibleSearchCount, setVisibleSearchCount] = useState(SEARCH_INITIAL_VISIBLE);
@@ -1103,7 +1134,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     setLoading(true);
     setError(null);
 
-    listDirectory(rootPath, controller.signal, showHiddenFiles, 'load_file_tree_root', `file-tree-root:${rootPath}`)
+    listDirectory(rootPath, controller.signal, showHiddenFiles, 'load_file_tree_root', `file-tree-root:${rootPath}`, rootSortMode)
       .then((result) => {
         if (cancelled) return;
         const treeNodes = toTreeNodes(result.entries);
@@ -1123,7 +1154,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
       controller.abort();
       cancelIoSlot(`file-tree-root:${rootPath}`);
     };
-  }, [queryLower, rootEntries, rootPath, setDirectoryCache, showHiddenFiles]);
+  }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles]);
 
   useEffect(() => {
     if (!rootPath || !queryLower) {

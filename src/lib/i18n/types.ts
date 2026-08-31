@@ -237,6 +237,7 @@ export type TranslationDictionary = {
     downloadFailed: string;
     uploadFile: string;
     uploadFiles: string;
+    insertLocalFile: string;
     insertLocalImage: string;
     layoutMode: string;
     layoutModeAuto: string;
@@ -460,6 +461,9 @@ export type TranslationDictionary = {
     truncatedHint: string;
     dropToUploadHere: string;
     symbolicLink: string;
+    sortByModified: string;
+    sortByName: string;
+    sortedByModified: string;
   };
   diffViewer: {
     noFileChanges: string;

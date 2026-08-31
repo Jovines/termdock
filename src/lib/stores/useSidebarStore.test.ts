@@ -1,5 +1,18 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { getSettingsMock, updateSettingsMock } = vi.hoisted(() => ({
+  getSettingsMock: vi.fn(async () => ({ fileSortModes: {} })),
+  updateSettingsMock: vi.fn(async (settings: { fileSortModes?: Record<string, 'modified'>; fileSortMode?: { path: string; mode: 'name' | 'modified' } }) => ({
+    fileSortModes: settings.fileSortModes ?? (settings.fileSortMode?.mode === 'modified' ? { [settings.fileSortMode.path]: 'modified' } : {}),
+  })),
+}));
+
+vi.mock('../terminal/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../terminal/api')>()),
+  getSettings: getSettingsMock,
+  updateSettings: updateSettingsMock,
+}));
 import {
   clampPinnedRightSidebarWidth,
   readLeftPinnedPreference,
@@ -24,6 +37,8 @@ function resetSidebarStore(): void {
     expandedPaths: new Set(),
     selectedFilePath: null,
     directoryCache: new Map(),
+    fileSortModes: {},
+    fileSortModesHydrated: true,
     showHiddenFiles: false,
     changedFiles: new Map(),
     fileChangeVersions: new Map(),
@@ -41,6 +56,8 @@ describe('useSidebarStore right tab persistence', () => {
   beforeEach(() => {
     window.localStorage.clear();
     resetSidebarStore();
+    getSettingsMock.mockClear();
+    updateSettingsMock.mockClear();
   });
 
   afterEach(() => {
@@ -258,5 +275,78 @@ describe('useSidebarStore file watch epoch', () => {
     const state = useSidebarStore.getState();
     expect(state.fileWatchEpoch).toBe(0);
     expect(state.fileChangeVersions.get('/workspace/a/img.png')).toBe(1);
+  });
+});
+
+describe('useSidebarStore per-directory file sorting', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+    getSettingsMock.mockClear();
+    updateSettingsMock.mockClear();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  it('keeps recent sorting scoped to one directory and reorders watcher updates', async () => {
+    useSidebarStore.setState({
+      directoryCache: new Map([['/workspace/logs', [
+        { name: 'older.log', path: '/workspace/logs/older.log', type: 'file', modified: '2026-01-01T00:00:00.000Z' },
+      ]]]),
+    });
+    await useSidebarStore.getState().setDirectorySortMode('/workspace/logs', 'modified');
+    useSidebarStore.getState().setDirectoryCache('/workspace/logs', [
+      { name: 'older.log', path: '/workspace/logs/older.log', type: 'file', modified: '2026-01-01T00:00:00.000Z' },
+    ]);
+
+    useSidebarStore.getState().applyFileWatchEvents([{
+      type: 'created',
+      path: '/workspace/logs/newer.log',
+      entry: { name: 'newer.log', path: '/workspace/logs/newer.log', type: 'file', modified: '2026-08-31T00:00:00.000Z' },
+    }]);
+
+    expect(useSidebarStore.getState().directoryCache.get('/workspace/logs')?.map((entry) => entry.name)).toEqual([
+      'newer.log',
+      'older.log',
+    ]);
+    expect(useSidebarStore.getState().fileSortModes['/workspace']).toBeUndefined();
+    expect(updateSettingsMock).toHaveBeenCalledWith({
+      fileSortMode: { path: '/workspace/logs', mode: 'modified' },
+    });
+  });
+
+  it('hydrates the server preference as the source of truth', async () => {
+    getSettingsMock.mockResolvedValueOnce({ fileSortModes: { '/workspace/archive': 'modified' } });
+    useSidebarStore.setState({
+      fileSortModes: { '/workspace/local-only': 'modified' },
+      fileSortModesHydrated: false,
+      directoryCache: new Map([['/workspace', []]]),
+    });
+
+    await useSidebarStore.getState().hydrateFileSortModes();
+
+    expect(useSidebarStore.getState().fileSortModes).toEqual({ '/workspace/archive': 'modified' });
+    expect(useSidebarStore.getState().fileSortModesHydrated).toBe(true);
+    expect(useSidebarStore.getState().directoryCache.size).toBe(0);
+    expect(updateSettingsMock).not.toHaveBeenCalled();
+  });
+
+  it('migrates legacy local preferences when the server has none', async () => {
+    getSettingsMock.mockResolvedValueOnce({ fileSortModes: {} });
+    updateSettingsMock.mockResolvedValueOnce({ fileSortModes: { '/workspace/legacy': 'modified' } });
+    useSidebarStore.setState({
+      fileSortModes: { '/workspace/legacy': 'modified' },
+      fileSortModesHydrated: false,
+    });
+
+    await useSidebarStore.getState().hydrateFileSortModes();
+
+    expect(updateSettingsMock).toHaveBeenCalledWith({
+      fileSortModes: { '/workspace/legacy': 'modified' },
+    });
+    expect(useSidebarStore.getState().fileSortModes).toEqual({ '/workspace/legacy': 'modified' });
   });
 });

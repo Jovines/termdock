@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, ImagePlus, Loader2, Move, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, Clipboard, ClipboardPaste, CornerDownLeft as RiArrowGoBackLine, FileUp, Loader2, Move, X } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { vibrate as hapticVibrate } from 'browser-haptic';
 import { splitButtonsIntoRows, type MobileToolbarAction, type ToolbarPresetMode, type ToolbarPresetOption } from './mobileKeyboardPresets';
@@ -60,8 +60,9 @@ interface MobileKeyboardProps {
   onKeyPress: (key: MobileKey) => void;
   onTextPress: (sequence: string) => void;
   onPastePress?: () => void;
-  onImagePress?: () => void;
-  imageUploadState?: 'idle' | 'uploading' | 'inserted' | 'failed';
+  onFilePress?: () => void;
+  fileUploadState?: 'idle' | 'uploading' | 'inserted' | 'failed';
+  fileUploadProgress?: number;
   longPressMode?: 'arrows' | 'copy';
   copyFeedback?: 'idle' | 'copied' | 'failed';
   onLongPressModeToggle?: () => void;
@@ -88,8 +89,9 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
   onKeyPress,
   onTextPress,
   onPastePress,
-  onImagePress,
-  imageUploadState = 'idle',
+  onFilePress,
+  fileUploadState = 'idle',
+  fileUploadProgress = 0,
   longPressMode = 'arrows',
   copyFeedback = 'idle',
   onLongPressModeToggle,
@@ -349,12 +351,12 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
     [toolbarDisabled, triggerPastePress],
   );
 
-  const handleImageClick = React.useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
-    if (toolbarDisabled || imageUploadState === 'uploading' || !onImagePress) return;
+  const handleFileClick = React.useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    if (toolbarDisabled || fileUploadState === 'uploading' || !onFilePress) return;
     event.preventDefault();
     event.stopPropagation();
-    onImagePress();
-  }, [imageUploadState, onImagePress, toolbarDisabled]);
+    onFilePress();
+  }, [fileUploadState, onFilePress, toolbarDisabled]);
 
   const stopToolbarButtonBubble = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement> | React.TouchEvent<HTMLButtonElement>) => {
@@ -548,7 +550,7 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
 
           10 列网格贴底全宽,原有按钮保持原位:
           - 高频键靠右放;展开键固定最右一列,不要动;
-          - 本地图片按钮新增在 C-U 后面,不挪动原有按钮的相对顺序。
+          - 本地文件按钮放在 C-U 后面,不挪动原有按钮的相对顺序。
         */
         <div data-mobile-keyboard-primary-row="true" className="grid grid-cols-10 gap-1">
         <button
@@ -598,39 +600,49 @@ export const MobileKeyboard: React.FC<MobileKeyboardProps> = ({
           data-mobile-native-action="true"
           onPointerDown={stopToolbarButtonBubble}
           onTouchStart={stopToolbarButtonBubble}
-          onClick={handleImageClick}
+          onClick={handleFileClick}
           tabIndex={-1}
-          disabled={buttonDisabled || !onImagePress || imageUploadState === 'uploading'}
-          title={imageUploadState === 'uploading'
-            ? t('rightSidebar.uploading')
-            : imageUploadState === 'inserted'
+          disabled={buttonDisabled || !onFilePress || fileUploadState === 'uploading'}
+          title={fileUploadState === 'uploading'
+            ? `${t('rightSidebar.uploading')} ${Math.round(fileUploadProgress)}%`
+            : fileUploadState === 'inserted'
               ? t('rightSidebar.inserted')
-              : imageUploadState === 'failed'
+              : fileUploadState === 'failed'
                 ? t('rightSidebar.uploadFailed')
-                : t('rightSidebar.insertLocalImage')}
-          aria-label={t('rightSidebar.insertLocalImage')}
-          className={`h-7 w-full rounded-full shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center ${
-            imageUploadState === 'inserted'
+                : t('rightSidebar.insertLocalFile')}
+          aria-label={t('rightSidebar.insertLocalFile')}
+          className={`relative h-7 w-full overflow-hidden rounded-full shadow-sm active:bg-accent active:text-accent-foreground transition-all keyboard-button-active disabled:opacity-50 flex items-center justify-center ${
+            fileUploadState === 'inserted'
               ? 'bg-primary/15 text-primary'
-              : imageUploadState === 'failed'
+              : fileUploadState === 'failed'
                 ? 'bg-destructive/15 text-destructive'
                 : 'bg-surface-2'
           }`}
         >
-          {imageUploadState === 'uploading' ? (
-            <Loader2 size={15} className="animate-spin" />
-          ) : imageUploadState === 'inserted' ? (
-            <Check size={15} />
-          ) : imageUploadState === 'failed' ? (
-            <X size={15} />
-          ) : (
-            <ImagePlus size={15} />
+          {fileUploadState === 'uploading' && (
+            <span
+              aria-hidden="true"
+              data-file-upload-progress="true"
+              className="absolute inset-y-0 left-0 bg-primary/25 transition-[width] duration-150 ease-out"
+              style={{ width: `${Math.max(0, Math.min(100, fileUploadProgress))}%` }}
+            />
           )}
-          {imageUploadState !== 'idle' && (
+          <span className="relative z-10 flex items-center justify-center">
+            {fileUploadState === 'uploading' ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : fileUploadState === 'inserted' ? (
+              <Check size={15} />
+            ) : fileUploadState === 'failed' ? (
+              <X size={15} />
+            ) : (
+              <FileUp size={15} />
+            )}
+          </span>
+          {fileUploadState !== 'idle' && (
             <span className="sr-only" role="status" aria-live="polite">
-              {imageUploadState === 'uploading'
-                ? t('rightSidebar.uploading')
-                : imageUploadState === 'inserted'
+              {fileUploadState === 'uploading'
+                ? `${t('rightSidebar.uploading')} ${Math.round(fileUploadProgress)}%`
+                : fileUploadState === 'inserted'
                   ? t('rightSidebar.inserted')
                   : t('rightSidebar.uploadFailed')}
             </span>

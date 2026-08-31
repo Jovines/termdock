@@ -41,6 +41,8 @@ export interface SettingsDoc {
   newSessionAgentSlug: string | null;
   /** Show the floating shortcut used to cycle through running agent sessions. */
   runningSessionButtonEnabled: boolean;
+  /** Explorer folders whose direct children are sorted by modification time. */
+  fileSortModes: Record<string, 'modified'>;
   updatedAt: number;
 }
 
@@ -102,6 +104,18 @@ export function normalizeNewSessionAgentSlug(value: unknown): string | null {
   return /^[a-z][a-z0-9-]{0,39}$/.test(slug) ? slug : null;
 }
 
+export function normalizeFileSortModes(value: unknown): Record<string, 'modified'> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([filePath, mode]) => (
+      mode === 'modified'
+      && filePath.length > 0
+      && filePath.length <= 4096
+      && (filePath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(filePath))
+    ))
+    .slice(-500)) as Record<string, 'modified'>;
+}
+
 function normalizeSettings(value: unknown): SettingsDoc {
   const raw = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -150,6 +164,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
       : 12_000,
     newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
     runningSessionButtonEnabled: raw.runningSessionButtonEnabled === true,
+    fileSortModes: normalizeFileSortModes(raw.fileSortModes),
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -497,5 +512,24 @@ export function getRunningSessionButtonEnabledSetting(): boolean {
 export function setRunningSessionButtonEnabledSetting(enabled: boolean): SettingsDoc {
   return updateSettings((settings) => {
     settings.runningSessionButtonEnabled = enabled;
+  });
+}
+
+export function getFileSortModesSetting(): Record<string, 'modified'> {
+  return { ...loadSettings().fileSortModes };
+}
+
+export function setFileSortModesSetting(modes: Record<string, unknown>): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.fileSortModes = normalizeFileSortModes(modes);
+  });
+}
+
+export function setFileSortModeSetting(filePath: string, mode: 'name' | 'modified'): SettingsDoc {
+  return updateSettings((settings) => {
+    const next = { ...settings.fileSortModes };
+    if (mode === 'modified') next[filePath] = mode;
+    else delete next[filePath];
+    settings.fileSortModes = normalizeFileSortModes(next);
   });
 }

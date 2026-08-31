@@ -1,6 +1,6 @@
 import { create } from 'zustand';
-import type { FileWatchEvent, GitChangedFile } from '../terminal/api';
-import { readCache, writeCache } from '../utils/localStorageCache';
+import { getSettings, updateSettings, type FileSortMode, type FileWatchEvent, type GitChangedFile } from '../terminal/api';
+import { clearCache, readCache, writeCache } from '../utils/localStorageCache';
 
 export type RightSidebarTab = 'git' | 'files' | 'diff';
 export type RightSidebarLayoutPreference = 'auto' | 'narrow' | 'wide';
@@ -30,6 +30,7 @@ const EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:explorer-roots-by-sessi
 const PINNED_EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:pinned-explorer-roots:v1';
 const SELECTED_FILE_PATHS_CACHE_KEY = 'termdock:right-sidebar:selected-files-by-session:v2';
 const SHOW_HIDDEN_FILES_CACHE_KEY = 'termdock:right-sidebar:show-hidden-files:v1';
+const FILE_SORT_MODES_CACHE_KEY = 'termdock:right-sidebar:file-sort-modes:v1';
 // 分组开关 / 折叠状态：复用 LeftSidebar 旧 localStorage key 以保留用户已有偏好。
 // 旧编码是裸 localStorage（'1' 与 JSON 数组），与 readCache 包装格式不兼容，
 // 因此这里用专用 reader/writer 沿用旧格式。
@@ -305,11 +306,24 @@ function getInitialShowHiddenFiles(): boolean {
   return readCache(SHOW_HIDDEN_FILES_CACHE_KEY, isBoolean) ?? false;
 }
 
+function isFileSortModes(value: unknown): value is Record<string, FileSortMode> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((mode) => mode === 'modified');
+}
+
+function getInitialFileSortModes(): Record<string, FileSortMode> {
+  return readCache(FILE_SORT_MODES_CACHE_KEY, isFileSortModes) ?? {};
+}
+
+let fileSortModesHydration: Promise<void> | null = null;
+const fileSortModeSaveSequences = new Map<string, number>();
+
 export interface FileTreeNode {
   name: string;
   path: string;
   type: 'file' | 'directory' | 'symlink';
   isSymlink?: boolean;
+  modified?: string;
   expanded?: boolean;
   loaded?: boolean;
   children?: FileTreeNode[];
@@ -326,10 +340,14 @@ function isSameOrChildPath(parent: string, child: string): boolean {
   return child === normalizedParent || child.startsWith(`${normalizedParent}/`);
 }
 
-function sortFileTreeNodes(nodes: FileTreeNode[]): FileTreeNode[] {
+function sortFileTreeNodes(nodes: FileTreeNode[], sortMode: FileSortMode = 'name'): FileTreeNode[] {
   return [...nodes].sort((a, b) => {
     if (a.type === 'directory' && b.type !== 'directory') return -1;
     if (a.type !== 'directory' && b.type === 'directory') return 1;
+    if (sortMode === 'modified') {
+      const modifiedDelta = Date.parse(b.modified ?? '') - Date.parse(a.modified ?? '');
+      if (Number.isFinite(modifiedDelta) && modifiedDelta !== 0) return modifiedDelta;
+    }
     return a.name.localeCompare(b.name);
   });
 }
@@ -341,6 +359,7 @@ function toFileTreeNode(event: FileWatchEvent): FileTreeNode | null {
     path: event.entry.path,
     type: event.entry.type,
     isSymlink: event.entry.isSymlink,
+    modified: event.entry.modified,
     expanded: false,
     loaded: false,
     children: event.entry.type === 'directory' ? [] : undefined,
@@ -375,6 +394,8 @@ interface SidebarState {
   expandedPaths: Set<string>;
   selectedFilePath: string | null;
   directoryCache: Map<string, FileTreeNode[]>;
+  fileSortModes: Record<string, FileSortMode>;
+  fileSortModesHydrated: boolean;
 
   // Whether dotfiles / hidden entries are shown in the file explorer.
   showHiddenFiles: boolean;
@@ -435,6 +456,8 @@ interface SidebarState {
   setGroupByFolder: (enabled: boolean) => void;
   toggleGroupCollapsed: (key: string) => void;
   setDirectoryCache: (path: string, entries: FileTreeNode[]) => void;
+  hydrateFileSortModes: () => Promise<void>;
+  setDirectorySortMode: (path: string, mode: FileSortMode) => Promise<void>;
   invalidateDirectoryCache: (path: string, recursive?: boolean) => void;
   applyFileWatchEvents: (events: FileWatchEvent[]) => void;
   bumpFileWatchEpoch: () => void;
@@ -463,6 +486,8 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   expandedPaths: new Set(),
   selectedFilePath: null,
   directoryCache: new Map(),
+  fileSortModes: getInitialFileSortModes(),
+  fileSortModesHydrated: false,
   showHiddenFiles: getInitialShowHiddenFiles(),
   groupByFolder: readGroupByFolder(),
   collapsedGroups: readCollapsedGroups(),
@@ -675,6 +700,63 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       return { directoryCache: next };
     }),
 
+  hydrateFileSortModes: async () => {
+    if (useSidebarStore.getState().fileSortModesHydrated) return;
+    if (fileSortModesHydration) return fileSortModesHydration;
+    fileSortModesHydration = (async () => {
+      const localModes = useSidebarStore.getState().fileSortModes;
+      const settings = await getSettings();
+      let serverModes: Record<string, FileSortMode> = settings.fileSortModes ?? {};
+      if (Object.keys(serverModes).length === 0 && Object.keys(localModes).length > 0) {
+        const migrated = await updateSettings({ fileSortModes: localModes });
+        serverModes = migrated.fileSortModes ?? localModes;
+      }
+      clearCache(FILE_SORT_MODES_CACHE_KEY);
+      set({
+        fileSortModes: serverModes,
+        fileSortModesHydrated: true,
+        directoryCache: new Map(),
+      });
+    })().finally(() => {
+      fileSortModesHydration = null;
+    });
+    return fileSortModesHydration;
+  },
+
+  setDirectorySortMode: async (path, mode) => {
+    try {
+      await useSidebarStore.getState().hydrateFileSortModes();
+    } catch {
+      // A settings read failure should not make the local explorer unusable;
+      // the write below still gets a chance to persist the explicit choice.
+    }
+    const previousMode = useSidebarStore.getState().fileSortModes[path] ?? 'name';
+    const sequence = (fileSortModeSaveSequences.get(path) ?? 0) + 1;
+    fileSortModeSaveSequences.set(path, sequence);
+    set((s) => {
+      const fileSortModes = { ...s.fileSortModes };
+      if (mode === 'modified') fileSortModes[path] = mode;
+      else delete fileSortModes[path];
+      const directoryCache = new Map(s.directoryCache);
+      directoryCache.delete(path);
+      return { fileSortModes, fileSortModesHydrated: true, directoryCache };
+    });
+    try {
+      await updateSettings({ fileSortMode: { path, mode } });
+      clearCache(FILE_SORT_MODES_CACHE_KEY);
+    } catch {
+      if (fileSortModeSaveSequences.get(path) !== sequence) return;
+      set((s) => {
+        const fileSortModes = { ...s.fileSortModes };
+        if (previousMode === 'modified') fileSortModes[path] = previousMode;
+        else delete fileSortModes[path];
+        const directoryCache = new Map(s.directoryCache);
+        directoryCache.delete(path);
+        return { fileSortModes, directoryCache };
+      });
+    }
+  },
+
   invalidateDirectoryCache: (path, recursive = false) =>
     set((s) => {
       const next = new Map(s.directoryCache);
@@ -751,7 +833,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
         const existing = siblings.find((entry) => entry.path === node.path);
         const nextSiblings = sortFileTreeNodes(existing
           ? siblings.map((entry) => entry.path === node.path ? { ...entry, ...node, children: entry.children } : entry)
-          : [...siblings, node]);
+          : [...siblings, node], s.fileSortModes[parent] ?? 'name');
         directoryCache.set(parent, nextSiblings);
         changed = true;
       }

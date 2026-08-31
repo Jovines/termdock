@@ -36,7 +36,7 @@ import {
   isTransientBackendSessionMiss,
 } from '../../terminal/sessionRecovery';
 import { buildReferenceInputText } from '../sidebar/referencePaths';
-import { uploadTemporaryImageAndInsertReference } from '../sidebar/temporaryImageUpload';
+import { uploadTemporaryFileAndInsertReference } from '../sidebar/temporaryImageUpload';
 
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
@@ -179,7 +179,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return window.localStorage.getItem(MOBILE_LONG_PRESS_MODE_STORAGE_KEY) === 'copy' ? 'copy' : 'arrows';
   });
   const [mobileCopyFeedback, setMobileCopyFeedback] = React.useState<'idle' | 'copied' | 'failed'>('idle');
-  const [mobileImageUploadState, setMobileImageUploadState] = React.useState<'idle' | 'uploading' | 'inserted' | 'failed'>('idle');
+  const [mobileFileUploadState, setMobileFileUploadState] = React.useState<'idle' | 'uploading' | 'inserted' | 'failed'>('idle');
+  const [mobileFileUploadProgress, setMobileFileUploadProgress] = React.useState(0);
 
   const terminalState = useTerminalStore((state) => state.sessions.get(sessionId));
   const {
@@ -253,8 +254,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const pendingShellTitleRef = React.useRef<{ sessionId: string; title: string | null } | null>(null);
   const shellTitleRafRef = React.useRef<number | null>(null);
   const mobileCopyFeedbackTimerRef = React.useRef<number | null>(null);
-  const mobileImageFeedbackTimerRef = React.useRef<number | null>(null);
-  const mobileImageInputRef = React.useRef<HTMLInputElement | null>(null);
+  const mobileFileFeedbackTimerRef = React.useRef<number | null>(null);
+  const mobileFileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const flushPendingShellTitle = React.useCallback(() => {
     shellTitleRafRef.current = null;
@@ -425,10 +426,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         window.clearTimeout(mobileCopyFeedbackTimerRef.current);
       }
       mobileCopyFeedbackTimerRef.current = null;
-      if (mobileImageFeedbackTimerRef.current !== null && typeof window !== 'undefined') {
-        window.clearTimeout(mobileImageFeedbackTimerRef.current);
+      if (mobileFileFeedbackTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(mobileFileFeedbackTimerRef.current);
       }
-      mobileImageFeedbackTimerRef.current = null;
+      mobileFileFeedbackTimerRef.current = null;
     };
   }, []);
 
@@ -1957,31 +1958,35 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     void terminalControllerRef.current?.pasteClipboardText();
   }, []);
 
-  const showMobileImageUploadState = React.useCallback((state: 'idle' | 'uploading' | 'inserted' | 'failed') => {
-    if (mobileImageFeedbackTimerRef.current !== null) {
-      window.clearTimeout(mobileImageFeedbackTimerRef.current);
-      mobileImageFeedbackTimerRef.current = null;
+  const showMobileFileUploadState = React.useCallback((state: 'idle' | 'uploading' | 'inserted' | 'failed') => {
+    if (mobileFileFeedbackTimerRef.current !== null) {
+      window.clearTimeout(mobileFileFeedbackTimerRef.current);
+      mobileFileFeedbackTimerRef.current = null;
     }
-    setMobileImageUploadState(state);
+    setMobileFileUploadState(state);
     if (state === 'inserted' || state === 'failed') {
-      mobileImageFeedbackTimerRef.current = window.setTimeout(() => {
-        mobileImageFeedbackTimerRef.current = null;
-        setMobileImageUploadState('idle');
+      mobileFileFeedbackTimerRef.current = window.setTimeout(() => {
+        mobileFileFeedbackTimerRef.current = null;
+        setMobileFileUploadState('idle');
       }, 1400);
     }
   }, []);
 
-  const handleMobileImagePress = React.useCallback(() => {
-    showMobileImageUploadState('idle');
-    mobileImageInputRef.current?.click();
-  }, [showMobileImageUploadState]);
+  const handleMobileFilePress = React.useCallback(() => {
+    showMobileFileUploadState('idle');
+    setMobileFileUploadProgress(0);
+    mobileFileInputRef.current?.click();
+  }, [showMobileFileUploadState]);
 
-  const handleMobileImageChange = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const image = event.currentTarget.files?.[0];
+  const handleMobileFileChange = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
-    if (!image) return;
-    showMobileImageUploadState('uploading');
-    void uploadTemporaryImageAndInsertReference(image, uploadFiles, (uploadedPath) => {
+    if (!file) return;
+    setMobileFileUploadProgress(0);
+    showMobileFileUploadState('uploading');
+    void uploadTemporaryFileAndInsertReference(file, (directory, files) => (
+      uploadFiles(directory, files, undefined, setMobileFileUploadProgress)
+    ), (uploadedPath) => {
       if (!isActiveRef.current || isConnectionTransitionRef.current) {
         throw new Error('Terminal unavailable');
       }
@@ -1989,10 +1994,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         detail: { text: buildReferenceInputText(uploadedPath, null), focus: true },
       }));
     }).then(
-      () => showMobileImageUploadState('inserted'),
-      () => showMobileImageUploadState('failed'),
+      () => showMobileFileUploadState('inserted'),
+      () => showMobileFileUploadState('failed'),
     );
-  }, [showMobileImageUploadState]);
+  }, [showMobileFileUploadState]);
 
   // 重连抖动修复：auto-recreate / 短线重连过渡期 activeProgram 会被清成 null
   // （clearTerminalSession），随后 connected 事件再写回。若直接用它推导 preset，
@@ -2166,8 +2171,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       onKeyPress={handleMobileKeyPress}
       onTextPress={handleToolbarTextPress}
       onPastePress={isMobile ? handleMobilePastePress : undefined}
-      onImagePress={isMobile ? handleMobileImagePress : undefined}
-      imageUploadState={mobileImageUploadState}
+      onFilePress={isMobile ? handleMobileFilePress : undefined}
+      fileUploadState={mobileFileUploadState}
+      fileUploadProgress={mobileFileUploadProgress}
       longPressMode={mobileLongPressMode}
       copyFeedback={mobileCopyFeedback}
       onLongPressModeToggle={handleLongPressModeToggle}
@@ -2182,11 +2188,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden" style={wrapperStyle}>
       <input
-        ref={mobileImageInputRef}
+        ref={mobileFileInputRef}
         type="file"
-        accept="image/*"
         className="hidden"
-        onChange={handleMobileImageChange}
+        onChange={handleMobileFileChange}
       />
       {showDebug && (
         <DebugPanel

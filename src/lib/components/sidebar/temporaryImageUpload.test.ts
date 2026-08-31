@@ -1,23 +1,26 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 import {
-  TEMPORARY_IMAGE_UPLOAD_DIRECTORY,
-  uploadTemporaryImageAndInsertReference,
+  TEMPORARY_FILE_UPLOAD_DIRECTORY,
+  uploadTemporaryFileAndInsertReference,
 } from './temporaryImageUpload';
 
-describe('temporary image upload', () => {
-  it('uploads one selected image to /tmp and inserts the returned unique path', async () => {
-    const image = new File(['image-bytes'], '手机截图.png', { type: 'image/png' });
+describe('temporary file upload', () => {
+  it.each([
+    ['image', new File(['image-bytes'], '手机截图.png', { type: 'image/png' })],
+    ['video', new File(['video-bytes'], '现场视频.mov', { type: 'video/quicktime' })],
+    ['document', new File(['document-bytes'], '需求说明.pdf', { type: 'application/pdf' })],
+  ])('uploads one selected %s to /tmp and inserts the returned unique path', async (_kind, file) => {
     const upload = vi.fn().mockResolvedValue({
-      files: [{ name: '手机截图.png', path: '/tmp/手机截图_1.png', size: 11 }],
+      files: [{ name: file.name, path: `/tmp/${file.name}`, size: file.size }],
     });
     const insertReference = vi.fn();
 
-    const uploaded = await uploadTemporaryImageAndInsertReference(image, upload, insertReference);
+    const uploaded = await uploadTemporaryFileAndInsertReference(file, upload, insertReference);
 
-    expect(upload).toHaveBeenCalledWith(TEMPORARY_IMAGE_UPLOAD_DIRECTORY, [image]);
-    expect(insertReference).toHaveBeenCalledWith('/tmp/手机截图_1.png');
-    expect(uploaded.path).toBe('/tmp/手机截图_1.png');
+    expect(upload).toHaveBeenCalledWith(TEMPORARY_FILE_UPLOAD_DIRECTORY, [file]);
+    expect(insertReference).toHaveBeenCalledWith(`/tmp/${file.name}`);
+    expect(uploaded.path).toBe(`/tmp/${file.name}`);
     expect(upload.mock.invocationCallOrder[0]).toBeLessThan(insertReference.mock.invocationCallOrder[0]);
   });
 
@@ -26,7 +29,7 @@ describe('temporary image upload', () => {
     const upload = vi.fn().mockResolvedValue({ files: [] });
     const insertReference = vi.fn();
 
-    await expect(uploadTemporaryImageAndInsertReference(image, upload, insertReference))
+    await expect(uploadTemporaryFileAndInsertReference(image, upload, insertReference))
       .rejects.toThrow('Upload did not return a file path');
     expect(insertReference).not.toHaveBeenCalled();
   });

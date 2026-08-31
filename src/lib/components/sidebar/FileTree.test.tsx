@@ -9,13 +9,21 @@ import { FileTree } from './FileTree';
 
 const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
 
-const { deleteFileMock } = vi.hoisted(() => ({
+const { deleteFileMock, getSettingsMock, listDirectoryMock, updateSettingsMock } = vi.hoisted(() => ({
   deleteFileMock: vi.fn(async () => undefined),
+  getSettingsMock: vi.fn(async () => ({ fileSortModes: {} })),
+  listDirectoryMock: vi.fn(async () => ({ path: '/workspace/project', entries: [] })),
+  updateSettingsMock: vi.fn(async (settings: { fileSortMode?: { path: string; mode: 'name' | 'modified' } }) => ({
+    fileSortModes: settings.fileSortMode?.mode === 'modified' ? { [settings.fileSortMode.path]: 'modified' } : {},
+  })),
 }));
 
 vi.mock('../../terminal/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../terminal/api')>()),
   deleteFile: deleteFileMock,
+  getSettings: getSettingsMock,
+  listDirectory: listDirectoryMock,
+  updateSettings: updateSettingsMock,
 }));
 
 describe('FileTree file deletion', () => {
@@ -24,6 +32,8 @@ describe('FileTree file deletion', () => {
       rootPath: '/workspace',
       selectedFilePath: '/workspace/notes.txt',
       expandedPaths: new Set(),
+      fileSortModes: {},
+      fileSortModesHydrated: true,
       directoryCache: new Map([['/workspace', [{
         name: 'notes.txt',
         path: '/workspace/notes.txt',
@@ -43,6 +53,9 @@ describe('FileTree file deletion', () => {
     if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView);
     else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     deleteFileMock.mockClear();
+    listDirectoryMock.mockClear();
+    getSettingsMock.mockClear();
+    updateSettingsMock.mockClear();
     vi.unstubAllGlobals();
   });
 
@@ -169,5 +182,46 @@ describe('FileTree file deletion', () => {
     const menu = screen.getByRole('button', { name: 'Pin' }).parentElement;
     expect(menu?.parentElement).toBe(directoryRow.parentElement);
     expect(directoryRow.parentElement?.contains(childRow)).toBe(false);
+  });
+
+  it('applies recent-change sorting only to the selected directory', async () => {
+    const user = userEvent.setup();
+    useSidebarStore.setState({
+      selectedFilePath: null,
+      expandedPaths: new Set(['/workspace/project']),
+      fileSortModes: {},
+      directoryCache: new Map([
+        ['/workspace', [{ name: 'project', path: '/workspace/project', type: 'directory', expanded: true, loaded: true, children: [] }]],
+        ['/workspace/project', [{ name: 'archive.md', path: '/workspace/project/archive.md', type: 'file', expanded: false, loaded: true }]],
+      ]),
+    });
+
+    render(
+      <I18nProvider>
+        <FileTree
+          rootPath="/workspace"
+          selectedFilePath={null}
+          onFileSelect={vi.fn()}
+          onDirectoryPinToggle={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+
+    await user.click(screen.getByTitle('More folder actions'));
+    await user.click(screen.getByRole('button', { name: 'Sort by recent changes' }));
+
+    await waitFor(() => expect(useSidebarStore.getState().fileSortModes).toEqual({ '/workspace/project': 'modified' }));
+    expect(screen.getByLabelText('Sorted by recent changes')).toBeTruthy();
+    expect(updateSettingsMock).toHaveBeenCalledWith({
+      fileSortMode: { path: '/workspace/project', mode: 'modified' },
+    });
+    await waitFor(() => expect(listDirectoryMock).toHaveBeenCalledWith(
+      '/workspace/project',
+      expect.any(AbortSignal),
+      false,
+      'expand_directory',
+      'file-tree:/workspace/project',
+      'modified',
+    ));
   });
 });

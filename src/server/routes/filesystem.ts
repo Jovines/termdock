@@ -19,6 +19,15 @@ import { deleteFilesystemFile } from '../utils/deleteFilesystemFile.js';
 import { inspectKicadBoardPoint } from '../utils/kicadBoardInspection.js';
 import { EdaPreviewCache, requestAcceptsEtag } from '../utils/edaPreviewCache.js';
 import { convertHeicPreview, HEIC_PREVIEW_MIME_TYPES, isHeicPreviewPath } from '../utils/heicPreview.js';
+import {
+  getWatchErrorCode,
+  enqueueLatestWatchEvent,
+  inspectLinuxInotifyUsage,
+  isWatchResourceExhaustion,
+  minimizeRecursiveWatchRoots,
+  WATCH_IGNORED_NAMES,
+  WATCH_RESOURCE_BACKOFF_MS,
+} from '../utils/fileWatchPolicy.js';
 
 const router = Router();
 
@@ -74,6 +83,7 @@ const activeIoSlots = new Map<string, { controller: AbortController; requestId: 
 interface SharedWatchClient {
   closed: boolean;
   enqueue: (event: FileWatchEvent) => void;
+  degrade: (reason: string) => void;
 }
 interface SharedWatchEntry {
   refs: number;
@@ -82,9 +92,80 @@ interface SharedWatchEntry {
   clients: Set<SharedWatchClient>;
   inFlight: Promise<watcher.AsyncSubscription | null> | null;
   evictTimer: ReturnType<typeof setTimeout> | null;
+  pendingEvents: Map<string, watcher.Event['type']>;
+  statWorkers: number;
+  eventGeneration: number;
+  needsRescanOnAttach: boolean;
 }
 const sharedWatchRegistry = new Map<string, SharedWatchEntry>();
-const SHARED_WATCH_EVICT_DELAY_MS = 60_000;
+const SHARED_WATCH_EVICT_DELAY_MS = 5_000;
+const WATCH_STAT_CONCURRENCY = 8;
+let watchAdmissionBlockedUntil = 0;
+
+function countActiveSharedWatches(): number {
+  let count = 0;
+  for (const entry of sharedWatchRegistry.values()) {
+    if (entry.subscription || entry.inFlight) count += 1;
+  }
+  return count;
+}
+
+function broadcastSharedWatchEvent(entry: SharedWatchEntry, event: FileWatchEvent): void {
+  for (const client of entry.clients) {
+    if (!client.closed) client.enqueue(event);
+  }
+}
+
+function drainSharedWatchEvents(entry: SharedWatchEntry): void {
+  if (entry.failure || entry.clients.size === 0) return;
+  while (entry.statWorkers < WATCH_STAT_CONCURRENCY && entry.pendingEvents.size > 0) {
+    const next = entry.pendingEvents.entries().next().value as [string, watcher.Event['type']] | undefined;
+    if (!next) return;
+    const [changedPath, eventType] = next;
+    entry.pendingEvents.delete(changedPath);
+    if (eventType === 'delete') {
+      broadcastSharedWatchEvent(entry, { type: 'deleted', path: changedPath });
+      continue;
+    }
+
+    const generation = entry.eventGeneration;
+    entry.statWorkers += 1;
+    void fs.promises.lstat(changedPath)
+      .then((stat) => {
+        if (entry.failure || generation !== entry.eventGeneration) return;
+        broadcastSharedWatchEvent(entry, {
+          type: eventType === 'create' ? 'created' : 'updated',
+          path: changedPath,
+          entry: toFileEntry(changedPath, stat),
+        });
+      })
+      .catch(() => {
+        if (entry.failure || generation !== entry.eventGeneration) return;
+        broadcastSharedWatchEvent(entry, { type: 'deleted', path: changedPath });
+      })
+      .finally(() => {
+        entry.statWorkers -= 1;
+        drainSharedWatchEvents(entry);
+      });
+  }
+}
+
+function enqueueSharedNativeEvents(rootPath: string, entry: SharedWatchEntry, events: watcher.Event[]): void {
+  if (entry.clients.size === 0) return;
+  for (const event of events) {
+    const changedPath = path.resolve(event.path);
+    if (!isPathInside(rootPath, changedPath) || isIgnoredWatchPath(rootPath, changedPath)) continue;
+    if (enqueueLatestWatchEvent(entry.pendingEvents, changedPath, event.type, WATCH_EVENT_STORM_LIMIT) === 'overflow') {
+      entry.pendingEvents.clear();
+      entry.eventGeneration += 1;
+      broadcastSharedWatchEvent(entry, { type: 'rescan-required', path: rootPath, reason: 'event-storm' });
+      return;
+    }
+    // The latest event for one path wins. This turns save bursts and atomic
+    // editor renames into one stat operation instead of one operation/event.
+  }
+  drainSharedWatchEvents(entry);
+}
 
 function sharedWatchCallback(rootPath: string, entry: SharedWatchEntry): (error: Error | null, events: watcher.Event[]) => void {
   return (error, events) => {
@@ -92,37 +173,32 @@ function sharedWatchCallback(rootPath: string, entry: SharedWatchEntry): (error:
     if (error) {
       entry.failure = error.message || 'watch-error';
       const reason = entry.failure;
-      for (const client of entry.clients) {
-        if (!client.closed) client.enqueue({ type: 'rescan-required', path: rootPath, reason });
+      entry.pendingEvents.clear();
+      entry.eventGeneration += 1;
+      const resourceExhausted = isWatchResourceExhaustion(error);
+      if (resourceExhausted) watchAdmissionBlockedUntil = Date.now() + WATCH_RESOURCE_BACKOFF_MS;
+      console.warn('[file-watch] Native subscription callback failed; degrading to manual refresh', {
+        rootPath,
+        code: getWatchErrorCode(error),
+        activeSubscriptions: countActiveSharedWatches(),
+        registrySize: sharedWatchRegistry.size,
+        resourceBackoffMs: resourceExhausted ? WATCH_RESOURCE_BACKOFF_MS : 0,
+        error: reason,
+      });
+      const failedSubscription = entry.subscription;
+      entry.subscription = null;
+      void failedSubscription?.unsubscribe().catch(() => undefined);
+      if (resourceExhausted) {
+        void inspectLinuxInotifyUsage().then((diagnostics) => {
+          if (diagnostics) console.warn('[file-watch] Linux inotify usage after callback failure', diagnostics);
+        }).catch(() => undefined);
+      }
+      for (const client of [...entry.clients]) {
+        if (!client.closed) client.degrade(reason);
       }
       return;
     }
-    for (const event of events) {
-      const changedPath = path.resolve(event.path);
-      if (!isPathInside(rootPath, changedPath) || isIgnoredWatchPath(rootPath, changedPath)) continue;
-      if (event.type === 'delete') {
-        for (const client of entry.clients) {
-          if (!client.closed) client.enqueue({ type: 'deleted', path: changedPath });
-        }
-        continue;
-      }
-      fs.promises.lstat(changedPath)
-        .then((stat) => {
-          const payload: FileWatchEvent = {
-            type: event.type === 'create' ? 'created' : 'updated',
-            path: changedPath,
-            entry: toFileEntry(changedPath, stat),
-          };
-          for (const client of entry.clients) {
-            if (!client.closed) client.enqueue(payload);
-          }
-        })
-        .catch(() => {
-          for (const client of entry.clients) {
-            if (!client.closed) client.enqueue({ type: 'deleted', path: changedPath });
-          }
-        });
-    }
+    enqueueSharedNativeEvents(rootPath, entry, events);
   };
 }
 
@@ -136,6 +212,10 @@ async function acquireSharedWatch(rootPath: string, client: SharedWatchClient): 
       clients: new Set(),
       inFlight: null,
       evictTimer: null,
+      pendingEvents: new Map(),
+      statWorkers: 0,
+      eventGeneration: 0,
+      needsRescanOnAttach: false,
     };
     sharedWatchRegistry.set(rootPath, entry);
   }
@@ -145,9 +225,30 @@ async function acquireSharedWatch(rootPath: string, client: SharedWatchClient): 
   }
   entry.refs += 1;
   entry.clients.add(client);
+  if (entry.needsRescanOnAttach) {
+    entry.needsRescanOnAttach = false;
+    client.enqueue({ type: 'rescan-required', path: rootPath, reason: 'reconnected' });
+  }
   if (entry.failure) return null;
   if (entry.subscription) return rootPath;
   if (!entry.inFlight) {
+    const now = Date.now();
+    const activeSubscriptions = countActiveSharedWatches();
+    if (now < watchAdmissionBlockedUntil) {
+      entry.failure = `native watcher admission paused for ${Math.ceil((watchAdmissionBlockedUntil - now) / 1000)}s after resource exhaustion`;
+      console.warn('[file-watch] Subscription skipped while resource backoff is active', {
+        rootPath,
+        activeSubscriptions,
+        registrySize: sharedWatchRegistry.size,
+      });
+      return null;
+    }
+    const startedAt = Date.now();
+    console.info('[file-watch] Starting native subscription', {
+      rootPath,
+      activeSubscriptions: activeSubscriptions + 1,
+      registrySize: sharedWatchRegistry.size,
+    });
     entry.inFlight = watcher.subscribe(rootPath, sharedWatchCallback(rootPath, entry), {
       ignore: Array.from(WATCH_IGNORED_NAMES).map((name) => `**/${name}/**`),
     })
@@ -160,11 +261,33 @@ async function acquireSharedWatch(rootPath: string, client: SharedWatchClient): 
           return null;
         }
         current.subscription = subscription;
+        console.info('[file-watch] Native subscription ready', {
+          rootPath,
+          scanDurationMs: Date.now() - startedAt,
+          activeSubscriptions: countActiveSharedWatches(),
+          registrySize: sharedWatchRegistry.size,
+        });
         return subscription;
       })
       .catch((error) => {
         const current = sharedWatchRegistry.get(rootPath);
         if (current) current.failure = error instanceof Error ? error.message : String(error);
+        const resourceExhausted = isWatchResourceExhaustion(error);
+        if (resourceExhausted) watchAdmissionBlockedUntil = Date.now() + WATCH_RESOURCE_BACKOFF_MS;
+        console.warn('[file-watch] Native subscription failed; degrading to manual refresh', {
+          rootPath,
+          code: getWatchErrorCode(error),
+          scanDurationMs: Date.now() - startedAt,
+          activeSubscriptions: countActiveSharedWatches(),
+          registrySize: sharedWatchRegistry.size,
+          resourceBackoffMs: resourceExhausted ? WATCH_RESOURCE_BACKOFF_MS : 0,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (resourceExhausted) {
+          void inspectLinuxInotifyUsage().then((diagnostics) => {
+            if (diagnostics) console.warn('[file-watch] Linux inotify usage after resource exhaustion', diagnostics);
+          }).catch(() => undefined);
+        }
         return null;
       })
       .finally(() => {
@@ -184,6 +307,13 @@ function releaseSharedWatch(rootPath: string, client: SharedWatchClient): void {
   entry.clients.delete(client);
   entry.refs -= 1;
   if (entry.refs > 0) return;
+  entry.needsRescanOnAttach = true;
+  entry.pendingEvents.clear();
+  entry.eventGeneration += 1;
+  if (!entry.subscription && !entry.inFlight) {
+    sharedWatchRegistry.delete(rootPath);
+    return;
+  }
   if (entry.evictTimer) clearTimeout(entry.evictTimer);
   entry.evictTimer = setTimeout(() => {
     const current = sharedWatchRegistry.get(rootPath);
@@ -656,6 +786,7 @@ interface FileSearchEntry {
   path: string;
   type: 'file' | 'directory' | 'symlink';
   isSymlink?: boolean;
+  modified?: string;
 }
 
 interface FileSearchPayload {
@@ -692,9 +823,6 @@ function compareDirents(a: Dirent, b: Dirent): number {
   return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
 }
 
-const WATCH_IGNORED_NAMES = new Set([
-  '.git', 'node_modules', 'dist', 'build', '.next', '.nuxt', '.turbo', 'coverage', 'target', '.gradle', '.idea', '.DS_Store',
-]);
 const NESTED_GIT_DISCOVERY_IGNORED_NAMES = new Set([
   '.git', 'node_modules', 'dist', 'build', '.next', '.nuxt', '.turbo', 'coverage', 'target', '.gradle', '.idea', '.DS_Store',
   '.cache', '.parcel-cache', '.yarn', '.pnpm-store', 'vendor',
@@ -1669,12 +1797,13 @@ function toFileEntry(entryPath: string, stat: fs.Stats, isSymlink = false): File
     path: entryPath,
     type: stat.isDirectory() ? 'directory' : stat.isSymbolicLink() ? 'symlink' : 'file',
     isSymlink,
+    modified: stat.mtime.toISOString(),
   };
 }
 
-async function toDirectoryEntry(dir: string, dirent: Dirent): Promise<FileSearchEntry> {
+async function toDirectoryEntry(dir: string, dirent: Dirent, includeModified = false): Promise<FileSearchEntry> {
   const entryPath = path.join(dir, dirent.name);
-  if (!dirent.isSymbolicLink()) {
+  if (!dirent.isSymbolicLink() && !includeModified) {
     return {
       name: dirent.name,
       path: entryPath,
@@ -1686,17 +1815,38 @@ async function toDirectoryEntry(dir: string, dirent: Dirent): Promise<FileSearch
     return {
       name: dirent.name,
       path: entryPath,
-      type: stat.isDirectory() ? 'directory' : 'symlink',
-      isSymlink: true,
+      type: stat.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : 'file',
+      isSymlink: dirent.isSymbolicLink() || undefined,
+      modified: includeModified ? stat.mtime.toISOString() : undefined,
     };
   } catch {
     return {
       name: dirent.name,
       path: entryPath,
-      type: 'symlink',
-      isSymlink: true,
+      type: dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : 'file',
+      isSymlink: dirent.isSymbolicLink() || undefined,
     };
   }
+}
+
+async function loadDirectoryEntriesWithModified(dir: string, dirents: Dirent[], signal: AbortSignal): Promise<FileSearchEntry[]> {
+  const entries: FileSearchEntry[] = [];
+  const batchSize = 64;
+  for (let offset = 0; offset < dirents.length; offset += batchSize) {
+    throwIfAborted(signal, 'fs.list');
+    entries.push(...await Promise.all(
+      dirents.slice(offset, offset + batchSize).map((dirent) => toDirectoryEntry(dir, dirent, true)),
+    ));
+  }
+  return entries;
+}
+
+function compareDirectoryEntriesByModified(a: FileSearchEntry, b: FileSearchEntry): number {
+  if (a.type === 'directory' && b.type !== 'directory') return -1;
+  if (a.type !== 'directory' && b.type === 'directory') return 1;
+  const modifiedDelta = Date.parse(b.modified ?? '') - Date.parse(a.modified ?? '');
+  if (Number.isFinite(modifiedDelta) && modifiedDelta !== 0) return modifiedDelta;
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
 }
 
 function isIgnoredWatchPath(rootPath: string, candidatePath: string): boolean {
@@ -2688,13 +2838,18 @@ router.get('/list', async (req: Request, res: Response) => {
       }
 
       const showHidden = req.query.showHidden === 'true';
+      const sortMode = req.query.sort === 'modified' ? 'modified' : 'name';
       const allEntries = await fs.promises.readdir(resolvedPath, { withFileTypes: true });
       throwIfAborted(controller.signal, 'fs.list');
       const visibleDirents = allEntries.filter(dirent => showHidden || !dirent.name.startsWith('.'));
-      const returnedDirents = visibleDirents
-        .sort(compareDirents)
-        .slice(0, MAX_DIRECTORY_ENTRIES);
-      const entries = await Promise.all(returnedDirents.map((dirent) => toDirectoryEntry(resolvedPath, dirent)));
+      const entries = sortMode === 'modified'
+        ? (await loadDirectoryEntriesWithModified(resolvedPath, visibleDirents, controller.signal))
+            .sort(compareDirectoryEntriesByModified)
+            .slice(0, MAX_DIRECTORY_ENTRIES)
+        : await Promise.all(visibleDirents
+            .sort(compareDirents)
+            .slice(0, MAX_DIRECTORY_ENTRIES)
+            .map((dirent) => toDirectoryEntry(resolvedPath, dirent)));
       throwIfAborted(controller.signal, 'fs.list');
       return { resolvedPath, entries, total: visibleDirents.length };
     })(), FS_ROUTE_TIMEOUT_MS, 'Directory listing took too long. The folder may be on a slow disk or network mount.', 'FS_LIST_TIMEOUT');
@@ -2720,18 +2875,19 @@ router.get('/watch', async (req: Request, res: Response) => {
   const rootsParam = req.query.roots;
   const rawRoots = (Array.isArray(rootsParam) ? rootsParam : typeof rootsParam === 'string' ? rootsParam.split('|') : [])
     .filter((root): root is string => typeof root === 'string');
-  const roots: string[] = [];
+  const validatedRoots: string[] = [];
   for (const rawRoot of rawRoots) {
     if (!rawRoot) continue;
     try {
       const resolved = await pathValidator.validatePathAsync(rawRoot);
       const stat = await fs.promises.stat(resolved);
-      if (stat.isDirectory() && !roots.includes(resolved)) roots.push(resolved);
+      if (stat.isDirectory() && !validatedRoots.includes(resolved)) validatedRoots.push(resolved);
     } catch {
       // Ignore invalid watch roots; the visible tree will still work via manual list requests.
     }
   }
 
+  const roots = minimizeRecursiveWatchRoots(validatedRoots);
   if (roots.length === 0) {
     res.status(400).json({ error: 'No valid roots to watch' });
     return;
@@ -2745,6 +2901,20 @@ router.get('/watch', async (req: Request, res: Response) => {
   let pending: FileWatchEvent[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   const attachedRoots = new Map<string, SharedWatchClient>();
+
+  // Register cleanup before the first native subscription starts. A recursive
+  // initial scan can take seconds on a large repository; the browser may abort
+  // during that await when the user switches files or roots. Registering this
+  // only after attachRoot() leaked the pending subscription and its reference.
+  const closeWatchStream = () => {
+    if (closed) return;
+    closed = true;
+    if (flushTimer) clearTimeout(flushTimer);
+    for (const [rootPath, client] of attachedRoots) {
+      releaseSharedWatch(rootPath, client);
+    }
+  };
+  res.once('close', closeWatchStream);
 
   const writeEvent = (type: string, payload: Record<string, unknown>) => {
     if (closed || res.destroyed) return;
@@ -2771,29 +2941,41 @@ router.get('/watch', async (req: Request, res: Response) => {
   };
 
   writeEvent('ready', { roots });
+  console.info('[file-watch] Stream ready', {
+    requestedRoots: rawRoots.length,
+    validatedRoots: validatedRoots.length,
+    subscribedRoots: roots.length,
+    collapsedOverlappingRoots: validatedRoots.length - roots.length,
+    activeSubscriptions: countActiveSharedWatches(),
+    registrySize: sharedWatchRegistry.size,
+  });
 
   const attachRoot = async (rootPath: string) => {
-    const client: SharedWatchClient = { closed: false, enqueue };
+    if (closed) return;
+    const client: SharedWatchClient = {
+      closed: false,
+      enqueue,
+      degrade: (reason) => {
+        if (closed) return;
+        enqueue({ type: 'rescan-required', path: rootPath, reason });
+        flush();
+        if (!res.writableEnded) res.end();
+      },
+    };
     attachedRoots.set(rootPath, client);
     const ok = await acquireSharedWatch(rootPath, client);
     if (closed) return;
     if (!ok) {
       const reason = sharedWatchRegistry.get(rootPath)?.failure ?? 'watch-unavailable';
-      enqueue({ type: 'rescan-required', path: rootPath, reason });
+      client.degrade(reason);
     }
   };
 
   for (const rootPath of roots) {
+    if (closed) break;
     await attachRoot(rootPath);
   }
 
-  req.on('close', () => {
-    closed = true;
-    if (flushTimer) clearTimeout(flushTimer);
-    for (const [rootPath, client] of attachedRoots) {
-      releaseSharedWatch(rootPath, client);
-    }
-  });
 });
 
 router.get('/cancel-slot', (req: Request, res: Response) => {

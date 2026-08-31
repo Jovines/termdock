@@ -37,9 +37,13 @@ import {
   setNewSessionAgentSlugSetting,
   getRunningSessionButtonEnabledSetting,
   setRunningSessionButtonEnabledSetting,
+  getFileSortModesSetting,
+  setFileSortModesSetting,
+  setFileSortModeSetting,
 } from '../utils/settings.js';
 import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
+import { inspectLinuxInotifyUsage, isWatchResourceExhaustion } from '../utils/fileWatchPolicy.js';
 import {
   getFocusSequence,
   removeClientFocusState,
@@ -835,6 +839,13 @@ function scheduleReloadGlobalSessionState(): void {
 }
 
 async function watchGlobalSessionStateFile(): Promise<void> {
+  const reportFailure = (message: string, error: unknown) => {
+    console.warn(message, getErrorMessage(error));
+    if (!isWatchResourceExhaustion(error)) return;
+    void inspectLinuxInotifyUsage().then((diagnostics) => {
+      if (diagnostics) console.warn('[session-persist] Linux inotify usage after watcher failure:', diagnostics);
+    }).catch(() => undefined);
+  };
   try {
     const dir = path.dirname(GLOBAL_SESSION_STATE_FILE);
     await fs.promises.mkdir(dir, { recursive: true });
@@ -846,10 +857,10 @@ async function watchGlobalSessionStateFile(): Promise<void> {
       scheduleReloadGlobalSessionState();
     });
     globalSessionStateWatcher.on('error', (error) => {
-      console.warn('[session-persist] Global state watcher failed:', getErrorMessage(error));
+      reportFailure('[session-persist] Global state watcher failed:', error);
     });
   } catch (error) {
-    console.warn('[session-persist] Failed to watch global state file:', getErrorMessage(error));
+    reportFailure('[session-persist] Failed to watch global state file:', error);
   }
 }
 
@@ -6450,6 +6461,7 @@ async function getSettingsPayload() {
     autoRenamePromptPayloadChars: getAutoRenamePromptPayloadCharsSetting(),
     newSessionAgentSlug: getNewSessionAgentSlugSetting(),
     runningSessionButtonEnabled: getRunningSessionButtonEnabledSetting(),
+    fileSortModes: getFileSortModesSetting(),
     localAccess: {
       ...localAccess,
       interfaces,
@@ -6572,6 +6584,23 @@ router.put('/settings', async (req, res) => {
 
   if (typeof body.runningSessionButtonEnabled === 'boolean') {
     setRunningSessionButtonEnabledSetting(body.runningSessionButtonEnabled);
+  }
+
+  if (body.fileSortModes && typeof body.fileSortModes === 'object' && !Array.isArray(body.fileSortModes)) {
+    setFileSortModesSetting(body.fileSortModes as Record<string, unknown>);
+  }
+
+  if (body.fileSortMode && typeof body.fileSortMode === 'object') {
+    const preference = body.fileSortMode as { path?: unknown; mode?: unknown };
+    const validPath = typeof preference.path === 'string'
+      && preference.path.length > 0
+      && preference.path.length <= 4096
+      && (preference.path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(preference.path));
+    if (!validPath || (preference.mode !== 'name' && preference.mode !== 'modified')) {
+      res.status(400).json({ error: 'Invalid file sort preference', code: 'FILE_SORT_MODE_INVALID' });
+      return;
+    }
+    setFileSortModeSetting(preference.path as string, preference.mode);
   }
 
   if (body.localAccess && typeof body.localAccess === 'object') {
