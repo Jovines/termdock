@@ -1847,11 +1847,9 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
   const record = globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId);
   const session = record?.backendSessionId ? terminalSessions.get(record.backendSessionId) : null;
   const pending = collaborationStore.inbox(frontendSessionId, { pendingOnly: true, limit: 10 });
-  // Rich hooks let us avoid interrupting an active turn. Third-party plugins
-  // without hooks still participate through the universal detected-Agent PTY
-  // path; their busy state is simply unknown, so delivery is immediate.
-  if (!session?.agent || pending.length === 0
-    || (session.agentSession?.rich && !['idle', 'done'].includes(session.agentSession.status))) {
+  // Submit to every online Agent immediately. Its TUI owns ordering while a
+  // turn is active; Termdock only retains messages when the Agent is offline.
+  if (!session || !canDeliverPromptToAgent(session) || pending.length === 0) {
     return { delivered: [], pending: pending.length };
   }
   session.ptyProcess.write(buildBracketedSubmitBytes(formatCollaborationDelivery(frontendSessionId, pending)));

@@ -24,6 +24,7 @@ describe('buildBracketedSubmitBytes', () => {
   it('accepts either process detection or hook state as a live Agent signal', () => {
     expect(canDeliverPromptToAgent({ agent: { slug: 'claude' }, agentSession: null })).toBe(true);
     expect(canDeliverPromptToAgent({ agent: null, agentSession: { status: 'idle' } })).toBe(true);
+    expect(canDeliverPromptToAgent({ agent: { slug: 'codex' }, agentSession: { status: 'working', rich: true } })).toBe(true);
     expect(canDeliverPromptToAgent({ agent: null, agentSession: null })).toBe(false);
   });
 });
