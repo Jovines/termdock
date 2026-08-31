@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  clampPinnedRightSidebarWidth,
   readLeftPinnedPreference,
   readRightSidebarLayoutPreference,
   readRightSidebarWidth,
@@ -68,6 +69,33 @@ describe('useSidebarStore right tab persistence', () => {
     useSidebarStore.getState().setRootPath('/workspace/fresh');
 
     expect(useSidebarStore.getState().rightTab).toBe('files');
+  });
+});
+
+describe('pinned right sidebar width', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    resetSidebarStore();
+  });
+
+  it('uses the viewport and terminal minimum width instead of a fixed desktop cap', () => {
+    expect(clampPinnedRightSidebarWidth(2_400, 2_560, 300)).toBe(1_970);
+    expect(clampPinnedRightSidebarWidth(1_000, 1_440, 300)).toBe(850);
+  });
+
+  it('keeps the right sidebar minimum when desktop space is constrained', () => {
+    expect(clampPinnedRightSidebarWidth(100, 1_024, 300)).toBe(320);
+  });
+
+  it('persists widths beyond the previous 760px limit', () => {
+    useSidebarStore.getState().setRightSidebarWidth(1_200);
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(1_200);
+    expect(readRightSidebarWidth()).toBe(1_200);
   });
 });
 

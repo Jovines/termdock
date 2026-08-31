@@ -70,7 +70,7 @@ import {
   type PwaNotificationAlertStyle,
 } from './lib/utils/pwaNotifications';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
-import { useSidebarStore } from './lib/stores/useSidebarStore';
+import { clampPinnedRightSidebarWidth, useSidebarStore } from './lib/stores/useSidebarStore';
 import { subscribeClientState } from './lib/utils/clientStateSync';
 import { clientLog } from './lib/utils/clientLog';
 import { shouldClearSessionFilePreview } from './lib/utils/rightSidebarSessionState';
@@ -791,6 +791,9 @@ function App() {
   const [isDesktopViewport, setIsDesktopViewport] = useState(() => (
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1024px)').matches
   ));
+  const [viewportWidth, setViewportWidth] = useState(() => (
+    typeof window === 'undefined' ? 1024 : window.innerWidth
+  ));
   // Landscape orientation. A phone in landscape (typically 667-896px wide)
   // has plenty of room for a wide workbench-style drawer, even though
   // its *short* side is < 1024px so the regular desktop check returns
@@ -869,10 +872,17 @@ function App() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const media = window.matchMedia('(min-width: 1024px)');
-    const updateViewportMode = () => setIsDesktopViewport(media.matches);
+    const updateViewportMode = () => {
+      setIsDesktopViewport(media.matches);
+      setViewportWidth(window.innerWidth);
+    };
     updateViewportMode();
     media.addEventListener('change', updateViewportMode);
-    return () => media.removeEventListener('change', updateViewportMode);
+    window.addEventListener('resize', updateViewportMode);
+    return () => {
+      media.removeEventListener('change', updateViewportMode);
+      window.removeEventListener('resize', updateViewportMode);
+    };
   }, []);
 
   useEffect(() => {
@@ -919,7 +929,6 @@ function App() {
   // enough horizontal real estate for a wide drawer.
   const useDesktopDrawer = isDesktopViewport || isLandscape;
   const useDesktopLeftDrawer = isDesktopViewport || isLandscape;
-  const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
   const rightDrawerWidthPx = useDesktopDrawer
     ? Math.min(Math.max(viewportWidth * 0.9, 360), viewportWidth - 56)
     : Math.min(viewportWidth * 0.92, 420);
@@ -1172,14 +1181,26 @@ function App() {
   const handleRightResizeMouseDown = useCallback((event: React.MouseEvent) => {
     event.preventDefault();
     rightResizeStartXRef.current = event.clientX;
-    rightResizeStartWidthRef.current = useSidebarStore.getState().rightSidebarWidth;
+    const initialSidebarState = useSidebarStore.getState();
+    const pinnedLeftWidth = initialSidebarState.leftPinned ? initialSidebarState.leftSidebarWidth : 0;
+    rightResizeStartWidthRef.current = clampPinnedRightSidebarWidth(
+      initialSidebarState.rightSidebarWidth,
+      window.innerWidth,
+      pinnedLeftWidth,
+    );
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
       if (rightResizeRafRef.current !== null) return;
       rightResizeRafRef.current = requestAnimationFrame(() => {
         rightResizeRafRef.current = null;
         const delta = rightResizeStartXRef.current - moveEvent.clientX;
-        useSidebarStore.getState().setRightSidebarWidth(rightResizeStartWidthRef.current + delta);
+        const sidebarState = useSidebarStore.getState();
+        const currentPinnedLeftWidth = sidebarState.leftPinned ? sidebarState.leftSidebarWidth : 0;
+        sidebarState.setRightSidebarWidth(clampPinnedRightSidebarWidth(
+          rightResizeStartWidthRef.current + delta,
+          window.innerWidth,
+          currentPinnedLeftWidth,
+        ));
       });
     };
 
@@ -2881,6 +2902,11 @@ function App() {
 
   const showPinnedLeft = sidebarLeftPinned && isDesktopViewport;
   const showPinnedRight = sidebarRightPinned && isDesktopViewport;
+  const effectiveRightSidebarWidth = clampPinnedRightSidebarWidth(
+    sidebarRightWidth,
+    viewportWidth,
+    showPinnedLeft ? sidebarLeftWidth : 0,
+  );
 
   // Pin mode: compute active session display info and agent state for the
   // centered top-bar title + background tint.
@@ -5159,10 +5185,10 @@ function App() {
             className="h-full w-[5px] shrink-0 cursor-col-resize bg-border/10 transition-colors hover:bg-primary/30 active:bg-primary/50"
             onMouseDown={handleRightResizeMouseDown}
           />
-          <div style={{ width: sidebarRightWidth, flexShrink: 0, height: '100%' }}>
+          <div style={{ width: effectiveRightSidebarWidth, flexShrink: 0, height: '100%' }}>
             <RightSidebar
               isOpen
-              drawerWidthPx={sidebarRightWidth}
+              drawerWidthPx={effectiveRightSidebarWidth}
               onClose={handleClosePinnedRight}
               onOpen={handleOpenRightSidebar}
               pinned

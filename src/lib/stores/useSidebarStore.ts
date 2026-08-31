@@ -6,6 +6,24 @@ export type RightSidebarTab = 'git' | 'files' | 'diff';
 export type RightSidebarLayoutPreference = 'auto' | 'narrow' | 'wide';
 
 export const RIGHT_SIDEBAR_NARROW_THRESHOLD_PX = 600;
+export const RIGHT_SIDEBAR_MIN_WIDTH_PX = 320;
+export const TERMINAL_WORKSPACE_MIN_WIDTH_PX = 280;
+export const PINNED_SIDEBAR_SEPARATOR_WIDTH_PX = 5;
+
+export function clampPinnedRightSidebarWidth(
+  requestedWidth: number,
+  viewportWidth: number,
+  pinnedLeftSidebarWidth = 0,
+): number {
+  const maxWidth = Math.max(
+    RIGHT_SIDEBAR_MIN_WIDTH_PX,
+    viewportWidth
+      - Math.max(0, pinnedLeftSidebarWidth)
+      - (PINNED_SIDEBAR_SEPARATOR_WIDTH_PX * (pinnedLeftSidebarWidth > 0 ? 2 : 1))
+      - TERMINAL_WORKSPACE_MIN_WIDTH_PX,
+  );
+  return Math.min(maxWidth, Math.max(RIGHT_SIDEBAR_MIN_WIDTH_PX, requestedWidth));
+}
 
 const RIGHT_SIDEBAR_TABS_BY_CONTEXT_CACHE_KEY = 'termdock:right-sidebar:tabs-by-session:v2';
 const EXPLORER_ROOTS_CACHE_KEY = 'termdock:right-sidebar:explorer-roots-by-session:v2';
@@ -84,7 +102,7 @@ export function readRightSidebarWidth(): number {
     const stored = window.localStorage.getItem(RIGHT_SIDEBAR_WIDTH_KEY);
     if (!stored) return 760;
     const parsed = parseInt(stored, 10);
-    return Number.isFinite(parsed) && parsed >= 320 && parsed <= 760 ? parsed : 760;
+    return Number.isFinite(parsed) && parsed >= RIGHT_SIDEBAR_MIN_WIDTH_PX ? parsed : 760;
   } catch {
     return 760;
   }
@@ -492,7 +510,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     }),
   setRightSidebarWidth: (width) =>
     set((s) => {
-      const clamped = Math.min(Math.max(width, 320), 760);
+      const clamped = Math.max(width, RIGHT_SIDEBAR_MIN_WIDTH_PX);
       if (s.rightSidebarWidth === clamped) return s;
       writeRightSidebarWidth(clamped);
       return { rightSidebarWidth: clamped };
