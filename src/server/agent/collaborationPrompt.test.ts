@@ -42,22 +42,24 @@ describe('formatCollaborationDelivery', () => {
       sessions,
     });
 
-    expect(prompt).toContain('[任务 #message-1] 用户 → 发布组: 检查构建');
+    expect(prompt).toContain('[Termdock 协作收件箱 · 1 条]');
+    expect(prompt).toContain('[任务 #message-1]\n来自：用户\n协作组：发布组\n--- 消息内容 ---\n检查构建\n--- 消息结束 ---');
     expect(prompt).toContain('发布组 [group-1] · 2 个成员');
     expect(prompt).toContain('开发 Agent [coder-id] · idle');
-    expect(prompt).toContain('它没有来源 Agent，不要运行 `td collab reply`');
-    expect(prompt).not.toContain('回复 Agent 消息');
+    expect(prompt).toContain('无来源 Agent，不能运行 `td collab reply`');
+    expect(prompt).not.toContain('- 回复：');
   });
 
   it('shows the source session id and valid reply command for an Agent message', () => {
     const prompt = formatCollaborationDelivery({
       targetSessionId: 'reviewer-id',
-      messages: [message({ fromSessionId: 'coder-id', kind: 'ask', content: '测试通过了吗？' })],
+      messages: [message({ fromSessionId: 'coder-id', kind: 'ask', content: '测试通过了吗？\n请附上失败项。' })],
       groups: [group],
       sessions,
     });
 
-    expect(prompt).toContain('[问题 #message-1] 开发 Agent [coder-id] → 发布组: 测试通过了吗？');
+    expect(prompt).toContain('[问题 #message-1]\n来自：开发 Agent [coder-id]\n协作组：发布组');
+    expect(prompt).toContain('--- 消息内容 ---\n测试通过了吗？\n请附上失败项。\n--- 消息结束 ---');
     expect(prompt).toContain('`td collab reply <消息ID> "回复内容"`');
     expect(prompt).toContain('`td collab send <会话ID> "消息内容"`');
     expect(prompt).toContain('`td collab add <协作组ID> <会话ID>`');
