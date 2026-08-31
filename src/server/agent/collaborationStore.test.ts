@@ -51,6 +51,17 @@ describe('CollaborationStore', () => {
     expect(reply).toMatchObject({ threadId: ask!.threadId, replyTo: ask!.id });
   });
 
+  it('updates group membership without replacing its identity or message history', () => {
+    const store = new CollaborationStore(filePath);
+    const group = store.save({ name: 'Team', sessionIds: ['a', 'b'] });
+    store.send({ groupId: group.id, fromSessionId: 'a', toSessionIds: ['b'], kind: 'message', content: 'before update' });
+
+    const updated = store.save({ id: group.id, name: group.name, sessionIds: ['a', 'b', 'c'] });
+
+    expect(updated).toMatchObject({ id: group.id, createdAt: group.createdAt, sessionIds: ['a', 'b', 'c'] });
+    expect(store.listMessages(group.id)).toHaveLength(1);
+  });
+
   it('removes a deleted Session and dissolves groups that can no longer collaborate', () => {
     const store = new CollaborationStore(filePath);
     const pair = store.save({ name: 'Pair', sessionIds: ['a', 'b'] });

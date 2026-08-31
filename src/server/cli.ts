@@ -161,9 +161,15 @@ interface CliOptions {
   pluginRemove?: string;
   agentEvent?: { slug: string; event: string; status?: string };
   collab?: {
-    action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply';
+    action: 'status' | 'inbox' | 'send' | 'handoff' | 'reply' | 'add' | 'remove' | 'spawn';
     target?: string;
     message?: string;
+    groupId?: string;
+    sessionId?: string;
+    agentSlug?: string;
+    name?: string;
+    cwd?: string;
+    task?: string;
     json: boolean;
   };
 }
@@ -284,6 +290,12 @@ Short commands:
                      Hand off work and context to another Session
   collab reply <message-id> <message>
                      Reply in the original collaboration thread
+  collab add <group-id> <session-id>
+                     Add an existing Session to a collaboration group
+  collab remove <group-id> <session-id>
+                     Remove a Session from a collaboration group
+  collab spawn <group-id> <agent-slug> [--name <name>] [--cwd <path>] [--task <text>]
+                     Create an Agent Session and add it to the group
   plugin-create <file>
                      Same as --plugin-create <file>
   plugin-install <source>
@@ -765,8 +777,37 @@ function parseArgs(argv: string[]): CliOptions {
           process.exit(1);
         }
         collab = { action, target, message, json };
+      } else if (action === 'add' || action === 'remove') {
+        const groupId = argv[2];
+        const sessionId = argv[3];
+        if (!groupId || !sessionId || groupId.startsWith('-') || sessionId.startsWith('-')) {
+          console.error(`${ICON.err} ${c.red(`Usage: td collab ${action} <group-id> <session-id>`)}`);
+          process.exit(1);
+        }
+        collab = { action, groupId, sessionId, json };
+      } else if (action === 'spawn') {
+        const groupId = argv[2];
+        const agentSlug = argv[3];
+        const optionValue = (flag: string): string | undefined => {
+          const index = argv.indexOf(flag);
+          const value = index >= 0 ? argv[index + 1] : undefined;
+          return value && !value.startsWith('--') ? value : undefined;
+        };
+        if (!groupId || !agentSlug || groupId.startsWith('-') || agentSlug.startsWith('-')) {
+          console.error(`${ICON.err} ${c.red('Usage: td collab spawn <group-id> <agent-slug> [--name <name>] [--cwd <path>] [--task <text>]')}`);
+          process.exit(1);
+        }
+        collab = {
+          action,
+          groupId,
+          agentSlug,
+          name: optionValue('--name'),
+          cwd: optionValue('--cwd'),
+          task: optionValue('--task'),
+          json,
+        };
       } else {
-        console.error(`${ICON.err} ${c.red('Usage: td collab <status|inbox|send|handoff|reply>')}`);
+        console.error(`${ICON.err} ${c.red('Usage: td collab <status|inbox|send|handoff|reply|add|remove|spawn>')}`);
         process.exit(1);
       }
       argv = [];
@@ -1388,6 +1429,22 @@ async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<vo
       messageId: command.target,
       content: command.message,
     });
+  } else if (command.action === 'add' || command.action === 'remove') {
+    response = await postLocalJson(baseUrl, runningState.localApiToken, '/api/terminal/operations/orchestration/members', {
+      ...context,
+      groupId: command.groupId,
+      targetSessionId: command.sessionId,
+      action: command.action,
+    });
+  } else if (command.action === 'spawn') {
+    response = await postLocalJson(baseUrl, runningState.localApiToken, '/api/terminal/operations/orchestration/spawn', {
+      ...context,
+      groupId: command.groupId,
+      agentSlug: command.agentSlug,
+      name: command.name,
+      cwd: command.cwd,
+      task: command.task,
+    });
   } else {
     response = await postLocalJson(baseUrl, runningState.localApiToken, '/api/terminal/operations/orchestration/send', {
       ...context,
@@ -1407,13 +1464,35 @@ async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<vo
     return;
   }
   if (command.action === 'status') {
-    const groups = Array.isArray(body.groups) ? body.groups as Array<{ name?: string }> : [];
+    const groups = Array.isArray(body.groups) ? body.groups as Array<{ id?: string; name?: string; sessionIds?: string[] }> : [];
     const peers = Array.isArray(body.peers) ? body.peers as Array<{ sessionId?: string; name?: string; status?: string; currentTask?: string; capability?: string }> : [];
+    const sessions = Array.isArray(body.sessions) ? body.sessions as Array<{ sessionId?: string; name?: string; status?: string; cwd?: string }> : [];
+    const agents = Array.isArray(body.agents) ? body.agents as Array<{ slug?: string; displayName?: string }> : [];
     console.log(`${ICON.ok} ${c.green(`Collaboration: ${groups.length} group(s), ${peers.length} peer(s)`)}`);
+    for (const group of groups) {
+      console.log(`  ${c.green(group.name ?? 'Group')} ${c.dim(`[${group.id ?? ''}]`)}`);
+      if (group.sessionIds?.length) console.log(`    ${c.dim(`${group.sessionIds.length} member(s)`)}`);
+    }
+    if (peers.length > 0) console.log(`\n${c.dim('Current group peers:')}`);
     for (const peer of peers) {
       console.log(`  ${c.cyan(peer.name ?? peer.sessionId ?? 'Session')} ${c.dim(`[${peer.sessionId ?? ''}]`)}`);
       console.log(`    ${peer.status ?? 'offline'} · ${peer.capability ?? ''}`);
       if (peer.currentTask) console.log(`    ${c.dim(peer.currentTask)}`);
+    }
+    for (const group of groups) {
+      const memberIds = new Set(group.sessionIds ?? []);
+      const candidates = sessions.filter((session) => session.sessionId && !memberIds.has(session.sessionId));
+      if (candidates.length > 0) {
+        console.log(`\n${c.dim(`Sessions available to add to ${group.name ?? 'group'} [${group.id ?? ''}]:`)}`);
+        for (const session of candidates) {
+          console.log(`  ${session.name ?? 'Session'} ${c.dim(`[${session.sessionId ?? ''}]`)} · ${session.status ?? 'offline'}`);
+          if (session.cwd) console.log(`    ${c.dim(session.cwd)}`);
+        }
+      }
+    }
+    if (agents.length > 0) {
+      console.log(`\n${c.dim('Agent types available to spawn:')}`);
+      for (const agent of agents) console.log(`  ${agent.displayName ?? agent.slug ?? 'Agent'} ${c.dim(`[${agent.slug ?? ''}]`)}`);
     }
     return;
   }
@@ -1429,7 +1508,13 @@ async function runCollab(command: NonNullable<CliOptions['collab']>): Promise<vo
     }
     return;
   }
-  console.log(`${ICON.ok} ${c.green(command.action === 'reply' ? 'Reply sent.' : command.action === 'handoff' ? 'Handoff sent.' : 'Message sent.')}`);
+  const success = command.action === 'reply' ? 'Reply sent.'
+    : command.action === 'handoff' ? 'Handoff sent.'
+      : command.action === 'add' ? 'Session added to collaboration group.'
+        : command.action === 'remove' ? 'Session removed from collaboration group.'
+          : command.action === 'spawn' ? 'Agent Session created and added to collaboration group.'
+            : 'Message sent.';
+  console.log(`${ICON.ok} ${c.green(success)}`);
 }
 
 async function runInjectChangeAudit(source: string | true): Promise<void> {

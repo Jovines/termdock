@@ -43,6 +43,7 @@ describe('formatCollaborationDelivery', () => {
     });
 
     expect(prompt).toContain('[任务 #message-1] 用户 → 发布组: 检查构建');
+    expect(prompt).toContain('发布组 [group-1] · 2 个成员');
     expect(prompt).toContain('开发 Agent [coder-id] · idle');
     expect(prompt).toContain('它没有来源 Agent，不要运行 `td collab reply`');
     expect(prompt).not.toContain('回复 Agent 消息');
@@ -59,5 +60,8 @@ describe('formatCollaborationDelivery', () => {
     expect(prompt).toContain('[问题 #message-1] 开发 Agent [coder-id] → 发布组: 测试通过了吗？');
     expect(prompt).toContain('`td collab reply <消息ID> "回复内容"`');
     expect(prompt).toContain('`td collab send <会话ID> "消息内容"`');
+    expect(prompt).toContain('`td collab add <协作组ID> <会话ID>`');
+    expect(prompt).toContain('`td collab remove <协作组ID> <会话ID>`');
+    expect(prompt).toContain('`td collab spawn <协作组ID> <agent-slug> --name "名称" --task "初始任务"`');
   });
 });

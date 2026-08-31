@@ -9,6 +9,8 @@ const apiMocks = vi.hoisted(() => ({
   listAgentAutomations: vi.fn().mockResolvedValue({ automations: [], runs: [] }),
   listCollaborationGroups: vi.fn().mockResolvedValue({ groups: [], sessions: [] }),
   searchTerminalSessions: vi.fn().mockResolvedValue({ results: [] }),
+  saveCollaborationGroup: vi.fn(),
+  spawnCollaborationAgent: vi.fn(),
   setAgentAutomationEnabled: vi.fn().mockResolvedValue({ automation: {} }),
 }));
 
@@ -27,8 +29,9 @@ vi.mock('../../terminal/api', () => ({
   removeCollaborationGroup: vi.fn(),
   runAgentAutomation: vi.fn(),
   saveAgentAutomation: vi.fn(),
-  saveCollaborationGroup: vi.fn(),
+  saveCollaborationGroup: apiMocks.saveCollaborationGroup,
   sendCollaborationMessage: vi.fn(),
+  spawnCollaborationAgent: apiMocks.spawnCollaborationAgent,
   setAgentAutomationEnabled: apiMocks.setAgentAutomationEnabled,
   searchTerminalSessions: apiMocks.searchTerminalSessions,
 }));
@@ -38,6 +41,8 @@ afterEach(() => {
   apiMocks.listAgentAutomations.mockReset().mockResolvedValue({ automations: [], runs: [] });
   apiMocks.listCollaborationGroups.mockReset().mockResolvedValue({ groups: [], sessions: [] });
   apiMocks.searchTerminalSessions.mockReset().mockResolvedValue({ results: [] });
+  apiMocks.saveCollaborationGroup.mockReset();
+  apiMocks.spawnCollaborationAgent.mockReset();
   apiMocks.setAgentAutomationEnabled.mockReset().mockResolvedValue({ automation: {} });
 });
 
@@ -145,6 +150,53 @@ describe('AgentOperationsPanel', () => {
     expect(screen.getByText('还需选择 1 个会话')).toBeTruthy();
     expect(document.body.textContent).not.toContain('transcript_path');
     expect(document.body.textContent).not.toContain('/secret/path');
+  });
+
+  it('lets the user add existing Sessions to a collaboration group', async () => {
+    const group = { id: 'group-one', name: '发布组', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1 };
+    const sessions = [
+      { sessionId: 'one', backendSessionId: 'backend-one', name: '开发', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'working', capability: 'agent', currentTask: '开发', updatedAt: 1 },
+      { sessionId: 'two', backendSessionId: 'backend-two', name: '测试', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'idle', capability: 'agent', currentTask: '测试', updatedAt: 1 },
+      { sessionId: 'three', backendSessionId: 'backend-three', name: '文档', cwd: '/repo/docs', agent: { slug: 'codex', displayName: 'Codex' }, status: 'idle', capability: 'agent', currentTask: '文档', updatedAt: 1 },
+    ];
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions });
+    apiMocks.saveCollaborationGroup.mockResolvedValue({ group: { ...group, sessionIds: ['one', 'two', 'three'] } });
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    await user.click(await screen.findByRole('button', { name: /管理成员/ }));
+    await user.click(screen.getByRole('checkbox', { name: /文档/ }));
+    await user.click(screen.getByRole('button', { name: /保存成员/ }));
+
+    expect(apiMocks.saveCollaborationGroup).toHaveBeenCalledWith({ id: 'group-one', name: '发布组', sessionIds: ['one', 'two', 'three'] });
+    expect(await screen.findByText('“发布组”成员已更新，共 3 个会话')).toBeTruthy();
+  });
+
+  it('creates an Agent Session and automatically joins it to the selected group', async () => {
+    const group = { id: 'group-one', name: '发布组', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1 };
+    const sessions = [
+      { sessionId: 'one', backendSessionId: 'backend-one', name: '开发', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'working', capability: 'agent', currentTask: '开发', updatedAt: 1 },
+      { sessionId: 'two', backendSessionId: 'backend-two', name: '测试', cwd: '/repo', agent: { slug: 'codex', displayName: 'Codex' }, status: 'idle', capability: 'agent', currentTask: '测试', updatedAt: 1 },
+    ];
+    apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions });
+    apiMocks.spawnCollaborationAgent.mockResolvedValue({ group: { ...group, sessionIds: ['one', 'two', 'new-agent'] }, session: { ...sessions[0], sessionId: 'new-agent', name: '发布审查' } });
+    const user = userEvent.setup();
+    render(<AgentOperationsPanel activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+
+    await user.click(screen.getByRole('button', { name: '会话协作' }));
+    await user.click(await screen.findByRole('button', { name: /新建 Agent/ }));
+    await user.selectOptions(screen.getByLabelText('新 Agent 类型'), 'custom');
+    await user.type(screen.getByLabelText('新 Agent 会话名称'), '发布审查');
+    await user.clear(screen.getByLabelText('新 Agent 工作目录'));
+    await user.type(screen.getByLabelText('新 Agent 工作目录'), '/repo/release');
+    await user.type(screen.getByLabelText('新 Agent 初始任务'), '检查发布产物');
+    await user.click(screen.getByRole('button', { name: /创建并加入/ }));
+
+    expect(apiMocks.spawnCollaborationAgent).toHaveBeenCalledWith('group-one', {
+      agentSlug: 'custom', name: '发布审查', cwd: '/repo/release', task: '检查发布产物',
+    });
+    expect(await screen.findByText('“发布审查”已创建并加入“发布组”')).toBeTruthy();
   });
 
   it('keeps search controls visible in structure and presents cleaned actionable results', async () => {

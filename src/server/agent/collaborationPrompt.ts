@@ -38,17 +38,24 @@ export function formatCollaborationDelivery(input: {
   });
   const hasUserMessage = input.messages.some((message) => message.fromSessionId === null);
   const hasAgentMessage = input.messages.some((message) => message.fromSessionId !== null);
+  const groupLines = input.groups.map((group) => `- ${group.name} [${group.id}] · ${group.sessionIds.length} 个成员`);
   const instructions = [
     ...(hasUserMessage ? ['- 用户发来的消息：直接在当前会话回答或执行；它没有来源 Agent，不要运行 `td collab reply`。'] : []),
     ...(hasAgentMessage ? ['- 回复 Agent 消息：`td collab reply <消息ID> "回复内容"`'] : []),
     '- 主动联系成员：`td collab send <会话ID> "消息内容"`',
     '- 交接工作：`td collab handoff <会话ID> "交接摘要"`',
+    '- 添加现有会话：`td collab add <协作组ID> <会话ID>`',
+    '- 移除现有会话：`td collab remove <协作组ID> <会话ID>`',
+    '- 创建并加入新 Agent：`td collab spawn <协作组ID> <agent-slug> --name "名称" --task "初始任务"`',
     '- 查看成员和收件箱：`td collab status` / `td collab inbox`',
   ];
 
   return [
     '[Termdock 协作收件箱]',
     ...lines,
+    '',
+    '所在协作组（方括号内是协作组 ID）：',
+    ...groupLines,
     '',
     '同组成员（方括号内是可直接使用的会话 ID）：',
     ...(peers.length > 0 ? peers : ['- 暂无其他成员']),

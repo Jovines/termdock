@@ -3514,6 +3514,18 @@ export function saveCollaborationGroup(input: { id?: string; name: string; sessi
   return operationsRequest('/collaboration-groups', { method: 'POST', body: JSON.stringify(input) });
 }
 
+export function spawnCollaborationAgent(groupId: string, input: {
+  agentSlug: string;
+  name?: string;
+  cwd?: string;
+  task?: string;
+}): Promise<{ group: CollaborationGroup; session: OrchestrationSession }> {
+  return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}/spawn`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
 export function removeCollaborationGroup(groupId: string): Promise<void> {
   return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' });
 }

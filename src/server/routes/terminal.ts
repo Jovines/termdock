@@ -81,7 +81,7 @@ import {
 import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent/resumeHistory.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
-import { CollaborationStore, type CollaborationMessageKind } from '../agent/collaborationStore.js';
+import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind } from '../agent/collaborationStore.js';
 import { formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
 import {
@@ -1849,6 +1849,54 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
   session.ptyProcess.write(buildBracketedSubmitBytes(prompt));
   collaborationStore.markDelivered(pending.map((message) => message.id));
   return { delivered: pending.map((message) => message.id), pending: 0 };
+}
+
+async function spawnCollaborationAgentSession(
+  req: express.Request,
+  group: CollaborationGroup,
+  sourceSessionId: string | null,
+  input: { agentSlug?: unknown; name?: unknown; cwd?: unknown; task?: unknown },
+): Promise<{ group: ReturnType<CollaborationStore['save']>; session: OrchestrationSessionSnapshot }> {
+  const agentSlug = typeof input.agentSlug === 'string' ? input.agentSlug.trim().toLowerCase() : '';
+  const launchers = await listDetectedAgentLaunchers();
+  const launcher = launchers.find((candidate) => candidate.slug === agentSlug);
+  if (!launcher) throw new HttpStatusError(400, '所选 Agent 当前不可用', 'COLLAB_AGENT_UNAVAILABLE');
+
+  const sourceRecord = sourceSessionId
+    ? globalSessionState.sessions.find((candidate) => candidate.sessionId === sourceSessionId)
+    : null;
+  const fallbackRecord = sourceRecord
+    ?? globalSessionState.sessions.find((candidate) => group.sessionIds.includes(candidate.sessionId))
+    ?? null;
+  const requestedName = typeof input.name === 'string' ? input.name.trim().slice(0, 120) : '';
+  const requestedCwd = typeof input.cwd === 'string' ? input.cwd.trim() : '';
+  const opened = await openInventorySession(req, {
+    name: requestedName || `${launcher.displayName} · ${group.name}`,
+    customName: true,
+    mode: 'shell',
+    cwd: requestedCwd || fallbackRecord?.cwd || undefined,
+  });
+  const frontendSessionId = opened.session.sessionId;
+  const backend = terminalSessions.get(opened.terminalSession.sessionId);
+  if (!backend) throw new HttpStatusError(500, 'Agent Session 创建失败', 'COLLAB_AGENT_SESSION_FAILED');
+
+  const updatedGroup = collaborationStore.save({
+    id: group.id,
+    name: group.name,
+    sessionIds: [...group.sessionIds, frontendSessionId],
+  });
+  writeTerminalInput(backend, `${launcher.command}\r`);
+
+  const requestedTask = typeof input.task === 'string' ? input.task.trim().slice(0, 20_000) : '';
+  collaborationStore.send({
+    groupId: updatedGroup.id,
+    fromSessionId: sourceSessionId,
+    toSessionIds: [frontendSessionId],
+    kind: 'handoff',
+    content: requestedTask || `你已创建并加入协作组“${updatedGroup.name}”。请运行 td collab status 查看成员，并准备参与协作。`,
+  });
+  setTimeout(() => tryDeliverCollaborationInbox(frontendSessionId), 300).unref?.();
+  return { group: updatedGroup, session: orchestrationSessionSnapshot(globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId)!) };
 }
 
 function getTmuxBinary(): string {
@@ -5978,6 +6026,17 @@ router.post('/operations/collaboration-groups', (req, res) => {
   res.json({ group });
 });
 
+router.post('/operations/collaboration-groups/:groupId/spawn', async (req, res) => {
+  const group = collaborationStore.getGroup(req.params.groupId);
+  if (!group) return res.status(404).json({ error: '协作组不存在' });
+  try {
+    res.json(await spawnCollaborationAgentSession(req, group, null, req.body ?? {}));
+  } catch (error) {
+    if (error instanceof HttpStatusError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
+    res.status(400).json({ error: getErrorMessage(error) });
+  }
+});
+
 router.delete('/operations/collaboration-groups/:groupId', (req, res) => {
   if (!collaborationStore.remove(req.params.groupId)) return res.status(404).json({ error: '协作组不存在' });
   res.status(204).send();
@@ -6021,13 +6080,53 @@ router.post('/operations/collaboration-groups/:groupId/messages', (req, res) => 
   }
 });
 
-router.get('/operations/orchestration/peers', (req, res) => {
+router.get('/operations/orchestration/peers', async (req, res) => {
   const sourceSessionId = resolveFrontendSessionId(req.query);
   const source = globalSessionState.sessions.find((candidate) => candidate.sessionId === sourceSessionId);
   if (!source) return res.status(404).json({ error: '会话不存在' });
   const groups = collaborationStore.groupsForSession(source.sessionId);
   const peerIds = new Set(groups.flatMap((group) => group.sessionIds).filter((id) => id !== source.sessionId));
-  res.json({ source: orchestrationSessionSnapshot(source), groups, peers: globalSessionState.sessions.filter((record) => peerIds.has(record.sessionId)).map(orchestrationSessionSnapshot) });
+  res.json({
+    source: orchestrationSessionSnapshot(source),
+    groups,
+    peers: globalSessionState.sessions.filter((record) => peerIds.has(record.sessionId)).map(orchestrationSessionSnapshot),
+    sessions: globalSessionState.sessions.map(orchestrationSessionSnapshot),
+    agents: await listDetectedAgentLaunchers(),
+  });
+});
+
+router.post('/operations/orchestration/members', (req, res) => {
+  const sourceSessionId = resolveFrontendSessionId(req.body ?? {});
+  const groupId = typeof req.body?.groupId === 'string' ? req.body.groupId.trim() : '';
+  const targetSessionId = typeof req.body?.targetSessionId === 'string' ? req.body.targetSessionId.trim() : '';
+  const action = req.body?.action === 'remove' ? 'remove' : req.body?.action === 'add' ? 'add' : null;
+  const group = collaborationStore.getGroup(groupId);
+  if (!sourceSessionId) return res.status(400).json({ error: '无法识别当前会话；请从 Termdock 会话内运行 td collab' });
+  if (!group || !group.sessionIds.includes(sourceSessionId)) return res.status(403).json({ error: '当前会话不在该协作组中' });
+  if (!action) return res.status(400).json({ error: '成员操作无效' });
+  if (!globalSessionState.sessions.some((candidate) => candidate.sessionId === targetSessionId)) {
+    return res.status(404).json({ error: '目标会话不存在' });
+  }
+  const nextSessionIds = action === 'add'
+    ? Array.from(new Set([...group.sessionIds, targetSessionId]))
+    : group.sessionIds.filter((sessionId) => sessionId !== targetSessionId);
+  if (nextSessionIds.length < 2) return res.status(400).json({ error: '协作组至少需要两个会话' });
+  const updated = collaborationStore.save({ id: group.id, name: group.name, sessionIds: nextSessionIds });
+  res.json({ ok: true, group: updated });
+});
+
+router.post('/operations/orchestration/spawn', async (req, res) => {
+  const sourceSessionId = resolveFrontendSessionId(req.body ?? {});
+  const groupId = typeof req.body?.groupId === 'string' ? req.body.groupId.trim() : '';
+  const group = collaborationStore.getGroup(groupId);
+  if (!sourceSessionId) return res.status(400).json({ error: '无法识别当前会话；请从 Termdock 会话内运行 td collab' });
+  if (!group || !group.sessionIds.includes(sourceSessionId)) return res.status(403).json({ error: '当前会话不在该协作组中' });
+  try {
+    res.json({ ok: true, ...await spawnCollaborationAgentSession(req, group, sourceSessionId, req.body ?? {}) });
+  } catch (error) {
+    if (error instanceof HttpStatusError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
+    res.status(400).json({ error: getErrorMessage(error) });
+  }
 });
 
 router.post('/operations/orchestration/send', (req, res) => {
@@ -6526,22 +6625,24 @@ router.get('/agent-hooks', async (_req, res) => {
   res.json({ agents: await listAllHookAgents() });
 });
 
-router.get('/agent-launchers', async (_req, res) => {
+interface DetectedAgentLauncher {
+  slug: string;
+  displayName: string;
+  command: string;
+  capabilities?: string[];
+  accentColor: string;
+  icon: string | null;
+  isPlugin: boolean;
+  iconMode?: 'mask' | 'native';
+  iconVersion?: number;
+}
+
+async function listDetectedAgentLaunchers(): Promise<DetectedAgentLauncher[]> {
   const pathEntries = buildAugmentedPath().split(path.delimiter).filter(Boolean);
   const executableExtensions = process.platform === 'win32'
     ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';')
     : [''];
-  const detected = [] as Array<{
-    slug: string;
-    displayName: string;
-    command: string;
-    capabilities?: string[];
-    accentColor: string;
-    icon: string | null;
-    isPlugin: boolean;
-    iconMode?: 'mask' | 'native';
-    iconVersion?: number;
-  }>;
+  const detected: DetectedAgentLauncher[] = [];
 
   for (const agent of listAgents()) {
     let command: string | null = null;
@@ -6574,7 +6675,11 @@ router.get('/agent-launchers', async (_req, res) => {
     }
   }
 
-  res.json({ agents: detected });
+  return detected;
+}
+
+router.get('/agent-launchers', async (_req, res) => {
+  res.json({ agents: await listDetectedAgentLaunchers() });
 });
 
 router.get('/directory-suggestions', async (req, res) => {

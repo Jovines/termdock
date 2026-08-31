@@ -14,6 +14,7 @@ import {
   saveCollaborationGroup,
   searchTerminalSessions,
   sendCollaborationMessage,
+  spawnCollaborationAgent,
   setAgentAutomationEnabled,
   type AgentAutomation,
   type AgentLauncherInfo,
@@ -110,7 +111,7 @@ export function AgentOperationsPanel({ activeSessionId, onClose, onNewSession }:
         {notice && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[11px] text-primary"><Check size={13} />{notice}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {tab === 'automation' && <AutomationTab automations={automations} runs={automationRuns} agents={agents} sessions={sessions} activeSessionId={activeSessionId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={onClose} />}
-          {tab === 'collaboration' && <CollaborationTab groups={groups} sessions={sessions} activeSessionId={activeSessionId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {tab === 'collaboration' && <CollaborationTab groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
           {tab === 'search' && <SearchTab onClose={onClose} onNewSession={onNewSession} setError={setError} />}
         </div>
       </section>
@@ -273,8 +274,8 @@ function TimePartSelect({ label, value, options, onChange }: { label: string; va
   return <label className="relative min-w-0 flex-1"><span className="sr-only">{label}</span><select aria-label={label} className="w-full appearance-none bg-transparent py-1 pl-1 pr-7 text-center text-[18px] font-semibold tabular-nums text-foreground outline-none" value={value} onChange={(event) => onChange(event.target.value)}>{Array.from({ length: options }, (_, index) => { const option = String(index).padStart(2, '0'); return <option key={option} value={option}>{option}</option>; })}</select><ChevronDown aria-hidden="true" size={13} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground" /></label>;
 }
 
-function CollaborationTab({ groups, sessions, activeSessionId, busy, setBusy, setError, setNotice, refresh }: {
-  groups: CollaborationGroup[]; sessions: OrchestrationSession[]; activeSessionId: string | null; busy: string | null;
+function CollaborationTab({ groups, sessions, agents, activeSessionId, busy, setBusy, setError, setNotice, refresh }: {
+  groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; busy: string | null;
   setBusy: (value: string | null) => void; setError: (value: string | null) => void; setNotice: (value: string | null) => void; refresh: () => Promise<void>;
 }) {
   const [name, setName] = useState('');
@@ -286,6 +287,13 @@ function CollaborationTab({ groups, sessions, activeSessionId, busy, setBusy, se
   const [targetSessionId, setTargetSessionId] = useState('*');
   const [kind, setKind] = useState<CollaborationMessageKind>('message');
   const [content, setContent] = useState('');
+  const [editingMembers, setEditingMembers] = useState(false);
+  const [memberSelection, setMemberSelection] = useState<Set<string>>(new Set());
+  const [spawnOpen, setSpawnOpen] = useState(false);
+  const [spawnAgentSlug, setSpawnAgentSlug] = useState('');
+  const [spawnName, setSpawnName] = useState('');
+  const [spawnCwd, setSpawnCwd] = useState('');
+  const [spawnTask, setSpawnTask] = useState('');
   const selectedGroup = selectedGroupId === 'new'
     ? null
     : groups.find((group) => group.id === selectedGroupId) ?? groups[0] ?? null;
@@ -298,6 +306,16 @@ function CollaborationTab({ groups, sessions, activeSessionId, busy, setBusy, se
   useEffect(() => {
     if (!selectedGroupId && groups[0]) setSelectedGroupId(groups[0].id);
   }, [groups, selectedGroupId]);
+
+  useEffect(() => {
+    setEditingMembers(false);
+    setSpawnOpen(false);
+    setMemberSelection(new Set(selectedGroup?.sessionIds ?? []));
+  }, [selectedGroup?.id]);
+
+  useEffect(() => {
+    if (!spawnAgentSlug && agents[0]) setSpawnAgentSlug(agents[0].slug);
+  }, [agents, spawnAgentSlug]);
 
   useEffect(() => {
     if (!selectedGroup) { setMessages([]); return; }
@@ -344,6 +362,38 @@ function CollaborationTab({ groups, sessions, activeSessionId, busy, setBusy, se
     catch (error) { setError(error instanceof Error ? error.message : '删除失败'); }
     finally { setBusy(null); }
   };
+  const saveMembers = async () => {
+    if (!selectedGroup) return;
+    const sessionIds = sessions.filter((session) => memberSelection.has(session.sessionId)).map((session) => session.sessionId);
+    setBusy('save-members'); setError(null); setNotice(null);
+    try {
+      await saveCollaborationGroup({ id: selectedGroup.id, name: selectedGroup.name, sessionIds });
+      setEditingMembers(false); await refresh();
+      setNotice(`“${selectedGroup.name}”成员已更新，共 ${sessionIds.length} 个会话`);
+    } catch (error) { setError(error instanceof Error ? error.message : '成员更新失败'); }
+    finally { setBusy(null); }
+  };
+  const openSpawn = () => {
+    const suggestedCwd = sessions.find((session) => session.sessionId === activeSessionId)?.cwd
+      ?? sessions.find((session) => selectedGroup?.sessionIds.includes(session.sessionId))?.cwd
+      ?? '';
+    setSpawnCwd(suggestedCwd); setSpawnName(''); setSpawnTask(''); setSpawnOpen(true); setEditingMembers(false);
+  };
+  const spawnAgent = async () => {
+    if (!selectedGroup || !spawnAgentSlug) return;
+    setBusy('spawn-agent'); setError(null); setNotice(null);
+    try {
+      const result = await spawnCollaborationAgent(selectedGroup.id, {
+        agentSlug: spawnAgentSlug,
+        name: spawnName.trim() || undefined,
+        cwd: spawnCwd.trim() || undefined,
+        task: spawnTask.trim() || undefined,
+      });
+      setSpawnOpen(false); await refresh();
+      setNotice(`“${result.session.name}”已创建并加入“${result.group.name}”`);
+    } catch (error) { setError(error instanceof Error ? error.message : 'Agent Session 创建失败'); }
+    finally { setBusy(null); }
+  };
   const activities = collapseCollaborationMessages(messages, sessions);
 
   return <div className="space-y-5">
@@ -369,8 +419,13 @@ function CollaborationTab({ groups, sessions, activeSessionId, busy, setBusy, se
 
     {selectedGroup && <>
       <section className="border-y border-border/15 py-4">
-        <div className="flex items-start justify-between gap-3"><div><h4 className="text-[13px] font-medium text-foreground">{selectedGroup.name}</h4><p className="mt-1 text-[10px] text-muted-foreground">{selectedGroup.sessionIds.length} 个成员 · 离线成员会在重新上线后收到未读消息</p></div>{confirmDelete ? <div className="flex shrink-0 items-center gap-1"><button className={`${buttonClass} bg-surface-2 px-2 text-foreground`} onClick={() => setConfirmDelete(false)}>取消</button><button disabled={busy !== null} className={`${buttonClass} bg-destructive px-2 text-destructive-foreground`} onClick={() => void remove()}>{busy === `delete:${selectedGroup.id}` ? <RefreshCw size={13} className="animate-spin" /> : null}确认删除</button></div> : <button aria-label={`删除协作组 ${selectedGroup.name}`} title="删除协作组" disabled={busy !== null} className="rounded-lg p-2 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive" onClick={() => setConfirmDelete(true)}><Trash2 size={14} /></button>}</div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0"><h4 className="text-[13px] font-medium text-foreground">{selectedGroup.name}</h4><p className="mt-1 text-[10px] text-muted-foreground">{selectedGroup.sessionIds.length} 个成员 · 组 ID：<span className="break-all font-mono">{selectedGroup.id}</span></p></div>
+          {confirmDelete ? <div className="flex flex-wrap items-center gap-1 sm:justify-end"><button className={`${buttonClass} bg-surface-2 px-2 text-foreground`} onClick={() => setConfirmDelete(false)}>取消</button><button disabled={busy !== null} className={`${buttonClass} bg-destructive px-2 text-destructive-foreground`} onClick={() => void remove()}>{busy === `delete:${selectedGroup.id}` ? <RefreshCw size={13} className="animate-spin" /> : null}确认删除</button></div> : <div className="flex flex-wrap items-center gap-1 sm:justify-end"><button className={`${buttonClass} px-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground`} onClick={() => { setMemberSelection(new Set(selectedGroup.sessionIds)); setEditingMembers((value) => !value); setSpawnOpen(false); }}><Pencil size={13} />管理成员</button><button className={`${buttonClass} px-2 text-primary hover:bg-primary/10`} onClick={openSpawn}><Plus size={13} />新建 Agent</button><button aria-label={`删除协作组 ${selectedGroup.name}`} title="删除协作组" disabled={busy !== null} className="rounded-lg p-2 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive" onClick={() => setConfirmDelete(true)}><Trash2 size={14} /></button></div>}
+        </div>
         <div className="mt-3 grid divide-y divide-border/10 border-y border-border/10 sm:grid-cols-2 sm:divide-x sm:divide-y-0">{selectedGroup.sessionIds.map((id) => { const session = sessions.find((candidate) => candidate.sessionId === id); return <button key={id} disabled={!session} onClick={() => session && window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: id }))} className="min-w-0 px-3 py-2.5 text-left transition hover:bg-surface-2 disabled:cursor-default"><span className="flex items-center gap-2"><span className={`h-2 w-2 shrink-0 rounded-full ${session?.status === 'working' ? 'bg-primary' : session ? 'bg-[var(--success)]' : 'bg-muted-foreground'}`} /><span className="truncate text-[11px] text-foreground">{session?.name ?? id}</span><span className="ml-auto shrink-0 text-[9px] text-muted-foreground">{session ? humanSessionStatus(session.status) : '已离线'}</span></span><span className="mt-1 block truncate text-[9px] text-muted-foreground">{session ? friendlyCurrentTask(session.currentTask) : '重新上线后可继续接收消息'}</span></button>; })}</div>
+        {editingMembers && <div className="mt-4 border-t border-border/15 pt-4"><div className="flex items-start justify-between gap-3"><div><h5 className="text-[11px] font-medium text-foreground">管理成员</h5><p className="mt-1 text-[9px] text-muted-foreground">勾选已有 Session，保存后立即参与之后的协作消息。</p></div><span className="text-[9px] text-muted-foreground">已选 {memberSelection.size}</span></div><div className="mt-3 max-h-52 divide-y divide-border/10 overflow-y-auto border-y border-border/10">{sessions.map((session) => <label key={session.sessionId} className="flex cursor-pointer items-center gap-3 px-2 py-2.5 transition hover:bg-surface-2"><input type="checkbox" checked={memberSelection.has(session.sessionId)} onChange={() => setMemberSelection((current) => { const next = new Set(current); if (next.has(session.sessionId)) next.delete(session.sessionId); else next.add(session.sessionId); return next; })} /><span className="min-w-0 flex-1"><span className="block truncate text-[11px] text-foreground">{session.name}</span><span className="block truncate text-[9px] text-muted-foreground">{humanSessionStatus(session.status)} · {session.cwd}</span></span></label>)}</div><div className="mt-3 flex justify-end gap-2"><button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setEditingMembers(false)}>取消</button><button disabled={busy !== null || memberSelection.size < 2} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void saveMembers()}>{busy === 'save-members' ? <RefreshCw size={13} className="animate-spin" /> : <Check size={13} />}保存成员</button></div></div>}
+        {spawnOpen && <div className="mt-4 border-t border-primary/20 pt-4"><div><h5 className="text-[11px] font-medium text-foreground">创建 Agent Session</h5><p className="mt-1 text-[9px] text-muted-foreground">新会话启动后自动加入本组，并收到初始任务和成员信息。</p></div><div className="mt-3 grid gap-2 sm:grid-cols-2"><label className="space-y-1 text-[9px] text-muted-foreground">Agent / Plugin<select aria-label="新 Agent 类型" className={inputClass} value={spawnAgentSlug} onChange={(event) => setSpawnAgentSlug(event.target.value)}>{agents.map((agent) => <option key={agent.slug} value={agent.slug}>{agent.displayName}{agent.isPlugin ? ' · Plugin' : ''}</option>)}</select></label><label className="space-y-1 text-[9px] text-muted-foreground">会话名称<input aria-label="新 Agent 会话名称" className={inputClass} value={spawnName} onChange={(event) => setSpawnName(event.target.value)} placeholder="留空则自动命名" /></label></div><label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">工作目录<input aria-label="新 Agent 工作目录" className={inputClass} value={spawnCwd} onChange={(event) => setSpawnCwd(event.target.value)} placeholder="默认继承当前会话" /></label><label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">初始任务<textarea aria-label="新 Agent 初始任务" className={`${inputClass} min-h-16 resize-y`} value={spawnTask} onChange={(event) => setSpawnTask(event.target.value)} placeholder="说明它加入后要先完成什么" /></label><div className="mt-3 flex justify-end gap-2"><button className={`${buttonClass} bg-surface-2 text-foreground`} onClick={() => setSpawnOpen(false)}>取消</button><button disabled={busy !== null || !spawnAgentSlug} className={`${buttonClass} bg-primary text-primary-foreground`} onClick={() => void spawnAgent()}>{busy === 'spawn-agent' ? <RefreshCw size={13} className="animate-spin" /> : <Bot size={13} />}创建并加入</button></div></div>}
       </section>
 
       <section><div className="mb-2 flex items-center justify-between"><h4 className="text-[11px] font-medium text-foreground">协作记录</h4><span className="text-[9px] text-muted-foreground">{activities.length} 条</span></div><div className="max-h-72 divide-y divide-border/10 overflow-y-auto border-y border-border/10">
