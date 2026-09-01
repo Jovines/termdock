@@ -52,6 +52,7 @@ import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { resolveRightSidebarNarrowLayout, useSidebarStore, type RightSidebarLayoutPreference } from '../../stores/useSidebarStore';
 import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
 import { minimizeClientWatchRoots } from '../../terminal/fileWatchRoots';
+import { partitionFileWatchEvents } from '../../terminal/fileWatchEvents';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
 import { subscribeClientState } from '../../utils/clientStateSync';
@@ -130,9 +131,9 @@ const FILE_TREE_WIDTH_WRITE_MS = 120;
 const GIT_BUNDLE_SLOW_MS = 700;
 const SIDEBAR_BACKGROUND_IO_DELAY_MS = 600;
 // File-watch reconnect backoff: the /fs/watch stream dies on server restart,
-// deploy, or network hiccups. Retry with capped backoff; before each retry the
-// watched roots' caches are invalidated and the watch epoch is bumped, because
-// events fired while disconnected can never be replayed.
+// deploy, or network hiccups. Retry with capped backoff. Shared native watches
+// report a `reconnected` rescan only when a change occurred during hand-off, so
+// retrying alone must not invalidate the visible tree.
 const FILE_WATCH_RECONNECT_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
 const MOBILE_SIDEBAR_OPEN_SETTLE_DELAY_MS = 320;
 // Closing: the settled reset is deferred past the close spring so the
@@ -4915,6 +4916,7 @@ type FilePreviewState =
 
 let filePreviewLoadingSeq = 0;
 let gitBundleLogSeq = 0;
+let gitBundleComponentSeq = 0;
 let diffInteractionLogSeq = 0;
 let diffInteractionIdSeq = 0;
 
@@ -6294,8 +6296,10 @@ export function RightSidebar(
   const gitBundleSlow = useSidebarStore((s) => s.gitBundleSlow);
   const gitBundleError = useSidebarStore((s) => s.gitBundleError);
   const gitBundleLastLoadedAt = useSidebarStore((s) => s.gitBundleLastLoadedAt);
-  const setGitBundleLoading = useSidebarStore((s) => s.setGitBundleLoading);
-  const setGitBundleSlow = useSidebarStore((s) => s.setGitBundleSlow);
+  const beginGitBundleLoading = useSidebarStore((s) => s.beginGitBundleLoading);
+  const setGitBundleSlowFor = useSidebarStore((s) => s.setGitBundleSlowFor);
+  const finishGitBundleLoading = useSidebarStore((s) => s.finishGitBundleLoading);
+  const resetGitBundleLoading = useSidebarStore((s) => s.resetGitBundleLoading);
   const setGitBundleError = useSidebarStore((s) => s.setGitBundleError);
   const markGitBundleLoaded = useSidebarStore((s) => s.markGitBundleLoaded);
   const fileTreeRoot = explorerRoot ?? rootPath;
@@ -6303,6 +6307,7 @@ export function RightSidebar(
   const rootEntriesLoaded = useSidebarStore((s) => Boolean(fileTreeRoot && s.directoryCache.has(fileTreeRoot)));
   const fileTreeScrollRef = useRef<HTMLDivElement | null>(null);
   const gitBundleRequestIdRef = useRef(0);
+  const [gitBundleComponentId] = useState(() => ++gitBundleComponentSeq);
   const gitBundleAbortRef = useRef<AbortController | null>(null);
   const gitBundlePendingRef = useRef<{ cwd: string; includeNested: boolean; refresh: boolean; cacheOnly: boolean; promise: Promise<GitBundleResponse | null> } | null>(null);
   const untrackedRequestSeqRef = useRef(0);
@@ -6713,6 +6718,12 @@ export function RightSidebar(
   }, [activeGitRepoRoot, isCurrentSidebarRoot, loadChangeAuditRecords, loadUntrackedFiles, rootPath, selectFile, setChangedFiles]);
 
   useEffect(() => {
+    // Pin/unpin moves the sidebar between overlay and inline layout, which
+    // remounts this component without changing rootPath. Drop any loading
+    // lease left by the previous instance so this instance can refresh from
+    // the server cache. Request ownership keeps the old instance's eventual
+    // completion from clearing a newer request.
+    resetGitBundleLoading();
     branchAuditModuleHydratedRootRef.current = null;
     branchAuditModuleSkipWriteRootRef.current = rootPath;
     const snapshotRepositories: GitRepositoryBundle[] = [];
@@ -6803,7 +6814,7 @@ export function RightSidebar(
     setGitRepoFilters(snapshotRepoFilters);
     setGitContext(null);
     lastAutoRefreshRootRef.current = null;
-  }, [rootPath]);
+  }, [resetGitBundleLoading, rootPath]);
 
   const loadGitBundle = useCallback(async (cwd: string | undefined = rootPath ?? undefined, options: { reloadDiff?: boolean; includeNested?: boolean; background?: boolean; refresh?: boolean; cacheOnly?: boolean; replaceRepoRoot?: string } = {}) => {
     if (!cwd) return null;
@@ -6820,6 +6831,7 @@ export function RightSidebar(
     }
     const requestId = gitBundleRequestIdRef.current + 1;
     gitBundleRequestIdRef.current = requestId;
+    const loadingOwner = `right-sidebar:${gitBundleComponentId}:${requestId}`;
     gitBundleAbortRef.current?.abort();
     const requestSlotId = buildGitBundleRequestSlotId(cwd);
     cancelIoSlot(requestSlotId);
@@ -6827,8 +6839,7 @@ export function RightSidebar(
     gitBundleAbortRef.current = controller;
     let slowTimer: number | null = null;
     if (!background) {
-      setGitBundleLoading(true);
-      setGitBundleSlow(false);
+      beginGitBundleLoading(loadingOwner);
     }
     setGitBundleError(null);
     logGitBundleClientEvent('start', {
@@ -6845,7 +6856,7 @@ export function RightSidebar(
     });
     if (!background && typeof window !== 'undefined') {
       slowTimer = window.setTimeout(() => {
-        if (gitBundleRequestIdRef.current === requestId) setGitBundleSlow(true);
+        if (gitBundleRequestIdRef.current === requestId) setGitBundleSlowFor(loadingOwner, true);
       }, GIT_BUNDLE_SLOW_MS);
     }
 
@@ -6900,8 +6911,7 @@ export function RightSidebar(
           untrackedDeferred: result.untrackedDeferred,
         });
       } else if (gitBundleRequestIdRef.current === requestId && isCurrentSidebarRoot(expectedRootPath)) {
-        setGitBundleLoading(false);
-        setGitBundleSlow(false);
+        finishGitBundleLoading(loadingOwner);
       }
       return result;
     } catch (err) {
@@ -6934,11 +6944,10 @@ export function RightSidebar(
       if (gitBundleAbortRef.current === controller) gitBundleAbortRef.current = null;
       if (gitBundlePendingRef.current?.promise === promise) gitBundlePendingRef.current = null;
       if (!background && gitBundleRequestIdRef.current === requestId && isCurrentSidebarRoot(expectedRootPath)) {
-        setGitBundleLoading(false);
-        setGitBundleSlow(false);
+        finishGitBundleLoading(loadingOwner);
       }
     }
-  }, [applyGitBundle, changedFiles.size, gitBundleLastLoadedAt, isCurrentSidebarRoot, markGitBundleLoaded, rootPath, setGitBundleError, setGitBundleLoading, setGitBundleSlow]);
+  }, [applyGitBundle, beginGitBundleLoading, changedFiles.size, finishGitBundleLoading, gitBundleComponentId, gitBundleLastLoadedAt, isCurrentSidebarRoot, markGitBundleLoaded, rootPath, setGitBundleError, setGitBundleSlowFor]);
 
   const refreshGitState = useCallback(async () => {
     if (!rootPath) return;
@@ -7623,7 +7632,10 @@ export function RightSidebar(
 
   useEffect(() => {
     const watchedFileRoots = watchedFileRootsKey ? watchedFileRootsKey.split('\n') : [];
-    if (!isOpen || watchedFileRoots.length === 0) return;
+    if (!isOpen || watchedFileRoots.length === 0) {
+      setFileWatchError(null);
+      return;
+    }
     const controller = new AbortController();
     let cancelled = false;
     let startTimer = 0;
@@ -7633,27 +7645,15 @@ export function RightSidebar(
     const runWatchLoop = async () => {
       let attempt = 0;
       while (!cancelled && !controller.signal.aborted) {
-        if (attempt > 0) {
-          // Reconnecting: events fired while the stream was down are lost
-          // forever, so self-heal before retrying — drop cached listings under
-          // the watched roots (expanded dirs refetch themselves) and bump the
-          // epoch so previews / markdown images reload.
-          for (const root of watchedFileRoots) invalidateDirectoryCache(root, true);
-          bumpFileWatchEpoch();
-        }
         let failure: unknown = null;
         try {
           // Established (or about to): clear any error from a previous
           // disconnect; a failed attempt re-sets it below.
           setFileWatchError(null);
           await watchFileSystem(watchedFileRoots, (events) => {
-            applyFileWatchEvents(events);
-            const degraded = events.find((event) => (
-              event.type === 'rescan-required'
-              && event.reason !== 'event-storm'
-              && event.reason !== 'reconnected'
-            ));
-            if (degraded?.reason) setFileWatchError(degraded.reason);
+            const { applicableEvents, unavailableReason } = partitionFileWatchEvents(events);
+            if (applicableEvents.length > 0) applyFileWatchEvents(applicableEvents);
+            if (unavailableReason) setFileWatchError(unavailableReason);
           }, controller.signal);
           // A clean resolve means the server closed the stream (deploy,
           // restart) — treat it as a disconnect and reconnect as well.
@@ -7681,7 +7681,7 @@ export function RightSidebar(
       window.clearTimeout(retryTimer);
       controller.abort();
     };
-  }, [applyFileWatchEvents, bumpFileWatchEpoch, invalidateDirectoryCache, isOpen, watchedFileRootsKey]);
+  }, [applyFileWatchEvents, isOpen, watchedFileRootsKey]);
 
   useEffect(() => {
     if (!rootPath) return;
@@ -10151,7 +10151,7 @@ export function RightSidebar(
           type="button"
           onClick={refreshExplorerRoot}
           disabled={!fileTreeRoot}
-          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95 ${fileWatchError ? 'text-destructive' : 'text-muted-foreground'}`}
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35 active:scale-95"
           aria-label={t('rightSidebar.refreshFiles')}
           title={fileWatchError ? t('rightSidebar.fileWatchUnavailable', { message: fileWatchError }) : t('rightSidebar.refreshFiles')}
         >

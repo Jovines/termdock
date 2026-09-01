@@ -45,6 +45,7 @@ function resetSidebarStore(): void {
     fileWatchEpoch: 0,
     gitBundleLoading: false,
     gitBundleSlow: false,
+    gitBundleLoadingOwner: null,
     gitBundleError: null,
     gitBundleLastLoadedAt: null,
     gitBundleCacheInfo: null,
@@ -86,6 +87,40 @@ describe('useSidebarStore right tab persistence', () => {
     useSidebarStore.getState().setRootPath('/workspace/fresh');
 
     expect(useSidebarStore.getState().rightTab).toBe('files');
+  });
+});
+
+describe('useSidebarStore Git bundle loading ownership', () => {
+  beforeEach(() => resetSidebarStore());
+
+  afterEach(() => resetSidebarStore());
+
+  it('does not let a remounted sidebar request clear the current loading state', () => {
+    const store = useSidebarStore.getState();
+    store.beginGitBundleLoading('old-sidebar:1');
+    store.resetGitBundleLoading();
+    store.beginGitBundleLoading('new-sidebar:1');
+
+    useSidebarStore.getState().finishGitBundleLoading('old-sidebar:1');
+
+    expect(useSidebarStore.getState()).toMatchObject({
+      gitBundleLoading: true,
+      gitBundleSlow: false,
+      gitBundleLoadingOwner: 'new-sidebar:1',
+    });
+  });
+
+  it('clears loading only when the active request finishes', () => {
+    const store = useSidebarStore.getState();
+    store.beginGitBundleLoading('sidebar:2');
+    store.setGitBundleSlowFor('sidebar:2', true);
+    store.finishGitBundleLoading('sidebar:2');
+
+    expect(useSidebarStore.getState()).toMatchObject({
+      gitBundleLoading: false,
+      gitBundleSlow: false,
+      gitBundleLoadingOwner: null,
+    });
   });
 });
 

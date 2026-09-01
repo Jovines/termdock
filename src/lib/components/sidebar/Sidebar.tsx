@@ -18,6 +18,7 @@ import {
   yieldToSwiper,
   type ManagedScrollerGesture,
 } from './gestureArbiter';
+import { dismissSoftKeyboardForEdgeOpen } from './sidebarSoftKeyboard';
 import { useI18n } from '../../i18n';
 
 interface SidebarProps {
@@ -419,6 +420,7 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
           onCloseRef.current();
         }, durationMs + COMMIT_BUFFER_MS);
       }
+      return shouldOpen;
     },
     [animateToState, flushPendingPosition],
   );
@@ -623,7 +625,10 @@ export const Sidebar = React.forwardRef<HTMLElement, SidebarProps>(function Side
       if (!active) {
         if (edgeDragActiveRef.current) {
           edgeDragActiveRef.current = false;
-          decideSnap(releaseVelocity());
+          const shouldOpen = decideSnap(releaseVelocity());
+          if (shouldOpen) {
+            dismissSoftKeyboardForEdgeOpen();
+          }
         }
         return;
       }

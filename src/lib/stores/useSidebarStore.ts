@@ -420,6 +420,7 @@ interface SidebarState {
   // Git bundle loading state (for right sidebar UX)
   gitBundleLoading: boolean;
   gitBundleSlow: boolean;
+  gitBundleLoadingOwner: string | null;
   gitBundleError: string | null;
   gitBundleLastLoadedAt: number | null;
   gitBundleCacheInfo: { cached?: boolean; stale?: boolean; cacheAgeMs?: number; nestedDeferred?: boolean; untrackedDeferred?: boolean } | null;
@@ -462,8 +463,10 @@ interface SidebarState {
   applyFileWatchEvents: (events: FileWatchEvent[]) => void;
   bumpFileWatchEpoch: () => void;
   setChangedFiles: (files: Map<string, GitChangedFile>) => void;
-  setGitBundleLoading: (loading: boolean) => void;
-  setGitBundleSlow: (slow: boolean) => void;
+  beginGitBundleLoading: (owner: string) => void;
+  setGitBundleSlowFor: (owner: string, slow: boolean) => void;
+  finishGitBundleLoading: (owner: string) => void;
+  resetGitBundleLoading: () => void;
   setGitBundleError: (error: string | null) => void;
   markGitBundleLoaded: (info?: { cached?: boolean; stale?: boolean; cacheAgeMs?: number; nestedDeferred?: boolean; untrackedDeferred?: boolean } | null) => void;
 }
@@ -496,6 +499,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   fileWatchEpoch: 0,
   gitBundleLoading: false,
   gitBundleSlow: false,
+  gitBundleLoadingOwner: null,
   gitBundleError: null,
   gitBundleLastLoadedAt: null,
   gitBundleCacheInfo: null,
@@ -591,6 +595,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       changedFiles: cached ? new Map(cached.changedFiles) : new Map(),
       gitBundleLoading: false,
       gitBundleSlow: false,
+      gitBundleLoadingOwner: null,
       gitBundleError: cached?.gitBundleError ?? null,
       gitBundleLastLoadedAt: cached?.gitBundleLastLoadedAt ?? null,
       gitBundleCacheInfo: cached?.gitBundleCacheInfo ?? null,
@@ -850,8 +855,16 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   bumpFileWatchEpoch: () => set((s) => ({ fileWatchEpoch: s.fileWatchEpoch + 1 })),
 
   setChangedFiles: (files) => set({ changedFiles: files }),
-  setGitBundleLoading: (loading) => set({ gitBundleLoading: loading }),
-  setGitBundleSlow: (slow) => set({ gitBundleSlow: slow }),
+  beginGitBundleLoading: (owner) => set({ gitBundleLoading: true, gitBundleSlow: false, gitBundleLoadingOwner: owner }),
+  setGitBundleSlowFor: (owner, slow) => set((s) => (
+    s.gitBundleLoadingOwner === owner ? { gitBundleSlow: slow } : s
+  )),
+  finishGitBundleLoading: (owner) => set((s) => (
+    s.gitBundleLoadingOwner === owner
+      ? { gitBundleLoading: false, gitBundleSlow: false, gitBundleLoadingOwner: null }
+      : s
+  )),
+  resetGitBundleLoading: () => set({ gitBundleLoading: false, gitBundleSlow: false, gitBundleLoadingOwner: null }),
   setGitBundleError: (error) => set({ gitBundleError: error }),
-  markGitBundleLoaded: (info = null) => set({ gitBundleLastLoadedAt: Date.now(), gitBundleCacheInfo: info, gitBundleLoading: false, gitBundleSlow: false }),
+  markGitBundleLoaded: (info = null) => set({ gitBundleLastLoadedAt: Date.now(), gitBundleCacheInfo: info }),
 }));
