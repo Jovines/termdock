@@ -17,6 +17,12 @@ The settings panel reports and updates these layers separately:
 The shell always contains a complete fallback Runtime, so it remains usable
 offline and can recover from a bad downloaded update.
 
+Desktop-managed and globally installed services share the same user state under
+`~/.termdock`, including authentication, settings, sessions, certificates, and
+Agent plugin packages. Only the executable Runtime differs. A desktop-managed
+service never invokes `npm install --global`; its update and restart are owned by
+the Electron main process and use the bundled Node executable.
+
 ## Update flow
 
 1. The packaged app checks `termdock/latest` on the npm registry.

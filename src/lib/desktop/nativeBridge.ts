@@ -45,6 +45,15 @@ export interface DesktopAppUpdateState {
   error: string | null;
 }
 
+export interface DesktopRuntimeUpdateState {
+  status: 'idle' | 'checking' | 'current' | 'ready' | 'restarting' | 'error';
+  currentVersion: string;
+  latestVersion: string | null;
+  source: 'desktop';
+  checkedAt: number | null;
+  error: string | null;
+}
+
 export interface TermdockDesktopBridge {
   platform: string;
   /** Present when the desktop shell only acknowledges confirmed native delivery. */
@@ -55,6 +64,11 @@ export interface TermdockDesktopBridge {
   checkDesktopUpdate?(): Promise<DesktopAppUpdateState>;
   installDesktopUpdate?(): Promise<DesktopAppUpdateState>;
   onDesktopUpdateState?(callback: (state: DesktopAppUpdateState) => void): void;
+  runtimeUpdateState?(): Promise<DesktopRuntimeUpdateState>;
+  checkRuntimeUpdate?(): Promise<DesktopRuntimeUpdateState>;
+  restartRuntime?(): Promise<DesktopRuntimeUpdateState>;
+  onRuntimeUpdateState?(callback: (state: DesktopRuntimeUpdateState) => void): void;
+  onStartupProgress?(callback: (message: string | null) => void): void;
   reportServiceActivity?(activity: { runningCount: number; reviewCount: number }): void;
   focusService?(origin: string): Promise<boolean>;
   onServiceActivity?(callback: (services: DesktopServiceActivity[]) => void): () => void;

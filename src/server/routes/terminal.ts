@@ -6504,10 +6504,22 @@ router.get('/update', (_req, res) => {
 });
 
 router.post('/update/check', async (_req, res) => {
+  if (process.env.TERMDOCK_DESKTOP === '1') {
+    return res.status(409).json({
+      code: 'DESKTOP_RUNTIME_UPDATE_REQUIRED',
+      error: '桌面内置服务必须由 Termdock Desktop 更新 Runtime。',
+    });
+  }
   res.json(await npmAutoUpdateManager.checkNow());
 });
 
 router.post('/update/restart', (_req, res) => {
+  if (process.env.TERMDOCK_DESKTOP === '1') {
+    return res.status(409).json({
+      code: 'DESKTOP_RUNTIME_UPDATE_REQUIRED',
+      error: '桌面内置服务必须由 Termdock Desktop 重启。',
+    });
+  }
   try {
     const state = npmAutoUpdateManager.confirmRestart();
     res.status(202).json(state);

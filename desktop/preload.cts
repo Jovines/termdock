@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   DesktopAppUpdateState,
   DesktopPreferences,
+  DesktopRuntimeUpdateState,
   DesktopServiceActivity,
   DesktopSnapshot,
   DesktopStatusSnapshot,
@@ -69,6 +70,15 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
   desktopUpdateState: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:update-state'),
   checkDesktopUpdate: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:check-update'),
   installDesktopUpdate: (): Promise<DesktopAppUpdateState> => ipcRenderer.invoke('desktop:install-update'),
+  runtimeUpdateState: (): Promise<DesktopRuntimeUpdateState> => ipcRenderer.invoke('desktop:runtime-update-state'),
+  checkRuntimeUpdate: (): Promise<DesktopRuntimeUpdateState> => ipcRenderer.invoke('desktop:check-runtime-update'),
+  restartRuntime: (): Promise<DesktopRuntimeUpdateState> => ipcRenderer.invoke('desktop:restart-runtime'),
+  onRuntimeUpdateState: (callback: (state: DesktopRuntimeUpdateState) => void): void => {
+    ipcRenderer.on('desktop:runtime-update-state-changed', (_event, state: DesktopRuntimeUpdateState) => callback(state));
+  },
+  onStartupProgress: (callback: (message: string | null) => void): void => {
+    ipcRenderer.on('desktop:startup-progress', (_event, message: string | null) => callback(message));
+  },
   onDesktopUpdateState: (callback: (state: DesktopAppUpdateState) => void): void => {
     ipcRenderer.on('desktop:update-state-changed', (_event, state: DesktopAppUpdateState) => callback(state));
   },

@@ -24,10 +24,17 @@ const elements = {
   connections: document.querySelector('#connections'),
   connectionCount: document.querySelector('#connection-count'),
   version: document.querySelector('#version'),
+  startupProgress: document.querySelector('#startup-progress'),
+  startupProgressMessage: document.querySelector('#startup-progress-message'),
 };
 
 let currentSnapshot = null;
 let editingConnectionId = null;
+
+api.onStartupProgress?.((message) => {
+  elements.startupProgress.hidden = !message;
+  if (message) elements.startupProgressMessage.textContent = message;
+});
 
 function setEditingConnection(connection = null) {
   editingConnectionId = connection?.id || null;

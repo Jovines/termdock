@@ -10,6 +10,7 @@ export interface ServiceProbe {
   url: string;
   version?: string;
   protocolVersion?: number;
+  desktopManaged?: boolean;
   error?: string;
 }
 
@@ -92,6 +93,23 @@ export interface DesktopAppUpdateState {
   currentVersion: string;
   latestVersion: string | null;
   releaseName: string | null;
+  checkedAt: number | null;
+  error: string | null;
+}
+
+export type DesktopRuntimeUpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'current'
+  | 'ready'
+  | 'restarting'
+  | 'error';
+
+export interface DesktopRuntimeUpdateState {
+  status: DesktopRuntimeUpdateStatus;
+  currentVersion: string;
+  latestVersion: string | null;
+  source: 'desktop';
   checkedAt: number | null;
   error: string | null;
 }

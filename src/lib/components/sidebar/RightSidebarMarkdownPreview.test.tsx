@@ -944,7 +944,7 @@ describe('right sidebar Markdown preview rendering', () => {
     const onChange = vi.fn();
     const onClose = vi.fn();
 
-    const { container } = render(
+    render(
       <MarkdownImageLightbox
         images={[
           { kind: 'image', src: '/one.png', alt: 'One' },
@@ -959,9 +959,11 @@ describe('right sidebar Markdown preview rendering', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
     expect(onChange).toHaveBeenCalledWith(1);
 
-    const stage = container.querySelector('[data-markdown-image-lightbox-stage]');
+    const lightbox = document.body.querySelector('[data-markdown-image-lightbox]');
+    const stage = document.body.querySelector('[data-markdown-image-lightbox-stage]');
     expect(stage).toBeTruthy();
-    expect(container.querySelector('[data-markdown-image-lightbox]')?.className).toContain(
+    expect(lightbox?.parentElement).toBe(document.body);
+    expect(lightbox?.className).toContain(
       'pt-[var(--safe-top-inset,env(safe-area-inset-top,0px))]',
     );
     fireEvent.click(stage as Element);
@@ -1026,7 +1028,7 @@ describe('right sidebar Markdown preview rendering', () => {
     Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 400 });
     Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 200 });
 
-    const { container } = render(
+    render(
       <MarkdownImageLightbox
         images={[
           { kind: 'image', src: '/diagram.svg', alt: 'Vector diagram' },
@@ -1052,7 +1054,7 @@ describe('right sidebar Markdown preview rendering', () => {
     expect(image.style.height).toBe('495px');
     expect(image.style.transform).toBe('translate3d(-50%, -50%, 0)');
     expect(image.style.willChange).toBe('');
-    expect(container.querySelector('[data-vector-zoom-surface]')).toBeTruthy();
+    expect(document.body.querySelector('[data-vector-zoom-surface]')).toBeTruthy();
 
     vi.useRealTimers();
   });

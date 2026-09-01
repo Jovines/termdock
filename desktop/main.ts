@@ -50,10 +50,15 @@ import {
 } from './activityStatus.js';
 import {
   checkForDesktopUpdates,
+  checkForRuntimeUpdates,
   configureDesktopUpdater,
   ensureLatestRuntime,
   getDesktopUpdateState,
+  getDesktopRuntimeUpdateState,
   installDownloadedDesktopUpdate,
+  markDesktopRuntimeRestarting,
+  markDesktopRuntimeRunning,
+  subscribeDesktopRuntimeUpdateState,
   subscribeDesktopUpdateState,
 } from './updater.js';
 import {
@@ -81,6 +86,7 @@ const DEFAULT_LOCAL_URL = 'http://localhost:9834';
 const PROTOCOL_VERSION = 1;
 const HEALTH_TIMEOUT_MS = 3_500;
 const START_TIMEOUT_MS = 90_000;
+const RESTORE_LOAD_TIMEOUT_MS = 15_000;
 const localServiceCertificatePath = path.join(termdockDir, 'certs', 'termdock-local.pem');
 const sessionTrustedCertificateTargets = new Set<string>();
 const sessionTrustedCertificateAuthorities = new Map<string, string>();
@@ -110,6 +116,8 @@ function triggerLocalNetworkPermission(): void {
 }
 
 let mainWindow: BrowserWindow | null = null;
+let startupRestoreActive = false;
+let startupProgressMessage = '正在启动 Termdock Desktop…';
 const serviceWindows = new Map<string, BrowserWindow>();
 const windowServiceOrigins = new WeakMap<BrowserWindow, string>();
 const restorableServiceWindows = new WeakSet<BrowserWindow>();
@@ -850,6 +858,7 @@ async function probeServiceWithCertificateAuthority(
           product?: unknown;
           version?: unknown;
           protocolVersion?: unknown;
+          desktopManaged?: unknown;
         } | null;
         if (metadata?.product && metadata.product !== 'termdock') {
           return { ok: false, url, error: '目标服务的产品标识不是 Termdock' };
@@ -861,6 +870,7 @@ async function probeServiceWithCertificateAuthority(
           protocolVersion: typeof metadata?.protocolVersion === 'number'
             ? metadata.protocolVersion
             : undefined,
+          desktopManaged: metadata?.desktopManaged === true,
         };
       }
     } catch {
@@ -897,6 +907,7 @@ async function probeService(rawUrl: string): Promise<ServiceProbe> {
           product?: unknown;
           version?: unknown;
           protocolVersion?: unknown;
+          desktopManaged?: unknown;
         };
         if (metadata.product && metadata.product !== 'termdock') {
           return { ok: false, url, error: '目标服务的产品标识不是 Termdock' };
@@ -908,6 +919,7 @@ async function probeService(rawUrl: string): Promise<ServiceProbe> {
           protocolVersion: typeof metadata.protocolVersion === 'number'
             ? metadata.protocolVersion
             : undefined,
+          desktopManaged: metadata.desktopManaged === true,
         };
       }
     } catch {
@@ -923,7 +935,10 @@ async function probeService(rawUrl: string): Promise<ServiceProbe> {
   }
 }
 
-async function probeServiceWithLocalNetworkPermission(rawUrl: string): Promise<ServiceProbe> {
+async function probeServiceWithLocalNetworkPermission(
+  rawUrl: string,
+  options: { interactive?: boolean } = {},
+): Promise<ServiceProbe> {
   let normalizedUrl: string;
   try {
     normalizedUrl = normalizeServiceUrl(rawUrl);
@@ -949,6 +964,7 @@ async function probeServiceWithLocalNetworkPermission(rawUrl: string): Promise<S
     return probe;
   }
   if (canOfferCertificateTrust(probe.url) && isCertificateTrustError(probe.error)) {
+    if (options.interactive === false) return probe;
     const certificate = await requestCertificateTrust(probe.url);
     if (!certificate) {
       return { ...probe, error: 'HTTPS 证书尚未受信任' };
@@ -959,6 +975,7 @@ async function probeServiceWithLocalNetworkPermission(rawUrl: string): Promise<S
     return probe;
   }
 
+  if (options.interactive === false) return probe;
   if (!(await requestLocalNetworkPermissionRetry(probe.url))) {
     return { ...probe, error: 'Termdock 尚未获得 macOS 本地网络权限' };
   }
@@ -1087,11 +1104,16 @@ async function snapshot(): Promise<DesktopSnapshot> {
 
 function desktopRuntimeEnv(runtime = runtimePaths()): NodeJS.ProcessEnv {
   const currentPath = process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin';
+  const userBinPaths = [
+    path.join(os.homedir(), '.local', 'bin'),
+    path.join(os.homedir(), 'bin'),
+    path.join(os.homedir(), '.npm-global', 'bin'),
+  ];
   return {
     ...process.env,
     LANG: process.env.LANG || 'en_US.UTF-8',
     LC_CTYPE: process.env.LC_CTYPE || process.env.LANG || 'en_US.UTF-8',
-    PATH: [runtime.toolchainBin, '/opt/homebrew/bin', '/usr/local/bin', currentPath]
+    PATH: [runtime.toolchainBin, ...userBinPaths, '/opt/homebrew/bin', '/usr/local/bin', currentPath]
       .filter(Boolean)
       .join(path.delimiter),
     TERMDOCK_DESKTOP: '1',
@@ -1232,8 +1254,33 @@ async function startLocalService(): Promise<ServiceProbe> {
     throw new Error(`桌面版服务启动失败：${probe.error ?? '未知错误'}。日志：${path.join(termdockDir, 'server.log')}`);
   }
   await ensureTmuxUtf8Environment(runtime);
+  markDesktopRuntimeRunning(runtime.version);
   await connectWindow(probe.url);
   return probe;
+}
+
+async function restartDesktopManagedRuntime(): Promise<ReturnType<typeof getDesktopRuntimeUpdateState>> {
+  const status = await getLocalServiceStatus();
+  if (status.running) {
+    if (status.probe?.desktopManaged !== true) {
+      throw new Error('当前本机服务不是由桌面版启动的，不能由桌面版自动重启。');
+    }
+    markDesktopRuntimeRestarting();
+    const pid = status.state?.pid;
+    if (!pid || !isProcessRunning(pid)) {
+      throw new Error('桌面服务状态已失效，请重新打开连接中心。');
+    }
+    process.kill(pid, 'SIGTERM');
+    const deadline = Date.now() + 15_000;
+    while (isProcessRunning(pid) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    if (isProcessRunning(pid)) throw new Error(`桌面服务 PID ${pid} 未能正常退出。`);
+    const latest = readServerState();
+    if (latest?.pid === pid) fs.rmSync(serverStatePath, { force: true });
+  }
+  await startLocalService();
+  return getDesktopRuntimeUpdateState();
 }
 
 function shellQuote(value: string): string {
@@ -1281,25 +1328,29 @@ async function installCli(): Promise<DesktopSnapshot> {
 
 async function connectWindow(
   rawUrl: string,
-  options: { focus?: boolean; updateLastConnection?: boolean } = {},
+  options: { focus?: boolean; updateLastConnection?: boolean; persist?: boolean } = {},
 ): Promise<ServiceProbe> {
-  let probe = await probeServiceWithLocalNetworkPermission(rawUrl);
+  let probe = await probeServiceWithLocalNetworkPermission(rawUrl, {
+    interactive: options.focus !== false,
+  });
   if (!probe.ok) return probe;
   const parsed = new URL(probe.url);
   const key = parsed.origin;
   const existingWindow = serviceWindows.get(key);
   if (existingWindow && !existingWindow.isDestroyed()) {
-    const config = readDesktopConfig();
-    if (options.updateLastConnection !== false) config.lastConnectionUrl = probe.url;
-    config.openConnectionUrls = [
-      ...config.openConnectionUrls.filter((url) => {
-        try { return new URL(url).origin !== key; } catch { return false; }
-      }),
-      probe.url,
-    ];
-    const existing = config.connections.find((entry) => entry.url === probe.url);
-    if (existing) existing.lastConnectedAt = Date.now();
-    writeDesktopConfig(config);
+    if (options.persist !== false) {
+      const config = readDesktopConfig();
+      if (options.updateLastConnection !== false) config.lastConnectionUrl = probe.url;
+      config.openConnectionUrls = [
+        ...config.openConnectionUrls.filter((url) => {
+          try { return new URL(url).origin !== key; } catch { return false; }
+        }),
+        probe.url,
+      ];
+      const existing = config.connections.find((entry) => entry.url === probe.url);
+      if (existing) existing.lastConnectedAt = Date.now();
+      writeDesktopConfig(config);
+    }
     if (options.focus !== false) {
       mainWindow?.hide();
       showAndFocusWindow(existingWindow);
@@ -1314,18 +1365,31 @@ async function connectWindow(
   broadcastServiceActivity();
   while (!workspaceWindow.isDestroyed()) {
     try {
-      await workspaceWindow.loadURL(probe.url);
-      const config = readDesktopConfig();
-      if (options.updateLastConnection !== false) config.lastConnectionUrl = probe.url;
-      config.openConnectionUrls = [
-        ...config.openConnectionUrls.filter((url) => {
-          try { return new URL(url).origin !== key; } catch { return false; }
-        }),
-        probe.url,
-      ];
-      const existing = config.connections.find((entry) => entry.url === probe.url);
-      if (existing) existing.lastConnectedAt = Date.now();
-      writeDesktopConfig(config);
+      const load = workspaceWindow.loadURL(probe.url);
+      if (options.focus === false) {
+        await Promise.race([
+          load,
+          new Promise<never>((_resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('恢复连接超时')), RESTORE_LOAD_TIMEOUT_MS);
+            timer.unref();
+          }),
+        ]);
+      } else {
+        await load;
+      }
+      if (options.persist !== false) {
+        const config = readDesktopConfig();
+        if (options.updateLastConnection !== false) config.lastConnectionUrl = probe.url;
+        config.openConnectionUrls = [
+          ...config.openConnectionUrls.filter((url) => {
+            try { return new URL(url).origin !== key; } catch { return false; }
+          }),
+          probe.url,
+        ];
+        const existing = config.connections.find((entry) => entry.url === probe.url);
+        if (existing) existing.lastConnectedAt = Date.now();
+        writeDesktopConfig(config);
+      }
       restorableServiceWindows.add(workspaceWindow);
       if (options.focus !== false) {
         mainWindow?.hide();
@@ -1339,6 +1403,10 @@ async function connectWindow(
       return probe;
     } catch (error) {
       const message = networkErrorDetails(error);
+      if (options.focus === false) {
+        workspaceWindow.destroy();
+        return { ...probe, ok: false, error: message };
+      }
       if (isLocalNetworkTarget(parsed) && looksLikeLocalNetworkPermissionError(error)) {
         if (await requestLocalNetworkPermissionRetry(probe.url)) continue;
         workspaceWindow.destroy();
@@ -1366,6 +1434,28 @@ async function showConnectionCenter(): Promise<void> {
     : path.join(projectRoot, 'desktop', 'renderer', 'index.html');
   await mainWindow?.loadFile(rendererPath);
   if (mainWindow) showAndFocusWindow(mainWindow);
+}
+
+async function showStartupProgress(message: string): Promise<void> {
+  if (!startupRestoreActive) return;
+  startupProgressMessage = message;
+  await showConnectionCenter();
+  if (!startupRestoreActive || !mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('desktop:startup-progress', startupProgressMessage);
+}
+
+function updateStartupProgress(message: string): void {
+  if (!startupRestoreActive) return;
+  startupProgressMessage = message;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('desktop:startup-progress', startupProgressMessage);
+  }
+}
+
+function finishStartupProgress(): void {
+  startupRestoreActive = false;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('desktop:startup-progress', null);
 }
 
 function createDesktopWindow(options?: { serviceOrigin: string; label: string }): BrowserWindow {
@@ -1649,6 +1739,9 @@ function installIpcHandlers(): void {
   ipcMain.handle('desktop:update-state', () => getDesktopUpdateState());
   ipcMain.handle('desktop:check-update', () => checkForDesktopUpdates());
   ipcMain.handle('desktop:install-update', () => installDownloadedDesktopUpdate());
+  ipcMain.handle('desktop:runtime-update-state', () => getDesktopRuntimeUpdateState());
+  ipcMain.handle('desktop:check-runtime-update', () => checkForRuntimeUpdates());
+  ipcMain.handle('desktop:restart-runtime', () => restartDesktopManagedRuntime());
   ipcMain.handle('desktop:show-connection-center', () => showConnectionCenter());
   ipcMain.handle('desktop:reveal-data-directory', async () => {
     fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
@@ -1935,13 +2028,33 @@ app.whenReady().then(async () => {
       if (!window.isDestroyed()) window.webContents.send('desktop:update-state-changed', state);
     }
   });
+  subscribeDesktopRuntimeUpdateState((state) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send('desktop:runtime-update-state-changed', state);
+    }
+  });
   const startupConfig = readDesktopConfig();
   const restoreUrls = startupConfig.openConnectionUrls;
-  let restoredWindowCount = 0;
-  for (const url of restoreUrls) {
-    const probe = await connectWindow(url, { focus: false, updateLastConnection: false });
-    if (probe.ok) restoredWindowCount += 1;
-  }
+  startupRestoreActive = true;
+  const startupProgressTimer = setTimeout(() => {
+    void showStartupProgress('正在检查本机 Runtime 和已保存连接…');
+  }, 350);
+  startupProgressTimer.unref();
+  let completedRestores = 0;
+  updateStartupProgress(`正在恢复连接 0/${restoreUrls.length}…`);
+  const restoreResults = await Promise.all(restoreUrls.map(async (url) => {
+    const probe = await connectWindow(url, {
+      focus: false,
+      updateLastConnection: false,
+      persist: false,
+    });
+    completedRestores += 1;
+    updateStartupProgress(`正在恢复连接 ${completedRestores}/${restoreUrls.length}…`);
+    return probe;
+  }));
+  const restoredWindowCount = restoreResults.filter((probe) => probe.ok).length;
+  clearTimeout(startupProgressTimer);
+  finishStartupProgress();
   if (restoredWindowCount > 0) {
     let preferredOrigin: string | null = null;
     try {

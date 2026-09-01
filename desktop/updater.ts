@@ -5,11 +5,12 @@ import {
   type MessageBoxReturnValue,
 } from 'electron';
 import {
+  resolvePackagedRuntime,
   updateRuntimeFromRegistry,
   type RuntimeUpdateResult,
 } from './runtime.js';
 import { buildGitHubUpdateFeed, startGitHubUpdateFeedServer } from './githubUpdateFeed.js';
-import type { DesktopAppUpdateState } from './types.js';
+import type { DesktopAppUpdateState, DesktopRuntimeUpdateState } from './types.js';
 
 const AUTOMATIC_CHECK_DELAY_MS = 15_000;
 const AUTOMATIC_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
@@ -17,6 +18,7 @@ const UPDATE_CHECK_TIMEOUT_MS = 30_000;
 
 type ShowMessageBox = (options: MessageBoxOptions) => Promise<MessageBoxReturnValue>;
 type UpdateStateListener = (state: DesktopAppUpdateState) => void;
+type RuntimeUpdateStateListener = (state: DesktopRuntimeUpdateState) => void;
 
 let configured = false;
 let nativeCheckDialogPending = false;
@@ -27,11 +29,21 @@ let settleCheck: ((state: DesktopAppUpdateState) => void) | null = null;
 let checkTimeout: ReturnType<typeof setTimeout> | null = null;
 let updateFeedPromise: Promise<string> | null = null;
 const stateListeners = new Set<UpdateStateListener>();
+const runtimeStateListeners = new Set<RuntimeUpdateStateListener>();
 let updateState: DesktopAppUpdateState = {
   status: 'idle',
   currentVersion: app.getVersion(),
   latestVersion: null,
   releaseName: null,
+  checkedAt: null,
+  error: null,
+};
+let runtimeCheckPromise: Promise<DesktopRuntimeUpdateState> | null = null;
+let runtimeUpdateState: DesktopRuntimeUpdateState = {
+  status: 'idle',
+  currentVersion: app.getVersion(),
+  latestVersion: null,
+  source: 'desktop',
   checkedAt: null,
   error: null,
 };
@@ -88,6 +100,97 @@ export function getDesktopUpdateState(): DesktopAppUpdateState {
 export function subscribeDesktopUpdateState(listener: UpdateStateListener): () => void {
   stateListeners.add(listener);
   return () => stateListeners.delete(listener);
+}
+
+function publishRuntimeUpdateState(
+  patch: Partial<DesktopRuntimeUpdateState>,
+): DesktopRuntimeUpdateState {
+  runtimeUpdateState = { ...runtimeUpdateState, ...patch, source: 'desktop' };
+  const snapshot = { ...runtimeUpdateState };
+  for (const listener of runtimeStateListeners) listener(snapshot);
+  return snapshot;
+}
+
+export function getDesktopRuntimeUpdateState(): DesktopRuntimeUpdateState {
+  if (supportsAutomaticUpdates()) {
+    try {
+      const selected = resolvePackagedRuntime({
+        appVersion: app.getVersion(),
+        resourcesPath: process.resourcesPath,
+      });
+      if (runtimeUpdateState.status === 'idle' || runtimeUpdateState.status === 'current') {
+        runtimeUpdateState = { ...runtimeUpdateState, currentVersion: selected.version };
+      }
+    } catch {
+      // The bundled version remains a safe display fallback.
+    }
+  }
+  return { ...runtimeUpdateState };
+}
+
+export function subscribeDesktopRuntimeUpdateState(
+  listener: RuntimeUpdateStateListener,
+): () => void {
+  runtimeStateListeners.add(listener);
+  return () => runtimeStateListeners.delete(listener);
+}
+
+export function markDesktopRuntimeRunning(version: string): DesktopRuntimeUpdateState {
+  return publishRuntimeUpdateState({
+    status: 'current',
+    currentVersion: version,
+    latestVersion: null,
+    checkedAt: Date.now(),
+    error: null,
+  });
+}
+
+export function markDesktopRuntimeRestarting(): DesktopRuntimeUpdateState {
+  return publishRuntimeUpdateState({ status: 'restarting', error: null });
+}
+
+export function checkForRuntimeUpdates(): Promise<DesktopRuntimeUpdateState> {
+  if (runtimeCheckPromise) return runtimeCheckPromise;
+  const before = getDesktopRuntimeUpdateState().currentVersion;
+  publishRuntimeUpdateState({ status: 'checking', error: null });
+  runtimeCheckPromise = ensureLatestRuntime()
+    .then((result) => {
+      if (!result || result.status === 'disabled' || result.status === 'current') {
+        return publishRuntimeUpdateState({
+          status: 'current',
+          currentVersion: result?.currentVersion ?? before,
+          latestVersion: result?.latestVersion ?? null,
+          checkedAt: Date.now(),
+          error: null,
+        });
+      }
+      if (result.status === 'requires-desktop') {
+        return publishRuntimeUpdateState({
+          status: 'error',
+          currentVersion: result.currentVersion,
+          latestVersion: result.latestVersion ?? null,
+          checkedAt: Date.now(),
+          error: result.reason ?? '该 Runtime 需要更新 macOS 桌面版。',
+        });
+      }
+      return publishRuntimeUpdateState({
+        status: 'ready',
+        currentVersion: before,
+        latestVersion: result.latestVersion ?? result.currentVersion,
+        checkedAt: Date.now(),
+        error: null,
+      });
+    })
+    .catch((error) => publishRuntimeUpdateState({
+      status: 'error',
+      currentVersion: before,
+      checkedAt: Date.now(),
+      error: error instanceof Error ? error.message : String(error),
+    }))
+    .finally(() => {
+      runtimeCheckPromise = null;
+    });
+  return runtimeCheckPromise;
 }
 
 async function reportUpdateError(error: unknown): Promise<void> {
@@ -176,13 +279,11 @@ function reportCurrentVersion(): DesktopAppUpdateState {
 }
 
 async function runAutomaticChecks(): Promise<void> {
-  try {
-    const runtime = await ensureLatestRuntime();
-    if (runtime?.status === 'updated') {
-      console.log(`[desktop-updater] runtime updated to ${runtime.currentVersion}`);
-    }
-  } catch (error) {
-    console.error('[desktop-runtime] automatic update check failed', error);
+  const runtime = await checkForRuntimeUpdates();
+  if (runtime.status === 'ready' && runtime.latestVersion) {
+    console.log(`[desktop-updater] runtime updated to ${runtime.latestVersion}`);
+  } else if (runtime.status === 'error') {
+    console.error('[desktop-runtime] automatic update check failed', runtime.error);
   }
   await checkForDesktopUpdates().catch(() => undefined);
 }

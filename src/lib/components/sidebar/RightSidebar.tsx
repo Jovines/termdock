@@ -2730,7 +2730,9 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
   if (!active) return null;
   const activeTitle = active.title || active.alt || (active.kind === 'mermaid' ? t('rightSidebar.mermaidDiagram') : t('rightSidebar.image'));
 
-  return (
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
     <>
       <div className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={onClose} />
       <div
@@ -2841,7 +2843,8 @@ export function MarkdownImageLightbox({ images, index, onChange, onClose }: Mark
           </div>
         </div>
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
 
@@ -3168,7 +3171,7 @@ export function MarkdownPreview({
             </div>
           </div>
         )}
-        {outlineOpen && (
+        {outlineOpen && typeof document !== 'undefined' && createPortal(
           <>
             <div className="fixed inset-0 z-menu-backdrop bg-[rgb(var(--background-rgb)_/_0.18)] sm:hidden" onClick={onOutlineClose} />
             <div
@@ -3232,7 +3235,8 @@ export function MarkdownPreview({
                 })}
               </div>
             </div>
-          </>
+          </>,
+          document.body,
         )}
         <div className="min-w-0 max-w-full space-y-1.5 overflow-x-hidden break-words px-1.5 py-3 text-[13px] leading-5 text-foreground sm:space-y-2 sm:px-2 sm:py-4 sm:text-sm sm:leading-6">
         <MarkdownMermaidOpenContext.Provider value={handleOpenMermaidLightbox}>
@@ -3682,7 +3686,7 @@ function AuditPromptScopeButton({
         {showScopePicker && <RiChevronDown size={11} className={`shrink-0 transition ${open ? 'rotate-180' : ''}`} />}
         {error && <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-destructive" />}
       </button>
-      {showScopePicker && open && (
+      {showScopePicker && open && typeof document !== 'undefined' && createPortal(
         <div
           className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] px-3 py-6 backdrop-blur-sm animate-fade-in"
           onClick={() => onOpenChange(false)}
@@ -3781,7 +3785,8 @@ function AuditPromptScopeButton({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -8169,12 +8174,13 @@ export function RightSidebar(
 
   function renderRepoPickerOverlay() {
     if (!rightSidebarRepoPickerOpen || !showGitRepoFilter) return null;
+    if (typeof document === 'undefined') return null;
     const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
     const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight;
     const desktopLeft = Math.max(12, Math.min(repoPickerAnchor?.x ?? (viewportWidth - 368), viewportWidth - 352));
     const desktopTop = Math.max(12, Math.min(repoPickerAnchor?.y ?? 80, viewportHeight - 420));
     const desktopPanelStyle: CSSProperties | undefined = isMobile ? undefined : { left: desktopLeft, top: desktopTop };
-    return (
+    return createPortal(
       <div
         className={`fixed inset-0 z-drawer-backdrop ${isMobile ? 'bg-[var(--app-backdrop)]' : 'bg-transparent'}`}
         onClick={closeRepoPicker}
@@ -8263,7 +8269,8 @@ export function RightSidebar(
             })}
           </div>
         </div>
-      </div>
+      </div>,
+      document.body,
     );
   }
 
@@ -11321,10 +11328,10 @@ export function RightSidebar(
         />
       )}
         {renderRepoSwitcher()}
-        {confirmGitAction && (
+        {confirmGitAction && typeof document !== 'undefined' && createPortal(
           <div className="fixed inset-0 z-modal-backdrop bg-[var(--app-backdrop)] backdrop-blur-sm" onClick={() => setConfirmGitAction(null)}>
             <div
-              className="fixed inset-x-3 bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] mx-auto max-w-md rounded-2xl border border-border/20 bg-surface-elevated p-4 shadow-2xl"
+              className="fixed inset-x-3 bottom-[max(1.5rem,env(safe-area-inset-bottom,0px))] z-modal-panel mx-auto max-w-md rounded-2xl border border-border/20 bg-surface-elevated p-4 shadow-2xl"
               onClick={(event) => event.stopPropagation()}
             >
               <div className="text-sm font-semibold text-foreground">
@@ -11381,7 +11388,8 @@ export function RightSidebar(
                 </button>
               </div>
             </div>
-          </div>
+          </div>,
+          document.body,
         )}
     </Sidebar>
   );

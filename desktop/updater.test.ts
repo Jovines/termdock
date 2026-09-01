@@ -33,7 +33,10 @@ const electronMock = vi.hoisted(() => {
 });
 
 const runtimeMock = vi.hoisted(() => ({
-  updateRuntimeFromRegistry: vi.fn(async () => ({
+  resolvePackagedRuntime: vi.fn(() => ({
+    serverRoot: '/runtime', cli: '/runtime/cli.js', version: '1.4.81', source: 'bundled',
+  })),
+  updateRuntimeFromRegistry: vi.fn(async (): Promise<any> => ({
     status: 'current',
     currentVersion: '1.4.81',
   })),
@@ -64,6 +67,12 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.resetModules();
   electronMock.reset();
+  runtimeMock.resolvePackagedRuntime.mockReset().mockReturnValue({
+    serverRoot: '/runtime', cli: '/runtime/cli.js', version: '1.4.81', source: 'bundled',
+  });
+  runtimeMock.updateRuntimeFromRegistry.mockReset().mockResolvedValue({
+    status: 'current', currentVersion: '1.4.81',
+  });
   feedMock.buildGitHubUpdateFeed.mockClear();
   feedMock.startGitHubUpdateFeedServer.mockClear();
   vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
@@ -128,5 +137,41 @@ describe('desktop updater', () => {
     expect(states).toContain('downloading');
     expect(states).toContain('ready');
     expect(states).toContain('installing');
+  });
+
+  it('stages npm Runtime updates without invoking the desktop app updater', async () => {
+    runtimeMock.updateRuntimeFromRegistry.mockResolvedValueOnce({
+      status: 'updated', currentVersion: '1.4.82', latestVersion: '1.4.82',
+    });
+    const updater = await import('./updater.js');
+    const states: string[] = [];
+    updater.subscribeDesktopRuntimeUpdateState((state) => states.push(state.status));
+
+    await expect(updater.checkForRuntimeUpdates()).resolves.toMatchObject({
+      status: 'ready',
+      currentVersion: '1.4.81',
+      latestVersion: '1.4.82',
+      source: 'desktop',
+    });
+    expect(runtimeMock.updateRuntimeFromRegistry).toHaveBeenCalledOnce();
+    expect(electronMock.autoUpdater.checkForUpdates).not.toHaveBeenCalled();
+    expect(states).toEqual(['checking', 'ready']);
+  });
+
+  it('reports incompatible Runtime updates as requiring a desktop update', async () => {
+    runtimeMock.updateRuntimeFromRegistry.mockResolvedValueOnce({
+      status: 'requires-desktop',
+      currentVersion: '1.4.81',
+      latestVersion: '1.5.0',
+      reason: 'Node 24 requires a desktop runtime rebuild',
+    });
+    const updater = await import('./updater.js');
+
+    await expect(updater.checkForRuntimeUpdates()).resolves.toMatchObject({
+      status: 'error',
+      currentVersion: '1.4.81',
+      latestVersion: '1.5.0',
+      error: 'Node 24 requires a desktop runtime rebuild',
+    });
   });
 });

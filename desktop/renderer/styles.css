@@ -17,6 +17,84 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+.startup-progress {
+  position: fixed;
+  z-index: var(--z-modal-panel);
+  inset: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  padding: 48px;
+  background: var(--background-subtle);
+  text-align: center;
+}
+
+.startup-progress[hidden] {
+  display: none;
+}
+
+.startup-progress-mark {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 15px;
+  background: var(--surface);
+  box-shadow: 0 18px 48px var(--app-shadow-strong);
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.startup-progress-kicker {
+  margin-top: 22px;
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+}
+
+.startup-progress h1 {
+  margin-top: 8px;
+  color: var(--overlay-foreground);
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+
+.startup-progress-track {
+  position: relative;
+  width: min(320px, 58vw);
+  height: 3px;
+  margin-top: 28px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-elevated);
+}
+
+.startup-progress-track i {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 42%;
+  border-radius: inherit;
+  background: var(--primary);
+  animation: startup-progress-slide 1.15s ease-in-out infinite;
+}
+
+.startup-progress-message {
+  margin-top: 13px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+@keyframes startup-progress-slide {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(340%); }
+}
+
 button,
 input {
   font: inherit;

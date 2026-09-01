@@ -417,6 +417,7 @@ export function createApp(options: AppOptions = {}): express.Express {
       version: getTermdockVersion(),
       protocolVersion: TERMDOCK_PROTOCOL_VERSION,
       capabilities: TERMDOCK_CAPABILITIES,
+      desktopManaged: process.env.TERMDOCK_DESKTOP === '1',
     });
   });
 
