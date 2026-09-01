@@ -105,6 +105,8 @@ import { TmuxLifecycleCoordinator } from '../utils/tmuxLifecycle.js';
 import {
   buildInteractiveColorEnvironment,
   buildTmuxColorEnvironmentCommands,
+  ensureTmuxColorCapabilities,
+  resolveTmuxInnerTerm,
 } from '../utils/terminalColorEnvironment.js';
 import {
   detectTmuxRecoveryIncident,
@@ -2360,6 +2362,11 @@ async function ensureTmuxColorEnvironment(sessionName?: string): Promise<void> {
   }
 }
 
+async function ensureManagedTmuxColorCapabilities(sessionName?: string): Promise<void> {
+  const innerTerm = await resolveTmuxInnerTerm();
+  await ensureTmuxColorCapabilities(runTmux, sessionName, innerTerm);
+}
+
 async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
   const format = [
     '#{session_name}',
@@ -4268,7 +4275,12 @@ async function ensureTmuxSessionExists(sessionName: string, cwd?: string): Promi
     await ensureTmuxColorEnvironment();
   }
 
-  const args = ['new-session', '-d', '-s', sessionName, '-e', 'COLORTERM=truecolor'];
+  const innerTerm = await resolveTmuxInnerTerm();
+  const args = [
+    'new-session', '-d', '-s', sessionName,
+    '-e', 'COLORTERM=truecolor',
+    '-e', `TERM=${innerTerm}`,
+  ];
   if (process.env.TERMDOCK_FORCE_COLOR === '1') {
     args.push('-e', 'FORCE_COLOR=1');
   }
@@ -4365,6 +4377,7 @@ async function enableTmuxExtendedKeys(): Promise<void> {
 
 async function ensureSharedTmuxServerReady(): Promise<void> {
   await ensureTmuxColorEnvironment();
+  await ensureManagedTmuxColorCapabilities();
   await applyTmuxScrollbackProfile();
   await disableTmuxFocusEventsForSafety();
   await enableTmuxExtendedKeys();
@@ -4389,6 +4402,12 @@ async function ensureManagedTmuxSessionReady(sessionName: string): Promise<void>
     await ensureTmuxColorEnvironment(sessionName);
   } catch (error) {
     console.warn(`Failed to set tmux color environment for ${sessionName}: ${getErrorMessage(error)}`);
+  }
+
+  try {
+    await ensureManagedTmuxColorCapabilities(sessionName);
+  } catch (error) {
+    console.warn(`Failed to set tmux color capabilities for ${sessionName}: ${getErrorMessage(error)}`);
   }
 
   try {

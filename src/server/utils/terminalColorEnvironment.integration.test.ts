@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildInteractiveColorEnvironment,
   buildTmuxColorEnvironmentCommands,
+  ensureTmuxColorCapabilities,
+  TERMDOCK_TRUECOLOR_FEATURE_SLOT,
 } from './terminalColorEnvironment.js';
 
 const execFileAsync = promisify(execFile);
@@ -44,5 +46,26 @@ describe('tmux interactive color environment', () => {
     const output = await tmux(socket, ['capture-pane', '-p', '-t', 'target'], cleanEnv);
     expect(output).toContain('clean');
     expect(output).not.toContain('polluted');
+  });
+
+  it('applies the Termdock truecolor contract idempotently', async () => {
+    const socket = `termdock-rgb-${process.pid}-${Date.now()}`;
+    sockets.push(socket);
+    await tmux(socket, [
+      '-f', '/dev/null',
+      'new-session', '-d', '-s', 'target',
+      '-e', 'TERM=tmux-256color',
+    ]);
+
+    const run = async (args: string[]) => { await tmux(socket, args); };
+    await ensureTmuxColorCapabilities(run, 'target', 'tmux-256color');
+    await ensureTmuxColorCapabilities(run, 'target', 'tmux-256color');
+
+    await expect(tmux(socket, ['show-options', '-sv', TERMDOCK_TRUECOLOR_FEATURE_SLOT]))
+      .resolves.toBe('xterm-256color:RGB\n');
+    await expect(tmux(socket, ['show-options', '-v', '-t', 'target', 'default-terminal']))
+      .resolves.toBe('tmux-256color\n');
+    await expect(tmux(socket, ['show-environment', '-t', 'target', 'TERM']))
+      .resolves.toContain('TERM=tmux-256color');
   });
 });

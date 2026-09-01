@@ -25,6 +25,8 @@ import { promisify } from 'util';
 import {
   buildInteractiveColorEnvironment,
   buildTmuxColorEnvironmentCommands,
+  ensureTmuxColorCapabilities,
+  resolveTmuxInnerTerm,
 } from './utils/terminalColorEnvironment.js';
 import { Writable } from 'stream';
 import { createRequire } from 'module';
@@ -2858,6 +2860,20 @@ async function ensureTmuxColorEnvironment(sessionName?: string): Promise<void> {
   }
 }
 
+async function ensureManagedTmuxColorCapabilities(sessionName?: string): Promise<void> {
+  const innerTerm = await resolveTmuxInnerTerm();
+  await ensureTmuxColorCapabilities(
+    async (args) => {
+      await execFileAsync('tmux', args, {
+        timeout: 5000,
+        maxBuffer: 64 * 1024,
+      });
+    },
+    sessionName,
+    innerTerm,
+  );
+}
+
 async function getTmuxOption(sessionName: string, key: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync('tmux', ['show-option', '-vqt', sessionName, key], {
@@ -2915,7 +2931,12 @@ async function ensureStampedTmuxSession(
     } catch {
       // No tmux server yet.
     }
-    const args = ['new-session', '-d', '-s', sessionName, '-e', 'COLORTERM=truecolor'];
+    const innerTerm = await resolveTmuxInnerTerm();
+    const args = [
+      'new-session', '-d', '-s', sessionName,
+      '-e', 'COLORTERM=truecolor',
+      '-e', `TERM=${innerTerm}`,
+    ];
     if (process.env.TERMDOCK_FORCE_COLOR === '1') {
       args.push('-e', 'FORCE_COLOR=1');
     }
@@ -2935,6 +2956,7 @@ async function ensureStampedTmuxSession(
   await disableTmuxFocusEventsForSafety();
   await ensureTmuxExtendedKeys();
   await ensureTmuxColorEnvironment(sessionName);
+  await ensureManagedTmuxColorCapabilities(sessionName);
   await ensureTmuxCliSessionOptions(sessionName);
   await setTmuxOption(sessionName, '@termdock-version', TERMDOCK_VERSION);
   await setTmuxOption(sessionName, '@termdock-host', TERMDOCK_HOST);

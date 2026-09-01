@@ -151,10 +151,15 @@ function drainSharedWatchEvents(entry: SharedWatchEntry): void {
 }
 
 function enqueueSharedNativeEvents(rootPath: string, entry: SharedWatchEntry, events: watcher.Event[]): void {
-  if (entry.clients.size === 0) return;
   for (const event of events) {
     const changedPath = path.resolve(event.path);
     if (!isPathInside(rootPath, changedPath) || isIgnoredWatchPath(rootPath, changedPath)) continue;
+    if (entry.clients.size === 0) {
+      // The native subscription is kept briefly for cheap stream hand-off.
+      // Only request a rescan when something actually changed in that gap.
+      entry.needsRescanOnAttach = true;
+      return;
+    }
     if (enqueueLatestWatchEvent(entry.pendingEvents, changedPath, event.type, WATCH_EVENT_STORM_LIMIT) === 'overflow') {
       entry.pendingEvents.clear();
       entry.eventGeneration += 1;
@@ -307,7 +312,9 @@ function releaseSharedWatch(rootPath: string, client: SharedWatchClient): void {
   entry.clients.delete(client);
   entry.refs -= 1;
   if (entry.refs > 0) return;
-  entry.needsRescanOnAttach = true;
+  entry.needsRescanOnAttach = entry.needsRescanOnAttach
+    || entry.pendingEvents.size > 0
+    || entry.statWorkers > 0;
   entry.pendingEvents.clear();
   entry.eventGeneration += 1;
   if (!entry.subscription && !entry.inFlight) {
