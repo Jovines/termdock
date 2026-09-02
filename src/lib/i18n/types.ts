@@ -159,6 +159,17 @@ export type TranslationDictionary = {
     searchModeName: string;
     searchModeContent: string;
     clearSearch: string;
+    searchScope: string;
+    searchScopePlaceholder: string;
+    resetSearchScope: string;
+    searchOptions: string;
+    searchExclude: string;
+    searchExcludePlaceholder: string;
+    clearSearchExclude: string;
+    contentSearchOptions: string;
+    matchCase: string;
+    matchWholeWord: string;
+    useRegex: string;
     insertGitContext: string;
     copyGitContext: string;
     insertChangeAuditPrompt: string;
@@ -437,6 +448,8 @@ export type TranslationDictionary = {
     openInFileBrowserTitle: string;
     openInFileBrowserFailed: string;
     moreDirActions: string;
+    searchFromDir: string;
+    searchFromDirTitle: string;
     pinDir: string;
     pinDirTitle: string;
     unpinDir: string;
@@ -455,6 +468,7 @@ export type TranslationDictionary = {
     searching: string;
     searchingWithCount: (params: TranslatorParams) => string;
     searchResults: (params: TranslatorParams) => string;
+    searchScope: string;
     searchTruncatedHint: (params: TranslatorParams) => string;
     searchStillRunning: string;
     showingSearchResults: (params: TranslatorParams) => string;

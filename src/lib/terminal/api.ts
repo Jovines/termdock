@@ -2171,6 +2171,13 @@ export type FileSearchEngine = 'rg' | 'fallback';
 
 export type FileSearchMode = 'name' | 'content';
 
+export interface FileSearchOptions {
+  excludePatterns?: string[];
+  caseSensitive?: boolean;
+  wholeWord?: boolean;
+  regex?: boolean;
+}
+
 export interface FileContentMatchLine {
   line: number;
   text: string;
@@ -2240,11 +2247,16 @@ export async function searchFilesStream(
   showHidden?: boolean,
   mode: FileSearchMode = 'name',
   requestSlotId?: string,
+  options: FileSearchOptions = {},
 ): Promise<void> {
   const params = new URLSearchParams({ path: dirPath, query, stream: 'true' });
   if (showHidden) params.set('showHidden', 'true');
   if (mode === 'content') params.set('mode', 'content');
   if (requestSlotId) params.set('requestSlotId', requestSlotId);
+  for (const pattern of options.excludePatterns ?? []) params.append('exclude', pattern);
+  if (options.caseSensitive) params.set('caseSensitive', 'true');
+  if (options.wholeWord) params.set('wholeWord', 'true');
+  if (options.regex) params.set('regex', 'true');
   const response = await fetch(`/api/terminal/fs/search?${params}`, { signal });
   if (!response.ok || !response.body) {
     const error = await response.json().catch(() => ({ error: 'Failed to search files' }));

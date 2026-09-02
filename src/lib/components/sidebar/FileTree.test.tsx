@@ -184,6 +184,33 @@ describe('FileTree file deletion', () => {
     expect(directoryRow.parentElement?.contains(childRow)).toBe(false);
   });
 
+  it('starts a scoped search directly from a directory action', async () => {
+    const user = userEvent.setup();
+    const onSearchFromDirectory = vi.fn();
+    useSidebarStore.setState({
+      selectedFilePath: null,
+      expandedPaths: new Set(),
+      directoryCache: new Map([['/workspace', [
+        { name: 'src', path: '/workspace/src', type: 'directory', expanded: false, loaded: true, children: [] },
+      ]]]),
+    });
+
+    render(
+      <I18nProvider>
+        <FileTree
+          rootPath="/workspace"
+          selectedFilePath={null}
+          onFileSelect={vi.fn()}
+          onSearchFromDirectory={onSearchFromDirectory}
+        />
+      </I18nProvider>,
+    );
+
+    await user.click(screen.getByTitle('More folder actions'));
+    await user.click(screen.getByRole('button', { name: 'Search from here' }));
+    expect(onSearchFromDirectory).toHaveBeenCalledWith('/workspace/src');
+  });
+
   it('applies recent-change sorting only to the selected directory', async () => {
     const user = userEvent.setup();
     useSidebarStore.setState({

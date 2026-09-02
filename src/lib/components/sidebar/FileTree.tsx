@@ -18,9 +18,10 @@ import {
   Trash2 as RiTrash,
   Clock3 as RiClock,
   ArrowDownAZ as RiSortName,
+  FolderSearch as RiFolderSearch,
 } from 'lucide-react';
 import { useSidebarStore, type FileTreeNode } from '../../stores/useSidebarStore';
-import { cancelIoSlot, listDirectory, searchFilesStream, downloadFile, deleteFile, isPreviewableModel3dPath, isPreviewableVideoPath, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode } from '../../terminal/api';
+import { cancelIoSlot, listDirectory, searchFilesStream, downloadFile, deleteFile, isPreviewableModel3dPath, isPreviewableVideoPath, type FileEntry, type FileSearchEngine, type FileContentSearchEntry, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
 import { useI18n } from '../../i18n';
 import { useReferenceLongPressCopy } from './referenceLongPress';
 
@@ -35,6 +36,7 @@ interface FileTreeProps {
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
   onDirectoryRoot?: (path: string) => void;
+  onSearchFromDirectory?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
   onOpenInFileBrowser?: (path: string) => void;
@@ -42,6 +44,8 @@ interface FileTreeProps {
   pinnedPaths?: Set<string>;
   selectedFilePath: string | null;
   query?: string;
+  searchRootPath?: string;
+  searchOptions?: FileSearchOptions;
   searchMode?: FileSearchMode;
   onContentMatchSelect?: (path: string, line: number) => void;
   onDirectoryDropFiles?: (path: string, files: File[]) => void;
@@ -52,6 +56,7 @@ const CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.
 const SEARCH_INITIAL_VISIBLE = 120;
 const SEARCH_LOAD_MORE_STEP = 120;
 const EMPTY_PINNED_PATHS = new Set<string>();
+const EMPTY_EXCLUDE_PATTERNS: string[] = [];
 
 const CHANGE_STYLES: Record<string, { label: string; className: string; title: string }> = {
   added: { label: 'A', className: 'text-[color:var(--diff-insert-strong)]', title: 'Added' },
@@ -197,6 +202,7 @@ interface FileTreeItemProps {
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
   onDirectoryRoot?: (path: string) => void;
+  onSearchFromDirectory?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
   onOpenInFileBrowser?: (path: string) => void;
@@ -221,6 +227,7 @@ const FileTreeItem = memo(function FileTreeItem({
   insertedReferenceKey,
   copiedReferenceKey,
   onDirectoryRoot,
+  onSearchFromDirectory,
   onDirectoryPinToggle,
   onFilePinToggle,
   onOpenInFileBrowser,
@@ -326,6 +333,12 @@ const FileTreeItem = memo(function FileTreeItem({
     onDirectoryRoot?.(node.path);
     setActionsOpen(false);
   }, [node.path, onDirectoryRoot]);
+
+  const handleSearchFromDirectory = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    onSearchFromDirectory?.(node.path);
+    setActionsOpen(false);
+  }, [node.path, onSearchFromDirectory]);
 
   const handleDirectoryPinClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
@@ -492,7 +505,7 @@ const FileTreeItem = memo(function FileTreeItem({
         </span>
         {loading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
         <ChangeBadge path={node.path} />
-        {node.type === 'directory' && !directoriesOnly && (onDirectoryRoot || onDirectoryPinToggle || canOpenLocal) && (
+        {node.type === 'directory' && !directoriesOnly && (onDirectoryRoot || onSearchFromDirectory || onDirectoryPinToggle || canOpenLocal) && (
           <span
             onClick={handleDirectoryMoreClick}
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
@@ -523,7 +536,7 @@ const FileTreeItem = memo(function FileTreeItem({
         )}
         </div>
 
-        {node.type === 'directory' && !directoriesOnly && actionsOpen && (onDirectoryRoot || onDirectoryPinToggle || canOpenLocal) && (
+        {node.type === 'directory' && !directoriesOnly && actionsOpen && (onDirectoryRoot || onSearchFromDirectory || onDirectoryPinToggle || canOpenLocal) && (
           <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {canOpenLocal && (
             <button
@@ -545,6 +558,17 @@ const FileTreeItem = memo(function FileTreeItem({
             >
               <RiFolderOpen size={13} className="shrink-0 text-[color:var(--folder)]" />
               <span className="min-w-0 flex-1 truncate">{t('fileTree.openDirRoot')}</span>
+            </button>
+          )}
+          {onSearchFromDirectory && (
+            <button
+              type="button"
+              onClick={handleSearchFromDirectory}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
+              title={t('fileTree.searchFromDirTitle')}
+            >
+              <RiFolderSearch size={13} className="shrink-0 text-primary" />
+              <span className="min-w-0 flex-1 truncate">{t('fileTree.searchFromDir')}</span>
             </button>
           )}
           {onDirectoryPinToggle && (
@@ -629,6 +653,7 @@ const FileTreeItem = memo(function FileTreeItem({
               getReferenceText={getReferenceText}
               onReferenceCopied={onReferenceCopied}
               onDirectoryRoot={onDirectoryRoot}
+              onSearchFromDirectory={onSearchFromDirectory}
               onDirectoryPinToggle={onDirectoryPinToggle}
               onFilePinToggle={onFilePinToggle}
               onOpenInFileBrowser={onOpenInFileBrowser}
@@ -660,6 +685,7 @@ interface FileSearchResultItemProps {
   insertedReferenceKey?: string | null;
   copiedReferenceKey?: string | null;
   onDirectoryRoot?: (path: string) => void;
+  onSearchFromDirectory?: (path: string) => void;
   onDirectoryPinToggle?: (path: string) => void;
   onFilePinToggle?: (path: string) => void;
   pinnedPaths: Set<string>;
@@ -678,6 +704,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   insertedReferenceKey,
   copiedReferenceKey,
   onDirectoryRoot,
+  onSearchFromDirectory,
   onDirectoryPinToggle,
   onFilePinToggle,
   pinnedPaths,
@@ -759,7 +786,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   }, [actionsOpen]);
 
   return (
-    <div ref={actionMenuRef} className="relative">
+    <div ref={actionMenuRef} className="relative border-b border-border/10 last:border-b-0">
       {getReferenceLongPressHandlers.popoverNode}
       <div
         role="button"
@@ -770,7 +797,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           event.preventDefault();
           handleClick();
         }}
-        className={`group flex w-full cursor-pointer items-center gap-1 rounded px-2 py-1.5 text-left text-[13px] ${
+        className={`group flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] transition ${
           isSelected
             ? 'bg-surface-elevated text-foreground'
             : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
@@ -789,7 +816,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           </>
         )}
         <span className="min-w-0 flex-1 select-text">
-          <span className={`block whitespace-normal break-all leading-snug ${isSelected ? 'font-medium' : ''}`}>
+          <span className={`block whitespace-normal break-all font-medium leading-snug ${isSelected ? 'text-primary' : 'text-foreground'}`}>
             {node.name}
             {node.isSymlink && (
               <span className="ml-1 inline-flex align-middle text-muted-foreground/70" title={t('fileTree.symbolicLink')}>
@@ -797,10 +824,10 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
               </span>
             )}
           </span>
-          <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, node.path)}</span>
+          <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground/80">{getRelativePath(rootPath, node.path)}</span>
         </span>
         <ChangeBadge path={node.path} />
-        {node.type === 'directory' && onDirectoryPinToggle && (
+        {node.type === 'directory' && (onDirectoryPinToggle || onSearchFromDirectory) && (
           <span
             onClick={handleDirectoryMoreClick}
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
@@ -830,7 +857,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           </span>
         )}
       </div>
-      {node.type === 'directory' && actionsOpen && (onDirectoryRoot || onDirectoryPinToggle) && (
+      {node.type === 'directory' && actionsOpen && (onDirectoryRoot || onSearchFromDirectory || onDirectoryPinToggle) && (
         <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {onDirectoryRoot && (
             <button
@@ -847,7 +874,21 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
               <span className="min-w-0 flex-1 truncate">{t('fileTree.openDirRoot')}</span>
             </button>
           )}
-          <button
+          {onSearchFromDirectory && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onSearchFromDirectory(node.path);
+                setActionsOpen(false);
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium text-foreground transition hover:bg-surface-2 active:scale-[0.99]"
+            >
+              <RiFolderSearch size={13} className="shrink-0 text-primary" />
+              <span className="min-w-0 flex-1 truncate">{t('fileTree.searchFromDir')}</span>
+            </button>
+          )}
+          {onDirectoryPinToggle && <button
             type="button"
             onClick={handleDirectoryPinClick}
             className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left font-medium transition active:scale-[0.99] ${isPinned ? 'text-primary hover:bg-primary/10' : 'text-foreground hover:bg-surface-2'}`}
@@ -855,7 +896,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           >
             {isPinned ? <RiPinOff size={13} className="shrink-0" /> : <RiPin size={13} className="shrink-0" />}
             <span className="min-w-0 flex-1 truncate">{isPinned ? t('fileTree.unpinDir') : t('fileTree.pinDir')}</span>
-          </button>
+          </button>}
         </div>
       )}
 
@@ -900,6 +941,38 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
 const SEARCH_INITIAL_VISIBLE_CONTENT = 60;
 const SEARCH_LOAD_MORE_STEP_CONTENT = 60;
 const MAX_VISIBLE_MATCHES_PER_FILE = 20;
+
+function SearchResultsHeader({ count, loading, engine, limited, scope, content }: {
+  count: number;
+  loading: boolean;
+  engine?: FileSearchEngine;
+  limited?: boolean;
+  scope: string;
+  content: boolean;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="sticky top-0 z-10 -mx-2 -mt-2 mb-2 border-b border-border/15 bg-surface/95 px-3 py-2.5 backdrop-blur">
+      <div className="flex items-center justify-between gap-2">
+        <span className="inline-flex min-w-0 items-center gap-2 text-[12px] font-semibold text-foreground">
+          <RiFolderSearch size={14} className="shrink-0 text-primary" />
+          <span>{content ? t('fileTree.contentMatchesCount', { count }) : t('fileTree.searchResults', { count })}</span>
+        </span>
+        {engine && (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 text-[9px] uppercase tracking-[0.12em] text-muted-foreground">
+            {loading && <RiLoader size={9} className="animate-spin" />}
+            {engine}{limited ? ' · limited' : ''}
+          </span>
+        )}
+      </div>
+      <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
+        <span className="shrink-0">{t('fileTree.searchScope')}</span>
+        <span className="min-w-0 truncate font-mono text-foreground/75" title={scope}>{scope}</span>
+        {loading && <span className="ml-auto shrink-0">{t('fileTree.searching')}</span>}
+      </div>
+    </div>
+  );
+}
 
 interface ContentSearchResultItemProps {
   entry: FileContentSearchEntry;
@@ -960,7 +1033,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
 
   return (
-    <div className="rounded">
+    <div className="border-b border-border/10 last:border-b-0">
       {getReferenceLongPressHandlers.popoverNode}
       <div
         role="button"
@@ -974,7 +1047,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
           event.preventDefault();
           setExpanded((open) => !open);
         }}
-        className={`group flex w-full cursor-pointer items-center gap-1 rounded px-2 py-1.5 text-left text-[13px] ${
+        className={`group flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] transition ${
           isSelected ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
         }`}
         title={entry.path}
@@ -983,7 +1056,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
         <span className={isSelected ? 'text-primary' : 'text-muted-foreground/80'}>{getFileIcon(entry.name, 'file')}</span>
         <span className="min-w-0 flex-1 select-text">
           <span className="block whitespace-normal break-all font-medium leading-snug">{entry.name}</span>
-          <span className="block truncate text-[10px] text-muted-foreground/70">{getRelativePath(rootPath, entry.path)}</span>
+          <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground/80">{getRelativePath(rootPath, entry.path)}</span>
         </span>
         <span className="shrink-0 select-none rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">{entry.matches.length}</span>
         <FileDownloadAction path={entry.path} />
@@ -1003,7 +1076,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
         )}
       </div>
       {expanded && (
-        <div className="ml-3 border-l border-border/15 pl-1">
+        <div className="mb-1 ml-3 border-l border-border/20 pl-1">
           {visibleMatches.map((match, matchIndex) => (
             <div
               // eslint-disable-next-line react/no-array-index-key
@@ -1037,7 +1110,7 @@ const ContentSearchResultItem = memo(function ContentSearchResultItem({
   );
 });
 
-export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPathReference, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles, revealDirectory }: FileTreeProps) {
+export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPathReference, getReferenceText, onReferenceCopied, insertedReferenceKey, copiedReferenceKey, onDirectoryRoot, onSearchFromDirectory, onDirectoryPinToggle, onFilePinToggle, onOpenInFileBrowser, canOpenInFileBrowser = false, pinnedPaths = EMPTY_PINNED_PATHS, selectedFilePath, query = '', searchRootPath, searchOptions = {}, searchMode = 'name', onContentMatchSelect, onDirectoryDropFiles, revealDirectory }: FileTreeProps) {
   const { t } = useI18n();
   // 只订阅根目录条目 — 其他树节点变化不重渲染 FileTree 容器
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
@@ -1060,8 +1133,12 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   const [contentEntries, setContentEntries] = useState<FileContentSearchEntry[]>([]);
   const [deletingFilePath, setDeletingFilePath] = useState<string | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const searchRequestSeqRef = useRef(0);
   const queryLower = query.trim().toLowerCase();
   const isContentMode = searchMode === 'content';
+  const activeSearchRoot = searchRootPath || rootPath;
+  const excludePatterns = searchOptions.excludePatterns ?? EMPTY_EXCLUDE_PATTERNS;
+  const excludeKey = excludePatterns.join('\n');
 
   useEffect(() => {
     const targetPath = revealDirectory?.path;
@@ -1157,7 +1234,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles]);
 
   useEffect(() => {
-    if (!rootPath || !queryLower) {
+    if (!activeSearchRoot || !queryLower) {
       setSearchLoading(false);
       setSearchError(null);
       setSearchEntries([]);
@@ -1176,8 +1253,8 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     setVisibleSearchCount(isContentMode ? SEARCH_INITIAL_VISIBLE_CONTENT : SEARCH_INITIAL_VISIBLE);
     setSearchMeta({ truncated: false, total: 0, engine: 'rg', limited: false, done: false });
 
-    const requestSlotId = `file-search:${rootPath}`;
-    searchFilesStream(rootPath, query.trim(), (progress) => {
+    const requestSlotId = `file-search:${activeSearchRoot}:${++searchRequestSeqRef.current}`;
+    searchFilesStream(activeSearchRoot, query.trim(), (progress) => {
       if (cancelled) return;
       if (progress.engine) {
         setSearchMeta((current) => ({
@@ -1219,7 +1296,12 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
           done: true,
         }));
       }
-    }, controller.signal, showHiddenFiles, searchMode, requestSlotId)
+    }, controller.signal, showHiddenFiles, searchMode, requestSlotId, {
+      excludePatterns,
+      caseSensitive: searchOptions.caseSensitive,
+      wholeWord: searchOptions.wholeWord,
+      regex: searchOptions.regex,
+    })
       .catch((err) => {
         if (cancelled || isAbortError(err)) return;
         setSearchError(err instanceof Error ? err.message : 'Failed to search files');
@@ -1236,7 +1318,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
       controller.abort();
       cancelIoSlot(requestSlotId);
     };
-  }, [query, queryLower, rootPath, showHiddenFiles, searchMode, isContentMode]);
+  }, [activeSearchRoot, excludeKey, isContentMode, query, queryLower, searchMode, searchOptions.caseSensitive, searchOptions.regex, searchOptions.wholeWord, showHiddenFiles]);
 
   useEffect(() => {
     if (!queryLower) return;
@@ -1280,16 +1362,8 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     const displayedEntries = contentEntries.slice(0, visibleSearchCount);
     const hasBufferedMore = visibleSearchCount < contentEntries.length;
     return (
-      <div className="termdock-native-select space-y-px px-2 py-2">
-        <div className="mb-2 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
-          <span>{searchLoading ? t('fileTree.searchingWithCount', { count: foundCount }) : t('fileTree.contentMatchesCount', { count: foundCount })}</span>
-          {searchMeta && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 uppercase tracking-[0.12em]">
-              {searchLoading && <RiLoader size={9} className="animate-spin" />}
-              {searchMeta.engine}{searchMeta.limited ? ' · limited' : ''}
-            </span>
-          )}
-        </div>
+      <div className="termdock-native-select min-h-full space-y-px bg-surface px-2 py-2">
+        <SearchResultsHeader count={foundCount} loading={searchLoading} engine={searchMeta?.engine} limited={searchMeta?.limited} scope={activeSearchRoot} content />
         {searchError ? (
           <div className="mx-1 mt-3 rounded-xl border border-border/15 bg-surface-2 px-4 py-5 text-center text-sm text-muted-foreground">
             {t('fileTree.contentSearchNeedsRipgrep')}
@@ -1314,7 +1388,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
               <ContentSearchResultItem
                 key={entry.path}
                 entry={entry}
-                rootPath={rootPath}
+                rootPath={activeSearchRoot}
                 selectedFilePath={selectedFilePath}
                 query={query.trim()}
                 onContentMatchSelect={onContentMatchSelect}
@@ -1351,16 +1425,8 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     const displayedSearchEntries = searchEntries.slice(0, visibleSearchCount);
     const hasBufferedMore = visibleSearchCount < searchEntries.length;
     return (
-      <div className="termdock-native-select space-y-px px-2 py-2">
-        <div className="mb-2 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
-          <span>{searchLoading ? t('fileTree.searchingWithCount', { count: foundCount }) : t('fileTree.searchResults', { count: foundCount })}</span>
-          {searchMeta && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 uppercase tracking-[0.12em]">
-              {searchLoading && <RiLoader size={9} className="animate-spin" />}
-              {searchMeta.engine}{searchMeta.limited ? ' · limited' : ''}
-            </span>
-          )}
-        </div>
+      <div className="termdock-native-select min-h-full space-y-px bg-surface px-2 py-2">
+        <SearchResultsHeader count={foundCount} loading={searchLoading} engine={searchMeta?.engine} limited={searchMeta?.limited} scope={activeSearchRoot} content={false} />
         {searchLoading && searchEntries.length === 0 ? (
           <div className="flex items-center justify-center py-8">
             <RiLoader size={20} className="animate-spin text-muted-foreground" />
@@ -1382,12 +1448,13 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
               <FileSearchResultItem
                 key={node.path}
                 node={node}
-                rootPath={rootPath}
+                rootPath={activeSearchRoot}
                 onFileSelect={onFileSelect}
                 onPathReference={onPathReference}
                 getReferenceText={getReferenceText}
                 onReferenceCopied={onReferenceCopied}
                 onDirectoryRoot={onDirectoryRoot}
+                onSearchFromDirectory={onSearchFromDirectory}
                 onDirectoryPinToggle={onDirectoryPinToggle}
                 onFilePinToggle={onFilePinToggle}
                 pinnedPaths={pinnedPaths}
@@ -1461,6 +1528,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
           getReferenceText={getReferenceText}
           onReferenceCopied={onReferenceCopied}
           onDirectoryRoot={onDirectoryRoot}
+          onSearchFromDirectory={onSearchFromDirectory}
           onDirectoryPinToggle={onDirectoryPinToggle}
           onFilePinToggle={onFilePinToggle}
           onOpenInFileBrowser={onOpenInFileBrowser}

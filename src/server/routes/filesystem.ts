@@ -17,6 +17,7 @@ import { inspectBinaryFile } from '../utils/binaryFile.js';
 import { GitApplyError, HUNK_APPLY_MODES, runGitApply, validateHunkPatch, type HunkApplyMode } from '../utils/hunkApply.js';
 import { deleteFilesystemFile } from '../utils/deleteFilesystemFile.js';
 import { inspectKicadBoardPoint } from '../utils/kicadBoardInspection.js';
+import { appendRipgrepExcludeArgs, createExcludeMatcher, normalizeExcludePatterns } from '../utils/fileSearchOptions.js';
 import { EdaPreviewCache, requestAcceptsEtag } from '../utils/edaPreviewCache.js';
 import { convertHeicPreview, HEIC_PREVIEW_MIME_TYPES, isHeicPreviewPath } from '../utils/heicPreview.js';
 import {
@@ -1882,10 +1883,11 @@ function addMatchingParentDirectories(rootPath: string, absoluteFilePath: string
   }
 }
 
-function searchWithRipgrep(rootPath: string, queryLower: string, showHidden: boolean, signal: AbortSignal): Promise<FileSearchPayload> {
+function searchWithRipgrep(rootPath: string, queryLower: string, showHidden: boolean, excludePatterns: string[], signal: AbortSignal): Promise<FileSearchPayload> {
   return new Promise((resolve, reject) => {
     const args = ['--files', '--color', 'never', '--no-messages', '--null'];
     if (showHidden) args.push('--hidden', '-g', '!.git/');
+    appendRipgrepExcludeArgs(args, excludePatterns);
 
     const proc = spawn('rg', args, { cwd: rootPath, stdio: ['ignore', 'pipe', 'pipe'] });
     const entries = new Map<string, FileSearchEntry>();
@@ -1945,9 +1947,10 @@ function searchWithRipgrep(rootPath: string, queryLower: string, showHidden: boo
   });
 }
 
-async function searchWithFallback(rootPath: string, queryLower: string, showHidden: boolean, signal: AbortSignal): Promise<FileSearchPayload> {
+async function searchWithFallback(rootPath: string, queryLower: string, showHidden: boolean, excludePatterns: string[], signal: AbortSignal): Promise<FileSearchPayload> {
   const entries = new Map<string, FileSearchEntry>();
   const queue = [rootPath];
+  const isExcluded = createExcludeMatcher(excludePatterns);
   let visited = 0;
 
   while (queue.length > 0 && visited < MAX_FALLBACK_SEARCH_VISITED) {
@@ -1965,6 +1968,7 @@ async function searchWithFallback(rootPath: string, queryLower: string, showHidd
       if (!showHidden && dirent.name.startsWith('.')) continue;
       if (dirent.name === '.git') continue;
       const fullPath = path.join(dirPath, dirent.name);
+      if (isExcluded(path.relative(rootPath, fullPath))) continue;
       const type: FileSearchEntry['type'] = dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : 'file';
       if (searchEntryMatches(rootPath, fullPath, queryLower)) {
         addSearchEntry(entries, fullPath, type);
@@ -2004,10 +2008,11 @@ function createSearchBatchEmitter(res: Response) {
   };
 }
 
-function streamSearchWithRipgrep(rootPath: string, queryLower: string, showHidden: boolean, signal: AbortSignal, res: Response): Promise<number> {
+function streamSearchWithRipgrep(rootPath: string, queryLower: string, showHidden: boolean, excludePatterns: string[], signal: AbortSignal, res: Response): Promise<number> {
   return new Promise((resolve, reject) => {
     const args = ['--files', '--color', 'never', '--no-messages', '--null'];
     if (showHidden) args.push('--hidden', '-g', '!.git/');
+    appendRipgrepExcludeArgs(args, excludePatterns);
 
     const proc = spawn('rg', args, { cwd: rootPath, stdio: ['ignore', 'pipe', 'pipe'] });
     const emitted = new Map<string, FileSearchEntry>();
@@ -2076,10 +2081,11 @@ function streamSearchWithRipgrep(rootPath: string, queryLower: string, showHidde
   });
 }
 
-async function streamSearchWithFallback(rootPath: string, queryLower: string, showHidden: boolean, signal: AbortSignal, res: Response): Promise<{ total: number; limited: boolean }> {
+async function streamSearchWithFallback(rootPath: string, queryLower: string, showHidden: boolean, excludePatterns: string[], signal: AbortSignal, res: Response): Promise<{ total: number; limited: boolean }> {
   const emitted = new Set<string>();
   const batch = createSearchBatchEmitter(res);
   const queue = [rootPath];
+  const isExcluded = createExcludeMatcher(excludePatterns);
   let visited = 0;
   const emitEntry = (entryPath: string, type: FileSearchEntry['type']) => {
     if (emitted.has(entryPath)) return;
@@ -2102,6 +2108,7 @@ async function streamSearchWithFallback(rootPath: string, queryLower: string, sh
       if (!showHidden && dirent.name.startsWith('.')) continue;
       if (dirent.name === '.git') continue;
       const fullPath = path.join(dirPath, dirent.name);
+      if (isExcluded(path.relative(rootPath, fullPath))) continue;
       const type: FileSearchEntry['type'] = dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : 'file';
       if (searchEntryMatches(rootPath, fullPath, queryLower)) {
         emitEntry(fullPath, type);
@@ -2135,15 +2142,26 @@ function createContentBatchEmitter(res: Response) {
 // file-name search there is no fallback engine: a recursive content grep
 // without ripgrep would be far too expensive, so callers get an explicit
 // "ripgrep required" error instead.
-function streamContentSearchWithRipgrep(rootPath: string, query: string, showHidden: boolean, signal: AbortSignal, res: Response): Promise<{ total: number; limited: boolean }> {
+function streamContentSearchWithRipgrep(
+  rootPath: string,
+  query: string,
+  showHidden: boolean,
+  excludePatterns: string[],
+  options: { caseSensitive: boolean; wholeWord: boolean; regex: boolean },
+  signal: AbortSignal,
+  res: Response,
+): Promise<{ total: number; limited: boolean }> {
   return new Promise((resolve, reject) => {
     const args = [
       '--json',
-      '--smart-case',
       '--no-messages',
       '-m', String(MAX_CONTENT_MATCHES_PER_FILE),
     ];
     if (showHidden) args.push('--hidden', '-g', '!.git/');
+    args.push(options.caseSensitive ? '--case-sensitive' : '--ignore-case');
+    if (options.wholeWord) args.push('--word-regexp');
+    if (!options.regex) args.push('--fixed-strings');
+    appendRipgrepExcludeArgs(args, excludePatterns);
     args.push('--', query);
 
     const proc = spawn('rg', args, { cwd: rootPath, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -3069,6 +3087,12 @@ router.get('/search', async (req: Request, res: Response) => {
     const showHidden = req.query.showHidden === 'true';
     const mode = req.query.mode === 'content' ? 'content' : 'name';
     const queryLower = query.toLowerCase();
+    const excludePatterns = normalizeExcludePatterns(req.query.exclude);
+    const contentOptions = {
+      caseSensitive: req.query.caseSensitive === 'true',
+      wholeWord: req.query.wholeWord === 'true',
+      regex: req.query.regex === 'true',
+    };
 
     if (mode === 'content') {
       if (req.query.stream !== 'true') {
@@ -3080,7 +3104,7 @@ router.get('/search', async (req: Request, res: Response) => {
       res.setHeader('X-Accel-Buffering', 'no');
       writeSearchEvent(res, 'meta', { path: resolvedPath, query, engine: 'rg', mode: 'content', limited: false });
       try {
-        const result = await streamContentSearchWithRipgrep(resolvedPath, query, showHidden, controller.signal, res);
+        const result = await streamContentSearchWithRipgrep(resolvedPath, query, showHidden, excludePatterns, contentOptions, controller.signal, res);
         if (!controller.signal.aborted && !res.destroyed) {
           writeSearchEvent(res, 'done', { total: result.total, truncated: result.limited, limited: result.limited, engine: 'rg', mode: 'content' });
           logSearch('ok', { count: result.total, truncated: result.limited, extra: { mode: 'content', engine: 'rg' } });
@@ -3106,7 +3130,7 @@ router.get('/search', async (req: Request, res: Response) => {
       res.setHeader('X-Accel-Buffering', 'no');
       writeSearchEvent(res, 'meta', { path: resolvedPath, query, engine: 'rg', limited: false });
       try {
-        const total = await streamSearchWithRipgrep(resolvedPath, queryLower, showHidden, controller.signal, res);
+        const total = await streamSearchWithRipgrep(resolvedPath, queryLower, showHidden, excludePatterns, controller.signal, res);
         if (!controller.signal.aborted && !res.destroyed) {
           writeSearchEvent(res, 'done', { total, truncated: false, limited: false, engine: 'rg' });
           logSearch('ok', { count: total, truncated: false, extra: { mode: 'name', engine: 'rg' } });
@@ -3119,7 +3143,7 @@ router.get('/search', async (req: Request, res: Response) => {
           return;
         }
         writeSearchEvent(res, 'meta', { path: resolvedPath, query, engine: 'fallback', limited: false });
-        const result = await streamSearchWithFallback(resolvedPath, queryLower, showHidden, controller.signal, res);
+        const result = await streamSearchWithFallback(resolvedPath, queryLower, showHidden, excludePatterns, controller.signal, res);
         if (!controller.signal.aborted && !res.destroyed) {
           writeSearchEvent(res, 'done', { total: result.total, truncated: result.limited, limited: result.limited, engine: 'fallback' });
           logSearch('ok', { count: result.total, truncated: result.limited, extra: { mode: 'name', engine: 'fallback' } });
@@ -3130,7 +3154,7 @@ router.get('/search', async (req: Request, res: Response) => {
     }
 
     try {
-      const result = await searchWithRipgrep(resolvedPath, queryLower, showHidden, controller.signal);
+      const result = await searchWithRipgrep(resolvedPath, queryLower, showHidden, excludePatterns, controller.signal);
       logSearch('ok', { count: result.entries.length, total: result.total, truncated: result.truncated, extra: { mode: 'name', engine: result.engine } });
       res.json(result);
     } catch (error) {
@@ -3141,7 +3165,7 @@ router.get('/search', async (req: Request, res: Response) => {
       }
       // Graceful fallback for machines without `rg` installed. It is bounded so
       // searching an enormous home directory cannot monopolize the server.
-      const result = await searchWithFallback(resolvedPath, queryLower, showHidden, controller.signal);
+      const result = await searchWithFallback(resolvedPath, queryLower, showHidden, excludePatterns, controller.signal);
       logSearch('ok', { count: result.entries.length, total: result.total, truncated: result.truncated, extra: { mode: 'name', engine: result.engine } });
       res.json(result);
     }

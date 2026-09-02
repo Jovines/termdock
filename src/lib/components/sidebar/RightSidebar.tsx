@@ -38,6 +38,11 @@ import {
   Maximize2 as RiFullscreen,
   Clock3 as RiClock,
   ArrowDownAZ as RiSortName,
+  FolderSearch as RiFolderSearch,
+  SlidersHorizontal as RiSliders,
+  CaseSensitive as RiCaseSensitive,
+  WholeWord as RiWholeWord,
+  Regex as RiRegex,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { FileTree } from './FileTree';
@@ -50,7 +55,7 @@ import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import { useDiffDisplayPrefs } from './diffDisplayPrefs';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { resolveRightSidebarNarrowLayout, useSidebarStore, type RightSidebarLayoutPreference } from '../../stores/useSidebarStore';
-import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode } from '../../terminal/api';
+import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
 import { minimizeClientWatchRoots } from '../../terminal/fileWatchRoots';
 import { partitionFileWatchEvents } from '../../terminal/fileWatchEvents';
 import { useI18n } from '../../i18n';
@@ -76,6 +81,7 @@ import { CsvPreview } from './CsvPreview';
 import { KicadProjectPreview } from './KicadProjectPreview';
 import { HtmlPreviewFrame, type HtmlPreviewFrameHandle } from './HtmlPreviewFrame';
 import { clearFilePreviewSearchHighlights, collectFilePreviewSearchRanges, paintFilePreviewSearchHighlights, resolveFilePreviewSearchShortcut, scrollFilePreviewSearchRangeIntoView } from './filePreviewSearch';
+import { describeSearchScope, parseExcludePatterns, resolveSearchScopePath } from './fileSearchOptions';
 import './sidebarSelection.css';
 
 interface RightSidebarProps {
@@ -6163,6 +6169,12 @@ export function RightSidebar(
   const rightSidebarLayoutPreference = useSidebarStore((s) => s.rightSidebarLayoutPreference);
   const setRightSidebarLayoutPreference = useSidebarStore((s) => s.setRightSidebarLayoutPreference);
   const [searchMode, setSearchMode] = useState<FileSearchMode>(() => readFileSearchMode());
+  const [searchScopeInput, setSearchScopeInput] = useState('.');
+  const [searchExcludeInput, setSearchExcludeInput] = useState('');
+  const [searchOptionsOpen, setSearchOptionsOpen] = useState(false);
+  const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
+  const [searchWholeWord, setSearchWholeWord] = useState(false);
+  const [searchRegex, setSearchRegex] = useState(false);
   const deferredFileQuery = useDeferredValue(fileQuery);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [gitRepositories, setGitRepositories] = useState<GitRepositoryBundle[]>([]);
@@ -6303,6 +6315,17 @@ export function RightSidebar(
   const setGitBundleError = useSidebarStore((s) => s.setGitBundleError);
   const markGitBundleLoaded = useSidebarStore((s) => s.markGitBundleLoaded);
   const fileTreeRoot = explorerRoot ?? rootPath;
+  const resolvedSearchRoot = useMemo(
+    () => fileTreeRoot ? resolveSearchScopePath(fileTreeRoot, searchScopeInput) : '',
+    [fileTreeRoot, searchScopeInput],
+  );
+  const searchExcludePatterns = useMemo(() => parseExcludePatterns(searchExcludeInput), [searchExcludeInput]);
+  const fileSearchOptions = useMemo<FileSearchOptions>(() => ({
+    excludePatterns: searchExcludePatterns,
+    caseSensitive: searchCaseSensitive,
+    wholeWord: searchWholeWord,
+    regex: searchRegex,
+  }), [searchCaseSensitive, searchExcludePatterns, searchRegex, searchWholeWord]);
   const fileTreeSortMode = useSidebarStore((s) => fileTreeRoot ? s.fileSortModes[fileTreeRoot] ?? 'name' : 'name');
   const rootEntriesLoaded = useSidebarStore((s) => Boolean(fileTreeRoot && s.directoryCache.has(fileTreeRoot)));
   const fileTreeScrollRef = useRef<HTMLDivElement | null>(null);
@@ -7586,6 +7609,15 @@ export function RightSidebar(
     setExplorerRoot(path);
     setFileQuery('');
   }, [setExplorerRoot]);
+
+  const searchFromDirectory = useCallback((path: string) => {
+    if (!fileTreeRoot) return;
+    setSearchScopeInput(describeSearchScope(fileTreeRoot, path));
+    setRightSearchOpen(true);
+    window.requestAnimationFrame(() => {
+      document.querySelector<HTMLInputElement>('[data-right-search]')?.focus();
+    });
+  }, [fileTreeRoot, setRightSearchOpen]);
 
   const togglePinnedDirectory = useCallback((path: string) => {
     if (!rootPath || path === rootPath) return;
@@ -10474,7 +10506,12 @@ export function RightSidebar(
           </div>
           <button
             type="button"
-            onClick={() => setRightSearchOpen(!searchOpen)}
+            onClick={() => {
+              const nextOpen = !searchOpen;
+              setRightSearchOpen(nextOpen);
+              if (!nextOpen) setFileQuery('');
+              else window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[data-right-search]')?.focus());
+            }}
             className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
               searchOpen
                 ? 'bg-primary/15 text-primary'
@@ -10637,8 +10674,8 @@ export function RightSidebar(
         </div>
 
         {searchOpen && (
-          <div className="mt-2 space-y-1.5">
-            <div className="flex items-center gap-2 rounded-full bg-surface-2 px-3 py-1.5 text-muted-foreground focus-within:bg-surface-elevated">
+          <div className="mt-2 space-y-1.5 pb-0.5">
+            <div className="flex items-center gap-2 rounded-xl bg-surface-2 px-3 py-1.5 text-muted-foreground transition focus-within:bg-surface-elevated">
               <RiSearch size={12} className="shrink-0" />
               <input
                 data-right-search
@@ -10653,8 +10690,6 @@ export function RightSidebar(
                 enterKeyHint="search"
                 spellCheck={false}
               />
-              {/* Keep the mode switch inline on every viewport. Mobile retains
-                  a slightly larger target without consuming a second row. */}
               <div className={`flex shrink-0 items-center gap-0.5 rounded-full bg-surface/70 p-0.5 font-medium ${isMobile ? 'text-[11px]' : 'text-[10px]'}`}>
                   <button
                     type="button"
@@ -10684,6 +10719,74 @@ export function RightSidebar(
                 </button>
               )}
             </div>
+            <div className="flex items-center gap-1.5">
+              <label className="flex min-w-0 flex-1 items-center gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 text-muted-foreground transition focus-within:bg-surface-elevated">
+                <RiFolderSearch size={12} className="shrink-0 text-primary" />
+                <span className="shrink-0 text-[10px] font-medium">{t('rightSidebar.searchScope')}</span>
+                <input
+                  data-search-scope
+                  value={searchScopeInput}
+                  onChange={(event) => setSearchScopeInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') document.querySelector<HTMLInputElement>('[data-right-search]')?.focus();
+                  }}
+                  className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground placeholder:text-muted-foreground"
+                  placeholder={t('rightSidebar.searchScopePlaceholder')}
+                  aria-label={t('rightSidebar.searchScope')}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                {searchScopeInput !== '.' && (
+                  <button type="button" onClick={() => setSearchScopeInput('.')} className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-surface hover:text-foreground" aria-label={t('rightSidebar.resetSearchScope')}>
+                    <RiCloseLine size={11} />
+                  </button>
+                )}
+              </label>
+              <button
+                type="button"
+                onClick={() => setSearchOptionsOpen((open) => !open)}
+                aria-expanded={searchOptionsOpen}
+                className={`relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition active:scale-95 ${searchOptionsOpen || searchExcludePatterns.length > 0 || searchCaseSensitive || searchWholeWord || searchRegex ? 'bg-primary/15 text-primary' : 'bg-surface-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}
+                title={t('rightSidebar.searchOptions')}
+                aria-label={t('rightSidebar.searchOptions')}
+              >
+                <RiSliders size={13} />
+                {searchExcludePatterns.length > 0 && <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-primary px-1 text-[8px] font-bold leading-4 text-primary-foreground">{searchExcludePatterns.length}</span>}
+              </button>
+            </div>
+            {searchOptionsOpen && (
+              <div className="animate-fade-in rounded-xl bg-surface-2 p-2">
+                <label className="flex items-center gap-2 rounded-lg bg-surface px-2.5 py-1.5 text-muted-foreground focus-within:bg-surface-elevated">
+                  <span className="shrink-0 text-[10px] font-medium">{t('rightSidebar.searchExclude')}</span>
+                  <input
+                    data-search-exclude
+                    value={searchExcludeInput}
+                    onChange={(event) => setSearchExcludeInput(event.target.value)}
+                    className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground placeholder:text-muted-foreground"
+                    placeholder={t('rightSidebar.searchExcludePlaceholder')}
+                    aria-label={t('rightSidebar.searchExclude')}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                  {searchExcludeInput && <button type="button" onClick={() => setSearchExcludeInput('')} className="rounded p-0.5 hover:bg-surface-2 hover:text-foreground" aria-label={t('rightSidebar.clearSearchExclude')}><RiCloseLine size={11} /></button>}
+                </label>
+                {searchMode === 'content' && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1" role="group" aria-label={t('rightSidebar.contentSearchOptions')}>
+                    {([
+                      [searchCaseSensitive, () => setSearchCaseSensitive((value) => !value), RiCaseSensitive, t('rightSidebar.matchCase')],
+                      [searchWholeWord, () => setSearchWholeWord((value) => !value), RiWholeWord, t('rightSidebar.matchWholeWord')],
+                      [searchRegex, () => setSearchRegex((value) => !value), RiRegex, t('rightSidebar.useRegex')],
+                    ] as const).map(([active, toggle, Icon, label]) => (
+                      <button key={label} type="button" onClick={toggle} aria-pressed={active} className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] transition ${active ? 'bg-primary/15 text-primary' : 'bg-surface text-muted-foreground hover:bg-surface-elevated hover:text-foreground'}`}>
+                        <Icon size={12} />{label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -10866,7 +10969,7 @@ export function RightSidebar(
                     </div>
                   </div>
                 )}
-                {fileExplorerNavigation}
+                {!fileQuery.trim() && fileExplorerNavigation}
                 <FileTree
                   rootPath={fileTreeRoot ?? ''}
                   onFileSelect={handleFileSelect}
@@ -10876,11 +10979,14 @@ export function RightSidebar(
                   insertedReferenceKey={insertedReferenceKey}
                   copiedReferenceKey={copiedReferenceKey}
                   onDirectoryRoot={openDirectoryAsExplorerRoot}
+                  onSearchFromDirectory={searchFromDirectory}
                   onDirectoryPinToggle={togglePinnedDirectory}
                   onFilePinToggle={togglePinnedFile}
                   pinnedPaths={pinnedExplorerRootSet}
                   selectedFilePath={selectedFilePath}
                   query={deferredFileQuery}
+                  searchRootPath={resolvedSearchRoot}
+                  searchOptions={fileSearchOptions}
                   searchMode={searchMode}
                   onContentMatchSelect={handleContentMatchSelect}
                   onDirectoryDropFiles={(path, files) => handleUploadFiles(files, path)}
@@ -10981,7 +11087,7 @@ export function RightSidebar(
                       </div>
                     </div>
                   )}
-                  {fileExplorerNavigation}
+                  {!fileQuery.trim() && fileExplorerNavigation}
                   <FileTree
                     rootPath={fileTreeRoot ?? ''}
                     onFileSelect={handleFileSelect}
@@ -10991,11 +11097,14 @@ export function RightSidebar(
                     insertedReferenceKey={insertedReferenceKey}
                     copiedReferenceKey={copiedReferenceKey}
                     onDirectoryRoot={openDirectoryAsExplorerRoot}
+                    onSearchFromDirectory={searchFromDirectory}
                     onDirectoryPinToggle={togglePinnedDirectory}
                     onFilePinToggle={togglePinnedFile}
                     pinnedPaths={pinnedExplorerRootSet}
                     selectedFilePath={selectedFilePath}
                     query={deferredFileQuery}
+                    searchRootPath={resolvedSearchRoot}
+                    searchOptions={fileSearchOptions}
                     searchMode={searchMode}
                     onContentMatchSelect={handleContentMatchSelect}
                     onDirectoryDropFiles={(path, files) => handleUploadFiles(files, path)}
