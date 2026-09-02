@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { DiffViewer, type DiffInlineMode, type DiffViewType } from './DiffViewer';
+import { canUseSplitDiffView, DiffViewer, SPLIT_DIFF_MEDIA_QUERY, type DiffInlineMode, type DiffViewType } from './DiffViewer';
 
-const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: string; oldSource?: string }> = {
+export const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: string; oldSource?: string }> = {
   kotlin: {
     label: 'Kotlin function signature + callback',
     path: 'SearchHintIconHelper.kt',
@@ -227,6 +227,57 @@ const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: string;
    return config;
  }`,
   },
+  unrelatedReplacement: {
+    label: 'Unrelated replacement lines',
+    path: 'UnrelatedReplacement.ts',
+    diff: `diff --git a/UnrelatedReplacement.ts b/UnrelatedReplacement.ts
+--- a/UnrelatedReplacement.ts
++++ b/UnrelatedReplacement.ts
+@@ -1,5 +1,5 @@
+ export function updateSession(request: Request) {
+-  const retries = calculateRetryBudget(request);
++  notifyObservers(session.status);
+   return session;
+ }`,
+  },
+  repeatedScaffolding: {
+    label: 'Repeated code with one real replacement',
+    path: 'RepeatedScaffolding.ts',
+    diff: `diff --git a/RepeatedScaffolding.ts b/RepeatedScaffolding.ts
+--- a/RepeatedScaffolding.ts
++++ b/RepeatedScaffolding.ts
+@@ -1,6 +1,7 @@
+ export function renderItems(items: Item[]) {
+-  items.map((item) => renderLegacy(item));
+-  items.map((item) => renderLegacy(item));
++  logger.debug('rendering modern items');
++  items.map((item) => renderModern(item));
++  items.map((item) => renderLegacy(item));
+   flushRenderQueue();
+ }`,
+  },
+  movedAndEdited: {
+    label: 'Moved block across hunks with an edit',
+    path: 'MovedAndEdited.ts',
+    diff: `diff --git a/MovedAndEdited.ts b/MovedAndEdited.ts
+--- a/MovedAndEdited.ts
++++ b/MovedAndEdited.ts
+@@ -1,8 +1,5 @@
+ export function run(input: Input) {
+-  const timeoutMs = config.timeoutMs;
+-  return runTask(timeoutMs);
+-
+   prepare(input);
+   return execute(input);
+ }
+@@ -20,4 +17,7 @@ export function configure(config: Config) {
+   validate(config);
++  const timeoutMs = config.timeoutMs;
++  return runTask(timeoutMs, signal);
++
+   persist(config);
+ }`,
+  },
   ifWrapper: {
     label: 'Wrap an unchanged block in an if',
     path: 'TaskRunner.ts',
@@ -245,6 +296,210 @@ const DIFF_FIXTURES: Record<string, { label: string; path: string; diff: string;
 +  }
    return context;
  }`,
+  },
+  loopNesting: {
+    label: 'Reorder nested loops while preserving the inner block',
+    path: 'BlockRanges.ts',
+    diff: `diff --git a/BlockRanges.ts b/BlockRanges.ts
+--- a/BlockRanges.ts
++++ b/BlockRanges.ts
+@@ -1,8 +1,9 @@
+ function projectBlockRanges(ranges: InlineDiffRange[], block: BlockText) {
+-  for (const range of ranges) {
+-    const rangeEnd = range.start + range.length;
+-    for (const line of block.lines) {
++  for (const line of block.lines) {
++    const lineRanges: InlineDiffRange[] = [];
++    for (const range of ranges) {
++      const rangeEnd = range.start + range.length;
+       const start = Math.max(range.start, line.start);
+       const end = Math.min(rangeEnd, line.end);
+       if (end <= start) continue;
+ }`,
+  },
+  addedFile: {
+    label: 'Entirely added file',
+    path: 'NewFeature.ts',
+    diff: `diff --git a/NewFeature.ts b/NewFeature.ts
+new file mode 100644
+--- /dev/null
++++ b/NewFeature.ts
+@@ -0,0 +1,5 @@
++export function newFeature(): string {
++  const status = 'ready';
++  announce(status);
++  return status;
++}`,
+  },
+  deletedFile: {
+    label: 'Entirely deleted file',
+    path: 'LegacyFeature.ts',
+    diff: `diff --git a/LegacyFeature.ts b/LegacyFeature.ts
+deleted file mode 100644
+--- a/LegacyFeature.ts
++++ /dev/null
+@@ -1,5 +0,0 @@
+-export function legacyFeature(): string {
+-  const status = 'deprecated';
+-  warn(status);
+-  return status;
+-}`,
+  },
+  renameOnly: {
+    label: 'Rename without content changes',
+    path: 'NewName.ts',
+    diff: `diff --git a/OldName.ts b/NewName.ts
+similarity index 100%
+rename from OldName.ts
+rename to NewName.ts`,
+  },
+  renamedWithEdit: {
+    label: 'Rename with a content edit',
+    path: 'NewConfig.ts',
+    diff: `diff --git a/OldConfig.ts b/NewConfig.ts
+similarity index 88%
+rename from OldConfig.ts
+rename to NewConfig.ts
+--- a/OldConfig.ts
++++ b/NewConfig.ts
+@@ -1,3 +1,3 @@
+ export const config = {
+-  timeoutMs: 1000,
++  timeoutMs: 1500,
+ };`,
+  },
+  binaryFile: {
+    label: 'Binary file changed',
+    path: 'preview.png',
+    diff: `diff --git a/preview.png b/preview.png
+index 1111111..2222222 100644
+Binary files a/preview.png and b/preview.png differ`,
+  },
+  blankAndTabs: {
+    label: 'Blank lines + tabs/spaces only',
+    path: 'Whitespace.ts',
+    diff: `diff --git a/Whitespace.ts b/Whitespace.ts
+--- a/Whitespace.ts
++++ b/Whitespace.ts
+@@ -1,6 +1,6 @@
+ export function whitespace() {
+-\tconst value = readValue();
+-
++  const value = readValue();
++${'  '}
+   return value;
+ }`.replace(/\n/gu, '\r\n'),
+  },
+  noFinalNewline: {
+    label: 'No final newline marker',
+    path: 'NoFinalNewline.txt',
+    diff: `diff --git a/NoFinalNewline.txt b/NoFinalNewline.txt
+--- a/NoFinalNewline.txt
++++ b/NoFinalNewline.txt
+@@ -1 +1 @@
+-status=old
+\\ No newline at end of file
++status=new
+\\ No newline at end of file`,
+  },
+  unicodeGraphemes: {
+    label: 'CJK + emoji + combining marks',
+    path: 'messages.ts',
+    diff: `diff --git a/messages.ts b/messages.ts
+--- a/messages.ts
++++ b/messages.ts
+@@ -1,5 +1,5 @@
+ export const messages = {
+-  status: '正在连接 👩‍💻 cafe\u0301',
++  status: '连接成功 👩🏽‍💻 café',
+   action: '继续',
+ };`,
+  },
+  longLine: {
+    label: 'Very long line with one mutation',
+    path: 'generated.ts',
+    diff: `diff --git a/generated.ts b/generated.ts
+--- a/generated.ts
++++ b/generated.ts
+@@ -1,3 +1,3 @@
+ export const generated = {
+-  payload: "${'stable-segment-'.repeat(90)}OLD_VALUE${'-stable-tail'.repeat(35)}",
++  payload: "${'stable-segment-'.repeat(90)}NEW_VALUE${'-stable-tail'.repeat(35)}",
+ };`,
+  },
+  ambiguousDuplicates: {
+    label: 'Ambiguous duplicate lines',
+    path: 'DuplicatePipeline.ts',
+    diff: `diff --git a/DuplicatePipeline.ts b/DuplicatePipeline.ts
+--- a/DuplicatePipeline.ts
++++ b/DuplicatePipeline.ts
+@@ -1,8 +1,9 @@
+ export function pipeline(item: Item) {
+-  process(item);
+-  process(item);
+-  saveLegacy(item);
+-  process(item);
++  process(item);
++  audit(item);
++  process(item);
++  saveModern(item);
++  process(item);
+   finish(item);
+ }`,
+  },
+  commentStringCollision: {
+    label: 'Comment/string similarity collision',
+    path: 'RetryLogger.ts',
+    diff: `diff --git a/RetryLogger.ts b/RetryLogger.ts
+--- a/RetryLogger.ts
++++ b/RetryLogger.ts
+@@ -1,6 +1,6 @@
+ export function reportRetry(error: Error) {
+-  // retry request after backoff
+-  logger.info('request failed');
++  logger.info('retry request after backoff');
++  // request failed permanently
+   capture(error);
+ }`,
+  },
+  multiHunkMixed: {
+    label: 'Multiple hunks with mixed change types',
+    path: 'MixedChanges.ts',
+    diff: `diff --git a/MixedChanges.ts b/MixedChanges.ts
+--- a/MixedChanges.ts
++++ b/MixedChanges.ts
+@@ -1,5 +1,6 @@
+ export function start(config: Config) {
+-  connect(config, 1000);
++  connect(config, 1500);
++  logConnection(config);
+   return config;
+ }
+@@ -20,6 +21,5 @@ export function stop(session: Session) {
+   flush(session);
+-  reportLegacyMetrics(session);
+   disconnect(session);
+   return session;
+ }`,
+  },
+  multiFilePatch: {
+    label: 'Multiple files in one patch',
+    path: 'First.ts',
+    diff: `diff --git a/First.ts b/First.ts
+--- a/First.ts
++++ b/First.ts
+@@ -1 +1 @@
+-export const first = 'old';
+\\ No newline at end of file
++export const first = 'new';
+\\ No newline at end of file
+diff --git a/Second.ts b/Second.ts
+new file mode 100644
+--- /dev/null
++++ b/Second.ts
+@@ -0,0 +1,2 @@
++export const second = true;
++announce(second);`,
   },
 };
 
@@ -274,10 +529,21 @@ function readInitialWrap(): boolean {
 export function DiffLab() {
   const [fixtureKey, setFixtureKey] = useState<keyof typeof DIFF_FIXTURES>(() => readInitialFixture());
   const [viewType, setViewType] = useState<DiffViewType>(() => readInitialViewType());
+  const [splitViewAvailable, setSplitViewAvailable] = useState(() => canUseSplitDiffView());
   const [inlineMode, setInlineMode] = useState<DiffInlineMode>(() => readInitialInlineMode());
   const [wrap, setWrap] = useState(() => readInitialWrap());
   const fixture = DIFF_FIXTURES[fixtureKey];
   const fixtureOptions = useMemo(() => Object.entries(DIFF_FIXTURES), []);
+  const effectiveViewType: DiffViewType = viewType === 'split' && !splitViewAvailable ? 'unified' : viewType;
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia(SPLIT_DIFF_MEDIA_QUERY);
+    const update = () => setSplitViewAvailable(media.matches);
+    update();
+    media.addEventListener?.('change', update);
+    return () => media.removeEventListener?.('change', update);
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -307,7 +573,8 @@ export function DiffLab() {
       className="min-h-screen bg-background-subtle text-foreground"
       data-diff-lab
       data-diff-lab-fixture={fixtureKey}
-      data-diff-lab-view={viewType}
+      data-diff-lab-view={effectiveViewType}
+      data-diff-lab-requested-view={viewType}
       data-diff-lab-inline={inlineMode}
       data-diff-lab-wrap={wrap ? 'on' : 'off'}
     >
@@ -334,14 +601,17 @@ export function DiffLab() {
               <button
                 type="button"
                 onClick={() => setViewType('unified')}
-                className={`rounded-full px-3 text-xs font-semibold ${viewType === 'unified' ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground'}`}
+                aria-pressed={effectiveViewType === 'unified'}
+                className={`rounded-full px-3 text-xs font-semibold ${effectiveViewType === 'unified' ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground'}`}
               >
                 Unified
               </button>
               <button
                 type="button"
                 onClick={() => setViewType('split')}
-                className={`rounded-full px-3 text-xs font-semibold ${viewType === 'split' ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground'}`}
+                disabled={!splitViewAvailable}
+                aria-pressed={effectiveViewType === 'split'}
+                className={`rounded-full px-3 text-xs font-semibold ${effectiveViewType === 'split' ? 'bg-surface-elevated text-foreground' : 'text-muted-foreground'} disabled:cursor-not-allowed disabled:opacity-40`}
               >
                 Split
               </button>
@@ -390,7 +660,7 @@ export function DiffLab() {
             active
             wrap={wrap}
             showScrollHint={!wrap}
-            viewType={viewType}
+            viewType={effectiveViewType}
             inlineMode={inlineMode}
           />
         </main>

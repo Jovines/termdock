@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  buildClipboardImageFilename,
   REMOTE_FILE_DROP_DIRECTORY,
   shouldUploadDroppedFiles,
+  uploadClipboardImage,
   uploadDroppedFiles,
 } from './fileDropUpload.js';
 
@@ -61,5 +63,33 @@ describe('desktop native file drops', () => {
       new File(['first'], 'one.txt'),
       new File(['second'], 'two.txt'),
     ], fetchRequest)).rejects.toThrow('every uploaded file path');
+  });
+
+  it('uploads a native clipboard PNG to the active service temporary directory', async () => {
+    const fetchRequest = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ csrfToken: 'token-1' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        files: [{ path: '/tmp/termdock-clipboard-2026-09-02T04-05-06-000Z.png' }],
+      }), { status: 200 }));
+    const uploadedAt = new Date('2026-09-02T04:05:06.000Z');
+
+    await expect(uploadClipboardImage(
+      new Uint8Array([137, 80, 78, 71]).buffer,
+      fetchRequest,
+      uploadedAt,
+    )).resolves.toBe('/tmp/termdock-clipboard-2026-09-02T04-05-06-000Z.png');
+
+    const request = fetchRequest.mock.calls[1]?.[1];
+    const file = (request?.body as FormData).get('files') as File;
+    expect(file.name).toBe(buildClipboardImageFilename(uploadedAt));
+    expect(file.type).toBe('image/png');
+    expect(file.size).toBe(4);
+  });
+
+  it('rejects an empty native clipboard image before making a request', async () => {
+    const fetchRequest = vi.fn<typeof fetch>();
+    await expect(uploadClipboardImage(new ArrayBuffer(0), fetchRequest))
+      .rejects.toThrow('Clipboard image is empty');
+    expect(fetchRequest).not.toHaveBeenCalled();
   });
 });

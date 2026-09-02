@@ -1621,6 +1621,15 @@ html[data-theme='light'] .termdock-code .token.important {
   min-width: 48rem;
 }
 
+/* A pinned sidebar can stay in split mode even when it is narrower than the
+   desktop-oriented 48rem canvas above. In wrap mode the table must follow the
+   sidebar width; otherwise the stale minimum makes the body horizontally
+   scrollable by the difference between the two widths. Keep the 48rem canvas
+   for raw/non-wrapping split diffs, where horizontal scrolling is intentional. */
+.diff-split.termdock-diff-wrap .diff {
+  min-width: 100%;
+}
+
 .diff-split .diff-gutter-col {
   width: var(--termdock-diff-gutter-width, 3ch);
 }

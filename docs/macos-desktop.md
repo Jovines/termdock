@@ -47,6 +47,9 @@ same sessions too, but `td at` remains reliable if tmux client versions differ.
 - `⌘B` toggles sessions and `⌘⇧B` toggles the file sidebar.
 - Files dropped from Finder onto a terminal are resolved through Electron's
   native file API and inserted as shell-quoted absolute paths.
+- Pasting a macOS clipboard image uploads a PNG to the active service's `/tmp`
+  directory and inserts the returned shell-quoted path. Local windows therefore
+  receive a local path, while LAN service windows receive a path on that host.
 - The last successful Termdock connection is reopened on the next launch.
 
 ## Building

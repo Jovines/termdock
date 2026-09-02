@@ -106,33 +106,149 @@ function significantTokens(value: string): string[] {
     .filter(Boolean);
 }
 
-export function getInlineDiffSimilarity(left: string, right: string): number {
-  if (left === right) return 1;
-  const leftTokens = significantTokens(left);
-  const rightTokens = significantTokens(right);
-  if (leftTokens.length === 0 && rightTokens.length === 0) return 1;
-  if (leftTokens.length === 0 || rightTokens.length === 0) return 0;
+function meaningfulTokens(value: string): string[] {
+  return significantTokens(value).filter((token) => /[\p{L}\p{N}_$]/u.test(token));
+}
+
+function multisetDice(left: string[], right: string[]): number {
+  if (left.length === 0 && right.length === 0) return 1;
+  if (left.length === 0 || right.length === 0) return 0;
   const counts = new Map<string, number>();
-  for (const token of leftTokens) counts.set(token, (counts.get(token) ?? 0) + 1);
+  for (const value of left) counts.set(value, (counts.get(value) ?? 0) + 1);
   let intersection = 0;
-  for (const token of rightTokens) {
-    const count = counts.get(token) ?? 0;
-    if (count > 0) {
-      intersection += 1;
-      counts.set(token, count - 1);
-    }
+  for (const value of right) {
+    const count = counts.get(value) ?? 0;
+    if (count <= 0) continue;
+    intersection += 1;
+    counts.set(value, count - 1);
   }
-  return (2 * intersection) / (leftTokens.length + rightTokens.length);
+  return (2 * intersection) / (left.length + right.length);
+}
+
+function characterBigrams(value: string): string[] {
+  const normalized = value.trim().replace(/\s+/gu, ' ');
+  if (normalized.length < 2) return normalized ? [normalized] : [];
+  const bigrams: string[] = [];
+  for (let index = 0; index < normalized.length - 1; index += 1) {
+    bigrams.push(normalized.slice(index, index + 2));
+  }
+  return bigrams;
+}
+
+type LineSemanticKind = 'blank' | 'comment' | 'code';
+
+function getLineSemanticKind(value: string): LineSemanticKind {
+  const trimmed = value.trim();
+  if (!trimmed) return 'blank';
+  return /^(?:\/\/|\/\*|\*|<!--|-->)/u.test(trimmed) ? 'comment' : 'code';
+}
+
+function lineKindsAreCompatible(left: string, right: string): boolean {
+  if (left.includes('\n') || right.includes('\n')) return true;
+  const leftKind = getLineSemanticKind(left);
+  const rightKind = getLineSemanticKind(right);
+  return leftKind === rightKind || leftKind === 'blank' || rightKind === 'blank';
+}
+
+function structuralSkeleton(value: string): string {
+  return value
+    .trim()
+    .replace(/(['"`])(?:\\.|[^\\])*?\1/gu, (_match, quote: string) => `${quote}${quote}`)
+    .replace(/\b\d+(?:\.\d+)?\b/gu, '0')
+    .replace(/\s+/gu, ' ');
+}
+
+function leadingPropertyName(value: string): string | null {
+  const match = value.match(/^\s*(?:([A-Za-z_$][A-Za-z0-9_$]*)|['"]([^'"]+)['"])\s*:/u);
+  return match?.[1] ?? match?.[2] ?? null;
+}
+
+export function getInlineDiffSimilarity(left: string, right: string): number {
+  const trimmedLeft = left.trim();
+  const trimmedRight = right.trim();
+  if (left === right) {
+    if (!trimmedLeft) return 0.1;
+    return /[\p{L}\p{N}_$]/u.test(trimmedLeft) ? 1 : 0.3;
+  }
+  if (trimmedLeft === trimmedRight) {
+    if (!trimmedLeft) return 0.1;
+    // Braces and separators are plentiful in code and make poor anchors on
+    // their own. Keep them available as a weak tie-breaker, not a line match.
+    return /[\p{L}\p{N}_$]/u.test(trimmedLeft) ? 0.99 : 0.3;
+  }
+  if (!lineKindsAreCompatible(left, right)) return 0;
+  const leftTokens = meaningfulTokens(trimmedLeft);
+  const rightTokens = meaningfulTokens(trimmedRight);
+  if (leftTokens.length === 0 || rightTokens.length === 0) return 0;
+  const orderedMatches = lcsPairs(leftTokens, rightTokens).length;
+  const ordered = (2 * orderedMatches) / (leftTokens.length + rightTokens.length);
+  const bag = multisetDice(leftTokens, rightTokens);
+  const characters = multisetDice(characterBigrams(trimmedLeft), characterBigrams(trimmedRight));
+  const lexicalScore = ordered * 0.5 + bag * 0.2 + characters * 0.3;
+  const leftSkeleton = structuralSkeleton(trimmedLeft);
+  const rightSkeleton = structuralSkeleton(trimmedRight);
+  const sameSubstantiveSkeleton = leftSkeleton === rightSkeleton
+    && /[\p{L}\p{N}_$]/u.test(leftSkeleton);
+  return sameSubstantiveSkeleton ? Math.max(0.72, lexicalScore) : lexicalScore;
 }
 
 export function pairChangedLinesForDisplay(
   deletes: Array<Pick<ChangeData, 'content'> & { lineNumber: number }>,
   inserts: Array<Pick<ChangeData, 'content'> & { lineNumber: number }>,
-  threshold = 0.18,
+  threshold = 0.42,
 ): PairedChangedLine[] {
   if (deletes.length === 0 || inserts.length === 0) return [];
-  const scores = deletes.map((deletion) => (
-    inserts.map((insertion) => getInlineDiffSimilarity(deletion.content, insertion.content))
+  if (deletes.length * inserts.length > 40_000) {
+    const oldKeys = deletes.map((change) => {
+      const trimmed = change.content.trim();
+      return /[\p{L}\p{N}_$]/u.test(trimmed) ? trimmed : '';
+    });
+    const newKeys = inserts.map((change) => {
+      const trimmed = change.content.trim();
+      return /[\p{L}\p{N}_$]/u.test(trimmed) ? trimmed : '';
+    });
+    return patienceAnchors(oldKeys, newKeys)
+      .filter((pair) => oldKeys[pair.left] !== '')
+      .map((pair) => ({
+        oldLineNumber: deletes[pair.left].lineNumber,
+        newLineNumber: inserts[pair.right].lineNumber,
+        score: getInlineDiffSimilarity(deletes[pair.left].content, inserts[pair.right].content),
+      }));
+  }
+  const deletedProperties = deletes.map((change) => leadingPropertyName(change.content));
+  const insertedProperties = inserts.map((change) => leadingPropertyName(change.content));
+  const countProperties = (properties: Array<string | null>) => {
+    const counts = new Map<string, number>();
+    for (const property of properties) {
+      if (property) counts.set(property, (counts.get(property) ?? 0) + 1);
+    }
+    return counts;
+  };
+  const deletedPropertyCounts = countProperties(deletedProperties);
+  const insertedPropertyCounts = countProperties(insertedProperties);
+  const similarities = deletes.map((deletion, oldIndex) => (
+    inserts.map((insertion, newIndex) => {
+      const similarity = getInlineDiffSimilarity(deletion.content, insertion.content);
+      // A unique object/config property name is a strong display identity even
+      // when its complete value expression changes. Keep this boost local to
+      // row alignment: the generic similarity is also used by moved-line and
+      // multi-line inline-refinement logic, where this assumption is unsafe.
+      const property = deletedProperties[oldIndex];
+      return property
+        && property === insertedProperties[newIndex]
+        && deletedPropertyCounts.get(property) === 1
+        && insertedPropertyCounts.get(property) === 1
+        ? Math.max(0.55, similarity)
+        : similarity;
+    })
+  ));
+  const scores = similarities.map((row, oldIndex) => (
+    row.map((similarity, newIndex) => {
+      const oldPosition = deletes.length <= 1 ? 0 : oldIndex / (deletes.length - 1);
+      const newPosition = inserts.length <= 1 ? 0 : newIndex / (inserts.length - 1);
+      const proximityTieBreaker = (1 - Math.abs(oldPosition - newPosition)) * 0.0001;
+      return similarity >= threshold ? similarity + proximityTieBreaker : similarity;
+    })
   ));
   const matrix = Array.from(
     { length: deletes.length + 1 },
@@ -140,9 +256,9 @@ export function pairChangedLinesForDisplay(
   );
   for (let oldIndex = deletes.length - 1; oldIndex >= 0; oldIndex -= 1) {
     for (let newIndex = inserts.length - 1; newIndex >= 0; newIndex -= 1) {
-      const similarity = scores[oldIndex][newIndex];
-      const paired = similarity >= threshold
-        ? similarity + matrix[oldIndex + 1][newIndex + 1]
+      const weightedScore = scores[oldIndex][newIndex];
+      const paired = weightedScore >= threshold
+        ? (weightedScore - threshold + 0.01) + matrix[oldIndex + 1][newIndex + 1]
         : Number.NEGATIVE_INFINITY;
       matrix[oldIndex][newIndex] = Math.max(
         paired,
@@ -156,16 +272,17 @@ export function pairChangedLinesForDisplay(
   let oldIndex = 0;
   let newIndex = 0;
   while (oldIndex < deletes.length && newIndex < inserts.length) {
-    const similarity = scores[oldIndex][newIndex];
-    const isPair = similarity >= threshold
+    const weightedScore = scores[oldIndex][newIndex];
+    const pairValue = weightedScore - threshold + 0.01;
+    const isPair = weightedScore >= threshold
       && Math.abs(
-        similarity + matrix[oldIndex + 1][newIndex + 1] - matrix[oldIndex][newIndex],
+        pairValue + matrix[oldIndex + 1][newIndex + 1] - matrix[oldIndex][newIndex],
       ) < 0.000001;
     if (isPair) {
       pairs.push({
         oldLineNumber: deletes[oldIndex].lineNumber,
         newLineNumber: inserts[newIndex].lineNumber,
-        score: similarity,
+        score: similarities[oldIndex][newIndex],
       });
       oldIndex += 1;
       newIndex += 1;
@@ -181,36 +298,83 @@ export function pairChangedLinesForDisplay(
 export function findMovedLineCandidates(
   deletes: Array<Pick<ChangeData, 'content'> & { lineNumber: number }>,
   inserts: Array<Pick<ChangeData, 'content'> & { lineNumber: number }>,
-  threshold = 0.92,
+  threshold = 0.7,
 ): MovedLineCandidate[] {
-  const candidates: MovedLineCandidate[] = [];
-  const available = new Set(inserts);
-  for (const deletion of deletes) {
-    let best: (Pick<ChangeData, 'content'> & { lineNumber: number }) | null = null;
-    let bestScore = 0;
-    for (const insertion of available) {
-      const score = getInlineDiffSimilarity(deletion.content, insertion.content);
-      if (score > bestScore) {
-        best = insertion;
-        bestScore = score;
-      }
+  const edges: Array<MovedLineCandidate & { oldIndex: number; newIndex: number }> = [];
+  if (deletes.length * inserts.length > 50_000) {
+    const insertedByContent = new Map<string, number[]>();
+    for (const [newIndex, insertion] of inserts.entries()) {
+      const key = insertion.content.trim();
+      if (!/[\p{L}\p{N}_$]/u.test(key)) continue;
+      const indexes = insertedByContent.get(key);
+      if (indexes) indexes.push(newIndex);
+      else insertedByContent.set(key, [newIndex]);
     }
-    if (best && bestScore >= threshold) {
-      available.delete(best);
-      candidates.push({
+    const deletedCounts = new Map(deletes.map((deletion) => [deletion.content.trim(), 0]));
+    for (const deletion of deletes) {
+      const key = deletion.content.trim();
+      deletedCounts.set(key, (deletedCounts.get(key) ?? 0) + 1);
+    }
+    for (const [oldIndex, deletion] of deletes.entries()) {
+      const key = deletion.content.trim();
+      const newIndexes = insertedByContent.get(key);
+      if (deletedCounts.get(key) !== 1 || newIndexes?.length !== 1) continue;
+      const newIndex = newIndexes[0];
+      edges.push({
         oldLineNumber: deletion.lineNumber,
-        newLineNumber: best.lineNumber,
-        score: bestScore,
+        newLineNumber: inserts[newIndex].lineNumber,
+        score: 1,
+        oldIndex,
+        newIndex,
       });
     }
+  } else {
+    for (const [oldIndex, deletion] of deletes.entries()) {
+      for (const [newIndex, insertion] of inserts.entries()) {
+        const score = getInlineDiffSimilarity(deletion.content, insertion.content);
+        if (score < threshold) continue;
+        edges.push({
+          oldLineNumber: deletion.lineNumber,
+          newLineNumber: insertion.lineNumber,
+          score,
+          oldIndex,
+          newIndex,
+        });
+      }
+    }
   }
-  if (candidates.length < 2) return [];
-  const oldMin = Math.min(...candidates.map((candidate) => candidate.oldLineNumber));
-  const oldMax = Math.max(...candidates.map((candidate) => candidate.oldLineNumber));
-  const newMin = Math.min(...candidates.map((candidate) => candidate.newLineNumber));
-  const newMax = Math.max(...candidates.map((candidate) => candidate.newLineNumber));
-  const separated = newMin > oldMax + 1 || oldMin > newMax + 1;
-  return separated ? candidates : [];
+  edges.sort((a, b) => b.score - a.score || a.oldIndex - b.oldIndex || a.newIndex - b.newIndex);
+  const usedOld = new Set<number>();
+  const usedNew = new Set<number>();
+  const matches = edges.filter((edge) => {
+    if (usedOld.has(edge.oldIndex) || usedNew.has(edge.newIndex)) return false;
+    usedOld.add(edge.oldIndex);
+    usedNew.add(edge.newIndex);
+    return true;
+  }).sort((a, b) => a.oldIndex - b.oldIndex);
+
+  const runs: typeof matches[] = [];
+  for (const match of matches) {
+    const current = runs[runs.length - 1];
+    const previous = current?.[current.length - 1];
+    if (previous && match.oldIndex === previous.oldIndex + 1 && match.newIndex === previous.newIndex + 1) {
+      current.push(match);
+    } else {
+      runs.push([match]);
+    }
+  }
+  const moved = runs.flatMap((run) => {
+    if (run.length < 2) return [];
+    const average = run.reduce((sum, candidate) => sum + candidate.score, 0) / run.length;
+    if (average < 0.82 || !run.some((candidate) => candidate.score >= 0.95)) return [];
+    const oldMin = run[0].oldLineNumber;
+    const oldMax = run[run.length - 1].oldLineNumber;
+    const newMin = run[0].newLineNumber;
+    const newMax = run[run.length - 1].newLineNumber;
+    if (!(newMin > oldMax + 1 || oldMin > newMax + 1)) return [];
+    return run;
+  });
+  return moved.map(({ oldLineNumber, newLineNumber, score }) => ({ oldLineNumber, newLineNumber, score }));
 }
 
 function lcsMatrix(left: string[], right: string[]): number[][] {
@@ -225,31 +389,77 @@ function lcsMatrix(left: string[], right: string[]): number[][] {
   return matrix;
 }
 
+function longestIncreasingRightIndexes(candidates: MatchPair[]): MatchPair[] {
+  if (candidates.length === 0) return [];
+  const tails: number[] = [];
+  const previous = new Int32Array(candidates.length).fill(-1);
+  for (let index = 0; index < candidates.length; index += 1) {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (candidates[tails[middle]].right < candidates[index].right) low = middle + 1;
+      else high = middle;
+    }
+    if (low > 0) previous[index] = tails[low - 1];
+    tails[low] = index;
+  }
+  const result: MatchPair[] = [];
+  let cursor = tails[tails.length - 1] ?? -1;
+  while (cursor >= 0) {
+    result.push(candidates[cursor]);
+    cursor = previous[cursor];
+  }
+  return result.reverse();
+}
+
+function patienceAnchors(left: string[], right: string[]): MatchPair[] {
+  const leftPositions = new Map<string, number[]>();
+  const rightPositions = new Map<string, number[]>();
+  const indexValue = (positions: Map<string, number[]>, value: string, index: number) => {
+    const entries = positions.get(value);
+    if (entries) entries.push(index);
+    else positions.set(value, [index]);
+  };
+  left.forEach((value, index) => indexValue(leftPositions, value, index));
+  right.forEach((value, index) => indexValue(rightPositions, value, index));
+  const candidates: MatchPair[] = [];
+  for (const [value, positions] of leftPositions) {
+    const other = rightPositions.get(value);
+    if (positions.length === 1 && other?.length === 1) {
+      candidates.push({ left: positions[0], right: other[0] });
+    }
+  }
+  candidates.sort((a, b) => a.left - b.left);
+  return longestIncreasingRightIndexes(candidates);
+}
+
+function stableEdgePairs(left: string[], right: string[]): MatchPair[] {
+  const prefix: MatchPair[] = [];
+  let start = 0;
+  while (start < left.length && start < right.length && left[start] === right[start]) {
+    prefix.push({ left: start, right: start });
+    start += 1;
+  }
+  const suffix: MatchPair[] = [];
+  let leftEnd = left.length - 1;
+  let rightEnd = right.length - 1;
+  while (leftEnd >= start && rightEnd >= start && left[leftEnd] === right[rightEnd]) {
+    suffix.push({ left: leftEnd, right: rightEnd });
+    leftEnd -= 1;
+    rightEnd -= 1;
+  }
+  return [...prefix, ...suffix.reverse()];
+}
+
 function lcsPairs(left: string[], right: string[]): MatchPair[] {
   if (left.length === 0 || right.length === 0) return [];
-  // IntelliJ's DiffIterableUtil has a large-input guard. Keep the worker
-  // bounded as well; huge changed blocks fall back to stable prefix/suffix
-  // anchors instead of blocking the sidebar with an O(n*m) allocation.
+  // Large blocks use patience-style unique anchors rather than allocating an
+  // O(n*m) matrix. Unlike a prefix/suffix-only fallback, this retains stable
+  // identifiers in the middle of generated files and long reformatted blocks.
   if (left.length * right.length > 1_200_000) {
-    const pairs: MatchPair[] = [];
-    let prefix = 0;
-    while (prefix < left.length && prefix < right.length && left[prefix] === right[prefix]) {
-      pairs.push({ left: prefix, right: prefix });
-      prefix += 1;
-    }
-    let leftSuffix = left.length - 1;
-    let rightSuffix = right.length - 1;
-    const suffix: MatchPair[] = [];
-    while (
-      leftSuffix >= prefix
-      && rightSuffix >= prefix
-      && left[leftSuffix] === right[rightSuffix]
-    ) {
-      suffix.push({ left: leftSuffix, right: rightSuffix });
-      leftSuffix -= 1;
-      rightSuffix -= 1;
-    }
-    return [...pairs, ...suffix.reverse()];
+    const anchors = patienceAnchors(left, right);
+    return anchors.length > 0 ? anchors : stableEdgePairs(left, right);
   }
 
   const matrix = lcsMatrix(left, right);
@@ -545,38 +755,123 @@ function buildBlockText(changes: ChangeData[]): BlockText {
   return { text, lines };
 }
 
+export function retainComparableInlineRanges(value: string, ranges: InlineDiffRange[]): InlineDiffRange[] {
+  if (ranges.length === 0) return ranges;
+  const changed = new Uint8Array(value.length);
+  for (const range of ranges) {
+    const end = Math.min(value.length, range.start + range.length);
+    for (let offset = Math.max(0, range.start); offset < end; offset += 1) changed[offset] = 1;
+  }
+  // Indentation and line-wrap changes are already communicated by the row
+  // tint and the code's new shape. A saturated inline chip on a few spaces
+  // makes an unchanged statement look substantively edited, especially when
+  // a block is merely wrapped in an `if` or reformatted across lines.
+  let changedVisibleCharacters = 0;
+  for (let offset = 0; offset < value.length; offset += 1) {
+    if (changed[offset] && /\S/u.test(value[offset])) changedVisibleCharacters += 1;
+  }
+  if (changedVisibleCharacters === 0) return [];
+  // A strong inline highlight is useful only when the same line still contains
+  // visible, unchanged content to compare against. Entirely new/removed lines
+  // already have the softer insert/delete row tint, so painting all of their
+  // text again adds emphasis without conveying any extra information.
+  for (let offset = 0; offset < value.length; offset += 1) {
+    if (!changed[offset] && /\S/u.test(value[offset])) return ranges;
+  }
+  return [];
+}
+
 function projectBlockRanges(ranges: InlineDiffRange[], block: BlockText): RangeTokenNode[] {
   const nodes: RangeTokenNode[] = [];
-  for (const range of ranges) {
-    const rangeEnd = range.start + range.length;
-    for (const line of block.lines) {
+  for (const line of block.lines) {
+    const lineRanges: InlineDiffRange[] = [];
+    for (const range of ranges) {
+      const rangeEnd = range.start + range.length;
       const start = Math.max(range.start, line.start);
       const end = Math.min(rangeEnd, line.end);
       if (end <= start) continue;
+      lineRanges.push({ start: start - line.start, length: end - start });
+    }
+    const value = block.text.slice(line.start, line.end);
+    for (const range of retainComparableInlineRanges(value, lineRanges)) {
       nodes.push({
         type: 'edit',
         lineNumber: line.lineNumber,
-        start: start - line.start,
-        length: end - start,
+        start: range.start,
+        length: range.length,
       });
     }
   }
   return nodes;
 }
 
-export function markSmartEdits(hunks: HunkData[], mode: SmartInlineDiffMode): TokenizeEnhancer {
+export interface SmartInlineRanges {
+  oldRanges: RangeTokenNode[];
+  newRanges: RangeTokenNode[];
+}
+
+function appendRefinedBlock(
+  deletes: ChangeData[],
+  inserts: ChangeData[],
+  mode: SmartInlineDiffMode,
+  ranges: SmartInlineRanges,
+  force: boolean,
+): void {
+  if (deletes.length === 0 || inserts.length === 0) return;
+  const oldBlock = buildBlockText(deletes);
+  const newBlock = buildBlockText(inserts);
+  if (!force) {
+    const oldKinds = deletes.map((change) => getLineSemanticKind(change.content));
+    const newKinds = inserts.map((change) => getLineSemanticKind(change.content));
+    if (oldKinds.join(',') !== newKinds.join(',')) return;
+  }
+  // Unpaired regions are refined only when their aggregate content is still
+  // recognisably the same code (most commonly one line reformatted to many).
+  // This prevents common punctuation in unrelated replacement lines from
+  // creating authoritative-looking inline highlights.
+  if (!force && getInlineDiffSimilarity(oldBlock.text, newBlock.text) < 0.5) return;
+  const [oldEdits, newEdits] = getJetBrainsStyleDiffRanges(oldBlock.text, newBlock.text, mode);
+  ranges.oldRanges.push(...projectBlockRanges(oldEdits, oldBlock));
+  ranges.newRanges.push(...projectBlockRanges(newEdits, newBlock));
+}
+
+function appendMappedChangeBlock(block: ChangeData[], mode: SmartInlineDiffMode, ranges: SmartInlineRanges): void {
+  const deletes = block.filter(isDelete);
+  const inserts = block.filter(isInsert);
+  if (deletes.length === 0 || inserts.length === 0) return;
+  const pairs = pairChangedLinesForDisplay(
+    deletes.map((change) => ({ content: change.content, lineNumber: getLineNumber(change) })),
+    inserts.map((change) => ({ content: change.content, lineNumber: getLineNumber(change) })),
+  );
+  const oldIndexByLine = new Map(deletes.map((change, index) => [getLineNumber(change), index]));
+  const newIndexByLine = new Map(inserts.map((change, index) => [getLineNumber(change), index]));
+  let oldCursor = 0;
+  let newCursor = 0;
+  for (const pair of pairs) {
+    const oldIndex = oldIndexByLine.get(pair.oldLineNumber);
+    const newIndex = newIndexByLine.get(pair.newLineNumber);
+    if (oldIndex === undefined || newIndex === undefined) continue;
+    appendRefinedBlock(deletes.slice(oldCursor, oldIndex), inserts.slice(newCursor, newIndex), mode, ranges, false);
+    appendRefinedBlock([deletes[oldIndex]], [inserts[newIndex]], mode, ranges, true);
+    oldCursor = oldIndex + 1;
+    newCursor = newIndex + 1;
+  }
+  appendRefinedBlock(deletes.slice(oldCursor), inserts.slice(newCursor), mode, ranges, false);
+}
+
+export function computeSmartInlineRanges(hunks: HunkData[], mode: SmartInlineDiffMode): SmartInlineRanges {
   const oldRanges: RangeTokenNode[] = [];
   const newRanges: RangeTokenNode[] = [];
+  const ranges = { oldRanges, newRanges };
   for (const hunk of hunks) {
     for (const block of findChangeBlocks(hunk.changes)) {
-      const deletes = block.filter(isDelete);
-      const inserts = block.filter(isInsert);
-      const oldBlock = buildBlockText(deletes);
-      const newBlock = buildBlockText(inserts);
-      const [oldEdits, newEdits] = getJetBrainsStyleDiffRanges(oldBlock.text, newBlock.text, mode);
-      oldRanges.push(...projectBlockRanges(oldEdits, oldBlock));
-      newRanges.push(...projectBlockRanges(newEdits, newBlock));
+      appendMappedChangeBlock(block, mode, ranges);
     }
   }
+  return ranges;
+}
+
+export function markSmartEdits(hunks: HunkData[], mode: SmartInlineDiffMode): TokenizeEnhancer {
+  const { oldRanges, newRanges } = computeSmartInlineRanges(hunks, mode);
   return pickRanges(oldRanges, newRanges);
 }

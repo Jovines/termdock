@@ -2,6 +2,7 @@ import './diffWorkerGlobalShim';
 import { parseDiff, tokenize, type FileData, type HunkData, type HunkTokens } from 'react-diff-view';
 import refractor from 'refractor';
 import { markSmartEdits, type SmartInlineDiffMode } from './inlineDiff';
+import { shouldComputeInlineDiff, shouldSyntaxHighlightDiff } from './diffComputationPolicy';
 
 
 interface ParseRequest {
@@ -39,13 +40,14 @@ self.onmessage = (event: MessageEvent<ParseRequest>) => {
     const parseMs = Math.round(performance.now() - parseStarted);
     const tokenizeStarted = performance.now();
     const tokens: Array<[string, HunkTokens]> = [];
-    if (inlineMode !== 'none') {
+    if (inlineMode !== 'none' && shouldComputeInlineDiff(diffContent)) {
+      const syntaxHighlight = Boolean(language && shouldSyntaxHighlightDiff(diffContent, oldSource));
       for (const file of files) {
         if (file.hunks.length === 0) continue;
         try {
           const hunkData = file.hunks as HunkData[];
           const enhancers = [markSmartEdits(hunkData, inlineMode)];
-          const hunkTokens = language
+          const hunkTokens = language && syntaxHighlight
             ? tokenize(hunkData, { enhancers, oldSource, highlight: true, refractor, language })
             : tokenize(hunkData, { enhancers, oldSource });
           tokens.push([fileTokenKey(file), hunkTokens]);

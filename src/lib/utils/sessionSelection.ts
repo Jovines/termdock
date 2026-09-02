@@ -6,9 +6,9 @@ export function pickSessionAfterClose<T>(
   const closedIndex = sessions.findIndex((session) => getSessionId(session) === closedSessionId);
   if (closedIndex < 0) return null;
 
-  return (closedIndex > 0
-    ? getSessionId(sessions[closedIndex - 1]!)
-    : sessions[closedIndex + 1]
-      ? getSessionId(sessions[closedIndex + 1]!)
+  return (sessions[closedIndex + 1]
+    ? getSessionId(sessions[closedIndex + 1]!)
+    : closedIndex > 0
+      ? getSessionId(sessions[closedIndex - 1]!)
       : null);
 }

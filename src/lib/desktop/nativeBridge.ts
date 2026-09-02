@@ -77,6 +77,8 @@ export interface TermdockDesktopBridge {
   openNotificationSettings?(): Promise<void>;
   prepareNotificationTest?(): Promise<void>;
   showNotification(payload: DesktopNotificationPayload): Promise<boolean>;
+  /** Uploads the native clipboard image to the active service and returns its path. */
+  pasteClipboardImage?(): Promise<string | null>;
   onNativeFileDrop(
     callback: (payload: NativeFileDropPayload) => void,
   ): void;

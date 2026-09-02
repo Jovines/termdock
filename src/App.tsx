@@ -2743,6 +2743,17 @@ function App() {
     ),
     [tmuxSessions, t],
   );
+  const detachedTmuxSessions = React.useMemo(
+    () => tmuxSessions
+      .filter((session) => !session.connected && !session.boundFrontendSessionId)
+      .sort((a, b) => (b.lastActiveAt ?? b.createdAt ?? 0) - (a.lastActiveAt ?? a.createdAt ?? 0)),
+    [tmuxSessions],
+  );
+
+  useEffect(() => {
+    if (!sidebarLeftOpen && !(sidebarLeftPinned && isDesktopViewport)) return;
+    void refreshTmuxSessions();
+  }, [sidebarLeftOpen, sidebarLeftPinned, isDesktopViewport, sessions.length, refreshTmuxSessions]);
 
   // 单个 tab 的渲染（编辑态 input / 普通态 tab 外壳），flat 与 分组 两种布局共用。
   //  - showDir: 是否显示目录副行（分组时为 false，只显示程序名/主名）
@@ -5035,6 +5046,9 @@ function App() {
         activeSessionId={activeSessionId}
         sessionStates={terminalSessions}
         onNewSession={(opts) => dispatchNewSession(opts)}
+        detachedTmuxSessions={detachedTmuxSessions}
+        detachedTmuxSessionsLoading={tmuxRefreshing}
+        onRefreshDetachedTmuxSessions={() => { void refreshTmuxSessions(); }}
         onCloseSession={handleSidebarCloseSession}
         onSplitSession={dispatchOpenSplitChooser}
         onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}
@@ -5164,6 +5178,9 @@ function App() {
             activeSessionId={activeSessionId}
             sessionStates={terminalSessions}
             onNewSession={(opts) => dispatchNewSession(opts)}
+            detachedTmuxSessions={detachedTmuxSessions}
+            detachedTmuxSessionsLoading={tmuxRefreshing}
+            onRefreshDetachedTmuxSessions={() => { void refreshTmuxSessions(); }}
             onCloseSession={handleSidebarCloseSession}
             onSplitSession={dispatchOpenSplitChooser}
             onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}

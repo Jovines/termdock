@@ -80,4 +80,55 @@ describe('LeftSidebar launch actions', () => {
     expect(screen.getByRole('region', { name: 'Start a session' })).toBeTruthy();
     expect(onNewSession).toHaveBeenCalledTimes(2);
   });
+
+  it('keeps detached tmux sessions visible and restores them in one click', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ locale: 'en' }),
+    })));
+    const user = userEvent.setup();
+    const onNewSession = vi.fn();
+
+    render(
+      <I18nProvider>
+        <LeftSidebar
+          isOpen
+          pinned
+          drawerWidthPx={320}
+          sessions={[]}
+          activeSessionId={null}
+          sessionStates={new Map()}
+          detachedTmuxSessions={[{
+            name: 'wt-codex',
+            windows: 1,
+            attached: 0,
+            friendlyName: 'Fix session recovery',
+            program: 'codex',
+            cwd: '/work/web-terminal',
+          }]}
+          onNewSession={onNewSession}
+          onClose={vi.fn()}
+          onCloseSession={vi.fn()}
+          onSplitSession={vi.fn()}
+          onCloseSplit={vi.fn()}
+          onRemoveFromSplit={vi.fn()}
+          splitWorkspaces={[]}
+          onSetSplitLayout={vi.fn()}
+          onReorderSplitWorkspace={vi.fn()}
+          onRenameSplitWorkspace={vi.fn()}
+          onCombineSplitSessions={vi.fn()}
+          onReorderSessions={vi.fn()}
+          onOpenSettings={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByRole('region', { name: 'Detached sessions' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Restore Fix session recovery' }));
+    expect(onNewSession).toHaveBeenCalledWith({
+      mode: 'tmux',
+      tmuxSessionName: 'wt-codex',
+      cwd: '/work/web-terminal',
+    });
+  });
 });

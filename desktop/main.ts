@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -1634,6 +1635,14 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
 }
 
 function installIpcHandlers(): void {
+  ipcMain.handle('desktop:read-clipboard-image', (event) => {
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!sourceWindow || !windowServiceOrigins.has(sourceWindow)) return null;
+    const image = clipboard.readImage();
+    if (image.isEmpty()) return null;
+    const png = image.toPNG();
+    return png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength);
+  });
   ipcMain.handle('desktop:snapshot', () => snapshot());
   ipcMain.handle('desktop:probe', (_event, url: string) => probeServiceWithLocalNetworkPermission(url));
   ipcMain.handle('desktop:save-connection', async (_event, input: { url: string; label: string }) => {

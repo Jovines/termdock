@@ -5,15 +5,15 @@ const sessions = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
 const getId = (session: { id: string }) => session.id;
 
 describe('pickSessionAfterClose', () => {
-  it('selects the previous session when closing a middle session', () => {
-    expect(pickSessionAfterClose(sessions, 'b', getId)).toBe('a');
+  it('selects the next session when closing a middle session', () => {
+    expect(pickSessionAfterClose(sessions, 'b', getId)).toBe('c');
   });
 
   it('selects the previous session when closing the last session', () => {
     expect(pickSessionAfterClose(sessions, 'c', getId)).toBe('b');
   });
 
-  it('selects the next session when the closed session has no predecessor', () => {
+  it('selects the next session when closing the first session', () => {
     expect(pickSessionAfterClose(sessions, 'a', getId)).toBe('b');
   });
 

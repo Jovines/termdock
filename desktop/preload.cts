@@ -8,7 +8,7 @@ import type {
   DesktopStatusSnapshot,
   ServiceProbe,
 } from './types.js';
-import { shouldUploadDroppedFiles, uploadDroppedFiles } from './fileDropUpload.js';
+import { shouldUploadDroppedFiles, uploadClipboardImage, uploadDroppedFiles } from './fileDropUpload.js';
 import { installServiceActivityObserver } from './serviceActivityObserver.js';
 
 if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
@@ -103,6 +103,11 @@ contextBridge.exposeInMainWorld('termdockDesktop', {
     silent?: boolean;
     persistent?: boolean;
   }): Promise<boolean> => ipcRenderer.invoke('desktop:show-notification', payload),
+  pasteClipboardImage: async (): Promise<string | null> => {
+    const png = await ipcRenderer.invoke('desktop:read-clipboard-image') as ArrayBuffer | null;
+    if (!(png instanceof ArrayBuffer) || png.byteLength === 0) return null;
+    return uploadClipboardImage(png);
+  },
   onNativeFileDrop: (
     callback: (payload: { sessionKey: string; paths: string[] }) => void,
   ): void => {

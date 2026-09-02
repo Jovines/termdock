@@ -16,7 +16,7 @@ const MAX_DIFF_CACHE_ENTRIES = 24;
 const MAX_PARSED_DIFF_CACHE_ENTRIES = 32;
 const MAX_RENDER_DIFF_LINES = 8_000;
 const DIFF_VIEW_TYPE_STORAGE_KEY = 'termdock:diff-viewer:view-type:v1';
-const SPLIT_DIFF_MEDIA_QUERY = '(min-width: 900px)';
+export const SPLIT_DIFF_MEDIA_QUERY = '(min-width: 900px)';
 
 type DiffLoadResult = FileDiffResponse;
 export type DiffViewType = 'unified' | 'split';
@@ -701,6 +701,12 @@ function getChangeLineNumber(change: HunkData['changes'][number] | null | undefi
   return change && 'lineNumber' in change && typeof change.lineNumber === 'number' ? change.lineNumber : null;
 }
 
+function splitRawFileDiffs(diffContent: string): string[] {
+  const starts = Array.from(diffContent.matchAll(/^diff --git /gmu), (match) => match.index);
+  if (starts.length === 0) return diffContent ? [diffContent] : [];
+  return starts.map((start, index) => diffContent.slice(start, starts[index + 1] ?? diffContent.length));
+}
+
 function isImportLikeLine(content: string): boolean {
   const trimmed = content.trim();
   if (!trimmed) return true;
@@ -758,8 +764,8 @@ function alignAdjacentChangesForSplitView(hunk: HunkData): HunkData {
       oldCursor = pairedOldIndex + 1;
       newCursor = pairedNewIndex + 1;
     }
-    while (oldCursor < deletes.length) changes.push(deletes[oldCursor++]);
     while (newCursor < inserts.length) changes.push(inserts[newCursor++]);
+    while (oldCursor < deletes.length) changes.push(deletes[oldCursor++]);
   }
   return { ...hunk, changes };
 }
@@ -888,7 +894,7 @@ function formatAuditTimestamp(timestamp: number | null | undefined, locale: stri
   }).format(new Date(timestamp));
 }
 
-function canUseSplitDiffView(): boolean {
+export function canUseSplitDiffView(): boolean {
   return typeof window !== 'undefined'
     && typeof window.matchMedia === 'function'
     && window.matchMedia(SPLIT_DIFF_MEDIA_QUERY).matches;
@@ -1445,7 +1451,15 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     && parsedDiffInput.oldSource === (oldSourceContent ?? undefined)
   );
   const effectiveDiffLoading = preparedDiff !== undefined ? false : diffLoading || oldSourceLoading || !parsedContentReady;
-  const files = preparedDiff !== undefined ? preparedDiff?.files ?? [] : parsedFiles;
+  const parsedOrPreparedFiles = preparedDiff !== undefined ? preparedDiff?.files ?? [] : parsedFiles;
+  const files = useMemo(() => parsedOrPreparedFiles.map((file) => (
+    file.type === 'modify'
+    && file.oldPath !== file.newPath
+    && file.oldPath !== '/dev/null'
+    && file.newPath !== '/dev/null'
+      ? { ...file, type: 'rename' as const }
+      : file
+  )), [parsedOrPreparedFiles]);
 
   useEffect(() => {
     if (!active || effectiveDiffLoading) return;
@@ -1583,14 +1597,23 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
       displayHunk: (typeof files)[number]['hunks'][number];
     }>();
     for (const file of files) {
+      const fileDeletedChanges = lightweight ? [] : file.hunks.flatMap((hunk) => hunk.changes
+        .filter((change) => change.type === 'delete')
+        .map((change) => ({ content: change.content, lineNumber: change.lineNumber })));
+      const fileInsertedChanges = lightweight ? [] : file.hunks.flatMap((hunk) => hunk.changes
+        .filter((change) => change.type === 'insert')
+        .map((change) => ({ content: change.content, lineNumber: change.lineNumber })));
+      const fileMovedCandidates = lightweight ? [] : findMovedLineCandidates(fileDeletedChanges, fileInsertedChanges);
       for (const hunk of file.hunks) {
-        const deletedChanges = lightweight ? [] : hunk.changes
+        const oldLines = new Set(hunk.changes
           .filter((change) => change.type === 'delete')
-          .map((change) => ({ content: change.content, lineNumber: change.lineNumber }));
-        const insertedChanges = lightweight ? [] : hunk.changes
+          .map((change) => change.lineNumber));
+        const newLines = new Set(hunk.changes
           .filter((change) => change.type === 'insert')
-          .map((change) => ({ content: change.content, lineNumber: change.lineNumber }));
-        const movedCandidates = lightweight ? [] : findMovedLineCandidates(deletedChanges, insertedChanges);
+          .map((change) => change.lineNumber));
+        const movedCandidates = fileMovedCandidates.filter((candidate) => (
+          oldLines.has(candidate.oldLineNumber) || newLines.has(candidate.newLineNumber)
+        ));
         map.set(hunk, {
           hunkSections: lightweight ? [] : buildHunkSections(hunk),
           movedCandidates,
@@ -1605,6 +1628,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
   }, [files, lightweight, viewType]);
 
   const totalHunks = useMemo(() => files.reduce((sum, file) => sum + file.hunks.length, 0), [files]);
+  const rawFileDiffs = useMemo(() => splitRawFileDiffs(effectiveDiffContent ?? ''), [effectiveDiffContent]);
 
   // New diff data reshuffles hunk positions; drop the stale jump target.
   useEffect(() => {
@@ -1619,6 +1643,7 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
     <>
       {files.map((file, fileIndex) => {
         const key = `${file.oldRevision}-${file.newRevision}-${file.newPath}`;
+        const hasNoFinalNewline = rawFileDiffs[fileIndex]?.includes('\\ No newline at end of file') ?? false;
         const stats = fileStats.get(key) ?? { additions: 0, deletions: 0 };
         const displayPath = file.newPath && !isDiffNullPath(file.newPath)
           ? file.newPath
@@ -1632,6 +1657,12 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         const referenceOldPath = toReferenceDiffPath(file.oldPath || displayPath, referencePathOptions);
         const referenceNewPath = toReferenceDiffPath(file.newPath || displayPath, referencePathOptions);
         const pathParts = getPathParts(displayPath, { name: 'unknown file', dir: '' });
+        const renamePathLabel = file.type === 'rename'
+          && file.oldPath
+          && file.newPath
+          && file.oldPath !== file.newPath
+          ? `${file.oldPath} → ${file.newPath}`
+          : null;
         const showFileHeader = !hideSingleFileHeader || files.length > 1;
         const fileDiffReferenceText = [
           `diff --git ${formatDiffEndpoint('a', referenceOldPath)} ${formatDiffEndpoint('b', referenceNewPath)}`,
@@ -1656,9 +1687,9 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
         >
           {showFileHeader && (
             <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-border/15 bg-surface-2/95 px-2 py-1.5 backdrop-blur">
-              <div className="min-w-0" title={file.newPath || file.oldPath}>
-                <div className="truncate font-mono text-[11px] text-foreground">{pathParts.name}</div>
-                {pathParts.dir && <div className="truncate font-mono text-[10px] text-muted-foreground/70">{pathParts.dir}</div>}
+              <div className="min-w-0" title={renamePathLabel ?? (file.newPath || file.oldPath)}>
+                <div className="truncate font-mono text-[11px] text-foreground">{renamePathLabel ?? pathParts.name}</div>
+                {!renamePathLabel && pathParts.dir && <div className="truncate font-mono text-[10px] text-muted-foreground/70">{pathParts.dir}</div>}
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
                 <span className="text-[10px] font-medium text-[color:var(--diff-insert-strong)]">+{stats.additions}</span>
@@ -1962,6 +1993,11 @@ export function DiffViewer({ filePath, repoRoot, referenceFilePath, interactionI
                       </div>
                     );
                   })}
+                {hasNoFinalNewline && (
+                  <div className="diff-decoration bg-surface-2 px-3 py-1.5 text-[10px] text-muted-foreground">
+                    {t('diffViewer.noFinalNewline')}
+                  </div>
+                )}
               </div>
             </div>
           )}

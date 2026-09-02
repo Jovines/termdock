@@ -18,11 +18,12 @@ import {
   RefreshCw as RiRefreshLine,
   ChevronDown as RiChevronDownLine,
   Workflow as RiWorkflowLine,
+  History as RiHistoryLine,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
-import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport } from '../../terminal/types';
+import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport, TmuxSessionSummary } from '../../terminal/types';
 import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
 import { getCachedShellTitle, getCachedAgentIdentity } from '../../stores/useTerminalStore';
 import { AgentSessionDot, AgentCountBadge, AgentBrandAvatar } from '../AgentIndicators';
@@ -70,6 +71,9 @@ interface LeftSidebarProps {
     gitStatus?: GitStatusReport | null;
   }>; 
   onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string }) => void;
+  detachedTmuxSessions?: TmuxSessionSummary[];
+  detachedTmuxSessionsLoading?: boolean;
+  onRefreshDetachedTmuxSessions?: () => void;
   onCloseSession: (sessionId: string, event: React.MouseEvent) => void;
   onSplitSession: (sessionId: string) => void;
   onCloseSplit: (sessionId: string) => void;
@@ -165,6 +169,9 @@ export function LeftSidebar(
     runningSessionButtonEnabled = false,
     onRunningSessionButtonEnabledChange,
     onTogglePinned,
+    detachedTmuxSessions = [],
+    detachedTmuxSessionsLoading = false,
+    onRefreshDetachedTmuxSessions,
   }: LeftSidebarProps,
 ) {
   const { t } = useI18n();
@@ -178,6 +185,7 @@ export function LeftSidebar(
   const [agentResumeHistoryLoading, setAgentResumeHistoryLoading] = useState(false);
   const [agentResumeHistoryPendingId, setAgentResumeHistoryPendingId] = useState<string | null>(null);
   const [agentResumeHistoryError, setAgentResumeHistoryError] = useState<string | null>(null);
+  const [attachingTmuxName, setAttachingTmuxName] = useState<string | null>(null);
   const [newSessionOptions, setNewSessionOptions] = useState<{
     mode: 'shell' | 'tmux';
     cwd?: string;
@@ -332,6 +340,19 @@ export function LeftSidebar(
     onNewSession({ mode: quickLaunchMode, command: newSessionAgent.command });
     closeIfOverlay();
   };
+
+  const handleAttachTmuxSession = (session: TmuxSessionSummary) => {
+    setAttachingTmuxName(session.name);
+    onNewSession({ mode: 'tmux', tmuxSessionName: session.name, cwd: session.cwd ?? undefined });
+    closeIfOverlay();
+  };
+
+  useEffect(() => {
+    if (!attachingTmuxName) return;
+    if (!detachedTmuxSessions.some((session) => session.name === attachingTmuxName)) {
+      setAttachingTmuxName(null);
+    }
+  }, [attachingTmuxName, detachedTmuxSessions]);
 
   const handleQuickLaunchAgent = (agent: import('../../hooks/useNewSessionAgentPreference').NewSessionAgentPreference) => {
     onNewSession({
@@ -1082,6 +1103,58 @@ export function LeftSidebar(
 
       {/* Session list */}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 py-1.5">
+        {detachedTmuxSessions.length > 0 && (
+          <section className="mb-2 rounded-lg bg-[rgb(var(--tmux-rgb)_/_0.07)] p-1" aria-label={t('sidebar.detachedSessions')}>
+            <div className="flex min-h-8 items-center gap-2 px-2 text-[10.5px] font-semibold text-[color:var(--tmux)]">
+              <RiHistoryLine size={12} className="shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{t('sidebar.detachedSessions')}</span>
+              <span className="text-muted-foreground">{detachedTmuxSessions.length}</span>
+              {onRefreshDetachedTmuxSessions && (
+                <button
+                  type="button"
+                  onClick={onRefreshDetachedTmuxSessions}
+                  disabled={detachedTmuxSessionsLoading}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+                  aria-label={t('sidebar.refreshDetachedSessions')}
+                  title={t('sidebar.refreshDetachedSessions')}
+                >
+                  <RiRefreshLine size={11} className={detachedTmuxSessionsLoading ? 'animate-spin' : ''} />
+                </button>
+              )}
+            </div>
+            <div className="space-y-0.5">
+              {detachedTmuxSessions.slice(0, 4).map((session) => {
+                const title = session.friendlyName?.trim() || session.label?.trim() || session.name;
+                const directory = getCwdLeafName(session.cwd ?? null);
+                const attaching = attachingTmuxName === session.name;
+                return (
+                  <button
+                    key={session.name}
+                    type="button"
+                    disabled={attachingTmuxName !== null}
+                    onClick={() => handleAttachTmuxSession(session)}
+                    className="group flex min-h-10 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:cursor-wait disabled:opacity-60"
+                    aria-label={t('sidebar.restoreDetachedSession', { name: title })}
+                    title={session.cwd || session.name}
+                  >
+                    <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[rgb(var(--tmux-rgb)_/_0.11)] text-[color:var(--tmux)]">
+                      {attaching ? <RiLoaderCircle size={12} className="animate-spin" /> : <RiLayoutGridLine size={12} />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[11.5px] font-semibold text-foreground">{title}</span>
+                      <span className="block truncate text-[9.5px] text-muted-foreground">
+                        {[session.program, directory].filter(Boolean).join(' · ') || `tmux:${session.name}`}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-[10px] font-medium text-[color:var(--tmux)] group-hover:text-foreground">
+                      {attaching ? t('sidebar.restoringDetachedSession') : t('sidebar.restore')}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
         {sessions.length === 0 ? (
           <div className="rounded-xl bg-surface-2/60 px-4 py-8 text-center">
             <RiTerminalLine size={26} className="mx-auto mb-2 text-muted-foreground" />

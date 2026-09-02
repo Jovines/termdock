@@ -56,3 +56,21 @@ export async function uploadDroppedFiles(
   }
   return paths;
 }
+
+export function buildClipboardImageFilename(uploadedAt = new Date()): string {
+  const timestamp = uploadedAt.toISOString().replace(/[:.]/g, '-');
+  return `termdock-clipboard-${timestamp}.png`;
+}
+
+/** Upload a PNG read by the native desktop shell to the active service. */
+export async function uploadClipboardImage(
+  png: ArrayBuffer,
+  fetchRequest: typeof fetch = fetch,
+  uploadedAt = new Date(),
+): Promise<string> {
+  if (png.byteLength === 0) throw new Error('Clipboard image is empty');
+  const file = new File([png], buildClipboardImageFilename(uploadedAt), { type: 'image/png' });
+  const [uploadedPath] = await uploadDroppedFiles([file], fetchRequest);
+  if (!uploadedPath) throw new Error('The service did not return a clipboard image path');
+  return uploadedPath;
+}

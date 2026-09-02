@@ -88,6 +88,11 @@ export type TranslationDictionary = {
     newSession: string;
     newSessionWithAgent: (params: TranslatorParams) => string;
     moreLaunchOptions: string;
+    detachedSessions: string;
+    refreshDetachedSessions: string;
+    restoreDetachedSession: (params: TranslatorParams) => string;
+    restoringDetachedSession: string;
+    restore: string;
     newSessionAdvanced: string;
     newSessionComposerTitle: string;
     newSessionHint: string;
@@ -493,6 +498,7 @@ export type TranslationDictionary = {
     workingTree: string;
     allUnstaged: string;
     binaryOrEmpty: string;
+    noFinalNewline: string;
     noHunks: string;
     hunkOutline: string;
     expandHunkRail: string;

@@ -1,5 +1,5 @@
 import React from 'react';
-import { subscribeNativeFileDrops } from '../../desktop/nativeBridge';
+import { getTermdockDesktopBridge, subscribeNativeFileDrops } from '../../desktop/nativeBridge';
 import { escapeShellPath } from '../../desktop/shellPath';
 import { useI18n } from '../../i18n';
 import { flushSync } from 'react-dom';
@@ -1601,6 +1601,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
     const readClipboardIntoTerminal = React.useCallback(async (textarea?: HTMLTextAreaElement | null): Promise<boolean> => {
       try {
+        const desktop = getTermdockDesktopBridge();
+        if (desktop?.pasteClipboardImage) {
+          const imagePath = await desktop.pasteClipboardImage();
+          if (imagePath) {
+            sendTerminalSeq(escapeShellPath(imagePath), textarea);
+            dismissMobileCopyPopover();
+            return true;
+          }
+        }
         if (!navigator.clipboard?.readText) {
           return false;
         }
@@ -1609,7 +1618,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       } catch {
         return false;
       }
-    }, [pasteTextIntoTerminal]);
+    }, [dismissMobileCopyPopover, pasteTextIntoTerminal, sendTerminalSeq]);
 
     /**
      * 桌面端：根据 xterm 当前光标位置计算 IME 候选窗锚点。
@@ -4708,7 +4717,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }}
               onPaste={(event) => {
                 const text = event.clipboardData.getData('text/plain');
-                if (!text) return;
+                if (!text) {
+                  if (getTermdockDesktopBridge()?.pasteClipboardImage) {
+                    event.preventDefault();
+                    void readClipboardIntoTerminal(event.currentTarget);
+                  }
+                  return;
+                }
                 event.preventDefault();
                 const ok = pasteTextIntoTerminal(text, event.currentTarget);
                 if (enableTouchScroll) {
