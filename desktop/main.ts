@@ -72,6 +72,12 @@ import {
 import { isExternalLinkStagingUrl, isSafeExternalUrl } from './externalLinks.js';
 import { shouldThrottleDesktopRenderer } from './windowPolicy.js';
 import {
+  checkConnectedServiceRuntime,
+  getConnectedServiceRuntimeState,
+  restartConnectedServiceRuntime,
+} from './connectedServiceRuntime.js';
+import { isOwnedDesktopRuntimeTarget } from './runtimeTarget.js';
+import {
   canOfferCertificateTrust,
   downloadCertificateAuthority,
   isCertificateTrustError,
@@ -133,6 +139,8 @@ let menuBarStatusWidth = 0;
 let floatingWidgetWindow: BrowserWindow | null = null;
 let floatingPositionTimer: ReturnType<typeof setTimeout> | null = null;
 let desktopRuntimeOwnerServer: http.Server | null = null;
+let connectedServiceRuntimePollTimer: ReturnType<typeof setInterval> | null = null;
+let connectedServiceRuntimePollInFlight = false;
 let isQuitting = false;
 const FLOATING_WIDGET_WIDTHS = [64, 108, 152] as const;
 const FLOATING_WIDGET_HEIGHT = 40;
@@ -1300,6 +1308,65 @@ async function restartDesktopManagedRuntime(): Promise<ReturnType<typeof getDesk
   return getDesktopRuntimeUpdateState();
 }
 
+function isOwnedDesktopRuntimeWindow(
+  window: BrowserWindow,
+  status: LocalServiceStatus,
+): boolean {
+  const origin = windowServiceOrigins.get(window);
+  if (!origin || !status.running || status.probe?.desktopManaged !== true || !status.state) return false;
+  const localAddresses = new Set(Object.values(os.networkInterfaces())
+    .flatMap((addresses) => addresses?.map((address) => address.address.toLowerCase()) ?? []));
+  return isOwnedDesktopRuntimeTarget({
+    origin,
+    servicePort: status.state.port,
+    desktopManaged: true,
+    localAddresses,
+  });
+}
+
+async function routeRuntimeOperationForWindow(
+  webContents: Electron.WebContents,
+  desktopOperation: () => Promise<unknown> | unknown,
+  serviceOperation: () => Promise<unknown>,
+): Promise<unknown> {
+  const sourceWindow = BrowserWindow.fromWebContents(webContents);
+  if (!sourceWindow || !windowServiceOrigins.has(sourceWindow)) {
+    throw new Error('只能从已连接的 Termdock 服务窗口操作 Runtime。');
+  }
+  const status = await getLocalServiceStatus();
+  return isOwnedDesktopRuntimeWindow(sourceWindow, status)
+    ? desktopOperation()
+    : serviceOperation();
+}
+
+function startConnectedServiceRuntimePolling(): void {
+  if (connectedServiceRuntimePollTimer) return;
+  const poll = async () => {
+    if (connectedServiceRuntimePollInFlight) return;
+    connectedServiceRuntimePollInFlight = true;
+    try {
+      const status = await getLocalServiceStatus();
+      await Promise.all(BrowserWindow.getAllWindows().map(async (window) => {
+        if (window.isDestroyed() || !windowServiceOrigins.has(window)) return;
+        if (isOwnedDesktopRuntimeWindow(window, status)) return;
+        try {
+          const state = await getConnectedServiceRuntimeState(window.webContents);
+          if (!window.isDestroyed()) {
+            window.webContents.send('desktop:runtime-update-state-changed', state);
+          }
+        } catch {
+          // A disconnected or older service will be retried on the next poll.
+        }
+      }));
+    } finally {
+      connectedServiceRuntimePollInFlight = false;
+    }
+  };
+  void poll();
+  connectedServiceRuntimePollTimer = setInterval(() => void poll(), 2_000);
+  connectedServiceRuntimePollTimer.unref();
+}
+
 function writeRuntimeOwnerResponse(
   response: http.ServerResponse,
   statusCode: number,
@@ -1812,9 +1879,21 @@ function installIpcHandlers(): void {
   ipcMain.handle('desktop:update-state', () => getDesktopUpdateState());
   ipcMain.handle('desktop:check-update', () => checkForDesktopUpdates());
   ipcMain.handle('desktop:install-update', () => installDownloadedDesktopUpdate());
-  ipcMain.handle('desktop:runtime-update-state', () => getDesktopRuntimeUpdateState());
-  ipcMain.handle('desktop:check-runtime-update', () => checkForRuntimeUpdates());
-  ipcMain.handle('desktop:restart-runtime', () => restartDesktopManagedRuntime());
+  ipcMain.handle('desktop:runtime-update-state', (event) => routeRuntimeOperationForWindow(
+    event.sender,
+    () => getDesktopRuntimeUpdateState(),
+    () => getConnectedServiceRuntimeState(event.sender),
+  ));
+  ipcMain.handle('desktop:check-runtime-update', (event) => routeRuntimeOperationForWindow(
+    event.sender,
+    () => checkForRuntimeUpdates(),
+    () => checkConnectedServiceRuntime(event.sender),
+  ));
+  ipcMain.handle('desktop:restart-runtime', (event) => routeRuntimeOperationForWindow(
+    event.sender,
+    () => restartDesktopManagedRuntime(),
+    () => restartConnectedServiceRuntime(event.sender),
+  ));
   ipcMain.handle('desktop:show-connection-center', () => showConnectionCenter());
   ipcMain.handle('desktop:reveal-data-directory', async () => {
     fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
@@ -2103,10 +2182,15 @@ app.whenReady().then(async () => {
     }
   });
   subscribeDesktopRuntimeUpdateState((state) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send('desktop:runtime-update-state-changed', state);
-    }
+    void getLocalServiceStatus().then((status) => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed() && isOwnedDesktopRuntimeWindow(window, status)) {
+          window.webContents.send('desktop:runtime-update-state-changed', state);
+        }
+      }
+    });
   });
+  startConnectedServiceRuntimePolling();
   const startupConfig = readDesktopConfig();
   const restoreUrls = startupConfig.openConnectionUrls;
   startupRestoreActive = true;
@@ -2167,6 +2251,9 @@ app.on('before-quit', () => {
   isQuitting = true;
   desktopRuntimeOwnerServer?.close();
   desktopRuntimeOwnerServer = null;
+  if (connectedServiceRuntimePollTimer) clearInterval(connectedServiceRuntimePollTimer);
+  connectedServiceRuntimePollTimer = null;
+  connectedServiceRuntimePollInFlight = false;
   fs.rmSync(desktopRuntimeOwnerSocketPath, { force: true });
 });
 
