@@ -174,4 +174,16 @@ describe('desktop updater', () => {
       error: 'Node 24 requires a desktop runtime rebuild',
     });
   });
+
+  it('leaves a failed Runtime restart retryable instead of stuck restarting', async () => {
+    const updater = await import('./updater.js');
+
+    updater.markDesktopRuntimeRestarting();
+    expect(updater.getDesktopRuntimeUpdateState().status).toBe('restarting');
+
+    expect(updater.markDesktopRuntimeRestartFailed(new Error('服务未能退出'))).toMatchObject({
+      status: 'error',
+      error: '服务未能退出',
+    });
+  });
 });

@@ -554,11 +554,6 @@ function App() {
     desktopBridge.checkDesktopUpdate &&
     desktopBridge.installDesktopUpdate,
   );
-  const desktopRuntimeUpdateSupported = Boolean(
-    desktopBridge?.runtimeUpdateState
-    && desktopBridge.checkRuntimeUpdate
-    && desktopBridge.restartRuntime,
-  );
   const [desktopSnapshot, setDesktopSnapshot] = React.useState<DesktopNativeSnapshot | null>(null);
   const [desktopUpdateState, setDesktopUpdateState] = React.useState<DesktopAppUpdateState | null>(null);
   const [desktopUpdatePending, setDesktopUpdatePending] = React.useState(false);
@@ -624,12 +619,10 @@ function App() {
     Promise.all([
       desktopBridge.snapshot(),
       desktopBridge.desktopUpdateState?.() ?? Promise.resolve(null),
-      desktopBridge.runtimeUpdateState?.() ?? Promise.resolve(null),
     ])
-      .then(([snapshot, updateState, runtimeState]) => {
+      .then(([snapshot, updateState]) => {
         setDesktopSnapshot(snapshot);
         setDesktopUpdateState(updateState);
-        if (runtimeState) setTermdockUpdateState(runtimeState);
       })
       .catch((error) => setDesktopActionMessage(error instanceof Error ? error.message : String(error)));
   }, [desktopBridge, isDrawerOpen]);
@@ -637,11 +630,6 @@ function App() {
   useEffect(() => {
     if (!desktopBridge?.onDesktopUpdateState) return;
     desktopBridge.onDesktopUpdateState(setDesktopUpdateState);
-  }, [desktopBridge]);
-
-  useEffect(() => {
-    if (!desktopBridge?.onRuntimeUpdateState) return;
-    desktopBridge.onRuntimeUpdateState(setTermdockUpdateState);
   }, [desktopBridge]);
 
   useEffect(() => {
@@ -707,22 +695,17 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const statePromise = desktopBridge?.runtimeUpdateState
-      ? desktopBridge.runtimeUpdateState()
-      : getTermdockUpdateState();
-    void statePromise
+    void getTermdockUpdateState()
       .then((state) => { if (!cancelled) setTermdockUpdateState(state); })
       .catch(() => undefined);
     const unsubscribe = subscribeClientState((event) => {
-      if (event.type === 'update-state' && !cancelled && !desktopBridge?.runtimeUpdateState) {
-        setTermdockUpdateState(event.state);
-      }
+      if (event.type === 'update-state' && !cancelled) setTermdockUpdateState(event.state);
     });
     return () => {
       cancelled = true;
       unsubscribe();
     };
-  }, [desktopBridge]);
+  }, []);
 
   const handleConfirmUpdateRestart = useCallback(async () => {
     const latestVersion = termdockUpdateState?.latestVersion;
@@ -730,29 +713,25 @@ function App() {
     if (!window.confirm(t('sidebar.updateRestartConfirm', { version: latestVersion }))) return;
     setUpdateActionPending(true);
     try {
-      setTermdockUpdateState(desktopRuntimeUpdateSupported && desktopBridge?.restartRuntime
-        ? await desktopBridge.restartRuntime()
-        : await confirmTermdockUpdateRestart());
+      setTermdockUpdateState(await confirmTermdockUpdateRestart());
     } catch (error) {
       window.alert(error instanceof Error ? error.message : String(error));
     } finally {
       setUpdateActionPending(false);
     }
-  }, [desktopBridge, desktopRuntimeUpdateSupported, termdockUpdateState?.latestVersion, t, updateActionPending]);
+  }, [termdockUpdateState?.latestVersion, t, updateActionPending]);
 
   const handleRetryUpdate = useCallback(async () => {
     if (updateActionPending) return;
     setUpdateActionPending(true);
     try {
-      setTermdockUpdateState(desktopRuntimeUpdateSupported && desktopBridge?.checkRuntimeUpdate
-        ? await desktopBridge.checkRuntimeUpdate()
-        : await checkTermdockUpdate());
+      setTermdockUpdateState(await checkTermdockUpdate());
     } catch (error) {
       window.alert(error instanceof Error ? error.message : String(error));
     } finally {
       setUpdateActionPending(false);
     }
-  }, [desktopBridge, desktopRuntimeUpdateSupported, updateActionPending]);
+  }, [updateActionPending]);
 
   const handleCheckDesktopUpdate = useCallback(async () => {
     if (!desktopBridge?.checkDesktopUpdate || desktopUpdatePending) return;

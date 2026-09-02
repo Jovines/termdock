@@ -10,6 +10,7 @@ import { createHash, randomUUID } from 'crypto';
 import { promisify } from 'util';
 import type { WebSocket } from 'ws';
 import { caffeinateManager } from '../utils/caffeinate.js';
+import { DesktopRuntimeOwnerClient } from '../utils/desktopRuntimeOwner.js';
 import { gitStatusCache, type GitStatus } from '../utils/gitStatus.js';
 import { getPtyHostManager, type PtyHostClient } from '../ptyhost/manager.js';
 import { pathValidator } from '../utils/pathValidator.js';
@@ -660,10 +661,20 @@ const npmAutoUpdateManager = new TermdockAutoUpdateManager({
   log: (message) => console.warn(message),
 });
 
+const desktopRuntimeOwner = process.env.TERMDOCK_DESKTOP_OWNER_SOCKET
+  ? new DesktopRuntimeOwnerClient(
+    process.env.TERMDOCK_DESKTOP_OWNER_SOCKET,
+    TERMDOCK_VERSION,
+    (state) => broadcastControlEvent({ type: 'update-state', state }),
+  )
+  : null;
+
 // Packaged desktop builds already have a signed app/runtime updater. The npm
 // updater only owns standalone CLI services, otherwise both mechanisms could
 // race to replace the runtime.
-if (process.env.TERMDOCK_DESKTOP !== '1') {
+if (desktopRuntimeOwner) {
+  desktopRuntimeOwner.start();
+} else {
   npmAutoUpdateManager.start();
 }
 
@@ -6500,28 +6511,24 @@ router.get('/auto-title/catalog', async (req, res) => {
 });
 
 router.get('/update', (_req, res) => {
-  res.json(npmAutoUpdateManager.getState());
+  res.json(desktopRuntimeOwner?.getState() ?? npmAutoUpdateManager.getState());
 });
 
 router.post('/update/check', async (_req, res) => {
-  if (process.env.TERMDOCK_DESKTOP === '1') {
-    return res.status(409).json({
-      code: 'DESKTOP_RUNTIME_UPDATE_REQUIRED',
-      error: '桌面内置服务必须由 Termdock Desktop 更新 Runtime。',
-    });
+  try {
+    res.json(desktopRuntimeOwner
+      ? await desktopRuntimeOwner.checkForUpdates()
+      : await npmAutoUpdateManager.checkNow());
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : String(error) });
   }
-  res.json(await npmAutoUpdateManager.checkNow());
 });
 
-router.post('/update/restart', (_req, res) => {
-  if (process.env.TERMDOCK_DESKTOP === '1') {
-    return res.status(409).json({
-      code: 'DESKTOP_RUNTIME_UPDATE_REQUIRED',
-      error: '桌面内置服务必须由 Termdock Desktop 重启。',
-    });
-  }
+router.post('/update/restart', async (_req, res) => {
   try {
-    const state = npmAutoUpdateManager.confirmRestart();
+    const state = desktopRuntimeOwner
+      ? await desktopRuntimeOwner.restart()
+      : npmAutoUpdateManager.confirmRestart();
     res.status(202).json(state);
   } catch (error) {
     res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
@@ -8340,7 +8347,10 @@ export function handleControlWebSocket(ws: WebSocket, clientId: string): void {
     }
     try {
       ws.send(JSON.stringify({ type: 'client-state', seq: initialSeq, state: globalSessionState, inventory: inventory ?? latestSessionInventory }));
-      ws.send(JSON.stringify({ type: 'update-state', state: npmAutoUpdateManager.getState() }));
+      ws.send(JSON.stringify({
+        type: 'update-state',
+        state: desktopRuntimeOwner?.getState() ?? npmAutoUpdateManager.getState(),
+      }));
     } catch {
       controlClients.delete(clientId);
       return;

@@ -149,6 +149,13 @@ export function markDesktopRuntimeRestarting(): DesktopRuntimeUpdateState {
   return publishRuntimeUpdateState({ status: 'restarting', error: null });
 }
 
+export function markDesktopRuntimeRestartFailed(error: unknown): DesktopRuntimeUpdateState {
+  return publishRuntimeUpdateState({
+    status: 'error',
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
 export function checkForRuntimeUpdates(): Promise<DesktopRuntimeUpdateState> {
   if (runtimeCheckPromise) return runtimeCheckPromise;
   const before = getDesktopRuntimeUpdateState().currentVersion;

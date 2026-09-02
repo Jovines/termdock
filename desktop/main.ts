@@ -20,6 +20,7 @@ import { execFile, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import dgram from 'node:dgram';
 import fs from 'node:fs';
+import http from 'node:http';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,6 +58,7 @@ import {
   getDesktopUpdateState,
   getDesktopRuntimeUpdateState,
   installDownloadedDesktopUpdate,
+  markDesktopRuntimeRestartFailed,
   markDesktopRuntimeRestarting,
   markDesktopRuntimeRunning,
   subscribeDesktopRuntimeUpdateState,
@@ -83,6 +85,7 @@ const projectRoot = path.resolve(currentDir, '..');
 const termdockDir = path.join(os.homedir(), '.termdock');
 const desktopConfigPath = path.join(termdockDir, 'desktop.json');
 const serverStatePath = path.join(termdockDir, 'server.json');
+const desktopRuntimeOwnerSocketPath = path.join(termdockDir, 'desktop-runtime-owner.sock');
 const DEFAULT_LOCAL_URL = 'http://localhost:9834';
 const PROTOCOL_VERSION = 1;
 const HEALTH_TIMEOUT_MS = 3_500;
@@ -129,6 +132,7 @@ let menuBarStatus: Tray | null = null;
 let menuBarStatusWidth = 0;
 let floatingWidgetWindow: BrowserWindow | null = null;
 let floatingPositionTimer: ReturnType<typeof setTimeout> | null = null;
+let desktopRuntimeOwnerServer: http.Server | null = null;
 let isQuitting = false;
 const FLOATING_WIDGET_WIDTHS = [64, 108, 152] as const;
 const FLOATING_WIDGET_HEIGHT = 40;
@@ -1118,6 +1122,7 @@ function desktopRuntimeEnv(runtime = runtimePaths()): NodeJS.ProcessEnv {
       .filter(Boolean)
       .join(path.delimiter),
     TERMDOCK_DESKTOP: '1',
+    TERMDOCK_DESKTOP_OWNER_SOCKET: desktopRuntimeOwnerSocketPath,
     TERMDOCK_BUNDLED_RUNTIME: app.isPackaged ? '1' : '0',
     TERMDOCK_VERSION: runtime.version,
     TERMDOCK_DESKTOP_SHELL_VERSION: app.getVersion(),
@@ -1262,26 +1267,85 @@ async function startLocalService(): Promise<ServiceProbe> {
 
 async function restartDesktopManagedRuntime(): Promise<ReturnType<typeof getDesktopRuntimeUpdateState>> {
   const status = await getLocalServiceStatus();
-  if (status.running) {
-    if (status.probe?.desktopManaged !== true) {
-      throw new Error('当前本机服务不是由桌面版启动的，不能由桌面版自动重启。');
-    }
-    markDesktopRuntimeRestarting();
-    const pid = status.state?.pid;
-    if (!pid || !isProcessRunning(pid)) {
-      throw new Error('桌面服务状态已失效，请重新打开连接中心。');
-    }
-    process.kill(pid, 'SIGTERM');
-    const deadline = Date.now() + 15_000;
-    while (isProcessRunning(pid) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-    if (isProcessRunning(pid)) throw new Error(`桌面服务 PID ${pid} 未能正常退出。`);
-    const latest = readServerState();
-    if (latest?.pid === pid) fs.rmSync(serverStatePath, { force: true });
+  const update = getDesktopRuntimeUpdateState();
+  if (!status.running || status.probe?.desktopManaged !== true) {
+    throw new Error('当前服务不是由这个 Termdock Desktop 宿主管理的。');
   }
-  await startLocalService();
+  if (update.status !== 'ready' || !update.latestVersion) {
+    throw new Error('没有等待重启的 Runtime 更新。');
+  }
+
+  markDesktopRuntimeRestarting();
+  const restartTimer = setTimeout(() => {
+    void (async () => {
+      const pid = status.state?.pid;
+      if (!pid || !isProcessRunning(pid)) {
+        throw new Error('本机服务状态已失效，请重试。');
+      }
+      process.kill(pid, 'SIGTERM');
+      const deadline = Date.now() + 15_000;
+      while (isProcessRunning(pid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      if (isProcessRunning(pid)) throw new Error(`本机服务 PID ${pid} 未能正常退出。`);
+      const latest = readServerState();
+      if (latest?.pid === pid) fs.rmSync(serverStatePath, { force: true });
+      await startLocalService();
+    })().catch((error) => {
+      markDesktopRuntimeRestartFailed(error);
+      console.error('[desktop-runtime] restart failed', error);
+    });
+  }, 250);
+  restartTimer.unref();
   return getDesktopRuntimeUpdateState();
+}
+
+function writeRuntimeOwnerResponse(
+  response: http.ServerResponse,
+  statusCode: number,
+  payload: unknown,
+): void {
+  response.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
+  response.end(JSON.stringify(payload));
+}
+
+async function startDesktopRuntimeOwnerServer(): Promise<void> {
+  if (desktopRuntimeOwnerServer) return;
+  fs.mkdirSync(termdockDir, { recursive: true, mode: 0o700 });
+  fs.rmSync(desktopRuntimeOwnerSocketPath, { force: true });
+  const server = http.createServer((request, response) => {
+    void (async () => {
+      if (request.method === 'GET' && request.url === '/runtime-update') {
+        writeRuntimeOwnerResponse(response, 200, getDesktopRuntimeUpdateState());
+        return;
+      }
+      if (request.method === 'POST' && request.url === '/runtime-update/check') {
+        writeRuntimeOwnerResponse(response, 200, await checkForRuntimeUpdates());
+        return;
+      }
+      if (request.method === 'POST' && request.url === '/runtime-update/restart') {
+        writeRuntimeOwnerResponse(response, 202, await restartDesktopManagedRuntime());
+        return;
+      }
+      writeRuntimeOwnerResponse(response, 404, { error: '未知的 Desktop Runtime 操作。' });
+    })().catch((error) => {
+      writeRuntimeOwnerResponse(response, 409, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(desktopRuntimeOwnerSocketPath, () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  server.on('error', (error) => {
+    console.error('[desktop-runtime] owner socket failed', error);
+  });
+  fs.chmodSync(desktopRuntimeOwnerSocketPath, 0o600);
+  desktopRuntimeOwnerServer = server;
 }
 
 function shellQuote(value: string): string {
@@ -2026,6 +2090,7 @@ function installMenu(): void {
 app.whenReady().then(async () => {
   triggerLocalNetworkPermission();
   configureLocalServiceCertificateTrust();
+  await startDesktopRuntimeOwnerServer();
   installIpcHandlers();
   installMenu();
   refreshDesktopStatusSurfaces();
@@ -2100,6 +2165,9 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  desktopRuntimeOwnerServer?.close();
+  desktopRuntimeOwnerServer = null;
+  fs.rmSync(desktopRuntimeOwnerSocketPath, { force: true });
 });
 
 export { PROTOCOL_VERSION };
