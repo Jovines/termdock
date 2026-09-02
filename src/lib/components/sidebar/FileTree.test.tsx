@@ -211,6 +211,45 @@ describe('FileTree file deletion', () => {
     expect(onSearchFromDirectory).toHaveBeenCalledWith('/workspace/src');
   });
 
+  it('opens directory actions directly from a desktop context menu', async () => {
+    const onSearchFromDirectory = vi.fn();
+    useSidebarStore.setState({
+      selectedFilePath: null,
+      expandedPaths: new Set(),
+      directoryCache: new Map([['/workspace', [
+        { name: 'src', path: '/workspace/src', type: 'directory', expanded: false, loaded: true, children: [] },
+      ]]]),
+    });
+
+    render(
+      <I18nProvider>
+        <FileTree
+          rootPath="/workspace"
+          selectedFilePath={null}
+          onFileSelect={vi.fn()}
+          onSearchFromDirectory={onSearchFromDirectory}
+        />
+      </I18nProvider>,
+    );
+
+    const directoryRow = screen.getByTitle('/workspace/src');
+    const touchLongPressEvent = new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    const contextMenuEvent = new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+    });
+
+    expect(directoryRow.dispatchEvent(touchLongPressEvent)).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Search from here' })).toBeNull();
+    expect(directoryRow.dispatchEvent(contextMenuEvent)).toBe(false);
+    expect(await screen.findByRole('button', { name: 'Search from here' })).toBeTruthy();
+  });
+
   it('applies recent-change sorting only to the selected directory', async () => {
     const user = userEvent.setup();
     useSidebarStore.setState({

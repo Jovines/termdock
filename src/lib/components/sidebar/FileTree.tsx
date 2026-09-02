@@ -160,6 +160,10 @@ function hasNativeTextSelection(): boolean {
   return Boolean(selection && !selection.isCollapsed && selection.toString().trim());
 }
 
+function isDesktopContextMenu(event: React.MouseEvent): boolean {
+  return event.button === 2 || event.ctrlKey;
+}
+
 function nodeMatchesQuery(node: FileTreeNode, queryLower: string): boolean {
   if (!queryLower) return true;
   return `${node.name} ${node.path}`.toLowerCase().includes(queryLower);
@@ -268,6 +272,9 @@ const FileTreeItem = memo(function FileTreeItem({
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
   const { state: fileDownloadState, run: runFileDownload } = useFileDownloadAction();
   const isDeleting = deletingFilePath === node.path;
+  const hasDirectoryActions = isDirectory
+    && !directoriesOnly
+    && Boolean(onDirectoryRoot || onSearchFromDirectory || onDirectoryPinToggle || canOpenLocal);
 
   const visibleChildren = useMemo(() => {
     if (!children) return undefined;
@@ -418,6 +425,13 @@ const FileTreeItem = memo(function FileTreeItem({
     setActionsOpen((open) => !open);
   }, []);
 
+  const handleDirectoryContextMenu = useCallback((event: React.MouseEvent) => {
+    if (!hasDirectoryActions || !isDesktopContextMenu(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setActionsOpen(true);
+  }, [hasDirectoryActions]);
+
   useEffect(() => {
     if (!actionsOpen) return;
     const closeOnPointerDown = (event: PointerEvent) => {
@@ -453,6 +467,7 @@ const FileTreeItem = memo(function FileTreeItem({
           if (hasNativeTextSelection()) return;
           void handleToggle();
         }}
+        onContextMenu={handleDirectoryContextMenu}
         onKeyDown={(event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return;
           event.preventDefault();
@@ -505,7 +520,7 @@ const FileTreeItem = memo(function FileTreeItem({
         </span>
         {loading && <RiLoader size={12} className="shrink-0 animate-spin text-muted-foreground" />}
         <ChangeBadge path={node.path} />
-        {node.type === 'directory' && !directoriesOnly && (onDirectoryRoot || onSearchFromDirectory || onDirectoryPinToggle || canOpenLocal) && (
+        {hasDirectoryActions && (
           <span
             onClick={handleDirectoryMoreClick}
             className={`inline-flex h-6 shrink-0 select-none items-center justify-center rounded-full text-muted-foreground transition active:scale-95 ${iconActionVisibilityClass(actionsOpen)} ${actionsOpen ? 'bg-surface-elevated text-foreground' : 'bg-surface-2 hover:bg-surface-elevated hover:text-foreground'}`}
@@ -536,7 +551,7 @@ const FileTreeItem = memo(function FileTreeItem({
         )}
         </div>
 
-        {node.type === 'directory' && !directoriesOnly && actionsOpen && (onDirectoryRoot || onSearchFromDirectory || onDirectoryPinToggle || canOpenLocal) && (
+        {hasDirectoryActions && actionsOpen && (
           <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {canOpenLocal && (
             <button
@@ -726,6 +741,8 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const [actionsOpen, setActionsOpen] = useState(false);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const isDeleting = deletingFilePath === node.path;
+  const hasDirectoryActions = isDirectory
+    && Boolean(onDirectoryRoot || onSearchFromDirectory || onDirectoryPinToggle);
 
   const handleClick = useCallback(() => {
     if (hasNativeTextSelection()) return;
@@ -767,6 +784,13 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
     setActionsOpen((open) => !open);
   }, []);
 
+  const handleDirectoryContextMenu = useCallback((event: React.MouseEvent) => {
+    if (!hasDirectoryActions || !isDesktopContextMenu(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setActionsOpen(true);
+  }, [hasDirectoryActions]);
+
   useEffect(() => {
     if (!actionsOpen) return;
     const closeOnPointerDown = (event: PointerEvent) => {
@@ -792,6 +816,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
         role="button"
         tabIndex={0}
         onClick={handleClick}
+        onContextMenu={handleDirectoryContextMenu}
         onKeyDown={(event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return;
           event.preventDefault();
@@ -857,7 +882,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           </span>
         )}
       </div>
-      {node.type === 'directory' && actionsOpen && (onDirectoryRoot || onSearchFromDirectory || onDirectoryPinToggle) && (
+      {hasDirectoryActions && actionsOpen && (
         <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
           {onDirectoryRoot && (
             <button
