@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
-import { LeftSidebar, reorderSessionIdsForSplitExit } from './LeftSidebar';
+import { LeftSidebar, normalizeSidebarCollaborationGroups, reorderSessionIdsForSplitExit } from './LeftSidebar';
 
 afterEach(() => {
   cleanup();
@@ -11,6 +11,17 @@ afterEach(() => {
 });
 
 describe('LeftSidebar session density', () => {
+  it('assigns overlapping collaboration memberships to one visible group deterministically', () => {
+    const base = { name: 'Group', createdAt: 1, updatedAt: 1 };
+    expect(normalizeSidebarCollaborationGroups([
+      { ...base, id: 'primary', sessionIds: ['one', 'two'] },
+      { ...base, id: 'secondary', sessionIds: ['two', 'three', 'four', 'missing'] },
+    ], new Set(['one', 'two', 'three', 'four']))).toEqual([
+      { ...base, id: 'primary', sessionIds: ['one', 'two'] },
+      { ...base, id: 'secondary', sessionIds: ['three', 'four'] },
+    ]);
+  });
+
   it('places a session exiting a split group at the requested visual boundary', () => {
     const entities = [
       { sessionIds: ['one'] },
@@ -114,5 +125,71 @@ describe('LeftSidebar session density', () => {
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'Stacked' }));
     expect(onSetSplitLayout).toHaveBeenCalledWith('one', 'vertical');
     expect(screen.queryByRole('menu', { name: 'Split layout' })).toBeNull();
+  });
+
+  it('renders an Agent workgroup as the primary card while preserving member split state', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => ({
+      ok: true,
+      json: async () => String(input).includes('/collaboration-groups')
+        ? {
+            groups: [{
+              id: 'agent-group',
+              name: 'Release team',
+              sessionIds: ['one', 'two'],
+              createdAt: 1,
+              updatedAt: 2,
+            }],
+            sessions: [],
+          }
+        : { locale: 'en' },
+    })));
+    const onRemoveFromSplit = vi.fn();
+    const onSplitSession = vi.fn();
+
+    render(
+      <I18nProvider>
+        <LeftSidebar
+          isOpen
+          pinned
+          drawerWidthPx={280}
+          onClose={vi.fn()}
+          sessions={[
+            { id: 'one', name: 'Planner', mode: 'shell' },
+            { id: 'two', name: 'Reviewer', mode: 'shell' },
+            { id: 'three', name: 'Standalone', mode: 'shell' },
+          ]}
+          activeSessionId="one"
+          sessionStates={new Map()}
+          onNewSession={vi.fn()}
+          onCloseSession={vi.fn()}
+          onSplitSession={onSplitSession}
+          onCloseSplit={vi.fn()}
+          onRemoveFromSplit={onRemoveFromSplit}
+          splitWorkspaces={[{ id: 'split-one', sessionIds: ['one', 'two'], layout: 'horizontal' }]}
+          onSetSplitLayout={vi.fn()}
+          onReorderSplitWorkspace={vi.fn()}
+          onRenameSplitWorkspace={vi.fn()}
+          onCombineSplitSessions={vi.fn()}
+          onReorderSessions={vi.fn()}
+          onOpenSettings={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+
+    const workgroup = await screen.findByRole('region', { name: 'Agent 工作组：Release team' });
+    expect(workgroup.querySelectorAll('[data-collaboration-member]')).toHaveLength(2);
+    expect(workgroup.querySelectorAll('[data-split-member="true"]')).toHaveLength(2);
+    expect(workgroup.querySelector('[data-split-workspace]')).toBeNull();
+    expect(screen.getByLabelText('移动 Agent 工作组：Release team')).toBeTruthy();
+
+    fireEvent.click(within(workgroup).getByRole('button', { name: 'Remove from split Planner' }));
+    expect(onRemoveFromSplit).toHaveBeenCalledWith('one');
+    fireEvent.click(screen.getByRole('button', { name: 'Split Standalone' }));
+    expect(onSplitSession).toHaveBeenCalledWith('three');
+    await waitFor(() => expect(document.querySelectorAll('[data-collaboration-group]')).toHaveLength(1));
   });
 });
