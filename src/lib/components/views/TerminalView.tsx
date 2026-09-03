@@ -27,8 +27,8 @@ import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 import { useI18n } from '../../i18n';
 import { getVisibleReconnectWatchdogDelayMs } from '../../terminal/resumeScheduling';
 import {
+  getActivationRefreshMode,
   shouldForceSettledRedraw,
-  shouldSchedulePageFlipRefresh,
 } from '../../terminal/refreshRedraw';
 import {
   CONFIRMED_SESSION_MISSING_MESSAGE,
@@ -348,10 +348,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       return;
     }
     wasActiveRef.current = true;
+    const activationRefreshMode = getActivationRefreshMode(isMobile, suppressPageFlipRefresh);
+    // A visible split pane is stationary. Coalesce its activation repaint with
+    // the focus event under the same reason instead of running the full Swiper
+    // settle sequence. This also repairs a stale renderer when focus transfer
+    // is intentionally unavailable (for example while another control owns it).
+    if (activationRefreshMode === 'single') {
+      terminalControllerRef.current?.requestRefresh('focus', {
+        skipResizePush: true,
+        skipScrollToBottom: true,
+      });
+      return;
+    }
     // Mobile activation separately schedules a forced resize refresh below.
-    // Repeating the desktop page-flip sequence here would repaint the full
-    // buffer up to three times around Swiper's settle frame and visibly flash.
-    if (!shouldSchedulePageFlipRefresh(isMobile, suppressPageFlipRefresh)) {
+    if (activationRefreshMode === 'none') {
       return;
     }
     const pageFlipStartDimensions = terminalControllerRef.current?.getDimensions() ?? null;

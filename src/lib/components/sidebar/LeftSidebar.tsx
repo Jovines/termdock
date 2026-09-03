@@ -19,8 +19,8 @@ import {
   Workflow as RiWorkflowLine,
   History as RiHistoryLine,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { DragDropContext, Droppable, Draggable, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DragDropContext, Droppable, Draggable, type DragStart, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport, TmuxSessionSummary } from '../../terminal/types';
 import { getCwdLeafName, getSessionDisplayName, buildFolderGroups, folderGroupKeyForCwd, reorderGroupedSessionIds, DEFAULT_SESSION_DISPLAY_SHELL_NAMES } from '../../terminal/display';
@@ -144,6 +144,21 @@ function buildSidebarEntities(
   return entities;
 }
 
+export function reorderSessionIdsForSplitExit(
+  entities: ReadonlyArray<{ sessionIds: readonly string[] }>,
+  sessionId: string,
+  destinationIndex: number,
+): string[] {
+  const insertionIndex = Math.min(entities.length, Math.max(0, destinationIndex));
+  const before = entities
+    .slice(0, insertionIndex)
+    .flatMap((entity) => entity.sessionIds.filter((id) => id !== sessionId));
+  const after = entities
+    .slice(insertionIndex)
+    .flatMap((entity) => entity.sessionIds.filter((id) => id !== sessionId));
+  return [...before, sessionId, ...after];
+}
+
 function StatusDot({
   status,
   detail,
@@ -205,6 +220,9 @@ export function LeftSidebar(
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
+  const splitMemberDragActiveRef = useRef(false);
+  const splitExitAllowedListIdRef = useRef<string | null>(null);
+  const splitExitTargetRef = useRef<{ listId: string; index: number } | null>(null);
   // 由「翻页→自动展开」机制维护的分组 key 集合，用于区分：
   //  - 自动展开（翻页进来时我们手动 expand）：翻走后允许自动收起
   //  - 用户手动展开：不参与自动收起，尊重用户意图
@@ -219,6 +237,66 @@ export function LeftSidebar(
     () => new Map(sessions.map((session) => [session.id, session])),
     [sessions],
   );
+
+  const updateSplitExitTarget = useCallback((clientX: number, clientY: number) => {
+    if (!splitMemberDragActiveRef.current) return;
+    const lists = Array.from(document.querySelectorAll<HTMLElement>('[data-sidebar-entity-list-id]'))
+      .filter((list) => list.dataset.sidebarEntityListId === splitExitAllowedListIdRef.current);
+    const targetList = lists.find((list) => {
+      const rect = list.getBoundingClientRect();
+      return clientX >= rect.left && clientX <= rect.right
+        && clientY >= rect.top - 8 && clientY <= rect.bottom + 8;
+    });
+    const markers = document.querySelectorAll<HTMLElement>('[data-split-exit-drop-index]');
+    markers.forEach((marker) => marker.removeAttribute('data-active'));
+    if (!targetList) {
+      splitExitTargetRef.current = null;
+      return;
+    }
+    const items = Array.from(targetList.children).filter((child): child is HTMLElement => (
+      child instanceof HTMLElement && child.hasAttribute('data-sidebar-entity-index')
+    ));
+    const index = items.findIndex((item) => {
+      const rect = item.getBoundingClientRect();
+      return clientY < rect.top + (rect.height / 2);
+    });
+    const insertionIndex = index < 0 ? items.length : index;
+    splitExitTargetRef.current = {
+      listId: targetList.dataset.sidebarEntityListId ?? '',
+      index: insertionIndex,
+    };
+    const marker = Array.from(targetList.children).find((child) => (
+      child instanceof HTMLElement
+      && child.dataset.splitExitDropIndex === String(insertionIndex)
+    ));
+    if (marker instanceof HTMLElement) marker.dataset.active = 'true';
+  }, []);
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => updateSplitExitTarget(event.clientX, event.clientY);
+    const handleTouchMove = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (touch) updateSplitExitTarget(touch.clientX, touch.clientY);
+    };
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('touchmove', handleTouchMove, { passive: true });
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('touchmove', handleTouchMove);
+    };
+  }, [updateSplitExitTarget]);
+
+  const finishSidebarDrag = useCallback((handler: (result: DropResult) => void, result: DropResult) => {
+    try {
+      handler(result);
+    } finally {
+      splitMemberDragActiveRef.current = false;
+      splitExitAllowedListIdRef.current = null;
+      splitExitTargetRef.current = null;
+      document.querySelectorAll<HTMLElement>('[data-split-exit-drop-index]')
+        .forEach((marker) => marker.removeAttribute('data-active'));
+    }
+  }, []);
   // Flat 模式中分屏 workspace 占一个顶层 item；目录模式由各目录自己决定是否合并。
   const visibleSessions = useMemo(
     () => sessions.filter((session) => !splitSessionIds.has(session.id)),
@@ -607,6 +685,21 @@ export function LeftSidebar(
     [sessions, sessionsById, splitWorkspaces],
   );
 
+  const handleSidebarDragStart = useCallback((start: DragStart) => {
+    splitMemberDragActiveRef.current = start.type === 'split-member';
+    const sourceWorkspaceId = start.source.droppableId.replace(/^split-members:/, '');
+    const sourceWorkspace = splitWorkspaces.find((workspace) => workspace.id === sourceWorkspaceId);
+    const sourceGroup = sourceWorkspace
+      ? folderGroups.find((group) => sourceWorkspace.sessionIds.every((id) => (
+          group.sessions.some((session) => session.id === id)
+        )))
+      : null;
+    splitExitAllowedListIdRef.current = groupByFolder
+      ? sourceGroup ? `group-sessions:${sourceGroup.key}` : null
+      : 'sidebar-entities';
+    splitExitTargetRef.current = null;
+  }, [folderGroups, groupByFolder, splitWorkspaces]);
+
   const handleSplitMemberDragEnd = useCallback((result: DropResult): boolean => {
     if (result.type !== 'split-member') return false;
     if (result.reason === 'CANCEL') return true;
@@ -615,6 +708,35 @@ export function LeftSidebar(
     const sourceWorkspaceId = result.source.droppableId.replace(/^split-members:/, '');
     const sourceWorkspace = splitWorkspaces.find((workspace) => workspace.id === sourceWorkspaceId);
     if (!sourceWorkspace?.sessionIds.includes(sessionId)) return true;
+
+    const splitExitTarget = result.destination ? null : splitExitTargetRef.current;
+    if (splitExitTarget) {
+      const targetGroup = folderGroups.find(
+        (group) => `group-sessions:${group.key}` === splitExitTarget.listId,
+      );
+      const targetEntities = splitExitTarget.listId === 'sidebar-entities'
+        ? flatSidebarEntities
+        : targetGroup
+          ? buildSidebarEntities(targetGroup.sessions, splitWorkspaces, sessionsById)
+          : null;
+      if (!targetEntities) return true;
+      const reorderedIds = reorderSessionIdsForSplitExit(
+        targetEntities,
+        sessionId,
+        splitExitTarget.index,
+      );
+      onRemoveFromSplit(sessionId);
+      if (splitExitTarget.listId === 'sidebar-entities') {
+        onReorderSessions(reorderedIds);
+      } else if (targetGroup) {
+        onReorderSessions(folderGroups.flatMap((group) => (
+          group.key === targetGroup.key
+            ? reorderedIds
+            : group.sessions.map((session) => session.id)
+        )));
+      }
+      return true;
+    }
 
     if (!result.destination) {
       onRemoveFromSplit(sessionId);
@@ -636,7 +758,20 @@ export function LeftSidebar(
     reorderedIds.splice(result.destination.index, 0, movedId);
     onReorderSplitWorkspace(sourceWorkspaceId, reorderedIds);
     return true;
-  }, [onCombineSplitSessions, onRemoveFromSplit, onReorderSplitWorkspace, splitWorkspaces]);
+  }, [flatSidebarEntities, folderGroups, onCombineSplitSessions, onRemoveFromSplit, onReorderSessions, onReorderSplitWorkspace, sessionsById, splitWorkspaces]);
+
+  const renderSplitExitDropZone = (index: number): React.ReactNode => (
+    <div
+      key={`split-exit:${index}`}
+      data-split-exit-drop-index={index}
+      className="group/split-exit relative z-10 -my-1 h-2"
+    >
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-1 top-1/2 h-px -translate-y-1/2 rounded-full bg-transparent transition-colors group-data-[active=true]/split-exit:bg-primary"
+      />
+    </div>
+  );
 
   const handleEntityDragEnd = useCallback((
     result: DropResult,
@@ -856,40 +991,59 @@ export function LeftSidebar(
     droppableId: string,
     folderKey?: string,
   ): React.ReactNode => (
-    <DragDropContext onDragEnd={(result) => handleEntityDragEnd(result, entities, folderKey)}>
+    <DragDropContext
+      onDragStart={handleSidebarDragStart}
+      onDragEnd={(result) => finishSidebarDrag(
+        (completed) => handleEntityDragEnd(completed, entities, folderKey),
+        result,
+      )}
+    >
       <Droppable droppableId={droppableId} direction="vertical" isCombineEnabled>
         {(provided) => (
-          <div ref={provided.innerRef} {...provided.droppableProps} className="space-y-0.5">
+          <div
+            ref={provided.innerRef}
+            {...provided.droppableProps}
+            data-sidebar-entity-list-id={droppableId}
+            className="space-y-0.5"
+          >
             {entities.map((entity, index) => (
-              <Draggable key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
-                {(dragProvided, snapshot) => (
-                  <div ref={dragProvided.innerRef} {...dragProvided.draggableProps}>
-                    {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
-                      entity.workspace,
-                      entity.members,
-                      snapshot.isDragging,
-                      Boolean(snapshot.combineTargetFor),
-                    ) : (
-                      <div
-                        {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(entity.session.id)) : {})}
-                        className={`group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
-                          snapshot.combineTargetFor
-                            ? 'bg-primary/15 text-foreground ring-1 ring-primary/40'
-                            : snapshot.isDragging
-                              ? 'bg-surface-elevated text-foreground opacity-90 shadow-lg'
-                              : getSessionStatusBackground(entity.session.id)
-                                ?? (entity.session.id === activeSessionId
-                                  ? 'bg-surface-elevated text-foreground'
-                                  : 'text-muted-foreground hover:bg-surface-2')
-                        } cursor-grab active:cursor-grabbing`}
-                      >
-                        {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </Draggable>
+              <Fragment key={entity.id}>
+                {renderSplitExitDropZone(index)}
+                <Draggable draggableId={entity.id} index={index} disableInteractiveElementBlocking>
+                  {(dragProvided, snapshot) => (
+                    <div
+                      ref={dragProvided.innerRef}
+                      {...dragProvided.draggableProps}
+                      data-sidebar-entity-index={index}
+                    >
+                      {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
+                        entity.workspace,
+                        entity.members,
+                        snapshot.isDragging,
+                        Boolean(snapshot.combineTargetFor),
+                      ) : (
+                        <div
+                          {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(entity.session.id)) : {})}
+                          className={`group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
+                            snapshot.combineTargetFor
+                              ? 'bg-primary/15 text-foreground ring-1 ring-primary/40'
+                              : snapshot.isDragging
+                                ? 'bg-surface-elevated text-foreground opacity-90 shadow-lg'
+                                : getSessionStatusBackground(entity.session.id)
+                                  ?? (entity.session.id === activeSessionId
+                                    ? 'bg-surface-elevated text-foreground'
+                                    : 'text-muted-foreground hover:bg-surface-2')
+                          } cursor-grab active:cursor-grabbing`}
+                        >
+                          {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </Draggable>
+              </Fragment>
             ))}
+            {renderSplitExitDropZone(entities.length)}
             {provided.placeholder}
           </div>
         )}
@@ -1102,7 +1256,10 @@ export function LeftSidebar(
           </div>
         ) : groupByFolder ? (
           <div className="space-y-1.5">
-            <DragDropContext onDragEnd={handleGroupedDragEnd}>
+            <DragDropContext
+              onDragStart={handleSidebarDragStart}
+              onDragEnd={(result) => finishSidebarDrag(handleGroupedDragEnd, result)}
+            >
               <Droppable droppableId="sidebar-groups" type="group" direction="vertical">
                 {(groupsProvided) => (
                   <div ref={groupsProvided.innerRef} {...groupsProvided.droppableProps} className="space-y-1.5">
@@ -1163,37 +1320,50 @@ export function LeftSidebar(
                                 <div className="mt-0.5 pl-2">
                                   <Droppable droppableId={`group-sessions:${group.key}`} type="session" direction="vertical" isCombineEnabled>
                                     {(sessionsProvided) => (
-                                      <div ref={sessionsProvided.innerRef} {...sessionsProvided.droppableProps} className="space-y-0.5">
+                                      <div
+                                        ref={sessionsProvided.innerRef}
+                                        {...sessionsProvided.droppableProps}
+                                        data-sidebar-entity-list-id={`group-sessions:${group.key}`}
+                                        className="space-y-0.5"
+                                      >
                                         {folderEntities.map((entity, index) => (
-                                          <Draggable key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
-                                            {(dragProvided, snapshot) => (
-                                              <div ref={dragProvided.innerRef} {...dragProvided.draggableProps}>
-                                                {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
-                                                  entity.workspace,
-                                                  entity.members,
-                                                  snapshot.isDragging,
-                                                  Boolean(snapshot.combineTargetFor),
-                                                ) : (
-                                                  <div
-                                                    {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(entity.session.id)) : {})}
-                                                    className={`group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
-                                                      snapshot.combineTargetFor
-                                                        ? 'bg-primary/15 text-foreground ring-1 ring-primary/40'
-                                                        : snapshot.isDragging
-                                                          ? 'bg-surface-elevated text-foreground opacity-90 shadow-lg'
-                                                          : getSessionStatusBackground(entity.session.id)
-                                                            ?? (entity.session.id === activeSessionId
-                                                              ? 'bg-surface-elevated text-foreground'
-                                                              : 'text-muted-foreground hover:bg-surface-2')
-                                                    } cursor-grab active:cursor-grabbing`}
-                                                  >
-                                                    {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
-                                                  </div>
-                                                )}
-                                              </div>
-                                            )}
-                                          </Draggable>
+                                          <Fragment key={entity.id}>
+                                            {renderSplitExitDropZone(index)}
+                                            <Draggable draggableId={entity.id} index={index} disableInteractiveElementBlocking>
+                                              {(dragProvided, snapshot) => (
+                                                <div
+                                                  ref={dragProvided.innerRef}
+                                                  {...dragProvided.draggableProps}
+                                                  data-sidebar-entity-index={index}
+                                                >
+                                                  {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
+                                                    entity.workspace,
+                                                    entity.members,
+                                                    snapshot.isDragging,
+                                                    Boolean(snapshot.combineTargetFor),
+                                                  ) : (
+                                                    <div
+                                                      {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(entity.session.id)) : {})}
+                                                      className={`group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
+                                                        snapshot.combineTargetFor
+                                                          ? 'bg-primary/15 text-foreground ring-1 ring-primary/40'
+                                                          : snapshot.isDragging
+                                                            ? 'bg-surface-elevated text-foreground opacity-90 shadow-lg'
+                                                            : getSessionStatusBackground(entity.session.id)
+                                                              ?? (entity.session.id === activeSessionId
+                                                                ? 'bg-surface-elevated text-foreground'
+                                                                : 'text-muted-foreground hover:bg-surface-2')
+                                                      } cursor-grab active:cursor-grabbing`}
+                                                    >
+                                                      {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              )}
+                                            </Draggable>
+                                          </Fragment>
                                         ))}
+                                        {renderSplitExitDropZone(folderEntities.length)}
                                         {sessionsProvided.placeholder}
                                       </div>
                                     )}

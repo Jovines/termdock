@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   combineSplitWorkspaces,
   findSplitWorkspace,
+  getSplitGridDimensions,
   normalizeSplitWorkspaces,
   pruneSplitWorkspaces,
   removeSessionFromSplitWorkspace,
   reorderSplitWorkspaceSessions,
+  resizeAdjacentRatios,
   renameSplitWorkspace,
 } from './splitWorkspaces';
 
@@ -67,5 +69,34 @@ describe('split workspaces', () => {
     workspaces = removeSessionFromSplitWorkspace(workspaces, 'B');
     expect(workspaces[0]?.sessionIds).toEqual(['A', 'C']);
     expect(removeSessionFromSplitWorkspace(workspaces, 'A')).toEqual([]);
+  });
+
+  it('normalizes independent column and row ratios for grid workspaces', () => {
+    expect(getSplitGridDimensions(4)).toEqual({ columns: 2, rows: 2 });
+    expect(getSplitGridDimensions(5)).toEqual({ columns: 3, rows: 2 });
+
+    const [workspace] = normalizeSplitWorkspaces([
+      {
+        id: 'grid',
+        sessionIds: ['A', 'B', 'C', 'D'],
+        layout: 'grid',
+        ratios: [1, 1, 1, 1],
+        gridColumnRatios: [1, 3],
+        gridRowRatios: [2, 1],
+      },
+    ]);
+    expect(workspace?.gridColumnRatios).toEqual([0.25, 0.75]);
+    expect(workspace?.gridRowRatios).toEqual([2 / 3, 1 / 3]);
+  });
+
+  it('resizes only the two tracks next to a dragged grid divider', () => {
+    expect(resizeAdjacentRatios([0.2, 0.3, 0.5], 1, 0.75, 0.1)).toEqual([
+      0.2,
+      0.55,
+      0.25,
+    ]);
+    const clamped = resizeAdjacentRatios([0.5, 0.5], 0, 0.95, 0.2);
+    expect(clamped[0]).toBeCloseTo(0.8);
+    expect(clamped[1]).toBeCloseTo(0.2);
   });
 });

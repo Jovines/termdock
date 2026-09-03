@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
-import { LeftSidebar } from './LeftSidebar';
+import { LeftSidebar, reorderSessionIdsForSplitExit } from './LeftSidebar';
 
 afterEach(() => {
   cleanup();
@@ -11,6 +11,20 @@ afterEach(() => {
 });
 
 describe('LeftSidebar session density', () => {
+  it('places a session exiting a split group at the requested visual boundary', () => {
+    const entities = [
+      { sessionIds: ['one'] },
+      { sessionIds: ['two', 'three'] },
+      { sessionIds: ['four'] },
+    ];
+    expect(reorderSessionIdsForSplitExit(entities, 'three', 0))
+      .toEqual(['three', 'one', 'two', 'four']);
+    expect(reorderSessionIdsForSplitExit(entities, 'three', 2))
+      .toEqual(['one', 'two', 'three', 'four']);
+    expect(reorderSessionIdsForSplitExit(entities, 'three', 3))
+      .toEqual(['one', 'two', 'four', 'three']);
+  });
+
   it('keeps repository metadata out of session rows and expands split groups by default', () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,

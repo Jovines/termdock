@@ -281,8 +281,7 @@ export type RefreshReason =
   | 'session-reset'          // 新 chunks 到达（replay / history restore）
   | 'buffer-reset'           // terminal.reset() 之后
   | 'clear'                  // 用户主动 clear（cmd-k）
-  | 'focus'                  // 输入框获焦
-  | 'blur'                   // 输入框失焦
+  | 'focus'                  // 输入框获焦（失焦不改变终端内容，无需整屏重绘）
   | 'webgl-context-loss';    // onContextLoss 回调
 
 export type RefreshOptions = {
@@ -4709,8 +4708,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   activeTag: activeElement?.tagName ?? null,
                   activeClass: activeElement?.className ?? null,
                 });
-                requestRefresh('blur', { skipResizePush: true, skipScrollToBottom: true });
-
                 if (!guarded) {
                   // readonly 仅对移动端有意义（防止 iOS 长按放大镜）；
                   // 桌面端绝不能 readonly，否则下次 focus 收不到键。

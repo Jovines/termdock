@@ -3,6 +3,21 @@ export interface TerminalDimensions {
   rows: number;
 }
 
+export type ActivationRefreshMode = 'none' | 'single' | 'settled';
+
+/**
+ * A normal desktop slide change gets a second refresh after Swiper settles.
+ * Split panes do not move, so activation only needs one coalesced repaint.
+ * Mobile has its own forced resize path.
+ */
+export function getActivationRefreshMode(
+  isMobile: boolean,
+  suppressPageFlipRefresh: boolean,
+): ActivationRefreshMode {
+  if (isMobile) return 'none';
+  return suppressPageFlipRefresh ? 'single' : 'settled';
+}
+
 /**
  * Mobile activation already schedules a forced resize refresh so xterm can
  * fit the newly active slide. Running the desktop page-flip refresh as well
@@ -13,7 +28,7 @@ export function shouldSchedulePageFlipRefresh(
   isMobile: boolean,
   suppressPageFlipRefresh: boolean,
 ): boolean {
-  return !isMobile && !suppressPageFlipRefresh;
+  return getActivationRefreshMode(isMobile, suppressPageFlipRefresh) === 'settled';
 }
 
 /**

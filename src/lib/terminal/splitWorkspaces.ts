@@ -6,6 +6,8 @@ export interface SplitWorkspace {
   sessionIds: string[];
   layout: SplitLayout;
   ratios: number[];
+  gridColumnRatios?: number[];
+  gridRowRatios?: number[];
 }
 
 export interface SplitWorkspaceSummary {
@@ -31,6 +33,31 @@ export function normalizeRatios(ratios: unknown, count: number): number[] {
   return numeric.map((ratio) => ratio / total);
 }
 
+export function getSplitGridDimensions(count: number): { columns: number; rows: number } {
+  const columns = Math.max(1, Math.ceil(Math.sqrt(Math.max(1, count))));
+  return {
+    columns,
+    rows: Math.max(1, Math.ceil(Math.max(1, count) / columns)),
+  };
+}
+
+export function resizeAdjacentRatios(
+  ratios: number[],
+  dividerIndex: number,
+  pointerRatio: number,
+  minimumRatio: number,
+): number[] {
+  if (dividerIndex < 0 || dividerIndex >= ratios.length - 1) return ratios;
+  const next = [...ratios];
+  const before = next.slice(0, dividerIndex).reduce((sum, ratio) => sum + ratio, 0);
+  const pairTotal = next[dividerIndex]! + next[dividerIndex + 1]!;
+  const minimum = Math.max(0, Math.min(pairTotal / 2, minimumRatio));
+  const first = Math.min(pairTotal - minimum, Math.max(minimum, pointerRatio - before));
+  next[dividerIndex] = first;
+  next[dividerIndex + 1] = pairTotal - first;
+  return next;
+}
+
 function isSplitLayout(value: unknown): value is SplitLayout {
   return value === 'horizontal' || value === 'vertical' || value === 'grid';
 }
@@ -52,6 +79,7 @@ export function normalizeSplitWorkspaces(value: unknown): SplitWorkspace[] {
       : [];
     const uniqueSessionIds = [...new Set(sessionIds)];
     if (uniqueSessionIds.length < 2) continue;
+    const gridDimensions = getSplitGridDimensions(uniqueSessionIds.length);
     uniqueSessionIds.forEach((id) => claimedSessionIds.add(id));
     claimedWorkspaceIds.add(candidate.id);
     result.push({
@@ -62,6 +90,12 @@ export function normalizeSplitWorkspaces(value: unknown): SplitWorkspace[] {
       sessionIds: uniqueSessionIds,
       layout: isSplitLayout(candidate.layout) ? candidate.layout : DEFAULT_LAYOUT,
       ratios: normalizeRatios(candidate.ratios, uniqueSessionIds.length),
+      ...(candidate.gridColumnRatios !== undefined
+        ? { gridColumnRatios: normalizeRatios(candidate.gridColumnRatios, gridDimensions.columns) }
+        : {}),
+      ...(candidate.gridRowRatios !== undefined
+        ? { gridRowRatios: normalizeRatios(candidate.gridRowRatios, gridDimensions.rows) }
+        : {}),
     });
   }
   return result;

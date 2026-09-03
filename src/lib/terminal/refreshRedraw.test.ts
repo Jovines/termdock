@@ -1,5 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { shouldForceSettledRedraw, shouldSchedulePageFlipRefresh } from './refreshRedraw';
+import {
+  getActivationRefreshMode,
+  shouldForceSettledRedraw,
+  shouldSchedulePageFlipRefresh,
+} from './refreshRedraw';
+
+describe('getActivationRefreshMode', () => {
+  it('uses one coalesced repaint when activating a stationary desktop split pane', () => {
+    expect(getActivationRefreshMode(false, true)).toBe('single');
+  });
+
+  it('keeps settled slide refreshes and leaves mobile to its resize path', () => {
+    expect(getActivationRefreshMode(false, false)).toBe('settled');
+    expect(getActivationRefreshMode(true, false)).toBe('none');
+    expect(getActivationRefreshMode(true, true)).toBe('none');
+  });
+});
 
 describe('shouldSchedulePageFlipRefresh', () => {
   it('keeps the page-flip stabilization refresh on desktop', () => {

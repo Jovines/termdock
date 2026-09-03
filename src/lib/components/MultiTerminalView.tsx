@@ -47,12 +47,15 @@ import {
   combineSplitWorkspaces,
   equalRatios,
   findSplitWorkspace,
+  getSplitGridDimensions,
+  normalizeRatios,
   normalizeSplitWorkspaces,
   pruneSplitWorkspaces,
   removeSessionFromSplitWorkspace,
   removeSplitWorkspaceForSession,
   reorderSplitWorkspaceSessions,
   renameSplitWorkspace,
+  resizeAdjacentRatios,
   type SplitLayout,
   type SplitWorkspace,
   type SplitWorkspaceSummary,
@@ -1500,6 +1503,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     vertical: boolean,
     workspaceId: string,
     dividerIndex: number,
+    trackKind: 'linear' | 'grid-columns' | 'grid-rows' = 'linear',
+    trackCount?: number,
   ) => {
     event.preventDefault();
     event.stopPropagation();
@@ -1536,18 +1541,21 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           : DESKTOP_SPLIT_MIN_WIDTH_PX;
       setSplitWorkspaces((current) => current.map((workspace) => {
         if (workspace.id !== workspaceId) return workspace;
-        const ratios = workspace.ratios.length === workspace.sessionIds.length
-          ? [...workspace.ratios]
-          : equalRatios(workspace.sessionIds.length);
-        const before = ratios.slice(0, dividerIndex).reduce((sum, ratio) => sum + ratio, 0);
+        const resolvedTrackCount = trackCount ?? workspace.sessionIds.length;
+        const sourceRatios = trackKind === 'grid-columns'
+          ? workspace.gridColumnRatios
+          : trackKind === 'grid-rows'
+            ? workspace.gridRowRatios
+            : workspace.ratios;
+        const ratios = normalizeRatios(sourceRatios, resolvedTrackCount);
         const pairTotal = ratios[dividerIndex]! + ratios[dividerIndex + 1]!;
         const minimumRatio = minPanePx > 0
           ? Math.min(pairTotal / 2, minPanePx / Math.max(1, dimension))
           : Math.min(pairTotal / 2, MOBILE_MIN_SPLIT_RATIO);
-        const first = Math.min(pairTotal - minimumRatio, Math.max(minimumRatio, pointerRatio - before));
-        ratios[dividerIndex] = first;
-        ratios[dividerIndex + 1] = pairTotal - first;
-        return { ...workspace, ratios };
+        const resizedRatios = resizeAdjacentRatios(ratios, dividerIndex, pointerRatio, minimumRatio);
+        if (trackKind === 'grid-columns') return { ...workspace, gridColumnRatios: resizedRatios };
+        if (trackKind === 'grid-rows') return { ...workspace, gridRowRatios: resizedRatios };
+        return { ...workspace, ratios: resizedRatios };
       }));
     };
     const stop = () => {
@@ -2147,13 +2155,21 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
               mobileKeyboardFocusMode && index !== keyboardFocusSessionIndex ? '0px' : `minmax(0, ${ratio}fr)`,
               ...(index < ratios.length - 1 ? [mobileKeyboardFocusMode ? '0px' : '1px'] : []),
             ]).join(' ');
-            const gridColumns = Math.ceil(Math.sqrt(slide.sessions.length));
+            const { columns: gridColumns, rows: gridRows } = getSplitGridDimensions(slide.sessions.length);
+            const gridColumnRatios = normalizeRatios(workspace?.gridColumnRatios, gridColumns);
+            const gridRowRatios = normalizeRatios(workspace?.gridRowRatios, gridRows);
+            const gridColumnDividerOffsets = gridColumnRatios
+              .slice(0, -1)
+              .map((_, index) => gridColumnRatios.slice(0, index + 1).reduce((sum, ratio) => sum + ratio, 0));
+            const gridRowDividerOffsets = gridRowRatios
+              .slice(0, -1)
+              .map((_, index) => gridRowRatios.slice(0, index + 1).reduce((sum, ratio) => sum + ratio, 0));
             const gridLastRowCount = slide.sessions.length % gridColumns;
             const splitGridStyle: React.CSSProperties = {
               ...(effectiveLayout === 'grid'
                 ? {
-                    gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
-                    gridTemplateRows: `repeat(${Math.ceil(slide.sessions.length / gridColumns)}, minmax(0, 1fr))`,
+                    gridTemplateColumns: gridColumnRatios.map((ratio) => `minmax(0, ${ratio}fr)`).join(' '),
+                    gridTemplateRows: gridRowRatios.map((ratio) => `minmax(0, ${ratio}fr)`).join(' '),
                     gap: '1px',
                   }
                 : verticalSplit
@@ -2189,7 +2205,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                     >
                     <div
                       data-split-container="true"
-                      className="grid min-h-0 min-w-0 flex-1 overflow-hidden"
+                      className="relative grid min-h-0 min-w-0 flex-1 overflow-hidden"
                       style={splitGridStyle}
                     >
                       {slide.sessions.map((session, index) => (
@@ -2245,6 +2261,75 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                             </button>
                           )}
                         </React.Fragment>
+                      ))}
+                      {effectiveLayout === 'grid' && workspace && gridColumnDividerOffsets.map((offset, index) => (
+                        <button
+                          key={`grid-column-divider:${index}`}
+                          type="button"
+                          data-split-grid-column-divider={index}
+                          className="swiper-no-swiping absolute top-0 z-20 w-px -translate-x-1/2 touch-none select-none cursor-col-resize bg-[var(--border-strong)] transition-colors hover:bg-primary active:bg-primary"
+                          style={{
+                            left: `${offset * 100}%`,
+                            bottom: gridLastRowCount === 0 || index < gridLastRowCount - 1
+                              ? 0
+                              : `${(gridRowRatios.at(-1) ?? 0) * 100}%`,
+                          }}
+                          onPointerDownCapture={(event) => {
+                            const container = event.currentTarget.closest('[data-split-container="true"]');
+                            if (container instanceof HTMLDivElement) {
+                              startSplitResize(event, container, false, workspace.id, index, 'grid-columns', gridColumns);
+                            }
+                          }}
+                          onDoubleClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setSplitWorkspaces((current) => current.map((candidate) => (
+                              candidate.id === workspace.id
+                                ? { ...candidate, gridColumnRatios: equalRatios(gridColumns) }
+                                : candidate
+                            )));
+                          }}
+                          aria-label={t('tab.split')}
+                        >
+                          <span
+                            aria-hidden="true"
+                            data-split-divider-hitarea="true"
+                            className="absolute inset-y-0"
+                            style={{ left: -MOBILE_SPLIT_HIT_SLOP_PX, right: -MOBILE_SPLIT_HIT_SLOP_PX }}
+                          />
+                        </button>
+                      ))}
+                      {effectiveLayout === 'grid' && workspace && gridRowDividerOffsets.map((offset, index) => (
+                        <button
+                          key={`grid-row-divider:${index}`}
+                          type="button"
+                          data-split-grid-row-divider={index}
+                          className="swiper-no-swiping absolute inset-x-0 z-20 h-px -translate-y-1/2 touch-none select-none cursor-row-resize bg-[var(--border-strong)] transition-colors hover:bg-primary active:bg-primary"
+                          style={{ top: `${offset * 100}%` }}
+                          onPointerDownCapture={(event) => {
+                            const container = event.currentTarget.closest('[data-split-container="true"]');
+                            if (container instanceof HTMLDivElement) {
+                              startSplitResize(event, container, true, workspace.id, index, 'grid-rows', gridRows);
+                            }
+                          }}
+                          onDoubleClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setSplitWorkspaces((current) => current.map((candidate) => (
+                              candidate.id === workspace.id
+                                ? { ...candidate, gridRowRatios: equalRatios(gridRows) }
+                                : candidate
+                            )));
+                          }}
+                          aria-label={t('tab.split')}
+                        >
+                          <span
+                            aria-hidden="true"
+                            data-split-divider-hitarea="true"
+                            className="absolute inset-x-0"
+                            style={{ top: -MOBILE_SPLIT_HIT_SLOP_PX, bottom: -MOBILE_SPLIT_HIT_SLOP_PX }}
+                          />
+                        </button>
                       ))}
                     </div>
                     {isMobileLayout && (

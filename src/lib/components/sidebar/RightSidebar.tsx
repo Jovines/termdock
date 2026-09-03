@@ -6983,14 +6983,18 @@ export function RightSidebar(
 
   const refreshGitState = useCallback(async () => {
     if (!rootPath) return;
-    const repoRoot = activeGitRepoRoot ?? rootPath;
-    await loadGitBundle(repoRoot, {
+    // Always refresh through the workspace root. A nested repository may have
+    // been discovered through a symlink, while its canonical root lives
+    // outside the workspace path. Requesting that canonical root directly
+    // loses the workspace-scoped authorization and makes Retry fail with an
+    // access error. The full workspace bundle preserves the selected repo and
+    // refreshes both direct and symlinked children in one pass.
+    await loadGitBundle(rootPath, {
       reloadDiff: true,
-      includeNested: !activeGitRepoRoot,
+      includeNested: true,
       refresh: true,
-      replaceRepoRoot: activeGitRepoRoot ?? undefined,
     });
-  }, [activeGitRepoRoot, loadGitBundle, rootPath]);
+  }, [loadGitBundle, rootPath]);
 
   const loadGitDetails = useCallback(async (cwd: string | undefined = rootPath ?? undefined) => {
     if (!cwd) return null;
