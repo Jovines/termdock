@@ -38,6 +38,7 @@ function resetSidebarStore(): void {
     rightSearchOpen: false,
     rootPath: null,
     contextKey: null,
+    rightSidebarWidthContextKey: null,
     explorerRoot: null,
     explorerRootCache: {},
     pinnedExplorerRootsCache: {},
@@ -181,6 +182,64 @@ describe('pinned right sidebar width', () => {
     useSidebarStore.getState().setRootPath('/workspace/a', 'session-a');
 
     expect(useSidebarStore.getState().rightSidebarWidth).toBe(880);
+  });
+
+  it('shares the pinned width between sessions in the same split workspace', () => {
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a', 'split-group-1');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(760);
+    useSidebarStore.getState().setRightSidebarWidth(680);
+
+    useSidebarStore.getState().setRootPath('/workspace/b', 'session-b', 'split-group-1');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(680);
+
+    useSidebarStore.getState().setRightSidebarWidth(940);
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a', 'split-group-1');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(940);
+  });
+
+  it('keeps split workspace widths separate from sessions and other split workspaces', () => {
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a');
+    useSidebarStore.getState().setRightSidebarWidth(620);
+
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a', 'split-group-1');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(620);
+    useSidebarStore.getState().setRightSidebarWidth(860);
+
+    useSidebarStore.getState().setRootPath('/workspace/c', 'session-c', 'split-group-2');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(760);
+
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(620);
+  });
+
+  it('prefers an existing split workspace width when a session rejoins it', () => {
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a', 'split-group-1');
+    useSidebarStore.getState().setRightSidebarWidth(900);
+
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a');
+    useSidebarStore.getState().setRightSidebarWidth(640);
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a', 'split-group-1');
+
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(900);
+  });
+
+  it('copies the final split width to every session that leaves the group', () => {
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a');
+    useSidebarStore.getState().setRightSidebarWidth(610);
+    useSidebarStore.getState().setRootPath('/workspace/b', 'session-b');
+    useSidebarStore.getState().setRightSidebarWidth(720);
+
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a', 'split-group-1');
+    useSidebarStore.getState().setRightSidebarWidth(930);
+    useSidebarStore.getState().inheritRightSidebarWidthFromSplitWorkspace('split-group-1', [
+      { sessionId: 'session-a', rootPath: '/workspace/a' },
+      { sessionId: 'session-b', rootPath: '/workspace/b' },
+    ]);
+
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(930);
+    useSidebarStore.getState().setRootPath('/workspace/b', 'session-b');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(930);
   });
 });
 

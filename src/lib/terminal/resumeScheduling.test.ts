@@ -12,6 +12,7 @@ import {
   shouldRunResumeRequest,
   shouldForceForegroundReconnect,
   shouldStartInitialConnection,
+  shouldMountSessionViewport,
 } from './resumeScheduling';
 
 describe('resolvePrioritySessionId', () => {
@@ -79,6 +80,54 @@ describe('shouldStartInitialConnection', () => {
       foregroundSessionId: null,
       foregroundReady: false,
     })).toBe(true);
+  });
+});
+
+describe('shouldMountSessionViewport', () => {
+  const visibleSessionIds = new Set(['selected', 'split-peer']);
+  const deferredViewportSessionIds = new Set(['background']);
+
+  it('mounts only visible terminal renderers on mobile', () => {
+    for (const sessionId of visibleSessionIds) {
+      expect(shouldMountSessionViewport({
+        sessionId,
+        foregroundSessionId: 'selected',
+        visibleSessionIds,
+        deferredViewportSessionIds,
+        isMobileLayout: true,
+      })).toBe(true);
+    }
+    expect(shouldMountSessionViewport({
+      sessionId: 'background',
+      foregroundSessionId: 'selected',
+      visibleSessionIds,
+      deferredViewportSessionIds,
+      isMobileLayout: true,
+    })).toBe(false);
+  });
+
+  it('keeps the staggered warm viewport policy on desktop', () => {
+    expect(shouldMountSessionViewport({
+      sessionId: 'selected',
+      foregroundSessionId: 'selected',
+      visibleSessionIds,
+      deferredViewportSessionIds,
+      isMobileLayout: false,
+    })).toBe(true);
+    expect(shouldMountSessionViewport({
+      sessionId: 'background',
+      foregroundSessionId: 'selected',
+      visibleSessionIds,
+      deferredViewportSessionIds,
+      isMobileLayout: false,
+    })).toBe(true);
+    expect(shouldMountSessionViewport({
+      sessionId: 'cold',
+      foregroundSessionId: 'selected',
+      visibleSessionIds,
+      deferredViewportSessionIds,
+      isMobileLayout: false,
+    })).toBe(false);
   });
 });
 

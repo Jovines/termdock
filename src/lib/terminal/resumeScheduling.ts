@@ -35,6 +35,20 @@ export function shouldStartInitialConnection(options: {
     || options.foregroundReady;
 }
 
+export function shouldMountSessionViewport(options: {
+  sessionId: string;
+  foregroundSessionId: string | null;
+  visibleSessionIds: ReadonlySet<string>;
+  deferredViewportSessionIds: ReadonlySet<string>;
+  isMobileLayout: boolean;
+}): boolean {
+  if (options.isMobileLayout) {
+    return options.visibleSessionIds.has(options.sessionId);
+  }
+  return options.sessionId === options.foregroundSessionId
+    || options.deferredViewportSessionIds.has(options.sessionId);
+}
+
 export function shouldRunResumeRequest(options: {
   sessionId: string;
   foregroundSessionId: string | null;
