@@ -72,6 +72,7 @@ interface TerminalViewProps {
   colorTheme?: TermdockColorTheme;
   toolbarPresets?: ToolbarPresetDefinition[];
   isActive?: boolean;
+  isLayoutVisible?: boolean;
   focusRequestToken?: number;
   resumeRequestToken?: number;
   resumeRequestReason?: Extract<RefreshReason, 'visibility' | 'bfcache' | 'online'>;
@@ -100,6 +101,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   colorTheme = 'dark',
   toolbarPresets: configuredToolbarPresets = [],
   isActive = true,
+  isLayoutVisible = true,
   focusRequestToken = 0,
   resumeRequestToken = 0,
   resumeRequestReason = 'visibility',
@@ -2280,6 +2282,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               key={terminalSessionKey}
               ref={handleTerminalControllerRef}
               sessionKey={terminalSessionKey}
+              isLayoutVisible={isLayoutVisible}
               chunks={bufferChunks}
               onInput={handleViewportInput}
               onResize={handleViewportResize}

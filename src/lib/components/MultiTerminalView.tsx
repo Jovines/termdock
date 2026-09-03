@@ -1925,6 +1925,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     } = {},
   ) => {
     const isActive = session.id === activeSessionId;
+    const isLayoutVisible = visibleSessionIds.has(session.id) && !options.hidden;
     const shouldMountViewport = connectionPriorityReady && shouldMountSessionViewport({
       sessionId: session.id,
       foregroundSessionId,
@@ -1973,6 +1974,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             colorTheme={colorTheme}
             toolbarPresets={toolbarPresets}
             isActive={isActive}
+            isLayoutVisible={isLayoutVisible}
             initialConnectEnabled={initialConnectEnabled}
             resumeRequestEnabled={resumeRequestEnabled}
             suppressKeyboard={options.suppressKeyboard}

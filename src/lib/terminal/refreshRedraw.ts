@@ -6,6 +6,20 @@ export interface TerminalDimensions {
 export type ActivationRefreshMode = 'none' | 'single' | 'settled';
 
 /**
+ * Mobile keeps every xterm mounted so Swiper page changes remain instant. A
+ * soft-keyboard animation consequently resizes every slide's container, but
+ * only terminals in the visible slide should spend work fitting and
+ * repainting. Desktop split panes still need every observed resize because
+ * inactive panes can be visible at the same time.
+ */
+export function shouldProcessObservedResize(
+  touchLayout: boolean,
+  isLayoutVisible: boolean,
+): boolean {
+  return !touchLayout || isLayoutVisible;
+}
+
+/**
  * A normal desktop slide change gets a second refresh after Swiper settles.
  * Split panes do not move, so activation only needs one coalesced repaint.
  * Mobile has its own forced resize path.

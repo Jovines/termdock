@@ -2,8 +2,21 @@ import { describe, expect, it } from 'vitest';
 import {
   getActivationRefreshMode,
   shouldForceSettledRedraw,
+  shouldProcessObservedResize,
   shouldSchedulePageFlipRefresh,
 } from './refreshRedraw';
+
+describe('shouldProcessObservedResize', () => {
+  it('freezes background mobile terminals while the keyboard changes layout', () => {
+    expect(shouldProcessObservedResize(true, false)).toBe(false);
+    expect(shouldProcessObservedResize(true, true)).toBe(true);
+  });
+
+  it('keeps desktop split-pane resize observation active', () => {
+    expect(shouldProcessObservedResize(false, false)).toBe(true);
+    expect(shouldProcessObservedResize(false, true)).toBe(true);
+  });
+});
 
 describe('getActivationRefreshMode', () => {
   it('uses one coalesced repaint when activating a stationary desktop split pane', () => {
