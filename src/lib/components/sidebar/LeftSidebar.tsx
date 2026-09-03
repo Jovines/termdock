@@ -34,7 +34,9 @@ import {
   listAgentResumeHistory,
   listCollaborationGroups,
   prepareAgentResumeHistory,
+  removeCollaborationGroup,
   removeAgentResumeHistory,
+  saveCollaborationGroup,
   type CollaborationGroup,
   type AgentResumeHistoryEntry,
   type TermdockUpdateState,
@@ -105,6 +107,9 @@ interface LeftSidebarProps {
 
 type SidebarSession = LeftSidebarProps['sessions'][number];
 type SidebarCollaborationGroup = CollaborationGroup & { sessionIds: string[] };
+type SidebarPointerDropTarget =
+  | { kind: 'list'; listId: string; index: number }
+  | { kind: 'collaboration'; groupId: string };
 
 type SidebarEntity =
   | { kind: 'session'; id: string; session: SidebarSession; sessionIds: [string] }
@@ -274,9 +279,10 @@ export function LeftSidebar(
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
   const collaborationRefreshIdRef = useRef(0);
-  const splitMemberDragActiveRef = useRef(false);
+  const sidebarMemberDragActiveRef = useRef(false);
+  const sourceCollaborationGroupIdRef = useRef<string | null>(null);
   const splitExitAllowedListIdRef = useRef<string | null>(null);
-  const splitExitTargetRef = useRef<{ listId: string; index: number } | null>(null);
+  const splitExitTargetRef = useRef<SidebarPointerDropTarget | null>(null);
   // 由「翻页→自动展开」机制维护的分组 key 集合，用于区分：
   //  - 自动展开（翻页进来时我们手动 expand）：翻走后允许自动收起
   //  - 用户手动展开：不参与自动收起，尊重用户意图
@@ -328,7 +334,25 @@ export function LeftSidebar(
   }, [agentOperationsOpen, isOpen, refreshCollaborationGroups]);
 
   const updateSplitExitTarget = useCallback((clientX: number, clientY: number) => {
-    if (!splitMemberDragActiveRef.current) return;
+    if (!sidebarMemberDragActiveRef.current) return;
+    document.querySelectorAll<HTMLElement>('[data-split-exit-drop-index]')
+      .forEach((marker) => marker.removeAttribute('data-active'));
+    document.querySelectorAll<HTMLElement>('[data-collaboration-group]')
+      .forEach((group) => group.removeAttribute('data-drop-active'));
+    const collaborationTarget = document.elementsFromPoint(clientX, clientY)
+      .map((element) => element.closest<HTMLElement>('[data-collaboration-group]'))
+      .find((group): group is HTMLElement => Boolean(
+        group?.dataset.collaborationGroup
+        && group.dataset.collaborationGroup !== sourceCollaborationGroupIdRef.current,
+      ));
+    if (collaborationTarget?.dataset.collaborationGroup) {
+      collaborationTarget.dataset.dropActive = 'true';
+      splitExitTargetRef.current = {
+        kind: 'collaboration',
+        groupId: collaborationTarget.dataset.collaborationGroup,
+      };
+      return;
+    }
     const lists = Array.from(document.querySelectorAll<HTMLElement>('[data-sidebar-entity-list-id]'))
       .filter((list) => list.dataset.sidebarEntityListId === splitExitAllowedListIdRef.current);
     const targetList = lists.find((list) => {
@@ -336,8 +360,6 @@ export function LeftSidebar(
       return clientX >= rect.left && clientX <= rect.right
         && clientY >= rect.top - 8 && clientY <= rect.bottom + 8;
     });
-    const markers = document.querySelectorAll<HTMLElement>('[data-split-exit-drop-index]');
-    markers.forEach((marker) => marker.removeAttribute('data-active'));
     if (!targetList) {
       splitExitTargetRef.current = null;
       return;
@@ -351,6 +373,7 @@ export function LeftSidebar(
     });
     const insertionIndex = index < 0 ? items.length : index;
     splitExitTargetRef.current = {
+      kind: 'list',
       listId: targetList.dataset.sidebarEntityListId ?? '',
       index: insertionIndex,
     };
@@ -378,11 +401,14 @@ export function LeftSidebar(
     try {
       handler(result);
     } finally {
-      splitMemberDragActiveRef.current = false;
+      sidebarMemberDragActiveRef.current = false;
+      sourceCollaborationGroupIdRef.current = null;
       splitExitAllowedListIdRef.current = null;
       splitExitTargetRef.current = null;
       document.querySelectorAll<HTMLElement>('[data-split-exit-drop-index]')
         .forEach((marker) => marker.removeAttribute('data-active'));
+      document.querySelectorAll<HTMLElement>('[data-collaboration-group]')
+        .forEach((group) => group.removeAttribute('data-drop-active'));
     }
   }, []);
   // Flat 模式中分屏 workspace 占一个顶层 item；目录模式由各目录自己决定是否合并。
@@ -790,31 +816,146 @@ export function LeftSidebar(
   );
 
   const handleSidebarDragStart = useCallback((start: DragStart) => {
-    splitMemberDragActiveRef.current = start.type === 'split-member';
-    const sourceWorkspaceId = start.source.droppableId.replace(/^split-members:/, '');
-    const sourceWorkspace = splitWorkspaces.find((workspace) => workspace.id === sourceWorkspaceId);
-    const sourceGroup = sourceWorkspace
-      ? folderGroups.find((group) => sourceWorkspace.sessionIds.every((id) => (
+    const splitSessionId = start.draggableId.replace(/^split-member:/, '');
+    const sourceWorkspace = start.type === 'split-member'
+      ? splitWorkspaces.find((workspace) => workspace.sessionIds.includes(splitSessionId))
+      : null;
+    const collaborationGroupId = start.type === 'collaboration-member'
+      ? start.source.droppableId.replace(/^collaboration-members:/, '')
+      : null;
+    const sourceCollaboration = collaborationGroupId
+      ? collaborationGroups.find((group) => group.id === collaborationGroupId)
+      : null;
+    sidebarMemberDragActiveRef.current = Boolean(
+      sourceWorkspace
+      || sourceCollaboration
+      || (start.type === 'session' && start.draggableId.startsWith('session:')),
+    );
+    sourceCollaborationGroupIdRef.current = sourceCollaboration?.id ?? null;
+    const sourceIds = sourceWorkspace?.sessionIds ?? sourceCollaboration?.sessionIds ?? [];
+    const sourceGroup = sourceIds.length > 0
+      ? folderGroups.find((group) => sourceIds.every((id) => (
           group.sessions.some((session) => session.id === id)
         )))
       : null;
     splitExitAllowedListIdRef.current = groupByFolder
       ? sourceGroup ? `group-sessions:${sourceGroup.key}` : null
-      : 'sidebar-entities';
+      : sourceIds.length > 0 ? 'sidebar-entities' : null;
     splitExitTargetRef.current = null;
-  }, [folderGroups, groupByFolder, splitWorkspaces]);
+  }, [collaborationGroups, folderGroups, groupByFolder, splitWorkspaces]);
+
+  const moveSessionBetweenCollaborationGroups = useCallback((
+    sessionId: string,
+    sourceGroupId: string | null,
+    targetGroupId: string | null,
+  ) => {
+    if (sourceGroupId === targetGroupId) return;
+    const source = sourceGroupId
+      ? rawCollaborationGroups.find((group) => group.id === sourceGroupId)
+      : null;
+    const target = targetGroupId
+      ? rawCollaborationGroups.find((group) => group.id === targetGroupId)
+      : null;
+    if (targetGroupId && !target) return;
+    const nextSourceIds = source?.sessionIds.filter((id) => id !== sessionId) ?? [];
+    const nextTargetIds = target
+      ? [...target.sessionIds.filter((id) => id !== sessionId), sessionId]
+      : [];
+    setRawCollaborationGroups((current) => current.flatMap((group) => {
+      if (group.id === sourceGroupId) {
+        return nextSourceIds.length >= 2 ? [{ ...group, sessionIds: nextSourceIds }] : [];
+      }
+      if (group.id === targetGroupId) return [{ ...group, sessionIds: nextTargetIds }];
+      return [group];
+    }));
+    const requests: Promise<unknown>[] = [];
+    if (source) {
+      requests.push(nextSourceIds.length >= 2
+        ? saveCollaborationGroup({ id: source.id, name: source.name, sessionIds: nextSourceIds })
+        : removeCollaborationGroup(source.id));
+    }
+    if (target) {
+      requests.push(saveCollaborationGroup({ id: target.id, name: target.name, sessionIds: nextTargetIds }));
+    }
+    void Promise.all(requests).then(
+      () => refreshCollaborationGroups(),
+      () => refreshCollaborationGroups(),
+    );
+  }, [rawCollaborationGroups, refreshCollaborationGroups]);
+
+  const reorderCollaborationMembers = useCallback((
+    groupId: string,
+    sourceIndex: number,
+    destinationIndex: number,
+  ) => {
+    const group = rawCollaborationGroups.find((candidate) => candidate.id === groupId);
+    if (!group || sourceIndex === destinationIndex) return;
+    const sessionIds = [...group.sessionIds];
+    const [movedId] = sessionIds.splice(sourceIndex, 1);
+    if (!movedId) return;
+    sessionIds.splice(destinationIndex, 0, movedId);
+    setRawCollaborationGroups((current) => current.map((candidate) => (
+      candidate.id === groupId ? { ...candidate, sessionIds } : candidate
+    )));
+    void saveCollaborationGroup({ id: group.id, name: group.name, sessionIds }).then(
+      () => refreshCollaborationGroups(),
+      () => refreshCollaborationGroups(),
+    );
+  }, [rawCollaborationGroups, refreshCollaborationGroups]);
+
+  const handleCollaborationMemberDragEnd = useCallback((result: DropResult): boolean => {
+    if (result.type !== 'collaboration-member') return false;
+    if (result.reason === 'CANCEL') return true;
+    const sourceGroupId = result.source.droppableId.replace(/^collaboration-members:/, '');
+    const sessionId = result.draggableId.replace(/^collaboration-member:/, '');
+    const pointerTarget = splitExitTargetRef.current;
+    if (pointerTarget?.kind === 'collaboration') {
+      moveSessionBetweenCollaborationGroups(sessionId, sourceGroupId, pointerTarget.groupId);
+      return true;
+    }
+    if (result.destination?.droppableId === result.source.droppableId) {
+      reorderCollaborationMembers(sourceGroupId, result.source.index, result.destination.index);
+      return true;
+    }
+    if (pointerTarget?.kind === 'list') {
+      const targetGroup = folderGroups.find(
+        (group) => `group-sessions:${group.key}` === pointerTarget.listId,
+      );
+      const targetEntities = pointerTarget.listId === 'sidebar-entities'
+        ? flatSidebarEntities
+        : targetGroup
+          ? buildSidebarEntities(targetGroup.sessions, splitWorkspaces, sessionsById, collaborationGroups)
+          : null;
+      if (targetEntities) {
+        const reorderedIds = reorderSessionIdsForSplitExit(targetEntities, sessionId, pointerTarget.index);
+        if (pointerTarget.listId === 'sidebar-entities') {
+          onReorderSessions(reorderedIds);
+        } else if (targetGroup) {
+          onReorderSessions(folderGroups.flatMap((group) => (
+            group.key === targetGroup.key ? reorderedIds : group.sessions.map((session) => session.id)
+          )));
+        }
+      }
+    }
+    moveSessionBetweenCollaborationGroups(sessionId, sourceGroupId, null);
+    return true;
+  }, [collaborationGroups, flatSidebarEntities, folderGroups, moveSessionBetweenCollaborationGroups, onReorderSessions, reorderCollaborationMembers, sessionsById, splitWorkspaces]);
 
   const handleSplitMemberDragEnd = useCallback((result: DropResult): boolean => {
     if (result.type !== 'split-member') return false;
     if (result.reason === 'CANCEL') return true;
 
     const sessionId = result.draggableId.replace(/^split-member:/, '');
-    const sourceWorkspaceId = result.source.droppableId.replace(/^split-members:/, '');
-    const sourceWorkspace = splitWorkspaces.find((workspace) => workspace.id === sourceWorkspaceId);
+    const sourceWorkspace = splitWorkspaces.find((workspace) => workspace.sessionIds.includes(sessionId));
     if (!sourceWorkspace?.sessionIds.includes(sessionId)) return true;
+    const sourceWorkspaceId = sourceWorkspace.id;
 
     const splitExitTarget = result.destination ? null : splitExitTargetRef.current;
-    if (splitExitTarget) {
+    if (splitExitTarget?.kind === 'collaboration') {
+      moveSessionBetweenCollaborationGroups(sessionId, null, splitExitTarget.groupId);
+      return true;
+    }
+    if (splitExitTarget?.kind === 'list') {
       const targetGroup = folderGroups.find(
         (group) => `group-sessions:${group.key}` === splitExitTarget.listId,
       );
@@ -862,7 +1003,7 @@ export function LeftSidebar(
     reorderedIds.splice(result.destination.index, 0, movedId);
     onReorderSplitWorkspace(sourceWorkspaceId, reorderedIds);
     return true;
-  }, [collaborationGroups, flatSidebarEntities, folderGroups, onCombineSplitSessions, onRemoveFromSplit, onReorderSessions, onReorderSplitWorkspace, sessionsById, splitWorkspaces]);
+  }, [collaborationGroups, flatSidebarEntities, folderGroups, moveSessionBetweenCollaborationGroups, onCombineSplitSessions, onRemoveFromSplit, onReorderSessions, onReorderSplitWorkspace, sessionsById, splitWorkspaces]);
 
   const renderSplitExitDropZone = (index: number, edge: 'top' | 'bottom' = 'top'): React.ReactNode => (
     <div
@@ -883,9 +1024,15 @@ export function LeftSidebar(
     entities: SidebarEntity[],
     folderKey?: string,
   ) => {
+    if (handleCollaborationMemberDragEnd(result)) return;
     if (handleSplitMemberDragEnd(result)) return;
     const source = entities.find((entity) => entity.id === result.draggableId);
     if (!source) return;
+    const pointerTarget = splitExitTargetRef.current;
+    if (pointerTarget?.kind === 'collaboration' && source.kind === 'session') {
+      moveSessionBetweenCollaborationGroups(source.session.id, null, pointerTarget.groupId);
+      return;
+    }
     if (result.combine) {
       const target = entities.find((entity) => entity.id === result.combine?.draggableId);
       if (!target) return;
@@ -911,7 +1058,7 @@ export function LeftSidebar(
     onReorderSessions(folderGroups.flatMap((group) => (
       group.key === folderKey ? reorderedIds : group.sessions.map((session) => session.id)
     )));
-  }, [folderGroups, handleSplitMemberDragEnd, onCombineSplitSessions, onReorderSessions]);
+  }, [folderGroups, handleCollaborationMemberDragEnd, handleSplitMemberDragEnd, moveSessionBetweenCollaborationGroups, onCombineSplitSessions, onReorderSessions]);
 
   // 目录模式下的拖拽：单个 DragDropContext，按 result.type 区分两种拖动。
   //  - type 'group'：整组顺序拖动（组与组之间排序），组内顺序不变。
@@ -919,6 +1066,7 @@ export function LeftSidebar(
   // 组是 Draggable、组内会话列表是嵌套 Droppable，pangea 官方支持的嵌套列表
   // 模式：父组可整组拖动，子列表内的 item 仍可各自排序。
   const handleGroupedDragEnd = useCallback((result: DropResult) => {
+    if (handleCollaborationMemberDragEnd(result)) return;
     if (handleSplitMemberDragEnd(result)) return;
     if (result.type === 'group') {
       if (!result.destination || result.source.index === result.destination.index) return;
@@ -935,7 +1083,7 @@ export function LeftSidebar(
     }
     if (!result.destination || result.destination.droppableId !== result.source.droppableId) return;
     handleEntityDragEnd(result, entities, groupKey);
-  }, [collaborationGroups, folderGroups, sessionsById, splitWorkspaces, handleEntityDragEnd, handleSplitMemberDragEnd, onReorderSessions]);
+  }, [collaborationGroups, folderGroups, sessionsById, splitWorkspaces, handleCollaborationMemberDragEnd, handleEntityDragEnd, handleSplitMemberDragEnd, onReorderSessions]);
 
   const renderSplitWorkspaceItem = (
     workspace: SplitWorkspaceSummary,
@@ -1105,7 +1253,7 @@ export function LeftSidebar(
         data-collaboration-group={collaboration.id}
         data-collaboration-group-name={collaboration.name}
         aria-label={`Agent 工作组：${collaboration.name}`}
-        className={`group/collaboration relative ml-1 rounded-md border border-border/10 bg-surface/35 p-0.5 transition-colors ${
+        className={`group/collaboration relative ml-1 rounded-md border border-border/10 bg-surface/35 p-0.5 transition-colors data-[drop-active=true]:bg-primary/15 data-[drop-active=true]:ring-1 data-[drop-active=true]:ring-primary/40 ${
           isCombineTarget
             ? 'bg-primary/15 ring-1 ring-primary/40'
             : isDragging
@@ -1125,26 +1273,52 @@ export function LeftSidebar(
         >
           <RiWorkflowLine size={9} />
         </span>
-        <div data-collaboration-members className="pl-0.5">
-          {members.map((session) => (
+        <Droppable
+          droppableId={`collaboration-members:${collaboration.id}`}
+          type="collaboration-member"
+          direction="vertical"
+        >
+          {(membersProvided, membersSnapshot) => (
             <div
-              key={session.id}
-              data-collaboration-member={session.id}
-              data-split-member={splitSessionIds.has(session.id) ? 'true' : undefined}
-              {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
-              className={`relative flex items-center rounded-sm pr-0.5 transition-colors ${
-                getSessionStatusBackground(session.id)
-                  ?? (session.id === activeSessionId
-                    ? 'bg-surface-elevated/80 text-foreground'
-                    : splitSessionIds.has(session.id)
-                      ? 'bg-primary/[0.05] text-muted-foreground hover:bg-primary/[0.09]'
-                      : 'text-muted-foreground hover:bg-surface-2')
-              }`}
+              ref={membersProvided.innerRef}
+              {...membersProvided.droppableProps}
+              data-collaboration-members
+              className={`pl-0.5 ${membersSnapshot.isDraggingOver ? 'rounded-sm bg-primary/10' : ''}`}
             >
-              {renderSessionRowBody(session, null, true)}
+              {members.map((session, memberIndex) => (
+                <Draggable
+                  key={session.id}
+                  draggableId={`collaboration-member:${session.id}`}
+                  index={memberIndex}
+                  disableInteractiveElementBlocking
+                >
+                  {(memberProvided, memberSnapshot) => (
+                    <div
+                      ref={memberProvided.innerRef}
+                      {...memberProvided.draggableProps}
+                      data-collaboration-member={session.id}
+                      data-split-member={splitSessionIds.has(session.id) ? 'true' : undefined}
+                      {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
+                      className={`relative flex items-center rounded-sm pr-0.5 transition-colors ${
+                        memberSnapshot.isDragging ? 'bg-surface-elevated opacity-90 shadow-lg ' : ''
+                      }${
+                        getSessionStatusBackground(session.id)
+                          ?? (session.id === activeSessionId
+                            ? 'bg-surface-elevated/80 text-foreground'
+                            : splitSessionIds.has(session.id)
+                              ? 'bg-primary/[0.05] text-muted-foreground hover:bg-primary/[0.09]'
+                              : 'text-muted-foreground hover:bg-surface-2')
+                      }`}
+                    >
+                      {renderSessionRowBody(session, memberProvided.dragHandleProps, true)}
+                    </div>
+                  )}
+                </Draggable>
+              ))}
+              {membersProvided.placeholder}
             </div>
-          ))}
-        </div>
+          )}
+        </Droppable>
       </section>
     );
   };

@@ -186,6 +186,10 @@ describe('LeftSidebar session density', () => {
     expect(workgroup.querySelectorAll('[data-split-member="true"]')).toHaveLength(1);
     expect(workgroup.querySelector('[data-split-workspace]')).toBeNull();
     expect(screen.getByLabelText('移动 Agent 工作组：Release team')).toBeTruthy();
+    expect(within(workgroup).getByRole('button', { name: 'Planner' })
+      .getAttribute('data-rfd-drag-handle-draggable-id')).toBe('collaboration-member:one');
+    expect(within(workgroup).getByRole('button', { name: 'Standalone' })
+      .getAttribute('data-rfd-drag-handle-draggable-id')).toBe('collaboration-member:three');
 
     fireEvent.click(within(workgroup).getByRole('button', { name: 'Remove from split Planner' }));
     expect(onRemoveFromSplit).toHaveBeenCalledWith('one');
