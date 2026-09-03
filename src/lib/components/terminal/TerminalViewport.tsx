@@ -28,9 +28,13 @@ import {
   type SelectionCell,
 } from '../../terminal/selectionHandles';
 import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal/imeAnchor';
-import { buildBracketedPastePayload } from '../../terminal/bracketedPaste';
+import { buildBracketedPastePayload, detectTextareaPaste } from '../../terminal/bracketedPaste';
 import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHysteresis';
-import { shouldForceSettledRedraw, type TerminalDimensions } from '../../terminal/refreshRedraw';
+import {
+  shouldForceSettledRedraw,
+  shouldProcessObservedResize,
+  type TerminalDimensions,
+} from '../../terminal/refreshRedraw';
 import { shouldAllowTerminalTransparency } from '../../terminal/renderer';
 import {
   acknowledgeResize,
@@ -371,6 +375,7 @@ export type TerminalViewportInputOptions = {
 
 interface TerminalViewportProps {
   sessionKey: string;
+  isLayoutVisible?: boolean;
   chunks: TerminalChunk[];
   onInput: (data: string, options?: TerminalViewportInputOptions) => void;
   onResize: (cols: number, rows: number, seq: number) => void;
@@ -799,6 +804,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
   (
     {
       sessionKey,
+      isLayoutVisible = true,
       chunks,
       onInput,
       onResize,
@@ -966,6 +972,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     autoFocusRef.current = autoFocus;
     const enableTouchScrollRef = React.useRef(enableTouchScroll);
     enableTouchScrollRef.current = enableTouchScroll;
+    const isLayoutVisibleRef = React.useRef(isLayoutVisible);
+    isLayoutVisibleRef.current = isLayoutVisible;
     const hasTmuxScroll = !!onTmuxScroll;
     const terminalConvertEol = getTerminalConvertEol(hasTmuxScroll);
     const {
@@ -3978,6 +3986,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           };
 
           localResizeObserver = new ResizeObserver((entries) => {
+            if (!shouldProcessObservedResize(enableTouchScrollRef.current, isLayoutVisibleRef.current)) {
+              debugTerminal('resize observer skipped: hidden mobile session');
+              return;
+            }
             // A pin/unpin or breakpoint transition can change which ancestor
             // establishes position:fixed coordinates while keeping the input
             // node connected. Force the next anchor pass to rediscover it.
@@ -4763,6 +4775,25 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                   return;
                 }
 
+                if (
+                  nativeEvent.inputType === 'insertFromPaste' ||
+                  nativeEvent.inputType === 'insertFromPasteAsQuotation'
+                ) {
+                  // Mobile Safari may expose pasted text only on beforeinput,
+                  // while the preceding paste event has empty clipboardData.
+                  // Catch it here before the textarea's ordinary diff-sync can
+                  // turn embedded newlines into separate agent submissions.
+                  const text = nativeEvent.dataTransfer?.getData('text/plain') || nativeEvent.data;
+                  if (text) {
+                    event.preventDefault();
+                    const ok = pasteTextIntoTerminal(text, event.currentTarget);
+                    if (enableTouchScroll) {
+                      onMobilePasteResultRef.current?.(ok);
+                    }
+                  }
+                  return;
+                }
+
                 if (nativeEvent.inputType === 'insertLineBreak') {
                   // IME 选词后浏览器会补一记 insertLineBreak，必须吞掉。
                   // 用一次性 token 而非时间窗口，避免误伤紧跟的真实回车。
@@ -4814,6 +4845,23 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
               }}
               onInput={(event) => {
                 if (isComposingRef.current) {
+                  return;
+                }
+                const nativeEvent = event.nativeEvent as InputEvent;
+                const pastedText = detectTextareaPaste(
+                  sentValueRef.current,
+                  sanitizeTerminalInput(event.currentTarget.value),
+                  nativeEvent.inputType,
+                );
+                if (pastedText) {
+                  // Some mobile browsers skip paste/beforeinput entirely (or
+                  // omit their data) and only reveal the inserted value here.
+                  // Atomic multiline insertion is therefore also treated as a
+                  // paste, which keeps every newline inside one protected block.
+                  const ok = pasteTextIntoTerminal(pastedText, event.currentTarget);
+                  if (enableTouchScroll) {
+                    onMobilePasteResultRef.current?.(ok);
+                  }
                   return;
                 }
                 syncTextareaToPty(event.currentTarget);

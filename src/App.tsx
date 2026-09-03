@@ -867,9 +867,11 @@ function App() {
   const [connectionPrioritySessionId, setConnectionPrioritySessionId] = React.useState<string | null>(
     initialConnectionPriorityRef.current,
   );
-  const [connectionPriorityReady, setConnectionPriorityReady] = React.useState(
-    initialConnectionPriorityRef.current !== null || typeof caches === 'undefined',
-  );
+  // Cache Storage is only a fallback for notification-click routing. Some PWA
+  // runtimes can take seconds to open that cache, so it must never gate the
+  // visible terminal's viewport or WebSocket. A cached target can switch the
+  // foreground session asynchronously once it arrives.
+  const [connectionPriorityReady, setConnectionPriorityReady] = React.useState(true);
   const pendingFocusSessionRef = React.useRef<string | null>(initialConnectionPriorityRef.current);
   const notificationTraceRef = React.useRef<string | null>(
     typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('_notifTrace'),
