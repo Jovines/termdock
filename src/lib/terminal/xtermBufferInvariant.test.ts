@@ -35,6 +35,38 @@ describe('xterm buffer viewport invariant', () => {
     }, 3)).toBe(0);
   });
 
+  it('cannot loop when the circular line store is already full', () => {
+    let pushCalls = 0;
+    const buffer = {
+      ybase: 3,
+      ydisp: 3,
+      lines: {
+        length: 4,
+        maxLength: 4,
+        push: () => { pushCalls++; },
+      },
+      getBlankLine: () => ({ blank: true }),
+    };
+
+    expect(repairXtermBufferViewport(buffer, 2)).toBe(1);
+    expect(buffer.ybase).toBe(2);
+    expect(buffer.ydisp).toBe(2);
+    expect(pushCalls).toBe(0);
+  });
+
+  it('stops if a line store does not grow after push', () => {
+    let pushCalls = 0;
+    expect(repairXtermBufferViewport({
+      ybase: 1,
+      lines: {
+        length: 2,
+        push: () => { pushCalls++; },
+      },
+      getBlankLine: () => ({ blank: true }),
+    }, 3)).toBe(0);
+    expect(pushCalls).toBe(1);
+  });
+
   it('prevents repeated-row corruption when a scrolled viewport grows', async () => {
     const { Terminal } = await import('@xterm/xterm');
     const terminal = new Terminal({ cols: 39, rows: 18, scrollback: 100, convertEol: false });

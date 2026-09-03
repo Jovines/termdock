@@ -2,11 +2,13 @@ import type { Terminal } from '@xterm/xterm';
 
 interface InternalLineStore {
   length: number;
+  maxLength?: number;
   push: (line: unknown) => void;
 }
 
 interface InternalBuffer {
   ybase: number;
+  ydisp?: number;
   lines: InternalLineStore;
   getBlankLine: (attr?: unknown) => unknown;
 }
@@ -31,10 +33,34 @@ export function repairXtermBufferViewport(
   if (!buffer || buffer.lines.length === 0 || !Number.isFinite(rows) || rows <= 0) {
     return 0;
   }
-  const requiredLength = Math.max(0, Math.floor(buffer.ybase) + Math.floor(rows));
+  const viewportRows = Math.floor(rows);
+  const capacity = Number.isFinite(buffer.lines.maxLength) && buffer.lines.maxLength! > 0
+    ? Math.floor(buffer.lines.maxLength!)
+    : null;
   let added = 0;
-  while (buffer.lines.length < requiredLength) {
+
+  // CircularList.push() replaces its oldest entry once maxLength is reached,
+  // so its length no longer grows. Clamp an impossible ybase first; otherwise
+  // a naive `while (length < ybase + rows)` becomes an infinite main-thread
+  // loop while a sidebar drag repeatedly fits the terminal.
+  if (capacity !== null) {
+    const maxYbase = Math.max(0, capacity - viewportRows);
+    if (buffer.ybase > maxYbase) {
+      buffer.ybase = maxYbase;
+      if (Number.isFinite(buffer.ydisp)) {
+        buffer.ydisp = Math.min(buffer.ydisp!, maxYbase);
+      }
+      added++;
+    }
+  }
+
+  const requiredLength = Math.max(0, Math.floor(buffer.ybase) + viewportRows);
+  const targetLength = capacity === null ? requiredLength : Math.min(requiredLength, capacity);
+  const missingLines = Math.max(0, targetLength - buffer.lines.length);
+  for (let index = 0; index < missingLines; index++) {
+    const lengthBeforePush = buffer.lines.length;
     buffer.lines.push(buffer.getBlankLine(undefined));
+    if (buffer.lines.length <= lengthBeforePush) break;
     added++;
   }
   return added;
