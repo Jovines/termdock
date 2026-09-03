@@ -1016,26 +1016,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     });
                   });
                 });
-                // 移动端兜底：软键盘 / Safari 视口尺寸在 connected 后才稳定，
-                // 多刷两次让 fit 跟上最终布局。桌面没有这个抖动，多刷反而会
-                // 让用户看到第二次 fit + scroll 的"闪一下"，所以仅 mobile 启用。
-                if (typeof window !== 'undefined' && isActiveRef.current && isMobileRef.current) {
-                  window.setTimeout(() => {
-                    terminalControllerRef.current?.requestRefresh('connected', {
-                      force: true,
-                      forceRedraw: true,
-                      reconcileServerSize: isActiveRef.current,
-                    });
-                  }, 120);
-                  window.setTimeout(() => {
-                    terminalControllerRef.current?.requestRefresh('connected', {
-                      force: true,
-                      forceRedraw: true,
-                      reconcileServerSize: isActiveRef.current,
-                    });
-                  }, 360);
-                }
-
                 if (event.mode !== 'tmux') {
                   setTmuxLayout(null);
                   setSessionCopyMode(storeSessionId, false);
