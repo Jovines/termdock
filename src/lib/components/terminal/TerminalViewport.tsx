@@ -66,6 +66,7 @@ import {
   type JoystickDirection,
 } from './joystickRepeat';
 import { createTerminalPathLinkProvider } from '../../terminal/pathLinks';
+import { repairXtermBufferInvariants } from '../../terminal/xtermBufferInvariant';
 
 const TERMINAL_HAPTIC_PATTERN_MS = 8;
 // 拖选（初次框选 / 拖选区 handle）时把指位向上提这么多 px 再换算格子：
@@ -2996,6 +2997,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (!proposed || proposed.cols <= 0 || proposed.rows <= 0) {
           return;
         }
+        // xterm.js #6063 can leave the logical line store shorter than the
+        // current viewport. Repair before deciding whether a resize is needed,
+        // because a same-size Session activation still needs to recover it.
+        const repairedBeforeResize = repairXtermBufferInvariants(terminal, before.rows);
         const hysteresis = decideFitHysteresis({
           reason,
           currentCols: before.cols,
@@ -3003,9 +3008,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           proposedCols: proposed.cols,
           proposedRows: proposed.rows,
         });
+        let repairedAfterResize = 0;
         if (hysteresis.accept) {
           terminal.resize(proposed.cols, proposed.rows);
+          repairedAfterResize = repairXtermBufferInvariants(terminal, proposed.rows);
           remainderPxRef.current = 0;
+        }
+        if (repairedBeforeResize > 0 || repairedAfterResize > 0) {
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+          debugTerminal('xterm buffer invariant repaired', {
+            reason,
+            before: repairedBeforeResize,
+            after: repairedAfterResize,
+            cols: terminal.cols,
+            rows: terminal.rows,
+          });
         }
         const next = { cols: terminal.cols, rows: terminal.rows };
 

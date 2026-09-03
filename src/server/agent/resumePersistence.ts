@@ -46,3 +46,21 @@ export function canRestoreDeadAgentShell(input: {
     && typeof input.agentResume?.sessionId === 'string'
     && input.agentResume.sessionId.length > 0;
 }
+
+/**
+ * A live Agent process can confirm recovery even when its session-start hook
+ * is delayed or unavailable. Require both the Agent identity and the native
+ * session id from the process argv so an unrelated fresh launch cannot clear
+ * the recovery offer.
+ */
+export function isConfirmedAgentResumeProcess(
+  pending: PersistedAgentResumeInfo | null | undefined,
+  detectedSlug: string,
+  inferredSessionId: string | null,
+): boolean {
+  return Boolean(
+    pending?.sessionId
+    && pending.slug === detectedSlug
+    && pending.sessionId === inferredSessionId,
+  );
+}

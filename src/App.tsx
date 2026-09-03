@@ -672,7 +672,9 @@ function App() {
   useEffect(() => {
     if (!agentResumeAction || agentResumeAction.status !== 'waiting') return;
     const session = terminalSessions.get(agentResumeAction.sessionId);
-    if (!session || session.agentResumeRecovered || session.agentStatus === null) return;
+    // Rich hooks confirm with agentStatus; process-level resume detection
+    // confirms with agent identity when a session-start hook is late/missing.
+    if (!session || session.agentResumeRecovered || (session.agentStatus === null && !session.agent)) return;
     const agentName = session.agent?.displayName ?? 'Agent';
     setAgentResumeAction(null);
     setAgentResumeNotice({ tone: 'success', message: t('tab.resumeAgentSuccess', { agent: agentName }) });

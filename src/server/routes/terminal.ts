@@ -84,6 +84,7 @@ import {
 } from '../agent/session.js';
 import {
   canRestoreDeadAgentShell,
+  isConfirmedAgentResumeProcess,
   normalizePersistedAgentResumeInfo,
   type PersistedAgentResumeInfo,
 } from '../agent/resumePersistence.js';
@@ -3567,6 +3568,12 @@ function syncAgentIdentity(sessionId: string, session: TerminalSession): void {
     if (argv.length > 0) {
       const sess = session.agentSession;
       const inferredSessionId = inferResumeSessionId(detected, argv);
+      const record = globalSessionState.sessions.find((s) => s.backendSessionId === sessionId);
+      const processConfirmedResume = session.agentResumeRecovered
+        && isConfirmedAgentResumeProcess(record?.agentResume, detected.slug, inferredSessionId);
+      if (processConfirmedResume) {
+        session.agentResumeRecovered = false;
+      }
       if (sess && !sess.sessionId && inferredSessionId) {
         sess.sessionId = inferredSessionId;
       }
@@ -3577,7 +3584,6 @@ function syncAgentIdentity(sessionId: string, session: TerminalSession): void {
       } else if (!sess && inferredSessionId) {
         // The session-start hook may predate a server/tmux reattach. Recover
         // both the native id and flags from a live `agent resume <id>` argv.
-        const record = globalSessionState.sessions.find((s) => s.backendSessionId === sessionId);
         const nextResume = {
           slug: detected.slug,
           sessionId: inferredSessionId,
@@ -3592,6 +3598,9 @@ function syncAgentIdentity(sessionId: string, session: TerminalSession): void {
           upsertGlobalSessionRecord({ ...record, agentResume: nextResume });
           schedulePersistGlobalState();
         }
+      }
+      if (processConfirmedResume) {
+        broadcastAgentStatus(sessionId, session);
       }
     }
   }

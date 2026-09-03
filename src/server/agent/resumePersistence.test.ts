@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { canRestoreDeadAgentShell, normalizePersistedAgentResumeInfo } from './resumePersistence.js';
+import {
+  canRestoreDeadAgentShell,
+  isConfirmedAgentResumeProcess,
+  normalizePersistedAgentResumeInfo,
+} from './resumePersistence.js';
 
 describe('persisted Agent resume metadata', () => {
   it('keeps a valid native session id and launch argv', () => {
@@ -32,5 +36,19 @@ describe('persisted Agent resume metadata', () => {
     expect(canRestoreDeadAgentShell({ cwd: '/repo', agentResume })).toBe(true);
     expect(canRestoreDeadAgentShell({ cwd: null, agentResume })).toBe(false);
     expect(canRestoreDeadAgentShell({ cwd: '/repo', agentResume: null })).toBe(false);
+  });
+
+  it('confirms recovery from a matching live resume process', () => {
+    const pending = normalizePersistedAgentResumeInfo({
+      slug: 'codex',
+      sessionId: 'thread-1',
+      launchArgv: ['codex'],
+      updatedAt: 10,
+    });
+
+    expect(isConfirmedAgentResumeProcess(pending, 'codex', 'thread-1')).toBe(true);
+    expect(isConfirmedAgentResumeProcess(pending, 'claude', 'thread-1')).toBe(false);
+    expect(isConfirmedAgentResumeProcess(pending, 'codex', 'thread-2')).toBe(false);
+    expect(isConfirmedAgentResumeProcess(pending, 'codex', null)).toBe(false);
   });
 });
