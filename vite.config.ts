@@ -8,9 +8,6 @@ import { PORT, DEFAULT_HOST } from './src/server/config';
 loadDotenv();
 
 export default defineConfig({
-  define: {
-    __TERMDOCK_BUILD_ID__: JSON.stringify(String(Date.now())),
-  },
   plugins: [
     react(),
     VitePWA({
