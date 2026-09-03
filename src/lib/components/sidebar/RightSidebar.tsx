@@ -85,6 +85,14 @@ import { describeSearchScope, parseExcludePatterns, resolveSearchScopePath } fro
 import './sidebarSelection.css';
 import { TERMINAL_DIRECTORY_OPEN_EVENT } from '../../terminal/pathLinks';
 
+export function mountRightSidebarRepoPickerOverlay(
+  overlay: ReactNode,
+  isMobile: boolean,
+  portalTarget: HTMLElement,
+): ReactNode {
+  return isMobile ? overlay : createPortal(overlay, portalTarget);
+}
+
 interface RightSidebarProps {
   isOpen: boolean;
   drawerWidthPx: number;
@@ -8224,7 +8232,7 @@ export function RightSidebar(
     const desktopLeft = Math.max(12, Math.min(repoPickerAnchor?.x ?? (viewportWidth - 368), viewportWidth - 352));
     const desktopTop = Math.max(12, Math.min(repoPickerAnchor?.y ?? 80, viewportHeight - 420));
     const desktopPanelStyle: CSSProperties | undefined = isMobile ? undefined : { left: desktopLeft, top: desktopTop };
-    return createPortal(
+    const overlay = (
       <div
         className={`fixed inset-0 z-drawer-backdrop ${isMobile ? 'bg-[var(--app-backdrop)]' : 'bg-transparent'}`}
         onClick={closeRepoPicker}
@@ -8313,9 +8321,9 @@ export function RightSidebar(
             })}
           </div>
         </div>
-      </div>,
-      document.body,
+      </div>
     );
+    return mountRightSidebarRepoPickerOverlay(overlay, isMobile, document.body);
   }
 
   function renderRepoSwitcher() {

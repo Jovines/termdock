@@ -85,6 +85,33 @@ describe('AgentFloatingSessionButtons', () => {
     expect(button.className).not.toContain('max-lg:inline-flex');
   });
 
+  it('keeps both floating controls left of a pinned right sidebar inset', () => {
+    const terminalArea = createTerminalArea({ right: window.innerWidth });
+    const rightInset = 240;
+    render(
+      <AgentFloatingSessionButtons
+        reviewCount={2}
+        runningSessions={[
+          { id: 'first', label: 'First workspace' },
+          { id: 'second', label: 'Second workspace' },
+        ]}
+        activeSessionId="other"
+        runningButtonEnabled
+        isDesktopLayout
+        containerElement={terminalArea}
+        occlusionInsets={{ right: rightInset }}
+      />,
+    );
+
+    const terminalContentRight = window.innerWidth - rightInset;
+    const attention = screen.getByRole('button', { name: 'Jump to next session needing attention: 2' });
+    const running = screen.getByRole('button', { name: 'Jump to next running session: 2' });
+    expect(Number.parseFloat(attention.style.left) + MOBILE_ATTENTION_SIZE_PX)
+      .toBeLessThanOrEqual(terminalContentRight - MOBILE_ATTENTION_EDGE_GAP_PX);
+    expect(Number.parseFloat(running.style.left) + MOBILE_ATTENTION_SIZE_PX)
+      .toBeLessThanOrEqual(terminalContentRight - MOBILE_ATTENTION_EDGE_GAP_PX);
+  });
+
   it('stays available beside desktop sidebars but hides behind mobile drawers', () => {
     const terminalArea = createTerminalArea();
     useSidebarStore.setState({ leftOpen: true });

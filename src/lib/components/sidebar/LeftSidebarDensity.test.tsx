@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { LeftSidebar } from './LeftSidebar';
@@ -21,6 +21,7 @@ describe('LeftSidebar session density', () => {
       json: async () => ({ locale: 'en' }),
     })));
     const onRemoveFromSplit = vi.fn();
+    const onSetSplitLayout = vi.fn();
 
     render(
       <I18nProvider>
@@ -57,7 +58,7 @@ describe('LeftSidebar session density', () => {
           onCloseSplit={vi.fn()}
           onRemoveFromSplit={onRemoveFromSplit}
           splitWorkspaces={[{ id: 'split-one', sessionIds: ['one', 'two'], layout: 'horizontal' }]}
-          onSetSplitLayout={vi.fn()}
+          onSetSplitLayout={onSetSplitLayout}
           onReorderSplitWorkspace={vi.fn()}
           onRenameSplitWorkspace={vi.fn()}
           onCombineSplitSessions={vi.fn()}
@@ -88,5 +89,12 @@ describe('LeftSidebar session density', () => {
     expect(ordinarySessionButton?.getAttribute('data-rfd-drag-handle-draggable-id')).toBe('session:three');
     expect(groupedSessionButton?.getAttribute('draggable')).not.toBe('true');
     expect(onRemoveFromSplit).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Split layout: Side by side' }));
+    expect(screen.getByRole('menu', { name: 'Split layout' })).toBeTruthy();
+    expect(screen.queryByRole('menuitemradio', { name: 'Grid' })).toBeNull();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Stacked' }));
+    expect(onSetSplitLayout).toHaveBeenCalledWith('one', 'vertical');
+    expect(screen.queryByRole('menu', { name: 'Split layout' })).toBeNull();
   });
 });

@@ -3356,6 +3356,7 @@ function App() {
         runningButtonEnabled={runningSessionButtonEnabled}
         isDesktopLayout={isDesktopViewport}
         containerElement={terminalAreaElement}
+        occlusionInsets={{ right: pinnedRightSidebarInset }}
       />
 
       {/* Settings modal (single page) */}

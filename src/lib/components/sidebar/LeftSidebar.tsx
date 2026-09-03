@@ -9,6 +9,9 @@ import {
   Pin as RiPushpinLine,
   PinOff as RiPinOffLine,
   Columns2 as RiSplitLine,
+  Rows2 as RiRowsLine,
+  Grid2X2 as RiGridLine,
+  Unlink as RiUnlinkLine,
   ChartBar as RiChartBarLine,
   MoreHorizontal as RiMoreHorizontal,
   RefreshCw as RiRefreshLine,
@@ -155,7 +158,7 @@ export function LeftSidebar(
     isOpen, drawerWidthPx, onClose, onOpen,
     sessions, activeSessionId, sessionStates,
     onNewSession, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, splitWorkspaces,
-    onReorderSplitWorkspace, onCombineSplitSessions,
+    onSetSplitLayout, onReorderSplitWorkspace, onCombineSplitSessions,
     onReorderSessions, onSessionMenu, onOpenSettings, onOpenQuota,
     updateState, updateActionPending = false, onConfirmUpdateRestart, onRetryUpdate,
     tmuxAvailable = true,
@@ -172,6 +175,7 @@ export function LeftSidebar(
 ) {
   const { t } = useI18n();
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const [layoutMenuWorkspaceId, setLayoutMenuWorkspaceId] = useState<string | null>(null);
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
   const [agentOperationsOpen, setAgentOperationsOpen] = useState(false);
   const [agentResumeHistory, setAgentResumeHistory] = useState<AgentResumeHistoryEntry[]>([]);
@@ -192,6 +196,7 @@ export function LeftSidebar(
     selectAgent: selectNewSessionAgent,
   } = useNewSessionAgentPreference();
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
+  const splitLayoutMenuRef = useRef<HTMLDivElement | null>(null);
   const pendingUpdate = Boolean(
     updateState?.latestVersion
     && ['installing', 'ready', 'restarting', 'error'].includes(updateState.status),
@@ -320,6 +325,21 @@ export function LeftSidebar(
     };
   }, [headerMenuOpen]);
 
+  useEffect(() => {
+    if (!layoutMenuWorkspaceId) return;
+    const closeMenu = (event: PointerEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent && event.key !== 'Escape') return;
+      if (event instanceof PointerEvent && event.target instanceof Node && splitLayoutMenuRef.current?.contains(event.target)) return;
+      setLayoutMenuWorkspaceId(null);
+    };
+    window.addEventListener('pointerdown', closeMenu);
+    window.addEventListener('keydown', closeMenu);
+    return () => {
+      window.removeEventListener('pointerdown', closeMenu);
+      window.removeEventListener('keydown', closeMenu);
+    };
+  }, [layoutMenuWorkspaceId]);
+
   const closeIfOverlay = () => {
     if (!push && !pinned) onClose();
   };
@@ -424,6 +444,7 @@ export function LeftSidebar(
     session: LeftSidebarProps['sessions'][number],
     dragHandleProps?: DraggableProvidedDragHandleProps | null,
     inSplitWorkspace?: boolean,
+    beforeActions?: React.ReactNode,
   ) => {
     const isActive = session.id === activeSessionId;
     const isSplit = splitSessionIds.has(session.id);
@@ -510,6 +531,7 @@ export function LeftSidebar(
             {displayName}
           </span>
         </button>
+        {beforeActions}
         <button
           type="button"
           onClick={(event) => {
@@ -530,7 +552,9 @@ export function LeftSidebar(
           aria-label={`${inSplitWorkspace ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')} ${displayName}`}
           title={inSplitWorkspace ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')}
         >
-          <RiSplitLine size={inSplitWorkspace ? 11 : 12} />
+          {inSplitWorkspace
+            ? <RiUnlinkLine size={11} />
+            : <RiSplitLine size={12} />}
         </button>
         <button
           type="button"
@@ -696,6 +720,21 @@ export function LeftSidebar(
     }
     const accessibleName = workspace.name?.trim()
       || `${t('tab.splitWorkspace')} ${splitWorkspaces.findIndex((candidate) => candidate.id === workspace.id) + 1}`;
+    const layoutMenuOpen = layoutMenuWorkspaceId === workspace.id;
+    const layoutOptions: Array<{ layout: SplitLayout; label: string; icon: typeof RiSplitLine }> = [
+      { layout: 'horizontal', label: t('tab.splitHorizontal'), icon: RiSplitLine },
+      { layout: 'vertical', label: t('tab.splitVertical'), icon: RiRowsLine },
+      ...(members.length >= 3
+        ? [{ layout: 'grid' as const, label: t('tab.splitGrid'), icon: RiGridLine }]
+        : []),
+    ];
+    const CurrentLayoutIcon = workspace.layout === 'vertical'
+      ? RiRowsLine
+      : workspace.layout === 'grid'
+        ? RiGridLine
+        : RiSplitLine;
+    const currentLayoutLabel = layoutOptions.find((option) => option.layout === workspace.layout)?.label
+      ?? t('tab.splitHorizontal');
     return (
       <section
         data-split-workspace={workspace.id}
@@ -731,7 +770,7 @@ export function LeftSidebar(
                       ref={memberProvided.innerRef}
                       {...memberProvided.draggableProps}
                       {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
-                      className={`flex items-center rounded-sm pr-0.5 transition-colors ${
+                      className={`${memberIndex === 0 && layoutMenuOpen ? 'relative z-20 ' : 'relative '}flex items-center rounded-sm pr-0.5 transition-colors ${
                         memberSnapshot.isDragging ? 'bg-surface-elevated opacity-90 shadow-lg ' : ''
                       }${
                         getSessionStatusBackground(session.id)
@@ -740,7 +779,66 @@ export function LeftSidebar(
                             : 'text-muted-foreground hover:bg-surface-2')
                       }`}
                     >
-                      {renderSessionRowBody(session, memberProvided.dragHandleProps, true)}
+                      {renderSessionRowBody(session, memberProvided.dragHandleProps, true, memberIndex === 0 ? (
+                        <div
+                          ref={layoutMenuOpen ? splitLayoutMenuRef : undefined}
+                          className="relative shrink-0"
+                          onPointerDown={(event) => event.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            className={`sidebar-session-action inline-flex h-6 w-6 items-center justify-center rounded-md transition active:scale-95 ${
+                              layoutMenuOpen
+                                ? 'bg-primary/15 text-primary'
+                                : 'text-muted-foreground/70 hover:bg-surface-2 hover:text-foreground'
+                            }`}
+                            aria-label={`${t('tab.splitLayout')}: ${currentLayoutLabel}`}
+                            aria-haspopup="menu"
+                            aria-expanded={layoutMenuOpen}
+                            title={t('tab.splitLayout')}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setLayoutMenuWorkspaceId((current) => current === workspace.id ? null : workspace.id);
+                            }}
+                          >
+                            <CurrentLayoutIcon size={12} />
+                          </button>
+                          {layoutMenuOpen && (
+                            <div
+                              role="menu"
+                              aria-label={t('tab.splitLayout')}
+                              className="absolute right-0 top-full z-30 mt-1 flex gap-0.5 rounded-md border border-border/20 bg-surface-elevated p-1 shadow-lg"
+                            >
+                              {layoutOptions.map((option) => {
+                                const LayoutIcon = option.icon;
+                                const selected = option.layout === workspace.layout;
+                                return (
+                                  <button
+                                    key={option.layout}
+                                    type="button"
+                                    role="menuitemradio"
+                                    aria-checked={selected}
+                                    aria-label={option.label}
+                                    title={option.label}
+                                    className={`sidebar-session-action inline-flex h-7 w-7 items-center justify-center rounded-sm transition active:scale-95 ${
+                                      selected
+                                        ? 'bg-primary/15 text-primary'
+                                        : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'
+                                    }`}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      onSetSplitLayout(session.id, option.layout);
+                                      setLayoutMenuWorkspaceId(null);
+                                    }}
+                                  >
+                                    <LayoutIcon size={13} />
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      ) : undefined)}
                     </div>
                   )}
                 </Draggable>

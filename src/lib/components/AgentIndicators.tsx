@@ -104,9 +104,17 @@ function readSafeInset(name: string): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
+export interface FloatingSessionOcclusionInsets {
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
+}
+
 function getMobileAttentionViewport(
   isDesktopLayout: boolean,
   containerElement: HTMLElement | null,
+  occlusionInsets: FloatingSessionOcclusionInsets = {},
 ): MobileAttentionViewport {
   if (typeof window === 'undefined') return { width: 390, height: 664 };
   const visualViewport = window.visualViewport;
@@ -119,19 +127,19 @@ function getMobileAttentionViewport(
     height,
     safeTop: Math.max(
       readSafeInset('--safe-top-inset'),
-      hasContainerBounds ? Math.max(0, bounds!.top) : 0,
+      (hasContainerBounds ? Math.max(0, bounds!.top) : 0) + Math.max(0, occlusionInsets.top ?? 0),
     ),
     safeRight: Math.max(
       readSafeInset('--safe-right-inset'),
-      hasContainerBounds ? Math.max(0, width - bounds!.right) : 0,
+      (hasContainerBounds ? Math.max(0, width - bounds!.right) : 0) + Math.max(0, occlusionInsets.right ?? 0),
     ),
     safeBottom: Math.max(
       readSafeInset('--safe-bottom-inset'),
-      hasContainerBounds ? Math.max(0, height - bounds!.bottom) : 0,
+      (hasContainerBounds ? Math.max(0, height - bounds!.bottom) : 0) + Math.max(0, occlusionInsets.bottom ?? 0),
     ),
     safeLeft: Math.max(
       readSafeInset('--safe-left-inset'),
-      hasContainerBounds ? Math.max(0, bounds!.left) : 0,
+      (hasContainerBounds ? Math.max(0, bounds!.left) : 0) + Math.max(0, occlusionInsets.left ?? 0),
     ),
     bottomClearance: isDesktopLayout ? MOBILE_ATTENTION_EDGE_GAP_PX : 72,
   };
@@ -510,17 +518,13 @@ interface RunningSessionRailLayout {
 
 function getRunningSessionRailLayout(
   position: MobileAttentionPosition,
-  containerElement: HTMLElement,
+  viewport: MobileAttentionViewport,
   count: number,
 ): RunningSessionRailLayout {
-  const bounds = containerElement.getBoundingClientRect();
-  const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
-  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-  const hasBounds = bounds.width > 0 && bounds.height > 0;
-  const terminalLeft = hasBounds ? Math.max(0, bounds.left) : 0;
-  const terminalRight = hasBounds ? Math.min(viewportWidth, bounds.right) : viewportWidth;
-  const terminalTop = hasBounds ? Math.max(0, bounds.top) : 0;
-  const terminalBottom = hasBounds ? Math.min(viewportHeight, bounds.bottom) : viewportHeight;
+  const terminalLeft = Math.max(0, viewport.safeLeft ?? 0);
+  const terminalRight = viewport.width - Math.max(0, viewport.safeRight ?? 0);
+  const terminalTop = Math.max(0, viewport.safeTop ?? 0);
+  const terminalBottom = viewport.height - Math.max(0, viewport.safeBottom ?? 0);
   const edgeGap = MOBILE_ATTENTION_EDGE_GAP_PX;
   const opensLeft = position.x + (MOBILE_ATTENTION_SIZE_PX / 2)
     >= terminalLeft + ((terminalRight - terminalLeft) / 2);
@@ -590,6 +594,7 @@ export function AgentFloatingSessionButtons({
   runningButtonEnabled,
   isDesktopLayout,
   containerElement,
+  occlusionInsets,
 }: {
   reviewCount: number;
   runningSessions: readonly RunningSessionShortcut[];
@@ -597,6 +602,8 @@ export function AgentFloatingSessionButtons({
   runningButtonEnabled: boolean;
   isDesktopLayout: boolean;
   containerElement: HTMLElement | null;
+  /** Persistent UI occupying an edge of the terminal's otherwise full-size container. */
+  occlusionInsets?: FloatingSessionOcclusionInsets;
 }): React.ReactElement | null {
   const { t } = useI18n();
   const sidebarLeftOpen = useSidebarStore((state) => state.leftOpen);
@@ -611,6 +618,20 @@ export function AgentFloatingSessionButtons({
     && runningSessions.length > 0
     && canJumpToRunningSession
     && floatingChromeVisible;
+  const occlusionTop = Math.max(0, occlusionInsets?.top ?? 0);
+  const occlusionRight = Math.max(0, occlusionInsets?.right ?? 0);
+  const occlusionBottom = Math.max(0, occlusionInsets?.bottom ?? 0);
+  const occlusionLeft = Math.max(0, occlusionInsets?.left ?? 0);
+  const getFloatingViewport = React.useCallback(() => getMobileAttentionViewport(
+    isDesktopLayout,
+    containerElement,
+    {
+      top: occlusionTop,
+      right: occlusionRight,
+      bottom: occlusionBottom,
+      left: occlusionLeft,
+    },
+  ), [containerElement, isDesktopLayout, occlusionBottom, occlusionLeft, occlusionRight, occlusionTop]);
   const preferencesRef = React.useRef<Record<FloatingSessionButtonKind, MobileAttentionPreference>>({
     attention: readFloatingButtonPreference(
       MOBILE_ATTENTION_POSITION_KEY,
@@ -623,7 +644,7 @@ export function AgentFloatingSessionButtons({
   });
 
   const resolvePositions = React.useCallback((): FloatingSessionButtonPositions => {
-    const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
+    const viewport = getFloatingViewport();
     const attention = resolveMobileAttentionPosition(viewport, preferencesRef.current.attention);
     const rawRunning = resolveMobileAttentionPosition(viewport, preferencesRef.current.running);
     return {
@@ -632,7 +653,7 @@ export function AgentFloatingSessionButtons({
         ? avoidMobileAttentionOverlap(viewport, rawRunning, attention)
         : rawRunning,
     };
-  }, [attentionVisible, containerElement, isDesktopLayout, runningVisible]);
+  }, [attentionVisible, getFloatingViewport, runningVisible]);
   const [positions, setPositions] = React.useState<FloatingSessionButtonPositions>(
     () => resolvePositions(),
   );
@@ -713,11 +734,11 @@ export function AgentFloatingSessionButtons({
     if (!isOtherButtonVisible(kind)) return position;
     const otherKind = kind === 'attention' ? 'running' : 'attention';
     return avoidMobileAttentionOverlap(
-      getMobileAttentionViewport(isDesktopLayout, containerElement),
+      getFloatingViewport(),
       position,
       positionsRef.current[otherKind],
     );
-  }, [containerElement, isDesktopLayout, isOtherButtonVisible]);
+  }, [getFloatingViewport, isOtherButtonVisible]);
 
   const persistReleasedPosition = React.useCallback((
     kind: FloatingSessionButtonKind,
@@ -731,7 +752,7 @@ export function AgentFloatingSessionButtons({
     clientX: number,
     clientY: number,
   ) => {
-    const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
+    const viewport = getFloatingViewport();
     const released = drag.moved
       ? clampMobileAttentionDrag(viewport, {
           x: drag.startX + (clientX - drag.originX),
@@ -749,7 +770,7 @@ export function AgentFloatingSessionButtons({
     const next = { ...positionsRef.current, [kind]: finalPosition.position };
     positionsRef.current = next;
     setPositions(next);
-  }, [avoidOtherButton, containerElement, isDesktopLayout]);
+  }, [avoidOtherButton, getFloatingViewport]);
 
   const suppressSyntheticClick = React.useCallback((kind: FloatingSessionButtonKind) => {
     suppressClickRef.current[kind] = true;
@@ -792,7 +813,7 @@ export function AgentFloatingSessionButtons({
       if (!drag.moved && Math.hypot(dx, dy) < 5) return;
       drag.moved = true;
       setDraggingKind('attention');
-      const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
+      const viewport = getFloatingViewport();
       const moved = avoidOtherButton('attention', clampMobileAttentionDrag(viewport, {
         x: drag.startX + dx,
         y: drag.startY + dy,
@@ -806,7 +827,7 @@ export function AgentFloatingSessionButtons({
   };
 
   const runningRailLayout = containerElement
-    ? getRunningSessionRailLayout(positions.running, containerElement, runningSessions.length)
+    ? getRunningSessionRailLayout(positions.running, getFloatingViewport(), runningSessions.length)
     : null;
 
   const clearRunningLongPress = (gesture: NonNullable<typeof runningGestureRef.current>) => {
@@ -885,7 +906,7 @@ export function AgentFloatingSessionButtons({
       if (gesture.mode !== 'dragging') return;
       if (!gesture.moved && Math.hypot(dx, dy) < 5) return;
       gesture.moved = true;
-      const viewport = getMobileAttentionViewport(isDesktopLayout, containerElement);
+      const viewport = getFloatingViewport();
       const moved = avoidOtherButton('running', clampMobileAttentionDrag(viewport, {
         x: gesture.startX + dx,
         y: gesture.startY + dy,
