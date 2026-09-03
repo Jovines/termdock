@@ -34,6 +34,7 @@ import { clientLog } from '../utils/clientLog';
 import { markStartupMilestone } from '../utils/startupPerformance';
 import { pickSessionAfterClose } from '../utils/sessionSelection';
 import type { ToolbarPresetDefinition } from './terminal/mobileKeyboardPresets';
+import { activateSplitPaneForWheel } from './splitPaneWheelActivation';
 import { AlertTriangle, Check, Columns2, Folder, Plus, RotateCcw, X } from 'lucide-react';
 import { useI18n } from '../i18n';
 import {
@@ -1901,6 +1902,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         aria-hidden={options.hidden || undefined}
         onPointerDown={() => {
           if (!isActive) activateSplitPane(session.id);
+        }}
+        onWheelCapture={() => {
+          // A trackpad/mouse wheel does not emit pointerdown. Activate during
+          // capture so this same wheel event reaches xterm as foreground input
+          // instead of being discarded by TerminalView's inactive-session gate.
+          activateSplitPaneForWheel(isActive, () => activateSplitPane(session.id));
         }}
       >
         <div className="min-h-0 flex-1 app-chrome-bg">

@@ -278,6 +278,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const lastSentViewingRef = React.useRef<boolean | null>(null);
   const streamVersionRef = React.useRef(0);
   const isActiveRef = React.useRef(isActive);
+  // Interaction capture in MultiTerminalView can synchronously promote a split
+  // pane while the original wheel event is still propagating into xterm. Keep
+  // this gate current during render so that same event is accepted immediately.
+  isActiveRef.current = isActive;
   const isMobileRef = React.useRef(isMobile);
   const desktopResumeFocusTimerRef = React.useRef<number | null>(null);
   const desktopInteractionFocusTimerRef = React.useRef<number | null>(null);
@@ -325,10 +329,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     });
     return result.terminalSession;
   }, [desiredSessionMode, desiredTmuxSessionName, fallbackTmuxSessionName, sessionId]);
-
-  React.useEffect(() => {
-    isActiveRef.current = isActive;
-  }, [isActive]);
 
   // Swiper 翻到本页（isActive 从 false→true）：让编排器走一遍刷新。
   //

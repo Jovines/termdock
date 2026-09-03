@@ -1768,6 +1768,7 @@ async function openInventorySession(
 
 interface OrchestrationSessionSnapshot {
   sessionId: string;
+  agentNativeSessionId: string | null;
   backendSessionId: string | null;
   name: string;
   cwd: string;
@@ -1784,6 +1785,7 @@ function orchestrationSessionSnapshot(record: PersistedClientSession): Orchestra
   const latestPrompt = backend?.autoTitlePromptPayloads.at(-1)?.trim() ?? '';
   return {
     sessionId: record.sessionId,
+    agentNativeSessionId: backend?.agentSession?.sessionId ?? record.agentResume?.sessionId ?? null,
     backendSessionId: record.backendSessionId ?? null,
     name: record.name,
     cwd: backend?.cwd ?? record.cwd ?? '',
@@ -1889,7 +1891,12 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
     groups: collaborationStore.groupsForSession(frontendSessionId),
     sessions: globalSessionState.sessions.map((candidate) => {
       const snapshot = orchestrationSessionSnapshot(candidate);
-      return { sessionId: snapshot.sessionId, name: snapshot.name, status: snapshot.status };
+      return {
+        sessionId: snapshot.sessionId,
+        agentNativeSessionId: snapshot.agentNativeSessionId,
+        name: snapshot.name,
+        status: snapshot.status,
+      };
     }),
   });
   session.ptyProcess.write(buildBracketedSubmitBytes(prompt));

@@ -32,6 +32,7 @@ function resetSidebarStore(): void {
   useSidebarStore.setState({
     leftOpen: false,
     rightOpen: false,
+    rightSidebarWidth: readRightSidebarWidth(),
     rightSidebarLayoutPreference: readRightSidebarLayoutPreference(),
     rightTab: 'files',
     rightSearchOpen: false,
@@ -155,6 +156,31 @@ describe('pinned right sidebar width', () => {
     useSidebarStore.getState().setRightSidebarWidth(1_200);
     expect(useSidebarStore.getState().rightSidebarWidth).toBe(1_200);
     expect(readRightSidebarWidth()).toBe(1_200);
+  });
+
+  it('persists and restores the pinned width for each session', () => {
+    useSidebarStore.getState().setRootPath('/workspace/shared', 'session-a');
+    useSidebarStore.getState().setRightSidebarWidth(640);
+
+    useSidebarStore.getState().setRootPath('/workspace/shared', 'session-b');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(760);
+    useSidebarStore.getState().setRightSidebarWidth(920);
+
+    useSidebarStore.getState().setRootPath('/workspace/shared', 'session-a');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(640);
+
+    useSidebarStore.getState().setRootPath('/workspace/shared', 'session-b');
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(920);
+  });
+
+  it('restores a session width from local storage after the in-memory state is reset', () => {
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a');
+    useSidebarStore.getState().setRightSidebarWidth(880);
+
+    resetSidebarStore();
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a');
+
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(880);
   });
 });
 

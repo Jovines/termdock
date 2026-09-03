@@ -40,6 +40,7 @@ const LEFT_PINNED_KEY = 'termdock-left-sidebar-pinned';
 const LEFT_SIDEBAR_WIDTH_KEY = 'termdock-left-sidebar-width';
 const RIGHT_PINNED_KEY = 'termdock-right-sidebar-pinned';
 const RIGHT_SIDEBAR_WIDTH_KEY = 'termdock-right-sidebar-width';
+const RIGHT_SIDEBAR_WIDTHS_BY_CONTEXT_CACHE_KEY = 'termdock:right-sidebar:widths-by-session:v1';
 const RIGHT_SIDEBAR_LAYOUT_PREFERENCE_KEY = 'termdock-right-sidebar-layout-preference';
 
 export function readLeftPinnedPreference(): boolean {
@@ -114,6 +115,30 @@ function writeRightSidebarWidth(width: number): void {
   try {
     window.localStorage.setItem(RIGHT_SIDEBAR_WIDTH_KEY, String(width));
   } catch { /* best-effort */ }
+}
+
+function isRightSidebarWidthCache(value: unknown): value is Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((width) => (
+    typeof width === 'number'
+    && Number.isFinite(width)
+    && width >= RIGHT_SIDEBAR_MIN_WIDTH_PX
+  ));
+}
+
+function readRightSidebarWidthCache(): Record<string, number> {
+  return readCache(RIGHT_SIDEBAR_WIDTHS_BY_CONTEXT_CACHE_KEY, isRightSidebarWidthCache) ?? {};
+}
+
+function writeRightSidebarWidthForContext(contextKey: string | null, width: number): void {
+  if (!contextKey) {
+    writeRightSidebarWidth(width);
+    return;
+  }
+  writeCache(RIGHT_SIDEBAR_WIDTHS_BY_CONTEXT_CACHE_KEY, {
+    ...readRightSidebarWidthCache(),
+    [contextKey]: width,
+  });
 }
 
 export function readRightSidebarLayoutPreference(): RightSidebarLayoutPreference {
@@ -547,7 +572,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     set((s) => {
       const clamped = Math.max(width, RIGHT_SIDEBAR_MIN_WIDTH_PX);
       if (s.rightSidebarWidth === clamped) return s;
-      writeRightSidebarWidth(clamped);
+      writeRightSidebarWidthForContext(s.contextKey, clamped);
       return { rightSidebarWidth: clamped };
     }),
   setRightSidebarLayoutPreference: (preference) =>
@@ -588,11 +613,13 @@ export const useSidebarStore = create<SidebarState>((set) => ({
 
     const cached = contextKey ? projectStateCache.get(contextKey) : undefined;
     const persistedRightTab = contextKey ? readRightSidebarTabCache()[contextKey] : undefined;
+    const persistedRightSidebarWidth = contextKey ? readRightSidebarWidthCache()[contextKey] : undefined;
     const persistedExplorerRoot = contextKey ? s.explorerRootCache[contextKey] : undefined;
     const persistedSelectedFilePath = contextKey ? readSelectedFilePathCache()[contextKey] : undefined;
     return {
       rootPath: path,
       contextKey,
+      rightSidebarWidth: persistedRightSidebarWidth ?? readRightSidebarWidth(),
       rightTab: cached?.rightTab ?? persistedRightTab ?? 'files',
       explorerRoot: cached?.explorerRoot ?? persistedExplorerRoot ?? path,
       expandedPaths: cached ? new Set(cached.expandedPaths) : new Set(),

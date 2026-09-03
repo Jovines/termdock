@@ -3542,6 +3542,7 @@ export interface CollaborationMessage {
 
 export interface OrchestrationSession {
   sessionId: string;
+  agentNativeSessionId?: string | null;
   backendSessionId: string | null;
   name: string;
   cwd: string;
