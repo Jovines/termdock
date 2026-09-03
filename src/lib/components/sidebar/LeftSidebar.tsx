@@ -32,8 +32,10 @@ import { useSuperLongPress } from '../../hooks/useSuperLongPress';
 import type { SplitLayout, SplitWorkspaceSummary } from '../../terminal/splitWorkspaces';
 import {
   listAgentResumeHistory,
+  listCollaborationGroups,
   prepareAgentResumeHistory,
   removeAgentResumeHistory,
+  type CollaborationGroup,
   type AgentResumeHistoryEntry,
   type TermdockUpdateState,
 } from '../../terminal/api';
@@ -102,26 +104,76 @@ interface LeftSidebarProps {
 }
 
 type SidebarSession = LeftSidebarProps['sessions'][number];
+type SidebarCollaborationGroup = CollaborationGroup & { sessionIds: string[] };
 
 type SidebarEntity =
   | { kind: 'session'; id: string; session: SidebarSession; sessionIds: [string] }
-  | { kind: 'workspace'; id: string; workspace: SplitWorkspaceSummary; members: SidebarSession[]; sessionIds: string[] };
+  | { kind: 'workspace'; id: string; workspace: SplitWorkspaceSummary; members: SidebarSession[]; sessionIds: string[] }
+  | { kind: 'collaboration'; id: string; group: SidebarCollaborationGroup; members: SidebarSession[]; sessionIds: string[] };
+
+export function normalizeSidebarCollaborationGroups(
+  groups: readonly CollaborationGroup[],
+  availableSessionIds: ReadonlySet<string>,
+): SidebarCollaborationGroup[] {
+  const claimedSessionIds = new Set<string>();
+  const normalized: SidebarCollaborationGroup[] = [];
+  for (const group of groups) {
+    const sessionIds = Array.from(new Set(group.sessionIds)).filter(
+      (id) => availableSessionIds.has(id) && !claimedSessionIds.has(id),
+    );
+    if (sessionIds.length < 2) continue;
+    sessionIds.forEach((id) => claimedSessionIds.add(id));
+    normalized.push({ ...group, sessionIds });
+  }
+  return normalized;
+}
 
 function buildSidebarEntities(
   orderedSessions: SidebarSession[],
   workspaces: SplitWorkspaceSummary[],
   sessionsById: Map<string, SidebarSession>,
+  collaborationGroups: readonly SidebarCollaborationGroup[] = [],
 ): SidebarEntity[] {
+  const collaborationBySessionId = new Map<string, SidebarCollaborationGroup>();
   const workspaceBySessionId = new Map<string, SplitWorkspaceSummary>();
   const allowedIds = new Set(orderedSessions.map((session) => session.id));
+  for (const group of collaborationGroups) {
+    const visibleIds = group.sessionIds.filter((id) => allowedIds.has(id));
+    if (visibleIds.length < 2) continue;
+    const visibleGroup = visibleIds.length === group.sessionIds.length
+      ? group
+      : { ...group, sessionIds: visibleIds };
+    visibleIds.forEach((id) => collaborationBySessionId.set(id, visibleGroup));
+  }
   for (const workspace of workspaces) {
     if (workspace.sessionIds.length < 2 || !workspace.sessionIds.every((id) => allowedIds.has(id))) continue;
+    // Collaboration is the primary visual grouping. A split that crosses its
+    // boundary remains visible through the split action state on each row.
+    if (workspace.sessionIds.some((id) => collaborationBySessionId.has(id))) continue;
     for (const id of workspace.sessionIds) workspaceBySessionId.set(id, workspace);
   }
 
+  const emittedCollaborationIds = new Set<string>();
   const emittedWorkspaceIds = new Set<string>();
   const entities: SidebarEntity[] = [];
   for (const session of orderedSessions) {
+    const collaboration = collaborationBySessionId.get(session.id);
+    if (collaboration) {
+      if (emittedCollaborationIds.has(collaboration.id)) continue;
+      emittedCollaborationIds.add(collaboration.id);
+      const members = collaboration.sessionIds.flatMap((id) => {
+        const member = sessionsById.get(id);
+        return member ? [member] : [];
+      });
+      entities.push({
+        kind: 'collaboration',
+        id: `collaboration:${collaboration.id}`,
+        group: collaboration,
+        members,
+        sessionIds: collaboration.sessionIds,
+      });
+      continue;
+    }
     const workspace = workspaceBySessionId.get(session.id);
     if (!workspace) {
       entities.push({ kind: 'session', id: `session:${session.id}`, session, sessionIds: [session.id] });
@@ -198,6 +250,7 @@ export function LeftSidebar(
   const [agentResumeHistoryPendingId, setAgentResumeHistoryPendingId] = useState<string | null>(null);
   const [agentResumeHistoryError, setAgentResumeHistoryError] = useState<string | null>(null);
   const [attachingTmuxName, setAttachingTmuxName] = useState<string | null>(null);
+  const [rawCollaborationGroups, setRawCollaborationGroups] = useState<CollaborationGroup[]>([]);
   const [newSessionOptions, setNewSessionOptions] = useState<{
     mode: 'shell' | 'tmux';
     cwd?: string;
@@ -220,6 +273,7 @@ export function LeftSidebar(
   const collapsedGroups = useSidebarStore((s) => s.collapsedGroups);
   const toggleGroupCollapsed = useSidebarStore((s) => s.toggleGroupCollapsed);
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
+  const collaborationRefreshIdRef = useRef(0);
   const splitMemberDragActiveRef = useRef(false);
   const splitExitAllowedListIdRef = useRef<string | null>(null);
   const splitExitTargetRef = useRef<{ listId: string; index: number } | null>(null);
@@ -237,6 +291,41 @@ export function LeftSidebar(
     () => new Map(sessions.map((session) => [session.id, session])),
     [sessions],
   );
+  const collaborationGroups = useMemo(
+    () => normalizeSidebarCollaborationGroups(rawCollaborationGroups, new Set(sessionsById.keys())),
+    [rawCollaborationGroups, sessionsById],
+  );
+  const collaborationSessionIds = useMemo(
+    () => new Set(collaborationGroups.flatMap((group) => group.sessionIds)),
+    [collaborationGroups],
+  );
+  const refreshCollaborationGroups = useCallback(async () => {
+    const refreshId = ++collaborationRefreshIdRef.current;
+    try {
+      const data = await listCollaborationGroups();
+      if (refreshId !== collaborationRefreshIdRef.current) return;
+      setRawCollaborationGroups(Array.isArray(data.groups) ? data.groups : []);
+    } catch {
+      // Collaboration is additive navigation metadata. Keep the last good
+      // snapshot when the operations endpoint is temporarily unavailable.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshCollaborationGroups();
+    const interval = window.setInterval(() => void refreshCollaborationGroups(), 10_000);
+    const handleFocus = () => void refreshCollaborationGroups();
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      collaborationRefreshIdRef.current += 1;
+      window.clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [refreshCollaborationGroups]);
+
+  useEffect(() => {
+    if (isOpen || !agentOperationsOpen) void refreshCollaborationGroups();
+  }, [agentOperationsOpen, isOpen, refreshCollaborationGroups]);
 
   const updateSplitExitTarget = useCallback((clientX: number, clientY: number) => {
     if (!splitMemberDragActiveRef.current) return;
@@ -520,11 +609,12 @@ export function LeftSidebar(
   const renderSessionRowBody = useCallback((
     session: LeftSidebarProps['sessions'][number],
     dragHandleProps?: DraggableProvidedDragHandleProps | null,
-    inSplitWorkspace?: boolean,
+    compact?: boolean,
     beforeActions?: React.ReactNode,
   ) => {
     const isActive = session.id === activeSessionId;
     const isSplit = splitSessionIds.has(session.id);
+    const removeSplitPane = Boolean(compact && isSplit);
     const ts = sessionStates.get(session.id);
     const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
     const shellTitle = ts?.shellTitle ?? getCachedShellTitle(session.id);
@@ -566,7 +656,7 @@ export function LeftSidebar(
             closeIfOverlay();
           }}
           className={`sidebar-session-primary relative min-w-0 flex flex-1 items-center overflow-hidden text-left ${dragHandleProps ? 'cursor-grab active:cursor-grabbing ' : ''}${
-            inSplitWorkspace ? 'gap-1.5 py-0.5 pl-1.5 pr-0.5' : 'gap-1.5 py-1 pl-2 pr-1'
+            compact ? 'gap-1.5 py-0.5 pl-1.5 pr-0.5' : 'gap-1.5 py-1 pl-2 pr-1'
           }`}
           title={ts?.cwd ?? session.name}
         >
@@ -574,7 +664,7 @@ export function LeftSidebar(
             <span className={`absolute inset-y-2 left-0 w-0.5 rounded-full ${accentClass}`} />
           )}
           <span className={`relative inline-flex shrink-0 items-center justify-center rounded-md ${
-            inSplitWorkspace ? 'h-5 w-5' : 'h-[22px] w-[22px]'
+            compact ? 'h-5 w-5' : 'h-[22px] w-[22px]'
           } ${
             isActive
               ? session.mode === 'tmux'
@@ -585,13 +675,13 @@ export function LeftSidebar(
                 : 'bg-surface text-muted-foreground'
           }`}>
             {ts?.isConnecting || (tuiProgressActive && !ts?.agentStatus) ? (
-              <RiLoaderCircle size={inSplitWorkspace ? 10 : 11} className="animate-spin" />
+              <RiLoaderCircle size={compact ? 10 : 11} className="animate-spin" />
             ) : (ts?.agent ?? getCachedAgentIdentity(session.id)) ? (
-              <AgentBrandAvatar agent={ts?.agent ?? getCachedAgentIdentity(session.id)!} size={inSplitWorkspace ? 13 : 15} />
+              <AgentBrandAvatar agent={ts?.agent ?? getCachedAgentIdentity(session.id)!} size={compact ? 13 : 15} />
             ) : session.mode === 'tmux' ? (
-              <RiLayoutGridLine size={inSplitWorkspace ? 10 : 11} />
+              <RiLayoutGridLine size={compact ? 10 : 11} />
             ) : (
-              <RiTerminalLine size={inSplitWorkspace ? 10 : 11} />
+              <RiTerminalLine size={compact ? 10 : 11} />
             )}
             <StatusDot
               status={ts?.agentStatus ?? null}
@@ -601,7 +691,7 @@ export function LeftSidebar(
             />
           </span>
           <span className={`min-w-0 flex-1 truncate leading-tight ${
-            inSplitWorkspace ? 'text-[11px]' : 'text-[12px]'
+            compact ? 'text-[11px]' : 'text-[12px]'
           } ${
               isActive ? 'font-medium text-foreground' : ''
             } ${ts?.inCopyMode ? 'text-[color:var(--tmux)]' : ''}`}>
@@ -613,7 +703,7 @@ export function LeftSidebar(
           type="button"
           onClick={(event) => {
             event.stopPropagation();
-            if (inSplitWorkspace) {
+            if (removeSplitPane) {
               onRemoveFromSplit(session.id);
             } else if (isSplit) {
               onCloseSplit(session.id);
@@ -622,14 +712,14 @@ export function LeftSidebar(
             }
           }}
           className={`sidebar-session-action inline-flex shrink-0 items-center justify-center rounded-md transition hover:bg-primary/15 hover:text-primary active:scale-95 ${
-            inSplitWorkspace ? 'h-6 w-6' : 'h-[26px] w-[26px]'
+            compact ? 'h-6 w-6' : 'h-[26px] w-[26px]'
           } ${
             isSplit ? 'bg-primary/15 text-primary' : 'text-muted-foreground/70'
           }`}
-          aria-label={`${inSplitWorkspace ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')} ${displayName}`}
-          title={inSplitWorkspace ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')}
+          aria-label={`${removeSplitPane ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')} ${displayName}`}
+          title={removeSplitPane ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')}
         >
-          {inSplitWorkspace
+          {removeSplitPane
             ? <RiUnlinkLine size={11} />
             : <RiSplitLine size={12} />}
         </button>
@@ -640,12 +730,12 @@ export function LeftSidebar(
             onCloseSession(session.id, event);
           }}
           className={`sidebar-session-action inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition hover:bg-destructive/15 hover:text-destructive active:scale-95 ${
-            inSplitWorkspace ? 'h-6 w-6' : 'h-[26px] w-[26px]'
+            compact ? 'h-6 w-6' : 'h-[26px] w-[26px]'
           }`}
           aria-label={t('sidebar.closeSession', { name: displayName })}
           title={t('common.close')}
         >
-          <RiCloseLine size={inSplitWorkspace ? 11 : 12} />
+          <RiCloseLine size={compact ? 11 : 12} />
         </button>
       </>
     );
@@ -660,28 +750,39 @@ export function LeftSidebar(
       (session) => sessionStates.get(session.id)?.cwd ?? null,
       t('sidebar.ungrouped'),
     );
-    const anchoredWorkspaceIdsByFolder = new Map<string, Set<string>>();
+    const anchoredEntityIdsByFolder = new Map<string, Set<string>>();
     for (const workspace of splitWorkspaces) {
+      if (workspace.sessionIds.some((id) => collaborationSessionIds.has(id))) continue;
       const anchorId = workspace.sessionIds[0];
       if (!anchorId) continue;
       const folderKey = folderGroupKeyForCwd(sessionStates.get(anchorId)?.cwd ?? null);
-      const workspaceIds = anchoredWorkspaceIdsByFolder.get(folderKey) ?? new Set<string>();
+      const workspaceIds = anchoredEntityIdsByFolder.get(folderKey) ?? new Set<string>();
       workspace.sessionIds.forEach((id) => workspaceIds.add(id));
-      anchoredWorkspaceIdsByFolder.set(folderKey, workspaceIds);
+      anchoredEntityIdsByFolder.set(folderKey, workspaceIds);
+    }
+    for (const collaboration of collaborationGroups) {
+      const anchorId = collaboration.sessionIds[0];
+      if (!anchorId) continue;
+      const folderKey = folderGroupKeyForCwd(sessionStates.get(anchorId)?.cwd ?? null);
+      const collaborationIds = anchoredEntityIdsByFolder.get(folderKey) ?? new Set<string>();
+      collaboration.sessionIds.forEach((id) => collaborationIds.add(id));
+      anchoredEntityIdsByFolder.set(folderKey, collaborationIds);
     }
     return baseGroups.flatMap((group) => {
       const allowedIds = new Set(
-        group.sessions.filter((session) => !splitSessionIds.has(session.id)).map((session) => session.id),
+        group.sessions.filter((session) => (
+          !splitSessionIds.has(session.id) && !collaborationSessionIds.has(session.id)
+        )).map((session) => session.id),
       );
-      anchoredWorkspaceIdsByFolder.get(group.key)?.forEach((id) => allowedIds.add(id));
+      anchoredEntityIdsByFolder.get(group.key)?.forEach((id) => allowedIds.add(id));
       const groupedSessions = sessions.filter((session) => allowedIds.has(session.id));
       return groupedSessions.length > 0 ? [{ ...group, sessions: groupedSessions }] : [];
     });
-  }, [groupByFolder, sessions, sessionStates, splitSessionIds, splitWorkspaces, t]);
+  }, [collaborationGroups, collaborationSessionIds, groupByFolder, sessions, sessionStates, splitSessionIds, splitWorkspaces, t]);
 
   const flatSidebarEntities = useMemo(
-    () => buildSidebarEntities(sessions, splitWorkspaces, sessionsById),
-    [sessions, sessionsById, splitWorkspaces],
+    () => buildSidebarEntities(sessions, splitWorkspaces, sessionsById, collaborationGroups),
+    [collaborationGroups, sessions, sessionsById, splitWorkspaces],
   );
 
   const handleSidebarDragStart = useCallback((start: DragStart) => {
@@ -716,7 +817,7 @@ export function LeftSidebar(
       const targetEntities = splitExitTarget.listId === 'sidebar-entities'
         ? flatSidebarEntities
         : targetGroup
-          ? buildSidebarEntities(targetGroup.sessions, splitWorkspaces, sessionsById)
+          ? buildSidebarEntities(targetGroup.sessions, splitWorkspaces, sessionsById, collaborationGroups)
           : null;
       if (!targetEntities) return true;
       const reorderedIds = reorderSessionIdsForSplitExit(
@@ -757,7 +858,7 @@ export function LeftSidebar(
     reorderedIds.splice(result.destination.index, 0, movedId);
     onReorderSplitWorkspace(sourceWorkspaceId, reorderedIds);
     return true;
-  }, [flatSidebarEntities, folderGroups, onCombineSplitSessions, onRemoveFromSplit, onReorderSessions, onReorderSplitWorkspace, sessionsById, splitWorkspaces]);
+  }, [collaborationGroups, flatSidebarEntities, folderGroups, onCombineSplitSessions, onRemoveFromSplit, onReorderSessions, onReorderSplitWorkspace, sessionsById, splitWorkspaces]);
 
   const renderSplitExitDropZone = (index: number, edge: 'top' | 'bottom' = 'top'): React.ReactNode => (
     <div
@@ -823,14 +924,14 @@ export function LeftSidebar(
     const groupKey = result.source.droppableId.replace(/^group-sessions:/, '');
     const group = folderGroups.find((candidate) => candidate.key === groupKey);
     if (!group) return;
-    const entities = buildSidebarEntities(group.sessions, splitWorkspaces, sessionsById);
+    const entities = buildSidebarEntities(group.sessions, splitWorkspaces, sessionsById, collaborationGroups);
     if (result.combine) {
       handleEntityDragEnd(result, entities, groupKey);
       return;
     }
     if (!result.destination || result.destination.droppableId !== result.source.droppableId) return;
     handleEntityDragEnd(result, entities, groupKey);
-  }, [folderGroups, sessionsById, splitWorkspaces, handleEntityDragEnd, handleSplitMemberDragEnd, onReorderSessions]);
+  }, [collaborationGroups, folderGroups, sessionsById, splitWorkspaces, handleEntityDragEnd, handleSplitMemberDragEnd, onReorderSessions]);
 
   const renderSplitWorkspaceItem = (
     workspace: SplitWorkspaceSummary,
@@ -986,6 +1087,64 @@ export function LeftSidebar(
     );
   };
 
+  const renderCollaborationGroupItem = (
+    collaboration: SidebarCollaborationGroup,
+    members: SidebarSession[],
+    dragHandleProps?: DraggableProvidedDragHandleProps | null,
+    isDragging = false,
+    isCombineTarget = false,
+  ): React.ReactNode => {
+    if (members.length < 2) return null;
+    const hasActive = members.some((session) => session.id === activeSessionId);
+    return (
+      <section
+        data-collaboration-group={collaboration.id}
+        data-collaboration-group-name={collaboration.name}
+        aria-label={`Agent 工作组：${collaboration.name}`}
+        className={`group/collaboration relative ml-1 rounded-md border border-border/10 bg-surface/35 p-0.5 transition-colors ${
+          isCombineTarget
+            ? 'bg-primary/15 ring-1 ring-primary/40'
+            : isDragging
+              ? 'bg-surface-elevated opacity-90 shadow-lg'
+              : hasActive
+                ? 'bg-primary/[0.07]'
+                : 'hover:bg-surface-2'
+        }`}
+      >
+        <span
+          {...(dragHandleProps ?? {})}
+          className={`absolute -left-1 top-1.5 z-10 inline-flex h-4 w-4 items-center justify-center rounded-full border border-border/20 bg-[var(--chrome-bg)] text-primary ${
+            dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''
+          }`}
+          title={`Agent 工作组：${collaboration.name}`}
+          aria-label={`移动 Agent 工作组：${collaboration.name}`}
+        >
+          <RiWorkflowLine size={9} />
+        </span>
+        <div data-collaboration-members className="pl-0.5">
+          {members.map((session) => (
+            <div
+              key={session.id}
+              data-collaboration-member={session.id}
+              data-split-member={splitSessionIds.has(session.id) ? 'true' : undefined}
+              {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
+              className={`relative flex items-center rounded-sm pr-0.5 transition-colors ${
+                getSessionStatusBackground(session.id)
+                  ?? (session.id === activeSessionId
+                    ? 'bg-surface-elevated/80 text-foreground'
+                    : splitSessionIds.has(session.id)
+                      ? 'bg-primary/[0.05] text-muted-foreground hover:bg-primary/[0.09]'
+                      : 'text-muted-foreground hover:bg-surface-2')
+              }`}
+            >
+              {renderSessionRowBody(session, null, true)}
+            </div>
+          ))}
+        </div>
+      </section>
+    );
+  };
+
   const renderSidebarEntityList = (
     entities: SidebarEntity[],
     droppableId: string,
@@ -1017,12 +1176,22 @@ export function LeftSidebar(
                   >
                     {renderSplitExitDropZone(index)}
                     {index === entities.length - 1 && renderSplitExitDropZone(entities.length, 'bottom')}
-                      {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
-                        entity.workspace,
-                        entity.members,
-                        snapshot.isDragging,
-                        Boolean(snapshot.combineTargetFor),
-                      ) : (
+                      {entity.kind === 'workspace'
+                        ? renderSplitWorkspaceItem(
+                          entity.workspace,
+                          entity.members,
+                          snapshot.isDragging,
+                          Boolean(snapshot.combineTargetFor),
+                        )
+                        : entity.kind === 'collaboration'
+                          ? renderCollaborationGroupItem(
+                            entity.group,
+                            entity.members,
+                            dragProvided.dragHandleProps,
+                            snapshot.isDragging,
+                            Boolean(snapshot.combineTargetFor),
+                          )
+                          : (
                         <div
                           {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(entity.session.id)) : {})}
                           className={`group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
@@ -1038,7 +1207,7 @@ export function LeftSidebar(
                         >
                           {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
                         </div>
-                      )}
+                          )}
                   </div>
                 )}
               </Draggable>
@@ -1264,7 +1433,12 @@ export function LeftSidebar(
                   <div ref={groupsProvided.innerRef} {...groupsProvided.droppableProps} className="space-y-1.5">
                     {folderGroups.map((group, groupIndex) => {
                       const collapsed = collapsedGroups.has(group.key);
-                      const folderEntities = buildSidebarEntities(group.sessions, splitWorkspaces, sessionsById);
+                      const folderEntities = buildSidebarEntities(
+                        group.sessions,
+                        splitWorkspaces,
+                        sessionsById,
+                        collaborationGroups,
+                      );
                       let groupRunning = 0;
                       let groupReview = 0;
                       for (const session of group.sessions) {
@@ -1337,12 +1511,22 @@ export function LeftSidebar(
                                                 {renderSplitExitDropZone(index)}
                                                 {index === folderEntities.length - 1
                                                   && renderSplitExitDropZone(folderEntities.length, 'bottom')}
-                                                  {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
-                                                    entity.workspace,
-                                                    entity.members,
-                                                    snapshot.isDragging,
-                                                    Boolean(snapshot.combineTargetFor),
-                                                  ) : (
+                                                  {entity.kind === 'workspace'
+                                                    ? renderSplitWorkspaceItem(
+                                                      entity.workspace,
+                                                      entity.members,
+                                                      snapshot.isDragging,
+                                                      Boolean(snapshot.combineTargetFor),
+                                                    )
+                                                    : entity.kind === 'collaboration'
+                                                      ? renderCollaborationGroupItem(
+                                                        entity.group,
+                                                        entity.members,
+                                                        dragProvided.dragHandleProps,
+                                                        snapshot.isDragging,
+                                                        Boolean(snapshot.combineTargetFor),
+                                                      )
+                                                      : (
                                                     <div
                                                       {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(entity.session.id)) : {})}
                                                       className={`group relative flex items-center gap-1 rounded-md pr-1 transition-colors ${
@@ -1358,7 +1542,7 @@ export function LeftSidebar(
                                                     >
                                                       {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
                                                     </div>
-                                                  )}
+                                                      )}
                                               </div>
                                             )}
                                           </Draggable>
