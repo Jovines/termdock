@@ -57,3 +57,25 @@ export function shouldForceSettledRedraw(
   if (!start || !settled) return true;
   return start.cols === settled.cols && start.rows === settled.rows;
 }
+
+/** The first observer burst belongs to xterm.open()/initial layout itself. */
+export function shouldForceObservedResizeRedraw(
+  hasCompletedInitialSettle: boolean,
+  start: TerminalDimensions | null,
+  settled: TerminalDimensions | null,
+): boolean {
+  return hasCompletedInitialSettle && shouldForceSettledRedraw(start, settled);
+}
+
+/**
+ * Normal writes and xterm.resize() already repaint the DOM/WebGL renderer.
+ * A second full-buffer refresh in the same startup frame briefly detaches all
+ * DOM rows, which is visible as a white/blank flash on session activation.
+ */
+export function shouldRefreshTerminalBuffer(
+  forceRedraw: boolean,
+  devicePixelRatioChanged: boolean,
+  rendererAlreadyRecovered: boolean,
+): boolean {
+  return !rendererAlreadyRecovered && (forceRedraw || devicePixelRatioChanged);
+}

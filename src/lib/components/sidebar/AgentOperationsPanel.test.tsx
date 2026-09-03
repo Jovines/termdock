@@ -152,6 +152,23 @@ describe('AgentOperationsPanel', () => {
     expect(document.body.textContent).not.toContain('/secret/path');
   });
 
+  it('opens a requested collaboration group directly from its sidebar shortcut', async () => {
+    apiMocks.listCollaborationGroups.mockResolvedValue({
+      groups: [
+        { id: 'group-one', name: '开发组', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1 },
+        { id: 'group-two', name: '发布组', sessionIds: ['two', 'three'], createdAt: 1, updatedAt: 2 },
+      ],
+      sessions: [],
+    });
+
+    render(<AgentOperationsPanel initialCollaborationGroupId="group-two" activeSessionId={null} onClose={() => undefined} onNewSession={() => undefined} />);
+
+    expect(screen.getByRole('button', { name: '会话协作' }).className).toContain('text-primary');
+    expect(await screen.findByRole('heading', { name: '发布组 · 协作消息' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: '发布组' })).toBeTruthy();
+    expect(screen.getByPlaceholderText(/说明背景、期望产出/)).toBeTruthy();
+  });
+
   it('lets the user add existing Sessions to a collaboration group', async () => {
     const group = { id: 'group-one', name: '发布组', sessionIds: ['one', 'two'], createdAt: 1, updatedAt: 1 };
     const sessions = [

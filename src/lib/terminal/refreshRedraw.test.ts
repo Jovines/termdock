@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   getActivationRefreshMode,
+  shouldForceObservedResizeRedraw,
   shouldForceSettledRedraw,
   shouldProcessObservedResize,
+  shouldRefreshTerminalBuffer,
   shouldSchedulePageFlipRefresh,
 } from './refreshRedraw';
 
@@ -62,5 +64,38 @@ describe('shouldForceSettledRedraw', () => {
   it('uses the conservative recovery path when dimensions are unavailable', () => {
     expect(shouldForceSettledRedraw(null, { cols: 80, rows: 24 })).toBe(true);
     expect(shouldForceSettledRedraw({ cols: 80, rows: 24 }, null)).toBe(true);
+  });
+});
+
+describe('shouldForceObservedResizeRedraw', () => {
+  it('does not blank freshly written rows during the initial observer settle', () => {
+    expect(shouldForceObservedResizeRedraw(
+      false,
+      { cols: 80, rows: 24 },
+      { cols: 80, rows: 24 },
+    )).toBe(false);
+  });
+
+  it('retains recovery redraws for later real layout changes', () => {
+    expect(shouldForceObservedResizeRedraw(
+      true,
+      { cols: 80, rows: 24 },
+      { cols: 80, rows: 24 },
+    )).toBe(true);
+  });
+});
+
+describe('shouldRefreshTerminalBuffer', () => {
+  it('skips normal fit-only refreshes because resize and writes already repaint', () => {
+    expect(shouldRefreshTerminalBuffer(false, false, false)).toBe(false);
+  });
+
+  it('keeps explicit recovery and DPR redraws', () => {
+    expect(shouldRefreshTerminalBuffer(true, false, false)).toBe(true);
+    expect(shouldRefreshTerminalBuffer(false, true, false)).toBe(true);
+  });
+
+  it('does not redraw twice after renderer recovery already repainted', () => {
+    expect(shouldRefreshTerminalBuffer(true, true, true)).toBe(false);
   });
 });

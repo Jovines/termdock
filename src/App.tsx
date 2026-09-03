@@ -588,6 +588,9 @@ function App() {
     tmuxSessionName: session.tmuxSessionName,
   })));
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(initialSessionChrome.activeSessionId);
+  const [hasRestoredSessionChrome, setHasRestoredSessionChrome] = React.useState(
+    initialSessionChrome.sessions.length > 0,
+  );
   const [agentResumeAction, setAgentResumeAction] = React.useState<AgentResumeActionState | null>(null);
   const [agentResumeNotice, setAgentResumeNotice] = React.useState<AgentResumeNotice | null>(null);
   const [splitWorkspaces, setSplitWorkspaces] = React.useState<SplitWorkspaceSummary[]>([]);
@@ -615,7 +618,10 @@ function App() {
       }
     });
     markStartupMilestone('session-chrome-hydrated');
-    return pickTabTerminalSessions(store.sessions);
+    // Zustand replaces its state object on every setter call. `store` above is
+    // therefore the pre-hydration snapshot; reading its sessions here makes the
+    // first grouped-tab paint fall back to "Other" until the next store event.
+    return pickTabTerminalSessions(useTerminalStore.getState().sessions);
   });
 
   useEffect(() => {
@@ -2545,6 +2551,10 @@ function App() {
     useTerminalStore.getState().setActiveSessionId(data.activeSessionId);
   }, []);
 
+  const handleInitialViewportReady = useCallback(() => {
+    setHasRestoredSessionChrome(true);
+  }, []);
+
   // Priority is a one-shot handoff. Once its target is the active session,
   // normal user selection becomes the source of truth for future reconnects.
   useEffect(() => {
@@ -3347,6 +3357,7 @@ function App() {
                 desktopPinnedLeftSidebarWidth={showPinnedLeft ? sidebarLeftWidth : 0}
                 desktopViewportWidth={viewportWidth}
                 onSessionDataUpdate={handleSessionDataUpdate}
+                onInitialViewportReady={handleInitialViewportReady}
               />
             </div>
           </div>
@@ -5162,6 +5173,17 @@ function App() {
     </div>
   );
 
+  // A true first visit has no local session cache. Keep the original boot
+  // surface above the already-mounted app while MultiTerminalView fetches and
+  // prepares the authoritative inventory, instead of flashing a complete
+  // "Sessions 0" desktop for one network round trip.
+  const initialSessionRestoreOverlay = !hasRestoredSessionChrome ? (
+    <div className="termdock-boot z-modal-panel" role="status" aria-live="polite">
+      <div className="termdock-boot-spinner" aria-hidden="true" />
+      <span>Loading Termdock</span>
+    </div>
+  ) : null;
+
   if (showPinnedLeft || showPinnedRight) {
     return (
       <div className="w-screen h-full flex flex-row">
@@ -5253,11 +5275,17 @@ function App() {
             </div>
           )}
         </div>
+        {initialSessionRestoreOverlay}
       </div>
     );
   }
 
-  return body;
+  return (
+    <>
+      {body}
+      {initialSessionRestoreOverlay}
+    </>
+  );
 }
 
 export default App;

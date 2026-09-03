@@ -250,6 +250,7 @@ export function LeftSidebar(
   const [layoutMenuWorkspaceId, setLayoutMenuWorkspaceId] = useState<string | null>(null);
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
   const [agentOperationsOpen, setAgentOperationsOpen] = useState(false);
+  const [agentOperationsGroupId, setAgentOperationsGroupId] = useState<string | null>(null);
   const [agentResumeHistory, setAgentResumeHistory] = useState<AgentResumeHistoryEntry[]>([]);
   const [agentResumeHistoryLoading, setAgentResumeHistoryLoading] = useState(false);
   const [agentResumeHistoryPendingId, setAgentResumeHistoryPendingId] = useState<string | null>(null);
@@ -1263,16 +1264,22 @@ export function LeftSidebar(
                 : 'hover:bg-surface-2'
         }`}
       >
-        <span
+        <button
+          type="button"
           {...(dragHandleProps ?? {})}
-          className={`absolute -left-1 top-1.5 z-10 inline-flex h-4 w-4 items-center justify-center rounded-full border border-border/20 bg-[var(--chrome-bg)] text-primary ${
+          className={`absolute -right-1 top-1.5 z-10 inline-flex h-4 w-4 items-center justify-center rounded-full border border-border/20 bg-[var(--chrome-bg)] text-primary transition hover:bg-surface-elevated hover:text-foreground ${
             dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''
           }`}
-          title={`Agent 工作组：${collaboration.name}`}
-          aria-label={`移动 Agent 工作组：${collaboration.name}`}
+          title={`打开 ${collaboration.name} 的协作消息`}
+          aria-label={`打开 Agent 工作组消息：${collaboration.name}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            setAgentOperationsGroupId(collaboration.id);
+            setAgentOperationsOpen(true);
+          }}
         >
           <RiWorkflowLine size={9} />
-        </span>
+        </button>
         <Droppable
           droppableId={`collaboration-members:${collaboration.id}`}
           type="collaboration-member"
@@ -1506,7 +1513,7 @@ export function LeftSidebar(
                       <span>{t('sidebar.subscriptionQuota')}</span>
                     </button>
                   )}
-                  <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); setAgentOperationsOpen(true); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
+                  <button type="button" role="menuitem" onClick={() => { setHeaderMenuOpen(false); setAgentOperationsGroupId(null); setAgentOperationsOpen(true); }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-foreground transition hover:bg-surface-2">
                     <RiWorkflowLine size={14} className="text-muted-foreground" />
                     <span>Agent 工作台</span>
                   </button>
@@ -1775,7 +1782,8 @@ export function LeftSidebar(
       {agentOperationsOpen && (
         <AgentOperationsPanel
           activeSessionId={activeSessionId}
-          onClose={() => setAgentOperationsOpen(false)}
+          initialCollaborationGroupId={agentOperationsGroupId}
+          onClose={() => { setAgentOperationsOpen(false); setAgentOperationsGroupId(null); }}
           onNewSession={(options) => onNewSession(options)}
         />
       )}

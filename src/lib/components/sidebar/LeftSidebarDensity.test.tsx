@@ -132,10 +132,14 @@ describe('LeftSidebar session density', () => {
       configurable: true,
       value: vi.fn(),
     });
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => ({
-      ok: true,
-      json: async () => String(input).includes('/collaboration-groups')
-        ? {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return {
+        ok: true,
+        json: async () => url.includes('/messages')
+          ? { messages: [] }
+          : url.includes('/collaboration-groups')
+            ? {
             groups: [{
               id: 'agent-group',
               name: 'Release team',
@@ -144,9 +148,14 @@ describe('LeftSidebar session density', () => {
               updatedAt: 2,
             }],
             sessions: [],
-          }
-        : { locale: 'en' },
-    })));
+              }
+            : url.includes('/automations')
+              ? { automations: [], runs: [] }
+              : url.includes('/agent-launchers')
+                ? { agents: [] }
+                : { locale: 'en' },
+      };
+    }));
     const onRemoveFromSplit = vi.fn();
     const onSplitSession = vi.fn();
     const onCloseSplit = vi.fn();
@@ -185,11 +194,16 @@ describe('LeftSidebar session density', () => {
     expect(workgroup.querySelectorAll('[data-collaboration-member]')).toHaveLength(2);
     expect(workgroup.querySelectorAll('[data-split-member="true"]')).toHaveLength(1);
     expect(workgroup.querySelector('[data-split-workspace]')).toBeNull();
-    expect(screen.getByLabelText('移动 Agent 工作组：Release team')).toBeTruthy();
+    const collaborationShortcut = screen.getByRole('button', { name: '打开 Agent 工作组消息：Release team' });
+    expect(collaborationShortcut.className).toContain('-right-1');
     expect(within(workgroup).getByRole('button', { name: 'Planner' })
       .getAttribute('data-rfd-drag-handle-draggable-id')).toBe('collaboration-member:one');
     expect(within(workgroup).getByRole('button', { name: 'Standalone' })
       .getAttribute('data-rfd-drag-handle-draggable-id')).toBe('collaboration-member:three');
+
+    fireEvent.click(collaborationShortcut);
+    expect(await screen.findByRole('heading', { name: 'Release team · 协作消息' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '会话协作' }).className).toContain('text-primary');
 
     fireEvent.click(within(workgroup).getByRole('button', { name: 'Remove from split Planner' }));
     expect(onRemoveFromSplit).toHaveBeenCalledWith('one');

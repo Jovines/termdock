@@ -32,6 +32,7 @@ type Tab = 'automation' | 'collaboration' | 'search';
 
 interface AgentOperationsPanelProps {
   activeSessionId: string | null;
+  initialCollaborationGroupId?: string | null;
   onClose: () => void;
   onNewSession: (opts: { mode: 'shell'; cwd?: string; command?: string }) => void;
 }
@@ -39,8 +40,8 @@ interface AgentOperationsPanelProps {
 const inputClass = 'w-full rounded-lg border border-border/20 bg-surface-2 px-3 py-2 text-[12px] text-foreground outline-none transition focus:border-primary/60';
 const buttonClass = 'inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40';
 
-export function AgentOperationsPanel({ activeSessionId, onClose, onNewSession }: AgentOperationsPanelProps) {
-  const [tab, setTab] = useState<Tab>('automation');
+export function AgentOperationsPanel({ activeSessionId, initialCollaborationGroupId = null, onClose, onNewSession }: AgentOperationsPanelProps) {
+  const [tab, setTab] = useState<Tab>(initialCollaborationGroupId ? 'collaboration' : 'automation');
   const [automations, setAutomations] = useState<AgentAutomation[]>([]);
   const [automationRuns, setAutomationRuns] = useState<AutomationRun[]>([]);
   const [agents, setAgents] = useState<AgentLauncherInfo[]>([]);
@@ -49,6 +50,9 @@ export function AgentOperationsPanel({ activeSessionId, onClose, onNewSession }:
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const directCollaborationGroup = initialCollaborationGroupId
+    ? groups.find((group) => group.id === initialCollaborationGroupId) ?? null
+    : null;
 
   const refresh = useCallback(async (options: { silent?: boolean } = {}) => {
     if (!options.silent) setError(null);
@@ -91,8 +95,8 @@ export function AgentOperationsPanel({ activeSessionId, onClose, onNewSession }:
         <header className="flex items-center gap-2 border-b border-border/15 px-4 py-3">
           <Bot size={17} className="text-primary" />
           <div className="min-w-0 flex-1">
-            <h2 className="text-[14px] font-semibold text-foreground">Agent 工作台</h2>
-            <p className="text-[10px] text-muted-foreground">自动任务、会话协作与全文恢复</p>
+            <h2 className="text-[14px] font-semibold text-foreground">{directCollaborationGroup ? `${directCollaborationGroup.name} · 协作消息` : 'Agent 工作台'}</h2>
+            <p className="text-[10px] text-muted-foreground">{directCollaborationGroup ? '发送任务、问题或工作交接' : '自动任务、会话协作与全文恢复'}</p>
           </div>
           <button className="rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" onClick={onClose} aria-label="关闭"><X size={16} /></button>
         </header>
@@ -111,7 +115,7 @@ export function AgentOperationsPanel({ activeSessionId, onClose, onNewSession }:
         {notice && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[11px] text-primary"><Check size={13} />{notice}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {tab === 'automation' && <AutomationTab automations={automations} runs={automationRuns} agents={agents} sessions={sessions} activeSessionId={activeSessionId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={onClose} />}
-          {tab === 'collaboration' && <CollaborationTab groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {tab === 'collaboration' && <CollaborationTab groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
           {tab === 'search' && <SearchTab onClose={onClose} onNewSession={onNewSession} setError={setError} />}
         </div>
       </section>
@@ -274,13 +278,13 @@ function TimePartSelect({ label, value, options, onChange }: { label: string; va
   return <label className="relative min-w-0 flex-1"><span className="sr-only">{label}</span><select aria-label={label} className="w-full appearance-none bg-transparent py-1 pl-1 pr-7 text-center text-[18px] font-semibold tabular-nums text-foreground outline-none" value={value} onChange={(event) => onChange(event.target.value)}>{Array.from({ length: options }, (_, index) => { const option = String(index).padStart(2, '0'); return <option key={option} value={option}>{option}</option>; })}</select><ChevronDown aria-hidden="true" size={13} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground" /></label>;
 }
 
-function CollaborationTab({ groups, sessions, agents, activeSessionId, busy, setBusy, setError, setNotice, refresh }: {
-  groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; busy: string | null;
+function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGroupId, busy, setBusy, setError, setNotice, refresh }: {
+  groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; initialGroupId: string | null; busy: string | null;
   setBusy: (value: string | null) => void; setError: (value: string | null) => void; setNotice: (value: string | null) => void; refresh: () => Promise<void>;
 }) {
   const [name, setName] = useState('');
   const [selected, setSelected] = useState<Set<string>>(() => new Set(activeSessionId ? [activeSessionId] : []));
-  const [selectedGroupId, setSelectedGroupId] = useState<string | 'new' | null>(groups[0]?.id ?? null);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | 'new' | null>(initialGroupId ?? groups[0]?.id ?? null);
   const [sessionQuery, setSessionQuery] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [messages, setMessages] = useState<CollaborationMessage[]>([]);
@@ -294,6 +298,8 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, busy, set
   const [spawnName, setSpawnName] = useState('');
   const [spawnCwd, setSpawnCwd] = useState('');
   const [spawnTask, setSpawnTask] = useState('');
+  const messageComposerRef = useRef<HTMLElement | null>(null);
+  const positionedInitialGroupRef = useRef(false);
   const selectedGroup = selectedGroupId === 'new'
     ? null
     : groups.find((group) => group.id === selectedGroupId) ?? groups[0] ?? null;
@@ -327,6 +333,12 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, busy, set
     const timer = window.setInterval(load, 3_000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [selectedGroup?.id, setError]);
+
+  useEffect(() => {
+    if (!initialGroupId || selectedGroup?.id !== initialGroupId || positionedInitialGroupRef.current) return;
+    positionedInitialGroupRef.current = true;
+    messageComposerRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [initialGroupId, selectedGroup?.id]);
 
   const createGroup = async () => {
     setBusy('create-group'); setError(null); setNotice(null);
@@ -433,7 +445,7 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, busy, set
         {activities.length === 0 && <Empty text="还没有消息。可以先发一个任务或问题。" />}
       </div></section>
 
-      <section className="border-t border-primary/20 bg-primary/5 px-3 py-3"><h4 className="text-[11px] font-medium text-foreground">发送给成员</h4><div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="space-y-1 text-[9px] text-muted-foreground">接收人<select className={inputClass} value={targetSessionId} onChange={(event) => setTargetSessionId(event.target.value)}><option value="*">全组成员</option>{selectedGroup.sessionIds.map((id) => <option key={id} value={id}>{sessions.find((session) => session.sessionId === id)?.name ?? `${id.slice(0, 8)}（离线）`}</option>)}</select></label><label className="space-y-1 text-[9px] text-muted-foreground">消息类型<select className={inputClass} value={kind} onChange={(event) => setKind(event.target.value as CollaborationMessageKind)}><option value="message">普通消息</option><option value="ask">需要回答的问题</option><option value="task">需要执行的任务</option><option value="handoff">工作交接</option><option value="done">完成通知</option></select></label></div>
+      <section ref={messageComposerRef} className="border-t border-primary/20 bg-primary/5 px-3 py-3"><h4 className="text-[11px] font-medium text-foreground">发送给成员</h4><div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="space-y-1 text-[9px] text-muted-foreground">接收人<select className={inputClass} value={targetSessionId} onChange={(event) => setTargetSessionId(event.target.value)}><option value="*">全组成员</option>{selectedGroup.sessionIds.map((id) => <option key={id} value={id}>{sessions.find((session) => session.sessionId === id)?.name ?? `${id.slice(0, 8)}（离线）`}</option>)}</select></label><label className="space-y-1 text-[9px] text-muted-foreground">消息类型<select className={inputClass} value={kind} onChange={(event) => setKind(event.target.value as CollaborationMessageKind)}><option value="message">普通消息</option><option value="ask">需要回答的问题</option><option value="task">需要执行的任务</option><option value="handoff">工作交接</option><option value="done">完成通知</option></select></label></div>
         <label className="mt-2 block space-y-1 text-[9px] text-muted-foreground">内容<textarea className={`${inputClass} min-h-20 resize-y`} value={content} onChange={(event) => setContent(event.target.value)} placeholder="说明背景、期望产出，以及对方需要回复或完成什么…" /></label>
         <div className="mt-2 flex items-center justify-between gap-3"><p className="text-[9px] leading-relaxed text-muted-foreground">在线成员立即入队；离线成员上线后送达。</p><button disabled={busy !== null || !content.trim()} className={`${buttonClass} shrink-0 bg-primary text-primary-foreground`} onClick={() => void send()}>{busy === 'send-message' ? <RefreshCw size={13} className="animate-spin" /> : null}发送</button></div>
       </section>

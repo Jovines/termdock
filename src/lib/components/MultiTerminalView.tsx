@@ -374,6 +374,7 @@ interface MultiTerminalViewProps {
     activeSessionId: string | null;
     splitWorkspaces: SplitWorkspaceSummary[];
   }) => void;
+  onInitialViewportReady?: () => void;
 }
 
 function pickCwdById(sessions: Map<string, { cwd: string | null }>): Map<string, string | null> {
@@ -418,12 +419,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   desktopViewportWidth = 0,
   onStatusChange,
   onSessionDataUpdate,
+  onInitialViewportReady,
 }) => {
   const { t } = useI18n();
   const debugSession = useMemo(() => createDebugLogger('session'), []);
   const debugTerminal = useMemo(() => createDebugLogger('terminal'), []);
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [pendingSwitchSessionId, setPendingSwitchSessionId] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
   const [resumeRequest, setResumeRequest] = useState<ResumeRequest>({
     token: 0,
@@ -611,7 +614,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   );
   const foregroundSessionId = selectConnectionForegroundSessionId({
     prioritySessionId: priorityForegroundSessionId,
-    activeSessionId,
+    activeSessionId: pendingSwitchSessionId ?? activeSessionId,
     persistedActiveSessionId: persistedForegroundSessionId,
     firstSessionId: sessions[0]?.id ?? null,
   });
@@ -633,11 +636,13 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     });
   }, []);
   const handleStreamConnected = useCallback((sessionId: string) => {
-    const expectedForeground = priorityForegroundSessionId ?? activeSessionIdRef.current;
+    const expectedForeground = priorityForegroundSessionId
+      ?? pendingSwitchSessionId
+      ?? activeSessionIdRef.current;
     if (sessionId !== expectedForeground) return;
     markStartupMilestone('foreground-stream-connected');
     setForegroundResumeCompletedToken(resumeRequestTokenRef.current);
-  }, [priorityForegroundSessionId]);
+  }, [pendingSwitchSessionId, priorityForegroundSessionId]);
   const handleViewportReadyChange = useCallback((sessionId: string, ready: boolean) => {
     setViewportReadySessionIds((current) => {
       if (current.has(sessionId) === ready) return current;
@@ -653,6 +658,27 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   useEffect(() => {
     if (foregroundViewportReady) markStartupMilestone('foreground-viewport-ready');
   }, [foregroundViewportReady]);
+
+  useEffect(() => {
+    if (!onInitialViewportReady) return;
+    if (!isRestoring && sessions.length === 0) {
+      onInitialViewportReady();
+      return;
+    }
+    if (!foregroundViewportReady || !foregroundConnectionReady) return;
+
+    // `connected` opens the write gate; the history chunk is parsed immediately
+    // afterward. Keep the cold-start surface for a few paint opportunities so
+    // we never reveal the fully mounted chrome with a still-empty xterm frame.
+    const timer = window.setTimeout(onInitialViewportReady, 120);
+    return () => window.clearTimeout(timer);
+  }, [
+    foregroundConnectionReady,
+    foregroundViewportReady,
+    isRestoring,
+    onInitialViewportReady,
+    sessions.length,
+  ]);
 
   useEffect(() => {
     if (visibleSessionIds.size === 0) return;
@@ -681,6 +707,33 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       return changed ? next : current;
     });
   }, [isMobileLayout, visibleSessionIds, workspaceSlides]);
+
+  useEffect(() => {
+    if (!pendingSwitchSessionId) return;
+    if (!sessions.some((session) => session.id === pendingSwitchSessionId)) {
+      setPendingSwitchSessionId(null);
+      return;
+    }
+    if (
+      !viewportReadySessionIds.has(pendingSwitchSessionId)
+      || !readySessionIds.has(pendingSwitchSessionId)
+    ) return;
+
+    // Keep the currently painted slide in place while an unvisited target is
+    // mounted and connected off-screen. Switching only after its xterm has had
+    // a few paint opportunities avoids the single black frame that otherwise
+    // appears between distant mobile tabs.
+    const timer = window.setTimeout(() => {
+      setActiveSessionId(pendingSwitchSessionId);
+      setPendingSwitchSessionId((current) => (
+        current === pendingSwitchSessionId ? null : current
+      ));
+      if (terminalFocusAvailableRef.current && !isMobileRef.current) {
+        setFocusTransferRequest({ sessionId: pendingSwitchSessionId, token: Date.now() });
+      }
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [pendingSwitchSessionId, readySessionIds, sessions, viewportReadySessionIds]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1602,10 +1655,14 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const handleSwitchSession = useCallback((sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
-      setActiveSessionId(sessionId);
-      if (terminalFocusAvailableRef.current && !isMobileRef.current) {
-        setFocusTransferRequest({ sessionId, token: Date.now() });
-      }
+      if (sessionId === activeSessionIdRef.current) return;
+      setDeferredViewportSessionIds((current) => {
+        if (current.has(sessionId)) return current;
+        const next = new Set(current);
+        next.add(sessionId);
+        return next;
+      });
+      setPendingSwitchSessionId(sessionId);
       debugSession('[Session] Switched to session:', sessionId);
     }
   }, [sessions, debugSession]);

@@ -31,8 +31,9 @@ import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal
 import { buildBracketedPastePayload, detectTextareaPaste } from '../../terminal/bracketedPaste';
 import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHysteresis';
 import {
-  shouldForceSettledRedraw,
+  shouldForceObservedResizeRedraw,
   shouldProcessObservedResize,
+  shouldRefreshTerminalBuffer,
   type TerminalDimensions,
 } from '../../terminal/refreshRedraw';
 import { shouldAllowTerminalTransparency } from '../../terminal/renderer';
@@ -71,6 +72,7 @@ import {
 } from './joystickRepeat';
 import { createTerminalPathLinkProvider } from '../../terminal/pathLinks';
 import { repairXtermBufferInvariants } from '../../terminal/xtermBufferInvariant';
+import { estimateTerminalCellHeight } from '../../terminal/initialDimensions';
 
 const TERMINAL_HAPTIC_PATTERN_MS = 8;
 // 拖选（初次框选 / 拖选区 handle）时把指位向上提这么多 px 再换算格子：
@@ -442,56 +444,26 @@ const TERMINAL_CRITICAL_FONT_PRELOADS = [
     text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
   },
   {
+    font: '700 13px "Termdock Mono"',
+    text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
+  },
+  {
     font: '400 13px "Noto Sans Mono CJK SC"',
+    text: '终端中文路径',
+  },
+  {
+    font: '700 13px "Noto Sans Mono CJK SC"',
     text: '终端中文路径',
   },
   {
     font: '400 13px "Termdock Star Symbol"',
     text: '✦✧',
   },
-] as const;
-
-// These variants improve uncommon styled cells but do not determine xterm's
-// base cell geometry. Fetching all of them before constructing the foreground
-// terminal cost roughly another 3 MB on every uncached launch. Warm them after
-// the critical regular Latin/CJK faces have unlocked the first viewport.
-const TERMINAL_DEFERRED_FONT_PRELOADS = [
-  {
-    font: '700 13px "Termdock Mono"',
-    text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
-  },
-  {
-    font: 'italic 400 13px "Termdock Mono"',
-    text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
-  },
-  {
-    font: '700 italic 13px "Termdock Mono"',
-    text: 'Termdock 0123456789 ❖ \ue0b0\ue0b1\uf07b\uf120\uf489',
-  },
   {
     font: '400 13px "Noto Sans Symbols 2"',
     text: '⏺⏸⏹✓✗',
   },
-  {
-    // CJK Bold 预加载：终端 ANSI bold 里的中文（如 echo -e '\e[1m粗体\e[0m'）
-    // 没有预加载时会先合成 bold（描边加粗），字体加载后跳变到真实 bold 字形。
-    font: '700 13px "Noto Sans Mono CJK SC"',
-    text: '终端中文路径',
-  },
 ] as const;
-
-const scheduleDeferredTerminalFonts = (fonts: FontFaceSet): void => {
-  const warm = () => {
-    void Promise.allSettled(
-      TERMINAL_DEFERRED_FONT_PRELOADS.map(({ font, text }) => fonts.load(font, text)),
-    );
-  };
-  if (typeof window.requestIdleCallback === 'function') {
-    window.requestIdleCallback(warm, { timeout: 2000 });
-  } else {
-    globalThis.setTimeout(warm, 250);
-  }
-};
 
 const ensureTerminalFontsReady = (): Promise<void> => {
   if (terminalFontsReadyPromise) return terminalFontsReadyPromise;
@@ -506,9 +478,7 @@ const ensureTerminalFontsReady = (): Promise<void> => {
   );
   terminalFontsReadyPromise = preload
     .then(() => fonts.ready)
-    .then(() => {
-      scheduleDeferredTerminalFonts(fonts);
-    })
+    .then(() => undefined)
     .catch(() => undefined);
   return terminalFontsReadyPromise;
 };
@@ -610,11 +580,11 @@ function estimateInitialDimensions(
       const deviceCharWidth = Math.floor(m.width * dpr);
       const cellWidth = (deviceCharWidth + Math.round(letterSpacing)) / dpr;
       // actualBoundingBox 在所有现代浏览器都支持；缺省值保底。
-      const ascent = (m as TextMetrics).actualBoundingBoxAscent ?? fontSize * 0.8;
-      const descent = (m as TextMetrics).actualBoundingBoxDescent ?? fontSize * 0.2;
       // 与 xterm WebGL renderer _updateDimensions 对齐：
-      // charHeight = ceil(boundingBoxHeight), cellHeight = floor(charHeight * lineHeight)
-      const cellHeight = Math.floor(Math.ceil(ascent + descent) * lineHeight);
+      // charHeight = ceil(font bounding box), cellHeight = floor(charHeight * lineHeight)
+      // 不能用 actualBoundingBox：大写 M 没有 descent，实测会把 17px cell
+      // 错估成 9px，导致第一帧先画 86 行、下一帧 fit 回 45 行。
+      const cellHeight = estimateTerminalCellHeight(m, fontSize, lineHeight);
       if (cellWidth >= 1 && cellHeight >= 1) {
         metrics = { cellWidth, cellHeight };
         cellMetricsCache.set(cacheKey, metrics);
@@ -3406,6 +3376,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           options.forceRendererRecreate === true ||
           webglContextLostRef.current ||
           (shouldUseWebgl && !!webglAddonRef.current && RESUME_REASONS.has(reason));
+        let rendererAlreadyRecovered = false;
         if (needsRecreate) {
           webglContextLostRef.current = false;
           if (shouldUseWebgl) {
@@ -3414,15 +3385,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             if (!enabled) {
               refreshTextureAtlasNow(`refresh:${reason}:webgl-fallback`);
             }
+            rendererAlreadyRecovered = true;
           } else {
             refreshTextureAtlasNow(`refresh:${reason}`);
+            rendererAlreadyRecovered = true;
           }
-        } else {
-          if (webglAddonRef.current && shouldUseWebgl && !options.forceRedraw) {
-            debugTerminal('webgl refresh skipped: renderer alive', { reason });
-          } else {
-            refreshTextureAtlasNow(`refresh:${reason}`);
-          }
+        }
+        if (shouldRefreshTerminalBuffer(
+          options.forceRedraw === true,
+          reason === 'dpr-change',
+          rendererAlreadyRecovered,
+        )) {
+          refreshTextureAtlasNow(`refresh:${reason}`);
+        } else if (!rendererAlreadyRecovered) {
+          debugTerminal('terminal redraw skipped: fit/write already repaints', { reason });
         }
 
         // 2) fit() —— 这一步会触发 xterm 的 onResize
@@ -3654,6 +3630,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       let localResizeObserver: ResizeObserver | null = null;
       let localResizeSettleTimer: number | null = null;
       let localResizeCycleStartDimensions: TerminalDimensions | null = null;
+      let hasCompletedInitialResizeSettle = false;
       let localDisposables: Array<{ dispose: () => void }> = [];
 
       const container = containerRef.current;
@@ -4062,13 +4039,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
                 // If fit changed rows/cols during this ResizeObserver burst,
                 // terminal.resize() already repainted. Avoid a second full
                 // buffer refresh that looks like a top-to-bottom sweep.
-                forceRedraw: shouldForceSettledRedraw(
+                forceRedraw: shouldForceObservedResizeRedraw(
+                  hasCompletedInitialResizeSettle,
                   localResizeCycleStartDimensions,
                   settledDimensions,
                 ),
                 reconcileServerSize: true,
                 skipScrollToBottom: true,
               });
+              hasCompletedInitialResizeSettle = true;
               localResizeCycleStartDimensions = null;
             }, 180);
           });

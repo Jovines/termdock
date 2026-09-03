@@ -1005,13 +1005,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   );
                 }
 
-                // 连接建立后强制刷新：等 history 落盘后由编排器完成 fit + atlas + scroll。
-                // 编排器内部默认会推 first-fit immediate resize 告诉服务端真实尺寸。
+                // 连接建立后只校准 fit / 服务端尺寸。history/replay 紧接着写入时
+                // xterm 会自行重画；这里若再 full refresh，DOM renderer 会短暂拆空
+                // 所有 row，手机切入 Session 时就表现为“内容闪一下再回来”。
                 requestAnimationFrame(() => {
                   requestAnimationFrame(() => {
                     terminalControllerRef.current?.requestRefresh('connected', {
                       force: true,
-                      forceRedraw: true,
                       reconcileServerSize: isActiveRef.current,
                     });
                   });
