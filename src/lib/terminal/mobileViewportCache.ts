@@ -14,7 +14,14 @@ export function selectCachedMobileViewportSessionIds(options: {
     [...options.currentVisibleSessionIds].filter((sessionId) => options.validSessionIds.has(sessionId)),
   );
   const idleMs = options.idleMs ?? MOBILE_VIEWPORT_CACHE_IDLE_MS;
-  const maxSessions = Math.max(selected.size, options.maxSessions ?? MOBILE_VIEWPORT_CACHE_MAX_SESSIONS);
+  // Keep enough room for the current workspace plus one equally sized
+  // recently visited workspace. A fixed four-session cap makes switching
+  // between two three-pane splits evict two panes on every transition, so the
+  // whole workspace visibly falls back to loading when the user returns.
+  const maxSessions = Math.max(
+    selected.size * 2,
+    options.maxSessions ?? MOBILE_VIEWPORT_CACHE_MAX_SESSIONS,
+  );
   const remainingSlots = maxSessions - selected.size;
   if (remainingSlots === 0) return selected;
 

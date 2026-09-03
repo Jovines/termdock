@@ -49,4 +49,28 @@ describe('mobile viewport cache', () => {
       maxSessions: 2,
     })).toEqual(visible);
   });
+
+  it('retains one previously visited split with the same pane count', () => {
+    const selected = selectCachedMobileViewportSessionIds({
+      currentVisibleSessionIds: new Set(['current-a', 'current-b', 'current-c']),
+      lastVisitedAtBySessionId: new Map([
+        ['previous-a', 9_900],
+        ['previous-b', 9_900],
+        ['previous-c', 9_900],
+        ['older', 9_800],
+      ]),
+      validSessionIds: new Set([
+        'current-a', 'current-b', 'current-c',
+        'previous-a', 'previous-b', 'previous-c',
+        'older',
+      ]),
+      now: 10_000,
+      idleMs: 1_000,
+    });
+
+    expect(selected).toEqual(new Set([
+      'current-a', 'current-b', 'current-c',
+      'previous-a', 'previous-b', 'previous-c',
+    ]));
+  });
 });
