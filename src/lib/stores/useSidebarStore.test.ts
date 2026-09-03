@@ -24,6 +24,7 @@ import {
   readLeftPinnedPreference,
   readRightSidebarLayoutPreference,
   readRightSidebarWidth,
+  readRightSidebarWidthForContext,
   resolveRightSidebarNarrowLayout,
   useSidebarStore,
 } from './useSidebarStore';
@@ -182,6 +183,20 @@ describe('pinned right sidebar width', () => {
     useSidebarStore.getState().setRootPath('/workspace/a', 'session-a');
 
     expect(useSidebarStore.getState().rightSidebarWidth).toBe(880);
+  });
+
+  it('reads inactive session and split widths without changing the active context', () => {
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a');
+    useSidebarStore.getState().setRightSidebarWidth(640);
+    useSidebarStore.getState().setRootPath('/workspace/b', 'session-b');
+    useSidebarStore.getState().setRightSidebarWidth(920);
+    useSidebarStore.getState().setRootPath('/workspace/a', 'session-a', 'split-group-1');
+    useSidebarStore.getState().setRightSidebarWidth(780);
+
+    expect(readRightSidebarWidthForContext('session-a', '/workspace/a', null)).toBe(640);
+    expect(readRightSidebarWidthForContext('session-b', '/workspace/b', null)).toBe(920);
+    expect(readRightSidebarWidthForContext('session-a', '/workspace/a', 'split-group-1')).toBe(780);
+    expect(useSidebarStore.getState().rightSidebarWidth).toBe(780);
   });
 
   it('shares the pinned width between sessions in the same split workspace', () => {

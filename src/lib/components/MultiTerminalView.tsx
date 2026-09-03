@@ -28,7 +28,12 @@ import {
   shouldStartInitialConnection,
 } from '../terminal/resumeScheduling';
 import { useTerminalStore } from '../stores/useTerminalStore';
-import { useSidebarStore } from '../stores/useSidebarStore';
+import {
+  PINNED_SIDEBAR_SEPARATOR_WIDTH_PX,
+  clampPinnedRightSidebarWidth,
+  readRightSidebarWidthForContext,
+  useSidebarStore,
+} from '../stores/useSidebarStore';
 import { deriveGroupedOrder, getCwdLeafName, getSessionDisplayLines } from '../terminal/display';
 import { createDebugLogger } from '../utils/debug';
 import { clientLog } from '../utils/clientLog';
@@ -358,6 +363,10 @@ interface MultiTerminalViewProps {
   defaultTmuxSessionName?: string;
   connectionPrioritySessionId?: string | null;
   connectionPriorityReady?: boolean;
+  desktopPinnedRightSidebar?: boolean;
+  desktopPinnedRightSidebarWidth?: number;
+  desktopPinnedLeftSidebarWidth?: number;
+  desktopViewportWidth?: number;
   onStatusChange?: (status: { isConnecting: boolean; isRestarting: boolean; hasError: boolean; sessionId: string | null }) => void;
   onSessionDataUpdate?: (data: {
     sessions: TerminalSessionInfo[];
@@ -402,6 +411,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   defaultTmuxSessionName = '',
   connectionPrioritySessionId = null,
   connectionPriorityReady = true,
+  desktopPinnedRightSidebar = false,
+  desktopPinnedRightSidebarWidth = 0,
+  desktopPinnedLeftSidebarWidth = 0,
+  desktopViewportWidth = 0,
   onStatusChange,
   onSessionDataUpdate,
 }) => {
@@ -557,6 +570,36 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     );
     return new Set(activeSlide?.sessions.map((session) => session.id) ?? []);
   }, [activeSessionId, workspaceSlides]);
+  const pinnedRightSidebarInsetBySlideKey = useMemo(() => {
+    const insets = new Map<string, number>();
+    if (!desktopPinnedRightSidebar || desktopViewportWidth <= 0) return insets;
+    for (const slide of workspaceSlides) {
+      const firstSession = slide.sessions[0];
+      if (!firstSession) continue;
+      const requestedWidth = slide.sessions.some((session) => session.id === activeSessionId)
+        ? desktopPinnedRightSidebarWidth
+        : readRightSidebarWidthForContext(
+            firstSession.id,
+            cwdById.get(firstSession.id) ?? null,
+            slide.workspace?.id ?? null,
+          );
+      const width = clampPinnedRightSidebarWidth(
+        requestedWidth,
+        desktopViewportWidth,
+        desktopPinnedLeftSidebarWidth,
+      );
+      insets.set(slide.key, width + PINNED_SIDEBAR_SEPARATOR_WIDTH_PX);
+    }
+    return insets;
+  }, [
+    activeSessionId,
+    cwdById,
+    desktopPinnedLeftSidebarWidth,
+    desktopPinnedRightSidebar,
+    desktopPinnedRightSidebarWidth,
+    desktopViewportWidth,
+    workspaceSlides,
+  ]);
   const priorityForegroundSessionId = useMemo(() => resolvePrioritySessionId(
     sessions.map((session) => ({ id: session.id, backendSessionId: session.sessionId })),
     connectionPrioritySessionId,
@@ -2128,17 +2171,22 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                 key={slide.key}
                 className="h-full"
               >
-                {isSplit ? (
-                  <div
-                    className="flex h-full min-h-0 min-w-0 flex-col bg-[var(--chrome-bg)]"
-                    style={isMobileLayout
-                      ? {
-                          transform: 'translateY(var(--kb-translate-y, 0px))',
-                          transition: 'none',
-                        }
-                      : undefined
-                    }
-                  >
+                <div
+                  className="h-full min-w-0"
+                  data-pinned-right-sidebar-inset={pinnedRightSidebarInsetBySlideKey.get(slide.key) ?? 0}
+                  style={{ paddingRight: pinnedRightSidebarInsetBySlideKey.get(slide.key) ?? 0 }}
+                >
+                  {isSplit ? (
+                    <div
+                      className="flex h-full min-h-0 min-w-0 flex-col bg-[var(--chrome-bg)]"
+                      style={isMobileLayout
+                        ? {
+                            transform: 'translateY(var(--kb-translate-y, 0px))',
+                            transition: 'none',
+                          }
+                        : undefined
+                      }
+                    >
                     <div
                       data-split-container="true"
                       className="grid min-h-0 min-w-0 flex-1 overflow-hidden"
@@ -2206,8 +2254,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
                         data-split-keyboard-host="true"
                       />
                     )}
-                  </div>
-                ) : renderTerminal(slide.sessions[0]!)}
+                    </div>
+                  ) : renderTerminal(slide.sessions[0]!)}
+                </div>
               </SwiperSlide>
             );
           })}

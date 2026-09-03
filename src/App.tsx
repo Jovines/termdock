@@ -70,7 +70,11 @@ import {
   type PwaNotificationAlertStyle,
 } from './lib/utils/pwaNotifications';
 import { useTerminalStore } from './lib/stores/useTerminalStore';
-import { clampPinnedRightSidebarWidth, useSidebarStore } from './lib/stores/useSidebarStore';
+import {
+  PINNED_SIDEBAR_SEPARATOR_WIDTH_PX,
+  clampPinnedRightSidebarWidth,
+  useSidebarStore,
+} from './lib/stores/useSidebarStore';
 import { subscribeClientState } from './lib/utils/clientStateSync';
 import { clientLog } from './lib/utils/clientLog';
 import { shouldClearSessionFilePreview } from './lib/utils/rightSidebarSessionState';
@@ -2968,6 +2972,9 @@ function App() {
     viewportWidth,
     showPinnedLeft ? sidebarLeftWidth : 0,
   );
+  const pinnedRightSidebarInset = showPinnedRight
+    ? effectiveRightSidebarWidth + PINNED_SIDEBAR_SEPARATOR_WIDTH_PX
+    : 0;
 
   // Pin mode: compute active session display info and agent state for the
   // centered top-bar title + background tint.
@@ -3011,6 +3018,7 @@ function App() {
             } ${
               groupByFolder ? 'h-10 sm:h-10' : 'h-9 sm:h-10'
             } ${topBarAgentBg}`}
+            style={{ marginRight: pinnedRightSidebarInset || undefined }}
           >
             {!showPinnedLeft && <button
               type="button"
@@ -3273,6 +3281,7 @@ function App() {
           {showRecoveredAgentResume && activeResumeSession && activeResumeTs?.terminalSessionId && (
             <div
               className="flex shrink-0 items-center gap-2 border-b border-border/15 bg-surface/80 px-3 py-2 animate-fade-in sm:px-4"
+              style={{ marginRight: pinnedRightSidebarInset || undefined }}
               role="status"
               data-testid="agent-resume-recovery-banner"
             >
@@ -3329,6 +3338,10 @@ function App() {
                 defaultTmuxSessionName={newSessionTmuxName}
                 connectionPrioritySessionId={connectionPrioritySessionId}
                 connectionPriorityReady={connectionPriorityReady}
+                desktopPinnedRightSidebar={showPinnedRight}
+                desktopPinnedRightSidebarWidth={effectiveRightSidebarWidth}
+                desktopPinnedLeftSidebarWidth={showPinnedLeft ? sidebarLeftWidth : 0}
+                desktopViewportWidth={viewportWidth}
                 onSessionDataUpdate={handleSessionDataUpdate}
               />
             </div>
@@ -5193,43 +5206,48 @@ function App() {
           onMouseDown={handleResizeMouseDown}
         />
         </>}
-        <div className="flex-1 min-w-0 h-full overflow-hidden">
+        <div className="relative flex-1 min-w-0 h-full overflow-hidden">
           {body}
+          {showPinnedRight && (
+            <div
+              className="absolute inset-y-0 right-0 z-20 flex"
+              style={{ width: pinnedRightSidebarInset }}
+            >
+              <div
+                role="separator"
+                tabIndex={-1}
+                className="h-full w-[5px] shrink-0 cursor-col-resize bg-border/10 transition-colors hover:bg-primary/30 active:bg-primary/50"
+                onMouseDown={handleRightResizeMouseDown}
+              />
+              <div style={{ width: effectiveRightSidebarWidth, flexShrink: 0, height: '100%' }}>
+                <RightSidebar
+                  isOpen
+                  drawerWidthPx={effectiveRightSidebarWidth}
+                  onClose={handleClosePinnedRight}
+                  onOpen={handleOpenRightSidebar}
+                  pinned
+                  onTogglePinned={handleToggleRightPinned}
+                  rightSidebarFilePreviewOpen={rightSidebarFilePreviewOpen}
+                  rightSidebarFilePreviewCloseSignal={rightSidebarFilePreviewCloseSignal}
+                  onOpenRightSidebarFilePreview={handleOpenRightSidebarFilePreview}
+                  onCloseRightSidebarFilePreview={handleCloseRightSidebarFilePreview}
+                  rightSidebarRepoPickerOpen={rightSidebarRepoPickerOpen}
+                  rightSidebarRepoPickerCloseSignal={rightSidebarRepoPickerCloseSignal}
+                  onOpenRightSidebarRepoPicker={handleOpenRightSidebarRepoPicker}
+                  onCloseRightSidebarRepoPicker={handleCloseRightSidebarRepoPicker}
+                  markdownOutlineOpen={markdownOutlineOpen}
+                  markdownOutlineCloseSignal={markdownOutlineCloseSignal}
+                  onOpenMarkdownOutline={handleOpenMarkdownOutline}
+                  onCloseMarkdownOutline={handleCloseMarkdownOutline}
+                  markdownImageLightboxOpen={markdownImageLightboxOpen}
+                  markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
+                  onOpenMarkdownImageLightbox={handleOpenMarkdownImageLightbox}
+                  onCloseMarkdownImageLightbox={handleCloseMarkdownImageLightbox}
+                />
+              </div>
+            </div>
+          )}
         </div>
-        {showPinnedRight && <>
-          <div
-            role="separator"
-            tabIndex={-1}
-            className="h-full w-[5px] shrink-0 cursor-col-resize bg-border/10 transition-colors hover:bg-primary/30 active:bg-primary/50"
-            onMouseDown={handleRightResizeMouseDown}
-          />
-          <div style={{ width: effectiveRightSidebarWidth, flexShrink: 0, height: '100%' }}>
-            <RightSidebar
-              isOpen
-              drawerWidthPx={effectiveRightSidebarWidth}
-              onClose={handleClosePinnedRight}
-              onOpen={handleOpenRightSidebar}
-              pinned
-              onTogglePinned={handleToggleRightPinned}
-              rightSidebarFilePreviewOpen={rightSidebarFilePreviewOpen}
-              rightSidebarFilePreviewCloseSignal={rightSidebarFilePreviewCloseSignal}
-              onOpenRightSidebarFilePreview={handleOpenRightSidebarFilePreview}
-              onCloseRightSidebarFilePreview={handleCloseRightSidebarFilePreview}
-              rightSidebarRepoPickerOpen={rightSidebarRepoPickerOpen}
-              rightSidebarRepoPickerCloseSignal={rightSidebarRepoPickerCloseSignal}
-              onOpenRightSidebarRepoPicker={handleOpenRightSidebarRepoPicker}
-              onCloseRightSidebarRepoPicker={handleCloseRightSidebarRepoPicker}
-              markdownOutlineOpen={markdownOutlineOpen}
-              markdownOutlineCloseSignal={markdownOutlineCloseSignal}
-              onOpenMarkdownOutline={handleOpenMarkdownOutline}
-              onCloseMarkdownOutline={handleCloseMarkdownOutline}
-              markdownImageLightboxOpen={markdownImageLightboxOpen}
-              markdownImageLightboxCloseSignal={markdownImageLightboxCloseSignal}
-              onOpenMarkdownImageLightbox={handleOpenMarkdownImageLightbox}
-              onCloseMarkdownImageLightbox={handleCloseMarkdownImageLightbox}
-            />
-          </div>
-        </>}
       </div>
     );
   }

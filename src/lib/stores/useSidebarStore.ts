@@ -334,6 +334,27 @@ function getRightSidebarWidthContextKey(
     : getSidebarContextKey(sessionId, rootPath);
 }
 
+export function readRightSidebarWidthForContext(
+  sessionId: string | null,
+  rootPath: string | null,
+  splitWorkspaceId: string | null,
+): number {
+  const cache = readRightSidebarWidthCache();
+  const contextKey = getRightSidebarWidthContextKey(sessionId, rootPath, splitWorkspaceId);
+  if (contextKey && cache[contextKey] !== undefined) {
+    return cache[contextKey];
+  }
+  // A split workspace inherits its first member's width until the shared
+  // context has been visited and persisted for the first time.
+  if (splitWorkspaceId) {
+    const sessionContextKey = getSidebarContextKey(sessionId, rootPath);
+    if (sessionContextKey && cache[sessionContextKey] !== undefined) {
+      return cache[sessionContextKey];
+    }
+  }
+  return readRightSidebarWidth();
+}
+
 function readInitializedSplitSidebarStates(): Set<string> {
   const stored = readCache(SPLIT_SIDEBAR_STATE_INITIALIZED_CACHE_KEY, (value): value is string[] => (
     Array.isArray(value) && value.every((entry) => typeof entry === 'string')
