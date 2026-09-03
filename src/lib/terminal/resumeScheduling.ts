@@ -46,6 +46,7 @@ export function shouldMountSessionViewport(options: {
     return true;
   }
   return options.sessionId === options.foregroundSessionId
+    || options.visibleSessionIds.has(options.sessionId)
     || options.deferredViewportSessionIds.has(options.sessionId);
 }
 

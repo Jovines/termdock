@@ -96,9 +96,6 @@ interface CloseSessionEventDetail {
 const SWIPE_ANIMATION_SPEED_MS = 320;
 const SWIPER_TRANSLATE_EPSILON_PX = 1;
 const TOUCH_SWIPE_RELEASE_GUARD_MS = SWIPE_ANIMATION_SPEED_MS + 120;
-const BACKGROUND_VIEWPORT_INITIAL_DELAY_MS = 48;
-const BACKGROUND_VIEWPORT_STAGGER_MS = 72;
-
 type SyncSwiperOptions = {
   immediate?: boolean;
 };
@@ -657,27 +654,22 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [foregroundViewportReady]);
 
   useEffect(() => {
-    if (!foregroundViewportReady) return;
-    // A mobile PWA only needs terminal renderers for the currently visible
-    // slide (or panes in the visible split). Creating every background xterm,
-    // addon set and WebSocket shortly after first paint monopolizes WebKit's
-    // main thread when many sessions are persisted. Mobile sessions mount on
-    // demand as the user switches slides; desktop keeps the warm stagger.
-    if (isMobileLayout) return;
-    const backgroundSessionIds = workspaceSlides
-      .flatMap((slide) => slide.sessions.map((session) => session.id))
-      .filter((sessionId) => sessionId !== foregroundSessionId);
-    const timers = backgroundSessionIds.map((sessionId, index) => window.setTimeout(() => {
-      setDeferredViewportSessionIds((current) => {
-        if (current.has(sessionId)) return current;
-        const next = new Set(current);
+    if (isMobileLayout || visibleSessionIds.size === 0) return;
+    // Desktop startup used to mount every background xterm within roughly one
+    // second. Restoring many long Agent histories then kept the renderer and
+    // layout engine busy for tens of seconds. Mount visible split panes
+    // immediately and retain only terminals the user has actually visited.
+    setDeferredViewportSessionIds((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const sessionId of visibleSessionIds) {
+        if (next.has(sessionId)) continue;
         next.add(sessionId);
-        if (index === 0) markStartupMilestone('background-viewports-started');
-        return next;
-      });
-    }, BACKGROUND_VIEWPORT_INITIAL_DELAY_MS + index * BACKGROUND_VIEWPORT_STAGGER_MS));
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [foregroundSessionId, foregroundViewportReady, isMobileLayout, workspaceSlides]);
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [isMobileLayout, visibleSessionIds]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;

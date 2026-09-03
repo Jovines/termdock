@@ -106,9 +106,16 @@ describe('shouldMountSessionViewport', () => {
     })).toBe(true);
   });
 
-  it('keeps the staggered warm viewport policy on desktop', () => {
+  it('mounts visible and previously warmed viewports on desktop', () => {
     expect(shouldMountSessionViewport({
       sessionId: 'selected',
+      foregroundSessionId: 'selected',
+      visibleSessionIds,
+      deferredViewportSessionIds,
+      isMobileLayout: false,
+    })).toBe(true);
+    expect(shouldMountSessionViewport({
+      sessionId: 'split-peer',
       foregroundSessionId: 'selected',
       visibleSessionIds,
       deferredViewportSessionIds,
