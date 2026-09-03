@@ -28,8 +28,6 @@ export default defineConfig({
         'maskable-icon-512x512.png',
         'sw-notifications.js',
         'robots.txt',
-        'fonts/*.woff2',
-        'fonts/*.ttf',
       ],
       manifest: {
         name: 'Termdock',
@@ -61,7 +59,7 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,ttf}'],
+        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
         globIgnores: ['**/apple-splash-*.png'],
         importScripts: ['sw-notifications.js'],
         // 关键：新 SW 安装完不要 wait，直接 activate；并立刻 claim 已打开的页面。
@@ -73,6 +71,20 @@ export default defineConfig({
         // 让 SW 在拿不到 precached 内容时回到 network 而不是报 404。
         navigateFallbackDenylist: [/^\/api\//, /^\/health$/],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+        runtimeCaching: [
+          {
+            urlPattern: /\/fonts\/.*\.(?:woff2|ttf)$/,
+            handler: 'StaleWhileRevalidate',
+            options: {
+              cacheName: 'termdock-fonts-v1',
+              cacheableResponse: { statuses: [0, 200] },
+              expiration: {
+                maxEntries: 24,
+                maxAgeSeconds: 30 * 24 * 60 * 60,
+              },
+            },
+          },
+        ],
       },
     }),
   ],
