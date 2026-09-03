@@ -6,14 +6,10 @@ import {
   LayoutGrid as RiLayoutGridLine,
   LoaderCircle as RiLoaderCircle,
   ChevronRight as RiChevronRightLine,
-  Bell as RiBellLine,
   Pin as RiPushpinLine,
   PinOff as RiPinOffLine,
   Columns2 as RiSplitLine,
-  Rows2 as RiSplitRowsLine,
   ChartBar as RiChartBarLine,
-  Pencil as RiPencilLine,
-  GripVertical as RiDragHandleLine,
   MoreHorizontal as RiMoreHorizontal,
   RefreshCw as RiRefreshLine,
   ChevronDown as RiChevronDownLine,
@@ -159,7 +155,7 @@ export function LeftSidebar(
     isOpen, drawerWidthPx, onClose, onOpen,
     sessions, activeSessionId, sessionStates,
     onNewSession, onCloseSession, onSplitSession, onCloseSplit, onRemoveFromSplit, splitWorkspaces,
-    onSetSplitLayout, onReorderSplitWorkspace, onRenameSplitWorkspace, onCombineSplitSessions,
+    onReorderSplitWorkspace, onCombineSplitSessions,
     onReorderSessions, onSessionMenu, onOpenSettings, onOpenQuota,
     updateState, updateActionPending = false, onConfirmUpdateRestart, onRetryUpdate,
     tmuxAvailable = true,
@@ -175,9 +171,6 @@ export function LeftSidebar(
   }: LeftSidebarProps,
 ) {
   const { t } = useI18n();
-  const [editingSplitWorkspaceId, setEditingSplitWorkspaceId] = useState<string | null>(null);
-  const [expandedSplitWorkspaceIds, setExpandedSplitWorkspaceIds] = useState<Set<string>>(new Set());
-  const [draggedSplitMember, setDraggedSplitMember] = useState<{ workspaceId: string; sessionId: string } | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [newSessionComposerOpen, setNewSessionComposerOpen] = useState(false);
   const [agentOperationsOpen, setAgentOperationsOpen] = useState(false);
@@ -422,6 +415,7 @@ export function LeftSidebar(
   }, [sessionStates]);
 
   // 会话行主体（切换按钮 + 关闭按钮），flat / 分组两种布局共用。
+  // 目录和 Git 信息由外层目录分组表达，不在每个会话里重复；分屏成员再收紧一档。
   // dragHandleProps 仅在可拖拽的 flat 模式传入。
   // 触屏「超长按」不挂在按钮上（按钮在可拖拽行上是 dnd 拖拽手柄）：
   // 与顶栏 tab 一致，挂在行外层 wrapper 上，与 dnd 的 120ms 拖拽抬起共存。
@@ -429,22 +423,22 @@ export function LeftSidebar(
   const renderSessionRowBody = useCallback((
     session: LeftSidebarProps['sessions'][number],
     dragHandleProps?: DraggableProvidedDragHandleProps | null,
-    grouped?: boolean,
     inSplitWorkspace?: boolean,
   ) => {
     const isActive = session.id === activeSessionId;
     const isSplit = splitSessionIds.has(session.id);
     const ts = sessionStates.get(session.id);
     const cwdLeaf = getCwdLeafName(ts?.cwd ?? null);
+    const shellTitle = ts?.shellTitle ?? getCachedShellTitle(session.id);
+    const contentShellTitle = shellTitle === ts?.cwd || shellTitle === cwdLeaf ? null : shellTitle;
     const displayName = getSessionDisplayName(
       session,
       ts?.activeProgram ?? null,
-      ts?.cwd ?? null,
+      null,
       DEFAULT_SESSION_DISPLAY_SHELL_NAMES,
-      ts?.shellTitle ?? getCachedShellTitle(session.id),
+      contentShellTitle,
       ts?.promptState ?? null,
     );
-    const cwdSecondary = cwdLeaf && cwdLeaf !== displayName ? cwdLeaf : null;
     // Shell integration (OSC 133) provides real-time running state.
     // Fall back to agentStatus for AI tools that don't emit OSC 133.
     const tuiProgressActive = Boolean(ts?.tuiProgress && ts.tuiProgress.state !== 'remove');
@@ -473,13 +467,17 @@ export function LeftSidebar(
             window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: session.id }));
             closeIfOverlay();
           }}
-          className="relative min-w-0 flex flex-1 items-center gap-2 overflow-hidden py-1.5 pl-2 pr-1 text-left"
+          className={`sidebar-session-primary relative min-w-0 flex flex-1 items-center overflow-hidden text-left ${dragHandleProps ? 'cursor-grab active:cursor-grabbing ' : ''}${
+            inSplitWorkspace ? 'gap-1.5 py-0.5 pl-1.5 pr-0.5' : 'gap-1.5 py-1 pl-2 pr-1'
+          }`}
           title={ts?.cwd ?? session.name}
         >
           {isActive && (
             <span className={`absolute inset-y-2 left-0 w-0.5 rounded-full ${accentClass}`} />
           )}
-          <span className={`relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
+          <span className={`relative inline-flex shrink-0 items-center justify-center rounded-md ${
+            inSplitWorkspace ? 'h-5 w-5' : 'h-[22px] w-[22px]'
+          } ${
             isActive
               ? session.mode === 'tmux'
                 ? 'bg-[rgb(var(--tmux-rgb)_/_0.15)] text-[color:var(--tmux)]'
@@ -489,13 +487,13 @@ export function LeftSidebar(
                 : 'bg-surface text-muted-foreground'
           }`}>
             {ts?.isConnecting || (tuiProgressActive && !ts?.agentStatus) ? (
-              <RiLoaderCircle size={12} className="animate-spin" />
+              <RiLoaderCircle size={inSplitWorkspace ? 10 : 11} className="animate-spin" />
             ) : (ts?.agent ?? getCachedAgentIdentity(session.id)) ? (
-              <AgentBrandAvatar agent={ts?.agent ?? getCachedAgentIdentity(session.id)!} size={16} />
+              <AgentBrandAvatar agent={ts?.agent ?? getCachedAgentIdentity(session.id)!} size={inSplitWorkspace ? 13 : 15} />
             ) : session.mode === 'tmux' ? (
-              <RiLayoutGridLine size={12} />
+              <RiLayoutGridLine size={inSplitWorkspace ? 10 : 11} />
             ) : (
-              <RiTerminalLine size={12} />
+              <RiTerminalLine size={inSplitWorkspace ? 10 : 11} />
             )}
             <StatusDot
               status={ts?.agentStatus ?? null}
@@ -504,29 +502,12 @@ export function LeftSidebar(
               inCopyMode={ts?.inCopyMode}
             />
           </span>
-          <span className="min-w-0 flex-1">
-            <span className={`block truncate text-[13px] leading-tight ${
+          <span className={`min-w-0 flex-1 truncate leading-tight ${
+            inSplitWorkspace ? 'text-[11px]' : 'text-[12px]'
+          } ${
               isActive ? 'font-medium text-foreground' : ''
             } ${ts?.inCopyMode ? 'text-[color:var(--tmux)]' : ''}`}>
-              {displayName}
-            </span>
-            {(cwdSecondary || ts?.gitStatus) && (
-              <span className="block truncate text-[10.5px] leading-tight text-muted-foreground/75">
-                {cwdSecondary}
-                {ts?.gitStatus && (
-                  <span className={cwdSecondary ? 'ml-1.5' : ''} title={ts.gitStatus.branch}>
-                    ⎇ {ts.gitStatus.branch.length > 14 ? `${ts.gitStatus.branch.slice(0, 14)}…` : ts.gitStatus.branch}
-                    {!grouped && (ts.gitStatus.added > 0 || ts.gitStatus.removed > 0) && (
-                      <span className="ml-1">
-                        <span className="text-[color:var(--success)]">+{ts.gitStatus.added}</span>
-                        {' '}
-                        <span className="text-[rgb(var(--warning-rgb))]">−{ts.gitStatus.removed}</span>
-                      </span>
-                    )}
-                  </span>
-                )}
-              </span>
-            )}
+            {displayName}
           </span>
         </button>
         <button
@@ -541,13 +522,15 @@ export function LeftSidebar(
               onSplitSession(session.id);
             }
           }}
-          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition hover:bg-primary/15 hover:text-primary active:scale-95 ${
+          className={`sidebar-session-action inline-flex shrink-0 items-center justify-center rounded-md transition hover:bg-primary/15 hover:text-primary active:scale-95 ${
+            inSplitWorkspace ? 'h-6 w-6' : 'h-[26px] w-[26px]'
+          } ${
             isSplit ? 'bg-primary/15 text-primary' : 'text-muted-foreground/70'
           }`}
           aria-label={`${inSplitWorkspace ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')} ${displayName}`}
           title={inSplitWorkspace ? t('tab.splitRemovePane') : isSplit ? t('tab.splitClose') : t('tab.split')}
         >
-          <RiSplitLine size={13} />
+          <RiSplitLine size={inSplitWorkspace ? 11 : 12} />
         </button>
         <button
           type="button"
@@ -555,11 +538,13 @@ export function LeftSidebar(
             event.stopPropagation();
             onCloseSession(session.id, event);
           }}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition hover:bg-destructive/15 hover:text-destructive active:scale-95"
+          className={`sidebar-session-action inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition hover:bg-destructive/15 hover:text-destructive active:scale-95 ${
+            inSplitWorkspace ? 'h-6 w-6' : 'h-[26px] w-[26px]'
+          }`}
           aria-label={t('sidebar.closeSession', { name: displayName })}
           title={t('common.close')}
         >
-          <RiCloseLine size={13} />
+          <RiCloseLine size={inSplitWorkspace ? 11 : 12} />
         </button>
       </>
     );
@@ -598,11 +583,43 @@ export function LeftSidebar(
     [sessions, sessionsById, splitWorkspaces],
   );
 
+  const handleSplitMemberDragEnd = useCallback((result: DropResult): boolean => {
+    if (result.type !== 'split-member') return false;
+    if (result.reason === 'CANCEL') return true;
+
+    const sessionId = result.draggableId.replace(/^split-member:/, '');
+    const sourceWorkspaceId = result.source.droppableId.replace(/^split-members:/, '');
+    const sourceWorkspace = splitWorkspaces.find((workspace) => workspace.id === sourceWorkspaceId);
+    if (!sourceWorkspace?.sessionIds.includes(sessionId)) return true;
+
+    if (!result.destination) {
+      onRemoveFromSplit(sessionId);
+      return true;
+    }
+
+    const targetWorkspaceId = result.destination.droppableId.replace(/^split-members:/, '');
+    if (targetWorkspaceId !== sourceWorkspaceId) {
+      const targetWorkspace = splitWorkspaces.find((workspace) => workspace.id === targetWorkspaceId);
+      const targetSessionId = targetWorkspace?.sessionIds[0];
+      if (targetSessionId) onCombineSplitSessions(targetSessionId, sessionId);
+      return true;
+    }
+
+    if (result.source.index === result.destination.index) return true;
+    const reorderedIds = [...sourceWorkspace.sessionIds];
+    const [movedId] = reorderedIds.splice(result.source.index, 1);
+    if (!movedId) return true;
+    reorderedIds.splice(result.destination.index, 0, movedId);
+    onReorderSplitWorkspace(sourceWorkspaceId, reorderedIds);
+    return true;
+  }, [onCombineSplitSessions, onRemoveFromSplit, onReorderSplitWorkspace, splitWorkspaces]);
+
   const handleEntityDragEnd = useCallback((
     result: DropResult,
     entities: SidebarEntity[],
     folderKey?: string,
   ) => {
+    if (handleSplitMemberDragEnd(result)) return;
     const source = entities.find((entity) => entity.id === result.draggableId);
     if (!source) return;
     if (result.combine) {
@@ -630,7 +647,7 @@ export function LeftSidebar(
     onReorderSessions(folderGroups.flatMap((group) => (
       group.key === folderKey ? reorderedIds : group.sessions.map((session) => session.id)
     )));
-  }, [folderGroups, onCombineSplitSessions, onReorderSessions]);
+  }, [folderGroups, handleSplitMemberDragEnd, onCombineSplitSessions, onReorderSessions]);
 
   // 目录模式下的拖拽：单个 DragDropContext，按 result.type 区分两种拖动。
   //  - type 'group'：整组顺序拖动（组与组之间排序），组内顺序不变。
@@ -638,6 +655,7 @@ export function LeftSidebar(
   // 组是 Draggable、组内会话列表是嵌套 Droppable，pangea 官方支持的嵌套列表
   // 模式：父组可整组拖动，子列表内的 item 仍可各自排序。
   const handleGroupedDragEnd = useCallback((result: DropResult) => {
+    if (handleSplitMemberDragEnd(result)) return;
     if (result.type === 'group') {
       if (!result.destination || result.source.index === result.destination.index) return;
       onReorderSessions(reorderGroupedSessionIds(folderGroups, result.source.index, result.destination.index));
@@ -653,18 +671,16 @@ export function LeftSidebar(
     }
     if (!result.destination || result.destination.droppableId !== result.source.droppableId) return;
     handleEntityDragEnd(result, entities, groupKey);
-  }, [folderGroups, sessionsById, splitWorkspaces, handleEntityDragEnd, onReorderSessions]);
+  }, [folderGroups, sessionsById, splitWorkspaces, handleEntityDragEnd, handleSplitMemberDragEnd, onReorderSessions]);
 
   const renderSplitWorkspaceItem = (
     workspace: SplitWorkspaceSummary,
     members: LeftSidebarProps['sessions'],
-    dragHandleProps?: DraggableProvidedDragHandleProps | null,
     isDragging = false,
     isCombineTarget = false,
   ): React.ReactNode => {
     if (members.length < 2) return null;
     const hasActive = members.some((session) => session.id === activeSessionId);
-    const expanded = expandedSplitWorkspaceIds.has(workspace.id);
     const reviewMembers: SidebarSession[] = [];
     const workingMembers: SidebarSession[] = [];
     const copyModeMembers: SidebarSession[] = [];
@@ -678,42 +694,13 @@ export function LeftSidebar(
         copyModeMembers.push(member);
       }
     }
-    const focusMember = (sessionId: string) => {
-      window.dispatchEvent(new CustomEvent('switch-terminal-session', { detail: sessionId }));
-      closeIfOverlay();
-    };
-    const defaultName = `${t('tab.splitWorkspace')} ${splitWorkspaces.findIndex((candidate) => candidate.id === workspace.id) + 1}`;
-    const displayName = workspace.name || defaultName;
-    const layoutActions: Array<{ layout: SplitLayout; icon: React.ReactNode; label: string }> = [
-      { layout: 'horizontal', icon: <RiSplitLine size={12} />, label: t('tab.splitHorizontal') },
-      { layout: 'vertical', icon: <RiSplitRowsLine size={12} />, label: t('tab.splitVertical') },
-      { layout: 'grid', icon: <RiLayoutGridLine size={12} />, label: t('tab.splitGrid') },
-    ];
-    const commitName = (value: string) => {
-      onRenameSplitWorkspace(workspace.id, value);
-      setEditingSplitWorkspaceId(null);
-    };
-    const toggleExpanded = () => {
-      setExpandedSplitWorkspaceIds((current) => {
-        const next = new Set(current);
-        if (next.has(workspace.id)) next.delete(workspace.id);
-        else next.add(workspace.id);
-        return next;
-      });
-    };
-    const reorderMemberAt = (targetSessionId: string, afterTarget: boolean) => {
-      if (!draggedSplitMember || draggedSplitMember.workspaceId !== workspace.id) return;
-      if (draggedSplitMember.sessionId === targetSessionId) return;
-      const sessionIds = workspace.sessionIds.filter((id) => id !== draggedSplitMember.sessionId);
-      const targetIndex = sessionIds.indexOf(targetSessionId);
-      if (targetIndex < 0) return;
-      sessionIds.splice(targetIndex + (afterTarget ? 1 : 0), 0, draggedSplitMember.sessionId);
-      onReorderSplitWorkspace(workspace.id, sessionIds);
-      setDraggedSplitMember(null);
-    };
+    const accessibleName = workspace.name?.trim()
+      || `${t('tab.splitWorkspace')} ${splitWorkspaces.findIndex((candidate) => candidate.id === workspace.id) + 1}`;
     return (
       <section
-        className={`group/split overflow-hidden rounded-md transition-colors ${
+        data-split-workspace={workspace.id}
+        aria-label={accessibleName}
+        className={`group/split relative rounded-md border border-border/10 bg-surface/35 p-0.5 transition-colors ${
           isCombineTarget
             ? 'bg-primary/15 ring-1 ring-primary/40'
             : isDragging
@@ -729,187 +716,39 @@ export function LeftSidebar(
                       : 'hover:bg-surface-2'
         }`}
       >
-        <header className="flex h-10 items-center gap-0.5 px-0.5">
-          <button
-            type="button"
-            onClick={toggleExpanded}
-            className="inline-flex h-8 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground"
-            aria-expanded={expanded}
-            aria-label={displayName}
-          >
-            <RiChevronRightLine size={13} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
-          </button>
-          <span className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
-            reviewMembers.length > 0
-              ? 'text-[color:var(--warning)]'
-              : workingMembers.length > 0
-                ? 'text-[color:var(--success)]'
-                : hasActive ? 'text-primary' : 'text-muted-foreground'
-          }`}>
-            {workspace.layout === 'vertical' ? <RiSplitRowsLine size={13} />
-              : workspace.layout === 'grid' ? <RiLayoutGridLine size={13} />
-                : <RiSplitLine size={13} />}
-          </span>
-          {editingSplitWorkspaceId === workspace.id ? (
-            <input
-              autoFocus
-              defaultValue={workspace.name ?? ''}
-              placeholder={defaultName}
-              className="h-7 min-w-0 flex-1 rounded-md bg-surface-elevated px-1.5 text-[11.5px] font-semibold text-foreground outline-none ring-1 ring-primary/40"
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') commitName(event.currentTarget.value);
-                if (event.key === 'Escape') setEditingSplitWorkspaceId(null);
-              }}
-              onBlur={(event) => commitName(event.currentTarget.value)}
-            />
-          ) : (
-            <button
-              type="button"
-              {...(dragHandleProps ?? {})}
-              onClick={() => {
-                const target = members.find((session) => session.id === activeSessionId) ?? reviewMembers[0] ?? members[0];
-                if (target) focusMember(target.id);
-              }}
-              className={`min-w-0 flex-1 px-1 text-left ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
-              title={`${displayName} · ${t('tab.sessionCount', { count: members.length })}`}
+        <Droppable droppableId={`split-members:${workspace.id}`} type="split-member" direction="vertical">
+          {(membersProvided, membersSnapshot) => (
+            <div
+              ref={membersProvided.innerRef}
+              {...membersProvided.droppableProps}
+              data-split-members
+              className={membersSnapshot.isDraggingOver ? 'rounded-sm bg-primary/10 ring-1 ring-primary/40' : ''}
             >
-              <span className="block truncate text-[11.5px] font-semibold text-foreground">{displayName}</span>
-              <span className="block truncate text-[9.5px] text-muted-foreground/70">
-                {members.map((session) => getSessionDisplayName(
-                  session,
-                  sessionStates.get(session.id)?.activeProgram ?? null,
-                  sessionStates.get(session.id)?.cwd ?? null,
-                  DEFAULT_SESSION_DISPLAY_SHELL_NAMES,
-                  sessionStates.get(session.id)?.shellTitle ?? getCachedShellTitle(session.id),
-                )).join(' · ')}
-              </span>
-            </button>
+              {members.map((session, memberIndex) => (
+                <Draggable key={session.id} draggableId={`split-member:${session.id}`} index={memberIndex} disableInteractiveElementBlocking>
+                  {(memberProvided, memberSnapshot) => (
+                    <div
+                      ref={memberProvided.innerRef}
+                      {...memberProvided.draggableProps}
+                      {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
+                      className={`flex items-center rounded-sm pr-0.5 transition-colors ${
+                        memberSnapshot.isDragging ? 'bg-surface-elevated opacity-90 shadow-lg ' : ''
+                      }${
+                        getSessionStatusBackground(session.id)
+                          ?? (session.id === activeSessionId
+                            ? 'bg-surface-elevated/80 text-foreground'
+                            : 'text-muted-foreground hover:bg-surface-2')
+                      }`}
+                    >
+                      {renderSessionRowBody(session, memberProvided.dragHandleProps, true)}
+                    </div>
+                  )}
+                </Draggable>
+              ))}
+              {membersProvided.placeholder}
+            </div>
           )}
-          {reviewMembers.length > 0 && (
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                focusMember(reviewMembers[0]!.id);
-              }}
-              className="inline-flex h-5 shrink-0 items-center gap-0.5 rounded-full bg-[rgb(var(--warning-rgb)_/_0.14)] px-1.5 text-[9px] font-semibold tabular-nums text-[color:var(--warning)] ring-1 ring-[rgb(var(--warning-rgb)_/_0.22)] transition hover:bg-[rgb(var(--warning-rgb)_/_0.22)]"
-              title={t('agent.needsReview')}
-              aria-label={`${t('agent.needsReview')}: ${reviewMembers.length}`}
-            >
-              <RiBellLine size={9} />
-              {reviewMembers.length}
-            </button>
-          )}
-          {workingMembers.length > 0 && (
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                focusMember(workingMembers[0]!.id);
-              }}
-              className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-[rgb(var(--success-rgb)_/_0.10)] px-1.5 text-[9px] font-medium tabular-nums text-[color:var(--success)] transition hover:bg-[rgb(var(--success-rgb)_/_0.16)]"
-              title={t('agent.aiRunning')}
-              aria-label={`${t('agent.aiRunning')}: ${workingMembers.length}`}
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-[var(--success)] animate-pulse" />
-              {workingMembers.length}
-            </button>
-          )}
-          {copyModeMembers.length > 0 && reviewMembers.length === 0 && workingMembers.length === 0 && (
-            <span
-              className="h-2 w-2 shrink-0 rounded-[2px] bg-[var(--tmux)]"
-              title={t('agent.copyMode')}
-            />
-          )}
-          <span className="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/60">{members.length}</span>
-          <button
-            type="button"
-            onClick={() => setEditingSplitWorkspaceId(workspace.id)}
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 opacity-0 transition hover:bg-surface-elevated hover:text-foreground group-hover/split:opacity-100 focus:opacity-100"
-            aria-label={t('tab.splitRename')}
-            title={t('tab.splitRename')}
-          >
-            <RiPencilLine size={11} />
-          </button>
-        </header>
-        {expanded && (
-          <div className="border-t border-border/10 pb-0.5">
-          <div className="flex items-center gap-0.5 px-1 py-0.5">
-            {layoutActions.map((action) => (
-              <button
-                key={action.layout}
-                type="button"
-                onClick={() => onSetSplitLayout(members[0]!.id, action.layout)}
-                className={`inline-flex h-6 w-7 items-center justify-center rounded-md transition ${
-                  workspace.layout === action.layout
-                    ? 'bg-primary/15 font-medium text-primary'
-                    : 'text-muted-foreground/70 hover:bg-surface-elevated hover:text-foreground'
-                }`}
-                aria-label={action.label}
-                title={action.label}
-              >
-                {action.icon}
-              </button>
-            ))}
-            <span className="min-w-0 flex-1" />
-            <button
-              type="button"
-              onClick={() => onSplitSession((members.find((session) => session.id === activeSessionId) ?? members[0])!.id)}
-              className="inline-flex h-6 w-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-primary/15 hover:text-primary"
-              aria-label={t('tab.split')}
-              title={t('tab.split')}
-            >
-              <RiAddLine size={12} />
-            </button>
-            <button
-              type="button"
-              onClick={() => onCloseSplit(members[0]!.id)}
-              className="inline-flex h-6 w-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-destructive/15 hover:text-destructive"
-              aria-label={t('tab.splitClose')}
-              title={t('tab.splitClose')}
-            >
-              <RiCloseLine size={12} />
-            </button>
-          </div>
-          <div className="px-0.5">
-            {members.map((session) => (
-              <div
-                key={session.id}
-                onDragOver={(event) => {
-                  if (draggedSplitMember?.workspaceId === workspace.id) event.preventDefault();
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  const bounds = event.currentTarget.getBoundingClientRect();
-                  reorderMemberAt(session.id, event.clientY > bounds.top + bounds.height / 2);
-                }}
-                {...(onSessionMenu ? bindSessionLongPress(() => onSessionMenu(session.id)) : {})}
-                className={`flex items-center rounded-md pr-1 transition-colors ${
-                  getSessionStatusBackground(session.id)
-                    ?? (session.id === activeSessionId
-                      ? 'bg-surface-elevated/80 text-foreground'
-                      : 'text-muted-foreground hover:bg-surface-2')
-                }`}
-              >
-                <span
-                  draggable
-                  onDragStart={(event) => {
-                    event.stopPropagation();
-                    event.dataTransfer.effectAllowed = 'move';
-                    setDraggedSplitMember({ workspaceId: workspace.id, sessionId: session.id });
-                  }}
-                  onDragEnd={() => setDraggedSplitMember(null)}
-                  className="inline-flex h-8 w-5 shrink-0 cursor-grab items-center justify-center text-muted-foreground/50 active:cursor-grabbing"
-                >
-                  <RiDragHandleLine size={12} />
-                </span>
-                {renderSessionRowBody(session, undefined, true, true)}
-              </div>
-            ))}
-          </div>
-          </div>
-        )}
+        </Droppable>
       </section>
     );
   };
@@ -930,7 +769,6 @@ export function LeftSidebar(
                     {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
                       entity.workspace,
                       entity.members,
-                      dragProvided.dragHandleProps,
                       snapshot.isDragging,
                       Boolean(snapshot.combineTargetFor),
                     ) : (
@@ -947,7 +785,7 @@ export function LeftSidebar(
                                   : 'text-muted-foreground hover:bg-surface-2')
                         } cursor-grab active:cursor-grabbing`}
                       >
-                        {renderSessionRowBody(entity.session, dragProvided.dragHandleProps, folderKey !== undefined)}
+                        {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
                       </div>
                     )}
                   </div>
@@ -1235,7 +1073,6 @@ export function LeftSidebar(
                                                 {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
                                                   entity.workspace,
                                                   entity.members,
-                                                  dragProvided.dragHandleProps,
                                                   snapshot.isDragging,
                                                   Boolean(snapshot.combineTargetFor),
                                                 ) : (
@@ -1252,7 +1089,7 @@ export function LeftSidebar(
                                                               : 'text-muted-foreground hover:bg-surface-2')
                                                     } cursor-grab active:cursor-grabbing`}
                                                   >
-                                                    {renderSessionRowBody(entity.session, dragProvided.dragHandleProps, true)}
+                                                    {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
                                                   </div>
                                                 )}
                                               </div>

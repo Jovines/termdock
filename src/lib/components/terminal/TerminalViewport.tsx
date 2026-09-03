@@ -33,6 +33,15 @@ import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHys
 import { shouldForceSettledRedraw, type TerminalDimensions } from '../../terminal/refreshRedraw';
 import { shouldAllowTerminalTransparency } from '../../terminal/renderer';
 import {
+  acknowledgeResize,
+  clearPendingResize,
+  createResizeSyncState,
+  observeServerSize,
+  requestResize as requestResizeSync,
+  retryResize,
+  type ResizeRequest,
+} from '../../terminal/resizeSync';
+import {
   TERMINAL_FALLBACK_LIGATURES,
   TERMINAL_LIGATURE_FEATURE_SETTINGS,
   type TerminalFontWeight,
@@ -338,6 +347,8 @@ export type TerminalController = {
    * 后端 session id 变化由 `session-key-change` refresh reason 额外处理。
    */
   setSessionReady: (ready: boolean) => void;
+  /** Confirm or reject the latest sequenced PTY resize request. */
+  acknowledgeResize: (ack: { seq?: number; ok: boolean; cols?: number; rows?: number }) => void;
   /**
    * 服务端 ws 推送的 pty-size 广播：把"服务端事实"同步到 viewport 的
    * lastServerSize 状态。多端切换时另一个客户端把 pty 拉小后，本端 fit
@@ -362,7 +373,7 @@ interface TerminalViewportProps {
   sessionKey: string;
   chunks: TerminalChunk[];
   onInput: (data: string, options?: TerminalViewportInputOptions) => void;
-  onResize: (cols: number, rows: number) => void;
+  onResize: (cols: number, rows: number, seq: number) => void;
   onFlowControl?: (paused: boolean) => void;
   onTmuxScroll?: (direction: 'up' | 'down', lines: number) => void;
   tmuxScrollSensitivity?: number;
@@ -815,7 +826,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const terminalRef = React.useRef<Terminal | null>(null);
     const fitAddonRef = React.useRef<FitAddon | null>(null);
     const inputHandlerRef = React.useRef<(data: string, options?: TerminalViewportInputOptions) => void>(onInput);
-    const resizeHandlerRef = React.useRef<(cols: number, rows: number) => void>(onResize);
+    const resizeHandlerRef = React.useRef<(cols: number, rows: number, seq: number) => void>(onResize);
     const inputFocusHandlerRef = React.useRef<typeof onInputFocusChange>(onInputFocusChange);
     const flowControlHandlerRef = React.useRef<typeof onFlowControl>(onFlowControl);
     const onReadyChangeRef = React.useRef(onReadyChange);
@@ -3146,8 +3157,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pendingReasonRafRef = React.useRef<Map<RefreshReason, number>>(new Map());
     // pending rAF 对应的最后一次 options；桌面滚轮可据此同步 flush resize。
     const pendingReasonOptionsRef = React.useRef<Map<RefreshReason, RefreshOptions>>(new Map());
-    // last sent to server，first-fit immediate 路径用它做"和上次一样就不发"判定
-    const lastServerSizeRef = React.useRef<{ cols: number; rows: number } | null>(null);
+    // 服务端 ACK / pty-size 广播确认过的尺寸，以及当前等待 ACK 的最新请求。
+    // WebSocket.send() 只代表进入发送队列，不能据此乐观地认为 PTY 已 resize。
+    const resizeSyncStateRef = React.useRef(createResizeSyncState());
+    const resizeAckTimerRef = React.useRef<number | null>(null);
     // 每个 reason 上一次处理的 dedupeKey（用于 tmux-layout 之类的服务端重复推送）
     const lastDedupeKeyRef = React.useRef<Map<RefreshReason, string>>(new Map());
     // renderer 是否已就绪（enableWebglRenderer / DOM fallback 完成）
@@ -3174,13 +3187,42 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       pendingReasonOptionsRef.current.clear();
     }, []);
 
+    const clearResizeAckTimer = React.useCallback(() => {
+      if (resizeAckTimerRef.current !== null) {
+        window.clearTimeout(resizeAckTimerRef.current);
+        resizeAckTimerRef.current = null;
+      }
+    }, []);
+
+    const sendResizeRequestRef = React.useRef<(request: ResizeRequest) => void>(() => {});
+    const sendResizeRequest = React.useCallback((request: ResizeRequest) => {
+      clearResizeAckTimer();
+      resizeHandlerRef.current(request.cols, request.rows, request.seq);
+      resizeAckTimerRef.current = window.setTimeout(() => {
+        resizeAckTimerRef.current = null;
+        const retry = retryResize(resizeSyncStateRef.current, request.seq);
+        resizeSyncStateRef.current = retry.state;
+        if (retry.request && sessionReadyRef.current) {
+          debugTerminal('resize ack timeout; retrying', {
+            seq: request.seq,
+            retrySeq: retry.request.seq,
+            cols: retry.request.cols,
+            rows: retry.request.rows,
+          });
+          sendResizeRequestRef.current(retry.request);
+        } else if (retry.exhausted) {
+          debugTerminal('resize ack timeout; leaving size unconfirmed', {
+            seq: request.seq,
+            cols: request.cols,
+            rows: request.rows,
+          });
+        }
+      }, 1200);
+    }, [clearResizeAckTimer, debugTerminal]);
+    sendResizeRequestRef.current = sendResizeRequest;
+
     const pushResizeToServer = React.useCallback(
       (cols: number, rows: number) => {
-        const last = lastServerSizeRef.current;
-        if (last && last.cols === cols && last.rows === rows) {
-          // 尺寸没变，不发
-          return;
-        }
         if (!sessionReadyRef.current) {
           // WS 还没收到 connected 事件：不能推 resize 给服务端。
           // 之前 (没有这个 gate) 会用旧的 terminalIdRef 直接 POST，
@@ -3191,10 +3233,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // connected 那次就发不出来了。
           return;
         }
-        lastServerSizeRef.current = { cols, rows };
-        resizeHandlerRef.current(cols, rows);
+        const queued = requestResizeSync(resizeSyncStateRef.current, { cols, rows });
+        resizeSyncStateRef.current = queued.state;
+        if (queued.request) {
+          sendResizeRequest(queued.request);
+        }
       },
-      []
+      [sendResizeRequest]
     );
 
     // ── 多端同步 / 防拉扯支持 ──
@@ -3222,7 +3267,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }
         const cleanCols = Math.floor(cols);
         const cleanRows = Math.floor(rows);
-        lastServerSizeRef.current = { cols: cleanCols, rows: cleanRows };
+        resizeSyncStateRef.current = observeServerSize(
+          resizeSyncStateRef.current,
+          { cols: cleanCols, rows: cleanRows },
+        );
         lastServerBroadcastAtRef.current = Date.now();
         debugTerminal('pty-size broadcast received', {
           cols: cleanCols,
@@ -3255,7 +3303,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }
         const cols = terminal.cols;
         const rows = terminal.rows;
-        const last = lastServerSizeRef.current;
+        const last = resizeSyncStateRef.current.confirmed;
         if (last && last.cols === cols && last.rows === rows) {
           return;
         }
@@ -3268,10 +3316,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         });
         // 立刻发（immediate），别等 debounce —— 这是 user-initiated 的"我希望
         // pty 跟我现在的可视尺寸吻合"。
-        lastServerSizeRef.current = { cols, rows };
-        resizeHandlerRef.current(cols, rows);
+        pushResizeToServer(cols, rows);
       },
-      [debugTerminal]
+      [debugTerminal, pushResizeToServer]
     );
 
     const runRefreshSequence = React.useCallback(
@@ -3360,7 +3407,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             if (shouldPushFittedSize({
               before,
               after,
-              lastServerSize: lastServerSizeRef.current,
+              lastServerSize: resizeSyncStateRef.current.confirmed,
               reconcileServerSize: options.reconcileServerSize,
             })) {
               pushResizeToServer(after.cols, after.rows);
@@ -3410,7 +3457,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         //    用于后端 terminalSessionId 变化（auto-recreate / restart）后，让下一次
         //    first-fit 重新走 immediate 路径，把当前真实尺寸告诉新的 session。
         if (reason === 'session-key-change') {
-          lastServerSizeRef.current = null;
+          resizeSyncStateRef.current = createResizeSyncState();
+          clearResizeAckTimer();
           lastDedupeKeyRef.current.clear();
           cancelAllPendingReasonRafs();
         }
@@ -3443,6 +3491,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         debugTerminal,
         cancelPendingReasonRaf,
         cancelAllPendingReasonRafs,
+        clearResizeAckTimer,
         runRefreshSequence,
       ]
     );
@@ -3472,14 +3521,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       };
     }, [sessionKey, cancelAllPendingReasonRafs]);
 
-    // sessionKey 变化 = 切到别的 session = 重置 lastServerSize /
+    // sessionKey 变化 = 切到别的 session = 重置 resize confirmation /
     // dedupe keys / renderer-ready，让下一个 session 的 first-fit 走 immediate 路径
     React.useEffect(() => {
-      lastServerSizeRef.current = null;
+      resizeSyncStateRef.current = createResizeSyncState();
+      clearResizeAckTimer();
       lastDedupeKeyRef.current.clear();
       // renderer 状态不在这里重置：disposeWebglRenderer 在 cleanup 跑，
       // 下一次 init useEffect 会再 enableWebglRenderer 并把 ready 置 true。
-    }, [sessionKey]);
+    }, [sessionKey, clearResizeAckTimer]);
 
     const flushWrites = React.useCallback(() => {
       if (isWritingRef.current) {
@@ -4066,6 +4116,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         viewportRef.current = null;
         lastBufferTypeRef.current = null;
         resetWriteState({ notifyFlowResume: true });
+        clearResizeAckTimer();
       };
     }, [
       fitTerminal,
@@ -4090,6 +4141,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       enableWebglRenderer,
       disposeWebglRenderer,
       debugTerminal,
+      clearResizeAckTimer,
     ]);
 
     React.useEffect(() => {
@@ -4146,7 +4198,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         hiddenInputRef.current.value = '';
       }
       // session-reset：先重置状态，fit + atlas 刷新都走编排器
-      // （sessionKey 变化时 lastServerSizeRef 已被 useEffect 重置为 null，
+      // （sessionKey 变化时 resize confirmation 已被 useEffect 重置，
       //   所以这里推 resize 走 first-fit immediate 路径）
       requestRefresh('session-reset', { skipScrollToBottom: true });
       if (autoFocusRef.current) {
@@ -4333,6 +4385,32 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         requestRefresh,
         setSessionReady: (ready: boolean) => {
           sessionReadyRef.current = ready;
+          if (!ready) {
+            clearResizeAckTimer();
+            resizeSyncStateRef.current = clearPendingResize(resizeSyncStateRef.current);
+          }
+        },
+        acknowledgeResize: (ack) => {
+          if (!ack.ok && typeof ack.seq === 'number') {
+            const retry = retryResize(resizeSyncStateRef.current, ack.seq);
+            if (!retry.request && !retry.exhausted) return;
+            clearResizeAckTimer();
+            resizeSyncStateRef.current = retry.state;
+            if (retry.request && sessionReadyRef.current) {
+              sendResizeRequestRef.current(retry.request);
+            }
+            return;
+          }
+          const result = acknowledgeResize(resizeSyncStateRef.current, ack);
+          if (!result.accepted) return;
+          clearResizeAckTimer();
+          resizeSyncStateRef.current = result.state;
+          debugTerminal('resize acknowledged', {
+            seq: ack.seq,
+            ok: ack.ok,
+            cols: ack.cols,
+            rows: ack.rows,
+          });
         },
         notifyServerSize,
         ensureSizeMatches,
@@ -4345,6 +4423,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         readClipboardIntoTerminal,
         sendTerminalSeq,
         requestRefresh,
+        clearResizeAckTimer,
+        debugTerminal,
+        pushResizeToServer,
         notifyServerSize,
         ensureSizeMatches,
       ]

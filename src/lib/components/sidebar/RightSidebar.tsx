@@ -4033,8 +4033,7 @@ function mergeRepoChangedFiles(current: GitChangedFile[], incoming: GitChangedFi
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
-function buildRepoFilterFromBundle(repo: GitRepositoryBundle, rootPath: string | null): GitRepositoryFilter | null {
-  if (repo.files.length === 0) return null;
+function buildRepoFilterFromBundle(repo: GitRepositoryBundle, rootPath: string | null): GitRepositoryFilter {
   const label = repo.relativeRoot === '.'
     ? getPathBasename(rootPath ?? repo.root) || repo.name || repo.root
     : (repo.relativeRoot || repo.name || getPathBasename(repo.root) || repo.root);
@@ -4051,7 +4050,6 @@ function buildRepoFiltersFromBundles(repositories: GitRepositoryBundle[], rootPa
   const rootLabel = getPathBasename(rootPath ?? '') || rootPath || '';
   return repositories
     .map((repo) => buildRepoFilterFromBundle(repo, rootPath))
-    .filter((repo): repo is GitRepositoryFilter => Boolean(repo))
     .sort((a, b) => {
       if (rootLabel && a.label === rootLabel) return -1;
       if (rootLabel && b.label === rootLabel) return 1;

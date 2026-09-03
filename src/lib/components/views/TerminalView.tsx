@@ -1162,6 +1162,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 });
                 break;
               }
+              case 'resize-ack': {
+                terminalControllerRef.current?.acknowledgeResize({
+                  seq: event.seq,
+                  ok: event.ok !== false,
+                  cols: event.cols,
+                  rows: event.rows,
+                });
+                break;
+              }
               case 'pty-size': {
                 // 服务端在任意 client resize 之后广播过来的真实 pty 尺寸。
                 // 同步给 viewport 的 lastServerSize：多端切换后 ensureSizeMatches
@@ -1734,14 +1743,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // TerminalViewport 内部已按动画帧合并并完成 skip-if-same，调用本函数说明
   // 编排器已经决策好了，直接通过当前 WebSocket 发送。
   const handleViewportResize = React.useCallback(
-    (cols: number, rows: number) => {
+    (cols: number, rows: number, seq: number) => {
       const terminalId = terminalIdRef.current;
       if (!terminalId) {
         debugKeyboard('xterm resize push skipped: no terminalId', { cols, rows });
         return;
       }
       debugKeyboard('xterm resize push', { cols, rows });
-      void terminal.resize({ sessionId: terminalId, cols, rows }).catch((err) => {
+      void terminal.resize({ sessionId: terminalId, cols, rows, seq }).catch((err) => {
+        terminalControllerRef.current?.acknowledgeResize({ seq, ok: false });
         // 静默失败：resize 失败不影响终端渲染
         // 但需要知道是不是 session-not-found——这通常是后端 session 已被清掉
         // 而前端 ref 还指着旧 id，是 race 的明确信号。

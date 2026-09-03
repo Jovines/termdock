@@ -360,6 +360,7 @@ interface TerminalSession {
   tmuxIoChain?: Promise<void>;
   tmuxScreenSyncClients?: Set<string>;
   tmuxResizeGeneration?: number;
+  tmuxScreenSyncTimers?: Map<string, ReturnType<typeof setTimeout>>;
 }
 
 type TuiProgressReport = {
@@ -2792,6 +2793,36 @@ function markTmuxClientsForScreenSync(sessionId: string, session: TerminalSessio
   session.tmuxResizeGeneration = (session.tmuxResizeGeneration ?? 0) + 1;
 }
 
+const TMUX_RESIZE_SCREEN_SYNC_DELAY_MS = 180;
+
+function clearTmuxScreenSyncTimer(session: TerminalSession, clientId: string): void {
+  const timer = session.tmuxScreenSyncTimers?.get(clientId);
+  if (timer) clearTimeout(timer);
+  session.tmuxScreenSyncTimers?.delete(clientId);
+  if (session.tmuxScreenSyncTimers?.size === 0) {
+    session.tmuxScreenSyncTimers = undefined;
+  }
+}
+
+function scheduleTmuxScreenSyncAfterResize(
+  sessionId: string,
+  session: TerminalSession,
+  clientId: string,
+): void {
+  if (session.mode !== 'tmux' || !session.tmuxSessionName) return;
+  clearTmuxScreenSyncTimer(session, clientId);
+  const timers = session.tmuxScreenSyncTimers ?? new Map<string, ReturnType<typeof setTimeout>>();
+  const timer = setTimeout(() => {
+    clearTmuxScreenSyncTimer(session, clientId);
+    const ws = wsClients.get(sessionId)?.get(clientId);
+    if (!ws || ws.readyState !== ws.OPEN) return;
+    void enqueueTmuxIo(session, () => syncTmuxScreenBeforeScroll(sessionId, clientId, session, ws));
+  }, TMUX_RESIZE_SCREEN_SYNC_DELAY_MS);
+  timer.unref?.();
+  timers.set(clientId, timer);
+  session.tmuxScreenSyncTimers = timers;
+}
+
 function isTmuxWheelInput(data: string): boolean {
   return /^(?:\u001b\[<6[45];\d+;\d+[Mm])+$/.test(data);
 }
@@ -2802,6 +2833,7 @@ async function syncTmuxScreenBeforeScroll(
   session: TerminalSession,
   ws: WebSocket,
 ): Promise<void> {
+  clearTmuxScreenSyncTimer(session, clientId);
   if (
     session.mode !== 'tmux'
     || !session.tmuxSessionName
@@ -4824,6 +4856,10 @@ function cleanupSession(sessionId: string, options: { killProcess: boolean; clea
   }
   session.flowPausedClientTimers.clear();
   session.flowPausedClients.clear();
+  for (const timer of session.tmuxScreenSyncTimers?.values() ?? []) {
+    clearTimeout(timer);
+  }
+  session.tmuxScreenSyncTimers = undefined;
   if (session.ptyPausedForFlowControl) {
     applyPtyFlowControl(sessionId, session, false, 'session-cleanup');
   }
@@ -4930,6 +4966,9 @@ function applyPtyResize(
       { type: 'pty-size', cols: cleanCols, rows: cleanRows, source },
       originClientId,
     );
+    if (originClientId) {
+      scheduleTmuxScreenSyncAfterResize(sessionId, session, originClientId);
+    }
   }
   return true;
 }
@@ -8348,6 +8387,7 @@ export function handleTerminalWebSocket(
       }
     }
     removeClientFocus(sessionId, session, clientId);
+    clearTmuxScreenSyncTimer(session, clientId);
     if (options.pushClientId) {
       setClientViewingSession(options.pushClientId, sessionId, false);
     }

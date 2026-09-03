@@ -270,6 +270,19 @@ body {
   textarea {
     font-size: 16px;
   }
+
+  /* Keep compact desktop density while giving every sidebar session action a
+     comfortable phone-sized hit area. */
+  .sidebar-session-primary {
+    min-height: 2.75rem;
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+  }
+
+  .sidebar-session-action {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
 }
 
 #root {

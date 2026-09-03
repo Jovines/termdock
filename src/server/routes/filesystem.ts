@@ -1443,7 +1443,6 @@ async function buildGitRepositoryBundle(workspaceRoot: string, resolvedCwd: stri
 
 function buildGitRepositoryFilters(workspaceRoot: string, repositories: GitRepositoryBundle[]): GitRepositoryFilter[] {
   return repositories
-    .filter((repo) => repo.files.length > 0)
     .map((repo) => ({
       root: repo.root,
       label: repo.relativeRoot === '.' ? path.basename(workspaceRoot) || workspaceRoot : (repo.relativeRoot || repo.name || path.basename(repo.root) || repo.root),

@@ -86,4 +86,38 @@ describe('replaceGitRepositorySnapshot', () => {
       { root: childRepo.root, count: 1 },
     ]);
   });
+
+  it('keeps a child repository selectable after its last change is cleared', () => {
+    const parentRepo = repository('/workspace', []);
+    const staleChildFile = changedFile('/workspace/packages/child', 'old.ts');
+    const childRepo = repository('/workspace/packages/child', [staleChildFile]);
+    const refreshedBundle: GitBundleResponse = {
+      available: true,
+      files: [],
+      context: { available: true, root: childRepo.root, branch: 'child-main' },
+      repositories: [{
+        ...childRepo,
+        relativeRoot: '.',
+        name: 'child',
+        depth: 0,
+        nested: false,
+        files: [],
+        context: { available: true, root: childRepo.root, branch: 'child-main' },
+      }],
+    };
+
+    const result = replaceGitRepositorySnapshot(
+      [staleChildFile],
+      [parentRepo, childRepo],
+      refreshedBundle,
+      childRepo.root,
+      parentRepo.root,
+    );
+
+    expect(result.files).toEqual([]);
+    expect(result.repoFilters.map(({ root, count }) => ({ root, count }))).toEqual([
+      { root: parentRepo.root, count: 0 },
+      { root: childRepo.root, count: 0 },
+    ]);
+  });
 });
