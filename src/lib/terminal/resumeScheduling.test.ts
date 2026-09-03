@@ -13,6 +13,7 @@ import {
   shouldForceForegroundReconnect,
   shouldStartInitialConnection,
   shouldMountSessionViewport,
+  shouldPublishSessionDataUpdate,
 } from './resumeScheduling';
 
 describe('resolvePrioritySessionId', () => {
@@ -87,14 +88,13 @@ describe('shouldMountSessionViewport', () => {
   const visibleSessionIds = new Set(['selected', 'split-peer']);
   const deferredViewportSessionIds = new Set(['background']);
 
-  it('keeps every terminal renderer mounted on mobile', () => {
+  it('mounts visible and previously warmed viewports', () => {
     for (const sessionId of visibleSessionIds) {
       expect(shouldMountSessionViewport({
         sessionId,
         foregroundSessionId: 'selected',
         visibleSessionIds,
         deferredViewportSessionIds,
-        isMobileLayout: true,
       })).toBe(true);
     }
     expect(shouldMountSessionViewport({
@@ -102,39 +102,20 @@ describe('shouldMountSessionViewport', () => {
       foregroundSessionId: 'selected',
       visibleSessionIds,
       deferredViewportSessionIds,
-      isMobileLayout: true,
-    })).toBe(true);
-  });
-
-  it('mounts visible and previously warmed viewports on desktop', () => {
-    expect(shouldMountSessionViewport({
-      sessionId: 'selected',
-      foregroundSessionId: 'selected',
-      visibleSessionIds,
-      deferredViewportSessionIds,
-      isMobileLayout: false,
-    })).toBe(true);
-    expect(shouldMountSessionViewport({
-      sessionId: 'split-peer',
-      foregroundSessionId: 'selected',
-      visibleSessionIds,
-      deferredViewportSessionIds,
-      isMobileLayout: false,
-    })).toBe(true);
-    expect(shouldMountSessionViewport({
-      sessionId: 'background',
-      foregroundSessionId: 'selected',
-      visibleSessionIds,
-      deferredViewportSessionIds,
-      isMobileLayout: false,
     })).toBe(true);
     expect(shouldMountSessionViewport({
       sessionId: 'cold',
       foregroundSessionId: 'selected',
       visibleSessionIds,
       deferredViewportSessionIds,
-      isMobileLayout: false,
     })).toBe(false);
+  });
+});
+
+describe('shouldPublishSessionDataUpdate', () => {
+  it('preserves cached tab chrome until runtime restoration completes', () => {
+    expect(shouldPublishSessionDataUpdate(true)).toBe(false);
+    expect(shouldPublishSessionDataUpdate(false)).toBe(true);
   });
 });
 

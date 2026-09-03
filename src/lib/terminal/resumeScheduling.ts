@@ -40,14 +40,14 @@ export function shouldMountSessionViewport(options: {
   foregroundSessionId: string | null;
   visibleSessionIds: ReadonlySet<string>;
   deferredViewportSessionIds: ReadonlySet<string>;
-  isMobileLayout: boolean;
 }): boolean {
-  if (options.isMobileLayout) {
-    return true;
-  }
   return options.sessionId === options.foregroundSessionId
     || options.visibleSessionIds.has(options.sessionId)
     || options.deferredViewportSessionIds.has(options.sessionId);
+}
+
+export function shouldPublishSessionDataUpdate(isRestoring: boolean): boolean {
+  return !isRestoring;
 }
 
 export function shouldRunResumeRequest(options: {

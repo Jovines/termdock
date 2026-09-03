@@ -25,6 +25,7 @@ import {
   shouldRunResumeRequest,
   shouldForceForegroundReconnect,
   shouldMountSessionViewport,
+  shouldPublishSessionDataUpdate,
   shouldStartInitialConnection,
 } from '../terminal/resumeScheduling';
 import { useTerminalStore } from '../stores/useTerminalStore';
@@ -654,22 +655,32 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   }, [foregroundViewportReady]);
 
   useEffect(() => {
-    if (isMobileLayout || visibleSessionIds.size === 0) return;
-    // Desktop startup used to mount every background xterm within roughly one
-    // second. Restoring many long Agent histories then kept the renderer and
-    // layout engine busy for tens of seconds. Mount visible split panes
-    // immediately and retain only terminals the user has actually visited.
+    if (visibleSessionIds.size === 0) return;
+    // Keep mounted terminals bounded on both desktop and mobile. Mobile used to
+    // create an xterm/canvas for every restored session at once, so a workspace
+    // with many Agent tabs delayed the first visible terminal and made the tab
+    // strip appear well before its content. Warm the neighbouring mobile slides
+    // for smooth swiping, then retain every slide the user has visited.
+    const idsToMount = new Set(visibleSessionIds);
+    if (isMobileLayout) {
+      const activeSlideIndex = workspaceSlides.findIndex((slide) => (
+        slide.sessions.some((session) => visibleSessionIds.has(session.id))
+      ));
+      for (const slideIndex of [activeSlideIndex - 1, activeSlideIndex + 1]) {
+        workspaceSlides[slideIndex]?.sessions.forEach((session) => idsToMount.add(session.id));
+      }
+    }
     setDeferredViewportSessionIds((current) => {
       let changed = false;
       const next = new Set(current);
-      for (const sessionId of visibleSessionIds) {
+      for (const sessionId of idsToMount) {
         if (next.has(sessionId)) continue;
         next.add(sessionId);
         changed = true;
       }
       return changed ? next : current;
     });
-  }, [isMobileLayout, visibleSessionIds]);
+  }, [isMobileLayout, visibleSessionIds, workspaceSlides]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1136,6 +1147,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   // Notify parent of session data changes
   useEffect(() => {
+    // App has already hydrated its tab chrome synchronously from the same
+    // persistence cache. Publishing this component's initial empty state would
+    // erase that stable first paint, then reinsert every tab after restore.
+    // Besides the visible flash, the active-tab scroll position was also reset.
+    if (!shouldPublishSessionDataUpdate(isRestoring)) return;
+
     const duplicateMappings = summarizeDuplicateMappings(sessions);
     const duplicateSnapshot = JSON.stringify(duplicateMappings);
     if (duplicateMappings.length > 0 && duplicateSnapshot !== lastDuplicateMappingSnapshotRef.current) {
@@ -1161,7 +1178,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
         layout,
       })),
     });
-  }, [sessions, activeSessionId, splitWorkspaces, onSessionDataUpdate]);
+  }, [sessions, activeSessionId, splitWorkspaces, onSessionDataUpdate, isRestoring]);
 
   // 恢复会话（尝试复用现有 session）- 只执行一次
   useEffect(() => {
@@ -1931,7 +1948,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       foregroundSessionId,
       visibleSessionIds,
       deferredViewportSessionIds,
-      isMobileLayout,
     });
     const initialConnectEnabled = shouldStartInitialConnection({
       sessionId: session.id,
