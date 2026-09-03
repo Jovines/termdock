@@ -317,6 +317,8 @@ function getInitialFileSortModes(): Record<string, FileSortMode> {
 
 let fileSortModesHydration: Promise<void> | null = null;
 const fileSortModeSaveSequences = new Map<string, number>();
+let pinnedExplorerRootsHydration: Promise<void> | null = null;
+const pinnedExplorerRootsOrigin = globalThis.crypto?.randomUUID?.() ?? `pins-${Math.random().toString(36).slice(2)}`;
 
 export interface FileTreeNode {
   name: string;
@@ -391,6 +393,7 @@ interface SidebarState {
   explorerRoot: string | null;
   explorerRootCache: Record<string, string>;
   pinnedExplorerRootsCache: Record<string, PinnedExplorerEntry[]>;
+  pinnedExplorerRootsHydrated: boolean;
   expandedPaths: Set<string>;
   selectedFilePath: string | null;
   directoryCache: Map<string, FileTreeNode[]>;
@@ -450,6 +453,8 @@ interface SidebarState {
   resetExplorerToProject: () => void;
   pinExplorerRoot: (path: string, kind?: PinnedEntryKind) => void;
   unpinExplorerRoot: (path: string) => void;
+  hydratePinnedExplorerRoots: () => Promise<void>;
+  syncPinnedExplorerRoots: (cache: Record<string, PinnedExplorerEntry[]>) => void;
   toggleExpanded: (path: string) => void;
   selectFile: (path: string | null) => void;
   toggleShowHiddenFiles: () => void;
@@ -486,6 +491,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   explorerRoot: null,
   explorerRootCache: readExplorerRootCache(),
   pinnedExplorerRootsCache: readPinnedExplorerRootsCache(),
+  pinnedExplorerRootsHydrated: false,
   expandedPaths: new Set(),
   selectedFilePath: null,
   directoryCache: new Map(),
@@ -625,6 +631,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
 
   pinExplorerRoot: (path, kind = 'directory') => set((s) => {
     if (!s.rootPath || !path) return s;
+    const rootPath = s.rootPath;
     const pinned = s.pinnedExplorerRootsCache[s.rootPath] ?? [];
     if (pinned.some((entry) => entry.path === path)) return s;
     const pinnedExplorerRootsCache = {
@@ -632,19 +639,72 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       [s.rootPath]: [{ path, kind }, ...pinned].slice(0, 12),
     };
     writePinnedExplorerRootsCache(pinnedExplorerRootsCache);
+    void (async () => {
+      try {
+        await useSidebarStore.getState().hydratePinnedExplorerRoots();
+        const settings = await updateSettings({
+          pinnedExplorerRoot: { rootPath, path, kind, pinned: true },
+          pinnedExplorerRootsOrigin,
+        });
+        useSidebarStore.getState().syncPinnedExplorerRoots(settings.pinnedExplorerRoots ?? {});
+      } catch { /* local cache remains as an offline fallback */ }
+    })();
     return { pinnedExplorerRootsCache };
   }),
 
   unpinExplorerRoot: (path) => set((s) => {
     if (!s.rootPath || !path) return s;
+    const rootPath = s.rootPath;
     const pinned = s.pinnedExplorerRootsCache[s.rootPath] ?? [];
+    const removed = pinned.find((entry) => entry.path === path);
     if (!pinned.some((entry) => entry.path === path)) return s;
     const nextPinned = pinned.filter((entry) => entry.path !== path);
     const pinnedExplorerRootsCache = { ...s.pinnedExplorerRootsCache };
     if (nextPinned.length > 0) pinnedExplorerRootsCache[s.rootPath] = nextPinned;
     else delete pinnedExplorerRootsCache[s.rootPath];
     writePinnedExplorerRootsCache(pinnedExplorerRootsCache);
+    void (async () => {
+      try {
+        await useSidebarStore.getState().hydratePinnedExplorerRoots();
+        const settings = await updateSettings({
+          pinnedExplorerRoot: { rootPath, path, kind: removed?.kind ?? 'directory', pinned: false },
+          pinnedExplorerRootsOrigin,
+        });
+        useSidebarStore.getState().syncPinnedExplorerRoots(settings.pinnedExplorerRoots ?? {});
+      } catch { /* local cache remains as an offline fallback */ }
+    })();
     return { pinnedExplorerRootsCache };
+  }),
+
+  hydratePinnedExplorerRoots: async () => {
+    if (useSidebarStore.getState().pinnedExplorerRootsHydrated) return;
+    if (pinnedExplorerRootsHydration) return pinnedExplorerRootsHydration;
+    pinnedExplorerRootsHydration = (async () => {
+      const localRoots = useSidebarStore.getState().pinnedExplorerRootsCache;
+      const settings = await getSettings();
+      let serverRoots = settings.pinnedExplorerRoots ?? {};
+      if (Object.keys(serverRoots).length === 0 && Object.keys(localRoots).length > 0) {
+        const migrated = await updateSettings({
+          pinnedExplorerRoots: localRoots,
+          pinnedExplorerRootsOrigin,
+        });
+        serverRoots = migrated.pinnedExplorerRoots ?? localRoots;
+      }
+      useSidebarStore.getState().syncPinnedExplorerRoots(serverRoots);
+    })().finally(() => {
+      pinnedExplorerRootsHydration = null;
+    });
+    return pinnedExplorerRootsHydration;
+  },
+
+  syncPinnedExplorerRoots: (cache) => set(() => {
+    const pinnedExplorerRootsCache: Record<string, PinnedExplorerEntry[]> = {};
+    for (const [rootPath, entries] of Object.entries(cache)) {
+      const normalized = normalizePinnedEntries(entries);
+      if (normalized.length > 0) pinnedExplorerRootsCache[rootPath] = normalized.slice(0, 12);
+    }
+    clearCache(PINNED_EXPLORER_ROOTS_CACHE_KEY);
+    return { pinnedExplorerRootsCache, pinnedExplorerRootsHydrated: true };
   }),
 
   toggleExpanded: (path) =>

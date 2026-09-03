@@ -91,6 +91,7 @@ function getRouteFamily(pathname: string): string {
 
 export interface CertificateRefreshResult {
   reloaded: boolean;
+  certificateUpdated?: boolean;
   localAccessState?: LocalAccessState;
 }
 
@@ -596,7 +597,11 @@ export function startServer(options: ServerOptions = {}): StartServerResult {
   certWatcher.on('refresh-needed', (missingNames: string[]) => {
     void (async () => {
       const result = await options.onCertificateRefreshNeeded?.(missingNames);
-      if (!result?.reloaded && !reloadHttpsCertificate(server, options)) {
+      const shouldReloadFromDisk = result?.certificateUpdated === true
+        || !options.onCertificateRefreshNeeded;
+      const reloaded = result?.reloaded === true
+        || (shouldReloadFromDisk && reloadHttpsCertificate(server, options));
+      if (!reloaded) {
         console.warn('[cert-watch] certificate refresh requested but HTTPS context could not be reloaded');
         certWatcher.markRefreshComplete(missingNames, false);
         return;

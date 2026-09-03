@@ -124,6 +124,42 @@ describe('FileTree file deletion', () => {
     ]));
   });
 
+  it('expands ancestors and scrolls to a file requested by a terminal link', async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    useSidebarStore.setState({
+      selectedFilePath: '/workspace/src/lib/pathLinks.ts',
+      expandedPaths: new Set(),
+      directoryCache: new Map([
+        ['/workspace', [{ name: 'src', path: '/workspace/src', type: 'directory', expanded: false, loaded: true, children: [] }]],
+        ['/workspace/src', [{ name: 'lib', path: '/workspace/src/lib', type: 'directory', expanded: false, loaded: true, children: [] }]],
+        ['/workspace/src/lib', [{ name: 'pathLinks.ts', path: '/workspace/src/lib/pathLinks.ts', type: 'file', expanded: false, loaded: true }]],
+      ]),
+    });
+
+    render(
+      <I18nProvider>
+        <FileTree
+          rootPath="/workspace"
+          selectedFilePath="/workspace/src/lib/pathLinks.ts"
+          onFileSelect={vi.fn()}
+          revealDirectory={{ path: '/workspace/src/lib/pathLinks.ts', nonce: 1 }}
+        />
+      </I18nProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByText('pathLinks.ts')).toBeTruthy());
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center', behavior: 'smooth' }));
+    expect(useSidebarStore.getState().expandedPaths).toEqual(new Set([
+      '/workspace/src',
+      '/workspace/src/lib',
+      '/workspace/src/lib/pathLinks.ts',
+    ]));
+  });
+
   it('reuses the explorer as a safe directory-only browser', async () => {
     const user = userEvent.setup();
     const onDirectoryRoot = vi.fn();
@@ -242,12 +278,30 @@ describe('FileTree file deletion', () => {
       bubbles: true,
       cancelable: true,
       button: 2,
+      clientX: 240,
+      clientY: 180,
     });
 
     expect(directoryRow.dispatchEvent(touchLongPressEvent)).toBe(true);
     expect(screen.queryByRole('button', { name: 'Search from here' })).toBeNull();
     expect(directoryRow.dispatchEvent(contextMenuEvent)).toBe(false);
-    expect(await screen.findByRole('button', { name: 'Search from here' })).toBeTruthy();
+    const searchAction = await screen.findByRole('button', { name: 'Search from here' });
+    const menu = searchAction.parentElement as HTMLElement;
+    expect(menu.parentElement).toBe(document.body);
+    expect(menu.style.left).toBe('240px');
+    expect(menu.style.top).toBe('180px');
+
+    directoryRow.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: window.innerWidth - 1,
+      clientY: window.innerHeight - 1,
+    }));
+    await waitFor(() => {
+      expect(Number.parseFloat(menu.style.left) + 176).toBeLessThanOrEqual(window.innerWidth - 8);
+      expect(Number.parseFloat(menu.style.top)).toBeLessThan(window.innerHeight - 160);
+    });
   });
 
   it('applies recent-change sorting only to the selected directory', async () => {

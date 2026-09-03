@@ -56,6 +56,7 @@ import {
   resolveJoystickDirection,
   type JoystickDirection,
 } from './joystickRepeat';
+import { createTerminalPathLinkProvider } from '../../terminal/pathLinks';
 
 const TERMINAL_HAPTIC_PATTERN_MS = 8;
 // 拖选（初次框选 / 拖选区 handle）时把指位向上提这么多 px 再换算格子：
@@ -370,6 +371,7 @@ interface TerminalViewportProps {
   onMobileLongPressCopyResult?: (ok: boolean) => void;
   onMobilePasteResult?: (ok: boolean) => void;
   onReadyChange?: (ready: boolean) => void;
+  onDirectoryLinkActivate?: (path: string) => void;
   terminalSettings: TerminalSettings;
   theme: TerminalTheme;
   className?: string;
@@ -797,6 +799,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       onMobileLongPressCopyResult,
       onMobilePasteResult,
       onReadyChange,
+      onDirectoryLinkActivate,
       terminalSettings,
       theme,
       className,
@@ -817,6 +820,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const flowControlHandlerRef = React.useRef<typeof onFlowControl>(onFlowControl);
     const onReadyChangeRef = React.useRef(onReadyChange);
     onReadyChangeRef.current = onReadyChange;
+    const directoryLinkActivateRef = React.useRef(onDirectoryLinkActivate);
+    directoryLinkActivateRef.current = onDirectoryLinkActivate;
     const rendererModeRef = React.useRef(terminalSettings.rendererMode);
     const pendingWriteRef = React.useRef('');
     const pendingBytesRef = React.useRef(0);
@@ -3638,6 +3643,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           };
           terminal.loadAddon(fitAddon);
           terminal.loadAddon(new WebLinksAddon());
+          terminal.registerLinkProvider(createTerminalPathLinkProvider(terminal, (path) => {
+            directoryLinkActivateRef.current?.(path);
+          }));
           const unicode11Addon = new Unicode11Addon();
           terminal.loadAddon(unicode11Addon);
           terminal.unicode.activeVersion = unicodeVersion;

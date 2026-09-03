@@ -88,10 +88,10 @@ export type TranslationDictionary = {
     newSession: string;
     newSessionWithAgent: (params: TranslatorParams) => string;
     moreLaunchOptions: string;
-    detachedSessions: string;
-    refreshDetachedSessions: string;
-    restoreDetachedSession: (params: TranslatorParams) => string;
-    restoringDetachedSession: string;
+    recoverableSessions: string;
+    refreshRecoverableSessions: string;
+    restoreRecoverableSession: (params: TranslatorParams) => string;
+    restoringRecoverableSession: string;
     restore: string;
     newSessionAdvanced: string;
     newSessionComposerTitle: string;
@@ -849,12 +849,11 @@ export type TranslationDictionary = {
     sessionCount: (params: TranslatorParams) => string;
     closeChooserTitle: string;
     closeChooserDescription: string;
-    detach: string;
-    detachHint: string;
     destroySession: string;
+    confirmDestroySession: string;
     destroySessionHint: string;
-    dragToDestroy: string;
-    releaseToDestroy: string;
+    dragToClose: string;
+    releaseToClose: string;
   };
   agent: {
     aiRunning: string;

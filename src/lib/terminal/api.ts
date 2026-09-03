@@ -1523,6 +1523,7 @@ export interface SettingsState {
   newSessionAgentSlug: string | null;
   runningSessionButtonEnabled: boolean;
   fileSortModes: Record<string, 'modified'>;
+  pinnedExplorerRoots: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>;
 }
 
 export async function getSettings(): Promise<SettingsState> {
@@ -1534,7 +1535,7 @@ export async function getSettings(): Promise<SettingsState> {
   return response.json();
 }
 
-export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode } }): Promise<SettingsState> {
+export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',

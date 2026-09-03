@@ -15,6 +15,13 @@ export interface LocalAccessSettings {
   source: LocalAccessNameSource;
 }
 
+export interface PinnedExplorerEntry {
+  path: string;
+  kind: 'file' | 'directory';
+}
+
+export type PinnedExplorerRoots = Record<string, PinnedExplorerEntry[]>;
+
 export interface SettingsDoc {
   [key: string]: unknown;
   version: 1;
@@ -43,6 +50,8 @@ export interface SettingsDoc {
   runningSessionButtonEnabled: boolean;
   /** Explorer folders whose direct children are sorted by modification time. */
   fileSortModes: Record<string, 'modified'>;
+  /** Explorer entries pinned per project root and shared by every connected client. */
+  pinnedExplorerRoots: PinnedExplorerRoots;
   updatedAt: number;
 }
 
@@ -116,6 +125,35 @@ export function normalizeFileSortModes(value: unknown): Record<string, 'modified
     .slice(-500)) as Record<string, 'modified'>;
 }
 
+function isAbsoluteFilePath(value: string): boolean {
+  return value.length > 0
+    && value.length <= 4096
+    && (value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value));
+}
+
+export function normalizePinnedExplorerRoots(value: unknown): PinnedExplorerRoots {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const normalized: PinnedExplorerRoots = {};
+  for (const [rootPath, rawEntries] of Object.entries(value as Record<string, unknown>).slice(-200)) {
+    if (!isAbsoluteFilePath(rootPath) || !Array.isArray(rawEntries)) continue;
+    const seen = new Set<string>();
+    const entries: PinnedExplorerEntry[] = [];
+    for (const rawEntry of rawEntries) {
+      if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) continue;
+      const entry = rawEntry as { path?: unknown; kind?: unknown };
+      if (typeof entry.path !== 'string'
+        || !isAbsoluteFilePath(entry.path)
+        || (entry.kind !== 'file' && entry.kind !== 'directory')
+        || seen.has(entry.path)) continue;
+      seen.add(entry.path);
+      entries.push({ path: entry.path, kind: entry.kind });
+      if (entries.length >= 12) break;
+    }
+    if (entries.length > 0) normalized[rootPath] = entries;
+  }
+  return normalized;
+}
+
 function normalizeSettings(value: unknown): SettingsDoc {
   const raw = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -165,6 +203,7 @@ function normalizeSettings(value: unknown): SettingsDoc {
     newSessionAgentSlug: normalizeNewSessionAgentSlug(raw.newSessionAgentSlug),
     runningSessionButtonEnabled: raw.runningSessionButtonEnabled === true,
     fileSortModes: normalizeFileSortModes(raw.fileSortModes),
+    pinnedExplorerRoots: normalizePinnedExplorerRoots(raw.pinnedExplorerRoots),
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
   };
 }
@@ -532,4 +571,82 @@ export function setFileSortModeSetting(filePath: string, mode: 'name' | 'modifie
     else delete next[filePath];
     settings.fileSortModes = normalizeFileSortModes(next);
   });
+}
+
+export function getPinnedExplorerRootsSetting(): PinnedExplorerRoots {
+  return loadSettings().pinnedExplorerRoots;
+}
+
+export function setPinnedExplorerRootsSetting(roots: unknown): SettingsDoc {
+  return updateSettings((settings) => {
+    settings.pinnedExplorerRoots = normalizePinnedExplorerRoots(roots);
+  });
+}
+
+export function setPinnedExplorerRootSetting(
+  rootPath: string,
+  entryPath: string,
+  kind: 'file' | 'directory',
+  pinned: boolean,
+): SettingsDoc {
+  return updateSettings((settings) => {
+    const roots = { ...settings.pinnedExplorerRoots };
+    const current = roots[rootPath] ?? [];
+    if (pinned) {
+      if (!current.some((entry) => entry.path === entryPath)) {
+        roots[rootPath] = [{ path: entryPath, kind }, ...current].slice(0, 12);
+      }
+    } else {
+      const next = current.filter((entry) => entry.path !== entryPath);
+      if (next.length > 0) roots[rootPath] = next;
+      else delete roots[rootPath];
+    }
+    settings.pinnedExplorerRoots = normalizePinnedExplorerRoots(roots);
+  });
+}
+
+/**
+ * Watch the settings file through its parent directory because atomic saves
+ * replace the file inode. This lets sibling Termdock server processes sharing
+ * the same home directory relay pin changes to their own connected clients.
+ */
+export function watchPinnedExplorerRootsSetting(
+  listener: (roots: PinnedExplorerRoots) => void,
+  settingsFile = SETTINGS_FILE,
+): () => void {
+  const initial = loadSettingsFile(settingsFile);
+  let previous = JSON.stringify(initial.pinnedExplorerRoots);
+  let timer: NodeJS.Timeout | null = null;
+  let closed = false;
+  const refresh = (): void => {
+    timer = null;
+    if (closed) return;
+    try {
+      const roots = loadSettingsFile(settingsFile).pinnedExplorerRoots;
+      const serialized = JSON.stringify(roots);
+      if (serialized === previous) return;
+      previous = serialized;
+      listener(roots);
+    } catch (error) {
+      console.warn('[settings] failed to refresh pinned explorer roots:', error);
+    }
+  };
+  let watcher: fs.FSWatcher;
+  try {
+    watcher = fs.watch(path.dirname(settingsFile), (_eventType, filename) => {
+      if (filename && filename.toString() !== path.basename(settingsFile)) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(refresh, 40);
+      timer.unref?.();
+    });
+    watcher.unref();
+  } catch (error) {
+    console.warn('[settings] failed to watch pinned explorer roots:', error);
+    return () => undefined;
+  }
+  return () => {
+    closed = true;
+    if (timer) clearTimeout(timer);
+    watcher.close();
+  };
 }

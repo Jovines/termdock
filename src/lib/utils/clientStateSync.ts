@@ -41,6 +41,13 @@ export interface ControlContextDraftEvent {
   origin: string | null;
 }
 
+export interface ControlPinnedExplorerRootsEvent {
+  type: 'pinned-explorer-roots';
+  pinnedExplorerRoots: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>;
+  updatedAt: number;
+  origin: string | null;
+}
+
 export interface ControlUpdateStateEvent {
   type: 'update-state';
   state: TermdockUpdateState;
@@ -50,6 +57,7 @@ export type ControlEvent =
   | ControlSnapshot
   | ControlConfigUpdatedEvent
   | ControlContextDraftEvent
+  | ControlPinnedExplorerRootsEvent
   | ControlUpdateStateEvent;
 
 type Listener = (state: ControlEvent) => void;
@@ -173,7 +181,7 @@ function connect(): void {
 
   ws.onmessage = (event) => {
     lastServerPingAt = Date.now();
-    let msg: { type?: string; state?: ClientStateSnapshot | TermdockUpdateState; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number; text?: string; origin?: string | null } | null = null;
+    let msg: { type?: string; state?: ClientStateSnapshot | TermdockUpdateState; inventory?: SessionInventory; seq?: number; key?: string; updatedAt?: number; text?: string; origin?: string | null; pinnedExplorerRoots?: unknown } | null = null;
     try {
       msg = JSON.parse(event.data as string);
     } catch {
@@ -204,6 +212,21 @@ function connect(): void {
       };
       for (const listener of sync.listeners) {
         try { listener(draftEvent); } catch (error) {
+          console.error('[clientStateSync] listener threw:', error);
+        }
+      }
+      return;
+    }
+    if (msg.type === 'pinned-explorer-roots') {
+      if (!msg.pinnedExplorerRoots || typeof msg.pinnedExplorerRoots !== 'object' || Array.isArray(msg.pinnedExplorerRoots)) return;
+      const pinnedEvent: ControlPinnedExplorerRootsEvent = {
+        type: 'pinned-explorer-roots',
+        pinnedExplorerRoots: msg.pinnedExplorerRoots as ControlPinnedExplorerRootsEvent['pinnedExplorerRoots'],
+        updatedAt: typeof msg.updatedAt === 'number' ? msg.updatedAt : Date.now(),
+        origin: typeof msg.origin === 'string' ? msg.origin : null,
+      };
+      for (const listener of sync.listeners) {
+        try { listener(pinnedEvent); } catch (error) {
           console.error('[clientStateSync] listener threw:', error);
         }
       }

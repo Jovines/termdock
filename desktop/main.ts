@@ -8,6 +8,7 @@ import {
   net,
   nativeImage,
   Notification,
+  powerMonitor,
   screen,
   session,
   shell,
@@ -77,11 +78,13 @@ import {
   restartConnectedServiceRuntime,
 } from './connectedServiceRuntime.js';
 import { isOwnedDesktopRuntimeTarget } from './runtimeTarget.js';
+import { serviceDocumentNeedsReload } from './serviceWindowRecovery.js';
 import {
   canOfferCertificateTrust,
   downloadCertificateAuthority,
   isCertificateTrustError,
   isLocalNetworkHostname,
+  matchManagedLocalCertificate,
   type DownloadedCertificateAuthority,
 } from './certificateTrust.js';
 
@@ -95,12 +98,15 @@ const desktopRuntimeOwnerSocketPath = path.join(termdockDir, 'desktop-runtime-ow
 const DEFAULT_LOCAL_URL = 'http://localhost:9834';
 const PROTOCOL_VERSION = 1;
 const HEALTH_TIMEOUT_MS = 3_500;
+const SERVICE_RECOVERY_PROBE_TIMEOUT_MS = 5_000;
 const START_TIMEOUT_MS = 90_000;
 const RESTORE_LOAD_TIMEOUT_MS = 15_000;
 const localServiceCertificatePath = path.join(termdockDir, 'certs', 'termdock-local.pem');
 const sessionTrustedCertificateTargets = new Set<string>();
 const sessionTrustedCertificateAuthorities = new Map<string, string>();
 let managedLocalCertificateFingerprint: string | null = null;
+const serviceWindowRecoveryTimers = new WeakMap<BrowserWindow, ReturnType<typeof setTimeout>>();
+const serviceWindowRecoveryInFlight = new WeakSet<BrowserWindow>();
 
 /** Delivered-but-unseen desktop notifications, mirrored into the Dock badge. */
 const activeNotifications = new Map<string, Notification>();
@@ -524,6 +530,14 @@ function certificateTrustKey(hostname: string, fingerprint: string): string {
   return `${hostname.toLowerCase().replace(/^\[|\]$/g, '')}\0${fingerprint}`;
 }
 
+function readManagedLocalCertificateFingerprint(): string | null {
+  try {
+    return new crypto.X509Certificate(fs.readFileSync(localServiceCertificatePath)).fingerprint256;
+  } catch {
+    return null;
+  }
+}
+
 function installCertificateVerifyProcedure(targetSession: Session = session.defaultSession): void {
   targetSession.setCertificateVerifyProc((request, callback) => {
     let isLocalTarget = false;
@@ -541,20 +555,21 @@ function installCertificateVerifyProcedure(targetSession: Session = session.defa
     const explicitlyTrustedTarget = presentedFingerprint
       ? sessionTrustedCertificateTargets.has(certificateTrustKey(request.hostname, presentedFingerprint))
       : false;
-    const managedLocalCertificate = isLocalTarget
-      && presentedFingerprint === managedLocalCertificateFingerprint;
+    const managedMatch = isLocalTarget
+      ? matchManagedLocalCertificate(
+        presentedFingerprint,
+        managedLocalCertificateFingerprint,
+        readManagedLocalCertificateFingerprint,
+      )
+      : { matches: false, currentFingerprint: managedLocalCertificateFingerprint };
+    managedLocalCertificateFingerprint = managedMatch.currentFingerprint;
+    const managedLocalCertificate = managedMatch.matches;
     callback(explicitlyTrustedTarget || managedLocalCertificate ? 0 : -3);
   });
 }
 
 function configureLocalServiceCertificateTrust(): void {
-  try {
-    managedLocalCertificateFingerprint = new crypto.X509Certificate(
-      fs.readFileSync(localServiceCertificatePath),
-    ).fingerprint256;
-  } catch {
-    // The certificate is created when the local service first enables HTTPS.
-  }
+  managedLocalCertificateFingerprint = readManagedLocalCertificateFingerprint();
   installCertificateVerifyProcedure();
 }
 
@@ -1590,6 +1605,48 @@ function finishStartupProgress(): void {
   mainWindow.webContents.send('desktop:startup-progress', null);
 }
 
+function scheduleServiceWindowRecovery(window: BrowserWindow, reason: string, delayMs = 750): void {
+  if (window.isDestroyed() || !windowServiceOrigins.has(window)) return;
+  const previous = serviceWindowRecoveryTimers.get(window);
+  if (previous) clearTimeout(previous);
+  const timer = setTimeout(() => {
+    serviceWindowRecoveryTimers.delete(window);
+    void recoverServiceWindow(window, reason);
+  }, delayMs);
+  timer.unref();
+  serviceWindowRecoveryTimers.set(window, timer);
+}
+
+async function recoverServiceWindow(window: BrowserWindow, reason: string): Promise<void> {
+  if (window.isDestroyed() || serviceWindowRecoveryInFlight.has(window)) return;
+  const serviceOrigin = windowServiceOrigins.get(window);
+  if (!serviceOrigin) return;
+  serviceWindowRecoveryInFlight.add(window);
+  try {
+    let probeTimer: ReturnType<typeof setTimeout> | null = null;
+    const probe = await Promise.race([
+      probeService(serviceOrigin),
+      new Promise<ServiceProbe>((resolve) => {
+        probeTimer = setTimeout(() => resolve({
+          ok: false,
+          url: serviceOrigin,
+          error: '桌面恢复健康检查超时',
+        }), SERVICE_RECOVERY_PROBE_TIMEOUT_MS);
+        probeTimer.unref();
+      }),
+    ]);
+    if (probeTimer) clearTimeout(probeTimer);
+    if (!probe.ok || window.isDestroyed()) return;
+    if (!(await serviceDocumentNeedsReload(window.webContents, serviceOrigin)) || window.isDestroyed()) return;
+    console.warn(`[desktop-recovery] reloading ${serviceOrigin} after ${reason}`);
+    await window.loadURL(probe.url);
+  } catch (error) {
+    console.warn(`[desktop-recovery] ${serviceOrigin} recovery after ${reason} failed: ${networkErrorDetails(error)}`);
+  } finally {
+    serviceWindowRecoveryInFlight.delete(window);
+  }
+}
+
 function createDesktopWindow(options?: { serviceOrigin: string; label: string }): BrowserWindow {
   const serviceSession = options
     ? session.fromPartition(`persist:termdock-service-${crypto
@@ -1731,6 +1788,13 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
       }
     `);
   });
+  window.webContents.on('did-fail-load', (_event, _errorCode, _errorDescription, _validatedURL, isMainFrame) => {
+    if (isMainFrame) scheduleServiceWindowRecovery(window, 'main-frame-load-failure');
+  });
+  window.webContents.on('render-process-gone', (_event, details) => {
+    scheduleServiceWindowRecovery(window, `renderer-${details.reason}`);
+  });
+  window.on('unresponsive', () => scheduleServiceWindowRecovery(window, 'unresponsive'));
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null;
     if (lastFocusedServiceWindow === window) lastFocusedServiceWindow = null;
@@ -1747,6 +1811,7 @@ function createDesktopWindow(options?: { serviceOrigin: string; label: string })
     broadcastServiceActivity();
     // User is looking at the app — the Dock badge has served its purpose.
     clearUnreadNotifications();
+    scheduleServiceWindowRecovery(window, 'window-focus');
   });
   window.on('close', (event) => {
     const serviceOrigin = windowServiceOrigins.get(window);
@@ -2175,6 +2240,11 @@ app.whenReady().then(async () => {
   refreshDesktopStatusSurfaces();
   screen.on('display-removed', keepFloatingWidgetOnScreen);
   screen.on('display-metrics-changed', keepFloatingWidgetOnScreen);
+  powerMonitor.on('resume', () => {
+    for (const window of serviceWindows.values()) {
+      scheduleServiceWindowRecovery(window, 'system-resume', 1_200);
+    }
+  });
   configureDesktopUpdater(showDesktopMessageBox);
   subscribeDesktopUpdateState((state) => {
     for (const window of BrowserWindow.getAllWindows()) {

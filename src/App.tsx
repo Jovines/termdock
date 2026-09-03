@@ -41,8 +41,8 @@ import { readCachedSessionPersistenceSnapshot } from './lib/hooks/useSessionPers
 import { useSuperLongPress } from './lib/hooks/useSuperLongPress';
 import { markStartupMilestone } from './lib/utils/startupPerformance';
 import type { TerminalSessionState, TmuxSessionSummary, TmuxStatus } from './lib/terminal/types';
+import { requiresSessionCloseConfirmation } from './lib/terminal/sessionClose';
 import { getCwdLeafName, getSessionDisplayLines, buildFolderGroups, deriveGroupedOrder, reorderGroupedSessionIds, reorderSessionsWithinGroup } from './lib/terminal/display';
-import { shouldDestroySessionDirectly } from './lib/terminal/sessionClose';
 import type { TerminalRendererMode } from './lib/terminal/renderer';
 import { getTmuxStatus, killTmuxSession, listTmuxSessions, getToolbarPresetsDoc, replaceToolbarPresetsDoc, logout, getSettings, updateSettings, replaceProgramRules, resetProgramRules, getProgramDetection, replaceProgramDetection, resetProgramDetection, resumeAgentSession, getTermdockUpdateState, checkTermdockUpdate, confirmTermdockUpdateRestart } from './lib/terminal/api';
 import type { ProgramLabelRule, ProgramDetectionConfig, LocalAccessState, TermdockUpdateState } from './lib/terminal/api';
@@ -490,7 +490,7 @@ function renderTabIcon(
 interface CloseSessionEventDetail {
   sessionId: string;
   source?: 'sidebar' | 'tab-menu' | 'other';
-  closeMode?: 'auto' | 'detach' | 'destroy';
+  closeMode?: 'auto' | 'destroy';
 }
 
 type AgentResumeActionStatus = 'submitting' | 'waiting';
@@ -1619,16 +1619,33 @@ function App() {
   }, [isDesktopViewport]);
 
   const finishSessionDrag = useCallback((result: DropResult): boolean => {
-    const shouldDestroy = isMobileSessionDestroyDrop(result, !isDesktopViewport);
+    const shouldClose = isMobileSessionDestroyDrop(result, !isDesktopViewport);
     mobileDestroyTargetActiveRef.current = false;
     setMobileDestroyTargetActive(false);
     setMobileDraggedSessionId(null);
-    if (!shouldDestroy) return false;
-    window.dispatchEvent(new CustomEvent('close-terminal-session', {
-      detail: { sessionId: result.draggableId, source: 'other', closeMode: 'destroy' } satisfies CloseSessionEventDetail,
-    }));
+    if (!shouldClose) return false;
+    const session = sessions.find((candidate) => candidate.id === result.draggableId);
+    const terminalState = session ? terminalSessions.get(session.id) : null;
+    if (session && requiresSessionCloseConfirmation({
+      mode: session.mode,
+      activeProgram: terminalState?.activeProgram ?? null,
+      promptState: terminalState?.promptState ?? null,
+      shellNames: SHELL_NAMES,
+    })) {
+      setSidebarCloseAnchor(null);
+      setSidebarCloseChoiceSessionId(session.id);
+      setTmuxKillError(null);
+    } else if (session) {
+      window.dispatchEvent(new CustomEvent('close-terminal-session', {
+        detail: {
+          sessionId: session.id,
+          source: 'other',
+          closeMode: session.mode === 'tmux' ? 'destroy' : 'auto',
+        } satisfies CloseSessionEventDetail,
+      }));
+    }
     return true;
-  }, [isDesktopViewport]);
+  }, [isDesktopViewport, sessions, terminalSessions]);
 
   const handleDragEnd = useCallback((result: DropResult) => {
     if (finishSessionDrag(result)) return;
@@ -2607,7 +2624,7 @@ function App() {
     const session = sessions.find((s) => s.id === sessionId);
     if (!session) return;
     const terminalState = terminalSessions.get(sessionId);
-    if (shouldDestroySessionDirectly({
+    if (!requiresSessionCloseConfirmation({
       mode: session.mode,
       activeProgram: terminalState?.activeProgram ?? null,
       promptState: terminalState?.promptState ?? null,
@@ -2722,9 +2739,9 @@ function App() {
     ),
     [tmuxSessions, t],
   );
-  const detachedTmuxSessions = React.useMemo(
+  const recoverableTmuxSessions = React.useMemo(
     () => tmuxSessions
-      .filter((session) => !session.connected && !session.boundFrontendSessionId)
+      .filter((session) => session.recoveryCandidate === true && !session.connected && !session.boundFrontendSessionId)
       .sort((a, b) => (b.lastActiveAt ?? b.createdAt ?? 0) - (a.lastActiveAt ?? a.createdAt ?? 0)),
     [tmuxSessions],
   );
@@ -2901,7 +2918,7 @@ function App() {
             >
               <RiDeleteBinLine size={28} strokeWidth={1.8} />
               <span className="px-2 text-center text-[11px] font-semibold leading-tight">
-                {highlighted ? t('tab.releaseToDestroy') : t('tab.dragToDestroy')}
+                {highlighted ? t('tab.releaseToClose') : t('tab.dragToClose')}
               </span>
             </div>
             {provided.placeholder}
@@ -3997,7 +4014,7 @@ function App() {
         </>
       )}
 
-      {/* Sidebar close action chooser for tmux sessions */}
+      {/* Destructive confirmation for tmux sessions */}
       {sidebarCloseChoiceSession && (
         <>
           <button
@@ -4033,28 +4050,6 @@ function App() {
                   dispatchCloseSession({
                     sessionId: sidebarCloseChoiceSession.id,
                     source: 'sidebar',
-                    closeMode: 'detach',
-                  });
-                  setSidebarCloseChoiceSessionId(null);
-                  setSidebarCloseAnchor(null);
-                  setTmuxKillError(null);
-                }}
-                className="flex items-center gap-3 px-4 py-3 text-left text-[13px] text-foreground transition hover:bg-surface-2"
-              >
-                <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-muted-foreground">
-                  <RiTerminalLine size={14} />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block font-medium">{t('tab.detach')}</span>
-                  <span className="block text-[11px] text-muted-foreground">{t('tab.detachHint')}</span>
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  dispatchCloseSession({
-                    sessionId: sidebarCloseChoiceSession.id,
-                    source: 'sidebar',
                     closeMode: 'destroy',
                   });
                   setSidebarCloseChoiceSessionId(null);
@@ -4066,7 +4061,7 @@ function App() {
                   <RiDeleteBinLine size={14} />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block font-medium">{t('tab.destroySession')}</span>
+                  <span className="block font-medium">{t('tab.confirmDestroySession')}</span>
                   <span className="block text-[11px] text-muted-foreground">{t('tab.destroySessionHint')}</span>
                 </span>
               </button>
@@ -4208,49 +4203,22 @@ function App() {
                 )}
                 <div className="my-1 border-t border-border/15" />
                 {menuSession.mode === 'tmux' ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        dispatchCloseSession({
-                          sessionId: menuSession.id,
-                          source: 'tab-menu',
-                          closeMode: 'detach',
-                        });
-                        closeTabMenu();
-                        setTmuxKillError(null);
-                      }}
-                      className={`${menuItemClassName} text-foreground hover:bg-surface-2`}
-                    >
-                      <span className={`${menuIconClassName} bg-surface-2 text-muted-foreground`}>
-                        <RiTerminalLine size={14} />
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block font-medium">{t('tab.detach')}</span>
-                        <span className="block text-[11px] text-muted-foreground">{t('tab.detachHint')}</span>
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        dispatchCloseSession({
-                          sessionId: menuSession.id,
-                          source: 'tab-menu',
-                          closeMode: 'destroy',
-                        });
-                        closeTabMenu();
-                      }}
-                      className={`${menuItemClassName} text-destructive hover:bg-destructive/10`}
-                    >
-                      <span className={`${menuIconClassName} bg-destructive/15 text-destructive`}>
-                        <RiDeleteBinLine size={14} />
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block font-medium">{t('tab.destroySession')}</span>
-                        <span className="block text-[11px] text-muted-foreground">{t('tab.destroySessionHint')}</span>
-                      </span>
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      closeTabMenu();
+                      handleSidebarCloseSession(menuSession.id);
+                    }}
+                    className={`${menuItemClassName} text-destructive hover:bg-destructive/10`}
+                  >
+                    <span className={`${menuIconClassName} bg-destructive/15 text-destructive`}>
+                      <RiDeleteBinLine size={14} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-medium">{t('tab.destroySession')}</span>
+                      <span className="block text-[11px] text-muted-foreground">{t('tab.destroySessionHint')}</span>
+                    </span>
+                  </button>
                 ) : (
                   <button
                     type="button"
@@ -5025,9 +4993,9 @@ function App() {
         activeSessionId={activeSessionId}
         sessionStates={terminalSessions}
         onNewSession={(opts) => dispatchNewSession(opts)}
-        detachedTmuxSessions={detachedTmuxSessions}
-        detachedTmuxSessionsLoading={tmuxRefreshing}
-        onRefreshDetachedTmuxSessions={() => { void refreshTmuxSessions(); }}
+        recoverableTmuxSessions={recoverableTmuxSessions}
+        recoverableTmuxSessionsLoading={tmuxRefreshing}
+        onRefreshRecoverableTmuxSessions={() => { void refreshTmuxSessions(); }}
         onCloseSession={handleSidebarCloseSession}
         onSplitSession={dispatchOpenSplitChooser}
         onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}
@@ -5157,9 +5125,9 @@ function App() {
             activeSessionId={activeSessionId}
             sessionStates={terminalSessions}
             onNewSession={(opts) => dispatchNewSession(opts)}
-            detachedTmuxSessions={detachedTmuxSessions}
-            detachedTmuxSessionsLoading={tmuxRefreshing}
-            onRefreshDetachedTmuxSessions={() => { void refreshTmuxSessions(); }}
+            recoverableTmuxSessions={recoverableTmuxSessions}
+            recoverableTmuxSessionsLoading={tmuxRefreshing}
+            onRefreshRecoverableTmuxSessions={() => { void refreshTmuxSessions(); }}
             onCloseSession={handleSidebarCloseSession}
             onSplitSession={dispatchOpenSplitChooser}
             onCloseSplit={(sessionId) => window.dispatchEvent(new CustomEvent('close-terminal-split', { detail: sessionId }))}

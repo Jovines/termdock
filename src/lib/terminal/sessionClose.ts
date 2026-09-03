@@ -1,6 +1,6 @@
 import type { TerminalMode } from './types';
 
-interface DirectDestroyDecision {
+interface CloseConfirmationDecision {
   mode: TerminalMode;
   activeProgram: string | null;
   promptState: 'idle' | 'running' | null;
@@ -8,18 +8,17 @@ interface DirectDestroyDecision {
 }
 
 /**
- * An explicit prompt state wins over the slower foreground-process poll.
- * Without shell integration, only a positively identified shell is safe to
- * destroy without asking; unknown state keeps the existing chooser.
+ * Empty tmux shells are cheap to close directly. Running programs and unknown
+ * states stay behind destructive confirmation so a stale poll cannot kill work.
  */
-export function shouldDestroySessionDirectly({
+export function requiresSessionCloseConfirmation({
   mode,
   activeProgram,
   promptState,
   shellNames,
-}: DirectDestroyDecision): boolean {
-  if (mode !== 'tmux') return true;
-  if (promptState === 'running') return false;
-  if (promptState === 'idle') return true;
-  return activeProgram !== null && shellNames.has(activeProgram.toLowerCase());
+}: CloseConfirmationDecision): boolean {
+  if (mode !== 'tmux') return false;
+  if (promptState === 'running') return true;
+  if (promptState === 'idle') return false;
+  return activeProgram === null || !shellNames.has(activeProgram.toLowerCase());
 }

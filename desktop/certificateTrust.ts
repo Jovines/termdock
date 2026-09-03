@@ -22,6 +22,28 @@ export function isCertificateTrustError(error: unknown): boolean {
   return /ERR_CERT_AUTHORITY_INVALID|ERR_CERT_INVALID|SELF[_ ]SIGNED[_ ]CERT(?:[_ ]IN[_ ]CHAIN)?|UNABLE[_ ]TO[_ ]VERIFY[_ ](?:THE[_ ]FIRST[_ ]CERTIFICATE|LEAF[_ ]SIGNATURE)|UNABLE[_ ]TO[_ ]GET[_ ]ISSUER[_ ]CERT/i.test(message);
 }
 
+export function matchManagedLocalCertificate(
+  presentedFingerprint: string | null,
+  cachedFingerprint: string | null,
+  readCurrentFingerprint: () => string | null,
+): { matches: boolean; currentFingerprint: string | null } {
+  if (!presentedFingerprint) {
+    return { matches: false, currentFingerprint: cachedFingerprint };
+  }
+  if (presentedFingerprint === cachedFingerprint) {
+    return { matches: true, currentFingerprint: cachedFingerprint };
+  }
+
+  // The managed service can replace its leaf certificate after a DHCP/network
+  // change while Desktop stays open. Re-read only on mismatch so the first
+  // request using the new certificate repairs the cached trust decision.
+  const currentFingerprint = readCurrentFingerprint();
+  return {
+    matches: presentedFingerprint === currentFingerprint,
+    currentFingerprint,
+  };
+}
+
 export function canOfferCertificateTrust(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl);

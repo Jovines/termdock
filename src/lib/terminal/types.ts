@@ -88,6 +88,7 @@ export interface TmuxSessionSummary {
   connected?: boolean;
   live?: boolean;
   restorable?: boolean;
+  recoveryCandidate?: boolean;
   friendlyName?: string | null;
   label?: string | null;
   program?: string | null;
@@ -121,6 +122,7 @@ export interface SessionInventoryTmuxSession extends TmuxSessionSummary {
   connected: boolean;
   live: boolean;
   restorable: boolean;
+  recoveryCandidate: boolean;
   friendlyName: string | null;
   label: string | null;
   program: string | null;

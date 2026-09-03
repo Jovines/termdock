@@ -1,57 +1,54 @@
 import { describe, expect, it } from 'vitest';
-import { shouldDestroySessionDirectly } from './sessionClose';
+import { requiresSessionCloseConfirmation } from './sessionClose';
 
-const shellNames = new Set(['bash', 'zsh', 'fish']);
+describe('requiresSessionCloseConfirmation', () => {
+  const shellNames = new Set(['bash', 'zsh', 'fish']);
 
-describe('shouldDestroySessionDirectly', () => {
-  it('destroys a tmux session immediately when it is at a shell prompt', () => {
-    expect(shouldDestroySessionDirectly({
+  it('closes an idle tmux shell without confirmation', () => {
+    expect(requiresSessionCloseConfirmation({
       mode: 'tmux',
       activeProgram: 'zsh',
       promptState: 'idle',
       shellNames,
-    })).toBe(true);
-  });
-
-  it('keeps the chooser while a program is running even if polling still reports a shell', () => {
-    expect(shouldDestroySessionDirectly({
-      mode: 'tmux',
-      activeProgram: 'bash',
-      promptState: 'running',
-      shellNames,
     })).toBe(false);
   });
 
-  it('uses the detected foreground program when prompt integration is unavailable', () => {
-    expect(shouldDestroySessionDirectly({
+  it('confirms while a program is running', () => {
+    expect(requiresSessionCloseConfirmation({
+      mode: 'tmux',
+      activeProgram: 'codex',
+      promptState: 'running',
+      shellNames,
+    })).toBe(true);
+  });
+
+  it('uses the foreground process when prompt integration is unavailable', () => {
+    expect(requiresSessionCloseConfirmation({
       mode: 'tmux',
       activeProgram: 'BASH',
       promptState: null,
       shellNames,
-    })).toBe(true);
-    expect(shouldDestroySessionDirectly({
+    })).toBe(false);
+    expect(requiresSessionCloseConfirmation({
       mode: 'tmux',
       activeProgram: 'vim',
       promptState: null,
       shellNames,
-    })).toBe(false);
+    })).toBe(true);
   });
 
-  it('keeps the chooser when tmux state is unknown', () => {
-    expect(shouldDestroySessionDirectly({
+  it('confirms unknown tmux state and keeps plain shell close immediate', () => {
+    expect(requiresSessionCloseConfirmation({
       mode: 'tmux',
       activeProgram: null,
       promptState: null,
       shellNames,
-    })).toBe(false);
-  });
-
-  it('continues closing non-tmux sessions directly', () => {
-    expect(shouldDestroySessionDirectly({
+    })).toBe(true);
+    expect(requiresSessionCloseConfirmation({
       mode: 'shell',
       activeProgram: 'vim',
       promptState: 'running',
       shellNames,
-    })).toBe(true);
+    })).toBe(false);
   });
 });

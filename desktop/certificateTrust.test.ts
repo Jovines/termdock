@@ -1,11 +1,30 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   canOfferCertificateTrust,
   isCertificateTrustError,
   isLocalNetworkHostname,
+  matchManagedLocalCertificate,
 } from './certificateTrust.js';
 
 describe('macOS certificate trust eligibility', () => {
+  it('refreshes a cached managed certificate fingerprint after leaf rotation', () => {
+    const readCurrent = vi.fn(() => 'NEW');
+    expect(matchManagedLocalCertificate('NEW', 'OLD', readCurrent)).toEqual({
+      matches: true,
+      currentFingerprint: 'NEW',
+    });
+    expect(readCurrent).toHaveBeenCalledOnce();
+  });
+
+  it('does not reread the managed certificate while the cached leaf still matches', () => {
+    const readCurrent = vi.fn(() => 'OTHER');
+    expect(matchManagedLocalCertificate('CURRENT', 'CURRENT', readCurrent)).toEqual({
+      matches: true,
+      currentFingerprint: 'CURRENT',
+    });
+    expect(readCurrent).not.toHaveBeenCalled();
+  });
+
   it.each([
     'localhost',
     'studio-mac.local',

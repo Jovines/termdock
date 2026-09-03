@@ -7,7 +7,9 @@ import {
   loadSettingsFileAsync,
   normalizeFileSortModes,
   normalizeNewSessionAgentSlug,
+  normalizePinnedExplorerRoots,
   saveSettingsFile,
+  watchPinnedExplorerRootsSetting,
 } from './settings.js';
 
 const tempDirs: string[] = [];
@@ -32,6 +34,25 @@ describe('normalizeNewSessionAgentSlug', () => {
     expect(normalizeNewSessionAgentSlug(null)).toBeNull();
     expect(normalizeNewSessionAgentSlug('../codex')).toBeNull();
     expect(normalizeNewSessionAgentSlug('')).toBeNull();
+  });
+});
+
+describe('normalizePinnedExplorerRoots', () => {
+  it('keeps bounded absolute file and directory pins grouped by project root', () => {
+    expect(normalizePinnedExplorerRoots({
+      '/workspace/app': [
+        { path: '/workspace/app/src', kind: 'directory' },
+        { path: '/workspace/app/README.md', kind: 'file' },
+        { path: '/workspace/app/src', kind: 'directory' },
+        { path: 'relative.txt', kind: 'file' },
+      ],
+      relative: [{ path: '/tmp/ignored', kind: 'directory' }],
+    })).toEqual({
+      '/workspace/app': [
+        { path: '/workspace/app/src', kind: 'directory' },
+        { path: '/workspace/app/README.md', kind: 'file' },
+      ],
+    });
   });
 });
 
@@ -70,6 +91,38 @@ describe('settings persistence', () => {
     saveSettingsFile(settings, settingsFile);
 
     expect(loadSettingsFile(settingsFile).fileSortModes).toEqual({ '/workspace/logs': 'modified' });
+  });
+
+  it('persists explorer pins for sharing between clients', () => {
+    const settingsFile = tempSettingsPath();
+    const settings = loadSettingsFile(settingsFile);
+    settings.pinnedExplorerRoots = {
+      '/workspace/app': [{ path: '/workspace/app/docs', kind: 'directory' }],
+    };
+    saveSettingsFile(settings, settingsFile);
+
+    expect(loadSettingsFile(settingsFile).pinnedExplorerRoots).toEqual(settings.pinnedExplorerRoots);
+  });
+
+  it('observes explorer pin writes made through the shared settings file', async () => {
+    const settingsFile = tempSettingsPath();
+    loadSettingsFile(settingsFile);
+    let stopWatching = () => undefined;
+    const observed = new Promise<Record<string, Array<{ path: string; kind: 'directory' }>>>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('settings watcher did not observe pin update')), 2_000);
+      stopWatching = watchPinnedExplorerRootsSetting((roots) => {
+        clearTimeout(timeout);
+        resolve(roots as Record<string, Array<{ path: string; kind: 'directory' }>>);
+      }, settingsFile);
+    });
+    const settings = loadSettingsFile(settingsFile);
+    settings.pinnedExplorerRoots = {
+      '/workspace/app': [{ path: '/workspace/app/docs', kind: 'directory' }],
+    };
+    saveSettingsFile(settings, settingsFile);
+
+    await expect(observed).resolves.toEqual(settings.pinnedExplorerRoots);
+    stopWatching();
   });
 
   it('preserves fields introduced by newer binaries', () => {

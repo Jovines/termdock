@@ -41,6 +41,10 @@ import {
   getFileSortModesSetting,
   setFileSortModesSetting,
   setFileSortModeSetting,
+  getPinnedExplorerRootsSetting,
+  setPinnedExplorerRootsSetting,
+  setPinnedExplorerRootSetting,
+  watchPinnedExplorerRootsSetting,
 } from '../utils/settings.js';
 import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
@@ -84,6 +88,7 @@ import {
   type PersistedAgentResumeInfo,
 } from '../agent/resumePersistence.js';
 import { AgentResumeHistoryStore, type AgentResumeHistoryReason } from '../agent/resumeHistory.js';
+import { isTmuxRecoveryCandidate } from '../utils/tmuxRecoveryCandidate.js';
 import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } from '../agent/automationStore.js';
 import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind } from '../agent/collaborationStore.js';
@@ -199,6 +204,7 @@ const TERMDOCK_VERSION: string = (() => {
 const TERMDOCK_HOST = os.hostname();
 const TERMDOCK_PID = String(process.pid);
 const TERMDOCK_GUI_DETACHED_AT_OPTION = '@termdock-gui-detached-at';
+const TERMDOCK_FRONTEND_SESSION_ID_OPTION = '@termdock-frontend-session-id';
 
 // WebSocket clients per session (separate from SSE clients).
 const wsClients = new Map<string, Map<string, WebSocket>>();
@@ -401,6 +407,7 @@ interface TmuxInventoryMeta {
   createdAt: number | null;
   lastActiveAt: number | null;
   guiDetachedAt: number | null;
+  sourceFrontendSessionId: string | null;
 }
 
 interface SessionInventoryClientSession extends PersistedClientSession {
@@ -427,6 +434,7 @@ interface SessionInventoryTmuxSession {
   connected: boolean;
   live: boolean;
   restorable: boolean;
+  recoveryCandidate: boolean;
   friendlyName: string | null;
   label: string | null;
   program: string | null;
@@ -601,6 +609,18 @@ function sendClientStatePayload(payload: string): void {
 function broadcastControlEvent(payload: unknown): void {
   sendClientStatePayload(JSON.stringify(payload));
 }
+
+// Atomic settings writes replace the inode, so the utility watches the parent
+// directory. Besides this process's own writes, it observes sibling Termdock
+// server processes that share ~/.termdock and relays their pin list here.
+watchPinnedExplorerRootsSetting((pinnedExplorerRoots) => {
+  broadcastControlEvent({
+    type: 'pinned-explorer-roots',
+    pinnedExplorerRoots,
+    updatedAt: Date.now(),
+    origin: null,
+  });
+});
 
 let serverRestartScheduled = false;
 
@@ -997,6 +1017,7 @@ async function backfillPersistedTmuxMetadata(): Promise<void> {
         '@termdock-version': TERMDOCK_VERSION,
         '@termdock-host': TERMDOCK_HOST,
         '@termdock-pid': TERMDOCK_PID,
+        [TERMDOCK_FRONTEND_SESSION_ID_OPTION]: s.sessionId,
         // Agent-hook plumbing (see ensureManagedTmuxSessionReady): backfilled
         // at startup so sessions created before this feature get it too.
         'allow-passthrough': 'on',
@@ -1261,7 +1282,7 @@ interface TmuxRuntimeMetadata {
 }
 
 function isTermdockManagedTmuxSession(session: TmuxInventoryMeta): boolean {
-  return !!(session.version || session.host || session.pid || session.createdAt || session.lastActiveAt || session.label || session.program || session.cwd || session.guiDetachedAt);
+  return !!(session.version || session.host || session.pid || session.createdAt || session.lastActiveAt || session.label || session.program || session.cwd || session.guiDetachedAt || session.sourceFrontendSessionId);
 }
 
 function normalizeMetadataProgram(program: string | null | undefined): string | null {
@@ -1732,6 +1753,7 @@ async function openInventorySession(
       '@termdock-version': TERMDOCK_VERSION,
       '@termdock-host': TERMDOCK_HOST,
       '@termdock-pid': TERMDOCK_PID,
+      [TERMDOCK_FRONTEND_SESSION_ID_OPTION]: savedRecord.sessionId,
     });
   }
 
@@ -2394,6 +2416,7 @@ async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
     '#{@termdock-created-at}',
     '#{@termdock-last-active-at}',
     `#{${TERMDOCK_GUI_DETACHED_AT_OPTION}}`,
+    `#{${TERMDOCK_FRONTEND_SESSION_ID_OPTION}}`,
   ].join(TMUX_DELIMITER);
 
   try {
@@ -2402,7 +2425,7 @@ async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
-      .map((line) => parseDelimitedRow(line, 14))
+      .map((line) => parseDelimitedRow(line, 15))
       .filter((row): row is string[] => row !== null)
       .map(([
         name,
@@ -2419,6 +2442,7 @@ async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
         createdAtRaw,
         lastActiveAtRaw,
         guiDetachedAtRaw,
+        sourceFrontendSessionId,
       ]) => ({
         name,
         windows: Number.parseInt(windowsRaw || '0', 10) || 0,
@@ -2434,6 +2458,7 @@ async function listLiveTmuxInventorySessions(): Promise<TmuxInventoryMeta[]> {
         createdAt: parseNumberOption(createdAtRaw),
         lastActiveAt: parseNumberOption(lastActiveAtRaw),
         guiDetachedAt: parseNumberOption(guiDetachedAtRaw),
+        sourceFrontendSessionId: sourceFrontendSessionId || null,
       }))
       .sort((a, b) => {
         const aCreated = a.createdAt ?? Number.POSITIVE_INFINITY;
@@ -2564,33 +2589,6 @@ async function buildSessionInventory(): Promise<SessionInventory> {
     }
   }));
 
-  let discoveredManagedTmuxSession = false;
-  for (const tmux of refreshedTmuxSessions) {
-    if (!isTermdockManagedTmuxSession(tmux)) continue;
-    if (tmux.guiDetachedAt !== null) continue;
-    const exists = globalSessionState.sessions.some((session) =>
-      session.mode === 'tmux' && session.tmuxSessionName === tmux.name,
-    );
-    if (exists) continue;
-
-    const liveBackend = findBackendSessionForTmux(tmux.name);
-    const friendlyName = tmux.friendlyName?.trim() || null;
-    upsertGlobalSessionRecord({
-      sessionId: randomUUID(),
-      name: friendlyName ?? `tmux:${tmux.name}`,
-      customName: friendlyName ? true : undefined,
-      backendSessionId: liveBackend?.[0] ?? null,
-      mode: 'tmux',
-      tmuxSessionName: tmux.name,
-      createdAt: tmux.createdAt ?? Date.now(),
-      lastActivity: tmux.lastActiveAt ?? Date.now(),
-    });
-    discoveredManagedTmuxSession = true;
-  }
-  if (discoveredManagedTmuxSession) {
-    schedulePersistGlobalState();
-  }
-
   const liveTmuxByName = new Map(refreshedTmuxSessions.map((session) => [session.name, session]));
   let synchronizedPersistedFields = false;
   globalSessionState = {
@@ -2700,6 +2698,12 @@ async function buildSessionInventory(): Promise<SessionInventory> {
       connected: bound?.connected === true,
       live: true,
       restorable: bound?.restorable === true,
+      recoveryCandidate: isTmuxRecoveryCandidate({
+        managedByTermdock: isTermdockManagedTmuxSession(tmux),
+        sourceFrontendSessionId: tmux.sourceFrontendSessionId,
+        guiDetachedAt: tmux.guiDetachedAt,
+        boundFrontendSessionId: bound?.sessionId ?? null,
+      }),
       friendlyName: tmux.friendlyName,
       label: tmux.label,
       program: tmux.program,
@@ -5734,6 +5738,7 @@ router.get('/tmux/sessions', async (_req, res) => {
       connected: session.connected,
       live: session.live,
       restorable: session.restorable,
+      recoveryCandidate: session.recoveryCandidate,
       friendlyName: session.friendlyName,
       label: session.label,
       program: session.program,
@@ -6492,6 +6497,7 @@ async function getSettingsPayload() {
     newSessionAgentSlug: getNewSessionAgentSlugSetting(),
     runningSessionButtonEnabled: getRunningSessionButtonEnabledSetting(),
     fileSortModes: getFileSortModesSetting(),
+    pinnedExplorerRoots: getPinnedExplorerRootsSetting(),
     localAccess: {
       ...localAccess,
       interfaces,
@@ -6537,6 +6543,7 @@ router.post('/update/restart', async (_req, res) => {
 
 router.put('/settings', async (req, res) => {
   const body = req.body ?? {};
+  let pinnedExplorerRootsChanged = false;
   if (typeof body.preventSleep === 'boolean') {
     caffeinateManager.setPreventSleep(body.preventSleep);
   }
@@ -6641,6 +6648,28 @@ router.put('/settings', async (req, res) => {
     setFileSortModeSetting(preference.path as string, preference.mode);
   }
 
+  if (body.pinnedExplorerRoots && typeof body.pinnedExplorerRoots === 'object' && !Array.isArray(body.pinnedExplorerRoots)) {
+    setPinnedExplorerRootsSetting(body.pinnedExplorerRoots);
+    pinnedExplorerRootsChanged = true;
+  }
+
+  if (body.pinnedExplorerRoot && typeof body.pinnedExplorerRoot === 'object') {
+    const mutation = body.pinnedExplorerRoot as { rootPath?: unknown; path?: unknown; kind?: unknown; pinned?: unknown };
+    const validAbsolutePath = (value: unknown): value is string => typeof value === 'string'
+      && value.length > 0
+      && value.length <= 4096
+      && (value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value));
+    if (!validAbsolutePath(mutation.rootPath)
+      || !validAbsolutePath(mutation.path)
+      || (mutation.kind !== 'file' && mutation.kind !== 'directory')
+      || typeof mutation.pinned !== 'boolean') {
+      res.status(400).json({ error: 'Invalid pinned explorer entry', code: 'PINNED_EXPLORER_ROOT_INVALID' });
+      return;
+    }
+    setPinnedExplorerRootSetting(mutation.rootPath, mutation.path, mutation.kind, mutation.pinned);
+    pinnedExplorerRootsChanged = true;
+  }
+
   if (body.localAccess && typeof body.localAccess === 'object') {
     const localAccessBody = body.localAccess as { name?: unknown; reset?: unknown };
     if (localAccessBody.reset === true) {
@@ -6659,7 +6688,16 @@ router.put('/settings', async (req, res) => {
     }
   }
 
-  res.json(await getSettingsPayload());
+  const payload = await getSettingsPayload();
+  if (pinnedExplorerRootsChanged) {
+    broadcastControlEvent({
+      type: 'pinned-explorer-roots',
+      pinnedExplorerRoots: payload.pinnedExplorerRoots,
+      updatedAt: Date.now(),
+      origin: typeof body.pinnedExplorerRootsOrigin === 'string' ? body.pinnedExplorerRootsOrigin : null,
+    });
+  }
+  res.json(payload);
 });
 
 // ── Context draft (cross-device realtime sync) ────────────────────────

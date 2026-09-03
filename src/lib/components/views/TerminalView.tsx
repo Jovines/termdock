@@ -6,7 +6,7 @@ import type { TerminalMode, TerminalStreamEvent, TmuxActionPayload, TmuxLayout }
 import { TerminalViewport, type RefreshReason, type TerminalController } from '../terminal/TerminalViewport';
 import { getTerminalTheme, type TermdockColorTheme } from '../../terminal';
 import { createTermdockAPI } from '../../terminal/factory';
-import { TerminalApiError, openSessionInventoryEntry, probeTerminalConnection, reconnectTerminalConnectionNow, sendTerminalFlowControlState, sendTerminalFocusState, sendTerminalViewingState, updateSessionInventoryEntry, uploadFiles } from '../../terminal/api';
+import { TerminalApiError, listDirectory, openSessionInventoryEntry, probeTerminalConnection, reconnectTerminalConnectionNow, sendTerminalFlowControlState, sendTerminalFocusState, sendTerminalViewingState, updateSessionInventoryEntry, uploadFiles } from '../../terminal/api';
 import {
   computeTerminalLogicalFocus,
   computeTerminalLogicalViewing,
@@ -37,6 +37,8 @@ import {
 } from '../../terminal/sessionRecovery';
 import { buildReferenceInputText } from '../sidebar/referencePaths';
 import { uploadTemporaryFileAndInsertReference } from '../sidebar/temporaryImageUpload';
+import { useSidebarStore } from '../../stores/useSidebarStore';
+import { resolveTerminalPath, TERMINAL_DIRECTORY_OPEN_EVENT } from '../../terminal/pathLinks';
 
 const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
@@ -210,6 +212,34 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const bufferChunks = terminalState?.bufferChunks ?? [];
   const isConnecting = terminalState?.isConnecting ?? false;
   const terminalSessionId = terminalSessionRef;
+  const handleDirectoryLinkActivate = React.useCallback(async (pathText: string) => {
+    const path = resolveTerminalPath(pathText, terminalState?.cwd || terminalState?.directory);
+    if (!path) return;
+    let targetPath = path;
+    let kind: 'directory' | 'file' = 'directory';
+    try {
+      // Resolve symlinks/relative syntax through the same guarded endpoint as
+      // the explorer. A regular file reaches the explicit "not a directory"
+      // branch after stat succeeds, so it is safe to hand to FilePreview.
+      const directory = await listDirectory(path);
+      targetPath = directory.path;
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'Path is not a directory') return;
+      kind = 'file';
+    }
+
+    try {
+      const sidebar = useSidebarStore.getState();
+      sidebar.setRightTab('files');
+      sidebar.openRight();
+      window.dispatchEvent(new CustomEvent(TERMINAL_DIRECTORY_OPEN_EVENT, {
+        detail: { path: targetPath, kind },
+      }));
+    } catch {
+      // Terminal output can outlive a deleted/moved path. Keep that stale text
+      // harmless and leave the user's current sidebar context untouched.
+    }
+  }, [terminalState?.cwd, terminalState?.directory]);
   const desiredSessionMode: TerminalMode = expectedMode ?? terminalState?.mode ?? 'shell';
   const desiredTmuxSessionName = desiredSessionMode === 'tmux'
     ? (expectedTmuxSessionName ?? terminalState?.tmuxSessionName ?? null)
@@ -2242,6 +2272,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onInputFocusChange={handleInputFocusChange}
               onMobileLongPressCopyResult={handleMobileLongPressCopyResult}
               onReadyChange={handleViewportReadyChange}
+              onDirectoryLinkActivate={handleDirectoryLinkActivate}
               terminalSettings={effectiveTerminalSettings}
               theme={xtermTheme}
               enableTouchScroll={isMobile}

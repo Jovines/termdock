@@ -83,6 +83,7 @@ import { HtmlPreviewFrame, type HtmlPreviewFrameHandle } from './HtmlPreviewFram
 import { clearFilePreviewSearchHighlights, collectFilePreviewSearchRanges, paintFilePreviewSearchHighlights, resolveFilePreviewSearchShortcut, scrollFilePreviewSearchRangeIntoView } from './filePreviewSearch';
 import { describeSearchScope, parseExcludePatterns, resolveSearchScopePath } from './fileSearchOptions';
 import './sidebarSelection.css';
+import { TERMINAL_DIRECTORY_OPEN_EVENT } from '../../terminal/pathLinks';
 
 interface RightSidebarProps {
   isOpen: boolean;
@@ -6290,6 +6291,8 @@ export function RightSidebar(
   const rootPath = useSidebarStore((s) => s.rootPath);
   const explorerRoot = useSidebarStore((s) => s.explorerRoot);
   const pinnedExplorerRootsCache = useSidebarStore((s) => s.pinnedExplorerRootsCache);
+  const hydratePinnedExplorerRoots = useSidebarStore((s) => s.hydratePinnedExplorerRoots);
+  const syncPinnedExplorerRoots = useSidebarStore((s) => s.syncPinnedExplorerRoots);
   const setExplorerRoot = useSidebarStore((s) => s.setExplorerRoot);
   const resetExplorerToProject = useSidebarStore((s) => s.resetExplorerToProject);
   const pinExplorerRoot = useSidebarStore((s) => s.pinExplorerRoot);
@@ -7413,6 +7416,17 @@ export function RightSidebar(
   useEffect(() => {
     writeCacheThrottled(CONTEXT_DRAFT_TEXT_STORAGE_KEY, contextDraftText, CONTEXT_DRAFT_WRITE_MS);
   }, [contextDraftText]);
+
+  // Pin 列表以服务端 settings 为真源；挂载时迁移旧 localStorage，随后通过
+  // control WebSocket 接收其它浏览器对同一服务端所做的实时变更。
+  useEffect(() => {
+    void hydratePinnedExplorerRoots().catch(() => undefined);
+    return subscribeClientState((event) => {
+      if (event.type === 'pinned-explorer-roots') {
+        syncPinnedExplorerRoots(event.pinnedExplorerRoots);
+      }
+    });
+  }, [hydratePinnedExplorerRoots, syncPinnedExplorerRoots]);
 
   // 草稿内容跨设备实时同步：服务端为真源（~/.termdock/context-draft.json），
   // control WebSocket 推送其它客户端的变更；本端改动防抖 500ms 上传。
@@ -10130,6 +10144,50 @@ export function RightSidebar(
       return;
     }
   }, [isMobile, onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen, selectFile, setExplorerRoot]);
+
+  useEffect(() => {
+    const handleTerminalDirectoryOpen = (event: Event) => {
+      const detail = (event as CustomEvent<{ path?: unknown; kind?: unknown }>).detail;
+      const path = detail?.path;
+      if (typeof path !== 'string' || !path.startsWith('/')) return;
+
+      setFileQuery('');
+      setLineRange(null);
+      const insideProject = Boolean(rootPath && (path === rootPath || path.startsWith(`${rootPath}/`)));
+      if (detail.kind === 'file') {
+        const parentPath = getParentPath(path);
+        // handleFileSelect clears an older reveal request, so open the preview
+        // first and then issue the new tree reveal. Point at the file itself:
+        // FileTree expands its ancestors and scrolls the selected row into view.
+        handleFileSelect(path);
+        if (insideProject) {
+          setExplorerRoot(null);
+        } else {
+          setExplorerRoot(parentPath);
+        }
+        setDirectoryReveal((current) => ({ path, nonce: (current?.nonce ?? 0) + 1 }));
+        return;
+      }
+
+      selectFile(null);
+      if (insideProject) {
+        setExplorerRoot(null);
+        setDirectoryReveal((current) => ({ path, nonce: (current?.nonce ?? 0) + 1 }));
+      } else {
+        setDirectoryReveal(null);
+        setExplorerRoot(path);
+      }
+
+      if (isMobile) {
+        if (rightSidebarFilePreviewOpen) onCloseRightSidebarFilePreview?.();
+        setMobileFileSlideIndex(0);
+        mobileFileSwiperRef.current?.slideTo(0);
+        setMobileFilePreviewOpen(false);
+      }
+    };
+    window.addEventListener(TERMINAL_DIRECTORY_OPEN_EVENT, handleTerminalDirectoryOpen);
+    return () => window.removeEventListener(TERMINAL_DIRECTORY_OPEN_EVENT, handleTerminalDirectoryOpen);
+  }, [handleFileSelect, isMobile, onCloseRightSidebarFilePreview, rightSidebarFilePreviewOpen, rootPath, selectFile, setExplorerRoot]);
 
   useEffect(() => {
     if (!isOpen) {

@@ -71,9 +71,9 @@ interface LeftSidebarProps {
     gitStatus?: GitStatusReport | null;
   }>; 
   onNewSession: (opts?: { mode?: 'shell' | 'tmux'; tmuxSessionName?: string; cwd?: string; command?: string }) => void;
-  detachedTmuxSessions?: TmuxSessionSummary[];
-  detachedTmuxSessionsLoading?: boolean;
-  onRefreshDetachedTmuxSessions?: () => void;
+  recoverableTmuxSessions?: TmuxSessionSummary[];
+  recoverableTmuxSessionsLoading?: boolean;
+  onRefreshRecoverableTmuxSessions?: () => void;
   onCloseSession: (sessionId: string, event: React.MouseEvent) => void;
   onSplitSession: (sessionId: string) => void;
   onCloseSplit: (sessionId: string) => void;
@@ -169,9 +169,9 @@ export function LeftSidebar(
     runningSessionButtonEnabled = false,
     onRunningSessionButtonEnabledChange,
     onTogglePinned,
-    detachedTmuxSessions = [],
-    detachedTmuxSessionsLoading = false,
-    onRefreshDetachedTmuxSessions,
+    recoverableTmuxSessions = [],
+    recoverableTmuxSessionsLoading = false,
+    onRefreshRecoverableTmuxSessions,
   }: LeftSidebarProps,
 ) {
   const { t } = useI18n();
@@ -341,7 +341,7 @@ export function LeftSidebar(
     closeIfOverlay();
   };
 
-  const handleAttachTmuxSession = (session: TmuxSessionSummary) => {
+  const handleRestoreTmuxSession = (session: TmuxSessionSummary) => {
     setAttachingTmuxName(session.name);
     onNewSession({ mode: 'tmux', tmuxSessionName: session.name, cwd: session.cwd ?? undefined });
     closeIfOverlay();
@@ -349,10 +349,10 @@ export function LeftSidebar(
 
   useEffect(() => {
     if (!attachingTmuxName) return;
-    if (!detachedTmuxSessions.some((session) => session.name === attachingTmuxName)) {
+    if (!recoverableTmuxSessions.some((session) => session.name === attachingTmuxName)) {
       setAttachingTmuxName(null);
     }
-  }, [attachingTmuxName, detachedTmuxSessions]);
+  }, [attachingTmuxName, recoverableTmuxSessions]);
 
   const handleQuickLaunchAgent = (agent: import('../../hooks/useNewSessionAgentPreference').NewSessionAgentPreference) => {
     onNewSession({
@@ -1103,27 +1103,27 @@ export function LeftSidebar(
 
       {/* Session list */}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 py-1.5">
-        {detachedTmuxSessions.length > 0 && (
-          <section className="mb-2 rounded-lg bg-[rgb(var(--tmux-rgb)_/_0.07)] p-1" aria-label={t('sidebar.detachedSessions')}>
+        {recoverableTmuxSessions.length > 0 && (
+          <section className="mb-2 rounded-lg bg-[rgb(var(--tmux-rgb)_/_0.07)] p-1" aria-label={t('sidebar.recoverableSessions')}>
             <div className="flex min-h-8 items-center gap-2 px-2 text-[10.5px] font-semibold text-[color:var(--tmux)]">
               <RiHistoryLine size={12} className="shrink-0" />
-              <span className="min-w-0 flex-1 truncate">{t('sidebar.detachedSessions')}</span>
-              <span className="text-muted-foreground">{detachedTmuxSessions.length}</span>
-              {onRefreshDetachedTmuxSessions && (
+              <span className="min-w-0 flex-1 truncate">{t('sidebar.recoverableSessions')}</span>
+              <span className="text-muted-foreground">{recoverableTmuxSessions.length}</span>
+              {onRefreshRecoverableTmuxSessions && (
                 <button
                   type="button"
-                  onClick={onRefreshDetachedTmuxSessions}
-                  disabled={detachedTmuxSessionsLoading}
+                  onClick={onRefreshRecoverableTmuxSessions}
+                  disabled={recoverableTmuxSessionsLoading}
                   className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
-                  aria-label={t('sidebar.refreshDetachedSessions')}
-                  title={t('sidebar.refreshDetachedSessions')}
+                  aria-label={t('sidebar.refreshRecoverableSessions')}
+                  title={t('sidebar.refreshRecoverableSessions')}
                 >
-                  <RiRefreshLine size={11} className={detachedTmuxSessionsLoading ? 'animate-spin' : ''} />
+                  <RiRefreshLine size={11} className={recoverableTmuxSessionsLoading ? 'animate-spin' : ''} />
                 </button>
               )}
             </div>
             <div className="space-y-0.5">
-              {detachedTmuxSessions.slice(0, 4).map((session) => {
+              {recoverableTmuxSessions.slice(0, 4).map((session) => {
                 const title = session.friendlyName?.trim() || session.label?.trim() || session.name;
                 const directory = getCwdLeafName(session.cwd ?? null);
                 const attaching = attachingTmuxName === session.name;
@@ -1132,9 +1132,9 @@ export function LeftSidebar(
                     key={session.name}
                     type="button"
                     disabled={attachingTmuxName !== null}
-                    onClick={() => handleAttachTmuxSession(session)}
+                    onClick={() => handleRestoreTmuxSession(session)}
                     className="group flex min-h-10 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-muted-foreground transition hover:bg-surface-elevated hover:text-foreground disabled:cursor-wait disabled:opacity-60"
-                    aria-label={t('sidebar.restoreDetachedSession', { name: title })}
+                    aria-label={t('sidebar.restoreRecoverableSession', { name: title })}
                     title={session.cwd || session.name}
                   >
                     <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[rgb(var(--tmux-rgb)_/_0.11)] text-[color:var(--tmux)]">
@@ -1147,7 +1147,7 @@ export function LeftSidebar(
                       </span>
                     </span>
                     <span className="shrink-0 text-[10px] font-medium text-[color:var(--tmux)] group-hover:text-foreground">
-                      {attaching ? t('sidebar.restoringDetachedSession') : t('sidebar.restore')}
+                      {attaching ? t('sidebar.restoringRecoverableSession') : t('sidebar.restore')}
                     </span>
                   </button>
                 );

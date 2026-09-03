@@ -2,9 +2,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { getSettingsMock, updateSettingsMock } = vi.hoisted(() => ({
-  getSettingsMock: vi.fn(async () => ({ fileSortModes: {} })),
-  updateSettingsMock: vi.fn(async (settings: { fileSortModes?: Record<string, 'modified'>; fileSortMode?: { path: string; mode: 'name' | 'modified' } }) => ({
+  getSettingsMock: vi.fn(async () => ({ fileSortModes: {}, pinnedExplorerRoots: {} })),
+  updateSettingsMock: vi.fn(async (settings: { fileSortModes?: Record<string, 'modified'>; fileSortMode?: { path: string; mode: 'name' | 'modified' }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean } }) => ({
     fileSortModes: settings.fileSortModes ?? (settings.fileSortMode?.mode === 'modified' ? { [settings.fileSortMode.path]: 'modified' } : {}),
+    pinnedExplorerRoots: settings.pinnedExplorerRoots ?? (settings.pinnedExplorerRoot?.pinned ? {
+      [settings.pinnedExplorerRoot.rootPath]: [{
+        path: settings.pinnedExplorerRoot.path,
+        kind: settings.pinnedExplorerRoot.kind,
+      }],
+    } : {}),
   })),
 }));
 
@@ -34,6 +40,7 @@ function resetSidebarStore(): void {
     explorerRoot: null,
     explorerRootCache: {},
     pinnedExplorerRootsCache: {},
+    pinnedExplorerRootsHydrated: true,
     expandedPaths: new Set(),
     selectedFilePath: null,
     directoryCache: new Map(),
@@ -185,7 +192,7 @@ describe('useSidebarStore session-scoped right sidebar state', () => {
     expect(useSidebarStore.getState().selectedFilePath).toBe('/workspace/shared/docs/a.md');
   });
 
-  it('continues sharing pinned entries between sessions in the same directory', () => {
+  it('continues sharing pinned entries between sessions in the same directory', async () => {
     useSidebarStore.getState().setRootPath('/workspace/shared', 'session-a');
     useSidebarStore.getState().pinExplorerRoot('/workspace/shared/README.md', 'file');
 
@@ -194,6 +201,50 @@ describe('useSidebarStore session-scoped right sidebar state', () => {
     expect(useSidebarStore.getState().pinnedExplorerRootsCache['/workspace/shared']).toEqual([
       { path: '/workspace/shared/README.md', kind: 'file' },
     ]);
+    await vi.waitFor(() => expect(updateSettingsMock).toHaveBeenCalledWith(expect.objectContaining({
+      pinnedExplorerRoot: {
+        rootPath: '/workspace/shared',
+        path: '/workspace/shared/README.md',
+        kind: 'file',
+        pinned: true,
+      },
+    })));
+  });
+
+  it('hydrates pinned entries from the server and removes the legacy browser cache', async () => {
+    getSettingsMock.mockResolvedValueOnce({
+      fileSortModes: {},
+      pinnedExplorerRoots: {
+        '/workspace/shared': [{ path: '/workspace/shared/docs', kind: 'directory' }],
+      },
+    });
+    window.localStorage.setItem('termdock:right-sidebar:pinned-explorer-roots:v1', JSON.stringify({
+      '/workspace/local': [{ path: '/workspace/local/tmp', kind: 'directory' }],
+    }));
+    useSidebarStore.setState({ pinnedExplorerRootsHydrated: false });
+
+    await useSidebarStore.getState().hydratePinnedExplorerRoots();
+
+    expect(useSidebarStore.getState().pinnedExplorerRootsCache).toEqual({
+      '/workspace/shared': [{ path: '/workspace/shared/docs', kind: 'directory' }],
+    });
+    expect(useSidebarStore.getState().pinnedExplorerRootsHydrated).toBe(true);
+    expect(window.localStorage.getItem('termdock:right-sidebar:pinned-explorer-roots:v1')).toBeNull();
+  });
+
+  it('migrates legacy browser pins when the server has no pin list yet', async () => {
+    const localRoots = {
+      '/workspace/local': [{ path: '/workspace/local/docs', kind: 'directory' as const }],
+    };
+    useSidebarStore.setState({
+      pinnedExplorerRootsCache: localRoots,
+      pinnedExplorerRootsHydrated: false,
+    });
+
+    await useSidebarStore.getState().hydratePinnedExplorerRoots();
+
+    expect(updateSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ pinnedExplorerRoots: localRoots }));
+    expect(useSidebarStore.getState().pinnedExplorerRootsCache).toEqual(localRoots);
   });
 });
 

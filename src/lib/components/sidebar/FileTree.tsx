@@ -1,4 +1,5 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ChevronRight as RiChevronRight,
   ChevronDown as RiChevronDown,
@@ -164,6 +165,68 @@ function isDesktopContextMenu(event: React.MouseEvent): boolean {
   return event.button === 2 || event.ctrlKey;
 }
 
+const DIRECTORY_MENU_WIDTH_PX = 176;
+const DIRECTORY_MENU_ESTIMATED_HEIGHT_PX = 160;
+const DIRECTORY_MENU_VIEWPORT_MARGIN_PX = 8;
+
+interface CursorMenuPosition {
+  anchorX: number;
+  anchorY: number;
+  left: number;
+  top: number;
+}
+
+function resolveCursorMenuPosition(clientX: number, clientY: number, menuWidth: number, menuHeight: number): CursorMenuPosition {
+  const viewport = window.visualViewport;
+  const viewportLeft = viewport?.offsetLeft ?? 0;
+  const viewportTop = viewport?.offsetTop ?? 0;
+  const viewportRight = viewportLeft + (viewport?.width ?? window.innerWidth);
+  const viewportBottom = viewportTop + (viewport?.height ?? window.innerHeight);
+  const minLeft = viewportLeft + DIRECTORY_MENU_VIEWPORT_MARGIN_PX;
+  const minTop = viewportTop + DIRECTORY_MENU_VIEWPORT_MARGIN_PX;
+  const maxLeft = Math.max(minLeft, viewportRight - menuWidth - DIRECTORY_MENU_VIEWPORT_MARGIN_PX);
+  const maxTop = Math.max(minTop, viewportBottom - menuHeight - DIRECTORY_MENU_VIEWPORT_MARGIN_PX);
+  const preferredTop = clientY + menuHeight <= viewportBottom - DIRECTORY_MENU_VIEWPORT_MARGIN_PX
+    ? clientY
+    : clientY - menuHeight;
+
+  return {
+    anchorX: clientX,
+    anchorY: clientY,
+    left: Math.min(Math.max(clientX, minLeft), maxLeft),
+    top: Math.min(Math.max(preferredTop, minTop), maxTop),
+  };
+}
+
+function useCursorAnchoredMenu(actionsOpen: boolean) {
+  const [position, setPosition] = useState<CursorMenuPosition | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  const openAt = useCallback((clientX: number, clientY: number) => {
+    setPosition(resolveCursorMenuPosition(
+      clientX,
+      clientY,
+      DIRECTORY_MENU_WIDTH_PX,
+      DIRECTORY_MENU_ESTIMATED_HEIGHT_PX,
+    ));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!actionsOpen || !position || !menuRef.current) return;
+    const rect = menuRef.current.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const next = resolveCursorMenuPosition(position.anchorX, position.anchorY, rect.width, rect.height);
+    if (next.left === position.left && next.top === position.top) return;
+    setPosition(next);
+  }, [actionsOpen, position]);
+
+  return { position, menuRef, openAt, clearPosition: () => setPosition(null) };
+}
+
+function renderDirectoryMenu(menu: ReactNode, atCursor: boolean): ReactNode {
+  return atCursor && typeof document !== 'undefined' ? createPortal(menu, document.body) : menu;
+}
+
 function nodeMatchesQuery(node: FileTreeNode, queryLower: string): boolean {
   if (!queryLower) return true;
   return `${node.name} ${node.path}`.toLowerCase().includes(queryLower);
@@ -255,6 +318,7 @@ const FileTreeItem = memo(function FileTreeItem({
   const setDirectorySortMode = useSidebarStore((s) => s.setDirectorySortMode);
   const [loading, setLoading] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
+  const { position: cursorMenuPosition, menuRef: directoryMenuRef, openAt: openDirectoryMenuAt, clearPosition: clearDirectoryMenuPosition } = useCursorAnchoredMenu(actionsOpen);
   const [dropTarget, setDropTarget] = useState(false);
   const dropDepthRef = useRef(0);
   const loadAbortRef = useRef<AbortController | null>(null);
@@ -422,21 +486,23 @@ const FileTreeItem = memo(function FileTreeItem({
 
   const handleDirectoryMoreClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
+    clearDirectoryMenuPosition();
     setActionsOpen((open) => !open);
-  }, []);
+  }, [clearDirectoryMenuPosition]);
 
   const handleDirectoryContextMenu = useCallback((event: React.MouseEvent) => {
     if (!hasDirectoryActions || !isDesktopContextMenu(event)) return;
     event.preventDefault();
     event.stopPropagation();
+    openDirectoryMenuAt(event.clientX, event.clientY);
     setActionsOpen(true);
-  }, [hasDirectoryActions]);
+  }, [hasDirectoryActions, openDirectoryMenuAt]);
 
   useEffect(() => {
     if (!actionsOpen) return;
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
-      if (target instanceof Node && actionMenuRef.current?.contains(target)) return;
+      if (target instanceof Node && (actionMenuRef.current?.contains(target) || directoryMenuRef.current?.contains(target))) return;
       setActionsOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -448,7 +514,7 @@ const FileTreeItem = memo(function FileTreeItem({
       document.removeEventListener('pointerdown', closeOnPointerDown);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [actionsOpen]);
+  }, [actionsOpen, directoryMenuRef]);
 
   useEffect(() => () => {
     loadAbortRef.current?.abort();
@@ -551,8 +617,12 @@ const FileTreeItem = memo(function FileTreeItem({
         )}
         </div>
 
-        {hasDirectoryActions && actionsOpen && (
-          <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+        {hasDirectoryActions && actionsOpen && renderDirectoryMenu(
+          <div
+            ref={directoryMenuRef}
+            className={`${cursorMenuPosition ? 'fixed z-menu-panel' : 'absolute right-2 top-[calc(100%+2px)] z-30'} w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in`}
+            style={cursorMenuPosition ? { left: cursorMenuPosition.left, top: cursorMenuPosition.top } : undefined}
+          >
           {canOpenLocal && (
             <button
               type="button"
@@ -605,7 +675,8 @@ const FileTreeItem = memo(function FileTreeItem({
             {sortMode === 'modified' ? <RiSortName size={13} className="shrink-0" /> : <RiClock size={13} className="shrink-0" />}
             <span className="min-w-0 flex-1 truncate">{sortMode === 'modified' ? t('fileTree.sortByName') : t('fileTree.sortByModified')}</span>
           </button>
-          </div>
+          </div>,
+          Boolean(cursorMenuPosition),
         )}
 
         {!isDirectory && actionsOpen && (
@@ -739,6 +810,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
   const getReferenceLongPressHandlers = useReferenceLongPressCopy(onReferenceCopied);
   const { state: fileDownloadState, run: runFileDownload } = useFileDownloadAction();
   const [actionsOpen, setActionsOpen] = useState(false);
+  const { position: cursorMenuPosition, menuRef: directoryMenuRef, openAt: openDirectoryMenuAt, clearPosition: clearDirectoryMenuPosition } = useCursorAnchoredMenu(actionsOpen);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const isDeleting = deletingFilePath === node.path;
   const hasDirectoryActions = isDirectory
@@ -781,21 +853,23 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
 
   const handleDirectoryMoreClick = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
+    clearDirectoryMenuPosition();
     setActionsOpen((open) => !open);
-  }, []);
+  }, [clearDirectoryMenuPosition]);
 
   const handleDirectoryContextMenu = useCallback((event: React.MouseEvent) => {
     if (!hasDirectoryActions || !isDesktopContextMenu(event)) return;
     event.preventDefault();
     event.stopPropagation();
+    openDirectoryMenuAt(event.clientX, event.clientY);
     setActionsOpen(true);
-  }, [hasDirectoryActions]);
+  }, [hasDirectoryActions, openDirectoryMenuAt]);
 
   useEffect(() => {
     if (!actionsOpen) return;
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
-      if (target instanceof Node && actionMenuRef.current?.contains(target)) return;
+      if (target instanceof Node && (actionMenuRef.current?.contains(target) || directoryMenuRef.current?.contains(target))) return;
       setActionsOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -807,7 +881,7 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
       document.removeEventListener('pointerdown', closeOnPointerDown);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [actionsOpen]);
+  }, [actionsOpen, directoryMenuRef]);
 
   return (
     <div ref={actionMenuRef} className="relative border-b border-border/10 last:border-b-0">
@@ -882,8 +956,12 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
           </span>
         )}
       </div>
-      {hasDirectoryActions && actionsOpen && (
-        <div className="absolute right-2 top-[calc(100%+2px)] z-30 w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in">
+      {hasDirectoryActions && actionsOpen && renderDirectoryMenu(
+        <div
+          ref={directoryMenuRef}
+          className={`${cursorMenuPosition ? 'fixed z-menu-panel' : 'absolute right-2 top-[calc(100%+2px)] z-30'} w-44 overflow-hidden rounded-xl border border-border/15 bg-surface/98 p-1 text-[12px] shadow-xl shadow-[0_18px_48px_var(--app-shadow-soft)] backdrop-blur animate-fade-in`}
+          style={cursorMenuPosition ? { left: cursorMenuPosition.left, top: cursorMenuPosition.top } : undefined}
+        >
           {onDirectoryRoot && (
             <button
               type="button"
@@ -922,7 +1000,8 @@ const FileSearchResultItem = memo(function FileSearchResultItem({
             {isPinned ? <RiPinOff size={13} className="shrink-0" /> : <RiPin size={13} className="shrink-0" />}
             <span className="min-w-0 flex-1 truncate">{isPinned ? t('fileTree.unpinDir') : t('fileTree.pinDir')}</span>
           </button>}
-        </div>
+        </div>,
+        Boolean(cursorMenuPosition),
       )}
 
       {!isDirectory && actionsOpen && (

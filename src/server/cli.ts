@@ -574,18 +574,20 @@ async function defaultCertificateNeedsRefresh(): Promise<boolean> {
 async function ensureDefaultHttpsCertificateFresh(): Promise<boolean> {
   if (!(await defaultCertificateNeedsRefresh())) return false;
   console.log(`${ICON.info} ${c.dim('Local HTTPS certificate is missing current domain/IP SANs; regenerating...')}`);
-  await runSetupLocalHttps({ quietRestartHint: true });
+  await runSetupLocalHttps({ quietRestartHint: true, installCa: false });
   return true;
 }
 
-async function runSetupLocalHttps(options: { quietRestartHint?: boolean } = {}): Promise<void> {
+async function runSetupLocalHttps(options: { quietRestartHint?: boolean; installCa?: boolean } = {}): Promise<void> {
   const mkcert = await ensureMkcertInstalled();
 
   ensureStateDir();
   fs.mkdirSync(certDir, { recursive: true, mode: 0o700 });
 
-  console.log(`${ICON.info} ${c.dim('Installing local CA into this computer trust store...')}`);
-  await execFileAsync(mkcert, ['-install'], { timeout: 120000, maxBuffer: 1024 * 1024 });
+  if (options.installCa !== false) {
+    console.log(`${ICON.info} ${c.dim('Installing local CA into this computer trust store...')}`);
+    await execFileAsync(mkcert, ['-install'], { timeout: 120000, maxBuffer: 1024 * 1024 });
+  }
 
   console.log(`${ICON.info} ${c.dim('Generating local certificate for Termdock domains...')}`);
   await execFileAsync(mkcert, [
@@ -3863,7 +3865,7 @@ async function main(): Promise<void> {
         ? async (): Promise<CertificateRefreshResult> => {
             console.log(`${ICON.info} ${c.dim('Termdock detected network/certificate changes; regenerating certificate and reloading TLS context...')}`);
             const refreshed = await refreshDefaultHttpsCertificateSafely();
-            if (!refreshed) return { reloaded: false };
+            if (!refreshed) return { reloaded: false, certificateUpdated: false };
             const state = await localAccessManager.start({
               host: options.host ?? DEFAULT_HOST,
               port: options.port ?? PORT.backend,
@@ -3885,11 +3887,11 @@ async function main(): Promise<void> {
               startedAt: new Date().toISOString(),
               localApiToken,
             });
-            return { reloaded: false, localAccessState: state };
+            return { reloaded: false, certificateUpdated: true, localAccessState: state };
           }
         : () => {
             console.warn('[cert-watch] certificate is missing current domain/IP SANs; restart Termdock with an updated certificate.');
-            return { reloaded: false };
+            return { reloaded: false, certificateUpdated: false };
           },
     });
     result.server.on('close', () => {

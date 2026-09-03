@@ -80,7 +80,7 @@ interface NewSessionEventDetail {
 interface CloseSessionEventDetail {
   sessionId: string;
   source?: 'sidebar' | 'tab-menu' | 'other';
-  closeMode?: 'auto' | 'detach' | 'destroy';
+  closeMode?: 'auto' | 'destroy';
 }
 
 const SWIPE_ANIMATION_SPEED_MS = 320;
@@ -1600,7 +1600,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           tmuxSessionName: session.tmuxSessionName,
         });
       } else if (session.sessionId) {
-        // default/detach path: close backend terminal wrapper session.
+        // Shell close path: close the backend terminal wrapper session.
         await closeTerminal(session.sessionId);
         debugSession('[Session] Closed backend terminal:', session.sessionId);
       }

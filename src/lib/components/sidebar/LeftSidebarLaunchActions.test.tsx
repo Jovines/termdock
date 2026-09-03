@@ -81,7 +81,7 @@ describe('LeftSidebar launch actions', () => {
     expect(onNewSession).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps detached tmux sessions visible and restores them in one click', async () => {
+  it('keeps recoverable tmux sessions visible and restores them in one click', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
       json: async () => ({ locale: 'en' }),
@@ -98,7 +98,7 @@ describe('LeftSidebar launch actions', () => {
           sessions={[]}
           activeSessionId={null}
           sessionStates={new Map()}
-          detachedTmuxSessions={[{
+          recoverableTmuxSessions={[{
             name: 'wt-codex',
             windows: 1,
             attached: 0,
@@ -123,7 +123,7 @@ describe('LeftSidebar launch actions', () => {
       </I18nProvider>,
     );
 
-    expect(screen.getByRole('region', { name: 'Detached sessions' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Recoverable sessions' })).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Restore Fix session recovery' }));
     expect(onNewSession).toHaveBeenCalledWith({
       mode: 'tmux',
