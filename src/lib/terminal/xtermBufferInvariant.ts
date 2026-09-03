@@ -54,9 +54,29 @@ export function repairXtermBufferViewport(
     }
   }
 
-  const requiredLength = Math.max(0, Math.floor(buffer.ybase) + viewportRows);
-  const targetLength = capacity === null ? requiredLength : Math.min(requiredLength, capacity);
-  const missingLines = Math.max(0, targetLength - buffer.lines.length);
+  let requiredLength = Math.max(0, Math.floor(buffer.ybase) + viewportRows);
+  let targetLength = capacity === null ? requiredLength : Math.min(requiredLength, capacity);
+  let missingLines = Math.max(0, targetLength - buffer.lines.length);
+
+  // A normal row growth can expose at most one viewport of missing lines. A
+  // larger deficit means ybase is stale relative to the live line store (for
+  // example while many Sessions are restored on page load). Filling thousands
+  // of BufferLines synchronously blocks the renderer, so recover the viewport
+  // to the last valid rows in O(1) instead.
+  if (missingLines > viewportRows) {
+    const maxYbaseFromLiveLines = Math.max(0, buffer.lines.length - viewportRows);
+    if (buffer.ybase > maxYbaseFromLiveLines) {
+      buffer.ybase = maxYbaseFromLiveLines;
+      if (Number.isFinite(buffer.ydisp)) {
+        buffer.ydisp = Math.min(buffer.ydisp!, maxYbaseFromLiveLines);
+      }
+      added++;
+    }
+    requiredLength = Math.max(0, Math.floor(buffer.ybase) + viewportRows);
+    targetLength = capacity === null ? requiredLength : Math.min(requiredLength, capacity);
+    missingLines = Math.max(0, targetLength - buffer.lines.length);
+  }
+
   for (let index = 0; index < missingLines; index++) {
     const lengthBeforePush = buffer.lines.length;
     buffer.lines.push(buffer.getBlankLine(undefined));

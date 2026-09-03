@@ -67,6 +67,25 @@ describe('xterm buffer viewport invariant', () => {
     expect(pushCalls).toBe(1);
   });
 
+  it('recovers a large stale viewport offset without synchronously filling it', () => {
+    let pushCalls = 0;
+    const buffer = {
+      ybase: 2_600,
+      ydisp: 2_600,
+      lines: {
+        length: 100,
+        maxLength: 10_000,
+        push: () => { pushCalls++; },
+      },
+      getBlankLine: () => ({ blank: true }),
+    };
+
+    expect(repairXtermBufferViewport(buffer, 30)).toBe(1);
+    expect(buffer.ybase).toBe(70);
+    expect(buffer.ydisp).toBe(70);
+    expect(pushCalls).toBe(0);
+  });
+
   it('prevents repeated-row corruption when a scrolled viewport grows', async () => {
     const { Terminal } = await import('@xterm/xterm');
     const terminal = new Terminal({ cols: 39, rows: 18, scrollback: 100, convertEol: false });

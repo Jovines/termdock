@@ -104,6 +104,10 @@ describe('LeftSidebar session density', () => {
     expect(groupedSessionButton?.getAttribute('draggable')).not.toBe('true');
     expect(onRemoveFromSplit).not.toHaveBeenCalled();
 
+    const splitExitMarker = document.querySelector<HTMLElement>('[data-split-exit-drop-index]');
+    expect(splitExitMarker?.className).toContain('absolute');
+    expect(splitExitMarker?.parentElement?.hasAttribute('data-sidebar-entity-index')).toBe(true);
+
     fireEvent.click(screen.getByRole('button', { name: 'Split layout: Side by side' }));
     expect(screen.getByRole('menu', { name: 'Split layout' })).toBeTruthy();
     expect(screen.queryByRole('menuitemradio', { name: 'Grid' })).toBeNull();

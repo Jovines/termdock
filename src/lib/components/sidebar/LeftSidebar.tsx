@@ -19,7 +19,7 @@ import {
   Workflow as RiWorkflowLine,
   History as RiHistoryLine,
 } from 'lucide-react';
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, type DragStart, type DropResult, type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { Sidebar } from './Sidebar';
 import type { AgentStatus, TuiProgressReport, AgentIdentity, GitStatusReport, TmuxSessionSummary } from '../../terminal/types';
@@ -265,10 +265,9 @@ export function LeftSidebar(
       listId: targetList.dataset.sidebarEntityListId ?? '',
       index: insertionIndex,
     };
-    const marker = Array.from(targetList.children).find((child) => (
-      child instanceof HTMLElement
-      && child.dataset.splitExitDropIndex === String(insertionIndex)
-    ));
+    const marker = Array.from(targetList.querySelectorAll<HTMLElement>(
+      ':scope > [data-sidebar-entity-index] > [data-split-exit-drop-index]',
+    )).find((candidate) => candidate.dataset.splitExitDropIndex === String(insertionIndex));
     if (marker instanceof HTMLElement) marker.dataset.active = 'true';
   }, []);
 
@@ -760,11 +759,12 @@ export function LeftSidebar(
     return true;
   }, [flatSidebarEntities, folderGroups, onCombineSplitSessions, onRemoveFromSplit, onReorderSessions, onReorderSplitWorkspace, sessionsById, splitWorkspaces]);
 
-  const renderSplitExitDropZone = (index: number): React.ReactNode => (
+  const renderSplitExitDropZone = (index: number, edge: 'top' | 'bottom' = 'top'): React.ReactNode => (
     <div
-      key={`split-exit:${index}`}
       data-split-exit-drop-index={index}
-      className="group/split-exit relative z-10 -my-1 h-2"
+      className={`group/split-exit pointer-events-none absolute inset-x-0 z-10 h-2 ${
+        edge === 'top' ? '-top-1' : '-bottom-1'
+      }`}
     >
       <span
         aria-hidden="true"
@@ -1007,15 +1007,16 @@ export function LeftSidebar(
             className="space-y-0.5"
           >
             {entities.map((entity, index) => (
-              <Fragment key={entity.id}>
-                {renderSplitExitDropZone(index)}
-                <Draggable draggableId={entity.id} index={index} disableInteractiveElementBlocking>
-                  {(dragProvided, snapshot) => (
-                    <div
-                      ref={dragProvided.innerRef}
-                      {...dragProvided.draggableProps}
-                      data-sidebar-entity-index={index}
-                    >
+              <Draggable key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
+                {(dragProvided, snapshot) => (
+                  <div
+                    ref={dragProvided.innerRef}
+                    {...dragProvided.draggableProps}
+                    data-sidebar-entity-index={index}
+                    className="relative"
+                  >
+                    {renderSplitExitDropZone(index)}
+                    {index === entities.length - 1 && renderSplitExitDropZone(entities.length, 'bottom')}
                       {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
                         entity.workspace,
                         entity.members,
@@ -1038,12 +1039,10 @@ export function LeftSidebar(
                           {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
                         </div>
                       )}
-                    </div>
-                  )}
-                </Draggable>
-              </Fragment>
+                  </div>
+                )}
+              </Draggable>
             ))}
-            {renderSplitExitDropZone(entities.length)}
             {provided.placeholder}
           </div>
         )}
@@ -1327,15 +1326,17 @@ export function LeftSidebar(
                                         className="space-y-0.5"
                                       >
                                         {folderEntities.map((entity, index) => (
-                                          <Fragment key={entity.id}>
-                                            {renderSplitExitDropZone(index)}
-                                            <Draggable draggableId={entity.id} index={index} disableInteractiveElementBlocking>
-                                              {(dragProvided, snapshot) => (
-                                                <div
-                                                  ref={dragProvided.innerRef}
-                                                  {...dragProvided.draggableProps}
-                                                  data-sidebar-entity-index={index}
-                                                >
+                                          <Draggable key={entity.id} draggableId={entity.id} index={index} disableInteractiveElementBlocking>
+                                            {(dragProvided, snapshot) => (
+                                              <div
+                                                ref={dragProvided.innerRef}
+                                                {...dragProvided.draggableProps}
+                                                data-sidebar-entity-index={index}
+                                                className="relative"
+                                              >
+                                                {renderSplitExitDropZone(index)}
+                                                {index === folderEntities.length - 1
+                                                  && renderSplitExitDropZone(folderEntities.length, 'bottom')}
                                                   {entity.kind === 'workspace' ? renderSplitWorkspaceItem(
                                                     entity.workspace,
                                                     entity.members,
@@ -1358,12 +1359,10 @@ export function LeftSidebar(
                                                       {renderSessionRowBody(entity.session, dragProvided.dragHandleProps)}
                                                     </div>
                                                   )}
-                                                </div>
-                                              )}
-                                            </Draggable>
-                                          </Fragment>
+                                              </div>
+                                            )}
+                                          </Draggable>
                                         ))}
-                                        {renderSplitExitDropZone(folderEntities.length)}
                                         {sessionsProvided.placeholder}
                                       </div>
                                     )}
