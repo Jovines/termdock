@@ -66,11 +66,40 @@ describe('mobile viewport cache', () => {
       ]),
       now: 10_000,
       idleMs: 1_000,
+      maxSessions: 6,
     });
 
     expect(selected).toEqual(new Set([
       'current-a', 'current-b', 'current-c',
       'previous-a', 'previous-b', 'previous-c',
+    ]));
+  });
+
+  it('retains three recently visited split workspaces without viewport churn', () => {
+    const selected = selectCachedMobileViewportSessionIds({
+      currentVisibleSessionIds: new Set(['third-a', 'third-b']),
+      lastVisitedAtBySessionId: new Map([
+        ['first-a', 9_700],
+        ['first-b', 9_700],
+        ['second-a', 9_800],
+        ['second-b', 9_800],
+        ['second-c', 9_800],
+        ['third-a', 9_900],
+        ['third-b', 9_900],
+      ]),
+      validSessionIds: new Set([
+        'first-a', 'first-b',
+        'second-a', 'second-b', 'second-c',
+        'third-a', 'third-b',
+      ]),
+      now: 10_000,
+      idleMs: 1_000,
+    });
+
+    expect(selected).toEqual(new Set([
+      'third-a', 'third-b',
+      'second-a', 'second-b', 'second-c',
+      'first-a', 'first-b',
     ]));
   });
 });
