@@ -751,13 +751,17 @@ export function LeftSidebar(
       t('sidebar.ungrouped'),
     );
     const anchoredEntityIdsByFolder = new Map<string, Set<string>>();
+    const anchoredSplitSessionIds = new Set<string>();
     for (const workspace of splitWorkspaces) {
       if (workspace.sessionIds.some((id) => collaborationSessionIds.has(id))) continue;
       const anchorId = workspace.sessionIds[0];
       if (!anchorId) continue;
       const folderKey = folderGroupKeyForCwd(sessionStates.get(anchorId)?.cwd ?? null);
       const workspaceIds = anchoredEntityIdsByFolder.get(folderKey) ?? new Set<string>();
-      workspace.sessionIds.forEach((id) => workspaceIds.add(id));
+      workspace.sessionIds.forEach((id) => {
+        workspaceIds.add(id);
+        anchoredSplitSessionIds.add(id);
+      });
       anchoredEntityIdsByFolder.set(folderKey, workspaceIds);
     }
     for (const collaboration of collaborationGroups) {
@@ -771,14 +775,14 @@ export function LeftSidebar(
     return baseGroups.flatMap((group) => {
       const allowedIds = new Set(
         group.sessions.filter((session) => (
-          !splitSessionIds.has(session.id) && !collaborationSessionIds.has(session.id)
+          !anchoredSplitSessionIds.has(session.id) && !collaborationSessionIds.has(session.id)
         )).map((session) => session.id),
       );
       anchoredEntityIdsByFolder.get(group.key)?.forEach((id) => allowedIds.add(id));
       const groupedSessions = sessions.filter((session) => allowedIds.has(session.id));
       return groupedSessions.length > 0 ? [{ ...group, sessions: groupedSessions }] : [];
     });
-  }, [collaborationGroups, collaborationSessionIds, groupByFolder, sessions, sessionStates, splitSessionIds, splitWorkspaces, t]);
+  }, [collaborationGroups, collaborationSessionIds, groupByFolder, sessions, sessionStates, splitWorkspaces, t]);
 
   const flatSidebarEntities = useMemo(
     () => buildSidebarEntities(sessions, splitWorkspaces, sessionsById, collaborationGroups),

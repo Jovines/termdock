@@ -127,7 +127,7 @@ describe('LeftSidebar session density', () => {
     expect(screen.queryByRole('menu', { name: 'Split layout' })).toBeNull();
   });
 
-  it('renders an Agent workgroup as the primary card while preserving member split state', async () => {
+  it('keeps both sides visible when a split crosses an Agent workgroup boundary', async () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
       value: vi.fn(),
@@ -139,7 +139,7 @@ describe('LeftSidebar session density', () => {
             groups: [{
               id: 'agent-group',
               name: 'Release team',
-              sessionIds: ['one', 'two'],
+              sessionIds: ['one', 'three'],
               createdAt: 1,
               updatedAt: 2,
             }],
@@ -149,6 +149,7 @@ describe('LeftSidebar session density', () => {
     })));
     const onRemoveFromSplit = vi.fn();
     const onSplitSession = vi.fn();
+    const onCloseSplit = vi.fn();
 
     render(
       <I18nProvider>
@@ -167,7 +168,7 @@ describe('LeftSidebar session density', () => {
           onNewSession={vi.fn()}
           onCloseSession={vi.fn()}
           onSplitSession={onSplitSession}
-          onCloseSplit={vi.fn()}
+          onCloseSplit={onCloseSplit}
           onRemoveFromSplit={onRemoveFromSplit}
           splitWorkspaces={[{ id: 'split-one', sessionIds: ['one', 'two'], layout: 'horizontal' }]}
           onSetSplitLayout={vi.fn()}
@@ -182,7 +183,7 @@ describe('LeftSidebar session density', () => {
 
     const workgroup = await screen.findByRole('region', { name: 'Agent 工作组：Release team' });
     expect(workgroup.querySelectorAll('[data-collaboration-member]')).toHaveLength(2);
-    expect(workgroup.querySelectorAll('[data-split-member="true"]')).toHaveLength(2);
+    expect(workgroup.querySelectorAll('[data-split-member="true"]')).toHaveLength(1);
     expect(workgroup.querySelector('[data-split-workspace]')).toBeNull();
     expect(screen.getByLabelText('移动 Agent 工作组：Release team')).toBeTruthy();
 
@@ -190,6 +191,8 @@ describe('LeftSidebar session density', () => {
     expect(onRemoveFromSplit).toHaveBeenCalledWith('one');
     fireEvent.click(screen.getByRole('button', { name: 'Split Standalone' }));
     expect(onSplitSession).toHaveBeenCalledWith('three');
+    fireEvent.click(screen.getByRole('button', { name: 'Exit split Reviewer' }));
+    expect(onCloseSplit).toHaveBeenCalledWith('two');
     await waitFor(() => expect(document.querySelectorAll('[data-collaboration-group]')).toHaveLength(1));
   });
 });
