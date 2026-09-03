@@ -436,18 +436,31 @@ function getTerminalConvertEol(hasTmuxScroll: boolean): boolean {
  *   - 任何加载失败都吞掉，让终端继续以 fallback 启动，不阻塞用户。
  */
 let terminalFontsReadyPromise: Promise<void> | null = null;
-const TERMINAL_FONT_PRELOADS = [
+const TERMINAL_CRITICAL_FONT_PRELOADS = [
   {
     font: '400 13px "Termdock Mono"',
     text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
   },
   {
+    font: '400 13px "Noto Sans Mono CJK SC"',
+    text: '终端中文路径',
+  },
+  {
+    font: '400 13px "Termdock Star Symbol"',
+    text: '✦✧',
+  },
+] as const;
+
+// These variants improve uncommon styled cells but do not determine xterm's
+// base cell geometry. Fetching all of them before constructing the foreground
+// terminal cost roughly another 3 MB on every uncached launch. Warm them after
+// the critical regular Latin/CJK faces have unlocked the first viewport.
+const TERMINAL_DEFERRED_FONT_PRELOADS = [
+  {
     font: '700 13px "Termdock Mono"',
     text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
   },
   {
-    // 真实 italic 字形，替代 xterm 合成斜体。预加载确保 man / less 等
-    // TUI 程序首帧就能拿到 italic 字形，不会先画成正体再跳变。
     font: 'italic 400 13px "Termdock Mono"',
     text: 'Termdock 0123456789 ~!@#$%^&*()[]{}',
   },
@@ -460,24 +473,25 @@ const TERMINAL_FONT_PRELOADS = [
     text: '⏺⏸⏹✓✗',
   },
   {
-    // Keep this text in sync with the Termdock Star Symbol unicode-range in
-    // index.html. It forces the self-hosted symbol subset to load before xterm
-    // measures cells, so mobile does not briefly fall back to oversized system
-    // symbol fonts.
-    font: '400 13px "Termdock Star Symbol"',
-    text: '✦✧',
-  },
-  {
-    font: '400 13px "Noto Sans Mono CJK SC"',
-    text: '终端中文路径',
-  },
-  {
     // CJK Bold 预加载：终端 ANSI bold 里的中文（如 echo -e '\e[1m粗体\e[0m'）
     // 没有预加载时会先合成 bold（描边加粗），字体加载后跳变到真实 bold 字形。
     font: '700 13px "Noto Sans Mono CJK SC"',
     text: '终端中文路径',
   },
 ] as const;
+
+const scheduleDeferredTerminalFonts = (fonts: FontFaceSet): void => {
+  const warm = () => {
+    void Promise.allSettled(
+      TERMINAL_DEFERRED_FONT_PRELOADS.map(({ font, text }) => fonts.load(font, text)),
+    );
+  };
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(warm, { timeout: 2000 });
+  } else {
+    globalThis.setTimeout(warm, 250);
+  }
+};
 
 const ensureTerminalFontsReady = (): Promise<void> => {
   if (terminalFontsReadyPromise) return terminalFontsReadyPromise;
@@ -486,13 +500,15 @@ const ensureTerminalFontsReady = (): Promise<void> => {
     return terminalFontsReadyPromise;
   }
   const fonts = document.fonts;
-  // 显式传入能命中各 @font-face unicode-range 的文本，触发字体真正下载。
+  // Only faces that determine the first viewport's cell geometry block xterm.
   const preload = Promise.allSettled(
-    TERMINAL_FONT_PRELOADS.map(({ font, text }) => fonts.load(font, text)),
+    TERMINAL_CRITICAL_FONT_PRELOADS.map(({ font, text }) => fonts.load(font, text)),
   );
   terminalFontsReadyPromise = preload
     .then(() => fonts.ready)
-    .then(() => undefined)
+    .then(() => {
+      scheduleDeferredTerminalFonts(fonts);
+    })
     .catch(() => undefined);
   return terminalFontsReadyPromise;
 };
