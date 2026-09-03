@@ -897,11 +897,13 @@ function App() {
   // Sync the active session's cwd to the sidebar from the live terminal store.
   // The tab metadata snapshot can lag during session switches, which otherwise
   // leaves Git/files browsing pointed at the previously active workspace.
-  const activeSplitWorkspaceId = React.useMemo(() => (
+  const activeSplitWorkspace = React.useMemo(() => (
     activeSessionId
-      ? splitWorkspaces.find((workspace) => workspace.sessionIds.includes(activeSessionId))?.id ?? null
+      ? splitWorkspaces.find((workspace) => workspace.sessionIds.includes(activeSessionId)) ?? null
       : null
   ), [activeSessionId, splitWorkspaces]);
+  const activeSplitWorkspaceId = activeSplitWorkspace?.id ?? null;
+  const sidebarSessionId = activeSplitWorkspace?.sessionIds[0] ?? activeSessionId;
 
   const previousSplitWorkspacesRef = React.useRef<SplitWorkspaceSummary[]>([]);
   React.useLayoutEffect(() => {
@@ -920,7 +922,7 @@ function App() {
           rootPath: useTerminalStore.getState().sessions.get(sessionId)?.cwd ?? null,
         }));
       if (departingSessions.length > 0) {
-        useSidebarStore.getState().inheritRightSidebarWidthFromSplitWorkspace(
+        useSidebarStore.getState().inheritRightSidebarStateFromSplitWorkspace(
           workspace.id,
           departingSessions,
         );
@@ -930,21 +932,21 @@ function App() {
 
   React.useLayoutEffect(() => {
     const syncRootPath = () => {
-      const cwd = activeSessionId
-        ? useTerminalStore.getState().sessions.get(activeSessionId)?.cwd ?? null
+      const cwd = sidebarSessionId
+        ? useTerminalStore.getState().sessions.get(sidebarSessionId)?.cwd ?? null
         : null;
-      useSidebarStore.getState().setRootPath(cwd, activeSessionId, activeSplitWorkspaceId);
+      useSidebarStore.getState().setRootPath(cwd, sidebarSessionId, activeSplitWorkspaceId);
     };
 
     syncRootPath();
     return useTerminalStore.subscribe((state, previous) => {
-      const current = activeSessionId ? state.sessions.get(activeSessionId)?.cwd ?? null : null;
-      const prev = activeSessionId ? previous.sessions.get(activeSessionId)?.cwd ?? null : null;
+      const current = sidebarSessionId ? state.sessions.get(sidebarSessionId)?.cwd ?? null : null;
+      const prev = sidebarSessionId ? previous.sessions.get(sidebarSessionId)?.cwd ?? null : null;
       if (current !== prev) {
-        useSidebarStore.getState().setRootPath(current, activeSessionId, activeSplitWorkspaceId);
+        useSidebarStore.getState().setRootPath(current, sidebarSessionId, activeSplitWorkspaceId);
       }
     });
-  }, [activeSessionId, activeSplitWorkspaceId]);
+  }, [activeSplitWorkspaceId, sidebarSessionId]);
 
   // Sidebar drawer dimensions — overlays on both mobile & desktop, so we
   // never cause the terminal column to resize when toggling the sidebar.

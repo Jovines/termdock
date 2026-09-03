@@ -41,6 +41,7 @@ const LEFT_SIDEBAR_WIDTH_KEY = 'termdock-left-sidebar-width';
 const RIGHT_PINNED_KEY = 'termdock-right-sidebar-pinned';
 const RIGHT_SIDEBAR_WIDTH_KEY = 'termdock-right-sidebar-width';
 const RIGHT_SIDEBAR_WIDTHS_BY_CONTEXT_CACHE_KEY = 'termdock:right-sidebar:widths-by-session:v1';
+const SPLIT_SIDEBAR_STATE_INITIALIZED_CACHE_KEY = 'termdock:right-sidebar:split-state-initialized:v1';
 const RIGHT_SIDEBAR_LAYOUT_PREFERENCE_KEY = 'termdock-right-sidebar-layout-preference';
 
 export function readLeftPinnedPreference(): boolean {
@@ -333,6 +334,20 @@ function getRightSidebarWidthContextKey(
     : getSidebarContextKey(sessionId, rootPath);
 }
 
+function readInitializedSplitSidebarStates(): Set<string> {
+  const stored = readCache(SPLIT_SIDEBAR_STATE_INITIALIZED_CACHE_KEY, (value): value is string[] => (
+    Array.isArray(value) && value.every((entry) => typeof entry === 'string')
+  ));
+  return new Set(stored ?? []);
+}
+
+function markSplitSidebarStateInitialized(splitWorkspaceId: string): void {
+  const initialized = readInitializedSplitSidebarStates();
+  if (initialized.has(splitWorkspaceId)) return;
+  initialized.add(splitWorkspaceId);
+  writeCache(SPLIT_SIDEBAR_STATE_INITIALIZED_CACHE_KEY, [...initialized]);
+}
+
 function isBoolean(value: unknown): value is boolean {
   return typeof value === 'boolean';
 }
@@ -489,7 +504,7 @@ interface SidebarState {
     sessionId?: string | null,
     splitWorkspaceId?: string | null,
   ) => void;
-  inheritRightSidebarWidthFromSplitWorkspace: (
+  inheritRightSidebarStateFromSplitWorkspace: (
     splitWorkspaceId: string,
     sessions: Array<{ sessionId: string; rootPath: string | null }>,
   ) => void;
@@ -614,31 +629,19 @@ export const useSidebarStore = create<SidebarState>((set) => ({
   closeRightSearch: () => set({ rightSearchOpen: false }),
   setRightSearchOpen: (open) => set({ rightSearchOpen: open }),
   setRootPath: (path, sessionId = null, splitWorkspaceId = null) => set((s) => {
-    const contextKey = getSidebarContextKey(sessionId, path);
+    const sessionContextKey = getSidebarContextKey(sessionId, path);
     const rightSidebarWidthContextKey = getRightSidebarWidthContextKey(
       sessionId,
       path,
       splitWorkspaceId,
     );
+    const contextKey = splitWorkspaceId
+      ? rightSidebarWidthContextKey
+      : sessionContextKey;
     if (
       s.contextKey === contextKey
       && s.rightSidebarWidthContextKey === rightSidebarWidthContextKey
-    ) return s;
-    if (s.contextKey === contextKey) {
-      const widthCache = readRightSidebarWidthCache();
-      let persistedRightSidebarWidth = rightSidebarWidthContextKey
-        ? widthCache[rightSidebarWidthContextKey]
-        : undefined;
-      if (splitWorkspaceId && rightSidebarWidthContextKey && persistedRightSidebarWidth === undefined) {
-        persistedRightSidebarWidth = (contextKey ? widthCache[contextKey] : undefined)
-          ?? s.rightSidebarWidth;
-        writeRightSidebarWidthForContext(rightSidebarWidthContextKey, persistedRightSidebarWidth);
-      }
-      return {
-        rightSidebarWidthContextKey,
-        rightSidebarWidth: persistedRightSidebarWidth ?? readRightSidebarWidth(),
-      };
-    }
+    ) return path === s.rootPath ? s : { rootPath: path };
     const projectStateCache = new Map(s.projectStateCache);
     if (s.contextKey) {
       projectStateCache.set(s.contextKey, {
@@ -654,6 +657,62 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       });
     }
 
+    const splitStateInitialized = splitWorkspaceId
+      ? readInitializedSplitSidebarStates().has(splitWorkspaceId)
+      : false;
+    let explorerRootCache = {
+      ...readExplorerRootCache(),
+      ...s.explorerRootCache,
+    };
+    const shouldInheritSessionState = !!splitWorkspaceId && !splitStateInitialized;
+    const sourceState = shouldInheritSessionState && sessionContextKey
+      ? (s.contextKey === sessionContextKey
+        ? {
+            rightTab: s.rightTab,
+            explorerRoot: s.explorerRoot,
+            expandedPaths: new Set(s.expandedPaths),
+            selectedFilePath: s.selectedFilePath,
+            directoryCache: new Map(s.directoryCache),
+            changedFiles: new Map(s.changedFiles),
+            gitBundleError: s.gitBundleError,
+            gitBundleLastLoadedAt: s.gitBundleLastLoadedAt,
+            gitBundleCacheInfo: s.gitBundleCacheInfo,
+          }
+        : projectStateCache.get(sessionContextKey))
+      : undefined;
+    if (shouldInheritSessionState && splitWorkspaceId) {
+      const inheritedRightTab = sourceState?.rightTab
+        ?? (sessionContextKey ? readRightSidebarTabCache()[sessionContextKey] : undefined)
+        ?? 'files';
+      const inheritedExplorerRoot = sourceState?.explorerRoot
+        ?? (sessionContextKey ? s.explorerRootCache[sessionContextKey] : undefined)
+        ?? path;
+      const inheritedSelectedFilePath = sourceState?.selectedFilePath
+        ?? (sessionContextKey ? readSelectedFilePathCache()[sessionContextKey] : undefined)
+        ?? null;
+      const inheritedState: ProjectSidebarState = {
+        rightTab: inheritedRightTab,
+        explorerRoot: inheritedExplorerRoot,
+        expandedPaths: new Set(sourceState?.expandedPaths ?? []),
+        selectedFilePath: inheritedSelectedFilePath,
+        directoryCache: new Map(sourceState?.directoryCache ?? []),
+        changedFiles: new Map(sourceState?.changedFiles ?? []),
+        gitBundleError: sourceState?.gitBundleError ?? null,
+        gitBundleLastLoadedAt: sourceState?.gitBundleLastLoadedAt ?? null,
+        gitBundleCacheInfo: sourceState?.gitBundleCacheInfo ?? null,
+      };
+      if (contextKey) {
+        projectStateCache.set(contextKey, inheritedState);
+        writeRightSidebarTab(contextKey, inheritedRightTab);
+        writeSelectedFilePath(contextKey, inheritedSelectedFilePath);
+        if (inheritedExplorerRoot) {
+          explorerRootCache = { ...explorerRootCache, [contextKey]: inheritedExplorerRoot };
+          writeExplorerRootCache(explorerRootCache);
+        }
+      }
+      markSplitSidebarStateInitialized(splitWorkspaceId);
+    }
+
     const cached = contextKey ? projectStateCache.get(contextKey) : undefined;
     const persistedRightTab = contextKey ? readRightSidebarTabCache()[contextKey] : undefined;
     const widthCache = readRightSidebarWidthCache();
@@ -661,11 +720,11 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       ? widthCache[rightSidebarWidthContextKey]
       : undefined;
     if (splitWorkspaceId && rightSidebarWidthContextKey && persistedRightSidebarWidth === undefined) {
-      persistedRightSidebarWidth = (contextKey ? widthCache[contextKey] : undefined)
+      persistedRightSidebarWidth = (sessionContextKey ? widthCache[sessionContextKey] : undefined)
         ?? readRightSidebarWidth();
       writeRightSidebarWidthForContext(rightSidebarWidthContextKey, persistedRightSidebarWidth);
     }
-    const persistedExplorerRoot = contextKey ? s.explorerRootCache[contextKey] : undefined;
+    const persistedExplorerRoot = contextKey ? explorerRootCache[contextKey] : undefined;
     const persistedSelectedFilePath = contextKey ? readSelectedFilePathCache()[contextKey] : undefined;
     return {
       rootPath: path,
@@ -676,6 +735,7 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       explorerRoot: cached?.explorerRoot ?? persistedExplorerRoot ?? path,
       expandedPaths: cached ? new Set(cached.expandedPaths) : new Set(),
       selectedFilePath: cached?.selectedFilePath ?? persistedSelectedFilePath ?? null,
+      explorerRootCache,
       directoryCache: cached ? new Map(cached.directoryCache) : new Map(),
       changedFiles: cached ? new Map(cached.changedFiles) : new Map(),
       gitBundleLoading: false,
@@ -688,30 +748,56 @@ export const useSidebarStore = create<SidebarState>((set) => ({
     };
   }),
 
-  inheritRightSidebarWidthFromSplitWorkspace: (splitWorkspaceId, sessions) => {
-    if (!splitWorkspaceId || sessions.length === 0) return;
+  inheritRightSidebarStateFromSplitWorkspace: (splitWorkspaceId, sessions) => set((state) => {
+    if (!splitWorkspaceId || sessions.length === 0) return state;
     const widthCache = readRightSidebarWidthCache();
     const splitContextKey = getRightSidebarWidthContextKey(null, null, splitWorkspaceId);
-    if (!splitContextKey) return;
-    const state = useSidebarStore.getState();
+    if (!splitContextKey) return state;
     const splitWidth = widthCache[splitContextKey]
       ?? (state.rightSidebarWidthContextKey === splitContextKey
         ? state.rightSidebarWidth
         : undefined);
-    if (splitWidth === undefined) return;
+    const splitState = state.contextKey === splitContextKey
+      ? {
+          rightTab: state.rightTab,
+          explorerRoot: state.explorerRoot,
+          expandedPaths: new Set(state.expandedPaths),
+          selectedFilePath: state.selectedFilePath,
+          directoryCache: new Map(state.directoryCache),
+          changedFiles: new Map(state.changedFiles),
+          gitBundleError: state.gitBundleError,
+          gitBundleLastLoadedAt: state.gitBundleLastLoadedAt,
+          gitBundleCacheInfo: state.gitBundleCacheInfo,
+        }
+      : state.projectStateCache.get(splitContextKey);
+    if (splitWidth === undefined && !splitState) return state;
 
-    let changed = false;
     const nextWidthCache = { ...widthCache };
+    const projectStateCache = new Map(state.projectStateCache);
+    const explorerRootCache = { ...state.explorerRootCache };
     for (const session of sessions) {
       const sessionContextKey = getSidebarContextKey(session.sessionId, session.rootPath);
-      if (!sessionContextKey || nextWidthCache[sessionContextKey] === splitWidth) continue;
-      nextWidthCache[sessionContextKey] = splitWidth;
-      changed = true;
+      if (!sessionContextKey) continue;
+      if (splitWidth !== undefined) nextWidthCache[sessionContextKey] = splitWidth;
+      if (splitState) {
+        projectStateCache.set(sessionContextKey, {
+          ...splitState,
+          expandedPaths: new Set(splitState.expandedPaths),
+          directoryCache: new Map(splitState.directoryCache),
+          changedFiles: new Map(splitState.changedFiles),
+        });
+        writeRightSidebarTab(sessionContextKey, splitState.rightTab);
+        writeSelectedFilePath(sessionContextKey, splitState.selectedFilePath);
+        if (splitState.explorerRoot) explorerRootCache[sessionContextKey] = splitState.explorerRoot;
+        else delete explorerRootCache[sessionContextKey];
+      }
     }
-    if (changed) {
+    if (splitWidth !== undefined) {
       writeCache(RIGHT_SIDEBAR_WIDTHS_BY_CONTEXT_CACHE_KEY, nextWidthCache);
     }
-  },
+    if (splitState) writeExplorerRootCache(explorerRootCache);
+    return { projectStateCache, explorerRootCache };
+  }),
 
   setExplorerRoot: (path) => set((s) => {
     if (s.explorerRoot === path) return s;
