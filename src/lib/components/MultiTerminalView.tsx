@@ -17,11 +17,6 @@ import type { TerminalMode } from '../terminal';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../terminal/settings';
 import type { TermdockColorTheme } from '../terminal/theme';
 import {
-  MOBILE_VIEWPORT_CACHE_IDLE_MS,
-  MOBILE_VIEWPORT_CACHE_SWEEP_INTERVAL_MS,
-  selectCachedMobileViewportSessionIds,
-} from '../terminal/mobileViewportCache';
-import {
   BACKGROUND_RESUME_INITIAL_DELAY_MS,
   buildResumeDelayBySessionId,
   resolvePrioritySessionId,
@@ -425,7 +420,6 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [foregroundResumeCompletedToken, setForegroundResumeCompletedToken] = useState(0);
   const [viewportReadySessionIds, setViewportReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [deferredViewportSessionIds, setDeferredViewportSessionIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [mobileViewportLastVisitedAt, setMobileViewportLastVisitedAt] = useState<ReadonlyMap<string, number>>(() => new Map());
   const restoredRef = useRef(false);
   const swiperRef = useRef<SwiperInstance | null>(null);
   const keyboardOpenBySessionRef = useRef<Record<string, boolean>>({});
@@ -557,44 +551,12 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     () => findSplitWorkspace(splitWorkspaces, activeSessionId),
     [activeSessionId, splitWorkspaces],
   );
-  const currentVisibleSessionIds = useMemo(() => {
+  const visibleSessionIds = useMemo(() => {
     const activeSlide = workspaceSlides.find((slide) =>
       slide.sessions.some((session) => session.id === activeSessionId)
     );
     return new Set(activeSlide?.sessions.map((session) => session.id) ?? []);
   }, [activeSessionId, workspaceSlides]);
-  useEffect(() => {
-    if (!isMobileLayout) return;
-    const refreshAccessTimes = () => {
-      const now = Date.now();
-      const validSessionIds = new Set(sessionsRef.current.map((session) => session.id));
-      setMobileViewportLastVisitedAt((current) => {
-        const next = new Map<string, number>();
-        for (const [sessionId, lastVisitedAt] of current) {
-          if (
-            validSessionIds.has(sessionId)
-            && (currentVisibleSessionIds.has(sessionId) || now - lastVisitedAt < MOBILE_VIEWPORT_CACHE_IDLE_MS)
-          ) {
-            next.set(sessionId, lastVisitedAt);
-          }
-        }
-        currentVisibleSessionIds.forEach((sessionId) => next.set(sessionId, now));
-        return next;
-      });
-    };
-    refreshAccessTimes();
-    const timer = window.setInterval(refreshAccessTimes, MOBILE_VIEWPORT_CACHE_SWEEP_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [currentVisibleSessionIds, isMobileLayout]);
-  const visibleSessionIds = useMemo(() => {
-    if (!isMobileLayout) return currentVisibleSessionIds;
-    return selectCachedMobileViewportSessionIds({
-      currentVisibleSessionIds,
-      lastVisitedAtBySessionId: mobileViewportLastVisitedAt,
-      validSessionIds: new Set(sessions.map((session) => session.id)),
-      now: Date.now(),
-    });
-  }, [currentVisibleSessionIds, isMobileLayout, mobileViewportLastVisitedAt, sessions]);
   const priorityForegroundSessionId = useMemo(() => resolvePrioritySessionId(
     sessions.map((session) => ({ id: session.id, backendSessionId: session.sessionId })),
     connectionPrioritySessionId,
@@ -612,9 +574,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const backgroundResumeDelayBySessionId = useMemo(() => {
     return buildResumeDelayBySessionId(
       workspaceSlides.flatMap((slide) => slide.sessions.map((session) => session.id)),
-      currentVisibleSessionIds,
+      visibleSessionIds,
     );
-  }, [currentVisibleSessionIds, workspaceSlides]);
+  }, [visibleSessionIds, workspaceSlides]);
   const foregroundConnectionReady = foregroundSessionId !== null && readySessionIds.has(foregroundSessionId);
   const handleStreamReadyChange = useCallback((sessionId: string, ready: boolean) => {
     setReadySessionIds((current) => {

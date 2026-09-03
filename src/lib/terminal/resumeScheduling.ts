@@ -43,7 +43,7 @@ export function shouldMountSessionViewport(options: {
   isMobileLayout: boolean;
 }): boolean {
   if (options.isMobileLayout) {
-    return options.visibleSessionIds.has(options.sessionId);
+    return true;
   }
   return options.sessionId === options.foregroundSessionId
     || options.deferredViewportSessionIds.has(options.sessionId);

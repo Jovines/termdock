@@ -87,7 +87,7 @@ describe('shouldMountSessionViewport', () => {
   const visibleSessionIds = new Set(['selected', 'split-peer']);
   const deferredViewportSessionIds = new Set(['background']);
 
-  it('mounts only visible terminal renderers on mobile', () => {
+  it('keeps every terminal renderer mounted on mobile', () => {
     for (const sessionId of visibleSessionIds) {
       expect(shouldMountSessionViewport({
         sessionId,
@@ -103,7 +103,7 @@ describe('shouldMountSessionViewport', () => {
       visibleSessionIds,
       deferredViewportSessionIds,
       isMobileLayout: true,
-    })).toBe(false);
+    })).toBe(true);
   });
 
   it('keeps the staggered warm viewport policy on desktop', () => {
