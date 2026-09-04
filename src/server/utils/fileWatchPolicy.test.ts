@@ -2,10 +2,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   countInotifyWatchDescriptors,
+  diffWatchSnapshots,
   enqueueLatestWatchEvent,
   getWatchErrorCode,
   isWatchResourceExhaustion,
-  minimizeRecursiveWatchRoots,
+  normalizeDirectoryWatchRoots,
+  resolveDirectWatchEventPath,
 } from './fileWatchPolicy.js';
 
 describe('countInotifyWatchDescriptors', () => {
@@ -17,6 +19,35 @@ describe('countInotifyWatchDescriptors', () => {
       'inotify wd:2 ino:456 sdev:8 mask:fc6',
       '',
     ].join('\n'))).toBe(2);
+  });
+});
+
+describe('resolveDirectWatchEventPath', () => {
+  it('accepts direct children and rejects nested or escaping paths', () => {
+    expect(resolveDirectWatchEventPath('/repo/src', 'app.ts')).toBe('/repo/src/app.ts');
+    expect(resolveDirectWatchEventPath('/repo/src', 'components/app.ts')).toBeNull();
+    expect(resolveDirectWatchEventPath('/repo/src', '../secret')).toBeNull();
+  });
+});
+
+describe('diffWatchSnapshots', () => {
+  it('reports creates, content updates, and deletes without unchanged noise', () => {
+    const previous = new Map([
+      ['/repo/deleted.ts', { signature: '1' }],
+      ['/repo/updated.ts', { signature: '1' }],
+      ['/repo/stable.ts', { signature: '1' }],
+    ]);
+    const next = new Map([
+      ['/repo/created.ts', { signature: '2' }],
+      ['/repo/updated.ts', { signature: '2' }],
+      ['/repo/stable.ts', { signature: '1' }],
+    ]);
+
+    expect(diffWatchSnapshots(previous, next)).toEqual([
+      { type: 'delete', path: '/repo/deleted.ts' },
+      { type: 'create', path: '/repo/created.ts', value: { signature: '2' } },
+      { type: 'update', path: '/repo/updated.ts', value: { signature: '2' } },
+    ]);
   });
 });
 
@@ -36,21 +67,18 @@ describe('enqueueLatestWatchEvent', () => {
   });
 });
 
-describe('minimizeRecursiveWatchRoots', () => {
-  it('deduplicates roots and removes descendants covered by a recursive ancestor', () => {
-    expect(minimizeRecursiveWatchRoots([
+describe('normalizeDirectoryWatchRoots', () => {
+  it('deduplicates roots while preserving nested directories needed by non-recursive watchers', () => {
+    expect(normalizeDirectoryWatchRoots([
       '/workspace/repo/src/components',
       '/workspace/repo/src',
       '/workspace/repo/src',
       '/workspace/repo/test',
-    ])).toEqual(['/workspace/repo/src', '/workspace/repo/test']);
-  });
-
-  it('does not treat similarly prefixed siblings as descendants', () => {
-    expect(minimizeRecursiveWatchRoots([
-      '/workspace/app',
-      '/workspace/application',
-    ])).toEqual(['/workspace/app', '/workspace/application']);
+    ])).toEqual([
+      '/workspace/repo/src',
+      '/workspace/repo/src/components',
+      '/workspace/repo/test',
+    ]);
   });
 });
 

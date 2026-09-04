@@ -5,7 +5,6 @@ import type { Dirent } from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
-import watcher from '@parcel/watcher';
 import busboy from 'busboy';
 import { pathValidator } from '../utils/pathValidator.js';
 import { isAuthEnabled, isRequestAuthenticated } from '../utils/authProtection.js';
@@ -22,13 +21,16 @@ import { EdaPreviewCache, requestAcceptsEtag } from '../utils/edaPreviewCache.js
 import { convertHeicPreview, HEIC_PREVIEW_MIME_TYPES, isHeicPreviewPath } from '../utils/heicPreview.js';
 import {
   getWatchErrorCode,
+  diffWatchSnapshots,
   enqueueLatestWatchEvent,
   inspectLinuxInotifyUsage,
   isWatchResourceExhaustion,
-  minimizeRecursiveWatchRoots,
+  normalizeDirectoryWatchRoots,
+  resolveDirectWatchEventPath,
   WATCH_IGNORED_NAMES,
   WATCH_RESOURCE_BACKOFF_MS,
 } from '../utils/fileWatchPolicy.js';
+import { isResponseWritable, writeResponseChunk } from '../utils/httpResponse.js';
 
 const router = Router();
 
@@ -72,15 +74,12 @@ const FS_IO_LOG_NAME = 'fs-io.log';
 const activeDiffSlots = new Map<string, { controller: AbortController; requestId: number }>();
 const activeIoSlots = new Map<string, { controller: AbortController; requestId: number; op: string }>();
 // ── Shared file-watch subscriptions ──────────────────────────────────────
-// @parcel/watcher's subscribe() recursively scans the whole subtree on a
-// libuv threadpool worker before it starts delivering events. Creating one
-// subscription per fs/watch connection turns client reconnects (which happen
-// on every file selection) into N full-tree scans, saturating the 16-worker
-// pool — every async fs operation then queues behind the scans and the whole
-// server appears frozen. The registry below makes the subscription per-root
-// and reference-counted: while any client watches a root, the tree is scanned
-// exactly once, and reconnect/re-subscribe attaches to the existing
-// subscription instead of rescanning.
+// The explorer only needs direct children of directories that are currently
+// visible. A recursive watcher here would allocate one Linux inotify watch per
+// descendant and scan the whole subtree before becoming ready. Keep one shared
+// non-recursive fs.watch per visible directory instead. If the host has already
+// exhausted native watcher resources, retain live refresh through a bounded,
+// low-frequency snapshot poll rather than terminating the client stream.
 interface SharedWatchClient {
   closed: boolean;
   enqueue: (event: FileWatchEvent) => void;
@@ -88,25 +87,34 @@ interface SharedWatchClient {
 }
 interface SharedWatchEntry {
   refs: number;
-  subscription: watcher.AsyncSubscription | null;
+  nativeWatcher: fs.FSWatcher | null;
+  mode: 'starting' | 'native' | 'polling';
   failure: string | null;
   clients: Set<SharedWatchClient>;
-  inFlight: Promise<watcher.AsyncSubscription | null> | null;
+  inFlight: Promise<boolean> | null;
   evictTimer: ReturnType<typeof setTimeout> | null;
-  pendingEvents: Map<string, watcher.Event['type']>;
+  pollTimer: ReturnType<typeof setTimeout> | null;
+  pollSnapshot: Map<string, DirectorySnapshotItem> | null;
+  pendingEvents: Map<string, 'create' | 'update' | 'delete'>;
   statWorkers: number;
   eventGeneration: number;
   needsRescanOnAttach: boolean;
 }
+interface DirectorySnapshotItem {
+  signature: string;
+  entry: FileSearchEntry;
+}
 const sharedWatchRegistry = new Map<string, SharedWatchEntry>();
-const SHARED_WATCH_EVICT_DELAY_MS = 5_000;
+const SHARED_WATCH_EVICT_DELAY_MS = 60_000;
 const WATCH_STAT_CONCURRENCY = 8;
+const WATCH_POLL_INTERVAL_MS = 4_000;
+const MAX_NATIVE_DIRECTORY_WATCHES = 256;
 let watchAdmissionBlockedUntil = 0;
 
 function countActiveSharedWatches(): number {
   let count = 0;
   for (const entry of sharedWatchRegistry.values()) {
-    if (entry.subscription || entry.inFlight) count += 1;
+    if (entry.nativeWatcher) count += 1;
   }
   return count;
 }
@@ -120,7 +128,7 @@ function broadcastSharedWatchEvent(entry: SharedWatchEntry, event: FileWatchEven
 function drainSharedWatchEvents(entry: SharedWatchEntry): void {
   if (entry.failure || entry.clients.size === 0) return;
   while (entry.statWorkers < WATCH_STAT_CONCURRENCY && entry.pendingEvents.size > 0) {
-    const next = entry.pendingEvents.entries().next().value as [string, watcher.Event['type']] | undefined;
+    const next = entry.pendingEvents.entries().next().value as [string, 'create' | 'update' | 'delete'] | undefined;
     if (!next) return;
     const [changedPath, eventType] = next;
     entry.pendingEvents.delete(changedPath);
@@ -151,61 +159,105 @@ function drainSharedWatchEvents(entry: SharedWatchEntry): void {
   }
 }
 
-function enqueueSharedNativeEvents(rootPath: string, entry: SharedWatchEntry, events: watcher.Event[]): void {
-  for (const event of events) {
-    const changedPath = path.resolve(event.path);
-    if (!isPathInside(rootPath, changedPath) || isIgnoredWatchPath(rootPath, changedPath)) continue;
-    if (entry.clients.size === 0) {
-      // The native subscription is kept briefly for cheap stream hand-off.
-      // Only request a rescan when something actually changed in that gap.
-      entry.needsRescanOnAttach = true;
-      return;
-    }
-    if (enqueueLatestWatchEvent(entry.pendingEvents, changedPath, event.type, WATCH_EVENT_STORM_LIMIT) === 'overflow') {
-      entry.pendingEvents.clear();
-      entry.eventGeneration += 1;
-      broadcastSharedWatchEvent(entry, { type: 'rescan-required', path: rootPath, reason: 'event-storm' });
-      return;
-    }
-    // The latest event for one path wins. This turns save bursts and atomic
-    // editor renames into one stat operation instead of one operation/event.
+function enqueueSharedNativeEvent(rootPath: string, entry: SharedWatchEntry, filename: string | Buffer | null): void {
+  if (!filename) {
+    entry.pendingEvents.clear();
+    entry.eventGeneration += 1;
+    broadcastSharedWatchEvent(entry, { type: 'rescan-required', path: rootPath, reason: 'directory-rescan' });
+    return;
+  }
+  const changedPath = resolveDirectWatchEventPath(rootPath, filename);
+  if (!changedPath || isIgnoredWatchPath(rootPath, changedPath)) return;
+  if (entry.clients.size === 0) {
+    entry.needsRescanOnAttach = true;
+    return;
+  }
+  if (enqueueLatestWatchEvent(entry.pendingEvents, changedPath, 'update', WATCH_EVENT_STORM_LIMIT) === 'overflow') {
+    entry.pendingEvents.clear();
+    entry.eventGeneration += 1;
+    broadcastSharedWatchEvent(entry, { type: 'rescan-required', path: rootPath, reason: 'event-storm' });
+    return;
   }
   drainSharedWatchEvents(entry);
 }
 
-function sharedWatchCallback(rootPath: string, entry: SharedWatchEntry): (error: Error | null, events: watcher.Event[]) => void {
-  return (error, events) => {
-    if (entry.failure) return;
-    if (error) {
-      entry.failure = error.message || 'watch-error';
-      const reason = entry.failure;
-      entry.pendingEvents.clear();
-      entry.eventGeneration += 1;
-      const resourceExhausted = isWatchResourceExhaustion(error);
-      if (resourceExhausted) watchAdmissionBlockedUntil = Date.now() + WATCH_RESOURCE_BACKOFF_MS;
-      console.warn('[file-watch] Native subscription callback failed; degrading to manual refresh', {
-        rootPath,
-        code: getWatchErrorCode(error),
-        activeSubscriptions: countActiveSharedWatches(),
-        registrySize: sharedWatchRegistry.size,
-        resourceBackoffMs: resourceExhausted ? WATCH_RESOURCE_BACKOFF_MS : 0,
-        error: reason,
-      });
-      const failedSubscription = entry.subscription;
-      entry.subscription = null;
-      void failedSubscription?.unsubscribe().catch(() => undefined);
-      if (resourceExhausted) {
-        void inspectLinuxInotifyUsage().then((diagnostics) => {
-          if (diagnostics) console.warn('[file-watch] Linux inotify usage after callback failure', diagnostics);
-        }).catch(() => undefined);
+async function readDirectorySnapshot(rootPath: string): Promise<Map<string, DirectorySnapshotItem>> {
+  const dirents = await fs.promises.readdir(rootPath, { withFileTypes: true });
+  const visible = dirents.filter((dirent) => !WATCH_IGNORED_NAMES.has(dirent.name));
+  const snapshot = new Map<string, DirectorySnapshotItem>();
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(WATCH_STAT_CONCURRENCY, visible.length) }, async () => {
+    while (cursor < visible.length) {
+      const dirent = visible[cursor++];
+      const entryPath = path.join(rootPath, dirent.name);
+      try {
+        const stat = await fs.promises.lstat(entryPath);
+        snapshot.set(entryPath, {
+          signature: `${stat.mode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`,
+          entry: toFileEntry(entryPath, stat, dirent.isSymbolicLink()),
+        });
+      } catch (error) {
+        if (getWatchErrorCode(error) !== 'ENOENT') throw error;
       }
-      for (const client of [...entry.clients]) {
-        if (!client.closed) client.degrade(reason);
+    }
+  });
+  await Promise.all(workers);
+  return snapshot;
+}
+
+function scheduleSharedWatchPoll(rootPath: string, entry: SharedWatchEntry, delay = WATCH_POLL_INTERVAL_MS): void {
+  if (entry.pollTimer || entry.mode !== 'polling' || entry.refs === 0) return;
+  entry.pollTimer = setTimeout(() => {
+    entry.pollTimer = null;
+    void pollSharedWatch(rootPath, entry);
+  }, delay);
+  entry.pollTimer.unref?.();
+}
+
+async function pollSharedWatch(rootPath: string, entry: SharedWatchEntry): Promise<void> {
+  if (entry.mode !== 'polling' || entry.refs === 0) return;
+  try {
+    const next = await readDirectorySnapshot(rootPath);
+    const previous = entry.pollSnapshot;
+    entry.pollSnapshot = next;
+    entry.failure = null;
+    if (previous) {
+      for (const change of diffWatchSnapshots(previous, next)) {
+        broadcastSharedWatchEvent(entry, {
+          type: change.type === 'delete' ? 'deleted' : change.type === 'create' ? 'created' : 'updated',
+          path: change.path,
+          entry: change.value?.entry,
+        });
       }
+    }
+  } catch (error) {
+    entry.failure = error instanceof Error ? error.message : String(error);
+    if (getWatchErrorCode(error) === 'ENOENT') {
+      for (const client of [...entry.clients]) if (!client.closed) client.degrade(entry.failure);
       return;
     }
-    enqueueSharedNativeEvents(rootPath, entry, events);
-  };
+    console.warn('[file-watch] Polling refresh failed; will retry', { rootPath, error: entry.failure });
+  }
+  scheduleSharedWatchPoll(rootPath, entry);
+}
+
+async function startPollingWatch(rootPath: string, entry: SharedWatchEntry, reason: string): Promise<boolean> {
+  entry.nativeWatcher?.close();
+  entry.nativeWatcher = null;
+  entry.mode = 'polling';
+  entry.pendingEvents.clear();
+  entry.eventGeneration += 1;
+  try {
+    entry.pollSnapshot = await readDirectorySnapshot(rootPath);
+    entry.failure = null;
+  } catch (error) {
+    entry.failure = error instanceof Error ? error.message : String(error);
+    return false;
+  }
+  broadcastSharedWatchEvent(entry, { type: 'rescan-required', path: rootPath, reason: 'polling-fallback' });
+  scheduleSharedWatchPoll(rootPath, entry);
+  console.warn('[file-watch] Using polling fallback', { rootPath, intervalMs: WATCH_POLL_INTERVAL_MS, reason });
+  return true;
 }
 
 async function acquireSharedWatch(rootPath: string, client: SharedWatchClient): Promise<string | null> {
@@ -213,11 +265,14 @@ async function acquireSharedWatch(rootPath: string, client: SharedWatchClient): 
   if (!entry) {
     entry = {
       refs: 0,
-      subscription: null,
+      nativeWatcher: null,
+      mode: 'starting',
       failure: null,
       clients: new Set(),
       inFlight: null,
       evictTimer: null,
+      pollTimer: null,
+      pollSnapshot: null,
       pendingEvents: new Map(),
       statWorkers: 0,
       eventGeneration: 0,
@@ -235,67 +290,55 @@ async function acquireSharedWatch(rootPath: string, client: SharedWatchClient): 
     entry.needsRescanOnAttach = false;
     client.enqueue({ type: 'rescan-required', path: rootPath, reason: 'reconnected' });
   }
-  if (entry.failure) return null;
-  if (entry.subscription) return rootPath;
+  if (entry.mode === 'polling' && entry.pollSnapshot) {
+    scheduleSharedWatchPoll(rootPath, entry, 0);
+    return rootPath;
+  }
+  if (entry.nativeWatcher) return rootPath;
   if (!entry.inFlight) {
     const now = Date.now();
     const activeSubscriptions = countActiveSharedWatches();
-    if (now < watchAdmissionBlockedUntil) {
-      entry.failure = `native watcher admission paused for ${Math.ceil((watchAdmissionBlockedUntil - now) / 1000)}s after resource exhaustion`;
-      console.warn('[file-watch] Subscription skipped while resource backoff is active', {
-        rootPath,
-        activeSubscriptions,
-        registrySize: sharedWatchRegistry.size,
-      });
-      return null;
-    }
-    const startedAt = Date.now();
-    console.info('[file-watch] Starting native subscription', {
-      rootPath,
-      activeSubscriptions: activeSubscriptions + 1,
-      registrySize: sharedWatchRegistry.size,
-    });
-    entry.inFlight = watcher.subscribe(rootPath, sharedWatchCallback(rootPath, entry), {
-      ignore: Array.from(WATCH_IGNORED_NAMES).map((name) => `**/${name}/**`),
-    })
-      .then((subscription) => {
-        const current = sharedWatchRegistry.get(rootPath);
-        if (!current || current.refs === 0) {
-          // Nobody is watching anymore (client disconnected mid-scan): free
-          // the freshly built subscription instead of leaking its DirTree.
-          void subscription.unsubscribe().catch(() => undefined);
-          return null;
-        }
-        current.subscription = subscription;
-        console.info('[file-watch] Native subscription ready', {
+    entry.inFlight = (async () => {
+      if (now < watchAdmissionBlockedUntil || activeSubscriptions >= MAX_NATIVE_DIRECTORY_WATCHES) {
+        const reason = now < watchAdmissionBlockedUntil ? 'native watcher resource backoff' : 'native watcher process budget reached';
+        return startPollingWatch(rootPath, entry!, reason);
+      }
+      try {
+        const nativeWatcher = fs.watch(rootPath, { persistent: false }, (_eventType, filename) => {
+          enqueueSharedNativeEvent(rootPath, entry!, filename);
+        });
+        entry!.nativeWatcher = nativeWatcher;
+        entry!.mode = 'native';
+        entry!.failure = null;
+        nativeWatcher.on('error', (error) => {
+          if (entry!.mode !== 'native') return;
+          const resourceExhausted = isWatchResourceExhaustion(error);
+          if (resourceExhausted) watchAdmissionBlockedUntil = Date.now() + WATCH_RESOURCE_BACKOFF_MS;
+          if (resourceExhausted) void inspectLinuxInotifyUsage().then((diagnostics) => {
+            if (diagnostics) console.warn('[file-watch] Linux inotify usage after watcher failure', diagnostics);
+          }).catch(() => undefined);
+          void startPollingWatch(rootPath, entry!, error.message || 'native watcher error').then((started) => {
+            if (!started) {
+              const reason = entry!.failure ?? 'watch-unavailable';
+              for (const client of [...entry!.clients]) if (!client.closed) client.degrade(reason);
+            }
+          });
+        });
+        console.info('[file-watch] Native directory watch ready', {
           rootPath,
-          scanDurationMs: Date.now() - startedAt,
-          activeSubscriptions: countActiveSharedWatches(),
+          activeSubscriptions: activeSubscriptions + 1,
           registrySize: sharedWatchRegistry.size,
         });
-        return subscription;
-      })
-      .catch((error) => {
-        const current = sharedWatchRegistry.get(rootPath);
-        if (current) current.failure = error instanceof Error ? error.message : String(error);
+        return true;
+      } catch (error) {
         const resourceExhausted = isWatchResourceExhaustion(error);
         if (resourceExhausted) watchAdmissionBlockedUntil = Date.now() + WATCH_RESOURCE_BACKOFF_MS;
-        console.warn('[file-watch] Native subscription failed; degrading to manual refresh', {
-          rootPath,
-          code: getWatchErrorCode(error),
-          scanDurationMs: Date.now() - startedAt,
-          activeSubscriptions: countActiveSharedWatches(),
-          registrySize: sharedWatchRegistry.size,
-          resourceBackoffMs: resourceExhausted ? WATCH_RESOURCE_BACKOFF_MS : 0,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        if (resourceExhausted) {
-          void inspectLinuxInotifyUsage().then((diagnostics) => {
-            if (diagnostics) console.warn('[file-watch] Linux inotify usage after resource exhaustion', diagnostics);
-          }).catch(() => undefined);
-        }
-        return null;
-      })
+        if (resourceExhausted) void inspectLinuxInotifyUsage().then((diagnostics) => {
+          if (diagnostics) console.warn('[file-watch] Linux inotify usage after watcher admission failure', diagnostics);
+        }).catch(() => undefined);
+        return startPollingWatch(rootPath, entry!, error instanceof Error ? error.message : String(error));
+      }
+    })()
       .finally(() => {
         const current = sharedWatchRegistry.get(rootPath);
         if (current) current.inFlight = null;
@@ -318,7 +361,11 @@ function releaseSharedWatch(rootPath: string, client: SharedWatchClient): void {
     || entry.statWorkers > 0;
   entry.pendingEvents.clear();
   entry.eventGeneration += 1;
-  if (!entry.subscription && !entry.inFlight) {
+  if (entry.pollTimer) {
+    clearTimeout(entry.pollTimer);
+    entry.pollTimer = null;
+  }
+  if (!entry.nativeWatcher && !entry.inFlight) {
     sharedWatchRegistry.delete(rootPath);
     return;
   }
@@ -327,8 +374,9 @@ function releaseSharedWatch(rootPath: string, client: SharedWatchClient): void {
     const current = sharedWatchRegistry.get(rootPath);
     if (!current || current.refs > 0) return;
     sharedWatchRegistry.delete(rootPath);
-    void current.subscription?.unsubscribe().catch(() => undefined);
-    current.subscription = null;
+    if (current.pollTimer) clearTimeout(current.pollTimer);
+    current.nativeWatcher?.close();
+    current.nativeWatcher = null;
   }, SHARED_WATCH_EVICT_DELAY_MS);
   entry.evictTimer.unref?.();
 }
@@ -1988,13 +2036,17 @@ async function searchWithFallback(rootPath: string, queryLower: string, showHidd
 }
 
 function writeSearchEvent(res: Response, type: string, payload: Record<string, unknown>): void {
-  res.write(`${JSON.stringify({ type, ...payload })}\n`);
+  writeResponseChunk(res, `${JSON.stringify({ type, ...payload })}\n`);
 }
 
 function createSearchBatchEmitter(res: Response) {
   let batch: FileSearchEntry[] = [];
   const flush = () => {
-    if (batch.length === 0 || res.destroyed) return;
+    if (batch.length === 0) return;
+    if (!isResponseWritable(res)) {
+      batch = [];
+      return;
+    }
     writeSearchEvent(res, 'batch', { entries: batch });
     batch = [];
   };
@@ -2123,7 +2175,11 @@ async function streamSearchWithFallback(rootPath: string, queryLower: string, sh
 function createContentBatchEmitter(res: Response) {
   let batch: ContentSearchEntry[] = [];
   const flush = () => {
-    if (batch.length === 0 || res.destroyed) return;
+    if (batch.length === 0) return;
+    if (!isResponseWritable(res)) {
+      batch = [];
+      return;
+    }
     writeSearchEvent(res, 'content-batch', { contentEntries: batch });
     batch = [];
   };
@@ -2896,8 +2952,17 @@ router.get('/list', async (req: Request, res: Response) => {
 // deep directory listing; it uses the OS watcher and sends small batched events
 // so the client can patch only directories it has already loaded.
 router.get('/watch', async (req: Request, res: Response) => {
+  const repeatedRootsParam = req.query.root;
   const rootsParam = req.query.roots;
-  const rawRoots = (Array.isArray(rootsParam) ? rootsParam : typeof rootsParam === 'string' ? rootsParam.split('|') : [])
+  const rawRoots = (Array.isArray(repeatedRootsParam)
+    ? repeatedRootsParam
+    : typeof repeatedRootsParam === 'string'
+      ? [repeatedRootsParam]
+      : Array.isArray(rootsParam)
+        ? rootsParam
+        : typeof rootsParam === 'string'
+          ? rootsParam.split('|')
+          : [])
     .filter((root): root is string => typeof root === 'string');
   const validatedRoots: string[] = [];
   for (const rawRoot of rawRoots) {
@@ -2911,7 +2976,7 @@ router.get('/watch', async (req: Request, res: Response) => {
     }
   }
 
-  const roots = minimizeRecursiveWatchRoots(validatedRoots);
+  const roots = normalizeDirectoryWatchRoots(validatedRoots);
   if (roots.length === 0) {
     res.status(400).json({ error: 'No valid roots to watch' });
     return;
@@ -2926,10 +2991,8 @@ router.get('/watch', async (req: Request, res: Response) => {
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   const attachedRoots = new Map<string, SharedWatchClient>();
 
-  // Register cleanup before the first native subscription starts. A recursive
-  // initial scan can take seconds on a large repository; the browser may abort
-  // during that await when the user switches files or roots. Registering this
-  // only after attachRoot() leaked the pending subscription and its reference.
+  // Register cleanup before the first native watch or fallback snapshot starts;
+  // the browser may abort while roots are being validated or attached.
   const closeWatchStream = () => {
     if (closed) return;
     closed = true;
@@ -2941,8 +3004,8 @@ router.get('/watch', async (req: Request, res: Response) => {
   res.once('close', closeWatchStream);
 
   const writeEvent = (type: string, payload: Record<string, unknown>) => {
-    if (closed || res.destroyed) return;
-    res.write(`${JSON.stringify({ type, ...payload })}\n`);
+    if (closed) return false;
+    return writeResponseChunk(res, `${JSON.stringify({ type, ...payload })}\n`);
   };
   const flush = () => {
     flushTimer = null;
@@ -2969,7 +3032,7 @@ router.get('/watch', async (req: Request, res: Response) => {
     requestedRoots: rawRoots.length,
     validatedRoots: validatedRoots.length,
     subscribedRoots: roots.length,
-    collapsedOverlappingRoots: validatedRoots.length - roots.length,
+    deduplicatedRoots: validatedRoots.length - roots.length,
     activeSubscriptions: countActiveSharedWatches(),
     registrySize: sharedWatchRegistry.size,
   });
@@ -2980,10 +3043,14 @@ router.get('/watch', async (req: Request, res: Response) => {
       closed: false,
       enqueue,
       degrade: (reason) => {
-        if (closed) return;
+        if (closed || !isResponseWritable(res)) {
+          closeWatchStream();
+          return;
+        }
         enqueue({ type: 'rescan-required', path: rootPath, reason });
         flush();
-        if (!res.writableEnded) res.end();
+        closeWatchStream();
+        if (isResponseWritable(res)) res.end();
       },
     };
     attachedRoots.set(rootPath, client);
@@ -3104,13 +3171,13 @@ router.get('/search', async (req: Request, res: Response) => {
       writeSearchEvent(res, 'meta', { path: resolvedPath, query, engine: 'rg', mode: 'content', limited: false });
       try {
         const result = await streamContentSearchWithRipgrep(resolvedPath, query, showHidden, excludePatterns, contentOptions, controller.signal, res);
-        if (!controller.signal.aborted && !res.destroyed) {
+        if (!controller.signal.aborted && isResponseWritable(res)) {
           writeSearchEvent(res, 'done', { total: result.total, truncated: result.limited, limited: result.limited, engine: 'rg', mode: 'content' });
           logSearch('ok', { count: result.total, truncated: result.limited, extra: { mode: 'content', engine: 'rg' } });
-          res.end();
+          if (isResponseWritable(res)) res.end();
         }
       } catch (error) {
-        if (controller.signal.aborted || res.destroyed) {
+        if (controller.signal.aborted || !isResponseWritable(res)) {
           const payload = getErrorPayload(controller.signal.reason ?? error);
           logSearch('error', { code: payload.code, error: payload.error, extra: { mode: 'content', engine: 'rg' } });
           return;
@@ -3118,7 +3185,7 @@ router.get('/search', async (req: Request, res: Response) => {
         const message = error instanceof Error ? error.message : 'Content search failed';
         logSearch('error', { code: 'CONTENT_SEARCH_UNAVAILABLE', error: message, extra: { mode: 'content', engine: 'rg' } });
         writeSearchEvent(res, 'error', { message, code: 'CONTENT_SEARCH_UNAVAILABLE' });
-        res.end();
+        if (isResponseWritable(res)) res.end();
       }
       return;
     }
@@ -3130,23 +3197,23 @@ router.get('/search', async (req: Request, res: Response) => {
       writeSearchEvent(res, 'meta', { path: resolvedPath, query, engine: 'rg', limited: false });
       try {
         const total = await streamSearchWithRipgrep(resolvedPath, queryLower, showHidden, excludePatterns, controller.signal, res);
-        if (!controller.signal.aborted && !res.destroyed) {
+        if (!controller.signal.aborted && isResponseWritable(res)) {
           writeSearchEvent(res, 'done', { total, truncated: false, limited: false, engine: 'rg' });
           logSearch('ok', { count: total, truncated: false, extra: { mode: 'name', engine: 'rg' } });
-          res.end();
+          if (isResponseWritable(res)) res.end();
         }
       } catch (error) {
-        if (controller.signal.aborted || res.destroyed) {
+        if (controller.signal.aborted || !isResponseWritable(res)) {
           const payload = getErrorPayload(controller.signal.reason ?? error);
           logSearch('error', { code: payload.code, error: payload.error, extra: { mode: 'name', engine: 'rg' } });
           return;
         }
         writeSearchEvent(res, 'meta', { path: resolvedPath, query, engine: 'fallback', limited: false });
         const result = await streamSearchWithFallback(resolvedPath, queryLower, showHidden, excludePatterns, controller.signal, res);
-        if (!controller.signal.aborted && !res.destroyed) {
+        if (!controller.signal.aborted && isResponseWritable(res)) {
           writeSearchEvent(res, 'done', { total: result.total, truncated: result.limited, limited: result.limited, engine: 'fallback' });
           logSearch('ok', { count: result.total, truncated: result.limited, extra: { mode: 'name', engine: 'fallback' } });
-          res.end();
+          if (isResponseWritable(res)) res.end();
         }
       }
       return;

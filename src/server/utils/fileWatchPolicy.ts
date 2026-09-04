@@ -9,6 +9,16 @@ export const WATCH_RESOURCE_BACKOFF_MS = 60_000;
 
 export type NativeWatchEventType = 'create' | 'update' | 'delete';
 
+export interface WatchSnapshotValue {
+  signature: string;
+}
+
+export interface WatchSnapshotChange<T extends WatchSnapshotValue> {
+  type: NativeWatchEventType;
+  path: string;
+  value?: T;
+}
+
 export function enqueueLatestWatchEvent(
   pending: Map<string, NativeWatchEventType>,
   eventPath: string,
@@ -20,24 +30,35 @@ export function enqueueLatestWatchEvent(
   return 'queued';
 }
 
-function isSameOrDescendant(parentPath: string, candidatePath: string): boolean {
-  const relative = path.relative(parentPath, candidatePath);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+export function resolveDirectWatchEventPath(rootPath: string, filename: string | Buffer): string | null {
+  const resolvedRoot = path.resolve(rootPath);
+  const candidate = path.resolve(resolvedRoot, filename.toString());
+  return path.dirname(candidate) === resolvedRoot ? candidate : null;
+}
+
+export function diffWatchSnapshots<T extends WatchSnapshotValue>(
+  previous: ReadonlyMap<string, T>,
+  next: ReadonlyMap<string, T>,
+): WatchSnapshotChange<T>[] {
+  const changes: WatchSnapshotChange<T>[] = [];
+  for (const entryPath of previous.keys()) {
+    if (!next.has(entryPath)) changes.push({ type: 'delete', path: entryPath });
+  }
+  for (const [entryPath, value] of next) {
+    const old = previous.get(entryPath);
+    if (!old || old.signature !== value.signature) {
+      changes.push({ type: old ? 'update' : 'create', path: entryPath, value });
+    }
+  }
+  return changes;
 }
 
 /**
- * Recursive watchers already cover every descendant. Keep only the shallowest
- * roots so expanding a folder inside an already watched folder cannot allocate
- * another overlapping native watcher.
+ * Non-recursive directory watchers need every visible directory, including
+ * nested ones. Normalize and deduplicate without collapsing descendants.
  */
-export function minimizeRecursiveWatchRoots(roots: string[]): string[] {
-  const uniqueRoots = [...new Set(roots.map((root) => path.resolve(root)))];
-  uniqueRoots.sort((a, b) => a.split(path.sep).length - b.split(path.sep).length || a.localeCompare(b));
-  const minimal: string[] = [];
-  for (const root of uniqueRoots) {
-    if (!minimal.some((parent) => isSameOrDescendant(parent, root))) minimal.push(root);
-  }
-  return minimal;
+export function normalizeDirectoryWatchRoots(roots: string[]): string[] {
+  return [...new Set(roots.map((root) => path.resolve(root)))].sort((a, b) => a.localeCompare(b));
 }
 
 export function getWatchErrorCode(error: unknown): string | null {
