@@ -48,6 +48,8 @@ const MODIFIER_DOUBLE_TAP_WINDOW_MS = 320;
 const MOBILE_KEYBOARD_EXPANDED_STORAGE_KEY = 'termdock:mobile-keyboard-expanded';
 const MOBILE_KEYBOARD_PRESET_MODE_STORAGE_KEY = 'termdock:mobile-keyboard-preset-mode';
 const MOBILE_LONG_PRESS_MODE_STORAGE_KEY = 'termdock:mobile-long-press-mode';
+const CURSOR_POSITION_SETTLE_MS = 80;
+const KEYBOARD_CURSOR_REDRAW_FALLBACK_MS = 3000;
 
 type Modifier = 'ctrl' | 'alt';
 
@@ -166,6 +168,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isInitialSizeReady, setIsInitialSizeReady] = React.useState(false);
   const [isCursorPresentationReady, setIsCursorPresentationReady] = React.useState(true);
   const [isKeyboardResizeSettling, setIsKeyboardResizeSettling] = React.useState(false);
+  const [isKeyboardCursorReady, setIsKeyboardCursorReady] = React.useState(true);
   const {
     isOpen: isViewportKeyboardOpen,
     keyboardHeight: viewportKeyboardHeight,
@@ -303,6 +306,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const lastCursorPositionRef = React.useRef<{ x: number; y: number; rows: number } | null>(null);
   const cursorPositionCandidateTimerRef = React.useRef<number | null>(null);
   const cursorPositionFallbackTimerRef = React.useRef<number | null>(null);
+  const lastSettledChunkIdRef = React.useRef<number | null>(null);
+  const keyboardCursorAwaitingPtyRef = React.useRef(false);
+  const keyboardCursorLayoutSettlingRef = React.useRef(false);
+  const keyboardCursorBaselineChunkIdRef = React.useRef<number | null>(null);
+  const keyboardCursorGenerationRef = React.useRef(0);
+  const lastKeyboardCursorPositionRef = React.useRef<{ x: number; y: number; rows: number } | null>(null);
+  const keyboardCursorCandidateTimerRef = React.useRef<number | null>(null);
+  const keyboardCursorFallbackTimerRef = React.useRef<number | null>(null);
   const isActiveRef = React.useRef(isActive);
   // Interaction capture in MultiTerminalView can synchronously promote a split
   // pane while the original wheel event is still propagating into xterm. Keep
@@ -338,6 +349,30 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     rows: number;
     lastProcessedChunkId: number | null;
   }) => {
+    lastSettledChunkIdRef.current = position.lastProcessedChunkId;
+    if (
+      keyboardCursorAwaitingPtyRef.current
+      && !keyboardCursorLayoutSettlingRef.current
+      && position.lastProcessedChunkId !== keyboardCursorBaselineChunkIdRef.current
+    ) {
+      if (keyboardCursorCandidateTimerRef.current !== null) {
+        window.clearTimeout(keyboardCursorCandidateTimerRef.current);
+        keyboardCursorCandidateTimerRef.current = null;
+      }
+      if (position.x !== 0 || position.y < position.rows - 1) {
+        const generation = keyboardCursorGenerationRef.current;
+        keyboardCursorCandidateTimerRef.current = window.setTimeout(() => {
+          keyboardCursorCandidateTimerRef.current = null;
+          if (generation !== keyboardCursorGenerationRef.current) return;
+          keyboardCursorAwaitingPtyRef.current = false;
+          if (keyboardCursorFallbackTimerRef.current !== null) {
+            window.clearTimeout(keyboardCursorFallbackTimerRef.current);
+            keyboardCursorFallbackTimerRef.current = null;
+          }
+          setIsKeyboardCursorReady(true);
+        }, CURSOR_POSITION_SETTLE_MS);
+      }
+    }
     if (!cursorPositionGateRef.current) return;
     if (cursorPositionCandidateTimerRef.current !== null) {
       window.clearTimeout(cursorPositionCandidateTimerRef.current);
@@ -350,7 +385,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     cursorPositionCandidateTimerRef.current = window.setTimeout(() => {
       cursorPositionCandidateTimerRef.current = null;
       setIsCursorPresentationReady(true);
-    }, 80);
+    }, CURSOR_POSITION_SETTLE_MS);
   }, []);
 
   const handleViewportWriteProgress = React.useCallback((writtenChunkId: number) => {
@@ -365,6 +400,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [markInitialContentReadyAfterPaint]);
 
   const handleViewportCursorPositionChange = React.useCallback((position: { x: number; y: number; rows: number }) => {
+    if (keyboardCursorAwaitingPtyRef.current) {
+      const previousKeyboardPosition = lastKeyboardCursorPositionRef.current;
+      if (
+        !previousKeyboardPosition
+        || previousKeyboardPosition.x !== position.x
+        || previousKeyboardPosition.y !== position.y
+        || previousKeyboardPosition.rows !== position.rows
+      ) {
+        lastKeyboardCursorPositionRef.current = position;
+        if (keyboardCursorCandidateTimerRef.current !== null) {
+          window.clearTimeout(keyboardCursorCandidateTimerRef.current);
+          keyboardCursorCandidateTimerRef.current = null;
+        }
+      }
+    }
     if (!cursorPositionGateRef.current) return;
     const previous = lastCursorPositionRef.current;
     if (
@@ -382,6 +432,57 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       setIsCursorPresentationReady(false);
     }
   }, []);
+
+  const handleKeyboardResizeSettlingChange = React.useCallback((settling: boolean) => {
+    setIsKeyboardResizeSettling(settling);
+    if (desiredSessionMode !== 'tmux') {
+      setIsKeyboardCursorReady(true);
+      return;
+    }
+
+    if (settling) {
+      keyboardCursorGenerationRef.current += 1;
+      keyboardCursorAwaitingPtyRef.current = true;
+      keyboardCursorLayoutSettlingRef.current = true;
+      keyboardCursorBaselineChunkIdRef.current = lastSettledChunkIdRef.current;
+      lastKeyboardCursorPositionRef.current = null;
+      if (keyboardCursorCandidateTimerRef.current !== null) {
+        window.clearTimeout(keyboardCursorCandidateTimerRef.current);
+        keyboardCursorCandidateTimerRef.current = null;
+      }
+      if (keyboardCursorFallbackTimerRef.current !== null) {
+        window.clearTimeout(keyboardCursorFallbackTimerRef.current);
+        keyboardCursorFallbackTimerRef.current = null;
+      }
+      setIsKeyboardCursorReady(false);
+      return;
+    }
+
+    if (!keyboardCursorAwaitingPtyRef.current) return;
+    keyboardCursorLayoutSettlingRef.current = false;
+    // Discard every cursor candidate produced while the viewport was still
+    // moving. Only a chunk newer than this post-fit baseline can prove tmux
+    // has redrawn for the final row count.
+    keyboardCursorGenerationRef.current += 1;
+    const generation = keyboardCursorGenerationRef.current;
+    keyboardCursorBaselineChunkIdRef.current = lastSettledChunkIdRef.current;
+    lastKeyboardCursorPositionRef.current = null;
+    if (keyboardCursorCandidateTimerRef.current !== null) {
+      window.clearTimeout(keyboardCursorCandidateTimerRef.current);
+      keyboardCursorCandidateTimerRef.current = null;
+    }
+    setIsKeyboardCursorReady(false);
+    // The local grid has finished fitting, but tmux may not have repainted its
+    // cursor for the new row count yet. Force one post-fit redraw and keep only
+    // the caret hidden until a newer PTY chunk settles at a real position.
+    terminalControllerRef.current?.requestPtyRedraw();
+    keyboardCursorFallbackTimerRef.current = window.setTimeout(() => {
+      keyboardCursorFallbackTimerRef.current = null;
+      if (generation !== keyboardCursorGenerationRef.current) return;
+      keyboardCursorAwaitingPtyRef.current = false;
+      setIsKeyboardCursorReady(true);
+    }, KEYBOARD_CURSOR_REDRAW_FALLBACK_MS);
+  }, [desiredSessionMode]);
 
   React.useEffect(() => {
     if (!deferCursorUntilPositioned) {
@@ -618,6 +719,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         window.clearTimeout(cursorPositionCandidateTimerRef.current);
       }
       cursorPositionCandidateTimerRef.current = null;
+      if (keyboardCursorCandidateTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(keyboardCursorCandidateTimerRef.current);
+      }
+      keyboardCursorCandidateTimerRef.current = null;
+      if (keyboardCursorFallbackTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(keyboardCursorFallbackTimerRef.current);
+      }
+      keyboardCursorFallbackTimerRef.current = null;
     };
   }, []);
 
@@ -2473,7 +2582,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onMobileLongPressCopyResult={handleMobileLongPressCopyResult}
               onReadyChange={handleViewportReadyChange}
               onSizeSynchronizedChange={setIsInitialSizeReady}
-              onKeyboardResizeSettlingChange={setIsKeyboardResizeSettling}
+              onKeyboardResizeSettlingChange={handleKeyboardResizeSettlingChange}
               onWritesSettled={handleViewportWritesSettled}
               onWriteProgress={handleViewportWriteProgress}
               onCursorPositionChange={handleViewportCursorPositionChange}
@@ -2483,10 +2592,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               enableTouchScroll={isMobile}
               mobileLongPressMode={mobileLongPressMode}
               autoFocus={!focusSuspended && !isMobile && !touchCapable}
-              cursorVisible={!focusSuspended && isCursorPresentationReady && !isKeyboardResizeSettling}
+              cursorVisible={
+                !focusSuspended
+                && isCursorPresentationReady
+                && !isKeyboardResizeSettling
+                && isKeyboardCursorReady
+              }
               suppressSmoothScroll={!isInitialContentReady || !isInitialSizeReady}
               className={
-                focusSuspended || !isCursorPresentationReady || isKeyboardResizeSettling
+                focusSuspended
+                || !isCursorPresentationReady
+                || isKeyboardResizeSettling
+                || !isKeyboardCursorReady
                   ? 'terminal-focus-suspended'
                   : undefined
               }

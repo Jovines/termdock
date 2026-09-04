@@ -117,6 +117,12 @@ import {
   resolveTmuxInnerTerm,
 } from '../utils/terminalColorEnvironment.js';
 import {
+  buildTmuxScreenSnapshot,
+  parseTmuxPaneSnapshot,
+  TMUX_CURSOR_MARKER,
+  type TmuxPaneSnapshot,
+} from '../utils/tmuxScreenSnapshot.js';
+import {
   detectTmuxRecoveryIncident,
   normalizeTmuxRecoveryIncident,
   type TmuxRecoveryIncident,
@@ -2734,7 +2740,7 @@ async function buildSessionInventory(): Promise<SessionInventory> {
 
 // ── end tmux user-option helpers ──
 
-async function captureTmuxPane(sessionName: string): Promise<string> {
+async function captureTmuxPane(sessionName: string): Promise<TmuxPaneSnapshot> {
   let lastError: unknown;
 
   // An attached session can briefly race with tmux pane availability.
@@ -2748,14 +2754,21 @@ async function captureTmuxPane(sessionName: string): Promise<string> {
         '#{pane_id}',
       ])).trim();
 
-      return await runTmux([
+      const output = await runTmux([
         'capture-pane',
         '-p',
         '-e',
         '-J',
         '-t',
         paneId || sessionName,
+        ';',
+        'display-message',
+        '-t',
+        paneId || sessionName,
+        '-p',
+        `${TMUX_CURSOR_MARKER}#{cursor_x},#{cursor_y}`,
       ]);
+      return parseTmuxPaneSnapshot(output);
     } catch (error) {
       lastError = error;
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -2763,17 +2776,6 @@ async function captureTmuxPane(sessionName: string): Promise<string> {
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
-const TMUX_SCREEN_RESET = '\u001b[H\u001b[2J\u001b[3J';
-
-function buildTmuxScreenSnapshot(snapshot: string): string[] {
-  return [
-    TMUX_SCREEN_RESET,
-    // capture-pane is line-oriented, whereas live tmux output contains the
-    // carriage returns required by convertEol=false.
-    snapshot.replace(/\r?\n/g, '\r\n'),
-  ];
 }
 
 function enqueueTmuxIo<T>(session: TerminalSession, operation: () => Promise<T> | T): Promise<T> {
@@ -2791,6 +2793,14 @@ function markTmuxClientsForScreenSync(sessionId: string, session: TerminalSessio
   if (!clients || clients.size === 0) return;
   const pending = session.tmuxScreenSyncClients ?? new Set<string>();
   for (const clientId of clients.keys()) pending.add(clientId);
+  session.tmuxScreenSyncClients = pending;
+  session.tmuxResizeGeneration = (session.tmuxResizeGeneration ?? 0) + 1;
+}
+
+function markTmuxClientForScreenSync(session: TerminalSession, clientId: string): void {
+  if (session.mode !== 'tmux') return;
+  const pending = session.tmuxScreenSyncClients ?? new Set<string>();
+  pending.add(clientId);
   session.tmuxScreenSyncClients = pending;
   session.tmuxResizeGeneration = (session.tmuxResizeGeneration ?? 0) + 1;
 }
@@ -2846,15 +2856,10 @@ async function syncTmuxScreenBeforeScroll(
 
   const generation = session.tmuxResizeGeneration ?? 0;
   try {
-    // This command enters tmux's own event loop after node-pty has applied the
-    // new winsize. It is an ordering barrier based on real work, not a timeout.
-    // The following capture is therefore taken from tmux's resized grid.
-    const preferredClientPid = getPtyProcessPid(session.ptyProcess);
-    const clientTty = await resolveTmuxClientTty(session.tmuxSessionName, preferredClientPid);
-    if (clientTty) {
-      await runTmux(['refresh-client', '-t', clientTty]);
-    }
-
+    // capture-pane itself enters tmux's command queue after the tty resize.
+    // Do not call refresh-client here: that emits another incremental repaint
+    // through node-pty which can arrive after this authoritative snapshot and
+    // be applied twice (for example, duplicate Codex "Working" rows).
     const snapshot = await captureTmuxPane(session.tmuxSessionName);
     if (ws.readyState === ws.OPEN) {
       ws.send(JSON.stringify({
@@ -4719,7 +4724,7 @@ async function getRestoreHistory(sessionId: string, session: TerminalSession): P
 
     try {
       const snapshot = await captureTmuxPane(session.tmuxSessionName);
-      return snapshot ? buildTmuxScreenSnapshot(snapshot) : [];
+      return buildTmuxScreenSnapshot(snapshot);
     } catch (error) {
       console.warn(`Failed to capture tmux pane for ${session.tmuxSessionName}: ${getErrorMessage(error)}`);
       return [];
@@ -8295,6 +8300,18 @@ export function handleTerminalWebSocket(
                   clientId,
                 ))
               : applyPtyResize(sessionId, session, cols, rows, `ws-resize:${clientId}`, clientId);
+            // A forced same-size resize is the client's explicit redraw
+            // request. There is no geometry change for applyPtyResize to mark,
+            // but the client still needs an authoritative grid (including the
+            // cursor position) rather than waiting for the TUI to emit output.
+            if (
+              ok
+              && session.mode === 'tmux'
+              && (session.tmuxResizeGeneration ?? 0) === screenSyncGenerationBefore
+            ) {
+              markTmuxClientForScreenSync(session, clientId);
+              scheduleTmuxScreenSyncAfterResize(sessionId, session, clientId);
+            }
             const screenSyncGeneration = session.tmuxResizeGeneration ?? 0;
             const screenSyncPending = ok
               && session.mode === 'tmux'
