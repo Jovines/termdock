@@ -46,6 +46,26 @@ export function shouldMountSessionViewport(options: {
     || options.deferredViewportSessionIds.has(options.sessionId);
 }
 
+export function shouldDeferSessionSwitch(options: {
+  isMobile: boolean;
+  viewportReady: boolean;
+  streamReady: boolean;
+  contentReady: boolean;
+}): boolean {
+  return options.isMobile
+    && (!options.viewportReady || !options.streamReady || !options.contentReady);
+}
+
+export function isInitialContentWriteSettled(options: {
+  hasPendingBufferWrites: boolean;
+  settledChunkId: number | null;
+  latestBufferChunkId: number | null;
+}): boolean {
+  return !options.hasPendingBufferWrites
+    && options.settledChunkId !== null
+    && options.settledChunkId === options.latestBufferChunkId;
+}
+
 export function shouldPublishSessionDataUpdate(isRestoring: boolean): boolean {
   return !isRestoring;
 }

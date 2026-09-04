@@ -588,9 +588,10 @@ function App() {
     tmuxSessionName: session.tmuxSessionName,
   })));
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(initialSessionChrome.activeSessionId);
-  const [hasRestoredSessionChrome, setHasRestoredSessionChrome] = React.useState(
-    initialSessionChrome.sessions.length > 0,
-  );
+  // Cached chrome makes the tab/sidebar shell available immediately, but the
+  // active xterm still needs to replay history and complete its first fit.
+  // Keep the boot surface until MultiTerminalView confirms that whole path.
+  const [hasRestoredSessionChrome, setHasRestoredSessionChrome] = React.useState(false);
   const [agentResumeAction, setAgentResumeAction] = React.useState<AgentResumeActionState | null>(null);
   const [agentResumeNotice, setAgentResumeNotice] = React.useState<AgentResumeNotice | null>(null);
   const [splitWorkspaces, setSplitWorkspaces] = React.useState<SplitWorkspaceSummary[]>([]);
@@ -2553,6 +2554,9 @@ function App() {
 
   const handleInitialViewportReady = useCallback(() => {
     setHasRestoredSessionChrome(true);
+    window.requestAnimationFrame(() => {
+      window.dispatchEvent(new Event('termdock:initial-viewport-presented'));
+    });
   }, []);
 
   // Priority is a one-shot handoff. Once its target is the active session,
@@ -5173,10 +5177,9 @@ function App() {
     </div>
   );
 
-  // A true first visit has no local session cache. Keep the original boot
-  // surface above the already-mounted app while MultiTerminalView fetches and
-  // prepares the authoritative inventory, instead of flashing a complete
-  // "Sessions 0" desktop for one network round trip.
+  // Keep the original boot surface above the already-mounted app while
+  // MultiTerminalView restores the active terminal. Cached chrome may render
+  // behind it, but must not expose the empty/history-replay/first-fit frames.
   const initialSessionRestoreOverlay = !hasRestoredSessionChrome ? (
     <div className="termdock-boot z-modal-panel" role="status" aria-live="polite">
       <div className="termdock-boot-spinner" aria-hidden="true" />

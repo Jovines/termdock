@@ -728,6 +728,10 @@ export function connectTerminalStream(
             rows: typeof msg.rows === 'number' ? msg.rows : undefined,
             ok: msg.ok !== false,
             error: typeof msg.error === 'string' ? msg.error : undefined,
+            screenSyncPending: msg.screenSyncPending === true,
+            screenSyncGeneration: typeof msg.screenSyncGeneration === 'number'
+              ? msg.screenSyncGeneration
+              : undefined,
           });
           return;
         }
@@ -1509,6 +1513,7 @@ export interface LocalAccessState {
 }
 
 export interface SettingsState {
+  locale: 'en' | 'zh';
   preventSleep: boolean;
   caffeinateActive: boolean;
   networkAvailable: boolean;
@@ -1526,16 +1531,31 @@ export interface SettingsState {
   pinnedExplorerRoots: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>;
 }
 
-export async function getSettings(): Promise<SettingsState> {
-  const response = await fetch('/api/terminal/settings', { method: 'GET' });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to load settings' }));
-    throw new Error(error.error || 'Failed to load settings');
+let settingsRequest: Promise<SettingsState> | null = null;
+let settingsSnapshot: { value: SettingsState; readAt: number } | null = null;
+const STARTUP_READ_DEDUPE_MS = 1500;
+
+export function getSettings(): Promise<SettingsState> {
+  if (settingsSnapshot && Date.now() - settingsSnapshot.readAt < STARTUP_READ_DEDUPE_MS) {
+    return Promise.resolve(settingsSnapshot.value);
   }
-  return response.json();
+  if (settingsRequest) return settingsRequest;
+  settingsRequest = (async () => {
+    const response = await fetch('/api/terminal/settings', { method: 'GET' });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Failed to load settings' }));
+      throw new Error(error.error || 'Failed to load settings');
+    }
+    const value = await response.json() as SettingsState;
+    settingsSnapshot = { value, readAt: Date.now() };
+    return value;
+  })().finally(() => {
+    settingsRequest = null;
+  });
+  return settingsRequest;
 }
 
-export async function updateSettings(settings: { preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string }): Promise<SettingsState> {
+export async function updateSettings(settings: { locale?: 'en' | 'zh'; preventSleep?: boolean; localAccess?: { name?: string; reset?: boolean }; contextDraftHeight?: { mobile?: number | null; desktop?: number | null }; autoRenameAgents?: string[]; autoRenameNamer?: string; autoRenameModels?: Record<string, string>; autoRenameIntervalMinutes?: number; autoRenamePromptPreference?: string; autoRenamePromptPayloadChars?: number; newSessionAgentSlug?: string | null; runningSessionButtonEnabled?: boolean; fileSortModes?: Record<string, FileSortMode>; fileSortMode?: { path: string; mode: FileSortMode }; pinnedExplorerRoots?: Record<string, Array<{ path: string; kind: 'file' | 'directory' }>>; pinnedExplorerRoot?: { rootPath: string; path: string; kind: 'file' | 'directory'; pinned: boolean }; pinnedExplorerRootsOrigin?: string }): Promise<SettingsState> {
   const csrfTokenHeader = await getCsrfToken();
   const response = await fetch('/api/terminal/settings', {
     method: 'PUT',
@@ -1546,7 +1566,9 @@ export async function updateSettings(settings: { preventSleep?: boolean; localAc
     const error = await response.json().catch(() => ({ error: 'Failed to update settings' }));
     throw new Error(error.error || 'Failed to update settings');
   }
-  return response.json();
+  const value = await response.json() as SettingsState;
+  settingsSnapshot = { value, readAt: Date.now() };
+  return value;
 }
 
 export interface TitleNamerModelInfo {
@@ -1579,13 +1601,27 @@ export interface ContextDraftState {
   updatedAt: number;
 }
 
-export async function getContextDraft(): Promise<ContextDraftState> {
-  const response = await fetch('/api/terminal/context-draft', { method: 'GET' });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to load context draft' }));
-    throw new Error(error.error || 'Failed to load context draft');
+let contextDraftRequest: Promise<ContextDraftState> | null = null;
+let contextDraftSnapshot: { value: ContextDraftState; readAt: number } | null = null;
+
+export function getContextDraft(): Promise<ContextDraftState> {
+  if (contextDraftSnapshot && Date.now() - contextDraftSnapshot.readAt < STARTUP_READ_DEDUPE_MS) {
+    return Promise.resolve(contextDraftSnapshot.value);
   }
-  return response.json();
+  if (contextDraftRequest) return contextDraftRequest;
+  contextDraftRequest = (async () => {
+    const response = await fetch('/api/terminal/context-draft', { method: 'GET' });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Failed to load context draft' }));
+      throw new Error(error.error || 'Failed to load context draft');
+    }
+    const value = await response.json() as ContextDraftState;
+    contextDraftSnapshot = { value, readAt: Date.now() };
+    return value;
+  })().finally(() => {
+    contextDraftRequest = null;
+  });
+  return contextDraftRequest;
 }
 
 export async function updateContextDraft(text: string, origin: string): Promise<ContextDraftState> {
@@ -1599,7 +1635,9 @@ export async function updateContextDraft(text: string, origin: string): Promise<
     const error = await response.json().catch(() => ({ error: 'Failed to update context draft' }));
     throw new Error(error.error || 'Failed to update context draft');
   }
-  return response.json();
+  const value = await response.json() as ContextDraftState;
+  contextDraftSnapshot = { value, readAt: Date.now() };
+  return value;
 }
 
 // ---- Auth ----
@@ -3603,8 +3641,16 @@ export function removeAgentAutomation(automationId: string): Promise<void> {
   return operationsRequest(`/automations/${encodeURIComponent(automationId)}`, { method: 'DELETE' });
 }
 
-export function listCollaborationGroups(): Promise<{ groups: CollaborationGroup[]; sessions: OrchestrationSession[] }> {
-  return operationsRequest('/collaboration-groups');
+type CollaborationGroupsResponse = { groups: CollaborationGroup[]; sessions: OrchestrationSession[] };
+let collaborationGroupsRequest: Promise<CollaborationGroupsResponse> | null = null;
+
+export function listCollaborationGroups(): Promise<CollaborationGroupsResponse> {
+  if (collaborationGroupsRequest) return collaborationGroupsRequest;
+  collaborationGroupsRequest = operationsRequest<CollaborationGroupsResponse>('/collaboration-groups')
+    .finally(() => {
+      collaborationGroupsRequest = null;
+    });
+  return collaborationGroupsRequest;
 }
 
 export function saveCollaborationGroup(input: { id?: string; name: string; sessionIds: string[] }): Promise<{ group: CollaborationGroup }> {

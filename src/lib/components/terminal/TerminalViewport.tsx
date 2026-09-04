@@ -41,6 +41,7 @@ import {
   acknowledgeResize,
   clearPendingResize,
   createResizeSyncState,
+  forceResize as forceResizeSync,
   observeServerSize,
   requestResize as requestResizeSync,
   retryResize,
@@ -354,7 +355,16 @@ export type TerminalController = {
    */
   setSessionReady: (ready: boolean) => void;
   /** Confirm or reject the latest sequenced PTY resize request. */
-  acknowledgeResize: (ack: { seq?: number; ok: boolean; cols?: number; rows?: number }) => void;
+  acknowledgeResize: (ack: {
+    seq?: number;
+    ok: boolean;
+    cols?: number;
+    rows?: number;
+    screenSyncPending?: boolean;
+    screenSyncGeneration?: number;
+  }) => void;
+  /** Mark an authoritative tmux screen generation as applied to the client. */
+  notifyScreenSynchronized: (generation: number) => void;
   /**
    * 服务端 ws 推送的 pty-size 广播：把"服务端事实"同步到 viewport 的
    * lastServerSize 状态。多端切换时另一个客户端把 pty 拉小后，本端 fit
@@ -368,6 +378,8 @@ export type TerminalController = {
    * 仅在 document.visibilityState === 'visible' 时才会真正推。
    */
   ensureSizeMatches: (reason: string) => void;
+  /** Re-signal the current PTY size once so a cold TUI redraws its cursor. */
+  requestPtyRedraw: () => void;
 };
 
 export type TerminalViewportInputOptions = {
@@ -389,6 +401,14 @@ interface TerminalViewportProps {
   onMobileLongPressCopyResult?: (ok: boolean) => void;
   onMobilePasteResult?: (ok: boolean) => void;
   onReadyChange?: (ready: boolean) => void;
+  onSizeSynchronizedChange?: (ready: boolean) => void;
+  onWritesSettled?: (position: {
+    x: number;
+    y: number;
+    rows: number;
+    lastProcessedChunkId: number | null;
+  }) => void;
+  onCursorPositionChange?: (position: { x: number; y: number; rows: number }) => void;
   onDirectoryLinkActivate?: (path: string) => void;
   terminalSettings: TerminalSettings;
   theme: TerminalTheme;
@@ -396,6 +416,7 @@ interface TerminalViewportProps {
   enableTouchScroll?: boolean;
   mobileLongPressMode?: 'arrows' | 'copy';
   autoFocus?: boolean;
+  cursorVisible?: boolean;
 }
 
 type LoadingState = 'loading' | 'ready' | 'error';
@@ -802,6 +823,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       onMobileLongPressCopyResult,
       onMobilePasteResult,
       onReadyChange,
+      onSizeSynchronizedChange,
+      onWritesSettled,
+      onCursorPositionChange,
       onDirectoryLinkActivate,
       terminalSettings,
       theme,
@@ -809,6 +833,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       enableTouchScroll,
       mobileLongPressMode = 'arrows',
       autoFocus = true,
+      cursorVisible = true,
     },
     ref
   ) => {
@@ -823,6 +848,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const flowControlHandlerRef = React.useRef<typeof onFlowControl>(onFlowControl);
     const onReadyChangeRef = React.useRef(onReadyChange);
     onReadyChangeRef.current = onReadyChange;
+    const onSizeSynchronizedChangeRef = React.useRef(onSizeSynchronizedChange);
+    onSizeSynchronizedChangeRef.current = onSizeSynchronizedChange;
+    const onWritesSettledRef = React.useRef(onWritesSettled);
+    onWritesSettledRef.current = onWritesSettled;
+    const onCursorPositionChangeRef = React.useRef(onCursorPositionChange);
+    onCursorPositionChangeRef.current = onCursorPositionChange;
     const directoryLinkActivateRef = React.useRef(onDirectoryLinkActivate);
     directoryLinkActivateRef.current = onDirectoryLinkActivate;
     const rendererModeRef = React.useRef(terminalSettings.rendererMode);
@@ -830,6 +861,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pendingBytesRef = React.useRef(0);
     const flowPausedRef = React.useRef(false);
     const writeScheduledRef = React.useRef<number | null>(null);
+    const writeSettleGenerationRef = React.useRef(0);
     const isWritingRef = React.useRef(false);
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
@@ -956,6 +988,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     rendererModeRef.current = terminalSettings.rendererMode;
     const autoFocusRef = React.useRef(autoFocus);
     autoFocusRef.current = autoFocus;
+    const cursorVisibleRef = React.useRef(cursorVisible);
+    cursorVisibleRef.current = cursorVisible;
     const enableTouchScrollRef = React.useRef(enableTouchScroll);
     enableTouchScrollRef.current = enableTouchScroll;
     const isLayoutVisibleRef = React.useRef(isLayoutVisible);
@@ -2948,6 +2982,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     });
 
     const resetWriteState = React.useCallback((options: { notifyFlowResume?: boolean } = {}) => {
+      writeSettleGenerationRef.current += 1;
       pendingWriteRef.current = '';
       pendingBytesRef.current = 0;
       if (flowPausedRef.current) {
@@ -3171,6 +3206,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     // WebSocket.send() 只代表进入发送队列，不能据此乐观地认为 PTY 已 resize。
     const resizeSyncStateRef = React.useRef(createResizeSyncState());
     const resizeAckTimerRef = React.useRef<number | null>(null);
+    const pendingScreenSyncGenerationRef = React.useRef<number | null>(null);
+    const lastAppliedScreenSyncGenerationRef = React.useRef(-1);
     // 每个 reason 上一次处理的 dedupeKey（用于 tmux-layout 之类的服务端重复推送）
     const lastDedupeKeyRef = React.useRef<Map<RefreshReason, string>>(new Map());
     // renderer 是否已就绪（enableWebglRenderer / DOM fallback 完成）
@@ -3207,6 +3244,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const sendResizeRequestRef = React.useRef<(request: ResizeRequest) => void>(() => {});
     const sendResizeRequest = React.useCallback((request: ResizeRequest) => {
       clearResizeAckTimer();
+      onSizeSynchronizedChangeRef.current?.(false);
       resizeHandlerRef.current(request.cols, request.rows, request.seq);
       resizeAckTimerRef.current = window.setTimeout(() => {
         resizeAckTimerRef.current = null;
@@ -3587,6 +3625,30 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           } else {
             flushWrites();
           }
+          return;
+        }
+
+        const settleGeneration = ++writeSettleGenerationRef.current;
+        const reportSettled = () => {
+          if (
+            settleGeneration !== writeSettleGenerationRef.current
+            || isWritingRef.current
+            || pendingWriteRef.current
+          ) return;
+          const activeBuffer = term.buffer.active;
+          onWritesSettledRef.current?.({
+            x: activeBuffer.cursorX,
+            y: activeBuffer.cursorY,
+            rows: term.rows,
+            lastProcessedChunkId: lastProcessedChunkIdRef.current,
+          });
+        };
+        if (typeof window === 'undefined') {
+          reportSettled();
+        } else {
+          window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(reportSettled);
+          });
         }
       });
     }, [resetWriteState]);
@@ -3610,6 +3672,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (!data) {
           return;
         }
+        writeSettleGenerationRef.current += 1;
         pendingWriteRef.current += data;
         pendingBytesRef.current += data.length;
 
@@ -3676,7 +3739,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             // WebGL 下禁用闪烁，避免“什么都不干”时仍持续 repaint；DOM 路径保持原行为。
             cursorBlink: !shouldUseWebgl,
             cursorStyle: 'block',
-            cursorInactiveStyle: 'bar',
+            cursorInactiveStyle: cursorVisibleRef.current ? 'bar' : 'none',
             scrollback: onTmuxScroll ? 2000 : 5000,
             allowTransparency: shouldAllowTerminalTransparency(rendererMode, enableImages),
             convertEol: terminalConvertEol,
@@ -3912,6 +3975,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 接收键盘输入。这样三方中文输入法（搜狗/微信）的 composition 不会
           // 拦截 keystroke 后吞掉某个字母。
           localDisposables.push(terminal.onRender(() => {
+            const activeBuffer = terminal.buffer.active;
+            onCursorPositionChangeRef.current?.({
+              x: activeBuffer.cursorX,
+              y: activeBuffer.cursorY,
+              rows: terminal.rows,
+            });
             const nextBufferType = terminal.buffer.active.type;
             if (lastBufferTypeRef.current !== nextBufferType) {
               lastBufferTypeRef.current = nextBufferType;
@@ -4173,6 +4242,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         return;
       }
 
+      terminal.options.cursorInactiveStyle = cursorVisible ? 'bar' : 'none';
+      if (!cursorVisible) terminal.blur();
+    }, [cursorVisible, terminalReadyVersion]);
+
+    React.useEffect(() => {
+      const terminal = terminalRef.current;
+      if (!terminal) {
+        return;
+      }
+
       if (shouldUseWebgl) {
         terminal.options.cursorBlink = false;
         const enabled = enableWebglRenderer(terminal, 'renderer-mode-change');
@@ -4411,6 +4490,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           if (!ready) {
             clearResizeAckTimer();
             resizeSyncStateRef.current = clearPendingResize(resizeSyncStateRef.current);
+            pendingScreenSyncGenerationRef.current = null;
+            lastAppliedScreenSyncGenerationRef.current = -1;
+            onSizeSynchronizedChangeRef.current?.(false);
           }
         },
         acknowledgeResize: (ack) => {
@@ -4433,10 +4515,61 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             ok: ack.ok,
             cols: ack.cols,
             rows: ack.rows,
+            screenSyncPending: ack.screenSyncPending === true,
+            screenSyncGeneration: ack.screenSyncGeneration,
           });
+          const terminal = terminalRef.current;
+          const confirmed = result.state.confirmed;
+          const matchesViewport = Boolean(
+            terminal
+            && confirmed
+            && terminal.cols === confirmed.cols
+            && terminal.rows === confirmed.rows
+          );
+          if (!matchesViewport) {
+            onSizeSynchronizedChangeRef.current?.(false);
+            return;
+          }
+          if (ack.screenSyncPending && typeof ack.screenSyncGeneration === 'number') {
+            pendingScreenSyncGenerationRef.current = ack.screenSyncGeneration;
+            const alreadyApplied = lastAppliedScreenSyncGenerationRef.current >= ack.screenSyncGeneration;
+            onSizeSynchronizedChangeRef.current?.(alreadyApplied);
+            if (alreadyApplied) pendingScreenSyncGenerationRef.current = null;
+            return;
+          }
+          pendingScreenSyncGenerationRef.current = null;
+          onSizeSynchronizedChangeRef.current?.(true);
+        },
+        notifyScreenSynchronized: (generation: number) => {
+          if (!Number.isFinite(generation)) return;
+          lastAppliedScreenSyncGenerationRef.current = Math.max(
+            lastAppliedScreenSyncGenerationRef.current,
+            generation,
+          );
+          const pendingGeneration = pendingScreenSyncGenerationRef.current;
+          if (pendingGeneration === null || generation < pendingGeneration) return;
+          pendingScreenSyncGenerationRef.current = null;
+          const terminal = terminalRef.current;
+          const confirmed = resizeSyncStateRef.current.confirmed;
+          onSizeSynchronizedChangeRef.current?.(Boolean(
+            terminal
+            && confirmed
+            && terminal.cols === confirmed.cols
+            && terminal.rows === confirmed.rows
+          ));
         },
         notifyServerSize,
         ensureSizeMatches,
+        requestPtyRedraw: () => {
+          const terminal = terminalRef.current;
+          if (!terminal || !sessionReadyRef.current) return;
+          const forced = forceResizeSync(resizeSyncStateRef.current, {
+            cols: terminal.cols,
+            rows: terminal.rows,
+          });
+          resizeSyncStateRef.current = forced.state;
+          sendResizeRequestRef.current(forced.request);
+        },
       }),
       [
         enableTouchScroll,

@@ -8284,6 +8284,7 @@ export function handleTerminalWebSocket(
           const cols = Number(msg.cols);
           const rows = Number(msg.rows);
           if (cols > 0 && rows > 0) {
+            const screenSyncGenerationBefore = session.tmuxResizeGeneration ?? 0;
             const ok = session.mode === 'tmux'
               ? await enqueueTmuxIo(session, () => applyPtyResize(
                   sessionId,
@@ -8294,12 +8295,19 @@ export function handleTerminalWebSocket(
                   clientId,
                 ))
               : applyPtyResize(sessionId, session, cols, rows, `ws-resize:${clientId}`, clientId);
+            const screenSyncGeneration = session.tmuxResizeGeneration ?? 0;
+            const screenSyncPending = ok
+              && session.mode === 'tmux'
+              && screenSyncGeneration > screenSyncGenerationBefore
+              && session.tmuxScreenSyncClients?.has(clientId) === true;
             ws.send(JSON.stringify({
               type: 'resize-ack',
               seq: typeof msg.seq === 'number' ? msg.seq : undefined,
               ok,
               cols: session.cols,
               rows: session.rows,
+              screenSyncPending,
+              screenSyncGeneration: screenSyncPending ? screenSyncGeneration : undefined,
             }));
           }
           break;

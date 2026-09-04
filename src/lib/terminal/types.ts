@@ -247,6 +247,9 @@ export interface TerminalStreamEvent {
   rows?: number;
   ok?: boolean;
   error?: string;
+  // A tmux resize ack can precede its authoritative capture-pane snapshot.
+  screenSyncPending?: boolean;
+  screenSyncGeneration?: number;
   // pty-size 广播：source 用来给客户端做防拉扯的冷却（"上次是不是我自己
   // 改的"），便于跨端切换时区分回声与远端改动。
   source?: string;

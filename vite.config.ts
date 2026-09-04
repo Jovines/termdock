@@ -59,8 +59,19 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
-        globIgnores: ['**/apple-splash-*.png'],
+        // Keep first-install work limited to the terminal app shell. Large optional
+        // chunks (Mermaid, model preview, KaTeX, diff workers, etc.) are cached on
+        // first use below instead of competing with the initial terminal restore.
+        globPatterns: [
+          'index.html',
+          'registerSW.js',
+          'assets/app-*.js',
+          'assets/react-*.js',
+          'assets/dnd-*.js',
+          'assets/terminal-*.js',
+          'assets/index-*.css',
+          'icons/agents/*.svg',
+        ],
         importScripts: ['sw-notifications.js'],
         // 关键：新 SW 安装完不要 wait，直接 activate；并立刻 claim 已打开的页面。
         // 这样以后无论 dev 还是 prod，用户刷新一次就能拿到最新代码，不再有
@@ -72,6 +83,20 @@ export default defineConfig({
         navigateFallbackDenylist: [/^\/api\//, /^\/health$/],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         runtimeCaching: [
+          {
+            // Vite content hashes make these immutable. Cache optional UI modules
+            // only when the user opens the corresponding feature.
+            urlPattern: /\/assets\/.*\.(?:js|css)$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'termdock-lazy-assets-v1',
+              cacheableResponse: { statuses: [0, 200] },
+              expiration: {
+                maxEntries: 96,
+                maxAgeSeconds: 30 * 24 * 60 * 60,
+              },
+            },
+          },
           {
             urlPattern: /\/fonts\/.*\.(?:woff2|ttf)$/,
             handler: 'StaleWhileRevalidate',
@@ -125,6 +150,9 @@ export default defineConfig({
     outDir: 'dist/client',
     rollupOptions: {
       output: {
+        // Give the application entry a stable semantic prefix so Workbox can
+        // precache it without also pulling in lazy chunks named index-*.js.
+        entryFileNames: 'assets/app-[hash].js',
         manualChunks: {
           react: ['react', 'react-dom'],
           terminal: ['@xterm/xterm', '@xterm/addon-fit'],

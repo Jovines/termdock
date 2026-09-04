@@ -64,11 +64,9 @@ function AuthGate() {
 
   if (status === null) {
     return (
-      <div
-        className="flex w-screen items-center justify-center bg-background text-muted-foreground"
-        style={{ height: 'var(--app-vh, 100vh)' }}
-      >
-        {error ? `${t('common.error')}: ${error}` : t('common.loading')}
+      <div className={`termdock-boot${error ? ' termdock-boot-error' : ''}`} role="status" aria-live="polite">
+        {!error && <div className="termdock-boot-spinner" aria-hidden="true" />}
+        <span>{error ? `${t('common.error')}: ${error}` : 'Loading Termdock'}</span>
       </div>
     );
   }

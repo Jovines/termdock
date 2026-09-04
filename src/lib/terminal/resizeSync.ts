@@ -46,6 +46,18 @@ export function requestResize(
   return makeRequest(state, size, 0);
 }
 
+/**
+ * Re-send the current dimensions even when they are already confirmed. TUI
+ * programs use the resulting PTY resize signal to repaint an authoritative
+ * cursor after a cold client has reconstructed the screen from byte history.
+ */
+export function forceResize(
+  state: ResizeSyncState,
+  size: TerminalSize,
+): { state: ResizeSyncState; request: ResizeRequest } {
+  return makeRequest(state, size, 0);
+}
+
 export function acknowledgeResize(
   state: ResizeSyncState,
   ack: { seq?: number; ok: boolean; cols?: number; rows?: number },

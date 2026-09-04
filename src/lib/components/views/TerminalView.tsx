@@ -25,7 +25,10 @@ import { clientLog } from '../../utils/clientLog';
 import { getDefaultTerminalSettings, type TerminalSettings } from '../../terminal/settings';
 import { useViewportKeyboardState } from '../../hooks/useViewportKeyboardState';
 import { useI18n } from '../../i18n';
-import { getVisibleReconnectWatchdogDelayMs } from '../../terminal/resumeScheduling';
+import {
+  getVisibleReconnectWatchdogDelayMs,
+  isInitialContentWriteSettled,
+} from '../../terminal/resumeScheduling';
 import {
   getActivationRefreshMode,
   shouldForceSettledRedraw,
@@ -72,6 +75,8 @@ interface TerminalViewProps {
   colorTheme?: TermdockColorTheme;
   toolbarPresets?: ToolbarPresetDefinition[];
   isActive?: boolean;
+  focusSuspended?: boolean;
+  deferCursorUntilPositioned?: boolean;
   isLayoutVisible?: boolean;
   focusRequestToken?: number;
   resumeRequestToken?: number;
@@ -84,6 +89,7 @@ interface TerminalViewProps {
   onStreamReadyChange?: (sessionId: string, ready: boolean) => void;
   onStreamConnected?: (sessionId: string) => void;
   onViewportReadyChange?: (sessionId: string, ready: boolean) => void;
+  onContentReadyChange?: (sessionId: string, ready: boolean) => void;
   onKeyboardVisibilityChange?: (sessionId: string, isOpen: boolean) => void;
   suppressKeyboard?: boolean;
   keyboardPortalTarget?: HTMLElement | null;
@@ -101,6 +107,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   colorTheme = 'dark',
   toolbarPresets: configuredToolbarPresets = [],
   isActive = true,
+  focusSuspended = false,
+  deferCursorUntilPositioned = false,
   isLayoutVisible = true,
   focusRequestToken = 0,
   resumeRequestToken = 0,
@@ -113,6 +121,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   onStreamReadyChange,
   onStreamConnected,
   onViewportReadyChange,
+  onContentReadyChange,
   onKeyboardVisibilityChange,
   suppressKeyboard = false,
   keyboardPortalTarget = null,
@@ -152,6 +161,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isDocumentVisible, setIsDocumentVisible] = React.useState(() => typeof document === 'undefined' ? true : !document.hidden);
   const [isWindowFocused, setIsWindowFocused] = React.useState(() => typeof document === 'undefined' ? true : document.hasFocus());
   const [isStreamReady, setIsStreamReady] = React.useState(false);
+  const [isInitialContentReady, setIsInitialContentReady] = React.useState(false);
+  const [isInitialSizeReady, setIsInitialSizeReady] = React.useState(false);
+  const [isCursorPresentationReady, setIsCursorPresentationReady] = React.useState(true);
   const {
     isOpen: isViewportKeyboardOpen,
     keyboardHeight: viewportKeyboardHeight,
@@ -279,11 +291,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const lastSentLogicalFocusRef = React.useRef<boolean | null>(null);
   const lastSentViewingRef = React.useRef<boolean | null>(null);
   const streamVersionRef = React.useRef(0);
+  const awaitingInitialWritesRef = React.useRef(false);
+  const contentReadyGenerationRef = React.useRef(0);
+  const cursorPositionGateRef = React.useRef(false);
+  const cursorPositionRequestRef = React.useRef(false);
+  const ptyRedrawRequestedRef = React.useRef(false);
+  const cursorPositionCandidateTimerRef = React.useRef<number | null>(null);
+  const cursorPositionFallbackTimerRef = React.useRef<number | null>(null);
   const isActiveRef = React.useRef(isActive);
   // Interaction capture in MultiTerminalView can synchronously promote a split
   // pane while the original wheel event is still propagating into xterm. Keep
   // this gate current during render so that same event is accepted immediately.
   isActiveRef.current = isActive;
+  const focusSuspendedRef = React.useRef(focusSuspended);
+  focusSuspendedRef.current = focusSuspended;
   const isMobileRef = React.useRef(isMobile);
   const desktopResumeFocusTimerRef = React.useRef<number | null>(null);
   const desktopInteractionFocusTimerRef = React.useRef<number | null>(null);
@@ -292,6 +313,90 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const mobileCopyFeedbackTimerRef = React.useRef<number | null>(null);
   const mobileFileFeedbackTimerRef = React.useRef<number | null>(null);
   const mobileFileInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const markInitialContentReadyAfterPaint = React.useCallback(() => {
+    const generation = ++contentReadyGenerationRef.current;
+    const settle = () => {
+      if (generation !== contentReadyGenerationRef.current) return;
+      setIsInitialContentReady(true);
+    };
+    if (typeof window === 'undefined') {
+      settle();
+      return;
+    }
+    window.requestAnimationFrame(() => window.requestAnimationFrame(settle));
+  }, []);
+
+  const handleViewportWritesSettled = React.useCallback((position: {
+    x: number;
+    y: number;
+    rows: number;
+    lastProcessedChunkId: number | null;
+  }) => {
+    if (awaitingInitialWritesRef.current) {
+      const store = useTerminalStore.getState();
+      const latestBufferChunkId = store.getTerminalSession(sessionId)?.bufferChunks.at(-1)?.id ?? null;
+      if (isInitialContentWriteSettled({
+        hasPendingBufferWrites: store.hasPendingBufferWrites(sessionId),
+        settledChunkId: position.lastProcessedChunkId,
+        latestBufferChunkId,
+      })) {
+        awaitingInitialWritesRef.current = false;
+        markInitialContentReadyAfterPaint();
+      }
+    }
+    if (!cursorPositionGateRef.current) return;
+    if (cursorPositionCandidateTimerRef.current !== null) {
+      window.clearTimeout(cursorPositionCandidateTimerRef.current);
+      cursorPositionCandidateTimerRef.current = null;
+    }
+    if (position.x === 0 && position.y >= position.rows - 1) {
+      setIsCursorPresentationReady(false);
+      return;
+    }
+    cursorPositionCandidateTimerRef.current = window.setTimeout(() => {
+      cursorPositionCandidateTimerRef.current = null;
+      setIsCursorPresentationReady(true);
+    }, 450);
+  }, [markInitialContentReadyAfterPaint, sessionId]);
+
+  const handleViewportCursorPositionChange = React.useCallback((position: { x: number; y: number; rows: number }) => {
+    if (!cursorPositionGateRef.current) return;
+    if (position.x !== 0 || position.y < position.rows - 1) return;
+    if (cursorPositionCandidateTimerRef.current !== null) {
+      window.clearTimeout(cursorPositionCandidateTimerRef.current);
+      cursorPositionCandidateTimerRef.current = null;
+    }
+    setIsCursorPresentationReady(false);
+  }, []);
+
+  React.useEffect(() => {
+    if (!deferCursorUntilPositioned) {
+      cursorPositionRequestRef.current = false;
+      return;
+    }
+    if (cursorPositionRequestRef.current) return;
+    cursorPositionRequestRef.current = true;
+    ptyRedrawRequestedRef.current = false;
+    cursorPositionGateRef.current = true;
+    setIsCursorPresentationReady(false);
+    if (cursorPositionCandidateTimerRef.current !== null) {
+      window.clearTimeout(cursorPositionCandidateTimerRef.current);
+      cursorPositionCandidateTimerRef.current = null;
+    }
+    if (cursorPositionFallbackTimerRef.current !== null) {
+      window.clearTimeout(cursorPositionFallbackTimerRef.current);
+    }
+    cursorPositionFallbackTimerRef.current = window.setTimeout(() => {
+      cursorPositionFallbackTimerRef.current = null;
+      if (cursorPositionCandidateTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(cursorPositionCandidateTimerRef.current);
+      }
+      cursorPositionCandidateTimerRef.current = null;
+      cursorPositionGateRef.current = false;
+      setIsCursorPresentationReady(true);
+    }, 15000);
+  }, [deferCursorUntilPositioned]);
 
   const flushPendingShellTitle = React.useCallback(() => {
     shellTitleRafRef.current = null;
@@ -401,17 +506,36 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [isMobile]);
 
   const focusTerminalIfActive = React.useCallback(() => {
-    if (!isActiveRef.current) {
+    if (!isActiveRef.current || focusSuspendedRef.current) {
       return;
     }
     terminalControllerRef.current?.focus();
   }, []);
 
+  React.useLayoutEffect(() => {
+    if (!focusSuspended) return;
+    terminalControllerRef.current?.blur();
+  }, [focusSuspended]);
+
+  React.useEffect(() => {
+    if (
+      !isActive
+      || focusSuspended
+      || isCursorPresentationReady
+      || ptyRedrawRequestedRef.current
+    ) return;
+    ptyRedrawRequestedRef.current = true;
+    const frame = window.requestAnimationFrame(() => {
+      terminalControllerRef.current?.requestPtyRedraw();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusSuspended, isActive, isCursorPresentationReady]);
+
   const scheduleDesktopResumeFocus = React.useCallback((reason: string) => {
     if (typeof window === 'undefined' || typeof document === 'undefined') {
       return;
     }
-    if (!isActiveRef.current || isMobileRef.current || document.hidden) {
+    if (!isActiveRef.current || focusSuspendedRef.current || isMobileRef.current || document.hidden) {
       return;
     }
 
@@ -421,7 +545,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     desktopResumeFocusTimerRef.current = window.setTimeout(() => {
       desktopResumeFocusTimerRef.current = null;
-      if (!isActiveRef.current || isMobileRef.current || document.hidden) {
+      if (!isActiveRef.current || focusSuspendedRef.current || isMobileRef.current || document.hidden) {
         return;
       }
 
@@ -472,6 +596,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         window.clearTimeout(mobileFileFeedbackTimerRef.current);
       }
       mobileFileFeedbackTimerRef.current = null;
+      if (cursorPositionFallbackTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(cursorPositionFallbackTimerRef.current);
+      }
+      cursorPositionFallbackTimerRef.current = null;
+      if (cursorPositionCandidateTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(cursorPositionCandidateTimerRef.current);
+      }
+      cursorPositionCandidateTimerRef.current = null;
     };
   }, []);
 
@@ -499,7 +631,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         ));
 
         if (!shouldRestoreTerminalFocusAfterInteraction({
-          isActive: isActiveRef.current,
+          isActive: isActiveRef.current && !focusSuspendedRef.current,
           isMobile: isMobileRef.current,
           documentVisible: !document.hidden,
           activeElementIsEditable,
@@ -601,7 +733,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [debugSession]);
 
   const logicalFocus = computeTerminalLogicalFocus({
-    isActive,
+    isActive: isActive && !focusSuspended,
     viewportFocused: isViewportFocused,
     documentVisible: isDocumentVisible,
     windowFocused: isWindowFocused,
@@ -770,6 +902,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   }, [isStreamReady, onStreamReadyChange, sessionId]);
 
   React.useEffect(() => {
+    onContentReadyChange?.(
+      sessionId,
+      isStreamReady && isInitialContentReady && isInitialSizeReady,
+    );
+  }, [isInitialContentReady, isInitialSizeReady, isStreamReady, onContentReadyChange, sessionId]);
+
+  React.useEffect(() => {
     if (!isTmuxMode) {
       shouldExitTmuxCopyModeOnInputRef.current = false;
       tmuxScrollPendingRef.current = null;
@@ -910,6 +1049,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       debugSession(`[startStream] Starting stream for frontendSessionId=${sessionId} backendSessionId=${terminalId}`);
       setReconnectStartedAt(null);
+      contentReadyGenerationRef.current += 1;
+      awaitingInitialWritesRef.current = false;
+      setIsInitialContentReady(false);
+      setIsInitialSizeReady(false);
       disconnectStream();
       const streamVersion = streamVersionRef.current + 1;
       streamVersionRef.current = streamVersion;
@@ -1052,6 +1195,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 //   覆盖），此时清屏 + 全量重放，避免错位拼接。
                 // - 否则直接 append，与现有 buffer 衔接。
                 const replayChunks = event.replayChunks;
+                const hasInitialWrites = Boolean(sessionState?.history?.length)
+                  || Boolean(replayChunks?.length);
+                if (hasInitialWrites) {
+                  awaitingInitialWritesRef.current = true;
+                } else {
+                  markInitialContentReadyAfterPaint();
+                }
                 if (replayChunks && replayChunks.length > 0) {
                   if (event.replayOutOfWindow) {
                     debugSession(`[Terminal] Replay out-of-window, clearing buffer before replay (${replayChunks.length} chunks)`);
@@ -1099,12 +1249,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   break;
                 }
                 lastTmuxScreenSyncGenerationRef.current = generation;
+                contentReadyGenerationRef.current += 1;
+                awaitingInitialWritesRef.current = true;
+                setIsInitialContentReady(false);
                 // This is an authoritative tmux grid, not another diff chunk.
                 // Reset xterm and replace the store atomically so stale lines
                 // from the pre-resize column layout cannot survive at the top.
                 flowPausedBufferRef.current = [];
                 terminalControllerRef.current?.clear();
                 replaceBuffer(storeSessionId, event.chunks ?? []);
+                terminalControllerRef.current?.notifyScreenSynchronized(generation);
+                if (!event.chunks?.length) {
+                  awaitingInitialWritesRef.current = false;
+                  markInitialContentReadyAfterPaint();
+                }
                 if (typeof event.cols === 'number' && typeof event.rows === 'number') {
                   terminalControllerRef.current?.notifyServerSize(
                     event.cols,
@@ -1160,6 +1318,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   ok: event.ok !== false,
                   cols: event.cols,
                   rows: event.rows,
+                  screenSyncPending: event.screenSyncPending,
+                  screenSyncGeneration: event.screenSyncGeneration,
                 });
                 break;
               }
@@ -1283,7 +1443,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       };
       activeTerminalIdRef.current = terminalId;
     },
-    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, onStreamConnected, reportFlowControl, restartEnsureSession, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
+    [appendToBuffer, clearBuffer, clearTerminalSession, debugSession, disconnectStream, markInitialContentReadyAfterPaint, onStreamConnected, reportFlowControl, restartEnsureSession, scheduleShellTitleUpdate, setConnecting, setSessionActiveProgram, setSessionAgentStatus, setSessionCopyMode, setSessionCwd, setSessionPromptState, terminal, sessionId]
   );
 
   // 后台会话允许长时间退避，覆盖锁屏和系统冻结；可见会话连续重连超过 60 秒时，
@@ -2275,12 +2435,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onInputFocusChange={handleInputFocusChange}
               onMobileLongPressCopyResult={handleMobileLongPressCopyResult}
               onReadyChange={handleViewportReadyChange}
+              onSizeSynchronizedChange={setIsInitialSizeReady}
+              onWritesSettled={handleViewportWritesSettled}
+              onCursorPositionChange={handleViewportCursorPositionChange}
               onDirectoryLinkActivate={handleDirectoryLinkActivate}
               terminalSettings={effectiveTerminalSettings}
               theme={xtermTheme}
               enableTouchScroll={isMobile}
               mobileLongPressMode={mobileLongPressMode}
-              autoFocus={!isMobile && !touchCapable}
+              autoFocus={!focusSuspended && !isMobile && !touchCapable}
+              cursorVisible={!focusSuspended && isCursorPresentationReady}
+              className={focusSuspended || !isCursorPresentationReady ? 'terminal-focus-suspended' : undefined}
             />
           </ErrorBoundary>
         </div>

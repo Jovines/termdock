@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import { en } from './en';
 import { zh } from './zh';
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type Locale, type TranslationDictionary } from './types';
+import { getSettings, updateSettings } from '../terminal/api';
 
 const STORAGE_KEY = 'termdock:locale';
 
@@ -81,14 +82,14 @@ function format(template: unknown, params?: InterpolationParams): string {
 
 export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(() => detectInitialLocale());
+  const shouldPersistLocaleRef = React.useRef(false);
 
   // Sync locale from server on mount (server-authoritative, shared across clients).
   // 仅在服务端返回非默认值（'zh'）或与当前一致时才接受；服务端默认值 'en'
   // 不覆盖用户已显式选择的语言，防止因上次 PUT 失败导致强制刷新后回退成英文。
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    fetch('/api/terminal/settings')
-      .then((r) => r.json())
+    getSettings()
       .then((s) => {
         if (s?.locale === 'zh' || s?.locale === 'en') {
           if (s.locale === locale) return;
@@ -108,28 +109,16 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore
     }
-    // Push to server so other connected clients pick up the change.
-    (async () => {
-      try {
-        // Read CSRF token from cookie (server sets XSRF-TOKEN cookie).
-        const cookies = document.cookie.split('; ');
-        const csrfCookie = cookies.find((c) => c.startsWith('XSRF-TOKEN='));
-        const csrfToken = csrfCookie ? decodeURIComponent(csrfCookie.split('=')[1]) : '';
-        await fetch('/api/terminal/settings', {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(csrfToken ? { 'X-XSRF-TOKEN': csrfToken } : {}),
-          },
-          body: JSON.stringify({ locale }),
-        });
-      } catch { /* best effort */ }
-    })();
+    if (shouldPersistLocaleRef.current) {
+      shouldPersistLocaleRef.current = false;
+      void updateSettings({ locale }).catch(() => { /* best effort */ });
+    }
     // Reflect on <html lang> for accessibility tools and CSS selectors.
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
   }, [locale]);
 
   const setLocale = useCallback((next: Locale) => {
+    shouldPersistLocaleRef.current = true;
     setLocaleState(next);
   }, []);
 

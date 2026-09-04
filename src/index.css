@@ -360,6 +360,13 @@ body {
   outline: none;
 }
 
+/* A cold session switch keeps the painted source slide visible until the
+ * destination has rendered. Do not leave a live-looking caret behind on that
+ * temporary frame: keyboard ownership is transferred with the destination. */
+.terminal-viewport-container.terminal-focus-suspended .xterm-cursor {
+  visibility: hidden;
+}
+
 .overlay-scrollbar {
   position: absolute;
   top: 0;

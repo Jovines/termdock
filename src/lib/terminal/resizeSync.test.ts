@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   acknowledgeResize,
   createResizeSyncState,
+  forceResize,
   observeServerSize,
   requestResize,
   retryResize,
@@ -22,6 +23,13 @@ describe('terminal resize synchronization', () => {
     const wider = requestResize(confirmed, { cols: 120, rows: 30 });
     const returned = requestResize(wider.state, { cols: 100, rows: 30 });
     expect(returned.request).toMatchObject({ seq: 2, cols: 100, rows: 30 });
+  });
+
+  it('can explicitly re-send an already confirmed size to redraw a TUI', () => {
+    const confirmed = observeServerSize(createResizeSyncState(), { cols: 100, rows: 30 });
+    const forced = forceResize(confirmed, { cols: 100, rows: 30 });
+    expect(forced.request).toMatchObject({ seq: 1, cols: 100, rows: 30, attempt: 0 });
+    expect(forced.state.pending).toEqual(forced.request);
   });
 
   it('ignores an old acknowledgement after a newer resize was requested', () => {

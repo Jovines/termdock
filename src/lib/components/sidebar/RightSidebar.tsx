@@ -7445,8 +7445,11 @@ export function RightSidebar(
   const draftSyncClientIdRef = useRef<string>(crypto.randomUUID?.() ?? `draft-${Math.random().toString(36).slice(2)}`);
   const lastSyncedDraftRef = useRef<string | null>(null);
   const draftUploadTimerRef = useRef<number | null>(null);
+  const [draftHydrated, setDraftHydrated] = useState(false);
 
   useEffect(() => {
+    if (!isOpen) return;
+    setDraftHydrated(false);
     let cancelled = false;
     getContextDraft()
       .then((server) => {
@@ -7458,8 +7461,12 @@ export function RightSidebar(
           if (server.text && server.text !== local) return server.text;
           return local;
         });
+        setDraftHydrated(true);
       })
-      .catch(() => { /* 拉取失败用本地缓存 */ });
+      .catch(() => {
+        // 拉取失败仍允许后续本地编辑重试上传。
+        if (!cancelled) setDraftHydrated(true);
+      });
     const unsubscribe = subscribeClientState((event) => {
       if (event.type !== 'context-draft') return;
       if (event.origin === draftSyncClientIdRef.current) return;
@@ -7475,9 +7482,10 @@ export function RightSidebar(
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isOpen]);
 
   useEffect(() => {
+    if (!draftHydrated) return;
     if (lastSyncedDraftRef.current === contextDraftText) return;
     if (draftUploadTimerRef.current !== null) window.clearTimeout(draftUploadTimerRef.current);
     const text = contextDraftText;
@@ -7489,7 +7497,7 @@ export function RightSidebar(
         })
         .catch(() => { /* 同步失败，下次改动再试 */ });
     }, 500);
-  }, [contextDraftText]);
+  }, [contextDraftText, draftHydrated]);
 
   const routeReferenceText = useCallback((text: string, key: string, suffix?: string) => {
     if (!text) return;
@@ -11493,7 +11501,7 @@ export function RightSidebar(
           ))}
         </Pane>
       </div>
-      {contextDraftEnabled && (
+      {isOpen && contextDraftEnabled && (
         <ContextDraftDock
           value={contextDraftText}
           collapsed={contextDraftCollapsed}

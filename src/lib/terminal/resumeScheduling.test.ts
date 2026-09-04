@@ -13,6 +13,8 @@ import {
   shouldForceForegroundReconnect,
   shouldStartInitialConnection,
   shouldMountSessionViewport,
+  shouldDeferSessionSwitch,
+  isInitialContentWriteSettled,
   shouldPublishSessionDataUpdate,
 } from './resumeScheduling';
 
@@ -116,6 +118,52 @@ describe('shouldPublishSessionDataUpdate', () => {
   it('preserves cached tab chrome until runtime restoration completes', () => {
     expect(shouldPublishSessionDataUpdate(true)).toBe(false);
     expect(shouldPublishSessionDataUpdate(false)).toBe(true);
+  });
+});
+
+describe('shouldDeferSessionSwitch', () => {
+  it('never delays an explicit desktop selection', () => {
+    expect(shouldDeferSessionSwitch({
+      isMobile: false,
+      viewportReady: false,
+      streamReady: false,
+      contentReady: false,
+    })).toBe(false);
+  });
+
+  it('only delays a cold mobile target', () => {
+    expect(shouldDeferSessionSwitch({
+      isMobile: true,
+      viewportReady: true,
+      streamReady: true,
+      contentReady: true,
+    })).toBe(false);
+    expect(shouldDeferSessionSwitch({
+      isMobile: true,
+      viewportReady: true,
+      streamReady: true,
+      contentReady: false,
+    })).toBe(true);
+  });
+});
+
+describe('isInitialContentWriteSettled', () => {
+  it('waits for both the store backlog and the latest rendered chunk', () => {
+    expect(isInitialContentWriteSettled({
+      hasPendingBufferWrites: true,
+      settledChunkId: 4,
+      latestBufferChunkId: 4,
+    })).toBe(false);
+    expect(isInitialContentWriteSettled({
+      hasPendingBufferWrites: false,
+      settledChunkId: 3,
+      latestBufferChunkId: 4,
+    })).toBe(false);
+    expect(isInitialContentWriteSettled({
+      hasPendingBufferWrites: false,
+      settledChunkId: 4,
+      latestBufferChunkId: 4,
+    })).toBe(true);
   });
 });
 

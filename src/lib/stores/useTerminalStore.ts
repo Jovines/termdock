@@ -59,6 +59,7 @@ export interface TerminalStore {
   clearAgentNeedsReview: (sessionId: string) => void;
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string, options?: { markActivity?: boolean }) => void;
+  hasPendingBufferWrites: (sessionId: string) => boolean;
   replaceBuffer: (sessionId: string, chunks: string[]) => void;
   clearTerminalSession: (sessionId: string) => void;
   clearBuffer: (sessionId: string) => void;
@@ -630,6 +631,10 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     }
     scheduleBatchFlush();
   },
+
+  hasPendingBufferWrites: (sessionId: string) => (
+    (batch.pendingChunksBySession.get(sessionId)?.length ?? 0) > 0
+  ),
 
   replaceBuffer: (sessionId: string, chunks: string[]) => {
     // 清掉这个 session 的 pending batch:replaceBuffer 是一次性整体替换,

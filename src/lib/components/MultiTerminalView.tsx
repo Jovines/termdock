@@ -25,6 +25,7 @@ import {
   shouldRunResumeRequest,
   shouldForceForegroundReconnect,
   shouldMountSessionViewport,
+  shouldDeferSessionSwitch,
   shouldPublishSessionDataUpdate,
   shouldStartInitialConnection,
 } from '../terminal/resumeScheduling';
@@ -436,6 +437,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
   const [readySessionIds, setReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [foregroundResumeCompletedToken, setForegroundResumeCompletedToken] = useState(0);
   const [viewportReadySessionIds, setViewportReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [contentReadySessionIds, setContentReadySessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [deferredViewportSessionIds, setDeferredViewportSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const restoredRef = useRef(false);
   const swiperRef = useRef<SwiperInstance | null>(null);
@@ -652,12 +654,27 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       return next;
     });
   }, []);
+  const handleContentReadyChange = useCallback((sessionId: string, ready: boolean) => {
+    setContentReadySessionIds((current) => {
+      if (current.has(sessionId) === ready) return current;
+      const next = new Set(current);
+      if (ready) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
   const foregroundViewportReady = foregroundSessionId !== null
     && viewportReadySessionIds.has(foregroundSessionId);
+  const foregroundContentReady = foregroundSessionId !== null
+    && contentReadySessionIds.has(foregroundSessionId);
 
   useEffect(() => {
     if (foregroundViewportReady) markStartupMilestone('foreground-viewport-ready');
   }, [foregroundViewportReady]);
+
+  useEffect(() => {
+    if (foregroundContentReady) markStartupMilestone('foreground-content-ready');
+  }, [foregroundContentReady]);
 
   useEffect(() => {
     if (!onInitialViewportReady) return;
@@ -665,15 +682,16 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       onInitialViewportReady();
       return;
     }
-    if (!foregroundViewportReady || !foregroundConnectionReady) return;
+    if (!foregroundViewportReady || !foregroundConnectionReady || !foregroundContentReady) return;
 
-    // `connected` opens the write gate; the history chunk is parsed immediately
-    // afterward. Keep the cold-start surface for a few paint opportunities so
-    // we never reveal the fully mounted chrome with a still-empty xterm frame.
-    const timer = window.setTimeout(onInitialViewportReady, 120);
-    return () => window.clearTimeout(timer);
+    // Content readiness is protocol-driven: it includes the fitted resize ACK
+    // and, for tmux, the matching authoritative screen-sync generation after
+    // its chunks have painted. No timing guess is needed here.
+    markStartupMilestone('initial-viewport-presented');
+    onInitialViewportReady();
   }, [
     foregroundConnectionReady,
+    foregroundContentReady,
     foregroundViewportReady,
     isRestoring,
     onInitialViewportReady,
@@ -682,19 +700,20 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
 
   useEffect(() => {
     if (visibleSessionIds.size === 0) return;
-    // Keep mounted terminals bounded on both desktop and mobile. Mobile used to
-    // create an xterm/canvas for every restored session at once, so a workspace
-    // with many Agent tabs delayed the first visible terminal and made the tab
-    // strip appear well before its content. Warm the neighbouring mobile slides
-    // for smooth swiping, then retain every slide the user has visited.
+    // Keep mounted terminals bounded on both desktop and mobile. Creating an
+    // xterm/canvas for every restored session at once delays the first visible
+    // terminal. Warm only nearby slides, then retain each one the user visits.
     const idsToMount = new Set(visibleSessionIds);
-    if (isMobileLayout) {
-      const activeSlideIndex = workspaceSlides.findIndex((slide) => (
-        slide.sessions.some((session) => visibleSessionIds.has(session.id))
-      ));
-      for (const slideIndex of [activeSlideIndex - 1, activeSlideIndex + 1]) {
-        workspaceSlides[slideIndex]?.sessions.forEach((session) => idsToMount.add(session.id));
-      }
+    const activeSlideIndex = workspaceSlides.findIndex((slide) => (
+      slide.sessions.some((session) => visibleSessionIds.has(session.id))
+    ));
+    // Mobile needs one neighbour for swiping. Desktop gets two slots of runway
+    // so walking the sidebar does not create/connect a brand-new xterm after
+    // every click, while still avoiding the old all-sessions-at-once startup.
+    const warmRadius = isMobileLayout ? 1 : 2;
+    for (let offset = -warmRadius; offset <= warmRadius; offset += 1) {
+      if (offset === 0) continue;
+      workspaceSlides[activeSlideIndex + offset]?.sessions.forEach((session) => idsToMount.add(session.id));
     }
     setDeferredViewportSessionIds((current) => {
       let changed = false;
@@ -717,6 +736,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     if (
       !viewportReadySessionIds.has(pendingSwitchSessionId)
       || !readySessionIds.has(pendingSwitchSessionId)
+      || !contentReadySessionIds.has(pendingSwitchSessionId)
     ) return;
 
     // Keep the currently painted slide in place while an unvisited target is
@@ -733,7 +753,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       }
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [pendingSwitchSessionId, readySessionIds, sessions, viewportReadySessionIds]);
+  }, [contentReadySessionIds, pendingSwitchSessionId, readySessionIds, sessions, viewportReadySessionIds]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1656,6 +1676,21 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
       if (sessionId === activeSessionIdRef.current) return;
+      const shouldDefer = shouldDeferSessionSwitch({
+        isMobile: isMobileRef.current,
+        viewportReady: viewportReadySessionIds.has(sessionId),
+        streamReady: readySessionIds.has(sessionId),
+        contentReady: contentReadySessionIds.has(sessionId),
+      });
+      if (!shouldDefer) {
+        setPendingSwitchSessionId(null);
+        setActiveSessionId(sessionId);
+        if (terminalFocusAvailableRef.current) {
+          setFocusTransferRequest({ sessionId, token: Date.now() });
+        }
+        debugSession('[Session] Switched to session:', sessionId);
+        return;
+      }
       setDeferredViewportSessionIds((current) => {
         if (current.has(sessionId)) return current;
         const next = new Set(current);
@@ -1665,7 +1700,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
       setPendingSwitchSessionId(sessionId);
       debugSession('[Session] Switched to session:', sessionId);
     }
-  }, [sessions, debugSession]);
+  }, [contentReadySessionIds, debugSession, readySessionIds, sessions, viewportReadySessionIds]);
 
   // Handle session rename
   const handleRenameSession = useCallback((sessionId: string, newName: string) => {
@@ -2019,7 +2054,9 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
     }) && connectionPriorityReady;
     const initialConnectDelayMs = session.id === foregroundSessionId
       ? 0
-      : backgroundResumeDelayBySessionId.get(session.id) ?? BACKGROUND_RESUME_INITIAL_DELAY_MS;
+      : deferredViewportSessionIds.has(session.id)
+        ? 0
+        : backgroundResumeDelayBySessionId.get(session.id) ?? BACKGROUND_RESUME_INITIAL_DELAY_MS;
     return (
       <div
         key={session.id}
@@ -2047,6 +2084,8 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             colorTheme={colorTheme}
             toolbarPresets={toolbarPresets}
             isActive={isActive}
+            focusSuspended={pendingSwitchSessionId !== null}
+            deferCursorUntilPositioned={pendingSwitchSessionId === session.id}
             isLayoutVisible={isLayoutVisible}
             initialConnectEnabled={initialConnectEnabled}
             resumeRequestEnabled={resumeRequestEnabled}
@@ -2067,6 +2106,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             onStreamReadyChange={handleStreamReadyChange}
             onStreamConnected={handleStreamConnected}
             onViewportReadyChange={handleViewportReadyChange}
+            onContentReadyChange={handleContentReadyChange}
             onKeyboardVisibilityChange={handleKeyboardVisibilityChange}
             showDebug={showDebug}
             onStatusChange={isActive ? onStatusChange : undefined}

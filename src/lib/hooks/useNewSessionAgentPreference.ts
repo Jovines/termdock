@@ -68,9 +68,17 @@ export function useNewSessionAgentPreference() {
   }, []);
 
   useEffect(() => {
-    void refresh().catch(() => {
-      // Keep the cached preference when the server is temporarily unavailable.
-    });
+    const start = () => {
+      void refresh().catch(() => {
+        // Keep the cached preference when the server is temporarily unavailable.
+      });
+    };
+    if (performance.getEntriesByName('termdock:startup:initial-viewport-presented').length > 0) {
+      start();
+      return;
+    }
+    window.addEventListener('termdock:initial-viewport-presented', start, { once: true });
+    return () => window.removeEventListener('termdock:initial-viewport-presented', start);
   }, [refresh]);
 
   const selectAgent = useCallback(async (next: NewSessionAgentPreference) => {
