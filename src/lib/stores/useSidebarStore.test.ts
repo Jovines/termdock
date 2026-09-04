@@ -512,13 +512,35 @@ describe('useSidebarStore file watch epoch', () => {
   it('bumps the global epoch on rescan-required', () => {
     useSidebarStore.getState().setRootPath('/workspace/a');
     useSidebarStore.getState().selectFile('/workspace/a/notes.md');
+    useSidebarStore.getState().setDirectoryCache('/workspace/a', [
+      { name: 'notes.md', path: '/workspace/a/notes.md', type: 'file' },
+    ]);
 
     useSidebarStore.getState().applyFileWatchEvents([{ type: 'rescan-required', path: '/workspace/a' }]);
 
     const state = useSidebarStore.getState();
     expect(state.fileWatchEpoch).toBe(1);
+    expect(state.directoryCache.get('/workspace/a')).toHaveLength(1);
     // Selected file keeps its per-path bump for path-only subscribers.
     expect(state.fileChangeVersions.get('/workspace/a/notes.md')).toBe(1);
+  });
+
+  it('reconciles a rescan without dropping the visible directory cache', () => {
+    useSidebarStore.getState().setDirectoryCache('/workspace/a', [
+      { name: 'old.txt', path: '/workspace/a/old.txt', type: 'file' },
+      { name: 'src', path: '/workspace/a/src', type: 'directory', children: [] },
+    ]);
+    useSidebarStore.getState().setDirectoryCache('/workspace/a/src', [
+      { name: 'index.ts', path: '/workspace/a/src/index.ts', type: 'file' },
+    ]);
+
+    useSidebarStore.getState().reconcileDirectoryCache('/workspace/a', [
+      { name: 'new.txt', path: '/workspace/a/new.txt', type: 'file' },
+    ]);
+
+    const state = useSidebarStore.getState();
+    expect(state.directoryCache.get('/workspace/a')?.map((entry) => entry.name)).toEqual(['new.txt']);
+    expect(state.directoryCache.has('/workspace/a/src')).toBe(false);
   });
 
   it('bumpFileWatchEpoch increments monotonically', () => {

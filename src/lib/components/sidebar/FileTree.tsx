@@ -1220,6 +1220,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   const rootEntries = useSidebarStore((s) => (rootPath ? s.directoryCache.get(rootPath) : undefined));
   const setDirectoryCache = useSidebarStore((s) => s.setDirectoryCache);
   const showHiddenFiles = useSidebarStore((s) => s.showHiddenFiles);
+  const fileSortModesHydrated = useSidebarStore((s) => s.fileSortModesHydrated);
   const rootSortMode = useSidebarStore((s) => s.fileSortModes[rootPath] ?? 'name');
   const hydrateFileSortModes = useSidebarStore((s) => s.hydrateFileSortModes);
   const [loading, setLoading] = useState(false);
@@ -1227,9 +1228,19 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   const [rootTruncated, setRootTruncated] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [sortHydrationSettled, setSortHydrationSettled] = useState(fileSortModesHydrated);
+  const sortModeReady = fileSortModesHydrated || sortHydrationSettled;
 
   useEffect(() => {
-    void hydrateFileSortModes().catch(() => undefined);
+    let cancelled = false;
+    void hydrateFileSortModes()
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setSortHydrationSettled(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [hydrateFileSortModes]);
   const [searchEntries, setSearchEntries] = useState<FileTreeNode[]>([]);
   const [searchMeta, setSearchMeta] = useState<{ truncated: boolean; total: number; engine: FileSearchEngine; limited: boolean; done: boolean } | null>(null);
@@ -1301,6 +1312,10 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
   // Load root directory
   useEffect(() => {
     if (!rootPath) return;
+    // The persisted sort mode determines the server request. Waiting for this
+    // lightweight hydration prevents a name-sorted request from completing
+    // just before hydration clears it and triggers a second visible loading.
+    if (!sortModeReady) return;
     if (queryLower) {
       setLoading(false);
       return;
@@ -1335,7 +1350,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
       controller.abort();
       cancelIoSlot(`file-tree-root:${rootPath}`);
     };
-  }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles]);
+  }, [queryLower, rootEntries, rootPath, rootSortMode, setDirectoryCache, showHiddenFiles, sortModeReady]);
 
   useEffect(() => {
     if (!activeSearchRoot || !queryLower) {
@@ -1453,7 +1468,7 @@ export function FileTree({ rootPath, onFileSelect, directoriesOnly = false, onPa
     );
   }
 
-  if (loading) {
+  if (loading || !sortModeReady) {
     return (
       <div className="flex items-center justify-center py-8">
         <RiLoader size={20} className="animate-spin text-muted-foreground" />

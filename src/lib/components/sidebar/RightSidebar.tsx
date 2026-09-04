@@ -55,7 +55,7 @@ import type { DiffInlineMode, DiffViewType } from './DiffViewer';
 import { useDiffDisplayPrefs } from './diffDisplayPrefs';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { resolveRightSidebarNarrowLayout, useSidebarStore, type RightSidebarLayoutPreference } from '../../stores/useSidebarStore';
-import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
+import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, listDirectory, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
 import { normalizeClientWatchRoots } from '../../terminal/fileWatchRoots';
 import { partitionFileWatchEvents } from '../../terminal/fileWatchEvents';
 import { useI18n } from '../../i18n';
@@ -6312,6 +6312,7 @@ export function RightSidebar(
   const invalidateDirectoryCache = useSidebarStore((s) => s.invalidateDirectoryCache);
   const setDirectorySortMode = useSidebarStore((s) => s.setDirectorySortMode);
   const applyFileWatchEvents = useSidebarStore((s) => s.applyFileWatchEvents);
+  const reconcileDirectoryCache = useSidebarStore((s) => s.reconcileDirectoryCache);
   const bumpFileWatchEpoch = useSidebarStore((s) => s.bumpFileWatchEpoch);
   const gitBundleLoading = useSidebarStore((s) => s.gitBundleLoading);
   const gitBundleSlow = useSidebarStore((s) => s.gitBundleSlow);
@@ -7679,6 +7680,8 @@ export function RightSidebar(
     return normalizeClientWatchRoots(roots).join('\n');
   }, [expandedPaths, filesPaneActive, fileTreeRoot, rootPath, selectedFilePath]);
 
+  const watchRescanControllersRef = useRef(new Map<string, AbortController>());
+
   useEffect(() => {
     const watchedFileRoots = watchedFileRootsKey ? watchedFileRootsKey.split('\n') : [];
     if (!isOpen || watchedFileRoots.length === 0) {
@@ -7702,6 +7705,34 @@ export function RightSidebar(
           await watchFileSystem(watchedFileRoots, (events) => {
             const { applicableEvents, unavailableReason } = partitionFileWatchEvents(events);
             if (applicableEvents.length > 0) applyFileWatchEvents(applicableEvents);
+            for (const event of applicableEvents) {
+              if (event.type !== 'rescan-required') continue;
+              const state = useSidebarStore.getState();
+              if (!state.directoryCache.has(event.path)) continue;
+              const previousController = watchRescanControllersRef.current.get(event.path);
+              previousController?.abort();
+              const rescanController = new AbortController();
+              watchRescanControllersRef.current.set(event.path, rescanController);
+              const requestSlotId = `file-watch-rescan:${event.path}`;
+              cancelIoSlot(requestSlotId);
+              void listDirectory(
+                event.path,
+                rescanController.signal,
+                state.showHiddenFiles,
+                'watch_rescan',
+                requestSlotId,
+                state.fileSortModes[event.path] ?? 'name',
+              ).then((result) => {
+                if (watchRescanControllersRef.current.get(event.path) !== rescanController) return;
+                reconcileDirectoryCache(event.path, result.entries);
+              }).catch((error) => {
+                if (!isAbortError(error)) setFileWatchError(error instanceof Error ? error.message : 'File refresh unavailable');
+              }).finally(() => {
+                if (watchRescanControllersRef.current.get(event.path) === rescanController) {
+                  watchRescanControllersRef.current.delete(event.path);
+                }
+              });
+            }
             if (unavailableReason) setFileWatchError(unavailableReason);
           }, controller.signal);
           // A clean resolve means the server closed the stream (deploy,
@@ -7729,8 +7760,10 @@ export function RightSidebar(
       window.clearTimeout(startTimer);
       window.clearTimeout(retryTimer);
       controller.abort();
+      for (const rescanController of watchRescanControllersRef.current.values()) rescanController.abort();
+      watchRescanControllersRef.current.clear();
     };
-  }, [applyFileWatchEvents, isOpen, watchedFileRootsKey]);
+  }, [applyFileWatchEvents, isOpen, reconcileDirectoryCache, watchedFileRootsKey]);
 
   useEffect(() => {
     if (!rootPath) return;

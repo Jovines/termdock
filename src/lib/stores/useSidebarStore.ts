@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { getSettings, updateSettings, type FileSortMode, type FileWatchEvent, type GitChangedFile } from '../terminal/api';
+import { getSettings, updateSettings, type FileEntry, type FileSortMode, type FileWatchEvent, type GitChangedFile } from '../terminal/api';
 import { clearCache, readCache, writeCache } from '../utils/localStorageCache';
 
 export type RightSidebarTab = 'git' | 'files' | 'diff';
@@ -542,6 +542,7 @@ interface SidebarState {
   setGroupByFolder: (enabled: boolean) => void;
   toggleGroupCollapsed: (key: string) => void;
   setDirectoryCache: (path: string, entries: FileTreeNode[]) => void;
+  reconcileDirectoryCache: (path: string, entries: FileEntry[]) => void;
   hydrateFileSortModes: () => Promise<void>;
   setDirectorySortMode: (path: string, mode: FileSortMode) => Promise<void>;
   invalidateDirectoryCache: (path: string, recursive?: boolean) => void;
@@ -976,6 +977,48 @@ export const useSidebarStore = create<SidebarState>((set) => ({
       return { directoryCache: next };
     }),
 
+  reconcileDirectoryCache: (path, entries) =>
+    set((s) => {
+      const previous = s.directoryCache.get(path);
+      // A rescan must never create a second loading path. If this directory is
+      // not cached yet, its normal initial request remains the source of truth.
+      if (!previous) return s;
+      const previousByPath = new Map(previous.map((node) => [node.path, node]));
+      const presentPaths = new Set(entries.map((entry) => entry.path));
+      const directoryCache = new Map(s.directoryCache);
+      const reconciled = entries.map((entry): FileTreeNode => {
+        const existing = previousByPath.get(entry.path);
+        return {
+          name: entry.name,
+          path: entry.path,
+          type: entry.type,
+          isSymlink: entry.isSymlink,
+          modified: entry.modified,
+          expanded: existing?.expanded ?? false,
+          loaded: existing?.loaded ?? false,
+          children: entry.type === 'directory' ? existing?.children ?? [] : undefined,
+        };
+      });
+      directoryCache.set(path, sortFileTreeNodes(reconciled, s.fileSortModes[path] ?? 'name'));
+      for (const oldEntry of previous) {
+        if (presentPaths.has(oldEntry.path)) continue;
+        for (const cachedPath of directoryCache.keys()) {
+          if (isSameOrChildPath(oldEntry.path, cachedPath)) directoryCache.delete(cachedPath);
+        }
+      }
+      let selectedFilePath = s.selectedFilePath;
+      if (selectedFilePath) {
+        const removedAncestor = previous.find((entry) => (
+          !presentPaths.has(entry.path) && isSameOrChildPath(entry.path, selectedFilePath!)
+        ));
+        if (removedAncestor) {
+          selectedFilePath = null;
+          writeSelectedFilePath(s.rootPath, null);
+        }
+      }
+      return { directoryCache, selectedFilePath };
+    }),
+
   hydrateFileSortModes: async () => {
     if (useSidebarStore.getState().fileSortModesHydrated) return;
     if (fileSortModesHydration) return fileSortModesHydration;
@@ -1059,16 +1102,9 @@ export const useSidebarStore = create<SidebarState>((set) => ({
 
       for (const event of events) {
         if (event.type === 'rescan-required') {
-          for (const key of directoryCache.keys()) {
-            if (isSameOrChildPath(event.path, key)) {
-              directoryCache.delete(key);
-              changed = true;
-            }
-          }
-          // rescan 表示该范围内可能有任意变更（事件风暴 / watcher 出错降级），
-          // 具体哪些文件变了无从得知。bump 全局 epoch，让所有把 epoch 计入
-          // 版本号的订阅者（md 引用图、lightbox、文件预览）统一刷新；选中
-          // 文件仍单独 bump 一份，兼容只按路径订阅的旧用法。
+          // Keep the visible tree in place while the caller reconciles this
+          // exact non-recursive directory in the background. The epoch still
+          // refreshes previews whose precise changed path is unknown.
           epochChanged = true;
           if (selectedFilePath && isSameOrChildPath(event.path, selectedFilePath)) {
             bumpVersion(selectedFilePath);
