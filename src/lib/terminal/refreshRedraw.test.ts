@@ -1,12 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
   getActivationRefreshMode,
+  KEYBOARD_FIT_SETTLE_MAX_MS,
+  KEYBOARD_FIT_SETTLE_QUIET_MS,
+  KEYBOARD_RESIZE_WRITE_HOLD_MAX_MS,
+  KEYBOARD_RESIZE_WRITE_HOLD_MIN_MS,
+  KEYBOARD_RESIZE_WRITE_HOLD_QUIET_MS,
+  nextKeyboardFitStableFrameCount,
+  shouldDeferTerminalFit,
   shouldForceObservedResizeRedraw,
   shouldForceSettledRedraw,
   shouldPreserveBottomAfterFit,
   shouldProcessObservedResize,
   shouldRefreshTerminalBuffer,
+  shouldReleaseKeyboardResizeWriteHold,
   shouldSchedulePageFlipRefresh,
+  shouldSettleKeyboardFit,
 } from './refreshRedraw';
 
 describe('shouldPreserveBottomAfterFit', () => {
@@ -17,6 +26,44 @@ describe('shouldPreserveBottomAfterFit', () => {
   it('preserves deliberate scrollback and alternate-screen positions', () => {
     expect(shouldPreserveBottomAfterFit('normal', 240, 180)).toBe(false);
     expect(shouldPreserveBottomAfterFit('alternate', 0, 0)).toBe(false);
+  });
+});
+
+describe('keyboard fit settling', () => {
+  it('requires two stable frames after viewport signals go quiet', () => {
+    expect(nextKeyboardFitStableFrameCount(null, 420, 0)).toBe(0);
+    expect(nextKeyboardFitStableFrameCount(420, 420.3, 0)).toBe(1);
+    expect(nextKeyboardFitStableFrameCount(420.3, 420.2, 1)).toBe(2);
+    expect(shouldSettleKeyboardFit(120, KEYBOARD_FIT_SETTLE_QUIET_MS - 1, 4)).toBe(false);
+    expect(shouldSettleKeyboardFit(120, KEYBOARD_FIT_SETTLE_QUIET_MS, 1)).toBe(false);
+    expect(shouldSettleKeyboardFit(120, KEYBOARD_FIT_SETTLE_QUIET_MS, 2)).toBe(true);
+  });
+
+  it('resets stability on movement and has a bounded fallback', () => {
+    expect(nextKeyboardFitStableFrameCount(420, 418, 5)).toBe(0);
+    expect(shouldSettleKeyboardFit(KEYBOARD_FIT_SETTLE_MAX_MS, 0, 0)).toBe(true);
+  });
+
+  it('only freezes fits for an active touch keyboard transition', () => {
+    expect(shouldDeferTerminalFit(true, true)).toBe(true);
+    expect(shouldDeferTerminalFit(true, false)).toBe(false);
+    expect(shouldDeferTerminalFit(false, true)).toBe(false);
+  });
+
+  it('coalesces delayed PTY redraw output after the final keyboard resize', () => {
+    expect(shouldReleaseKeyboardResizeWriteHold(
+      KEYBOARD_RESIZE_WRITE_HOLD_MIN_MS - 1,
+      KEYBOARD_RESIZE_WRITE_HOLD_QUIET_MS + 100,
+    )).toBe(false);
+    expect(shouldReleaseKeyboardResizeWriteHold(
+      KEYBOARD_RESIZE_WRITE_HOLD_MIN_MS,
+      KEYBOARD_RESIZE_WRITE_HOLD_QUIET_MS - 1,
+    )).toBe(false);
+    expect(shouldReleaseKeyboardResizeWriteHold(
+      KEYBOARD_RESIZE_WRITE_HOLD_MIN_MS,
+      KEYBOARD_RESIZE_WRITE_HOLD_QUIET_MS,
+    )).toBe(true);
+    expect(shouldReleaseKeyboardResizeWriteHold(KEYBOARD_RESIZE_WRITE_HOLD_MAX_MS, 0)).toBe(true);
   });
 });
 

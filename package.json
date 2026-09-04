@@ -1,6 +1,6 @@
 {
   "name": "termdock",
-  "version": "1.4.159",
+  "version": "1.4.160",
   "description": "A complete web-based terminal application with modern UI",
   "type": "module",
   "main": ".desktop-dist/main.js",

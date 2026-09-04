@@ -34,6 +34,53 @@ export function shouldPreserveBottomAfterFit(
   return bufferType !== 'alternate' && viewportY >= baseY;
 }
 
+export const KEYBOARD_FIT_SETTLE_QUIET_MS = 72;
+export const KEYBOARD_FIT_SETTLE_MAX_MS = 650;
+export const KEYBOARD_FIT_SETTLE_STABLE_FRAMES = 2;
+export const KEYBOARD_RESIZE_WRITE_HOLD_QUIET_MS = 80;
+export const KEYBOARD_RESIZE_WRITE_HOLD_MIN_MS = 240;
+export const KEYBOARD_RESIZE_WRITE_HOLD_MAX_MS = 500;
+
+export function nextKeyboardFitStableFrameCount(
+  previousHeight: number | null,
+  currentHeight: number,
+  previousStableFrames: number,
+  tolerancePx = 0.5,
+): number {
+  if (previousHeight === null || Math.abs(currentHeight - previousHeight) > tolerancePx) {
+    return 0;
+  }
+  return previousStableFrames + 1;
+}
+
+export function shouldSettleKeyboardFit(
+  elapsedMs: number,
+  quietMs: number,
+  stableFrames: number,
+): boolean {
+  return elapsedMs >= KEYBOARD_FIT_SETTLE_MAX_MS || (
+    quietMs >= KEYBOARD_FIT_SETTLE_QUIET_MS &&
+    stableFrames >= KEYBOARD_FIT_SETTLE_STABLE_FRAMES
+  );
+}
+
+export function shouldDeferTerminalFit(
+  touchLayout: boolean,
+  keyboardFitFreezeActive: boolean,
+): boolean {
+  return touchLayout && keyboardFitFreezeActive;
+}
+
+export function shouldReleaseKeyboardResizeWriteHold(
+  elapsedMs: number,
+  writeQuietMs: number,
+): boolean {
+  return elapsedMs >= KEYBOARD_RESIZE_WRITE_HOLD_MAX_MS || (
+    elapsedMs >= KEYBOARD_RESIZE_WRITE_HOLD_MIN_MS &&
+    writeQuietMs >= KEYBOARD_RESIZE_WRITE_HOLD_QUIET_MS
+  );
+}
+
 /**
  * A normal desktop slide change gets a second refresh after Swiper settles.
  * Split panes do not move, so activation only needs one coalesced repaint.

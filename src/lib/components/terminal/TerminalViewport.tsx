@@ -31,10 +31,14 @@ import { findFixedContainingBlock, resolveImeAnchorOffset } from '../../terminal
 import { buildBracketedPastePayload, detectTextareaPaste } from '../../terminal/bracketedPaste';
 import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHysteresis';
 import {
+  nextKeyboardFitStableFrameCount,
+  shouldDeferTerminalFit,
   shouldForceObservedResizeRedraw,
   shouldPreserveBottomAfterFit,
   shouldProcessObservedResize,
   shouldRefreshTerminalBuffer,
+  shouldReleaseKeyboardResizeWriteHold,
+  shouldSettleKeyboardFit,
   type TerminalDimensions,
 } from '../../terminal/refreshRedraw';
 import { shouldAllowTerminalTransparency } from '../../terminal/renderer';
@@ -95,7 +99,6 @@ const MOBILE_COPY_POPOVER_FINGER_GAP_PX = 14;
 // 选区 handle 的 44px 触控热区位于文字外侧；按钮再留 8px，才能真的
 // 不与继续框选的落指区竞争，而不只是避开那个 14px 的视觉圆点。
 const MOBILE_COPY_POPOVER_HANDLE_CLEARANCE_PX = 52;
-
 /**
  * 清洗用户输入，处理各种特殊字符
  * 1. 换行符统一转换为 CR (\r) - 终端标准
@@ -875,6 +878,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const isWritingRef = React.useRef(false);
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
     const pendingWriteLastChunkIdRef = React.useRef<number | null>(null);
+    const flushWritesRef = React.useRef<() => void>(() => {});
+    const keyboardResizeWriteHoldRef = React.useRef({
+      active: false,
+      startedAt: 0,
+      lastWriteAt: 0,
+      rafId: null as number | null,
+    });
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
     const imeFixedContainingBlockRef = React.useRef<HTMLElement | null | undefined>(undefined);
@@ -3042,6 +3052,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         window.cancelAnimationFrame(writeScheduledRef.current);
       }
       writeScheduledRef.current = null;
+      const resizeWriteHold = keyboardResizeWriteHoldRef.current;
+      if (resizeWriteHold.rafId !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(resizeWriteHold.rafId);
+      }
+      resizeWriteHold.active = false;
+      resizeWriteHold.rafId = null;
       isWritingRef.current = false;
       lastProcessedChunkIdRef.current = null;
       osc52RemainderRef.current = '';
@@ -3052,6 +3068,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       const terminal = terminalRef.current;
       const container = containerRef.current;
       if (!fitAddon || !terminal || !container) {
+        return;
+      }
+      if (shouldDeferTerminalFit(
+        enableTouchScrollRef.current,
+        keyboardFitFreezeRef.current.active,
+      )) {
+        debugTerminal('fit deferred: keyboard viewport settling', { reason });
         return;
       }
       // Check if terminal element is attached and has dimensions
@@ -3261,6 +3284,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const pendingReasonRafRef = React.useRef<Map<RefreshReason, number>>(new Map());
     // pending rAF 对应的最后一次 options；桌面滚轮可据此同步 flush resize。
     const pendingReasonOptionsRef = React.useRef<Map<RefreshReason, RefreshOptions>>(new Map());
+    const keyboardFitFreezeRef = React.useRef({
+      active: false,
+      startedAt: 0,
+      lastSignalAt: 0,
+      frozenContainerHeight: 0,
+      lastContainerHeight: null as number | null,
+      stableFrames: 0,
+      rafId: null as number | null,
+      cleanupRafId: null as number | null,
+      originalTransform: '',
+      originalWillChange: '',
+    });
     // 服务端 ACK / pty-size 广播确认过的尺寸，以及当前等待 ACK 的最新请求。
     // WebSocket.send() 只代表进入发送队列，不能据此乐观地认为 PTY 已 resize。
     const resizeSyncStateRef = React.useRef(createResizeSyncState());
@@ -3445,6 +3480,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           return;
         }
 
+        // A refresh may enter through tmux-layout, focus, a renderer callback,
+        // or a server size echo while the keyboard is moving. They all include
+        // fit/resize side effects, so the freeze must guard the orchestrator as
+        // a whole rather than only ResizeObserver's `resize` reason. The final
+        // settled resize refresh supersedes every deferred pass.
+        if (shouldDeferTerminalFit(
+          enableTouchScrollRef.current,
+          keyboardFitFreezeRef.current.active,
+        )) {
+          debugTerminal('refresh deferred: keyboard viewport settling', { reason });
+          return;
+        }
+
         // 0.5) dedupeKey：相同 reason + 相同 key 直接跳过，避免 tmux 服务端
         //      重复 layout 推送造成 fit/refresh 风暴。
         if (options.dedupeKey !== undefined) {
@@ -3566,6 +3614,20 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 里调也没问题，编排器会等下一帧再跑。
         }
 
+        // iOS emits a ResizeObserver burst for every intermediate keyboard
+        // height. Fitting each sample reflows scrollback into a different row
+        // count, which exposes unrelated history for several painted frames.
+        // Keep the existing grid during that burst and perform one final fit
+        // after the visual viewport has actually settled.
+        if (
+          reason === 'resize' &&
+          enableTouchScrollRef.current &&
+          keyboardFitFreezeRef.current.active
+        ) {
+          debugTerminal('resize refresh deferred: keyboard viewport settling');
+          return;
+        }
+
         // 0) session-key-change 只做状态复位，不额外触发 resize push 以外的副作用。
         //    用于后端 terminalSessionId 变化（auto-recreate / restart）后，让下一次
         //    first-fit 重新走 immediate 路径，把当前真实尺寸告诉新的 session。
@@ -3609,6 +3671,157 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       ]
     );
 
+    React.useEffect(() => {
+      if (!enableTouchScroll || typeof window === 'undefined') return;
+
+      const freeze = keyboardFitFreezeRef.current;
+      const writeHold = keyboardResizeWriteHoldRef.current;
+
+      const restoreTerminalTransform = () => {
+        const terminalElement = terminalRef.current?.element;
+        if (terminalElement) {
+          terminalElement.style.transform = freeze.originalTransform;
+          terminalElement.style.willChange = freeze.originalWillChange;
+        }
+      };
+
+      const waitForResizeWrites = () => {
+        writeHold.rafId = null;
+        if (!writeHold.active) return;
+        const now = window.performance.now();
+        if (shouldReleaseKeyboardResizeWriteHold(
+          now - writeHold.startedAt,
+          now - writeHold.lastWriteAt,
+        )) {
+          writeHold.active = false;
+          flushWritesRef.current();
+          return;
+        }
+        writeHold.rafId = window.requestAnimationFrame(waitForResizeWrites);
+      };
+
+      const beginResizeWriteHold = (now: number) => {
+        writeHold.active = true;
+        writeHold.startedAt = now;
+        writeHold.lastWriteAt = now;
+        if (writeScheduledRef.current !== null) {
+          window.cancelAnimationFrame(writeScheduledRef.current);
+          writeScheduledRef.current = null;
+        }
+        if (writeHold.rafId === null) {
+          writeHold.rafId = window.requestAnimationFrame(waitForResizeWrites);
+        }
+      };
+
+      const settleFrame = () => {
+        freeze.rafId = null;
+        if (!freeze.active) return;
+
+        const container = containerRef.current;
+        const terminalElement = terminalRef.current?.element;
+        if (!container || !terminalElement || !isLayoutVisibleRef.current) {
+          freeze.active = false;
+          restoreTerminalTransform();
+          return;
+        }
+
+        const now = window.performance.now();
+        const containerHeight = container.getBoundingClientRect().height;
+        freeze.stableFrames = nextKeyboardFitStableFrameCount(
+          freeze.lastContainerHeight,
+          containerHeight,
+          freeze.stableFrames,
+        );
+        freeze.lastContainerHeight = containerHeight;
+
+        // The xterm grid stays unchanged, while a compositor-only translation
+        // keeps its bottom edge attached to the shrinking/growing container.
+        // The parent's overflow clipping handles the temporarily hidden rows.
+        const translateY = containerHeight - freeze.frozenContainerHeight;
+        terminalElement.style.transform = `translate3d(0, ${translateY}px, 0)`;
+
+        if (shouldSettleKeyboardFit(
+          now - freeze.startedAt,
+          now - freeze.lastSignalAt,
+          freeze.stableFrames,
+        )) {
+          freeze.active = false;
+          freeze.lastContainerHeight = null;
+          freeze.stableFrames = 0;
+          beginResizeWriteHold(now);
+          requestRefresh('resize', {
+            force: true,
+            reconcileServerSize: true,
+            skipScrollToBottom: true,
+          });
+          // requestRefresh queued the one final fit first. Restore the
+          // compositor transform immediately after that fit in the same frame.
+          freeze.cleanupRafId = window.requestAnimationFrame(() => {
+            freeze.cleanupRafId = null;
+            if (!freeze.active) restoreTerminalTransform();
+          });
+          return;
+        }
+
+        freeze.rafId = window.requestAnimationFrame(settleFrame);
+      };
+
+      const handleKeyboardViewportChange = () => {
+        if (!isLayoutVisibleRef.current) return;
+        const container = containerRef.current;
+        const terminalElement = terminalRef.current?.element;
+        if (!container || !terminalElement) return;
+
+        const now = window.performance.now();
+        if (!freeze.active) {
+          // A reverse animation can begin before the final-fit cleanup frame.
+          // Restore the real terminal first, then capture the new baseline.
+          if (freeze.cleanupRafId !== null) {
+            window.cancelAnimationFrame(freeze.cleanupRafId);
+            freeze.cleanupRafId = null;
+            restoreTerminalTransform();
+          }
+          cancelPendingReasonRaf('resize');
+          freeze.active = true;
+          freeze.startedAt = now;
+          freeze.lastContainerHeight = null;
+          freeze.stableFrames = 0;
+          freeze.frozenContainerHeight = container.getBoundingClientRect().height;
+          freeze.originalTransform = terminalElement.style.transform;
+          freeze.originalWillChange = terminalElement.style.willChange;
+          terminalElement.style.willChange = 'transform';
+        }
+        freeze.lastSignalAt = now;
+        freeze.stableFrames = 0;
+        cancelPendingReasonRaf('resize');
+        if (freeze.rafId === null) {
+          freeze.rafId = window.requestAnimationFrame(settleFrame);
+        }
+      };
+
+      document.addEventListener('termdock:viewport-keyboard-change', handleKeyboardViewportChange);
+      return () => {
+        document.removeEventListener('termdock:viewport-keyboard-change', handleKeyboardViewportChange);
+        freeze.active = false;
+        if (freeze.rafId !== null) {
+          window.cancelAnimationFrame(freeze.rafId);
+          freeze.rafId = null;
+        }
+        if (freeze.cleanupRafId !== null) {
+          window.cancelAnimationFrame(freeze.cleanupRafId);
+          freeze.cleanupRafId = null;
+        }
+        const shouldFlushHeldWrites = writeHold.active && Boolean(pendingWriteRef.current);
+        if (writeHold.rafId !== null) {
+          window.cancelAnimationFrame(writeHold.rafId);
+          writeHold.rafId = null;
+        }
+        writeHold.active = false;
+        restoreTerminalTransform();
+        if (shouldFlushHeldWrites) flushWritesRef.current();
+      };
+    }, [enableTouchScroll, cancelPendingReasonRaf, requestRefresh]);
+
     const flushPendingRefresh = React.useCallback(
       (reason: RefreshReason) => {
         const raf = pendingReasonRafRef.current.get(reason);
@@ -3645,6 +3858,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [sessionKey, clearResizeAckTimer]);
 
     const flushWrites = React.useCallback(() => {
+      if (keyboardResizeWriteHoldRef.current.active) {
+        return;
+      }
       if (isWritingRef.current) {
         return;
       }
@@ -3716,6 +3932,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         }
       });
     }, [resetWriteState]);
+    flushWritesRef.current = flushWrites;
 
     const scheduleFlushWrites = React.useCallback(() => {
       if (writeScheduledRef.current !== null) {
@@ -3745,6 +3962,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (!flowPausedRef.current && pendingBytesRef.current >= FLOW_CONTROL_HIGH_WATERMARK) {
           flowPausedRef.current = true;
           flowControlHandlerRef.current?.(true);
+        }
+
+        if (keyboardResizeWriteHoldRef.current.active) {
+          keyboardResizeWriteHoldRef.current.lastWriteAt = window.performance.now();
+          return;
         }
 
         scheduleFlushWrites();
