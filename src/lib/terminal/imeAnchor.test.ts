@@ -38,4 +38,14 @@ describe('resolveImeAnchorOffset', () => {
       y: 98,
     });
   });
+
+  it('keeps the anchor on the terminal cursor while a keyboard transform moves its containing block', () => {
+    const containingBlock = elementAt(0, -350);
+    const terminal = elementAt(0, 40);
+
+    expect(resolveImeAnchorOffset(terminal, containingBlock, 18, 714)).toEqual({
+      x: 18,
+      y: 1104,
+    });
+  });
 });

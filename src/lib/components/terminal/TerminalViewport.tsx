@@ -972,8 +972,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       start: { left: number; top: number } | null;
       end: { left: number; top: number } | null;
     } | null>(null);
-    // 桌面 IME 候选窗锚点：跟随 xterm 光标的 1 cell 大小区域
-    // mobile（enableTouchScroll=true）下不使用，textarea 仍然 inset:0 全覆盖
+    // IME 组合文本锚点：跟随 xterm 光标的 1 cell 大小区域。
+    // 移动端 textarea 仍然 inset:0 全覆盖触控区，但独立的 composition
+    // 可视层也必须使用这个锚点，否则会被画到终端左上角。
     const [imeAnchor, setImeAnchor] = React.useState<ImeAnchorState>(
       { x: 0, y: 0, cellW: 8, cellH: 17, cursorX: 0 }
     );
@@ -1675,15 +1676,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [dismissMobileCopyPopover, pasteTextIntoTerminal, sendTerminalSeq]);
 
     /**
-     * 桌面端：根据 xterm 当前光标位置计算 IME 候选窗锚点。
-     * 候选窗会跟着 textarea 的视觉位置走；textarea 是 1 cell 大小，
-     * caret 在 (0,0) 即等于终端光标位置。
+     * 根据 xterm 当前光标位置计算 IME 组合文本锚点。桌面 textarea 会缩成
+     * 1 cell 来定位系统候选窗；移动端 textarea 保持全屏，只复用坐标给独立
+     * composition 可视层。
      */
-    const updateImeAnchor = React.useCallback((): ImeAnchorState | null => {
-      if (enableTouchScroll) return null;
+    const updateImeAnchor = React.useCallback((options?: { repositionFrozen?: boolean }): ImeAnchorState | null => {
       // composition 中冻结：后台 PTY 输出会触发 onRender，不能让 textarea
       // 跟着 cursor 走，否则候选窗会漂、文字会抖。
-      if (imeFrozenAnchorRef.current) return null;
+      if (imeFrozenAnchorRef.current && !options?.repositionFrozen) return null;
       const term = terminalRef.current;
       if (!term || !term.element) return null;
 
@@ -1721,6 +1721,9 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       // same browser task. Keep a synchronous copy so freezing never captures
       // the previous React render's coordinates.
       imeAnchorRef.current = next;
+      if (imeFrozenAnchorRef.current && options?.repositionFrozen) {
+        imeFrozenAnchorRef.current = { ...next };
+      }
 
       setImeAnchor((prev) => {
         if (
@@ -1735,10 +1738,42 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         return next;
       });
       return next;
-    }, [enableTouchScroll]);
+    }, []);
 
     const updateImeAnchorRef = React.useRef(updateImeAnchor);
     updateImeAnchorRef.current = updateImeAnchor;
+
+    // iOS 的 visual viewport 会在软键盘动画期间分多次收敛。只在这些明确的
+    // 布局事件上重算移动端锚点，避免把 getBoundingClientRect 带回普通 PTY
+    // 输出热路径；双 rAF 保证终端 fit 已先应用到当前帧。
+    React.useEffect(() => {
+      if (!enableTouchScroll) return;
+
+      let firstFrame: number | null = null;
+      let secondFrame: number | null = null;
+      const repositionAfterLayout = () => {
+        if (firstFrame !== null) window.cancelAnimationFrame(firstFrame);
+        if (secondFrame !== null) window.cancelAnimationFrame(secondFrame);
+        firstFrame = window.requestAnimationFrame(() => {
+          firstFrame = null;
+          secondFrame = window.requestAnimationFrame(() => {
+            secondFrame = null;
+            updateImeAnchorRef.current({ repositionFrozen: true });
+          });
+        });
+      };
+
+      window.visualViewport?.addEventListener('resize', repositionAfterLayout);
+      window.visualViewport?.addEventListener('scroll', repositionAfterLayout);
+      document.addEventListener('termdock:viewport-keyboard-change', repositionAfterLayout);
+      return () => {
+        if (firstFrame !== null) window.cancelAnimationFrame(firstFrame);
+        if (secondFrame !== null) window.cancelAnimationFrame(secondFrame);
+        window.visualViewport?.removeEventListener('resize', repositionAfterLayout);
+        window.visualViewport?.removeEventListener('scroll', repositionAfterLayout);
+        document.removeEventListener('termdock:viewport-keyboard-change', repositionAfterLayout);
+      };
+    }, [enableTouchScroll]);
 
     /**
      * 估算 IME composition 文本在终端格子坐标系下的视觉宽度(单位:cell)。
