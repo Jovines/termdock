@@ -254,7 +254,6 @@ async function startPollingWatch(rootPath: string, entry: SharedWatchEntry, reas
     entry.failure = error instanceof Error ? error.message : String(error);
     return false;
   }
-  broadcastSharedWatchEvent(entry, { type: 'rescan-required', path: rootPath, reason: 'polling-fallback' });
   scheduleSharedWatchPoll(rootPath, entry);
   console.warn('[file-watch] Using polling fallback', { rootPath, intervalMs: WATCH_POLL_INTERVAL_MS, reason });
   return true;
@@ -365,7 +364,7 @@ function releaseSharedWatch(rootPath: string, client: SharedWatchClient): void {
     clearTimeout(entry.pollTimer);
     entry.pollTimer = null;
   }
-  if (!entry.nativeWatcher && !entry.inFlight) {
+  if (!entry.nativeWatcher && !entry.inFlight && entry.mode !== 'polling') {
     sharedWatchRegistry.delete(rootPath);
     return;
   }
