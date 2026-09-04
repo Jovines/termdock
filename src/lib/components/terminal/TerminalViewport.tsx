@@ -99,6 +99,11 @@ const MOBILE_COPY_POPOVER_FINGER_GAP_PX = 14;
 // 选区 handle 的 44px 触控热区位于文字外侧；按钮再留 8px，才能真的
 // 不与继续框选的落指区竞争，而不只是避开那个 14px 的视觉圆点。
 const MOBILE_COPY_POPOVER_HANDLE_CLEARANCE_PX = 52;
+// DEC private mode 2026 is xterm's native synchronized-output protocol. It
+// keeps buffer parsing live while postponing paints until the matching reset,
+// so a full-screen PTY redraw cannot leak its intermediate ANSI states.
+const XTERM_SYNC_OUTPUT_BEGIN = '\x1b[?2026h';
+const XTERM_SYNC_OUTPUT_END = '\x1b[?2026l';
 /**
  * 清洗用户输入，处理各种特殊字符
  * 1. 换行符统一转换为 CR (\r) - 终端标准
@@ -881,6 +886,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const flushWritesRef = React.useRef<() => void>(() => {});
     const keyboardResizeWriteHoldRef = React.useRef({
       active: false,
+      synchronizedOutputActive: false,
       startedAt: 0,
       lastWriteAt: 0,
       rafId: null as number | null,
@@ -3053,10 +3059,16 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
       writeScheduledRef.current = null;
       const resizeWriteHold = keyboardResizeWriteHoldRef.current;
+      if (resizeWriteHold.synchronizedOutputActive) {
+        try {
+          terminalRef.current?.write(XTERM_SYNC_OUTPUT_END);
+        } catch { /* terminal may already be disposing */ }
+      }
       if (resizeWriteHold.rafId !== null && typeof window !== 'undefined') {
         window.cancelAnimationFrame(resizeWriteHold.rafId);
       }
       resizeWriteHold.active = false;
+      resizeWriteHold.synchronizedOutputActive = false;
       resizeWriteHold.rafId = null;
       isWritingRef.current = false;
       lastProcessedChunkIdRef.current = null;
@@ -3694,6 +3706,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           now - writeHold.lastWriteAt,
         )) {
           writeHold.active = false;
+          if (writeHold.synchronizedOutputActive) {
+            pendingWriteRef.current += XTERM_SYNC_OUTPUT_END;
+            pendingBytesRef.current += XTERM_SYNC_OUTPUT_END.length;
+            writeHold.synchronizedOutputActive = false;
+          }
           flushWritesRef.current();
           return;
         }
@@ -3708,9 +3725,32 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           window.cancelAnimationFrame(writeScheduledRef.current);
           writeScheduledRef.current = null;
         }
+      };
+
+      const startResizeWriteHoldTimer = () => {
+        const now = window.performance.now();
+        writeHold.startedAt = now;
+        writeHold.lastWriteAt = Math.max(writeHold.lastWriteAt, now);
         if (writeHold.rafId === null) {
           writeHold.rafId = window.requestAnimationFrame(waitForResizeWrites);
         }
+      };
+
+      const runFinalFit = () => {
+        freeze.active = false;
+        freeze.lastContainerHeight = null;
+        freeze.stableFrames = 0;
+        requestRefresh('resize', {
+          force: true,
+          reconcileServerSize: true,
+          skipScrollToBottom: true,
+        });
+        // requestRefresh queued the one final fit first. Restore the
+        // compositor transform immediately after that fit in the same frame.
+        freeze.cleanupRafId = window.requestAnimationFrame(() => {
+          freeze.cleanupRafId = null;
+          if (!freeze.active) restoreTerminalTransform();
+        });
       };
 
       const settleFrame = () => {
@@ -3737,7 +3777,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // The xterm grid stays unchanged, while a compositor-only translation
         // keeps its bottom edge attached to the shrinking/growing container.
         // The parent's overflow clipping handles the temporarily hidden rows.
-        const translateY = containerHeight - freeze.frozenContainerHeight;
+        // Shrinking clips from the top so the prompt remains attached to the
+        // keyboard. Growing keeps the existing history anchored at the top;
+        // moving a short grid down would create a conspicuous blank upper half.
+        const translateY = Math.min(0, containerHeight - freeze.frozenContainerHeight);
         terminalElement.style.transform = `translate3d(0, ${translateY}px, 0)`;
 
         if (shouldSettleKeyboardFit(
@@ -3745,21 +3788,27 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           now - freeze.lastSignalAt,
           freeze.stableFrames,
         )) {
-          freeze.active = false;
-          freeze.lastContainerHeight = null;
-          freeze.stableFrames = 0;
           beginResizeWriteHold(now);
-          requestRefresh('resize', {
-            force: true,
-            reconcileServerSize: true,
-            skipScrollToBottom: true,
-          });
-          // requestRefresh queued the one final fit first. Restore the
-          // compositor transform immediately after that fit in the same frame.
-          freeze.cleanupRafId = window.requestAnimationFrame(() => {
-            freeze.cleanupRafId = null;
-            if (!freeze.active) restoreTerminalTransform();
-          });
+          const terminal = terminalRef.current;
+          if (!terminal) {
+            startResizeWriteHoldTimer();
+            runFinalFit();
+            return;
+          }
+          try {
+            terminal.write(XTERM_SYNC_OUTPUT_BEGIN, () => {
+              if (!writeHold.active) {
+                terminal.write(XTERM_SYNC_OUTPUT_END);
+                return;
+              }
+              writeHold.synchronizedOutputActive = true;
+              startResizeWriteHoldTimer();
+              runFinalFit();
+            });
+          } catch {
+            startResizeWriteHoldTimer();
+            runFinalFit();
+          }
           return;
         }
 
@@ -3811,14 +3860,19 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           window.cancelAnimationFrame(freeze.cleanupRafId);
           freeze.cleanupRafId = null;
         }
-        const shouldFlushHeldWrites = writeHold.active && Boolean(pendingWriteRef.current);
+        const shouldReleaseHeldWrites = writeHold.active || writeHold.synchronizedOutputActive;
         if (writeHold.rafId !== null) {
           window.cancelAnimationFrame(writeHold.rafId);
           writeHold.rafId = null;
         }
         writeHold.active = false;
+        if (writeHold.synchronizedOutputActive) {
+          pendingWriteRef.current += XTERM_SYNC_OUTPUT_END;
+          pendingBytesRef.current += XTERM_SYNC_OUTPUT_END.length;
+          writeHold.synchronizedOutputActive = false;
+        }
         restoreTerminalTransform();
-        if (shouldFlushHeldWrites) flushWritesRef.current();
+        if (shouldReleaseHeldWrites) flushWritesRef.current();
       };
     }, [enableTouchScroll, cancelPendingReasonRaf, requestRefresh]);
 
