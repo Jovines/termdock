@@ -49,6 +49,7 @@ import {
 import { loadContextDraft, saveContextDraft } from '../utils/contextDraft.js';
 import { getOnboardingServerUrl } from '../onboardingServer.js';
 import { inspectLinuxInotifyUsage, isWatchResourceExhaustion } from '../utils/fileWatchPolicy.js';
+import { writeResponseChunk } from '../utils/httpResponse.js';
 import {
   getFocusSequence,
   removeClientFocusState,
@@ -4787,8 +4788,8 @@ function shouldRetryShellSpawn(error: unknown): boolean {
   return /posix_spawnp failed|ENOENT|EACCES/i.test(errorMessage);
 }
 
-function writeSse(res: express.Response, payload: unknown): void {
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+function writeSse(res: express.Response, payload: unknown): boolean {
+  return writeResponseChunk(res, `data: ${JSON.stringify(payload)}\n\n`);
 }
 
 function getTotalClients(sessionId: string): number {
@@ -4835,7 +4836,7 @@ function broadcastEvent(sessionId: string, payload: unknown): void {
   if (session) {
     for (const [clientId, client] of session.clients.entries()) {
       try {
-        writeSse(client, payload);
+        if (!writeSse(client, payload)) closeClient(session, sessionId, clientId);
       } catch {
         closeClient(session, sessionId, clientId);
       }
@@ -7471,10 +7472,7 @@ router.get('/:sessionId/stream', async (req, res) => {
   }
 
   const heartbeatInterval = setInterval(() => {
-    try {
-      res.write(': heartbeat\n\n');
-    } catch (error) {
-      console.error(`Heartbeat failed for client ${clientId}:`, error);
+    if (!writeResponseChunk(res, ': heartbeat\n\n')) {
       clearInterval(heartbeatInterval);
     }
   }, 15000);
