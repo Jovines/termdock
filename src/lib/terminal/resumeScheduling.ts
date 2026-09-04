@@ -57,13 +57,18 @@ export function shouldDeferSessionSwitch(options: {
 }
 
 export function isInitialContentWriteSettled(options: {
-  hasPendingBufferWrites: boolean;
-  settledChunkId: number | null;
-  latestBufferChunkId: number | null;
+  writtenChunkId: number | null;
+  initialTargetChunkId: number | null;
 }): boolean {
-  return !options.hasPendingBufferWrites
-    && options.settledChunkId !== null
-    && options.settledChunkId === options.latestBufferChunkId;
+  return options.writtenChunkId !== null
+    && options.initialTargetChunkId !== null
+    && options.writtenChunkId >= options.initialTargetChunkId;
+}
+
+export function shouldRestartMissingTerminalConnection(options: {
+  initialConnectionPending: boolean;
+}): boolean {
+  return !options.initialConnectionPending;
 }
 
 export function shouldPublishSessionDataUpdate(isRestoring: boolean): boolean {

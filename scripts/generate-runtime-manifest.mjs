@@ -66,6 +66,7 @@ const manifest = {
   nodeMajor: compatibility.nodeMajor,
   dependencyHash,
   serverBundleHash: hashDirectory(path.join(root, 'dist', 'server')),
+  clientBundleHash: hashDirectory(path.join(root, 'dist', 'client')),
   entrypoint: 'dist/server/cli.js',
   clientEntrypoint: 'dist/client/index.html',
 };

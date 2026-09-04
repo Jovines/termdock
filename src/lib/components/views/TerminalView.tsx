@@ -28,6 +28,7 @@ import { useI18n } from '../../i18n';
 import {
   getVisibleReconnectWatchdogDelayMs,
   isInitialContentWriteSettled,
+  shouldRestartMissingTerminalConnection,
 } from '../../terminal/resumeScheduling';
 import {
   getActivationRefreshMode,
@@ -292,6 +293,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const lastSentViewingRef = React.useRef<boolean | null>(null);
   const streamVersionRef = React.useRef(0);
   const awaitingInitialWritesRef = React.useRef(false);
+  const initialContentTargetChunkIdRef = React.useRef<number | null>(null);
+  const initialConnectionPendingRef = React.useRef(false);
   const contentReadyGenerationRef = React.useRef(0);
   const cursorPositionGateRef = React.useRef(false);
   const cursorPositionRequestRef = React.useRef(false);
@@ -333,18 +336,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     rows: number;
     lastProcessedChunkId: number | null;
   }) => {
-    if (awaitingInitialWritesRef.current) {
-      const store = useTerminalStore.getState();
-      const latestBufferChunkId = store.getTerminalSession(sessionId)?.bufferChunks.at(-1)?.id ?? null;
-      if (isInitialContentWriteSettled({
-        hasPendingBufferWrites: store.hasPendingBufferWrites(sessionId),
-        settledChunkId: position.lastProcessedChunkId,
-        latestBufferChunkId,
-      })) {
-        awaitingInitialWritesRef.current = false;
-        markInitialContentReadyAfterPaint();
-      }
-    }
     if (!cursorPositionGateRef.current) return;
     if (cursorPositionCandidateTimerRef.current !== null) {
       window.clearTimeout(cursorPositionCandidateTimerRef.current);
@@ -358,7 +349,18 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       cursorPositionCandidateTimerRef.current = null;
       setIsCursorPresentationReady(true);
     }, 450);
-  }, [markInitialContentReadyAfterPaint, sessionId]);
+  }, []);
+
+  const handleViewportWriteProgress = React.useCallback((writtenChunkId: number) => {
+    if (!awaitingInitialWritesRef.current) return;
+    if (!isInitialContentWriteSettled({
+      writtenChunkId,
+      initialTargetChunkId: initialContentTargetChunkIdRef.current,
+    })) return;
+    awaitingInitialWritesRef.current = false;
+    initialContentTargetChunkIdRef.current = null;
+    markInitialContentReadyAfterPaint();
+  }, [markInitialContentReadyAfterPaint]);
 
   const handleViewportCursorPositionChange = React.useCallback((position: { x: number; y: number; rows: number }) => {
     if (!cursorPositionGateRef.current) return;
@@ -702,6 +704,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       backendSessionId: tid,
       active: isActiveRef.current,
     });
+    if (!shouldRestartMissingTerminalConnection({
+      initialConnectionPending: initialConnectionPendingRef.current,
+    })) {
+      debugSession('[Terminal] resume probe deferred during initial websocket handshake', {
+        reason,
+        backendSessionId: tid,
+      });
+      return;
+    }
     restartEnsureSession();
   }, [debugSession, onStreamConnected, restartEnsureSession, sessionId]);
 
@@ -1025,6 +1036,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const cleanup = streamCleanupRef.current;
     streamCleanupRef.current = null;
     activeTerminalIdRef.current = null;
+    initialConnectionPendingRef.current = false;
     // 断开后立即把 sessionReady 复位：后续 resize push 会被编排器 gate 住，
     setIsStreamReady(false);
     // 直到下次 connected 事件再 setSessionReady(true)。
@@ -1051,11 +1063,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       setReconnectStartedAt(null);
       contentReadyGenerationRef.current += 1;
       awaitingInitialWritesRef.current = false;
+      initialContentTargetChunkIdRef.current = null;
       setIsInitialContentReady(false);
       setIsInitialSizeReady(false);
       disconnectStream();
       const streamVersion = streamVersionRef.current + 1;
       streamVersionRef.current = streamVersion;
+      initialConnectionPendingRef.current = true;
 
       const subscription = terminal.connect(
         terminalId,
@@ -1070,6 +1084,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
             switch (event.type) {
               case 'connected': {
+                initialConnectionPendingRef.current = false;
                 const resumeAttempt = resumeAttemptRef.current;
                 if (resumeAttempt) {
                   clientLog('info', 'PWA_RESUME terminal-connected', {
@@ -1218,6 +1233,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     appendToBuffer(storeSessionId, chunk);
                   }
                 }
+                if (hasInitialWrites) {
+                  initialContentTargetChunkIdRef.current = useTerminalStore
+                    .getState()
+                    .flushPendingBufferWrites(storeSessionId);
+                  if (initialContentTargetChunkIdRef.current === null) {
+                    awaitingInitialWritesRef.current = false;
+                    markInitialContentReadyAfterPaint();
+                  }
+                }
                 break;
               }
               case 'reconnecting': {
@@ -1257,7 +1281,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 // from the pre-resize column layout cannot survive at the top.
                 flowPausedBufferRef.current = [];
                 terminalControllerRef.current?.clear();
-                replaceBuffer(storeSessionId, event.chunks ?? []);
+                initialContentTargetChunkIdRef.current = replaceBuffer(storeSessionId, event.chunks ?? []);
                 terminalControllerRef.current?.notifyScreenSynchronized(generation);
                 if (!event.chunks?.length) {
                   awaitingInitialWritesRef.current = false;
@@ -1381,6 +1405,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
             const storeSessionId = sessionId;
             if (!storeSessionId) return;
+            initialConnectionPendingRef.current = false;
 
             const isAuthenticationFailure = fatal && error.message === 'Authentication required';
             const isRecoverableBackendMiss = isTransientBackendSessionMiss(error);
@@ -2437,6 +2462,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onReadyChange={handleViewportReadyChange}
               onSizeSynchronizedChange={setIsInitialSizeReady}
               onWritesSettled={handleViewportWritesSettled}
+              onWriteProgress={handleViewportWriteProgress}
               onCursorPositionChange={handleViewportCursorPositionChange}
               onDirectoryLinkActivate={handleDirectoryLinkActivate}
               terminalSettings={effectiveTerminalSettings}

@@ -60,7 +60,8 @@ export interface TerminalStore {
   setConnecting: (sessionId: string, isConnecting: boolean) => void;
   appendToBuffer: (sessionId: string, chunk: string, options?: { markActivity?: boolean }) => void;
   hasPendingBufferWrites: (sessionId: string) => boolean;
-  replaceBuffer: (sessionId: string, chunks: string[]) => void;
+  flushPendingBufferWrites: (sessionId: string) => number | null;
+  replaceBuffer: (sessionId: string, chunks: string[]) => number | null;
   clearTerminalSession: (sessionId: string) => void;
   clearBuffer: (sessionId: string) => void;
   removeTerminalSession: (sessionId: string) => void;
@@ -232,6 +233,48 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     batchFlushRafRef: null,
   };
 
+  const applyBufferedChunks = (
+    batches: Map<string, string[]>,
+    activitySessionIds: ReadonlySet<string>,
+  ): Map<string, number> => {
+    const lastChunkIds = new Map<string, number>();
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      let nextChunkId = state.nextChunkId;
+      const now = Date.now();
+      for (const [sessionId, chunks] of batches) {
+        const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
+        let bufferChunks: TerminalChunk[] = existing.bufferChunks.length > 0
+          ? [...existing.bufferChunks]
+          : [];
+        let bufferLength = existing.bufferLength;
+
+        for (const data of chunks) {
+          const id = nextChunkId++;
+          bufferChunks.push({ id, data });
+          lastChunkIds.set(sessionId, id);
+          bufferLength += data.length;
+        }
+
+        while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
+          const removed = bufferChunks.shift();
+          if (!removed) break;
+          bufferLength -= removed.data.length;
+        }
+
+        newSessions.set(sessionId, {
+          ...existing,
+          bufferChunks,
+          bufferLength,
+          lastOutputAt: activitySessionIds.has(sessionId) ? now : existing.lastOutputAt,
+          updatedAt: now,
+        });
+      }
+      return { sessions: newSessions, nextChunkId };
+    });
+    return lastChunkIds;
+  };
+
   const scheduleBatchFlush = () => {
     if (batch.batchFlushRafRef !== null) return;
     if (typeof window === 'undefined') {
@@ -255,38 +298,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         batch.activitySessionIds.delete(sessionId);
       }
     }
-    set((state) => {
-      const newSessions = new Map(state.sessions);
-      let nextChunkId = state.nextChunkId;
-      const now = Date.now();
-      for (const [sessionId, chunks] of batches) {
-        const existing = newSessions.get(sessionId) ?? createEmptySessionState(sessionId);
-        let bufferChunks: TerminalChunk[] = existing.bufferChunks.length > 0
-          ? [...existing.bufferChunks]
-          : [];
-        let bufferLength = existing.bufferLength;
-
-        for (const data of chunks) {
-          bufferChunks.push({ id: nextChunkId++, data });
-          bufferLength += data.length;
-        }
-
-        while (bufferLength > TERMINAL_BUFFER_LIMIT && bufferChunks.length > 1) {
-          const removed = bufferChunks.shift();
-          if (!removed) break;
-          bufferLength -= removed.data.length;
-        }
-
-        newSessions.set(sessionId, {
-          ...existing,
-          bufferChunks,
-          bufferLength,
-          lastOutputAt: activitySessionIds.has(sessionId) ? now : existing.lastOutputAt,
-          updatedAt: now,
-        });
-      }
-      return { sessions: newSessions, nextChunkId };
-    });
+    applyBufferedChunks(batches, activitySessionIds);
     if (batch.pendingChunksBySession.size > 0) scheduleBatchFlush();
   };
 
@@ -636,6 +648,24 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
     (batch.pendingChunksBySession.get(sessionId)?.length ?? 0) > 0
   ),
 
+  flushPendingBufferWrites: (sessionId: string) => {
+    const chunks = batch.pendingChunksBySession.get(sessionId);
+    if (!chunks?.length) {
+      return get().sessions.get(sessionId)?.bufferChunks.at(-1)?.id ?? null;
+    }
+    batch.pendingChunksBySession.delete(sessionId);
+    const marksActivity = batch.activitySessionIds.delete(sessionId);
+    if (batch.pendingChunksBySession.size === 0 && batch.batchFlushRafRef !== null) {
+      window.cancelAnimationFrame(batch.batchFlushRafRef);
+      batch.batchFlushRafRef = null;
+    }
+    const lastChunkIds = applyBufferedChunks(
+      new Map([[sessionId, chunks]]),
+      marksActivity ? new Set([sessionId]) : new Set(),
+    );
+    return lastChunkIds.get(sessionId) ?? null;
+  },
+
   replaceBuffer: (sessionId: string, chunks: string[]) => {
     // 清掉这个 session 的 pending batch:replaceBuffer 是一次性整体替换,
     // 之前的 pending chunks 不能 flush 进 state(否则新旧数据混在一起)。
@@ -645,6 +675,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
       window.cancelAnimationFrame(batch.batchFlushRafRef);
       batch.batchFlushRafRef = null;
     }
+    let lastChunkId: number | null = null;
     set((state) => {
       const newSessions = new Map(state.sessions);
       const existing = newSessions.get(sessionId);
@@ -670,7 +701,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
         if (!chunk) continue;
         // 拆大 chunk:同 appendToBuffer 注释
         for (const slice of splitTerminalOutputChunk(chunk)) {
-          bufferChunks.push({ id: nextChunkId++, data: slice });
+          const id = nextChunkId++;
+          bufferChunks.push({ id, data: slice });
+          lastChunkId = id;
           bufferLength += slice.length;
         }
       }
@@ -690,6 +723,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => {
 
       return { sessions: newSessions, nextChunkId };
     });
+    return lastChunkId;
   },
 
   clearTerminalSession: (sessionId: string) => {

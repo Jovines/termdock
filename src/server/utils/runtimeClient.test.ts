@@ -33,6 +33,7 @@ describe('resolveRuntimeClientDist', () => {
     writeJson(path.join(packageRoot, 'runtime-manifest.json'), {
       schemaVersion: 1,
       serverBundleHash: 'sha256-server-a',
+      clientBundleHash: 'sha256-client-a',
       clientEntrypoint: 'dist/client/index.html',
     });
 
@@ -45,6 +46,7 @@ describe('resolveRuntimeClientDist', () => {
     writeJson(path.join(selectedPackage, 'runtime-manifest.json'), {
       schemaVersion: 1,
       serverBundleHash: 'sha256-server-a',
+      clientBundleHash: 'sha256-client-a',
       clientEntrypoint: 'dist/client/index.html',
     });
     fs.symlinkSync(path.join('versions', '1.4.47'), path.join(runtimeRoot, 'client-current'), 'dir');
@@ -53,6 +55,7 @@ describe('resolveRuntimeClientDist', () => {
     writeJson(path.join(selectedPackage, 'runtime-manifest.json'), {
       schemaVersion: 1,
       serverBundleHash: 'sha256-server-b',
+      clientBundleHash: 'sha256-client-a',
       clientEntrypoint: 'dist/client/index.html',
     });
     expect(resolveRuntimeClientDist(defaultClient, homeDir)).toBe(defaultClient);
@@ -70,6 +73,7 @@ describe('pinBundledRuntimeClientDist', () => {
     writeJson(path.join(packageRoot, 'runtime-manifest.json'), {
       schemaVersion: 1,
       serverBundleHash: 'sha256-running-server',
+      clientBundleHash: 'sha256-old-client',
       clientEntrypoint: 'dist/client/index.html',
     });
 
@@ -93,6 +97,7 @@ describe('pinBundledRuntimeClientDist', () => {
     writeJson(path.join(packageRoot, 'runtime-manifest.json'), {
       schemaVersion: 1,
       serverBundleHash: 'sha256-stable-server',
+      clientBundleHash: 'sha256-stable-client',
       clientEntrypoint: 'dist/client/index.html',
     });
 
@@ -100,5 +105,32 @@ describe('pinBundledRuntimeClientDist', () => {
     const second = pinBundledRuntimeClientDist(defaultClient, homeDir);
 
     expect(second).toBe(first);
+  });
+
+  it('does not reuse a snapshot when only the client bundle changed', () => {
+    const homeDir = tempDirectory();
+    const packageRoot = path.join(tempDirectory(), 'package');
+    const defaultClient = path.join(packageRoot, 'dist', 'client');
+    fs.mkdirSync(defaultClient, { recursive: true });
+    fs.writeFileSync(path.join(defaultClient, 'index.html'), 'client-a');
+    writeJson(path.join(packageRoot, 'runtime-manifest.json'), {
+      schemaVersion: 1,
+      serverBundleHash: 'sha256-stable-server',
+      clientBundleHash: 'sha256-client-a',
+      clientEntrypoint: 'dist/client/index.html',
+    });
+    const first = pinBundledRuntimeClientDist(defaultClient, homeDir);
+
+    fs.writeFileSync(path.join(defaultClient, 'index.html'), 'client-b');
+    writeJson(path.join(packageRoot, 'runtime-manifest.json'), {
+      schemaVersion: 1,
+      serverBundleHash: 'sha256-stable-server',
+      clientBundleHash: 'sha256-client-b',
+      clientEntrypoint: 'dist/client/index.html',
+    });
+    const second = pinBundledRuntimeClientDist(defaultClient, homeDir);
+
+    expect(second).not.toBe(first);
+    expect(fs.readFileSync(path.join(second, 'index.html'), 'utf8')).toBe('client-b');
   });
 });

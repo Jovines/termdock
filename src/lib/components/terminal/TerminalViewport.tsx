@@ -408,6 +408,7 @@ interface TerminalViewportProps {
     rows: number;
     lastProcessedChunkId: number | null;
   }) => void;
+  onWriteProgress?: (lastWrittenChunkId: number) => void;
   onCursorPositionChange?: (position: { x: number; y: number; rows: number }) => void;
   onDirectoryLinkActivate?: (path: string) => void;
   terminalSettings: TerminalSettings;
@@ -827,6 +828,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       onReadyChange,
       onSizeSynchronizedChange,
       onWritesSettled,
+      onWriteProgress,
       onCursorPositionChange,
       onDirectoryLinkActivate,
       terminalSettings,
@@ -857,6 +859,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     onSizeSynchronizedChangeRef.current = onSizeSynchronizedChange;
     const onWritesSettledRef = React.useRef(onWritesSettled);
     onWritesSettledRef.current = onWritesSettled;
+    const onWriteProgressRef = React.useRef(onWriteProgress);
+    onWriteProgressRef.current = onWriteProgress;
     const onCursorPositionChangeRef = React.useRef(onCursorPositionChange);
     onCursorPositionChangeRef.current = onCursorPositionChange;
     const directoryLinkActivateRef = React.useRef(onDirectoryLinkActivate);
@@ -869,6 +873,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const writeSettleGenerationRef = React.useRef(0);
     const isWritingRef = React.useRef(false);
     const lastProcessedChunkIdRef = React.useRef<number | null>(null);
+    const pendingWriteLastChunkIdRef = React.useRef<number | null>(null);
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
     const imeFixedContainingBlockRef = React.useRef<HTMLElement | null | undefined>(undefined);
@@ -2989,6 +2994,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const resetWriteState = React.useCallback((options: { notifyFlowResume?: boolean } = {}) => {
       writeSettleGenerationRef.current += 1;
       pendingWriteRef.current = '';
+      pendingWriteLastChunkIdRef.current = null;
       pendingBytesRef.current = 0;
       if (flowPausedRef.current) {
         flowPausedRef.current = false;
@@ -3607,13 +3613,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
       const chunk = pendingWriteRef.current;
       const chunkBytes = chunk.length;
+      const writtenThroughChunkId = pendingWriteLastChunkIdRef.current;
       pendingWriteRef.current = '';
+      pendingWriteLastChunkIdRef.current = null;
 
       isWritingRef.current = true;
       term.write(chunk, () => {
         isWritingRef.current = false;
         pendingBytesRef.current -= chunkBytes;
         if (pendingBytesRef.current < 0) pendingBytesRef.current = 0;
+        if (writtenThroughChunkId !== null) {
+          onWriteProgressRef.current?.(writtenThroughChunkId);
+        }
 
         // Flow control: resume PTY if paused and below low watermark
         if (flowPausedRef.current && pendingBytesRef.current < FLOW_CONTROL_LOW_WATERMARK) {
@@ -3673,12 +3684,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     }, [flushWrites]);
 
     const enqueueWrite = React.useCallback(
-      (data: string) => {
+      (data: string, throughChunkId: number) => {
         if (!data) {
           return;
         }
         writeSettleGenerationRef.current += 1;
         pendingWriteRef.current += data;
+        pendingWriteLastChunkIdRef.current = throughChunkId;
         pendingBytesRef.current += data.length;
 
         // Flow control: pause PTY if above high watermark
@@ -4433,7 +4445,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         const { cleaned, remainder } = processOsc52Clipboard(merged);
         osc52RemainderRef.current = remainder;
         if (cleaned) {
-          enqueueWrite(cleaned);
+          enqueueWrite(cleaned, pending[pending.length - 1].id);
+        } else {
+          // Control-only chunks (for example OSC 52) are fully consumed by
+          // the parser without entering xterm's write queue. They still cross
+          // the replay boundary and must not leave initial readiness waiting.
+          onWriteProgressRef.current?.(pending[pending.length - 1].id);
         }
       }
 

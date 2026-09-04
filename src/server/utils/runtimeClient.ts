@@ -6,6 +6,7 @@ import path from 'node:path';
 interface RuntimeClientManifest {
   schemaVersion?: unknown;
   serverBundleHash?: unknown;
+  clientBundleHash?: unknown;
   clientEntrypoint?: unknown;
 }
 
@@ -17,10 +18,15 @@ function readManifest(filePath: string): RuntimeClientManifest | null {
   }
 }
 
-function isCompleteSnapshot(clientDist: string, serverBundleHash: string): boolean {
+function isCompleteSnapshot(
+  clientDist: string,
+  serverBundleHash: string,
+  clientBundleHash: string,
+): boolean {
   const marker = readManifest(path.join(clientDist, '..', '..', 'snapshot-manifest.json'));
   return marker?.schemaVersion === 1
     && marker.serverBundleHash === serverBundleHash
+    && marker.clientBundleHash === clientBundleHash
     && marker.clientEntrypoint === 'dist/client/index.html'
     && fs.existsSync(path.join(clientDist, 'index.html'));
 }
@@ -44,6 +50,7 @@ export function pinBundledRuntimeClientDist(
     if (
       manifest?.schemaVersion !== 1
       || typeof manifest.serverBundleHash !== 'string'
+      || typeof manifest.clientBundleHash !== 'string'
       || manifest.clientEntrypoint !== 'dist/client/index.html'
       || !fs.existsSync(path.join(defaultClientDist, 'index.html'))
     ) {
@@ -52,13 +59,13 @@ export function pinBundledRuntimeClientDist(
 
     const snapshotKey = crypto
       .createHash('sha256')
-      .update(manifest.serverBundleHash)
+      .update(`${manifest.serverBundleHash}\0${manifest.clientBundleHash}`)
       .digest('hex')
       .slice(0, 24);
     const snapshotsRoot = path.join(homeDir, '.termdock', 'client-snapshots');
     const snapshotRoot = path.join(snapshotsRoot, snapshotKey);
     const snapshotClientDist = path.join(snapshotRoot, 'dist', 'client');
-    if (isCompleteSnapshot(snapshotClientDist, manifest.serverBundleHash)) {
+    if (isCompleteSnapshot(snapshotClientDist, manifest.serverBundleHash, manifest.clientBundleHash)) {
       return snapshotClientDist;
     }
 
@@ -75,6 +82,7 @@ export function pinBundledRuntimeClientDist(
         `${JSON.stringify({
           schemaVersion: 1,
           serverBundleHash: manifest.serverBundleHash,
+          clientBundleHash: manifest.clientBundleHash,
           clientEntrypoint: 'dist/client/index.html',
         })}\n`,
         { mode: 0o600 },
@@ -90,7 +98,7 @@ export function pinBundledRuntimeClientDist(
       }
     }
 
-    return isCompleteSnapshot(snapshotClientDist, manifest.serverBundleHash)
+    return isCompleteSnapshot(snapshotClientDist, manifest.serverBundleHash, manifest.clientBundleHash)
       ? snapshotClientDist
       : defaultClientDist;
   } catch {
@@ -109,6 +117,7 @@ export function resolveRuntimeClientDist(
     if (
       runningManifest?.schemaVersion !== 1
       || typeof runningManifest.serverBundleHash !== 'string'
+      || typeof runningManifest.clientBundleHash !== 'string'
     ) {
       return defaultClientDist;
     }
@@ -124,6 +133,7 @@ export function resolveRuntimeClientDist(
     if (
       selectedManifest?.schemaVersion !== 1
       || selectedManifest.serverBundleHash !== runningManifest.serverBundleHash
+      || selectedManifest.clientBundleHash !== runningManifest.clientBundleHash
       || selectedManifest.clientEntrypoint !== 'dist/client/index.html'
     ) {
       return defaultClientDist;

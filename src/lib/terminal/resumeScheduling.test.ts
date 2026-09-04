@@ -15,6 +15,7 @@ import {
   shouldMountSessionViewport,
   shouldDeferSessionSwitch,
   isInitialContentWriteSettled,
+  shouldRestartMissingTerminalConnection,
   shouldPublishSessionDataUpdate,
 } from './resumeScheduling';
 
@@ -148,22 +149,22 @@ describe('shouldDeferSessionSwitch', () => {
 });
 
 describe('isInitialContentWriteSettled', () => {
-  it('waits for both the store backlog and the latest rendered chunk', () => {
+  it('waits for the fixed initial replay boundary, not later live output', () => {
     expect(isInitialContentWriteSettled({
-      hasPendingBufferWrites: true,
-      settledChunkId: 4,
-      latestBufferChunkId: 4,
+      writtenChunkId: 3,
+      initialTargetChunkId: 4,
     })).toBe(false);
     expect(isInitialContentWriteSettled({
-      hasPendingBufferWrites: false,
-      settledChunkId: 3,
-      latestBufferChunkId: 4,
-    })).toBe(false);
-    expect(isInitialContentWriteSettled({
-      hasPendingBufferWrites: false,
-      settledChunkId: 4,
-      latestBufferChunkId: 4,
+      writtenChunkId: 7,
+      initialTargetChunkId: 4,
     })).toBe(true);
+  });
+});
+
+describe('shouldRestartMissingTerminalConnection', () => {
+  it('does not supersede an initial websocket handshake', () => {
+    expect(shouldRestartMissingTerminalConnection({ initialConnectionPending: true })).toBe(false);
+    expect(shouldRestartMissingTerminalConnection({ initialConnectionPending: false })).toBe(true);
   });
 });
 
