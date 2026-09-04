@@ -31,10 +31,20 @@ describe('watchFileSystem degradation', () => {
     expect(received).toEqual([events]);
   });
 
-  it.each(['event-storm', 'reconnected'])('treats %s rescans as healthy stream events', async (reason) => {
+  it.each(['event-storm', 'reconnected', 'directory-rescan', 'polling-fallback'])('treats %s rescans as healthy stream events', async (reason) => {
     const events: FileWatchEvent[] = [{ type: 'rescan-required', path: '/repo', reason }];
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(ndjsonResponse([{ type: 'events', events }])));
 
     await expect(watchFileSystem(['/repo'], () => undefined)).resolves.toBeUndefined();
+  });
+
+  it('encodes roots independently so valid pipe characters in paths remain unambiguous', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(ndjsonResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await watchFileSystem(['/repo/a|b', '/repo/c'], () => undefined);
+
+    const requestUrl = new URL(fetchMock.mock.calls[0][0], 'https://localhost');
+    expect(requestUrl.searchParams.getAll('root')).toEqual(['/repo/a|b', '/repo/c']);
   });
 });

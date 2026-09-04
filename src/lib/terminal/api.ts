@@ -2304,7 +2304,7 @@ export async function watchFileSystem(
   signal?: AbortSignal,
 ): Promise<void> {
   const params = new URLSearchParams();
-  params.set('roots', roots.join('|'));
+  for (const root of roots) params.append('root', root);
   const response = await fetch(`/api/terminal/fs/watch?${params}`, { signal });
   if (!response.ok || !response.body) {
     const error = await response.json().catch(() => ({ error: 'Failed to watch files' }));
@@ -2324,6 +2324,8 @@ export async function watchFileSystem(
         item.type === 'rescan-required'
         && item.reason !== 'event-storm'
         && item.reason !== 'reconnected'
+        && item.reason !== 'directory-rescan'
+        && item.reason !== 'polling-fallback'
       ));
       if (unavailable?.reason) unavailableReason = unavailable.reason;
     }
