@@ -32,6 +32,7 @@ import { buildBracketedPastePayload, detectTextareaPaste } from '../../terminal/
 import { decideFitHysteresis, shouldPushFittedSize } from '../../terminal/fitHysteresis';
 import {
   shouldForceObservedResizeRedraw,
+  shouldPreserveBottomAfterFit,
   shouldProcessObservedResize,
   shouldRefreshTerminalBuffer,
   type TerminalDimensions,
@@ -3068,6 +3069,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
       try {
         const before = { cols: terminal.cols, rows: terminal.rows };
+        const activeBufferBeforeFit = terminal.buffer.active;
+        const preserveBottom = shouldPreserveBottomAfterFit(
+          activeBufferBeforeFit.type,
+          activeBufferBeforeFit.baseY,
+          activeBufferBeforeFit.viewportY,
+        );
         const proposed = fitAddon.proposeDimensions();
         if (!proposed || proposed.cols <= 0 || proposed.rows <= 0) {
           return;
@@ -3087,6 +3094,12 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (hysteresis.accept) {
           terminal.resize(proposed.cols, proposed.rows);
           repairedAfterResize = repairXtermBufferInvariants(terminal, proposed.rows);
+          // terminal.resize() can transiently expose arbitrary scrollback while
+          // keyboard-driven row changes reflow the buffer. Restore an existing
+          // bottom-follow state synchronously, before the browser can paint.
+          if (preserveBottom) {
+            terminal.scrollToBottom();
+          }
           remainderPxRef.current = 0;
         }
         if (repairedBeforeResize > 0 || repairedAfterResize > 0) {

@@ -20,6 +20,21 @@ export function shouldProcessObservedResize(
 }
 
 /**
+ * Growing or shrinking xterm can temporarily move viewportY away from baseY
+ * while its rows are reflowed. If the user was already following the bottom,
+ * restore that invariant in the same task as resize so an intermediate paint
+ * cannot expose unrelated scrollback. Deliberately scrolled history and the
+ * alternate buffer keep their own positions.
+ */
+export function shouldPreserveBottomAfterFit(
+  bufferType: string,
+  baseY: number,
+  viewportY: number,
+): boolean {
+  return bufferType !== 'alternate' && viewportY >= baseY;
+}
+
+/**
  * A normal desktop slide change gets a second refresh after Swiper settles.
  * Split panes do not move, so activation only needs one coalesced repaint.
  * Mobile has its own forced resize path.

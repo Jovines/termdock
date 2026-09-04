@@ -3,10 +3,22 @@ import {
   getActivationRefreshMode,
   shouldForceObservedResizeRedraw,
   shouldForceSettledRedraw,
+  shouldPreserveBottomAfterFit,
   shouldProcessObservedResize,
   shouldRefreshTerminalBuffer,
   shouldSchedulePageFlipRefresh,
 } from './refreshRedraw';
+
+describe('shouldPreserveBottomAfterFit', () => {
+  it('keeps a normal-buffer terminal pinned when it was already at the bottom', () => {
+    expect(shouldPreserveBottomAfterFit('normal', 240, 240)).toBe(true);
+  });
+
+  it('preserves deliberate scrollback and alternate-screen positions', () => {
+    expect(shouldPreserveBottomAfterFit('normal', 240, 180)).toBe(false);
+    expect(shouldPreserveBottomAfterFit('alternate', 0, 0)).toBe(false);
+  });
+});
 
 describe('shouldProcessObservedResize', () => {
   it('freezes background mobile terminals while the keyboard changes layout', () => {
