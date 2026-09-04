@@ -16,7 +16,7 @@ describe('partitionFileWatchEvents', () => {
     });
   });
 
-  it.each(['event-storm', 'reconnected'])('preserves %s rescans', (reason) => {
+  it.each(['event-storm', 'reconnected', 'directory-rescan', 'polling-fallback'])('preserves %s rescans', (reason) => {
     const event: FileWatchEvent = { type: 'rescan-required', path: '/workspace/src', reason };
     expect(partitionFileWatchEvents([event])).toEqual({
       applicableEvents: [event],

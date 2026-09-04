@@ -5,6 +5,13 @@ export interface FileWatchEventBatch {
   unavailableReason: string | null;
 }
 
+export function isHealthyRescanReason(reason?: string): boolean {
+  return reason === 'event-storm'
+    || reason === 'reconnected'
+    || reason === 'directory-rescan'
+    || reason === 'polling-fallback';
+}
+
 /**
  * A native watcher failure describes the auto-update transport, not a known
  * file-system change. Keep the current tree intact and let manual refresh
@@ -13,9 +20,7 @@ export interface FileWatchEventBatch {
 export function partitionFileWatchEvents(events: FileWatchEvent[]): FileWatchEventBatch {
   let unavailableReason: string | null = null;
   const applicableEvents = events.filter((event) => {
-    const unavailable = event.type === 'rescan-required'
-      && event.reason !== 'event-storm'
-      && event.reason !== 'reconnected';
+    const unavailable = event.type === 'rescan-required' && !isHealthyRescanReason(event.reason);
     if (unavailable && event.reason && !unavailableReason) unavailableReason = event.reason;
     return !unavailable;
   });
