@@ -39,7 +39,7 @@ import {
   writeJsonLog,
   writeTextLog,
 } from './utils/serverLogger.js';
-import { resolveRuntimeClientDist } from './utils/runtimeClient.js';
+import { pinBundledRuntimeClientDist, resolveRuntimeClientDist } from './utils/runtimeClient.js';
 import {
   getTermdockVersion,
   TERMDOCK_CAPABILITIES,
@@ -516,34 +516,27 @@ export function createApp(options: AppOptions = {}): express.Express {
   app.use('/api/terminal/fs', filesystemRoutes);
 
   if (fs.existsSync(bundledClientIndexPath)) {
-    let cachedClientPath = '';
-    let cachedCompression: express.RequestHandler | null = null;
-    let cachedStatic: express.RequestHandler | null = null;
-    const activeClientHandlers = () => {
-      const clientPath = resolveRuntimeClientDist(bundledClientDistPath);
-      if (clientPath !== cachedClientPath || !cachedCompression || !cachedStatic) {
-        cachedClientPath = clientPath;
-        cachedCompression = createStaticCompressionMiddleware(clientPath);
-        cachedStatic = express.static(clientPath, {
-          setHeaders: (res, filePath, stat) => {
-            void stat;
-            const relativePath = `/${path.relative(clientPath, filePath).split(path.sep).join('/')}`;
-            setStaticCacheHeaders({ url: relativePath, path: relativePath } as express.Request, res);
-          },
-        });
-      }
-      return { clientPath, compression: cachedCompression, staticFiles: cachedStatic };
-    };
+    const selectedClientPath = resolveRuntimeClientDist(bundledClientDistPath);
+    const clientPath = selectedClientPath === bundledClientDistPath
+      ? pinBundledRuntimeClientDist(bundledClientDistPath)
+      : selectedClientPath;
+    const compression = createStaticCompressionMiddleware(clientPath);
+    const staticFiles = express.static(clientPath, {
+      setHeaders: (res, filePath, stat) => {
+        void stat;
+        const relativePath = `/${path.relative(clientPath, filePath).split(path.sep).join('/')}`;
+        setStaticCacheHeaders({ url: relativePath, path: relativePath } as express.Request, res);
+      },
+    });
     app.use((req, res, next) => {
-      const handlers = activeClientHandlers();
-      handlers.compression(req, res, (compressionError) => {
+      compression(req, res, (compressionError) => {
         if (compressionError) return next(compressionError);
-        handlers.staticFiles(req, res, next);
+        staticFiles(req, res, next);
       });
     });
     app.get(/^(?!\/api(?:\/|$)|\/health$|\/onboarding(?:\/|$)|\/ca(?:\/|$)).*/, (req, res) => {
       setStaticCacheHeaders(req, res);
-      res.sendFile(path.join(activeClientHandlers().clientPath, 'index.html'));
+      res.sendFile(path.join(clientPath, 'index.html'));
     });
   }
 
