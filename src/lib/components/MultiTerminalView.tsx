@@ -2238,7 +2238,7 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
           simulateTouch={false}
           noSwiping
           noSwipingSelector="[data-mobile-keyboard='true']"
-          className="h-full"
+          className="terminal-session-swiper h-full"
         >
           {workspaceSlides.map((slide) => {
             const workspace = slide.workspace;

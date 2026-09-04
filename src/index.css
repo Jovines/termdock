@@ -924,6 +924,27 @@ div.swiper {
   overflow: clip;
 }
 
+/* iOS WebKit can repeatedly rasterize xterm's dense DOM row surface while
+   Swiper translates it, which presents as a full-terminal flash even though
+   neither terminal has changed. Keep only the three slides involved in a
+   gesture on stable compositor layers; promoting every retained session would
+   waste substantial GPU memory for users with many sessions. Scope this to the
+   main terminal swiper so file/diff swipers keep their existing behavior. */
+@media (max-width: 768px) {
+  .terminal-session-swiper > .swiper-wrapper {
+    will-change: transform;
+    transform-style: preserve-3d;
+  }
+
+  .terminal-session-swiper > .swiper-wrapper > .swiper-slide-active,
+  .terminal-session-swiper > .swiper-wrapper > .swiper-slide-prev,
+  .terminal-session-swiper > .swiper-wrapper > .swiper-slide-next {
+    -webkit-backface-visibility: hidden;
+    backface-visibility: hidden;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
 /* Gradient text utility */
 .text-gradient {
   background-clip: text;
