@@ -1,17 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { minimizeClientWatchRoots } from './fileWatchRoots';
+import { normalizeClientWatchRoots } from './fileWatchRoots';
 
-describe('minimizeClientWatchRoots', () => {
-  it('keeps the watch key stable when a covered child directory is expanded', () => {
-    expect(minimizeClientWatchRoots([
+describe('normalizeClientWatchRoots', () => {
+  it('keeps nested expanded directories for non-recursive watching', () => {
+    expect(normalizeClientWatchRoots([
       '/repo/src',
       '/repo/src/components',
       '/repo/src/components/sidebar',
-    ])).toEqual(['/repo/src']);
+    ])).toEqual(['/repo/src', '/repo/src/components', '/repo/src/components/sidebar']);
   });
 
   it('keeps independent sibling roots and normalizes trailing slashes', () => {
-    expect(minimizeClientWatchRoots([
+    expect(normalizeClientWatchRoots([
       '/repo/src/',
       '/repo/test',
       '/repo/testing',

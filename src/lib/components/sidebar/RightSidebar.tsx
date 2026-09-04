@@ -56,7 +56,7 @@ import { useDiffDisplayPrefs } from './diffDisplayPrefs';
 import type { DiffReviewMode } from './DiffReviewWorkspace';
 import { resolveRightSidebarNarrowLayout, useSidebarStore, type RightSidebarLayoutPreference } from '../../stores/useSidebarStore';
 import { applyDiffHunk, buildHtmlPreviewUrl, buildVideoPreviewUrl, cancelIoSlot, clearBranchAuditRecords, clearChangeAuditRecords, getBranchAuditRecords, getBranchDiff, getChangeAuditRecords, getCommitDiff, getContextDraft, getDefaultEdaPreviewView, getGitActionStatus, getGitBundle, getGitContext, getLocalFileBrowserAvailability, getRecentCommits, getUntrackedFiles, getVideoMimeTypeForPath, isHeicImagePath, isPreviewableEdaPath, isPreviewableHtmlPath, isPreviewableImagePath, isPreviewableModel3dPath, isPreviewableVideoPath, openInFileBrowser, readEdaPreviewBlob, readFileContent, readImagePreviewBlob, readModel3dBlob, runGitAction, updateContextDraft, watchFileSystem, downloadFile, uploadFiles, type ApplyDiffHunkRequest, type BranchAuditRecord, type BranchDiffHunk, type BranchDiffResponse, type ChangeAuditRecord, type ChangeWalkthrough, type ChangeWalkthroughAnchor, type EdaPreviewView, type GitActionRequest, type GitActionResponse, type GitBundleResponse, type GitChangedFile, type GitContext, type GitDiffOptions, type GitRepositoryBundle, type GitRepositoryFilter, type FileSearchMode, type FileSearchOptions } from '../../terminal/api';
-import { minimizeClientWatchRoots } from '../../terminal/fileWatchRoots';
+import { normalizeClientWatchRoots } from '../../terminal/fileWatchRoots';
 import { partitionFileWatchEvents } from '../../terminal/fileWatchEvents';
 import { useI18n } from '../../i18n';
 import { flushCacheThrottled, readCache, writeCache, writeCacheThrottled } from '../../utils/localStorageCache';
@@ -7656,20 +7656,15 @@ export function RightSidebar(
   }, [pinExplorerRoot, pinnedExplorerRootSet, rootPath, unpinExplorerRoot]);
 
   const expandedPaths = useSidebarStore((s) => s.expandedPaths);
-  // Watch ONLY the directories the tree has actually expanded (plus the
-  // selected file's parent when it lives outside the explorer root). The
-  // server-side watcher recursively scans the full subtree of every root it
-  // subscribes to on a libuv threadpool worker — watching the whole explorer
-  // root (e.g. /home/qiao with 300k+ directories) blocks a worker for minutes
-  // per subscription, exhausts inotify, and eventually freezes every fs
-  // request. The key is a stable sorted string so selecting a file (which
-  // changes selectedFilePath) does not tear down and re-establish the stream.
+  // Watch the explorer root plus exactly the directories the tree has expanded.
+  // The server uses non-recursive directory watches, so even a home-directory
+  // root costs one watch rather than scanning its entire subtree.
   const watchedFileRootsKey = useMemo(() => {
     const roots = new Set<string>();
     if (filesPaneActive && fileTreeRoot) {
+      roots.add(fileTreeRoot);
       const treeRoot = `${fileTreeRoot.replace(/\/+$/, '')}/`;
       for (const expandedPath of expandedPaths) {
-        if (expandedPath === fileTreeRoot) continue;
         if (expandedPath.startsWith(treeRoot)) roots.add(expandedPath);
       }
     }
@@ -7679,11 +7674,9 @@ export function RightSidebar(
     if (filesPaneActive && rootPath && selectedFilePath) {
       const selectedAbsolutePath = selectedFilePath.startsWith('/') ? selectedFilePath : `${rootPath}/${selectedFilePath}`;
       const selectedParent = getParentPath(selectedAbsolutePath);
-      // A file directly inside the explorer root needs no extra watcher — the
-      // root itself is deliberately not watched (it can be the whole home dir).
-      if (selectedParent && selectedParent !== fileTreeRoot) roots.add(selectedParent);
+      if (selectedParent) roots.add(selectedParent);
     }
-    return minimizeClientWatchRoots(roots).join('\n');
+    return normalizeClientWatchRoots(roots).join('\n');
   }, [expandedPaths, filesPaneActive, fileTreeRoot, rootPath, selectedFilePath]);
 
   useEffect(() => {
