@@ -368,8 +368,9 @@ body {
 }
 
 /* Preserve the last coherent DOM-renderer frame while xterm changes its row
- * surface and the PTY redraw is held by synchronized output. The live terminal
- * remains visible underneath, so this layer can never create a blank state. */
+ * surface and the PTY redraw is held by synchronized output. This fixed,
+ * opaque cover prevents the translated snapshot and the newly fitted live
+ * grid underneath from ever being visible at the same time. */
 .terminal-keyboard-resize-frame-shield {
   position: absolute !important;
   inset: 0;

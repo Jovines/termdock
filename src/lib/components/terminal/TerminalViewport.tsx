@@ -3095,11 +3095,14 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       shield.className = 'terminal-keyboard-resize-frame-shield';
       shield.setAttribute('aria-hidden', 'true');
       // At capture time the terminal root may be translated to follow the
-      // shrinking keyboard. The root is restored in the final-fit frame, so
-      // retain that translation on the old rows themselves until the swap.
-      shield.style.transform = terminalElement?.style.transform || 'none';
+      // shrinking keyboard. Keep the opaque shield fixed over the whole live
+      // screen and retain that translation only on the cloned rows. Moving the
+      // shield itself would uncover part of the newly fitted live rows, making
+      // the old and new grids visible together as duplicated terminal lines.
+      const snapshotRows = rows.cloneNode(true) as HTMLElement;
+      snapshotRows.style.transform = terminalElement?.style.transform || 'none';
       shield.style.visibility = 'hidden';
-      shield.appendChild(rows.cloneNode(true));
+      shield.appendChild(snapshotRows);
       screen.appendChild(shield);
       keyboardResizeFrameShieldRef.current.element = shield;
       const generation = keyboardResizePresentationRef.current.generation;
