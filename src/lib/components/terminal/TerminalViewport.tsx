@@ -891,6 +891,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       lastWriteAt: 0,
       rafId: null as number | null,
     });
+    const keyboardResizeFrameShieldRef = React.useRef({
+      element: null as HTMLDivElement | null,
+      timeoutId: null as number | null,
+    });
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
     const imeFixedContainingBlockRef = React.useRef<HTMLElement | null | undefined>(undefined);
@@ -3043,6 +3047,46 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       onPointerCancel: enableTouchScroll ? lp_onPointerCancel : undefined,
     });
 
+    const removeKeyboardResizeFrameShield = React.useCallback(() => {
+      const shield = keyboardResizeFrameShieldRef.current;
+      if (shield.timeoutId !== null && typeof window !== 'undefined') {
+        window.clearTimeout(shield.timeoutId);
+      }
+      shield.timeoutId = null;
+      shield.element?.remove();
+      shield.element = null;
+    }, []);
+
+    const captureKeyboardResizeFrameShield = React.useCallback(() => {
+      removeKeyboardResizeFrameShield();
+      const terminalElement = terminalRef.current?.element;
+      const screen = terminalElement?.querySelector<HTMLElement>('.xterm-screen');
+      const rows = screen?.querySelector<HTMLElement>(':scope > .xterm-rows');
+      // The built-in DOM renderer keeps painted rows below .xterm-screen. WebGL
+      // has a canvas and does not need this path; an empty clone would only
+      // cover a valid live renderer.
+      if (!screen || !rows?.querySelector(':scope > div')) return;
+
+      const shield = document.createElement('div');
+      shield.className = 'terminal-keyboard-resize-frame-shield';
+      shield.setAttribute('aria-hidden', 'true');
+      // At capture time the terminal root may be translated to follow the
+      // shrinking keyboard. The root is restored in the final-fit frame, so
+      // retain that translation on the old rows themselves until the swap.
+      shield.style.transform = terminalElement?.style.transform || 'none';
+      shield.style.visibility = 'hidden';
+      shield.appendChild(rows.cloneNode(true));
+      screen.appendChild(shield);
+      keyboardResizeFrameShieldRef.current.element = shield;
+      // Safety only. The normal path removes the shield on the first completed
+      // render after synchronized output ends. Since the live terminal is never
+      // hidden, timeout expiry cannot reveal an empty placeholder.
+      keyboardResizeFrameShieldRef.current.timeoutId = window.setTimeout(
+        removeKeyboardResizeFrameShield,
+        750,
+      );
+    }, [removeKeyboardResizeFrameShield]);
+
     const resetWriteState = React.useCallback((options: { notifyFlowResume?: boolean } = {}) => {
       writeSettleGenerationRef.current += 1;
       pendingWriteRef.current = '';
@@ -3073,7 +3117,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       isWritingRef.current = false;
       lastProcessedChunkIdRef.current = null;
       osc52RemainderRef.current = '';
-    }, []);
+      removeKeyboardResizeFrameShield();
+    }, [removeKeyboardResizeFrameShield]);
 
     const fitTerminal = React.useCallback((reason: string = 'unknown') => {
       const fitAddon = fitAddonRef.current;
@@ -3737,6 +3782,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       };
 
       const runFinalFit = () => {
+        // xterm's renderer resizes its visible row surface before DEC 2026 can
+        // flush the PTY redraw. Preserve the last coherent DOM frame across
+        // that tiny gap, while leaving the live terminal rendering underneath.
+        captureKeyboardResizeFrameShield();
         freeze.active = false;
         freeze.lastContainerHeight = null;
         freeze.stableFrames = 0;
@@ -3749,7 +3798,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         // compositor transform immediately after that fit in the same frame.
         freeze.cleanupRafId = window.requestAnimationFrame(() => {
           freeze.cleanupRafId = null;
-          if (!freeze.active) restoreTerminalTransform();
+          if (!freeze.active) {
+            restoreTerminalTransform();
+            const shield = keyboardResizeFrameShieldRef.current.element;
+            if (shield) shield.style.visibility = 'visible';
+          }
         });
       };
 
@@ -3871,10 +3924,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           pendingBytesRef.current += XTERM_SYNC_OUTPUT_END.length;
           writeHold.synchronizedOutputActive = false;
         }
+        removeKeyboardResizeFrameShield();
         restoreTerminalTransform();
         if (shouldReleaseHeldWrites) flushWritesRef.current();
       };
-    }, [enableTouchScroll, cancelPendingReasonRaf, requestRefresh]);
+    }, [
+      enableTouchScroll,
+      cancelPendingReasonRaf,
+      requestRefresh,
+      captureKeyboardResizeFrameShield,
+      removeKeyboardResizeFrameShield,
+    ]);
 
     const flushPendingRefresh = React.useCallback(
       (reason: RefreshReason) => {
@@ -4319,6 +4379,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 接收键盘输入。这样三方中文输入法（搜狗/微信）的 composition 不会
           // 拦截 keystroke 后吞掉某个字母。
           localDisposables.push(terminal.onRender(() => {
+            const resizeWriteHold = keyboardResizeWriteHoldRef.current;
+            if (
+              keyboardResizeFrameShieldRef.current.element
+              && !resizeWriteHold.active
+              && !resizeWriteHold.synchronizedOutputActive
+            ) {
+              // onRender fires while xterm is committing the completed frame.
+              // Keep the shield through this paint, then expose the live rows
+              // on the next animation frame as one atomic visual transition.
+              window.requestAnimationFrame(removeKeyboardResizeFrameShield);
+            }
             const activeBuffer = terminal.buffer.active;
             onCursorPositionChangeRef.current?.({
               x: activeBuffer.cursorX,

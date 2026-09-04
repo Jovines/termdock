@@ -367,6 +367,19 @@ body {
   visibility: hidden;
 }
 
+/* Preserve the last coherent DOM-renderer frame while xterm changes its row
+ * surface and the PTY redraw is held by synchronized output. The live terminal
+ * remains visible underneath, so this layer can never create a blank state. */
+.terminal-keyboard-resize-frame-shield {
+  position: absolute !important;
+  inset: 0;
+  z-index: 10;
+  overflow: hidden;
+  background: var(--chrome-bg);
+  pointer-events: none;
+  contain: strict;
+}
+
 .overlay-scrollbar {
   position: absolute;
   top: 0;
