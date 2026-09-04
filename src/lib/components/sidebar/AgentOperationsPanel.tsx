@@ -33,6 +33,7 @@ type Tab = 'automation' | 'collaboration' | 'search';
 interface AgentOperationsPanelProps {
   activeSessionId: string | null;
   initialCollaborationGroupId?: string | null;
+  defaultSessionMode?: 'shell' | 'tmux';
   onClose: () => void;
   onNewSession: (opts: { mode: 'shell'; cwd?: string; command?: string }) => void;
 }
@@ -40,7 +41,7 @@ interface AgentOperationsPanelProps {
 const inputClass = 'w-full rounded-lg border border-border/20 bg-surface-2 px-3 py-2 text-[12px] text-foreground outline-none transition focus:border-primary/60';
 const buttonClass = 'inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40';
 
-export function AgentOperationsPanel({ activeSessionId, initialCollaborationGroupId = null, onClose, onNewSession }: AgentOperationsPanelProps) {
+export function AgentOperationsPanel({ activeSessionId, initialCollaborationGroupId = null, defaultSessionMode = 'shell', onClose, onNewSession }: AgentOperationsPanelProps) {
   const [tab, setTab] = useState<Tab>(initialCollaborationGroupId ? 'collaboration' : 'automation');
   const [automations, setAutomations] = useState<AgentAutomation[]>([]);
   const [automationRuns, setAutomationRuns] = useState<AutomationRun[]>([]);
@@ -115,7 +116,7 @@ export function AgentOperationsPanel({ activeSessionId, initialCollaborationGrou
         {notice && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-[11px] text-primary"><Check size={13} />{notice}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {tab === 'automation' && <AutomationTab automations={automations} runs={automationRuns} agents={agents} sessions={sessions} activeSessionId={activeSessionId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} onClose={onClose} />}
-          {tab === 'collaboration' && <CollaborationTab groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
+          {tab === 'collaboration' && <CollaborationTab groups={groups} sessions={sessions} agents={agents} activeSessionId={activeSessionId} initialGroupId={initialCollaborationGroupId} defaultSessionMode={defaultSessionMode} busy={busy} setBusy={setBusy} setError={setError} setNotice={setNotice} refresh={refresh} />}
           {tab === 'search' && <SearchTab onClose={onClose} onNewSession={onNewSession} setError={setError} />}
         </div>
       </section>
@@ -278,8 +279,8 @@ function TimePartSelect({ label, value, options, onChange }: { label: string; va
   return <label className="relative min-w-0 flex-1"><span className="sr-only">{label}</span><select aria-label={label} className="w-full appearance-none bg-transparent py-1 pl-1 pr-7 text-center text-[18px] font-semibold tabular-nums text-foreground outline-none" value={value} onChange={(event) => onChange(event.target.value)}>{Array.from({ length: options }, (_, index) => { const option = String(index).padStart(2, '0'); return <option key={option} value={option}>{option}</option>; })}</select><ChevronDown aria-hidden="true" size={13} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground" /></label>;
 }
 
-function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGroupId, busy, setBusy, setError, setNotice, refresh }: {
-  groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; initialGroupId: string | null; busy: string | null;
+function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGroupId, defaultSessionMode, busy, setBusy, setError, setNotice, refresh }: {
+  groups: CollaborationGroup[]; sessions: OrchestrationSession[]; agents: AgentLauncherInfo[]; activeSessionId: string | null; initialGroupId: string | null; defaultSessionMode: 'shell' | 'tmux'; busy: string | null;
   setBusy: (value: string | null) => void; setError: (value: string | null) => void; setNotice: (value: string | null) => void; refresh: () => Promise<void>;
 }) {
   const [name, setName] = useState('');
@@ -400,6 +401,7 @@ function CollaborationTab({ groups, sessions, agents, activeSessionId, initialGr
         name: spawnName.trim() || undefined,
         cwd: spawnCwd.trim() || undefined,
         task: spawnTask.trim() || undefined,
+        mode: defaultSessionMode,
       });
       setSpawnOpen(false); await refresh();
       setNotice(`“${result.session.name}”已创建并加入“${result.group.name}”`);

@@ -199,7 +199,7 @@ describe('AgentOperationsPanel', () => {
     apiMocks.listCollaborationGroups.mockResolvedValue({ groups: [group], sessions });
     apiMocks.spawnCollaborationAgent.mockResolvedValue({ group: { ...group, sessionIds: ['one', 'two', 'new-agent'] }, session: { ...sessions[0], sessionId: 'new-agent', name: '发布审查' } });
     const user = userEvent.setup();
-    render(<AgentOperationsPanel activeSessionId="one" onClose={() => undefined} onNewSession={() => undefined} />);
+    render(<AgentOperationsPanel activeSessionId="one" defaultSessionMode="tmux" onClose={() => undefined} onNewSession={() => undefined} />);
 
     await user.click(screen.getByRole('button', { name: '会话协作' }));
     await user.click(await screen.findByRole('button', { name: /新建 Agent/ }));
@@ -211,7 +211,7 @@ describe('AgentOperationsPanel', () => {
     await user.click(screen.getByRole('button', { name: /创建并加入/ }));
 
     expect(apiMocks.spawnCollaborationAgent).toHaveBeenCalledWith('group-one', {
-      agentSlug: 'custom', name: '发布审查', cwd: '/repo/release', task: '检查发布产物',
+      agentSlug: 'custom', name: '发布审查', cwd: '/repo/release', task: '检查发布产物', mode: 'tmux',
     });
     expect(await screen.findByText('“发布审查”已创建并加入“发布组”')).toBeTruthy();
   });

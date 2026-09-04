@@ -339,7 +339,7 @@ const RESUME_REASONS: ReadonlySet<RefreshReason> = new Set<RefreshReason>([
 export type TerminalController = {
   focus: () => void;
   blur: () => void;
-  clear: () => void;
+  clear: (options?: { preserveKeyboardResizePresentation?: boolean }) => void;
   copySelectionOrViewport: () => Promise<boolean>;
   pasteClipboardText: () => Promise<boolean>;
   /**
@@ -3114,10 +3114,65 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (keyboardResizePresentationRef.current.generation === generation) {
           setKeyboardResizePresentationSettling(false);
         }
-      }, 750);
+      }, 1500);
     }, [removeKeyboardResizeFrameShield, setKeyboardResizePresentationSettling]);
 
-    const resetWriteState = React.useCallback((options: { notifyFlowResume?: boolean } = {}) => {
+    const releaseKeyboardResizeFrameShieldAfterSynchronizedPaint = React.useCallback(() => {
+      const presentation = keyboardResizePresentationRef.current;
+      if (!presentation.active || !presentation.awaitingFinalRender) return;
+      const generation = presentation.generation;
+      const shieldHadContent = Boolean(
+        keyboardResizeFrameShieldRef.current.element?.textContent?.trim(),
+      );
+      let matchingFrames = 0;
+      let lastRenderedText: string | null = null;
+      const waitForMatchingDomFrame = () => {
+        const current = keyboardResizePresentationRef.current;
+        const writeHold = keyboardResizeWriteHoldRef.current;
+        if (
+          !current.active
+          || !current.awaitingFinalRender
+          || current.generation !== generation
+          || writeHold.active
+          || writeHold.synchronizedOutputActive
+          || isWritingRef.current
+          || Boolean(pendingWriteRef.current)
+          || pendingScreenSyncGenerationRef.current !== null
+        ) {
+          return;
+        }
+        const terminal = terminalRef.current;
+        const rows = terminal?.element?.querySelector<HTMLElement>('.xterm-screen > .xterm-rows');
+        if (!terminal || !rows) return;
+        const renderedText = Array.from(rows.children)
+          .map((row) => (row.textContent ?? '').replace(/\s+$/g, ''))
+          .join('\n')
+          .replace(/\s+$/g, '');
+        // During a DOM-renderer full refresh both surfaces can briefly agree on
+        // an empty frame before the populated rows land. Wait for the expected
+        // row count and two identical presentable DOM frames after the
+        // authoritative write completes; xterm's buffer serialization is not
+        // byte-identical to DOM text because the renderer elides cell spacing.
+        const framePresentable = rows.children.length === terminal.rows
+          && (!shieldHadContent || renderedText.length > 0);
+        matchingFrames = framePresentable && renderedText === lastRenderedText
+          ? matchingFrames + 1
+          : (framePresentable ? 1 : 0);
+        lastRenderedText = renderedText;
+        if (matchingFrames < 2) {
+          window.requestAnimationFrame(waitForMatchingDomFrame);
+          return;
+        }
+        removeKeyboardResizeFrameShield();
+        setKeyboardResizePresentationSettling(false);
+      };
+      window.requestAnimationFrame(waitForMatchingDomFrame);
+    }, [removeKeyboardResizeFrameShield, setKeyboardResizePresentationSettling]);
+
+    const resetWriteState = React.useCallback((options: {
+      notifyFlowResume?: boolean;
+      preserveKeyboardResizePresentation?: boolean;
+    } = {}) => {
       writeSettleGenerationRef.current += 1;
       pendingWriteRef.current = '';
       pendingWriteLastChunkIdRef.current = null;
@@ -3133,22 +3188,31 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       }
       writeScheduledRef.current = null;
       const resizeWriteHold = keyboardResizeWriteHoldRef.current;
-      if (resizeWriteHold.synchronizedOutputActive) {
-        try {
-          terminalRef.current?.write(XTERM_SYNC_OUTPUT_END);
-        } catch { /* terminal may already be disposing */ }
+      if (options.preserveKeyboardResizePresentation) {
+        // terminal.reset() has already reset synchronized-output mode. Keep the
+        // active write hold/timer so the replacement snapshot remains hidden
+        // behind the captured frame until it is fully consumed.
+        resizeWriteHold.synchronizedOutputActive = false;
+      } else {
+        if (resizeWriteHold.synchronizedOutputActive) {
+          try {
+            terminalRef.current?.write(XTERM_SYNC_OUTPUT_END);
+          } catch { /* terminal may already be disposing */ }
+        }
+        if (resizeWriteHold.rafId !== null && typeof window !== 'undefined') {
+          window.cancelAnimationFrame(resizeWriteHold.rafId);
+        }
+        resizeWriteHold.active = false;
+        resizeWriteHold.synchronizedOutputActive = false;
+        resizeWriteHold.rafId = null;
       }
-      if (resizeWriteHold.rafId !== null && typeof window !== 'undefined') {
-        window.cancelAnimationFrame(resizeWriteHold.rafId);
-      }
-      resizeWriteHold.active = false;
-      resizeWriteHold.synchronizedOutputActive = false;
-      resizeWriteHold.rafId = null;
       isWritingRef.current = false;
       lastProcessedChunkIdRef.current = null;
       osc52RemainderRef.current = '';
-      removeKeyboardResizeFrameShield();
-      setKeyboardResizePresentationSettling(false);
+      if (!options.preserveKeyboardResizePresentation) {
+        removeKeyboardResizeFrameShield();
+        setKeyboardResizePresentationSettling(false);
+      }
     }, [removeKeyboardResizeFrameShield, setKeyboardResizePresentationSettling]);
 
     const fitTerminal = React.useCallback((reason: string = 'unknown') => {
@@ -3380,7 +3444,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       lastContainerHeight: null as number | null,
       stableFrames: 0,
       rafId: null as number | null,
-      cleanupRafId: null as number | null,
       originalTransform: '',
       originalWillChange: '',
     });
@@ -3821,20 +3884,18 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         freeze.active = false;
         freeze.lastContainerHeight = null;
         freeze.stableFrames = 0;
+        // Transfer presentation ownership before scheduling the fit. The clone
+        // retains the compositor translation that was visible at capture time,
+        // while the live terminal returns to its normal transform underneath.
+        // Showing the clone only after fit would reintroduce an older frame at
+        // the end of the transition—the brief history flash seen on iOS.
+        restoreTerminalTransform();
+        const shield = keyboardResizeFrameShieldRef.current.element;
+        if (shield) shield.style.visibility = 'visible';
         requestRefresh('resize', {
           force: true,
           reconcileServerSize: true,
           skipScrollToBottom: true,
-        });
-        // requestRefresh queued the one final fit first. Restore the
-        // compositor transform immediately after that fit in the same frame.
-        freeze.cleanupRafId = window.requestAnimationFrame(() => {
-          freeze.cleanupRafId = null;
-          if (!freeze.active) {
-            restoreTerminalTransform();
-            const shield = keyboardResizeFrameShieldRef.current.element;
-            if (shield) shield.style.visibility = 'visible';
-          }
         });
       };
 
@@ -3909,13 +3970,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
 
         const now = window.performance.now();
         if (!freeze.active) {
-          // A reverse animation can begin before the final-fit cleanup frame.
-          // Restore the real terminal first, then capture the new baseline.
-          if (freeze.cleanupRafId !== null) {
-            window.cancelAnimationFrame(freeze.cleanupRafId);
-            freeze.cleanupRafId = null;
-            restoreTerminalTransform();
-          }
           cancelPendingReasonRaf('resize');
           setKeyboardResizePresentationSettling(true);
           freeze.active = true;
@@ -3942,10 +3996,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (freeze.rafId !== null) {
           window.cancelAnimationFrame(freeze.rafId);
           freeze.rafId = null;
-        }
-        if (freeze.cleanupRafId !== null) {
-          window.cancelAnimationFrame(freeze.cleanupRafId);
-          freeze.cleanupRafId = null;
         }
         const shouldReleaseHeldWrites = writeHold.active || writeHold.synchronizedOutputActive;
         if (writeHold.rafId !== null) {
@@ -4072,6 +4122,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             rows: term.rows,
             lastProcessedChunkId: lastProcessedChunkIdRef.current,
           });
+          releaseKeyboardResizeFrameShieldAfterSynchronizedPaint();
         };
         if (typeof window === 'undefined') {
           reportSettled();
@@ -4081,7 +4132,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           });
         }
       });
-    }, [resetWriteState]);
+    }, [releaseKeyboardResizeFrameShieldAfterSynchronizedPaint, resetWriteState]);
     flushWritesRef.current = flushWrites;
 
     const scheduleFlushWrites = React.useCallback(() => {
@@ -4415,27 +4466,6 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           // 接收键盘输入。这样三方中文输入法（搜狗/微信）的 composition 不会
           // 拦截 keystroke 后吞掉某个字母。
           localDisposables.push(terminal.onRender(() => {
-            const resizeWriteHold = keyboardResizeWriteHoldRef.current;
-            if (
-              keyboardResizePresentationRef.current.active
-              && keyboardResizePresentationRef.current.awaitingFinalRender
-              && !resizeWriteHold.active
-              && !resizeWriteHold.synchronizedOutputActive
-            ) {
-              // onRender fires while xterm is committing the completed frame.
-              // Keep the shield through this paint, then expose the live rows
-              // on the next animation frame as one atomic visual transition.
-              const generation = keyboardResizePresentationRef.current.generation;
-              window.requestAnimationFrame(() => {
-                if (
-                  keyboardResizePresentationRef.current.active
-                  && keyboardResizePresentationRef.current.generation === generation
-                ) {
-                  removeKeyboardResizeFrameShield();
-                  setKeyboardResizePresentationSettling(false);
-                }
-              });
-            }
             const activeBuffer = terminal.buffer.active;
             onCursorPositionChangeRef.current?.({
               x: activeBuffer.cursorX,
@@ -4923,13 +4953,13 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           }
           inputFocusHandlerRef.current?.(false);
         },
-        clear: () => {
+        clear: (options) => {
           const terminal = terminalRef.current;
           if (!terminal) {
             return;
           }
           terminal.reset();
-          resetWriteState();
+          resetWriteState(options);
           // clear 走 requestRefresh 统一路径（renderer 不重建、resize 不推）
           requestRefresh('clear', { skipResizePush: true, skipScrollToBottom: true });
         },

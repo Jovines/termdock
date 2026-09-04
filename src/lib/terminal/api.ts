@@ -3662,6 +3662,7 @@ export function spawnCollaborationAgent(groupId: string, input: {
   name?: string;
   cwd?: string;
   task?: string;
+  mode?: 'shell' | 'tmux';
 }): Promise<{ group: CollaborationGroup; session: OrchestrationSession }> {
   return operationsRequest(`/collaboration-groups/${encodeURIComponent(groupId)}/spawn`, {
     method: 'POST',

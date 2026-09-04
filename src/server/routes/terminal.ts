@@ -95,6 +95,7 @@ import { AutomationStore, normalizeAutomationSchedule, type AgentAutomation } fr
 import { buildBracketedSubmitBytes, canDeliverPromptToAgent } from '../agent/promptDelivery.js';
 import { CollaborationStore, type CollaborationGroup, type CollaborationMessageKind } from '../agent/collaborationStore.js';
 import { formatCollaborationDelivery } from '../agent/collaborationPrompt.js';
+import { resolveCollaborationSpawnMode } from '../agent/collaborationSpawn.js';
 import { SessionSearchStore, type SessionSearchMetadata } from '../agent/sessionSearchStore.js';
 import {
   listAllHookAgents,
@@ -1913,11 +1914,57 @@ function tryDeliverCollaborationInbox(frontendSessionId: string): { delivered: s
   return { delivered: pending.map((message) => message.id), pending: 0 };
 }
 
+async function refreshCollaborationAgentIdentity(
+  backendSessionId: string,
+  session: TerminalSession,
+): Promise<void> {
+  let activeProgram: TerminalSession['activeProgram'] = null;
+  if (session.mode === 'shell') {
+    activeProgram = await detectShellActiveProgram(session);
+  } else if (session.tmuxSessionName) {
+    const layout = await getCachedTmuxLayout(session.tmuxSessionName);
+    const activePane = getActivePaneFromLayout(layout);
+    const resolved = activePane ? await resolveTmuxPaneProgram(activePane) : null;
+    activeProgram = resolved
+      ? { ...resolved, updatedAt: Date.now() }
+      : getActiveProgramFromTmuxLayout(layout);
+  }
+  if (!activeProgram) return;
+  session.activeProgram = activeProgram;
+  persistActiveProgramBinding(backendSessionId, activeProgram.command);
+  syncAgentIdentity(backendSessionId, session);
+}
+
+function deliverCollaborationInboxWhenAgentReady(
+  frontendSessionId: string,
+  backendSessionId: string,
+  attempt = 0,
+): void {
+  const session = terminalSessions.get(backendSessionId);
+  if (!session) return;
+  if (canDeliverPromptToAgent(session)) {
+    setTimeout(() => tryDeliverCollaborationInbox(frontendSessionId), 300).unref?.();
+    return;
+  }
+  if (attempt >= 60) return;
+  void refreshCollaborationAgentIdentity(backendSessionId, session)
+    .catch(() => undefined)
+    .finally(() => {
+      if (canDeliverPromptToAgent(session)) {
+        setTimeout(() => tryDeliverCollaborationInbox(frontendSessionId), 300).unref?.();
+        return;
+      }
+      setTimeout(() => {
+        deliverCollaborationInboxWhenAgentReady(frontendSessionId, backendSessionId, attempt + 1);
+      }, 250).unref?.();
+    });
+}
+
 async function spawnCollaborationAgentSession(
   req: express.Request,
   group: CollaborationGroup,
   sourceSessionId: string | null,
-  input: { agentSlug?: unknown; name?: unknown; cwd?: unknown; task?: unknown },
+  input: { agentSlug?: unknown; name?: unknown; cwd?: unknown; task?: unknown; mode?: unknown },
 ): Promise<{ group: ReturnType<CollaborationStore['save']>; session: OrchestrationSessionSnapshot }> {
   const agentSlug = typeof input.agentSlug === 'string' ? input.agentSlug.trim().toLowerCase() : '';
   const launchers = await listDetectedAgentLaunchers();
@@ -1930,12 +1977,17 @@ async function spawnCollaborationAgentSession(
   const fallbackRecord = sourceRecord
     ?? globalSessionState.sessions.find((candidate) => group.sessionIds.includes(candidate.sessionId))
     ?? null;
+  const mode = resolveCollaborationSpawnMode({
+    requestedMode: input.mode,
+    sourceMode: sourceRecord?.mode,
+    fallbackMode: fallbackRecord?.mode,
+  });
   const requestedName = typeof input.name === 'string' ? input.name.trim().slice(0, 120) : '';
   const requestedCwd = typeof input.cwd === 'string' ? input.cwd.trim() : '';
   const opened = await openInventorySession(req, {
     name: requestedName || `${launcher.displayName} · ${group.name}`,
     customName: true,
-    mode: 'shell',
+    mode,
     cwd: requestedCwd || fallbackRecord?.cwd || undefined,
   });
   const frontendSessionId = opened.session.sessionId;
@@ -1957,7 +2009,9 @@ async function spawnCollaborationAgentSession(
     kind: 'handoff',
     content: requestedTask || `你已创建并加入协作组“${updatedGroup.name}”。请运行 td collab status 查看成员，并准备参与协作。`,
   });
-  setTimeout(() => tryDeliverCollaborationInbox(frontendSessionId), 300).unref?.();
+  setTimeout(() => {
+    deliverCollaborationInboxWhenAgentReady(frontendSessionId, opened.terminalSession.sessionId);
+  }, 300).unref?.();
   return { group: updatedGroup, session: orchestrationSessionSnapshot(globalSessionState.sessions.find((candidate) => candidate.sessionId === frontendSessionId)!) };
 }
 

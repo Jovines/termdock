@@ -1783,6 +1783,7 @@ export function LeftSidebar(
         <AgentOperationsPanel
           activeSessionId={activeSessionId}
           initialCollaborationGroupId={agentOperationsGroupId}
+          defaultSessionMode={defaultSessionMode}
           onClose={() => { setAgentOperationsOpen(false); setAgentOperationsGroupId(null); }}
           onNewSession={(options) => onNewSession(options)}
         />

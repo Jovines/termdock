@@ -298,6 +298,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const streamVersionRef = React.useRef(0);
   const awaitingInitialWritesRef = React.useRef(false);
   const initialContentTargetChunkIdRef = React.useRef<number | null>(null);
+  const pendingTmuxScreenSyncGenerationRef = React.useRef<number | null>(null);
   const initialConnectionPendingRef = React.useRef(false);
   const contentReadyGenerationRef = React.useRef(0);
   const cursorPositionGateRef = React.useRef(false);
@@ -308,7 +309,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const cursorPositionFallbackTimerRef = React.useRef<number | null>(null);
   const lastSettledChunkIdRef = React.useRef<number | null>(null);
   const keyboardCursorAwaitingPtyRef = React.useRef(false);
-  const keyboardCursorLayoutSettlingRef = React.useRef(false);
+  const keyboardCursorAuthoritativeWriteReadyRef = React.useRef(false);
   const keyboardCursorBaselineChunkIdRef = React.useRef<number | null>(null);
   const keyboardCursorGenerationRef = React.useRef(0);
   const lastKeyboardCursorPositionRef = React.useRef<{ x: number; y: number; rows: number } | null>(null);
@@ -352,7 +353,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     lastSettledChunkIdRef.current = position.lastProcessedChunkId;
     if (
       keyboardCursorAwaitingPtyRef.current
-      && !keyboardCursorLayoutSettlingRef.current
+      && keyboardCursorAuthoritativeWriteReadyRef.current
       && position.lastProcessedChunkId !== keyboardCursorBaselineChunkIdRef.current
     ) {
       if (keyboardCursorCandidateTimerRef.current !== null) {
@@ -365,6 +366,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           keyboardCursorCandidateTimerRef.current = null;
           if (generation !== keyboardCursorGenerationRef.current) return;
           keyboardCursorAwaitingPtyRef.current = false;
+          keyboardCursorAuthoritativeWriteReadyRef.current = false;
           if (keyboardCursorFallbackTimerRef.current !== null) {
             window.clearTimeout(keyboardCursorFallbackTimerRef.current);
             keyboardCursorFallbackTimerRef.current = null;
@@ -394,6 +396,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       writtenChunkId,
       initialTargetChunkId: initialContentTargetChunkIdRef.current,
     })) return;
+    const synchronizedGeneration = pendingTmuxScreenSyncGenerationRef.current;
+    pendingTmuxScreenSyncGenerationRef.current = null;
+    if (synchronizedGeneration !== null) {
+      // replaceBuffer only queues the authoritative tmux snapshot. Report it
+      // as synchronized after xterm has actually consumed the target chunk,
+      // otherwise the keyboard resize shield can expose an intermediate grid.
+      terminalControllerRef.current?.notifyScreenSynchronized(synchronizedGeneration);
+      keyboardCursorAuthoritativeWriteReadyRef.current = true;
+    }
     awaitingInitialWritesRef.current = false;
     initialContentTargetChunkIdRef.current = null;
     markInitialContentReadyAfterPaint();
@@ -443,7 +454,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     if (settling) {
       keyboardCursorGenerationRef.current += 1;
       keyboardCursorAwaitingPtyRef.current = true;
-      keyboardCursorLayoutSettlingRef.current = true;
+      keyboardCursorAuthoritativeWriteReadyRef.current = false;
       keyboardCursorBaselineChunkIdRef.current = lastSettledChunkIdRef.current;
       lastKeyboardCursorPositionRef.current = null;
       if (keyboardCursorCandidateTimerRef.current !== null) {
@@ -459,27 +470,27 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     }
 
     if (!keyboardCursorAwaitingPtyRef.current) return;
-    keyboardCursorLayoutSettlingRef.current = false;
-    // Discard every cursor candidate produced while the viewport was still
-    // moving. Only a chunk newer than this post-fit baseline can prove tmux
-    // has redrawn for the final row count.
-    keyboardCursorGenerationRef.current += 1;
-    const generation = keyboardCursorGenerationRef.current;
-    keyboardCursorBaselineChunkIdRef.current = lastSettledChunkIdRef.current;
-    lastKeyboardCursorPositionRef.current = null;
-    if (keyboardCursorCandidateTimerRef.current !== null) {
-      window.clearTimeout(keyboardCursorCandidateTimerRef.current);
-      keyboardCursorCandidateTimerRef.current = null;
+    // The resize screen-sync is already an authoritative tmux frame and now
+    // reports completion only after xterm consumes it. Preserve that cursor
+    // candidate instead of forcing a second same-size resize/snapshot cycle.
+    // If it has not arrived, keep the post-fit baseline so a later sync can
+    // still prove that the cursor belongs to the final row count.
+    if (!keyboardCursorAuthoritativeWriteReadyRef.current) {
+      keyboardCursorGenerationRef.current += 1;
+      keyboardCursorBaselineChunkIdRef.current = lastSettledChunkIdRef.current;
+      lastKeyboardCursorPositionRef.current = null;
+      if (keyboardCursorCandidateTimerRef.current !== null) {
+        window.clearTimeout(keyboardCursorCandidateTimerRef.current);
+        keyboardCursorCandidateTimerRef.current = null;
+      }
     }
+    const generation = keyboardCursorGenerationRef.current;
     setIsKeyboardCursorReady(false);
-    // The local grid has finished fitting, but tmux may not have repainted its
-    // cursor for the new row count yet. Force one post-fit redraw and keep only
-    // the caret hidden until a newer PTY chunk settles at a real position.
-    terminalControllerRef.current?.requestPtyRedraw();
     keyboardCursorFallbackTimerRef.current = window.setTimeout(() => {
       keyboardCursorFallbackTimerRef.current = null;
       if (generation !== keyboardCursorGenerationRef.current) return;
       keyboardCursorAwaitingPtyRef.current = false;
+      keyboardCursorAuthoritativeWriteReadyRef.current = false;
       setIsKeyboardCursorReady(true);
     }, KEYBOARD_CURSOR_REDRAW_FALLBACK_MS);
   }, [desiredSessionMode]);
@@ -1024,6 +1035,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   React.useEffect(() => {
     terminalIdRef.current = terminalSessionId;
     lastTmuxScreenSyncGenerationRef.current = -1;
+    pendingTmuxScreenSyncGenerationRef.current = null;
     lastSentLogicalFocusRef.current = null;
     lastSentViewingRef.current = null;
     lastSentFlowPausedRef.current = null;
@@ -1401,10 +1413,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 // Reset xterm and replace the store atomically so stale lines
                 // from the pre-resize column layout cannot survive at the top.
                 flowPausedBufferRef.current = [];
-                terminalControllerRef.current?.clear();
+                terminalControllerRef.current?.clear({ preserveKeyboardResizePresentation: true });
+                pendingTmuxScreenSyncGenerationRef.current = generation;
                 initialContentTargetChunkIdRef.current = replaceBuffer(storeSessionId, event.chunks ?? []);
-                terminalControllerRef.current?.notifyScreenSynchronized(generation);
-                if (!event.chunks?.length) {
+                if (!event.chunks?.length || initialContentTargetChunkIdRef.current === null) {
+                  pendingTmuxScreenSyncGenerationRef.current = null;
+                  terminalControllerRef.current?.notifyScreenSynchronized(generation);
                   awaitingInitialWritesRef.current = false;
                   markInitialContentReadyAfterPaint();
                 }
