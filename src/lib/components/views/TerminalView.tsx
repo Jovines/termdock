@@ -165,6 +165,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [isInitialContentReady, setIsInitialContentReady] = React.useState(false);
   const [isInitialSizeReady, setIsInitialSizeReady] = React.useState(false);
   const [isCursorPresentationReady, setIsCursorPresentationReady] = React.useState(true);
+  const [isKeyboardResizeSettling, setIsKeyboardResizeSettling] = React.useState(false);
   const {
     isOpen: isViewportKeyboardOpen,
     keyboardHeight: viewportKeyboardHeight,
@@ -299,6 +300,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const cursorPositionGateRef = React.useRef(false);
   const cursorPositionRequestRef = React.useRef(false);
   const ptyRedrawRequestedRef = React.useRef(false);
+  const lastCursorPositionRef = React.useRef<{ x: number; y: number; rows: number } | null>(null);
   const cursorPositionCandidateTimerRef = React.useRef<number | null>(null);
   const cursorPositionFallbackTimerRef = React.useRef<number | null>(null);
   const isActiveRef = React.useRef(isActive);
@@ -348,7 +350,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     cursorPositionCandidateTimerRef.current = window.setTimeout(() => {
       cursorPositionCandidateTimerRef.current = null;
       setIsCursorPresentationReady(true);
-    }, 450);
+    }, 80);
   }, []);
 
   const handleViewportWriteProgress = React.useCallback((writtenChunkId: number) => {
@@ -364,12 +366,21 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
   const handleViewportCursorPositionChange = React.useCallback((position: { x: number; y: number; rows: number }) => {
     if (!cursorPositionGateRef.current) return;
-    if (position.x !== 0 || position.y < position.rows - 1) return;
+    const previous = lastCursorPositionRef.current;
+    if (
+      previous
+      && previous.x === position.x
+      && previous.y === position.y
+      && previous.rows === position.rows
+    ) return;
+    lastCursorPositionRef.current = position;
     if (cursorPositionCandidateTimerRef.current !== null) {
       window.clearTimeout(cursorPositionCandidateTimerRef.current);
       cursorPositionCandidateTimerRef.current = null;
     }
-    setIsCursorPresentationReady(false);
+    if (position.x === 0 && position.y >= position.rows - 1) {
+      setIsCursorPresentationReady(false);
+    }
   }, []);
 
   React.useEffect(() => {
@@ -381,6 +392,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     cursorPositionRequestRef.current = true;
     ptyRedrawRequestedRef.current = false;
     cursorPositionGateRef.current = true;
+    lastCursorPositionRef.current = null;
     setIsCursorPresentationReady(false);
     if (cursorPositionCandidateTimerRef.current !== null) {
       window.clearTimeout(cursorPositionCandidateTimerRef.current);
@@ -2461,6 +2473,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onMobileLongPressCopyResult={handleMobileLongPressCopyResult}
               onReadyChange={handleViewportReadyChange}
               onSizeSynchronizedChange={setIsInitialSizeReady}
+              onKeyboardResizeSettlingChange={setIsKeyboardResizeSettling}
               onWritesSettled={handleViewportWritesSettled}
               onWriteProgress={handleViewportWriteProgress}
               onCursorPositionChange={handleViewportCursorPositionChange}
@@ -2470,9 +2483,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               enableTouchScroll={isMobile}
               mobileLongPressMode={mobileLongPressMode}
               autoFocus={!focusSuspended && !isMobile && !touchCapable}
-              cursorVisible={!focusSuspended && isCursorPresentationReady}
+              cursorVisible={!focusSuspended && isCursorPresentationReady && !isKeyboardResizeSettling}
               suppressSmoothScroll={!isInitialContentReady || !isInitialSizeReady}
-              className={focusSuspended || !isCursorPresentationReady ? 'terminal-focus-suspended' : undefined}
+              className={
+                focusSuspended || !isCursorPresentationReady || isKeyboardResizeSettling
+                  ? 'terminal-focus-suspended'
+                  : undefined
+              }
             />
           </ErrorBoundary>
         </div>

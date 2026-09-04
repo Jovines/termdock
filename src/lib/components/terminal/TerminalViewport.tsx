@@ -411,6 +411,7 @@ interface TerminalViewportProps {
   onMobilePasteResult?: (ok: boolean) => void;
   onReadyChange?: (ready: boolean) => void;
   onSizeSynchronizedChange?: (ready: boolean) => void;
+  onKeyboardResizeSettlingChange?: (settling: boolean) => void;
   onWritesSettled?: (position: {
     x: number;
     y: number;
@@ -836,6 +837,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       onMobilePasteResult,
       onReadyChange,
       onSizeSynchronizedChange,
+      onKeyboardResizeSettlingChange,
       onWritesSettled,
       onWriteProgress,
       onCursorPositionChange,
@@ -866,6 +868,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     onReadyChangeRef.current = onReadyChange;
     const onSizeSynchronizedChangeRef = React.useRef(onSizeSynchronizedChange);
     onSizeSynchronizedChangeRef.current = onSizeSynchronizedChange;
+    const onKeyboardResizeSettlingChangeRef = React.useRef(onKeyboardResizeSettlingChange);
+    onKeyboardResizeSettlingChangeRef.current = onKeyboardResizeSettlingChange;
     const onWritesSettledRef = React.useRef(onWritesSettled);
     onWritesSettledRef.current = onWritesSettled;
     const onWriteProgressRef = React.useRef(onWriteProgress);
@@ -894,6 +898,11 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const keyboardResizeFrameShieldRef = React.useRef({
       element: null as HTMLDivElement | null,
       timeoutId: null as number | null,
+    });
+    const keyboardResizePresentationRef = React.useRef({
+      active: false,
+      generation: 0,
+      awaitingFinalRender: false,
     });
     const touchScrollCleanupRef = React.useRef<(() => void) | null>(null);
     const hiddenInputRef = React.useRef<HTMLTextAreaElement>(null);
@@ -3057,6 +3066,21 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       shield.element = null;
     }, []);
 
+    const setKeyboardResizePresentationSettling = React.useCallback((settling: boolean) => {
+      const presentation = keyboardResizePresentationRef.current;
+      // Every new keyboard transition invalidates a pending onRender/timeout
+      // from the previous direction, even when the old transition has not
+      // finished presenting yet (keyboard open -> immediate close).
+      if (settling) {
+        presentation.generation += 1;
+        presentation.awaitingFinalRender = false;
+      }
+      if (presentation.active === settling) return;
+      presentation.active = settling;
+      if (!settling) presentation.awaitingFinalRender = false;
+      onKeyboardResizeSettlingChangeRef.current?.(settling);
+    }, []);
+
     const captureKeyboardResizeFrameShield = React.useCallback(() => {
       removeKeyboardResizeFrameShield();
       const terminalElement = terminalRef.current?.element;
@@ -3078,14 +3102,17 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       shield.appendChild(rows.cloneNode(true));
       screen.appendChild(shield);
       keyboardResizeFrameShieldRef.current.element = shield;
+      const generation = keyboardResizePresentationRef.current.generation;
       // Safety only. The normal path removes the shield on the first completed
       // render after synchronized output ends. Since the live terminal is never
       // hidden, timeout expiry cannot reveal an empty placeholder.
-      keyboardResizeFrameShieldRef.current.timeoutId = window.setTimeout(
-        removeKeyboardResizeFrameShield,
-        750,
-      );
-    }, [removeKeyboardResizeFrameShield]);
+      keyboardResizeFrameShieldRef.current.timeoutId = window.setTimeout(() => {
+        removeKeyboardResizeFrameShield();
+        if (keyboardResizePresentationRef.current.generation === generation) {
+          setKeyboardResizePresentationSettling(false);
+        }
+      }, 750);
+    }, [removeKeyboardResizeFrameShield, setKeyboardResizePresentationSettling]);
 
     const resetWriteState = React.useCallback((options: { notifyFlowResume?: boolean } = {}) => {
       writeSettleGenerationRef.current += 1;
@@ -3118,7 +3145,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       lastProcessedChunkIdRef.current = null;
       osc52RemainderRef.current = '';
       removeKeyboardResizeFrameShield();
-    }, [removeKeyboardResizeFrameShield]);
+      setKeyboardResizePresentationSettling(false);
+    }, [removeKeyboardResizeFrameShield, setKeyboardResizePresentationSettling]);
 
     const fitTerminal = React.useCallback((reason: string = 'unknown') => {
       const fitAddon = fitAddonRef.current;
@@ -3756,6 +3784,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             pendingBytesRef.current += XTERM_SYNC_OUTPUT_END.length;
             writeHold.synchronizedOutputActive = false;
           }
+          keyboardResizePresentationRef.current.awaitingFinalRender = true;
           flushWritesRef.current();
           return;
         }
@@ -3815,6 +3844,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
         if (!container || !terminalElement || !isLayoutVisibleRef.current) {
           freeze.active = false;
           restoreTerminalTransform();
+          setKeyboardResizePresentationSettling(false);
           return;
         }
 
@@ -3884,6 +3914,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             restoreTerminalTransform();
           }
           cancelPendingReasonRaf('resize');
+          setKeyboardResizePresentationSettling(true);
           freeze.active = true;
           freeze.startedAt = now;
           freeze.lastContainerHeight = null;
@@ -3925,6 +3956,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           writeHold.synchronizedOutputActive = false;
         }
         removeKeyboardResizeFrameShield();
+        setKeyboardResizePresentationSettling(false);
         restoreTerminalTransform();
         if (shouldReleaseHeldWrites) flushWritesRef.current();
       };
@@ -3934,6 +3966,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       requestRefresh,
       captureKeyboardResizeFrameShield,
       removeKeyboardResizeFrameShield,
+      setKeyboardResizePresentationSettling,
     ]);
 
     const flushPendingRefresh = React.useCallback(
@@ -4381,14 +4414,24 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
           localDisposables.push(terminal.onRender(() => {
             const resizeWriteHold = keyboardResizeWriteHoldRef.current;
             if (
-              keyboardResizeFrameShieldRef.current.element
+              keyboardResizePresentationRef.current.active
+              && keyboardResizePresentationRef.current.awaitingFinalRender
               && !resizeWriteHold.active
               && !resizeWriteHold.synchronizedOutputActive
             ) {
               // onRender fires while xterm is committing the completed frame.
               // Keep the shield through this paint, then expose the live rows
               // on the next animation frame as one atomic visual transition.
-              window.requestAnimationFrame(removeKeyboardResizeFrameShield);
+              const generation = keyboardResizePresentationRef.current.generation;
+              window.requestAnimationFrame(() => {
+                if (
+                  keyboardResizePresentationRef.current.active
+                  && keyboardResizePresentationRef.current.generation === generation
+                ) {
+                  removeKeyboardResizeFrameShield();
+                  setKeyboardResizePresentationSettling(false);
+                }
+              });
             }
             const activeBuffer = terminal.buffer.active;
             onCursorPositionChangeRef.current?.({

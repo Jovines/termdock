@@ -2085,7 +2085,10 @@ export const MultiTerminalView: React.FC<MultiTerminalViewProps> = ({
             toolbarPresets={toolbarPresets}
             isActive={isActive}
             focusSuspended={pendingSwitchSessionId !== null}
-            deferCursorUntilPositioned={pendingSwitchSessionId === session.id}
+            deferCursorUntilPositioned={
+              pendingSwitchSessionId === session.id
+              || (session.mode === 'tmux' && !contentReadySessionIds.has(session.id))
+            }
             isLayoutVisible={isLayoutVisible}
             initialConnectEnabled={initialConnectEnabled}
             resumeRequestEnabled={resumeRequestEnabled}
