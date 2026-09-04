@@ -2445,6 +2445,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               mobileLongPressMode={mobileLongPressMode}
               autoFocus={!focusSuspended && !isMobile && !touchCapable}
               cursorVisible={!focusSuspended && isCursorPresentationReady}
+              suppressSmoothScroll={!isInitialContentReady || !isInitialSizeReady}
               className={focusSuspended || !isCursorPresentationReady ? 'terminal-focus-suspended' : undefined}
             />
           </ErrorBoundary>

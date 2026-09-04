@@ -417,6 +417,8 @@ interface TerminalViewportProps {
   mobileLongPressMode?: 'arrows' | 'copy';
   autoFocus?: boolean;
   cursorVisible?: boolean;
+  /** Disable animated viewport settling while an initial buffer is restored off-screen. */
+  suppressSmoothScroll?: boolean;
 }
 
 type LoadingState = 'loading' | 'ready' | 'error';
@@ -834,6 +836,7 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       mobileLongPressMode = 'arrows',
       autoFocus = true,
       cursorVisible = true,
+      suppressSmoothScroll = false,
     },
     ref
   ) => {
@@ -841,6 +844,8 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
     const containerRef = React.useRef<HTMLDivElement>(null);
     const viewportRef = React.useRef<HTMLElement | null>(null);
     const terminalRef = React.useRef<Terminal | null>(null);
+    const suppressSmoothScrollRef = React.useRef(suppressSmoothScroll);
+    suppressSmoothScrollRef.current = suppressSmoothScroll;
     const fitAddonRef = React.useRef<FitAddon | null>(null);
     const inputHandlerRef = React.useRef<(data: string, options?: TerminalViewportInputOptions) => void>(onInput);
     const resizeHandlerRef = React.useRef<(cols: number, rows: number, seq: number) => void>(onResize);
@@ -3748,7 +3753,10 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
             minimumContrastRatio,
             letterSpacing,
             lineHeight,
-            smoothScrollDuration: smoothScrolling ? 125 : 0,
+            // Initial history restore happens behind the boot surface. Animating
+            // that hidden scroll can outlive term.write's callback and produce a
+            // one-row jump immediately after the surface is removed.
+            smoothScrollDuration: smoothScrolling && !suppressSmoothScrollRef.current ? 125 : 0,
             scrollOnEraseInDisplay: true,
             tabStopWidth: 8,
             vtExtensions: {
@@ -4235,6 +4243,15 @@ const TerminalViewportInner = React.forwardRef<TerminalController, TerminalViewp
       debugTerminal,
       clearResizeAckTimer,
     ]);
+
+    React.useEffect(() => {
+      const terminal = terminalRef.current;
+      if (!terminal) {
+        return;
+      }
+
+      terminal.options.smoothScrollDuration = smoothScrolling && !suppressSmoothScroll ? 125 : 0;
+    }, [smoothScrolling, suppressSmoothScroll, terminalReadyVersion]);
 
     React.useEffect(() => {
       const terminal = terminalRef.current;
